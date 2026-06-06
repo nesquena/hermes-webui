@@ -165,21 +165,96 @@ _is_alive() {
   kill -0 "${pid}" >/dev/null 2>&1
 }
 
-_proc_args() {
+_is_windows_bash() {
+  [[ "${OS:-}" == "Windows_NT" ]] && return 0
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_windows_bash_path() {
+  local path="${1//\\//}" drive rest
+  if [[ "${path}" =~ ^([A-Za-z]):(.*)$ ]]; then
+    drive="${BASH_REMATCH[1],,}"
+    rest="${BASH_REMATCH[2]}"
+    printf '/%s%s\n' "${drive}" "${rest}"
+    return
+  fi
+  printf '%s\n' "${path}"
+}
+
+_windows_pid_for_bash_pid() {
   local pid="$1"
-  ps -p "${pid}" -o args= 2>/dev/null || true
+  ps -p "${pid}" -l 2>/dev/null | awk 'NR == 2 { print $4 }'
+}
+
+_stop_webui_pid() {
+  local pid="$1" signal="${2:-TERM}"
+  if _is_windows_bash && command -v taskkill >/dev/null 2>&1; then
+    local winpid
+    winpid="$(_windows_pid_for_bash_pid "${pid}")"
+    if [[ "${winpid}" =~ ^[0-9]+$ ]]; then
+      taskkill //F //T //PID "${winpid}" >/dev/null 2>&1 || true
+      return
+    fi
+  fi
+  if [[ "${signal}" == "KILL" ]]; then
+    kill -KILL "${pid}" >/dev/null 2>&1 || true
+  else
+    kill "${pid}" >/dev/null 2>&1 || true
+  fi
+}
+
+_proc_args() {
+  local pid="$1" args
+  args="$(ps -p "${pid}" -o args= 2>/dev/null || true)"
+  if [[ -n "${args}" ]]; then
+    printf '%s\n' "${args}"
+    return
+  fi
+  if _is_windows_bash; then
+    local winpid
+    winpid="$(_windows_pid_for_bash_pid "${pid}")"
+    if [[ "${winpid}" =~ ^[0-9]+$ ]] && command -v wmic >/dev/null 2>&1; then
+      args="$(wmic process where "ProcessId=${winpid}" get CommandLine //value 2>/dev/null | sed -n 's/^CommandLine=//p' | tr -d '\r')"
+      if [[ -n "${args}" ]]; then
+        printf '%s\n' "${args}"
+        return
+      fi
+    fi
+    ps -p "${pid}" -f 2>/dev/null | awk 'NR == 2 { for (i = 8; i <= NF; i++) printf "%s%s", (i == 8 ? "" : " "), $i; print "" }'
+  fi
 }
 
 _is_owned_webui_pid() {
-  local pid="$1" args state_repo="" state_python=""
+  local pid="$1" args args_slash state_repo="" state_repo_slash="" state_repo_win="" state_repo_win_slash="" state_python="" state_python_slash="" state_python_bash=""
   [[ -f "${STATE_FILE}" ]] || return 1
   _load_state_if_present
   state_repo="${REPO_ROOT:-}"
   state_python="${PYTHON_EXE:-}"
+  state_repo_slash="${state_repo//\\//}"
+  state_python_slash="${state_python//\\//}"
+  if _is_windows_bash; then
+    state_repo_win="$(cygpath -w "${state_repo}" 2>/dev/null || true)"
+    state_repo_win_slash="${state_repo_win//\\//}"
+  fi
+  if [[ -n "${state_python}" ]] && _is_windows_bash; then
+    state_python_bash="$(_windows_bash_path "${state_python}")"
+  fi
   [[ "${state_repo}" == "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" ]] || return 1
   args="$(_proc_args "${pid}")"
   [[ -n "${args}" ]] || return 1
-  [[ "${args}" == *"${state_repo}/bootstrap.py"* || "${args}" == *"${state_repo}/server.py"* || "${args}" == *"${state_repo}/start.sh"* || ( -n "${state_python}" && "${args}" == *"${state_python}"* ) ]]
+  args_slash="${args//\\//}"
+  [[ "${args_slash}" == *"${state_repo_slash}/bootstrap.py"* ||
+     "${args_slash}" == *"${state_repo_slash}/server.py"* ||
+     "${args_slash}" == *"${state_repo_slash}/start.sh"* ||
+     ( -n "${state_repo_win_slash}" && "${args_slash}" == *"${state_repo_win_slash}/bootstrap.py"* ) ||
+     ( -n "${state_repo_win_slash}" && "${args_slash}" == *"${state_repo_win_slash}/server.py"* ) ||
+     ( -n "${state_repo_win_slash}" && "${args_slash}" == *"${state_repo_win_slash}/start.sh"* ) ||
+     ( -n "${state_python}" && "${args}" == *"${state_python}"* ) ||
+     ( -n "${state_python_slash}" && "${args_slash}" == *"${state_python_slash}"* ) ||
+     ( -n "${state_python_bash}" && "${args_slash}" == *"${state_python_bash}"* ) ]]
 }
 
 _current_pid() {
@@ -308,7 +383,7 @@ stop_cmd() {
   fi
 
   echo "[ctl] Stopping Hermes WebUI (PID ${pid})"
-  kill "${pid}" >/dev/null 2>&1 || true
+  _stop_webui_pid "${pid}" TERM
   local i
   for i in {1..50}; do
     if ! _is_alive "${pid}"; then
@@ -320,7 +395,7 @@ stop_cmd() {
   done
 
   echo "[ctl] Process did not exit after SIGTERM; sending SIGKILL" >&2
-  kill -KILL "${pid}" >/dev/null 2>&1 || true
+  _stop_webui_pid "${pid}" KILL
   rm -f "${PID_FILE}" "${STATE_FILE}"
 }
 

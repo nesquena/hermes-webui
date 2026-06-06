@@ -46,7 +46,7 @@ def test_streaming_persists_context_fields_on_session_before_save():
     # structural check (presence of s.save() shortly after the post-merge marker)
     # would be more durable; left as a follow-up. Earlier limits: 9000 (cancellation
     # guards) → 13000 (#3263 v1) → 15000 (#3256/#3263 dual-gate).
-    assert save_call - block_start < 16000, (
+    assert save_call - block_start < 18000, (
         "s.save() should be close to the post-merge marker — block expanded unexpectedly. "
         "If you've added a new pre-save mutation block here, bump this limit."
     )

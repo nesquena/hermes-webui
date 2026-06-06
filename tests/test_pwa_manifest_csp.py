@@ -18,8 +18,11 @@ class TestManifestSrcCSP:
         text = (ROOT / "api" / "helpers.py").read_text(encoding="utf-8")
         start = text.find("Content-Security-Policy")
         assert start != -1, "Content-Security-Policy not found in helpers.py"
-        # Grab the full CSP string (up to the closing paren of send_header)
-        chunk = text[start:start + 600]
+        # Grab the full CSP string (up to the closing paren of send_header).
+        # Widened from 600 -> 1000 after the PDF-preview fix (#3652) added
+        # `blob:` to script-src + a `worker-src` directive, pushing later
+        # directives (form-action) past the old window.
+        chunk = text[start:start + 1000]
         return chunk
 
     def test_manifest_src_self_present(self):

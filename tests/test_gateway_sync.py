@@ -12,6 +12,7 @@ Tests are ordered TDD-style:
 import json
 import os
 import pathlib
+import subprocess
 import sqlite3
 import time
 import urllib.error
@@ -245,15 +246,15 @@ def test_gateway_sessions_appear_when_enabled():
 
 
 def test_webui_state_db_session_without_sidecar_appears_when_agent_sessions_enabled():
-    """Regression: WebUI-origin rows in state.db can recover missing JSON sidecars."""
+    """Regression: state.db rows without JSON sidecars can be recovered via agent bridge."""
     conn = _ensure_state_db()
-    sid = 'webui_state_only_001'
+    sid = 'cli_state_only_001'
     try:
         _insert_agent_session_row(
             conn,
             session_id=sid,
-            source='webui',
-            title='Recovered WebUI Session',
+            source='cli',
+            title='Recovered CLI Session',
             model='openai/gpt-5',
             messages=2,
         )
@@ -265,10 +266,10 @@ def test_webui_state_db_session_without_sidecar_appears_when_agent_sessions_enab
         sessions = data.get('sessions', [])
         recovered = [s for s in sessions if s.get('session_id') == sid]
         assert len(recovered) == 1, (
-            "WebUI-origin sessions that exist in state.db but have no JSON sidecar "
+            "State.db sessions without a JSON sidecar "
             "should be surfaced through the agent-session bridge for recovery."
         )
-        assert recovered[0].get('source_tag') == 'webui'
+        assert recovered[0].get('source_tag') == 'cli'
         assert recovered[0].get('is_cli_session') is True
     finally:
         try:
@@ -780,7 +781,7 @@ def test_gateway_session_has_correct_metadata():
         assert gw.get('raw_source') == 'telegram'
         assert gw.get('session_source') == 'messaging'
         assert gw.get('source_label') == 'Telegram'
-        assert gw.get('is_cli_session') is True, "is_cli_session should be True for agent sessions"
+        assert gw.get('is_cli_session') is False, "is_cli_session should be False for messaging (telegram) sessions"
         assert gw.get('title') == 'Meta Test'
     finally:
         try:
@@ -798,6 +799,8 @@ def test_agent_session_source_normalization_contract():
     cases = {
         'cli': ('cli', 'CLI'),
         'email': ('messaging', 'Email'),
+        'wecom': ('messaging', 'WeCom'),
+        'wecom_callback': ('messaging', 'WeCom Callback'),
         'weixin': ('messaging', 'Weixin'),
         'telegram': ('messaging', 'Telegram'),
         'discord': ('messaging', 'Discord'),
@@ -823,8 +826,39 @@ def test_sessions_js_treats_email_as_messaging_source():
     """Email gateway sessions should receive the same sidebar metadata as other messaging channels."""
     src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
-    assert "'email'" in src[src.find("_MESSAGING_RAW_SOURCES"):src.find("function _isMessagingSession")]
-    assert "email: 'Email'" in src[src.find("_MESSAGING_SOURCE_LABELS"):src.find("function _isMessagingSession")]
+    raw_section = src[src.find("_MESSAGING_RAW_SOURCES"):src.find("function _isMessagingSession")]
+    label_section = src[src.find("_MESSAGING_SOURCE_LABELS"):src.find("function _isMessagingSession")]
+
+    for raw_source in ("email", "wecom", "wecom_callback"):
+        assert f"'{raw_source}'" in raw_section, f"Missing raw source {raw_source!r} in _MESSAGING_RAW_SOURCES"
+
+    assert "email: 'Email'" in label_section
+    assert "wecom: 'WeCom'" in label_section
+    assert "wecom_callback: 'WeCom Callback'" in label_section
+
+
+def test_sessions_js_treats_wecom_sidecars_as_messaging_behaviorally():
+    """Stale WeCom sidecars with session_source=other should still route as messaging."""
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = src.index("const _MESSAGING_RAW_SOURCES")
+    end = src.index("/**", start)
+    block = src[start:end]
+    script = f"""
+{block}
+const cases = [
+  {{ session_source: 'other', source: 'wecom' }},
+  {{ session_source: 'other', raw_source: 'wecom_callback' }},
+  {{ session_source: 'other', source_tag: 'wecom' }},
+  {{ session_source: 'messaging', source: 'anything' }},
+];
+for (const c of cases) {{
+  if (!_isMessagingSession(c)) throw new Error('expected messaging for '+JSON.stringify(c));
+}}
+if (_isMessagingSession({{ session_source: 'other', source: 'cli' }})) {{
+  throw new Error('cli should not be treated as messaging');
+}}
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
 
 def test_empty_active_gateway_session_does_not_hide_messaging_history(monkeypatch):

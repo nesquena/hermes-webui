@@ -313,14 +313,12 @@ def handle_logo_delete(handler) -> bool:
 
     Deletes the corresponding logo file and returns ok.
     """
-    import json as _json
+    from api.helpers import read_body
 
-    content_length = int(handler.headers.get("Content-Length", "0"))
-    body_raw = handler.rfile.read(content_length) if content_length else b"{}"
     try:
-        body = _json.loads(body_raw)
-    except (ValueError, TypeError):
-        return bad(handler, "Invalid JSON body")
+        body = read_body(handler)
+    except ValueError as exc:
+        return bad(handler, str(exc))
 
     mode = (body.get("mode") or "").strip()
     if mode not in _VALID_MODES:

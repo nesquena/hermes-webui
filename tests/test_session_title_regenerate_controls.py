@@ -59,7 +59,7 @@ def test_regenerate_endpoint_persists_generated_title_without_reordering_sidebar
     assert "s.llm_title_generated = True" in block
     assert "s.save(touch_updated_at=False)" in block
     assert "_sync_session_title_to_insights(s)" in block
-    assert 'publish_session_list_changed("session_title_regenerate")' in block
+    assert 'publish_session_list_changed("session_title_regenerate", profile=getattr(s, "profile", None))' in block
     assert "Read-only imported sessions cannot be renamed" in block
 
 

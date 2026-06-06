@@ -74,6 +74,94 @@ if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window 
 let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';
 let _selectedTextReplyRaf=0;
+const _persistentStateToastSeen=new Set();
+
+function _persistentToastText(value){
+  if(value===null||value===undefined)return '';
+  if(typeof value==='string')return value;
+  try{return JSON.stringify(value);}catch(_){return String(value||'');}
+}
+
+function _persistentToastToolName(tool){
+  return String(tool&&tool.name||'').trim();
+}
+
+function _persistentToastArgs(tool){
+  const args=tool&&tool.args;
+  return args&&typeof args==='object'?args:{};
+}
+
+function _persistentToastPreview(tool){
+  return [
+    _persistentToastText(tool&&tool.preview),
+    _persistentToastText(tool&&tool.snippet),
+  ].filter(Boolean).join('\n');
+}
+
+function _persistentToastHasWriteIntent(name, text){
+  const nameWords=String(name||'').replace(/_/g,' ');
+  const haystack=`${nameWords}\n${text}`.toLowerCase();
+  if(/\b(read|list|view|search|lookup|get|fetch|load|usage|toggle|delete|remove)\b/.test(nameWords))return false;
+  if(/\b(no|not|nothing)\s+(?:was\s+)?(?:saved|updated|created|written|stored|changed)\b/.test(haystack))return false;
+  if(/\b(?:unchanged|skipped|dry[- ]run|failed|error)\b/.test(haystack))return false;
+  return /\b(save|saved|write|wrote|written|update|updated|create|created|store|stored|persist|persisted|remember|remembered)\b/.test(haystack);
+}
+
+function _persistentToastSkillName(tool){
+  const args=_persistentToastArgs(tool);
+  const raw=args.name||args.skill_name||args.skill||args.title||'';
+  const direct=String(raw||'').trim();
+  if(direct)return direct;
+  const text=_persistentToastPreview(tool);
+  const match=text.match(/\bskill(?:\s+updated|\s+created|\s+saved)?\s*[:=]\s*["'`]?([A-Za-z0-9_.-]{2,80})/i);
+  return match?match[1]:'';
+}
+
+function _maybeNotifyPersistentStateSaved(tool){
+  if(!tool||tool.is_error||typeof showToast!=='function')return;
+  const name=_persistentToastToolName(tool);
+  if(!name)return;
+  const nameKey=name.toLowerCase().replace(/[^a-z0-9]+/g,'_');
+  const preview=_persistentToastPreview(tool);
+  const argsText=_persistentToastText(_persistentToastArgs(tool));
+  const text=`${preview}\n${argsText}`;
+  if(!_persistentToastHasWriteIntent(nameKey, text))return;
+
+  const nameWords=nameKey.replace(/_/g,' ');
+  const isSkill=/\bskills?\b/.test(nameWords);
+  const isMemory=/\b(memory|memories|remember|profile)\b/.test(nameWords);
+  if(!isSkill&&!isMemory)return;
+  const skillName=isSkill?_persistentToastSkillName(tool):'';
+  if(isSkill&&!skillName)return;
+  _showPersistentStateToast(isSkill?'skill':'memory', skillName, {
+    created: isSkill&&/\b(create|created|new)\b/.test(`${nameKey}\n${preview}`.toLowerCase()),
+  });
+}
+
+function _showPersistentStateToast(kind, name, options){
+  if(typeof showToast!=='function')return;
+  const normalizedKind=String(kind||'').toLowerCase();
+  if(normalizedKind!=='skill'&&normalizedKind!=='memory')return;
+  const itemName=String(name||'').trim();
+  const dedupeKey=[
+    S&&S.session&&S.session.session_id||'',
+    normalizedKind,
+    itemName||'memory',
+  ].join(':');
+  if(_persistentStateToastSeen.has(dedupeKey))return;
+  _persistentStateToastSeen.add(dedupeKey);
+  if(_persistentStateToastSeen.size>200){
+    const first=_persistentStateToastSeen.values().next().value;
+    _persistentStateToastSeen.delete(first);
+  }
+
+  if(normalizedKind==='skill'){
+    const base=options&&options.created?t('skill_created'):t('skill_updated');
+    showToast(itemName?`${base}: ${itemName}`:base,4200,'success');
+    return;
+  }
+  showToast(t('memory_saved'),3600,'success');
+}
 
 function _selectedTextReplyT(key, fallback){
   try{
@@ -208,6 +296,11 @@ if(typeof document!=='undefined'){
 let _sendInProgress = false;
 let _sendInProgressSid = null;  // session_id of the in-flight send
 const _sessionTitleProvisionalBySid = new Map();
+// Agent commands that are safe to execute directly in the WebUI even though
+// their canonical command is registered on the backend (for example
+// /reload-mcp). Keep this intentionally narrow and include underscore variants
+// observed by users so typing either form still routes through executeAgentCommand.
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'codex-runtime', 'codex_runtime']);
 
 function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   if(!S||!S.busy||compressionRunning) return false;
@@ -423,6 +516,22 @@ async function send(){
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
+      const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
+      if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
+        if(!S.session){await newSession();await renderSessionList();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        let _agentOutput='(no output)';
+        try{
+          _agentOutput=typeof executeAgentCommand==='function'
+            ? await executeAgentCommand(text,_agentCmd||{name:_agentCmdName})
+            : 'Agent command runtime unavailable in WebUI.';
+        }catch(e){
+          _agentOutput=`Agent command error: ${e&&e.message||e}`;
+        }
+        S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
+        renderMessages();
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
         if(!S.session){await newSession();await renderSessionList();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
@@ -459,6 +568,16 @@ async function send(){
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
+  if(_forcedSkillDirectivePending){
+    const _pending=_forcedSkillDirectivePending;
+    if(!_pending.sessionId||_pending.sessionId===activeSid){
+      const _directive = await _pending.promise;
+      if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
+      if(typeof _directive==='string'&&_directive){
+        msgText=`${_directive}\n\n${msgText||''}`.trim();
+      }
+    }
+  }
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
   $('msg').value='';autoResize();
@@ -668,6 +787,15 @@ function closeLiveStream(sessionId, streamId, source){
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
+  // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
+  // per-event snapshot (snapshotLiveTurn) only fires on content/tool_complete
+  // SSE events, so switching away during a quiet window (mid tool-exec, silent
+  // thinking) would leave a stale-or-absent snapshot — on switch-back
+  // restoreLiveTurnHtmlForSession() then fails and loadSession()'s fallback
+  // rebuilds with an EMPTY appendThinking(), permanently losing the streamed
+  // thinking/tool content (only the elapsed clock survives). Capturing here
+  // guarantees switch-back restores the exact state shown at switch-away. (#3668)
+  if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(sessionId);
   try{live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
   // closeLiveStream() is called during session-switch teardown for any session
@@ -749,6 +877,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
+  function _ownsActiveStreamOrBackground(){
+    return !_isActiveSession() || S.activeStreamId===streamId;
+  }
+  function _bailOutOfTerminalEventsFromStaleStream(source){
+    if(_ownsActiveStreamOrBackground()) return false;
+    _closeSource(source);
+    return true;
+  }
   function _clearActivePaneInflightIfOwner(){
     if(_isActiveSession()) clearInflight();
   }
@@ -771,6 +907,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     hideClarifyCard(true, reason||'terminal');
   }
   function _clearOwnerInflightState(){
+    if(_isActiveSession() && S.activeStreamId!==streamId) return;
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
@@ -829,6 +966,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       messages:inflight.messages||[],
       uploaded:inflight.uploaded||[...uploaded],
       toolCalls:inflight.toolCalls||[],
+      todos:Array.isArray(inflight.todos)?inflight.todos:S.todos,
+      todoStateMeta:inflight.todoStateMeta||S.todoStateMeta||null,
     });
   }
   function snapshotLiveTurn(){
@@ -1804,10 +1943,52 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof noteWorkspaceMutationsFromToolCall==='function') noteWorkspaceMutationsFromToolCall(tc);
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
+      _maybeNotifyPersistentStateSaved(tc);
       if(typeof refreshOpenPreviewIfMutated==='function') refreshOpenPreviewIfMutated();
       appendLiveToolCard(tc);
       snapshotLiveTurn();
       scrollIfPinned();
+    });
+
+    // Phase 2: dedicated `todo_state` event carries a full snapshot of
+    // the upstream TodoStore.  We treat it as the single source of truth
+    // for the Todos panel — never merge, always replace.  The handler
+    // is intentionally cheap: parse, validate, write S.todos, mirror to
+    // INFLIGHT, schedule a RAF render.  Out-of-order events are filtered
+    // by ts; SSE journal replay is idempotent because snapshots are full.
+    // Cross-session protection mirrors every other live listener:
+    // payload.session_id must match activeSid or the event is dropped.
+    source.addEventListener('todo_state',e=>{
+      let d;
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){ return; }
+      if(!d||typeof d!=='object') return;
+      // Cross-session double check: payload.session_id is the SSE-side
+      // filter (some legacy emissions omit it), and S.session.session_id
+      // is the UI-side filter (a late event that arrives after the user
+      // already navigated to another session must not pollute S.todos).
+      // Both must agree with activeSid before we touch global state.
+      if(d.session_id&&d.session_id!==activeSid) return;
+      if(!S.session||S.session.session_id!==activeSid) return;
+      if(!Array.isArray(d.todos)) return;
+      const incomingTs=Number(d.ts)||0;
+      const currentTs=(S.todoStateMeta&&Number(S.todoStateMeta.ts))||0;
+      // Strictly older snapshots are discarded; equal-ts events still
+      // apply so a compression-source refresh can land on the same
+      // second as the tool emit it follows.
+      if(incomingTs&&currentTs&&incomingTs<currentTs) return;
+      S.todos=d.todos;
+      S.todoStateMeta={
+        ts:incomingTs||(Date.now()/1000),
+        source:String(d.source||'tool'),
+        version:Number(d.version)||1,
+      };
+      const inflight=INFLIGHT[activeSid];
+      if(inflight){
+        inflight.todos=S.todos;
+        inflight.todoStateMeta=S.todoStateMeta;
+      }
+      if(typeof persistInflightState==='function') persistInflightState();
+      if(typeof scheduleTodosRefresh==='function') scheduleTodosRefresh();
     });
 
     source.addEventListener('approval',e=>{
@@ -1822,6 +2003,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
       sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed');
+    });
+
+    source.addEventListener('state_saved',e=>{
+      let d={};
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){}
+      if((d.session_id||activeSid)!==activeSid) return;
+      if(!S.session||S.session.session_id!==activeSid) return;
+      _showPersistentStateToast(d.kind, d.name||'', {created:String(d.action||'').toLowerCase()==='created'});
     });
 
     source.addEventListener('title',e=>{
@@ -1914,6 +2103,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
       // _streamFinalized=false, calls _restoreSettledSession(), and overwrites
@@ -1975,6 +2165,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
+          if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
+          if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
           if(S.session&&S.session.session_id){
             try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
@@ -2005,7 +2197,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Stamp _ts on the last assistant message if it has no timestamp
           if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
           if(d.usage){
-            S.lastUsage=d.usage;_syncCtxIndicator(d.usage);
+            const _doneUsageFallback={...(S.lastUsage||{})};
+            if(S.session){
+              for(const _usageField of ['context_length','threshold_tokens','last_prompt_tokens']){
+                if(_doneUsageFallback[_usageField]==null&&S.session[_usageField]!=null){
+                  _doneUsageFallback[_usageField]=S.session[_usageField];
+                }
+              }
+            }
+            S.lastUsage=typeof _mergeUsageForCtxIndicator==='function'
+              ? _mergeUsageForCtxIndicator(d.usage,_doneUsageFallback)
+              : {..._doneUsageFallback,...d.usage};
+            _syncCtxIndicator(S.lastUsage);
             // #503 — compute per-turn cost delta and attach to last assistant message
             if(lastAsst){
               const prevIn=_prevIn;
@@ -2077,6 +2280,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
           if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
           if(isSessionViewed) _markSessionViewed(completedSid, completedSession.message_count ?? S.messages.length);
+          // Cooldown: prevent refreshActiveSessionIfExternallyUpdated from
+          // force-reloading immediately after "done" — the event already
+          // delivered the final messages and tool calls.
+          if(typeof window!=='undefined') window._streamJustFinished=true;
+          setTimeout(()=>{ if(typeof window!=='undefined') window._streamJustFinished=false; }, 5000);
+          // Expand render window to cover all messages so the done render
+          // doesn't hide Activity behind a tiny window (winSize=50).
+          if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
+            _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
+          }
           syncTopbar();renderMessages({preserveScroll:true});
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
@@ -2115,6 +2328,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource(source);
         return;
       }
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
@@ -2183,6 +2397,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // state in global transient UI makes later renderMessages() calls insert
           // a duplicate Automatic Compression card.
           window._compressionUi=null;
+          if(typeof _restoreCompressionPlaceholder==='function') _restoreCompressionPlaceholder();
           snapshotLiveTurn();
           return;
         }
@@ -2206,7 +2421,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const displaySid=currentSid;
       const message=String(d.message||'Context auto-compressed to continue the conversation').trim();
       if(d.usage&&typeof _syncCtxIndicator==='function'){
-        S.lastUsage={...(S.lastUsage||{}),...d.usage};
+        S.lastUsage=typeof _mergeUsageForCtxIndicator==='function'
+          ? _mergeUsageForCtxIndicator(d.usage,S.lastUsage||{})
+          : {...(S.lastUsage||{}),...d.usage};
         _syncCtxIndicator(S.lastUsage);
       }
       if(typeof setCompressionUi==='function'){
@@ -2228,6 +2445,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // completion state as global transient UI, otherwise every subsequent
           // render projects the same Auto Compression card again.
           window._compressionUi=null;
+          if(typeof _restoreCompressionPlaceholder==='function') _restoreCompressionPlaceholder();
           snapshotLiveTurn();
         }
       }
@@ -2242,7 +2460,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if((d.session_id||activeSid)!==activeSid) return;
         if(d.usage&&typeof _syncCtxIndicator==='function'){
           if(S.session&&S.session.session_id===activeSid){
-            S.lastUsage={...(S.lastUsage||{}),...d.usage};
+            S.lastUsage=typeof _mergeUsageForCtxIndicator==='function'
+              ? _mergeUsageForCtxIndicator(d.usage,S.lastUsage||{})
+              : {...(S.lastUsage||{}),...d.usage};
             _syncCtxIndicator(S.lastUsage);
           }
         }
@@ -2255,6 +2475,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('apperror',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -2268,12 +2489,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearOwnerInflightState();
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
-      if(S.session&&S.session.session_id===activeSid){
+      let d={};
+      try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      const currentSid=S.session&&S.session.session_id;
+      const eventSid=d.old_session_id||d.session_id||'';
+      const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';
+      const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||continuationSid===currentSid));
+      if(S.session&&eventMatchesCurrent){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
         let isRecoveryControlMessage=false;
         try{
-          const d=JSON.parse(e.data);
           const isRateLimit=d.type==='rate_limit';
           const isQuotaExhausted=d.type==='quota_exhausted';
           const isAuthMismatch=d.type==='auth_mismatch';
@@ -2281,14 +2507,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isModelNotFound=d.type==='model_not_found';
           const isCancelled=d.type==='cancelled';
           const isInterrupted=d.type==='interrupted';
+          const isCompressionExhausted=d.type==='compression_exhausted';
           isRecoveryControlMessage=isInterrupted && (d.recovery_control===true || _streamRecoveryControlMessageText(d.message));
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
-          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
+          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isCompressionExhausted?'Context compression exhausted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
           const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
+          window._compressionUi=null;
+          if(typeof clearCompressionUi==='function') clearCompressionUi();
           if(isRecoveryControlMessage){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
+          } else if(d.session&&typeof d.session==='object'){
+            S.session=d.session;
+            S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);
+            if(S.session&&S.session.session_id){
+              try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+              if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+            }
           } else {
             S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
           }
@@ -2305,13 +2541,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           })();
         } else {
-          _markSessionViewed(activeSid, S.messages.length);
+          _markSessionViewed((S.session&&S.session.session_id)||activeSid, S.messages.length);
           renderMessages({preserveScroll:true});
         }
       }else if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
-        try{const d=JSON.parse(e.data);trackBackgroundError(activeSid,_errTitle,d.message||'Error');}
-        catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
+        trackBackgroundError(activeSid,_errTitle,d.message||'Error');
       }
       _setActivePaneIdleIfOwner();
       renderSessionList(); // clear streaming indicator immediately on apperror
@@ -2330,6 +2565,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('error',async e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source) && !_streamFinalized){
+        return;
+      }
       if(_terminalStateReached || _streamFinalized){
         _closeSource(source);
         return;
@@ -2380,6 +2618,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('cancel',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -2404,6 +2643,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             S.session=data.session;
             const _nextMsgs3018=(data.session.messages||[]).filter(m=>m&&m.role);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+            if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
             clearLiveToolCards();if(!assistantText)removeThinking();
             _markSessionViewed(activeSid, data.session.message_count ?? S.messages.length);
             renderMessages({preserveScroll:true});
@@ -2422,7 +2662,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _setActivePaneIdleIfOwner();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }
@@ -2470,6 +2710,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   async function _restoreSettledSession(source){
+    if(_isActiveSession() && S.activeStreamId!==streamId){
+      _closeSource(source);
+      return false;
+    }
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
@@ -2501,6 +2745,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
         S.messages=_filterRecoveryControlMessages(S.messages || []);
+        if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         if(S.session&&S.session.session_id){
           try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
@@ -2524,6 +2769,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.toolCalls=[];
         }
         if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
+        // Expand render window so the settled render doesn't hide Activity.
+        if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
+          _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
+        }
         syncTopbar();renderMessages({preserveScroll:true});
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
@@ -2536,6 +2785,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _handleStreamError(source){
+    if(_isActiveSession() && S.activeStreamId!==streamId){
+      _closeSource(source);
+      return;
+    }
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -2698,6 +2951,8 @@ function hideApprovalCard(force=false) {
   _approvalSessionId = null;
   _resetApprovalCardState();
   card.classList.remove("visible");
+  card.classList.remove("collapsed");
+  _syncApprovalTranscriptSpace(null);
   $("approvalCmd").textContent = "";
   $("approvalDesc").textContent = "";
 }
@@ -2752,7 +3007,7 @@ function showApprovalCard(pending, pendingCount) {
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
-  const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null});
+  const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null, approval_id: pending.approval_id || null});
   const card = $("approvalCard");
   const sameApproval = card.classList.contains("visible") && _approvalSignature === sig;
   $("approvalDesc").textContent = desc;
@@ -2773,17 +3028,81 @@ function showApprovalCard(pending, pendingCount) {
   if (!sameApproval) {
     _approvalVisibleSince = Date.now();
     _clearApprovalHideTimer();
+    // A distinct approval must always render expanded — never inherit a prior
+    // approval's collapsed state, which would hide its command + action buttons. (#3515)
+    card.classList.remove("collapsed");
   }
   // Re-enable buttons in case a previous approval disabled them
   ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
     const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
   });
   card.classList.add("visible");
+  _syncApprovalCollapseButton(card);
+  _syncApprovalTranscriptSpace(card, {immediate: true});
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   const onceBtn = $("approvalBtnOnce");
   if (onceBtn && document.activeElement !== $('msg')) {
     setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
   }
+}
+
+function _syncApprovalCollapseButton(card) {
+  const collapse = $("approvalCollapse");
+  if (!collapse || !card) return;
+  const collapsed = card.classList.contains("collapsed");
+  collapse.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  // Icon swap: chevron-down when expanded (click to collapse), chevron-up when collapsed (click to expand)
+  const polyline = collapse.querySelector("svg polyline");
+  if (polyline) polyline.setAttribute("points", collapsed ? "18 15 12 9 6 15" : "6 9 12 15 18 9");
+  const label = collapsed ? "Expand approval" : "Collapse approval";
+  collapse.setAttribute("aria-label", label);
+  collapse.title = label;
+}
+
+function _approvalMessagesNearBottom(messages) {
+  if (!messages) return false;
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 150;
+}
+
+function _syncApprovalTranscriptSpace(card, opts) {
+  opts = opts || {};
+  const messages = $("messages");
+  if (!messages) return;
+  const wasNearBottom = _approvalMessagesNearBottom(messages);
+  if (!card || !card.classList.contains("visible")) {
+    messages.classList.remove("approval-open");
+    messages.classList.remove("approval-collapsed");
+    messages.style.removeProperty("--approval-card-height");
+    messages.style.removeProperty("--approval-dock-height");
+    if (wasNearBottom && typeof scrollToBottom === "function" && typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(scrollToBottom);
+    }
+    return;
+  }
+  const collapsed = card.classList.contains("collapsed");
+  messages.classList.add("approval-open");
+  messages.classList.toggle("approval-collapsed", collapsed);
+  const measure = () => {
+    if (!card.classList.contains("visible")) return;
+    const target = collapsed ? card : (card.querySelector(".approval-inner") || card);
+    const h = target && target.getBoundingClientRect().height;
+    if (h > 0) {
+      messages.style.setProperty(collapsed ? "--approval-dock-height" : "--approval-card-height", Math.ceil(h + 24) + "px");
+    }
+    if (wasNearBottom && typeof scrollToBottom === "function") scrollToBottom();
+  };
+  if (opts.immediate) measure();
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(measure);
+  setTimeout(measure, 420);
+}
+
+function toggleApprovalCardCollapsed(forceCollapsed) {
+  const card = $("approvalCard");
+  if (!card) return;
+  const collapsed = typeof forceCollapsed === "boolean" ? forceCollapsed : !card.classList.contains("collapsed");
+  card.classList.toggle("collapsed", collapsed);
+  _syncApprovalCollapseButton(card);
+  _syncApprovalTranscriptSpace(card, {immediate: true});
 }
 
 async function respondApproval(choice) {
@@ -3096,6 +3415,8 @@ function _startClarifyCountdown(pending) {
 
 function _stashClarifyDraft(reason) {
   if (reason !== "expired" && reason !== "terminal") return false;
+  const submit = $("clarifySubmit");
+  if (submit && submit.classList.contains("loading")) return false;
   const input = $("clarifyInput");
   const draft = String((input && input.value) || "").trim();
   if (!draft) return false;

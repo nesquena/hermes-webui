@@ -2,6 +2,7 @@
 
 import struct
 from pathlib import Path
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
@@ -158,6 +159,60 @@ def test_logo_version_for_settings_value_only_accepts_current_canonical_asset(tm
     assert logo_version_for_settings_value("logo-light.gif") == ""
 
 
+def test_logo_delete_uses_capped_json_body_reader(monkeypatch):
+    called = {}
+    monkeypatch.setattr(branding, "_delete_logo_files_for_mode", lambda mode: called.setdefault("mode", mode) or [])
+    handler = SimpleNamespace(
+        headers={"Content-Length": "17"},
+        rfile=BytesIO(b'{"mode":"light"}'),
+        sent_headers={},
+        status=None,
+        body=bytearray(),
+    )
+
+    class Writer:
+        def write(self, data):
+            handler.body.extend(data)
+
+    handler.wfile = Writer()
+    handler.send_response = lambda status: setattr(handler, "status", status)
+    handler.send_header = lambda key, value: handler.sent_headers.setdefault(key, value)
+    handler.end_headers = lambda: None
+
+    branding.handle_logo_delete(handler)
+    assert handler.status == 200
+    assert called["mode"] == "light"
+
+
+def test_logo_delete_rejects_oversized_content_length_without_reading():
+    class RejectRead:
+        def read(self, _length):
+            raise AssertionError("oversized delete body must be rejected before reading")
+
+    handler = SimpleNamespace(
+        headers={"Content-Length": str(25 * 1024 * 1024)},
+        rfile=RejectRead(),
+        sent_headers={},
+        status=None,
+        body=bytearray(),
+        close_connection=False,
+    )
+
+    class Writer:
+        def write(self, data):
+            handler.body.extend(data)
+
+    handler.wfile = Writer()
+    handler.send_response = lambda status: setattr(handler, "status", status)
+    handler.send_header = lambda key, value: handler.sent_headers.setdefault(key, value)
+    handler.end_headers = lambda: None
+
+    branding.handle_logo_delete(handler)
+    assert handler.status == 400
+    assert handler.close_connection is True
+    assert b"Request body too large" in bytes(handler.body)
+
+
 def test_custom_logo_dom_hooks_exist():
     html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
 
@@ -191,6 +246,7 @@ def test_custom_logo_favicon_uses_resolved_theme_variant():
     assert "else if(typeof _systemThemeMq.addListener==='function')" in js
     assert "_setFavicon(src);" in js
     assert "_setFavicon(lightSrc);" not in js
+    assert "_setFavicon('static/favicon.svg')" not in js
     assert "window._customLogoDarkMode" in js
 
 

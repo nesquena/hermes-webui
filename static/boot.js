@@ -11,19 +11,43 @@
   } catch(_) {}
 })();
 
+// cancelStream: stop the active chat stream.
+// See docs/rfcs/webui-run-state-consistency-contract.md (Invariants #2, #4)
+// for the owner-aware + terminal-settle rationale.
 async function cancelStream(){
+  const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
   if(!streamId) return;
+  let respBody=null;
   try{
-    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
-  }catch(e){/* cancel request failed - cleanup below still runs */}
-  // Clear status unconditionally after the cancel request completes.
-  // The SSE cancel event may also fire, but if the connection is already
-  // closed it won't arrive — so we handle cleanup here as the guaranteed path.
-  S.activeStreamId=null;
-  setBusy(false);
-  if(typeof setComposerStatus==='function') setComposerStatus('');
-  else setStatus('');
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    try{respBody=await r.json();}catch(_){}
+  }catch(e){
+    if(typeof console !== 'undefined' && console.warn){
+      console.warn('cancelStream: /api/chat/cancel request failed', e);
+    }
+  }
+  // Active-session cancel should not tear down the current SSE transport before
+  // the backend emits its terminal event; do that only for stale owner paths
+  // where the user moved on to a different stream before this request
+  // completed.
+  if(sid && S.activeStreamId !== streamId && typeof closeLiveStream==='function'){
+    closeLiveStream(sid, streamId);
+  }
+  // Owner guard: if the backend accepted the active-session cancel, leave
+  // the current SSE transport and owner state intact so the terminal
+  // `cancel` event can clear INFLIGHT, render "Task cancelled", and refresh
+  // the sidebar. Only clear locally when the backend says there is no active
+  // stream left to settle.
+  if(respBody && respBody.cancelled===false && S.activeStreamId===streamId){
+    S.activeStreamId=null;
+    setBusy(false);
+    if(typeof setComposerStatus==='function') setComposerStatus('');
+    else setStatus('');
+    // /api/chat/cancel only exposes `cancelled:bool`, so we cannot
+    // distinguish reasons — keep the toast generic and short.
+    if(typeof showToast==='function') showToast('Stream is no longer active',2000);
+  }
 }
 
 async function cancelSessionStream(session){
@@ -370,6 +394,9 @@ function expandSidebar(){
 // panels.js hasn't loaded yet (typeof guard).
 (function _restoreTabVisibility(){
   try{
+    if(typeof _applyTabOrder==='function'&&typeof _getTabOrder==='function'){
+      _applyTabOrder(_getTabOrder());
+    }
     if(typeof _applyTabVisibility==='function'&&typeof _getHiddenTabs==='function'){
       _applyTabVisibility(_getHiddenTabs());
     }
@@ -1478,6 +1505,7 @@ const _SKINS=[
   {name:'Neon',     colors:['#B347FF','#C76BFF','#00DDFF']},
   {name:'Geist Contrast', value:'geist-contrast', colors:['#000000','#ffffff','#FFF175']},
   {name:'Zeus',     colors:['#FFD700','#FFBF00','#1A1A00']},
+  {name:'Verdigris', value:'verdigris', colors:['#C89A5A','#0F1714','#22342C']},
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
 const _VALID_SKINS=new Set((_SKINS||[]).map(s=>(s.value||s.name).toLowerCase()));
@@ -1835,7 +1863,8 @@ function applyCustomLogo(settings){
 
   if(!enabled||!lightPath){
     _setCustomLogoSrc('');
-    _setFavicon('static/favicon.svg');
+    document.documentElement.removeAttribute('data-custom-logo-mode');
+    document.documentElement.removeAttribute('data-custom-logo-src');
     return;
   }
 
@@ -2044,7 +2073,7 @@ function applyCustomLogo(settings){
     api(_checkUrl).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
   // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
+  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';S.activeProfileIsDefault=!!p.is_default;}catch(e){S.activeProfile='default';S.activeProfileIsDefault=true;}
   applyBotName();
   applyCustomLogo(_bootSettings);
   // Update profile chip label immediately

@@ -42,13 +42,12 @@ def test_clarify_pending_and_resolved_publish_session_list_changed(monkeypatch):
 
 def test_approval_pending_and_resolved_publish_session_list_changed(monkeypatch):
     import api.routes as routes
+    import api.route_approvals as route_approvals
 
     events = []
-    monkeypatch.setattr(
-        routes,
-        "publish_session_list_changed",
-        lambda reason: events.append(reason),
-    )
+    capture = lambda reason: events.append(reason)
+    monkeypatch.setattr(route_approvals, "publish_session_list_changed", capture)
+    monkeypatch.setattr(routes, "publish_session_list_changed", capture)
     sid = "test-attention-approval"
 
     with routes._lock:

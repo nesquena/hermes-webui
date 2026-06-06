@@ -11,7 +11,14 @@ from pathlib import Path
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
 from api.helpers import j, bad
 from api.models import get_session
-from api.workspace import safe_resolve_ws, resolve_trusted_workspace, open_anchored_create_fd, make_anchored_dir
+from api.workspace import (
+    safe_resolve_ws,
+    resolve_trusted_workspace,
+    open_anchored_create_fd,
+    make_anchored_dir,
+    rmtree_anchored,
+    unlink_anchored,
+)
 
 
 def _max_extracted_bytes() -> int:
@@ -310,7 +317,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     except Exception:
         # Clean up partially-extracted directory to avoid orphaned folders
         try:
-            shutil.rmtree(dest_dir, ignore_errors=True)
+            rmtree_anchored(workspace, dest_dir)
         except Exception:
             pass
         raise
@@ -496,7 +503,10 @@ def handle_workspace_upload(handler):
                 try:
                     extraction = extract_archive(file_bytes, safe_name, target_dir)
                     # Remove the archive file after successful extraction
-                    dest.unlink(missing_ok=True)
+                    try:
+                        unlink_anchored(workspace, dest.resolve())
+                    except FileNotFoundError:
+                        pass
                     results.append({
                         'filename': safe_name,
                         'path': str(extraction.get('dest', target_dir)),
@@ -510,7 +520,10 @@ def handle_workspace_upload(handler):
                 except (zipfile.BadZipFile, tarfile.TarError, ValueError) as e:
                     # Extraction failed — remove the archive file (no partial
                     # content left behind) and surface the error to the user.
-                    dest.unlink(missing_ok=True)
+                    try:
+                        unlink_anchored(workspace, dest.resolve())
+                    except FileNotFoundError:
+                        pass
                     print(f'[webui] workspace upload extract error: {e}', flush=True)
                     results.append({
                         'filename': safe_name,
@@ -524,7 +537,10 @@ def handle_workspace_upload(handler):
                     continue
                 except Exception:
                     print('[webui] workspace upload extract error: ' + _extract_tb.format_exc(), flush=True)
-                    dest.unlink(missing_ok=True)
+                    try:
+                        unlink_anchored(workspace, dest.resolve())
+                    except FileNotFoundError:
+                        pass
                     results.append({
                         'filename': safe_name,
                         'path': str(target_dir),

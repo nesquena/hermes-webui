@@ -104,6 +104,55 @@ def test_agent_session_row_exists_handles_missing_sessions_table(tmp_path, monke
     assert models.agent_session_row_exists("whatever") is True
 
 
+def test_agent_session_rows_existing_returns_present_subset(tmp_path, monkeypatch):
+    from api import models
+
+    home = tmp_path / "home"
+    home.mkdir()
+    _make_state_db(home / "state.db", ["sess-a", "sess-b"])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: home / "state.db")
+
+    existing = models.agent_session_rows_existing(
+        ["sess-a", "sess-b", "sess-missing", "", None]
+    )
+    assert existing == frozenset({"sess-a", "sess-b"})
+
+
+def test_agent_session_rows_existing_safe_when_db_missing(tmp_path, monkeypatch):
+    from api import models
+
+    monkeypatch.setattr(
+        models, "_active_state_db_path", lambda: tmp_path / "nope" / "state.db"
+    )
+    wanted = ["orphan-a", "orphan-b"]
+    assert models.agent_session_rows_existing(wanted) == frozenset(wanted)
+
+
+def test_agent_session_rows_existing_batches_over_500_ids(tmp_path, monkeypatch):
+    from api import models
+
+    home = tmp_path / "home"
+    home.mkdir()
+    ids = [f"sess-{i:04d}" for i in range(600)]
+    _make_state_db(home / "state.db", ids[:300])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: home / "state.db")
+
+    existing = models.agent_session_rows_existing(ids)
+    assert existing == frozenset(ids[:300])
+
+
+def test_agent_session_rows_existing_normalizes_whitespace_in_probe_ids(tmp_path, monkeypatch):
+    from api import models
+
+    home = tmp_path / "home"
+    home.mkdir()
+    _make_state_db(home / "state.db", ["cli-padded"])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: home / "state.db")
+
+    existing = models.agent_session_rows_existing(["  cli-padded  "])
+    assert existing == frozenset({"cli-padded"})
+
+
 # ── Orphan-prune decision predicate (mirrors the sidebar merge-loop guard) ──
 
 

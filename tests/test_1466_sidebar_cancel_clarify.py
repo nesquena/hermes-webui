@@ -79,8 +79,9 @@ class TestSidebarCancelAction:
         # to 5200 in #2111 for response-aware archive toast handling, then
         # to 6400 in #2294 for the "Hide from list" action on external sessions,
         # then to 7200 in #3223 for the "Regenerate title" action (gated on
-        # !session.is_imported) added between Stop-response and the worktree/delete block.
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 7200)
+        # !session.is_imported) added between Stop-response and the worktree/delete block,
+        # then to 8000 in #3199 for the manual status picker before the danger block.
+        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8000)
         assert "const isCliSession = _isCliSession(session);" in body
         assert "const isExternalSession = isMessagingSession || isCliSession;" in body
         assert "if(!isExternalSession)" in body

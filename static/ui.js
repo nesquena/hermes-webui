@@ -1,4 +1,11 @@
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
+// `todos` is the single source of truth for the Todos panel.  Any update
+// goes through the `todo_state` SSE event (live) or session.todo_state
+// (cold-load).  `todoStateMeta` doubles as a sentinel: while it is null
+// no explicit signal has been seen, so loadTodos() falls back to the
+// legacy reverse-scan over S.messages — that keeps new clients working
+// against old servers (Phase 1 may not yet be deployed everywhere).
+// See api/todo_state.py for the wire contract.
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null};
 
 function assistantDisplayName(){
   if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
@@ -86,12 +93,44 @@ async function checkOfflineRecoveryNow(){
     _setOfflineChecking(true);
     const ok=await _probeOfflineRecovery();
     _setOfflineChecking(false);
-    if(ok){_stopOfflineProbeTimer();window.location.reload();return true;}
+    if(ok){_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();return true;}
     showOfflineBanner('network');
     return false;
   })();
   try{return await _offlineProbePromise;}
   finally{_offlineProbePromise=null;}
+}
+// Recover from a transient "Connection lost" without a full page reload.
+//
+// The offline banner fires whenever a fetch/SSE errors — which Android does
+// aggressively every time the PWA is backgrounded, even for a second. The old
+// behaviour here was `window.location.reload()`: a hard cold boot that re-runs
+// the whole app and re-pulls /api/sessions + /api/session, producing the
+// multi-second "reload to see the conversation I was just in" flash on every
+// resume. The reload was also intermittent (only when a request actually
+// errored that time), matching the reported "sometimes it reloads, sometimes
+// it doesn't".
+//
+// The server keeps the agent running and buffers stream events while no
+// subscriber is attached (#2307), so a hard reload is never required to
+// recover — we just need to reattach. This does the soft path: hide the
+// banner, restart the gateway SSE (bfcache/background kills the connection),
+// and re-fetch the active session so any messages that landed while we were
+// away appear. A full reload is the fallback only if the soft path throws.
+async function _recoverFromOfflineSoftly(){
+  try{
+    _hideOfflineBanner();
+    if(typeof startGatewaySSE==='function') startGatewaySSE();
+    if(S.session && typeof refreshSession==='function'){
+      await refreshSession();
+    }
+    return true;
+  }catch(_){
+    // Soft reattach failed (server mid-restart, session gone, etc.) — fall
+    // back to the original hard reload so the user is never stuck offline.
+    window.location.reload();
+    return false;
+  }
 }
 function _isAbortError(e){return !!(e&&(e.name==='AbortError'||e.code===20));}
 function _patchOfflineFetch(){
@@ -268,9 +307,11 @@ let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 // Cached visWithIdx array — invalidated when S.messages.length changes.
 let _visWithIdxCache=null;
 let _visWithIdxCacheLen=0;
+let _visWithIdxCacheSrc=null;  // S.messages reference — detects wholesale replacement with same length
 function clearVisibleMessageRowCache(){
   _visWithIdxCache=null;
   _visWithIdxCacheLen=0;
+  _visWithIdxCacheSrc=null;
 }
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
@@ -316,9 +357,10 @@ function _messageRenderableMessageCount(){
   for(const m of (S.messages||[])){
     if(!m||!m.role||m.role==='tool') continue;
     if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) continue;
+    if(_isRecoveryControlMessage(m)) continue;
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) count++;
+    if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) count++;
   }
   return count;
 }
@@ -377,9 +419,18 @@ async function jumpToSessionStart(){
   _messageUserUnpinned=true;
   _programmaticScroll=true;
   try{
-    if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+    // During active streaming, skip full message load — API response won't
+    // include live messages from the current turn, and replacing S.messages
+    // would lose user/assistant/tool messages.
+    if(!(S.busy||S.activeStreamId)){
+      if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+    }
     _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
-    renderMessages({ preserveScroll:true });
+    // During streaming, skip renderMessages — it rebuilds the DOM but tool card
+    // insertion is blocked by !S.busy, losing Activity until "done" fires.
+    if(!(S.busy||S.activeStreamId)){
+      renderMessages({ preserveScroll:true });
+    }
     requestAnimationFrame(()=>{
       container.scrollTop=0;
       _updateSessionStartJumpButton();
@@ -1337,14 +1388,22 @@ function _addLiveModelsToSelect(provider, models, sel){
   if(!providerGroup){
     providerGroup=document.createElement('optgroup');
     providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
+    providerGroup.dataset.provider=provider;
     sel.appendChild(providerGroup);
+  }else if(!providerGroup.dataset.provider){
+    providerGroup.dataset.provider=provider;
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
-  // Normalized dedup: strip one @provider: prefix and namespace so
-  // 'minimax/minimax-m2.7' matches '@nous:minimax/minimax-m2.7' (#907).
+  // Normalized dedup strips provider/custom prefixes and namespaces (#907, #3478).
   const _normId=id=>{
     let s=String(id||'');
-    if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1);
+    if(s.startsWith('@')&&s.includes(':')){
+      if(s.startsWith('@custom:')){
+        s=s.substring(s.lastIndexOf(':')+1)||s;
+      }else{
+        s=s.substring(s.indexOf(':')+1);
+      }
+    }
     s=s.split('/').pop();
     return s.replace(/-/g,'.').toLowerCase();
   };
@@ -1365,6 +1424,7 @@ function _addLiveModelsToSelect(provider, models, sel){
     opt.value=mid;
     opt.textContent=m.label||m.id;
     opt.title='Live model — fetched from provider';
+    opt.dataset.provider=provider;
     providerGroup.appendChild(opt);
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
@@ -2705,6 +2765,30 @@ function _syncMobileCtxDisplay(state){
   _setCtxCompressButton(compressBtn,state.compressText||'');
 }
 
+function _mergeUsageForCtxIndicator(latest, fallback){
+  const latestObj=(latest&&typeof latest==='object')?latest:{};
+  const fallbackObj=(fallback&&typeof fallback==='object')?fallback:{};
+  const merged={...latestObj};
+  for(const field of [
+    'input_tokens','output_tokens','estimated_cost',
+    'cache_read_tokens','cache_write_tokens','cache_hit_percent',
+    'turn_cache_hit_percent','duration_seconds','tps','gateway_routing',
+  ]){
+    if(merged[field]==null&&fallbackObj[field]!=null){
+      merged[field]=fallbackObj[field];
+    }
+  }
+  if(!(Number(latestObj.context_length)>0)&&Number(fallbackObj.context_length)>0){
+    merged.context_length=fallbackObj.context_length;
+  }
+  for(const field of ['threshold_tokens','last_prompt_tokens']){
+    if(latestObj[field]==null&&fallbackObj[field]!=null){
+      merged[field]=fallbackObj[field];
+    }
+  }
+  return merged;
+}
+
 // Context usage indicator in composer footer
 function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
@@ -2871,7 +2955,11 @@ function _messageBottomDistance(){
   return el.scrollHeight-el.scrollTop-el.clientHeight;
 }
 function _shouldFollowMessagesOnDomReplace(){
-  return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(1200));
+  // Final stream settlement replaces the live DOM with persisted messages. Keep
+  // following only for users who are still pinned or effectively at the tail.
+  // A broad near-bottom window causes long answers/mobile readers who scroll up
+  // a little to read mid-stream to get snapped back to the bottom on completion.
+  return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(120));
 }
 function _settleMessageScrollToBottom(force){
   // Markdown post-processing (Prism, tables, Mermaid/KaTeX/PDF placeholders)
@@ -3746,6 +3834,7 @@ function setComposerStatus(t){
 }
 
 let _composerLockState=null;
+let _compressionPlaceholderSaved=null;
 
 function lockComposerForClarify(placeholderText){
   const input=$('msg');
@@ -3817,6 +3906,7 @@ function getComposerPrimaryAction(){
   if(!isBusy) return hasContent?'send':'disabled';
   if(!hasContent){
     if(S.activeStreamId&&typeof cancelStream==='function') return 'stop';
+    if(compressionRunning) return 'queue';
     return 'disabled';
   }
   const explicitAction=_getExplicitBusyCommandAction(msg&&msg.value);
@@ -3861,10 +3951,10 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    const _dcompr=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
     if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
-    else if(_dcompr) _btnTitle=_tt('composer_disabled_compression','Waiting for compression to finish');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
+  }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
+    _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
   }else{
     const _tmap={send:'Send message',queue:'Queue message',interrupt:'Interrupt and send',steer:'Steer current response',stop:'Stop generation'};
     _btnTitle=_tt('composer_'+action,_tmap[action]||'Send message');
@@ -4484,9 +4574,131 @@ function _stripForTTS(text){
   return text;
 }
 
+function _splitForTTS(text, maxChars){
+  // Split long text into chunks at natural sentence/paragraph boundaries
+  // to avoid browser SpeechSynthesis truncation on long texts.
+  maxChars=maxChars||300;
+  if(text.length<=maxChars) return [text];
+  const chunks=[];
+  let remaining=text;
+  while(remaining.length>0){
+    if(remaining.length<=maxChars){ chunks.push(remaining); break; }
+    let splitAt=maxChars;
+    const sentencePattern=new RegExp('^[\\s\\S]{0,'+(maxChars-1)+'}[。！？.!？](?=\\s|$)','g');
+    const m=sentencePattern.exec(remaining);
+    if(m) splitAt=m.index+m[0].length;
+    else{
+      const sub=remaining.slice(0,maxChars);
+      const lastSpace=Math.max(sub.lastIndexOf(' '),sub.lastIndexOf('\n'),sub.lastIndexOf(','),sub.lastIndexOf('，'));
+      if(lastSpace>maxChars*0.5) splitAt=lastSpace+1;
+    }
+    chunks.push(remaining.slice(0,splitAt).trim());
+    remaining=remaining.slice(splitAt).trim();
+  }
+  return chunks.filter(Boolean);
+}
+
 let _ttsSpeaking=false;
 let _ttsCurrentUtterance=null;
+let _ttsChunkQueue=[];
+let _ttsChunkIndex=0;
+let _ttsActiveBtn=null;
 let _playingEdgeAudio=null;
+
+function _buildBrowserUtterance(text, btn){
+  const utter=new SpeechSynthesisUtterance(text);
+  const savedVoice=localStorage.getItem('hermes-tts-voice');
+  const voices=speechSynthesis.getVoices();
+  if(savedVoice&&voices.length){
+    const match=voices.find(v=>v.name===savedVoice);
+    if(match) utter.voice=match;
+  }
+  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+  if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
+  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+  if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
+  utter.onend=()=>{
+    _ttsChunkIndex++;
+    if(_ttsChunkIndex<_ttsChunkQueue.length){
+      const next=new SpeechSynthesisUtterance(_ttsChunkQueue[_ttsChunkIndex]);
+      next.voice=utter.voice; next.rate=utter.rate; next.pitch=utter.pitch;
+      next.onend=utter.onend; next.onerror=utter.onerror;
+      _ttsCurrentUtterance=next;
+      speechSynthesis.speak(next);
+    } else {
+      _ttsSpeaking=false; _ttsCurrentUtterance=null;
+      _ttsChunkQueue=[]; _ttsChunkIndex=0; _ttsActiveBtn=null;
+      if(btn) btn.dataset.speaking='0';
+    }
+  };
+  utter.onerror=()=>{
+    _ttsSpeaking=false; _ttsCurrentUtterance=null;
+    _ttsChunkQueue=[]; _ttsChunkIndex=0; _ttsActiveBtn=null;
+    if(btn) btn.dataset.speaking='0';
+  };
+  return utter;
+}
+
+function _playEdgeTtsChunked(text, btn){
+  const chunks=_splitForTTS(text);
+  const _playOne=function(idx){
+    if(idx>=chunks.length){
+      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(btn) btn.dataset.speaking='0';
+      return;
+    }
+    const chunk=chunks[idx];
+    const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
+    const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+    const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+    let rate='', pitch='';
+    if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
+    if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
+    fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch})
+    })
+    .then(function(r){
+      if(!r.ok){
+        return r.json().catch(function(){return {};}).then(function(j){
+          throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+        });
+      }
+      return r.blob();
+    })
+    .then(function(blob){
+      if(!_ttsSpeaking) return;
+      const url=URL.createObjectURL(blob);
+      const audio=new Audio(url);
+      _playingEdgeAudio=audio;
+      audio.onended=function(){
+        URL.revokeObjectURL(url);
+        _playingEdgeAudio=null;
+        if(_ttsSpeaking) _playOne(idx+1);
+      };
+      audio.onerror=function(){
+        URL.revokeObjectURL(url);
+        _playingEdgeAudio=null;
+        _ttsSpeaking=false;
+        if(btn) btn.dataset.speaking='0';
+      };
+      audio.play().catch(function(e){
+        URL.revokeObjectURL(url);
+        _playingEdgeAudio=null;
+        _ttsSpeaking=false;
+        if(btn) btn.dataset.speaking='0';
+        if(typeof showToast==='function') showToast('Edge TTS error: '+(e&&e.message||e));
+      });
+    })
+    .catch(function(e){
+      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(btn) btn.dataset.speaking='0';
+      if(typeof showToast==='function') showToast('Edge TTS failed: '+(e&&e.message||e));
+    });
+  };
+  _playOne(0);
+}
 
 function speakMessage(btn){
   if(btn&&btn.dataset.speaking==='1'){
@@ -4504,7 +4716,7 @@ function speakMessage(btn){
 
   const engine=localStorage.getItem('hermes-tts-engine')||'browser';
   if(engine==='edge'){
-    _playEdgeTts(clean, btn);
+    _playEdgeTtsChunked(clean, btn);
     return;
   }
 
@@ -4513,74 +4725,15 @@ function speakMessage(btn){
     return;
   }
 
-  const utter=new SpeechSynthesisUtterance(clean);
+  _ttsChunkQueue=_splitForTTS(clean);
+  _ttsChunkIndex=0;
+  _ttsActiveBtn=btn;
+  _ttsSpeaking=true;
+  if(btn) btn.dataset.speaking='1';
 
-  // Apply saved voice preference
-  const savedVoice=localStorage.getItem('hermes-tts-voice');
-  const voices=speechSynthesis.getVoices();
-  if(savedVoice&&voices.length){
-    const match=voices.find(v=>v.name===savedVoice);
-    if(match) utter.voice=match;
-  }
-
-  // Apply saved rate/pitch
-  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-  if(!isNaN(savedRate)) utter.rate= Math.min(2,Math.max(0.5,savedRate));
-  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-  if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
-
+  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], btn);
   _ttsCurrentUtterance=utter;
-  _ttsSpeaking=true;
-  if(btn) btn.dataset.speaking='1';
-
-  utter.onend=()=>{ _ttsSpeaking=false; _ttsCurrentUtterance=null; if(btn) btn.dataset.speaking='0'; };
-  utter.onerror=()=>{ _ttsSpeaking=false; _ttsCurrentUtterance=null; if(btn) btn.dataset.speaking='0'; };
-
   speechSynthesis.speak(utter);
-}
-
-function _playEdgeTts(text, btn){
-  const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
-  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-  let rate='', pitch='';
-  if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
-  if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-  if(btn) btn.dataset.speaking='1';
-  _ttsSpeaking=true;
-  // /api/tts is POST-only (and behind the same-origin CSRF gate); GET via
-  // new Audio(url) would 405 and silently fail, and would also leak the message
-  // text into the query string / access log. POST the JSON body, then play the
-  // returned audio via an object URL — mirrors the working boot.js edge path.
-  const _fail=function(msg){
-    _ttsSpeaking=false;_playingEdgeAudio=null;
-    if(btn)btn.dataset.speaking='0';
-    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
-  };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, voice:voice, rate:rate, pitch:pitch})
-  })
-  .then(function(r){
-    if(!r.ok){
-      // Surface the server error (e.g. 503 "edge-tts not installed", 429 rate limit)
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-      });
-    }
-    return r.blob();
-  })
-  .then(function(blob){
-    const url=URL.createObjectURL(blob);
-    const audio=new Audio(url);
-    _playingEdgeAudio=audio;
-    const _cleanup=function(){_ttsSpeaking=false;_playingEdgeAudio=null;if(btn)btn.dataset.speaking='0';try{URL.revokeObjectURL(url);}catch(_){}};
-    audio.onended=_cleanup;
-    audio.onerror=function(){_cleanup();};
-    audio.play().catch(function(e){_cleanup();showToast('Edge TTS error: '+(e&&e.message||e));});
-  })
-  .catch(function(e){ _fail((e&&e.message)||'Edge TTS failed'); });
 }
 
 function stopTTS(){
@@ -4594,6 +4747,9 @@ function stopTTS(){
   }
   _ttsSpeaking=false;
   _ttsCurrentUtterance=null;
+  _ttsChunkQueue=[];
+  _ttsChunkIndex=0;
+  _ttsActiveBtn=null;
   // Reset all speaking buttons
   document.querySelectorAll('[data-speaking="1"]').forEach(btn=>{ btn.dataset.speaking='0'; });
 }
@@ -4612,21 +4768,15 @@ function autoReadLastAssistant(){
   const clean=_stripForTTS(text);
   if(!clean) return;
   if(engine==='edge'){
-    _playEdgeTts(clean, null);
+    _playEdgeTtsChunked(clean, null);
     return;
   }
-  const utter=new SpeechSynthesisUtterance(clean);
-  const savedVoice=localStorage.getItem('hermes-tts-voice');
-  const voices=speechSynthesis.getVoices();
-  if(savedVoice&&voices.length){
-    const match=voices.find(v=>v.name===savedVoice);
-    if(match) utter.voice=match;
-  }
-  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-  if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
-  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-  if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
-
+  // Use chunked playback for browser TTS
+  _ttsChunkQueue=_splitForTTS(clean);
+  _ttsChunkIndex=0;
+  _ttsSpeaking=true;
+  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], null);
+  _ttsCurrentUtterance=utter;
   speechSynthesis.speak(utter);
 }
 
@@ -4693,11 +4843,20 @@ function _compactInflightState(state){
   const limits=_getInflightStateLimits();
   const messages=Array.isArray(state.messages)?state.messages.slice(-limits.messages):[];
   const toolCalls=Array.isArray(state.toolCalls)?state.toolCalls.slice(-limits.toolCalls):[];
+  // Phase 2: persist the live todo snapshot so reload / SSE reattach
+  // restores the panel without waiting for the next live `todo` write.
+  // The list is bounded by the agent (typically <20 items) and each
+  // item is small, so no per-list cap is needed beyond the existing
+  // stringChars truncation in _truncateInflightValue.
+  const todos=Array.isArray(state.todos)?state.todos:null;
+  const todoStateMeta=(state.todoStateMeta&&typeof state.todoStateMeta==='object')?state.todoStateMeta:null;
   return _truncateInflightValue({
     streamId:state.streamId||null,
     messages,
     uploaded:Array.isArray(state.uploaded)?state.uploaded.slice(-20):[],
     toolCalls,
+    todos,
+    todoStateMeta,
   }, limits.stringChars);
 }
 function _writeInflightStateMap(all){
@@ -4757,6 +4916,154 @@ function clearInflightState(sid){
     if(Object.keys(all).length) localStorage.setItem(INFLIGHT_STATE_KEY, JSON.stringify(all));
     else localStorage.removeItem(INFLIGHT_STATE_KEY);
   }catch(_){ }
+}
+
+// ─── Todo state: single source of truth + render scheduling ─────────────────
+//
+// Three concerns live together so they can share state cleanly:
+//
+//   1. _todosHash(items)  — cheap content fingerprint; skips re-render when
+//      a snapshot would paint the same DOM.  Used both as a short-circuit
+//      and as the hash that compares "rendered vs current" snapshots.
+//
+//   2. scheduleTodosRefresh() — coalesces multiple `todo_state` events that
+//      land in the same animation frame into a single loadTodos() call.
+//      Skips work entirely when the panel is not active.
+//
+//   3. _hydrateTodosFromSession(session) — applies cold-load todo_state
+//      from the session GET payload, or clears the panel when neither a
+//      cold-load nor an INFLIGHT signal is available.  Called at every
+//      `S.session = ...` settle point so cross-session navigation never
+//      leaves a stale list visible.
+//
+// The hash is keyed on (id, content, status); the render itself uses
+// `esc()` for any user-controlled string, so XSS surface is the same as
+// any other innerHTML path in this file.
+let _todosLastRenderedHash=null;
+let _todosRenderRafId=0;
+
+function _todosHash(items){
+  if(!Array.isArray(items)) return '';
+  // String concat outperforms JSON.stringify on small arrays in V8 (no
+  // intermediate object allocation) and is exact enough — the field set
+  // matches what the renderer reads, so any visible change in DOM
+  // implies a hash change.  Field separators (\x1f, \x1e) are control
+  // chars unlikely to appear in real todo content, so collisions across
+  // boundaries are not realistic.
+  let h=items.length+'|';
+  for(let i=0;i<items.length;i++){
+    const t=items[i]||{};
+    h+=String(t.id==null?'':t.id)+'\x1f'+String(t.content==null?'':t.content)+'\x1f'+String(t.status==null?'':t.status)+'\x1e';
+  }
+  return h;
+}
+
+function _todosPanelIsActive(){
+  if(typeof document==='undefined') return false;
+  const panel=document.getElementById('panelTodos');
+  return !!(panel&&panel.classList&&panel.classList.contains('active'));
+}
+
+function scheduleTodosRefresh(){
+  // Idempotent: many `todo_state` events fire on each tool result, but
+  // only the latest snapshot needs to paint.  RAF lets us coalesce
+  // without timer drift.
+  if(_todosRenderRafId) return;
+  if(typeof requestAnimationFrame!=='function'){
+    if(typeof loadTodos==='function') loadTodos();
+    return;
+  }
+  _todosRenderRafId=requestAnimationFrame(()=>{
+    _todosRenderRafId=0;
+    if(!_todosPanelIsActive()) return;
+    if(typeof loadTodos==='function') loadTodos();
+  });
+}
+
+function _resetTodosRenderCache(){
+  // Clear after every cross-session navigation so the next render is
+  // never short-circuited against a hash from a different session.
+  _todosLastRenderedHash=null;
+}
+
+function _hydrateTodosFromSession(session){
+  // Three input cases, three deterministic outcomes:
+  //   a) cold-load AND inflight both present  → pick newer by ts so a
+  //      stale cold-load from the session GET cannot regress a fresher
+  //      INFLIGHT snapshot persisted from a still-running stream
+  //      (avoids visible rollback on reload).
+  //   b) only one of cold-load / inflight is present  → use it.
+  //   c) neither  → reset to empty + sentinel so loadTodos() falls
+  //      through to the legacy reverse-scan or paints the empty state.
+  const sid=(session&&session.session_id)||'';
+  const inflight=(typeof INFLIGHT==='object'&&INFLIGHT&&sid)?INFLIGHT[sid]:null;
+  const cold=session&&session.todo_state;
+  const coldOk=!!(cold&&Array.isArray(cold.todos));
+  const inflightOk=!!(inflight&&Array.isArray(inflight.todos)&&inflight.todoStateMeta);
+  const coldTs=coldOk?(Number(cold.ts)||0):0;
+  const inflightTs=inflightOk?(Number(inflight.todoStateMeta&&inflight.todoStateMeta.ts)||0):0;
+  // Whether a live stream currently owns this session. This is the signal
+  // that disambiguates a ts-less cold-load (see below); it comes from the
+  // session GET payload (mirrors sessions.js `S.session.active_stream_id`).
+  const streamActive=!!(session&&session.active_stream_id);
+  if(coldOk&&inflightOk){
+    // Reconcile the server's settled cold-load snapshot against the
+    // locally-persisted INFLIGHT snapshot.
+    //
+    // coldTs===0 means the cold-load carries NO usable timestamp, so we
+    // cannot order it against INFLIGHT by recency. A todo tool message can
+    // legitimately lose its `timestamp` during context compression/rebuild
+    // (the on-disk message ends up timestamp=None), and derive_todo_state
+    // (api/todo_state.py) then returns the correct latest-by-POSITION todos
+    // but omits `ts`. The tie-break depends on who owns the INFLIGHT tail:
+    //
+    //   - stream ACTIVE → INFLIGHT is the live tail. The most recent todo
+    //     write may still be in flight and not yet settled into the message
+    //     list derive_todo_state scans, so a ts-less cold-load can be an
+    //     OLDER (pre-latest-write) view. Letting cold win here rolls the
+    //     panel back to a stale list, and since the stream may have just
+    //     ended on that very write there is no guaranteed forward SSE event
+    //     to self-heal. So prefer INFLIGHT. If cold is in fact newer, the
+    //     reattach replay (sessions.js attachLiveStream, reconnecting) re-
+    //     emits the journaled `todo_state` events which reconcile forward by
+    //     ts, so any transient discrepancy corrects itself.
+    //
+    //   - stream IDLE → INFLIGHT is leftover from a finished/crashed stream
+    //     (idle sessions purge it shortly after, sessions.js), and there is
+    //     no replay to correct anything. The settled cold-load is the
+    //     authoritative latest-by-position view, so prefer cold. This also
+    //     preserves the original fix for the "shows an old todo list" bug,
+    //     where a stale prior-turn INFLIGHT must not beat a ts-less cold-load.
+    //
+    // When coldTs>0 the original recency rule stands: strict ">", and on a
+    // tie prefer INFLIGHT for the freshest in-tab edits.
+    const coldWins=(coldTs===0)?(!streamActive):(coldTs>inflightTs);
+    if(coldWins){
+      S.todos=cold.todos;
+      S.todoStateMeta={
+        ts:coldTs,
+        source:'cold-load',
+        version:Number(cold.version)||1,
+      };
+    }else{
+      S.todos=inflight.todos;
+      S.todoStateMeta=inflight.todoStateMeta;
+    }
+  }else if(coldOk){
+    S.todos=cold.todos;
+    S.todoStateMeta={
+      ts:coldTs,
+      source:'cold-load',
+      version:Number(cold.version)||1,
+    };
+  }else if(inflightOk){
+    S.todos=inflight.todos;
+    S.todoStateMeta=inflight.todoStateMeta;
+  }else{
+    S.todos=[];
+    S.todoStateMeta=null;
+  }
+  _resetTodosRenderCache();
 }
 
 function snapshotLiveTurnHtmlForSession(sid){
@@ -5028,7 +5335,7 @@ async function refreshSession() {
     if(pendingMsg) S.messages.push(pendingMsg);
     S.activeStreamId=data.session.active_stream_id||null;
 
-    syncTopbar(); renderMessages();
+    syncTopbar(); _renderMessagesWithScrollSnapshot();
     showToast('Conversation refreshed');
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }
@@ -5339,6 +5646,8 @@ async function applyUpdates(){
     return;
   }
   try{
+    const stashConflictMessages=[];
+    const baselineServerIdentity = await _readHealthServerIdentity();
     for(const target of targets){
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
       if(!res.ok){
@@ -5346,11 +5655,16 @@ async function applyUpdates(){
         resetApplyButton(0);
         return;
       }
+      if(res.stash_conflict){
+        stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
+        if(errEl){errEl.textContent=stashConflictMessages.join('\n\n');errEl.style.display='block';}
+      }
     }
-    showToast('Update applied — restarting…');
+    const stashConflictMessage=stashConflictMessages.join('\n\n');
+    showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload();
+    _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
     const msg=_formatUpdateApplyExceptionMessage(e);
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -5374,6 +5688,26 @@ function _showUpdateError(target,res){
     forceBtn.style.display='inline-block';
   }
 }
+function _normalizeHealthServerIdentity(rawIdentity){
+  if(rawIdentity===undefined||rawIdentity===null) return null;
+  if(typeof rawIdentity==='string'){
+    const value=rawIdentity.trim();
+    return value ? value : null;
+  }
+  const numeric=Number(rawIdentity);
+  return Number.isFinite(numeric) ? String(numeric) : null;
+}
+
+async function _readHealthServerIdentity() {
+  try {
+    const r=await fetch(new URL('health', document.baseURI||location.href).href,{cache:'no-store'});
+    if(!r.ok) return null;
+    const data=await r.json();
+    return _normalizeHealthServerIdentity(data&&data.server_started_at);
+  } catch (_) {
+    return null;
+  }
+}
 async function forceUpdate(btn){
   const target=btn&&btn.dataset.target;
   if(!target) return;
@@ -5389,6 +5723,7 @@ async function forceUpdate(btn){
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
+    const baselineServerIdentity = await _readHealthServerIdentity();
     const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
@@ -5398,7 +5733,7 @@ async function forceUpdate(btn){
     showToast('Force update applied — restarting…');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload();
+    _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
     if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
     btn.disabled=false;btn.textContent='Force update';
@@ -5413,6 +5748,7 @@ async function _waitForServerThenReload(opts){
   opts=opts||{};
   const interval=opts.interval||500;
   const maxMs=opts.maxMs||15000;
+  const baselineServerIdentity=_normalizeHealthServerIdentity(opts.baselineServerIdentity);
   window._restartingForUpdate=true;
   const msgEl=$('reconnectMsg');
   const banner=$('reconnectBanner');
@@ -5429,8 +5765,16 @@ async function _waitForServerThenReload(opts){
         let data={};
         try{ data=await r.json(); }catch(_){}
         if(data && data.status==='ok'){
-          location.reload();
-          return;
+          const nextServerIdentity=_normalizeHealthServerIdentity(data&&data.server_started_at);
+          if (baselineServerIdentity===null){
+            location.reload();
+            return;
+          }
+          if (nextServerIdentity!==null && nextServerIdentity !== baselineServerIdentity){
+            location.reload();
+            return;
+          }
+          // Keep polling while the server keeps reporting the same (pre-restart) process identity
         }
       }
     }catch(_){ /* socket closed during restart — retry */ }
@@ -5487,6 +5831,24 @@ async function checkInflightOnBoot(sid) {
   } catch(e) { clearInflight(); }
 }
 
+function _topbarLoadedMessageCount(){
+  const messages=Array.isArray(S.messages)?S.messages:[];
+  return messages.filter(m=>m&&m.role&&m.role!=='tool').length;
+}
+function _topbarMessageMetaText(){
+  const loadedCount=_topbarLoadedMessageCount();
+  const totalCount=Number(S.session&&S.session.message_count);
+  const hasTotal=Number.isFinite(totalCount)&&totalCount>0;
+  const isTruncated=!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated);
+  if(isTruncated&&hasTotal&&totalCount>loadedCount){
+    return `${loadedCount} loaded of ${totalCount} messages`;
+  }
+  // Fully loaded: use the tool-row-filtered loadedCount, NOT the raw server
+  // total (api/routes.py sets message_count to len(_all_msgs), which counts
+  // role:"tool" rows the topbar has always excluded). Only the truncated
+  // branch above surfaces the raw server total, and only as "loaded of total".
+  return t('n_messages',loadedCount);
+}
 function syncTopbar(){
   if(!S.session){
     document.title=assistantDisplayName();
@@ -5510,13 +5872,12 @@ function syncTopbar(){
   const sessionTitle=S.session.title||t('untitled');
   const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
   document.title=sessionTitle+' \u2014 '+assistantDisplayName();
-  const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
   const _topbarMeta=$('topbarMeta');
   if(_topbarMeta){
     let sourceLabel=(S.session&&(S.session.source_label||S.session.source_tag||S.session.raw_source))||'';
     // Recovered sidecars stamp source_label 'WebUI' (api/session_recovery.py); don't badge a native session as its own source (#3338).
     if(/^webui$/i.test(sourceLabel)) sourceLabel='';
-    const metaText=t('n_messages',vis.length);
+    const metaText=_topbarMessageMetaText();
     _topbarMeta.textContent=metaText;
     if(sourceLabel){
       const badge=document.createElement('span');
@@ -5615,9 +5976,19 @@ function syncTopbar(){
   if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
   if(typeof syncTerminalButton==='function') syncTerminalButton();
   // modelSelect already set above
-  // Update profile chip label
+  // Update profile chip label.
+  // The chip is the profile-SWITCHER trigger (it fronts the profile dropdown) and
+  // governs where the next message / new chat routes — both follow the client
+  // active profile (the hermes_profile cookie, set only by /api/profile/switch).
+  // It must therefore reflect S.activeProfile, NOT the loaded session's profile.
+  // #3331 briefly keyed this on S.session.profile so the label would track the
+  // session being browsed, but loadSession() never updates S.activeProfile, so
+  // opening a cross-profile session made the chip disagree with the dropdown
+  // checkmark and lie about message routing (#3635). #3331's legitimate work —
+  // scoping project/session operations to the session's own profile — is
+  // unaffected by this line.
   const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=(S.session&&S.session.profile)||S.activeProfile||'default';
+  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
 }
 
 function msgContent(m){
@@ -5844,10 +6215,22 @@ function isCompressionUiRunning(){
   const lock=_compressionSessionLock();
   return !!((state&&state.phase==='running') || (lock && S.session && lock===S.session.session_id));
 }
+// Restore the composer placeholder saved when auto-compaction started. Safe to
+// call whenever compression leaves the running state, from any path (clear,
+// non-running setCompressionUi, or a direct window._compressionUi=null in the
+// SSE handler) — it no-ops when nothing was saved. (#3512)
+function _restoreCompressionPlaceholder(){
+  const _input=$('msg');
+  if(_input&&typeof _compressionPlaceholderSaved==='string'){
+    _input.placeholder=_compressionPlaceholderSaved;
+  }
+  _compressionPlaceholderSaved=null;
+}
 function clearCompressionUi(){
   window._compressionUi=null;
   _clearCompressionElapsedTimer();
   _setCompressionSessionLock(null);
+  _restoreCompressionPlaceholder();
   renderCompressionUi();
 }
 function setCompressionUi(state){
@@ -5861,8 +6244,19 @@ function setCompressionUi(state){
   }
   window._compressionUi=nextState;
   if(nextState.sessionId) _setCompressionSessionLock(nextState.sessionId);
-  if(nextState.automatic&&nextState.phase==='running') _startCompressionElapsedTimer();
-  else _clearCompressionElapsedTimer();
+  if(nextState.automatic&&nextState.phase==='running'){
+    _startCompressionElapsedTimer();
+    const _input=$('msg');
+    if(_input&&_compressionPlaceholderSaved===null){
+      _compressionPlaceholderSaved=_input.placeholder;
+      _input.placeholder=typeof t==='function'?t('composer_compression_will_queue')||'Type a message — it will queue and send after compression':'Type a message — it will queue and send after compression';
+    }
+  } else {
+    _clearCompressionElapsedTimer();
+    // Leaving the running state (e.g. setCompressionUi(done)) must restore the
+    // placeholder too — not only clearCompressionUi(). (#3512 leak fix)
+    _restoreCompressionPlaceholder();
+  }
   renderCompressionUi();
 }
 function _compressionCardsHtml(state){
@@ -5979,6 +6373,7 @@ function _compressionCardsNode(state){
 }
 function appendLiveCompressionCard(state){
   if(!S.session||!S.activeStreamId||!state) return false;
+  const scrollSnapshot=_captureMessageScrollSnapshot();
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -6014,6 +6409,7 @@ function appendLiveCompressionCard(state){
   const existing=inner.querySelector('[data-live-compression-card="1"]');
   if(existing) existing.replaceWith(node);
   else inner.appendChild(node);
+  _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
@@ -6062,7 +6458,10 @@ function _collectHandoffSummaryStates(messages){
 function _isContextCompactionMessage(m){
   if(!m||!m.role||m.role==='tool') return false;
   const text=msgContent(m)||String(m.content||'');
-  return /^\s*\[context compaction/i.test(text) || /^\s*context compaction/i.test(text);
+  return _isContextCompactionText(text);
+}
+function _isContextCompactionText(text){
+  return /^\s*\[context compaction/i.test(String(text||'')) || /^\s*context compaction/i.test(String(text||''));
 }
 function _isPreservedCompressionTaskListMarkerText(text){
   return /^\s*\[your active task list was preserved across context compression\]/i.test(String(text||''));
@@ -6139,6 +6538,9 @@ function _latestCompressionReferenceMessage(messages, summaryText=''){
     if(contentNorm.includes(summaryNorm)) return {message:m, rawIdx:i};
   }
   return {message:null, rawIdx:-1};
+}
+function _shouldShowSettledCompressionReference(referenceText){
+  return !!String(referenceText||'').trim() && !_isContextCompactionText(referenceText);
 }
 function _compressionReferenceCardHtml(text, open=false){
   const copy=_engineAwareCompressionCopy();
@@ -6280,7 +6682,7 @@ function _handoffStateForCurrentSession(){
 }
 function clearHandoffUi(){
   window._handoffUi=null;
-  renderMessages();
+  _renderMessagesWithScrollSnapshot();
 }
 function setHandoffUi(state){
   if(!state){
@@ -6288,7 +6690,7 @@ function setHandoffUi(state){
     return;
   }
   window._handoffUi={...state};
-  renderMessages();
+  _renderMessagesWithScrollSnapshot();
 }
 function _handoffCardsHtml(state){
   if(!state) return '';
@@ -6521,7 +6923,13 @@ function _cliToolCardHasDiffSnippet(resultSnippet, patchSnippet){
 function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
-  return {top:el.scrollTop};
+  const bottom=Math.max(0,el.scrollHeight-el.scrollTop-el.clientHeight);
+  return {
+    top:el.scrollTop,
+    bottom,
+    pinned:_shouldFollowMessagesOnDomReplace(),
+    userUnpinned:_messageUserUnpinned,
+  };
 }
 function _restoreMessageScrollSnapshot(snapshot){
   const el=$('messages');
@@ -6532,6 +6940,33 @@ function _restoreMessageScrollSnapshot(snapshot){
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
   requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+}
+function _restoreMessageScrollSnapshotSameFrame(snapshot){
+  const el=$('messages');
+  if(!el||!snapshot) return;
+  const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+  const bottom=Number(snapshot.bottom);
+  const target=(snapshot.pinned===true&&Number.isFinite(bottom))
+    ? maxTop-Math.max(0,bottom)
+    : Number(snapshot.top)||0;
+  _programmaticScroll=true;
+  el.scrollTop=Math.max(0,Math.min(target,maxTop));
+  _lastScrollTop=el.scrollTop;
+  if(snapshot.pinned===true){
+    _messageUserUnpinned=false;
+    _scrollPinned=true;
+    _nearBottomCount=2;
+  }else if(snapshot.userUnpinned===true){
+    _messageUserUnpinned=true;
+    _scrollPinned=false;
+    _nearBottomCount=0;
+  }
+  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+}
+function _renderMessagesWithScrollSnapshot(options){
+  const scrollSnapshot=_captureMessageScrollSnapshot();
+  renderMessages({...(options||{}),preserveScroll:true});
+  _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
 }
 function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // Terminal stream renders can happen after S.activeStreamId is cleared.
@@ -6611,7 +7046,8 @@ function renderMessages(options){
     if(m.role==='assistant'){
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      if(hasTc||hasTu||_messageHasReasoningPayload(m)) return true;
+      const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+      if(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)) return true;
       if(_assistantMessageHasVisibleContent(m)) return true;
     }
     return m._statusCard||msgContent(m)||m.attachments?.length;
@@ -6626,27 +7062,30 @@ function renderMessages(options){
   const referenceText=referenceMessage
     ? msgContent(referenceMessage)||String(referenceMessage.content||'')
     : sessionCompressionSummary;
-  const referenceNode=(!compressionState && !!referenceText && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
+  const referenceNode=(!compressionState && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   let preservedCompressionTaskCardsAttached=!!referenceNode;
   // Cache visWithIdx so expanding the render window (Load earlier) doesn't
   // re-scan S.messages from scratch.  Invalidate only when the message array
   // length changes — i.e. new messages arrived or session was truncated.
-  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length){
+  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
     const rebuilt=[];
     let ri=0;
     for(const m of S.messages){
       if(!m||!m.role||m.role==='tool'){ri++;continue;}
+      if(_isContextCompactionMessage(m)){ri++;continue;}
       if(_isPreservedCompressionTaskListMessage(m)){ri++;continue;}
       if(_isRecoveryControlMessage(m)){ri++;continue;}
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) rebuilt.push({m,rawIdx:ri});
+      const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) rebuilt.push({m,rawIdx:ri});
       ri++;
     }
     _visWithIdxCache=rebuilt;
     _visWithIdxCacheLen=S.messages.length;
+    _visWithIdxCacheSrc=S.messages;
   }
   const visWithIdx=_visWithIdxCache;
   const preservedCompressionRawIdxs=[];
@@ -6665,6 +7104,7 @@ function renderMessages(options){
   const renderVisWithIdx=visWithIdx.slice(windowStart);
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
+  const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   if(hiddenBeforeCount>0 || hasServerOlder){
     const indicator=document.createElement('button');
@@ -6673,7 +7113,9 @@ function renderMessages(options){
     indicator.className='load-older-indicator message-window-load-earlier';
     indicator.textContent=hiddenBeforeCount>0
       ? `Load earlier messages (${hiddenBeforeCount} hidden)`
-      : (typeof t==='function'?t('load_older_messages'):'Load earlier messages');
+      : (serverOlderCount>0
+        ? `Load earlier messages (${serverOlderCount} older)`
+        : (typeof t==='function'?t('load_older_messages'):'Load earlier messages'));
     indicator.onclick=()=>{
       if(hiddenBeforeCount>0) _showEarlierRenderedMessages();
       else if(typeof _loadOlderMessages==='function') _loadOlderMessages();
@@ -6720,6 +7162,39 @@ function renderMessages(options){
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
     else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
   }
+  // #3709 (defect B): build a per-turn combined visible-answer text so the
+  // thinking echo-strip can de-dupe a thinking-only message (whose own visible
+  // body is empty) against the answer prose carried by a SIBLING message in the
+  // same turn. A turn = the run of assistant messages between two user messages.
+  // Map every assistant rawIdx in a run to the run's combined visible text.
+  const _turnVisibleTextByRawIdx=new Map();
+  {
+    let _run=[]; let _runText=[];
+    const _flush=()=>{
+      if(_run.length){
+        const combined=_runText.join('\n\n');
+        for(const ri of _run) _turnVisibleTextByRawIdx.set(ri, combined);
+      }
+      _run=[]; _runText=[];
+    };
+    for(const entry of renderVisWithIdx){
+      const em=entry&&entry.m; const role=em&&em.role;
+      if(role==='assistant'){
+        _run.push(entry.rawIdx);
+        // Visible prose = content with any leading <think>…</think> /channel-thought
+        // block stripped (the same blocks the per-message extractor removes below).
+        let vis=typeof em.content==='string'?em.content:'';
+        vis=vis.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'')
+               .replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'')
+               .replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trim();
+        if(vis) _runText.push(vis);
+      }else{
+        _flush();
+      }
+    }
+    _flush();
+  }
+
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
@@ -6791,6 +7266,13 @@ function renderMessages(options){
     const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
     if(thinkingText&&!isUser){
       thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent);
+      // #3709 (defect B): if this message's own visible body didn't strip the
+      // echo (e.g. a thinking-only message whose answer prose lives on a sibling
+      // message in the same turn), also strip against the turn's combined answer.
+      const turnVisible=_turnVisibleTextByRawIdx.get(rawIdx);
+      if(thinkingText&&turnVisible&&turnVisible!==displayContent){
+        thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, turnVisible);
+      }
     }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     const nextRendered=renderVisWithIdx[vi+1];
@@ -6839,17 +7321,7 @@ function renderMessages(options){
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
-      if(compressionState || referenceNode){
-        continue;
-      }else{
-        currentAssistantTurn=null;
-        const row=document.createElement('div');
-        const preservedForThisCard=preservedCompressionTaskCardsAttached?[]:preservedCompressionTaskMessages;
-        row.innerHTML=_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard);
-        if(preservedForThisCard.length) preservedCompressionTaskCardsAttached=true;
-        inner.appendChild(row.firstElementChild);
-        continue;
-      }
+      continue;
     }
 
     if(isUser){
@@ -6962,7 +7434,7 @@ function renderMessages(options){
     }
     inner.appendChild(node);
   }
-  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)
+  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceNode||compressionState)&&preservedCompressionTaskMessages.length)
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   const preservedOnlyAnchor=preservedCompressionRawIdxs.length
@@ -7018,7 +7490,8 @@ function renderMessages(options){
       if(m.role==='assistant'){
         const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
         const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
-        if(hasTopLevelToolCalls||hasContentToolUse) fallbackToolSources.push({m,rawIdx});
+        const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+        if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});
       }
     });
     const derived=[];
@@ -7069,10 +7542,39 @@ function renderMessages(options){
           });
         });
       }
+      // WebUI-internal partial tool calls captured on cancel/stop
+      // (private shape: name/args/done/preview/snippet, no OpenAI envelope).
+      if(Array.isArray(m._partial_tool_calls)){
+        m._partial_tool_calls.forEach(tc=>{
+          if(!tc||typeof tc!=='object') return;
+          const name=tc.name||'tool';
+          const args=tc.args||{};
+          const tid=tc.id||tc.call_id||tc.tool_call_id||tc.tid||'';
+          const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+          const resultSnippet=_cliToolResultSnippet(tc.snippet||tc.result||tc.output||tc.preview||'');
+          const argsSnap={};
+          if(args && typeof args==='object'){
+            Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
+          }
+          derived.push({
+            name,
+            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+            tid,
+            assistant_msg_idx:rawIdx,
+            args:argsSnap,
+            done:true,
+          });
+        });
+      }
     });
     if(derived.length) S.toolCalls=derived;
   }
-  if(!S.busy){
+  // Render tool cards: allow during streaming when S.toolCalls is already
+  // populated (e.g. from INFLIGHT restore or SSE events). Only the fallback
+  // derivation above is blocked by S.busy — DOM insertion should proceed
+  // whenever tool cards exist.
+  if(!S.busy || (S.toolCalls&&S.toolCalls.length)){
     inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"])').forEach(el=>el.remove());
     const byAssistant = {};
     for(const tc of (S.toolCalls||[])){
@@ -7083,15 +7585,80 @@ function renderMessages(options){
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const anchorInsertAfter = new Map();
     if(isSimplifiedToolCalling()){
+      // Shared anchor resolver: maps an activity index to the assistant segment
+      // its Activity group will anchor on. The group-render path falls back to a
+      // nearby earlier segment when an index has no directly-rendered segment
+      // (legacy/rebased assistant_msg_idx). The inline-suppression precompute MUST
+      // use the SAME resolution, or a fallback-anchored group's turn won't be in
+      // turnsWithActivityGroup and the thinking renders twice (Codex re-gate).
+      const _anchorRowForActivityIdx=(aIdx)=>{
+        let row=assistantSegments.get(aIdx)||null;
+        if(!row&&assistantIdxs.length){
+          if(aIdx<assistantIdxs[0]) return null;
+          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+          row=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+        }
+        return row;
+      };
+      // #3709: a turn (one .assistant-turn, spanning every assistant segment
+      // between two user messages) can contain BOTH a tool-bearing message and a
+      // trailing thinking-only message. The tool message builds an Activity group
+      // that already carries the turn's thinking at its top; if the thinking-only
+      // sibling ALSO renders its thinking inline, the card shows twice. Precompute
+      // the set of turn nodes that have any tool card so the inline branch can
+      // skip turns that already own an Activity group.
+      const turnsWithActivityGroup=new Set();
+      // Per-turn merged thinking: a tool-bearing turn's Activity group must carry
+      // ALL of that turn's thinking — including a trailing thinking-only sibling
+      // whose inline card we suppress below (#3709 A1). Rendering only the tool
+      // message's own assistantThinking entry would silently DROP a sibling's
+      // distinct reasoning. Aggregate every assistantThinking entry by turn,
+      // de-duped and in index order, and render that once in the group.
+      const turnThinkingParts=new Map(); // turnNode -> [text,...]
+      const _addTurnThinking=(idx)=>{
+        if(!assistantThinking.has(idx)) return;
+        const seg=_anchorRowForActivityIdx(idx);
+        const turn=seg?seg.closest('.assistant-turn'):null;
+        if(!turn) return;
+        const txt=String(assistantThinking.get(idx)||'').trim();
+        if(!txt) return;
+        const arr=turnThinkingParts.get(turn)||[];
+        if(!arr.includes(txt)) arr.push(txt);
+        turnThinkingParts.set(turn, arr);
+      };
+      for(const tcIdx of Object.keys(byAssistant).map(k=>parseInt(k))){
+        if(!(byAssistant[tcIdx]||[]).length) continue;
+        const tcSeg=_anchorRowForActivityIdx(tcIdx);
+        const tcTurn=tcSeg?tcSeg.closest('.assistant-turn'):null;
+        if(tcTurn) turnsWithActivityGroup.add(tcTurn);
+      }
+      // Aggregate thinking for every assistant idx that has it (tool-bearing or not).
+      for(const tIdx of assistantThinking.keys()) _addTurnThinking(tIdx);
+      const _renderedTurnThinking=new Set();
       const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
       for(const aIdx of activityIdxs){
         const cards=byAssistant[aIdx]||[];
-        let anchorRow=assistantSegments.get(aIdx)||null;
-        if(!anchorRow&&assistantIdxs.length){
-          if(aIdx<assistantIdxs[0]) continue;
-          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+        if(!cards.length&&assistantThinking.has(aIdx)){
+          // Thinking-only message. Render its thinking inline ONLY when the turn
+          // has no Activity group at all (#3592 — a genuinely thinking-only turn
+          // must not bury its thinking in a collapsed group). If a sibling
+          // tool-message in the same turn built a group, that group carries the
+          // turn's thinking (including THIS message's, via turnThinkingParts) —
+          // don't emit a duplicate inline card here (#3709 A).
+          const anchorRow=_anchorRowForActivityIdx(aIdx);
+          const anchorTurn=anchorRow?anchorRow.closest('.assistant-turn'):null;
+          if(anchorRow&&window._showThinking!==false&&!(anchorTurn&&turnsWithActivityGroup.has(anchorTurn))){
+            // Insert the thinking card BEFORE the answer body + msg-foot footer
+            // (the segment already has them appended), so it reads above the
+            // answer rather than orphaned below the "Done in …" line (#3709 A2).
+            const bodyEl=anchorRow.querySelector('.msg-body,.msg-foot');
+            const cardHtml=_thinkingCardHtml(assistantThinking.get(aIdx));
+            if(bodyEl) bodyEl.insertAdjacentHTML('beforebegin',cardHtml);
+            else anchorRow.insertAdjacentHTML('beforeend',cardHtml);
+          }
+          continue;
         }
+        let anchorRow=_anchorRowForActivityIdx(aIdx);
         if(!anchorRow) continue;
         const anchorParent=anchorRow.parentElement;
         let insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
@@ -7100,9 +7667,13 @@ function renderMessages(options){
         if(sourceMsg._turnDuration!==undefined) group.setAttribute('data-turn-duration', String(sourceMsg._turnDuration));
         const body=group&&group.querySelector('.tool-call-group-body');
         if(!body) continue;
-        const thinkingText=assistantThinking.get(aIdx);
-        if(thinkingText){
-          body.appendChild(_thinkingActivityNode(thinkingText, false));
+        // Render the TURN's merged thinking once (covers this message's own
+        // thinking + any suppressed thinking-only sibling in the same turn, #3709).
+        const groupTurn=anchorRow?anchorRow.closest('.assistant-turn'):null;
+        const mergedThinking=(groupTurn&&turnThinkingParts.get(groupTurn)||[]).join('\n\n').trim();
+        if(mergedThinking&&!(groupTurn&&_renderedTurnThinking.has(groupTurn))){
+          body.appendChild(_thinkingActivityNode(mergedThinking, false));
+          if(groupTurn) _renderedTurnThinking.add(groupTurn);
         }
         for(const tc of cards){
           body.appendChild(buildToolCard(tc));
@@ -7167,10 +7738,13 @@ function renderMessages(options){
       const failoverText=_gatewayRoutingFailoverText(routing);
       const modelWarningText=_gatewayModelWarningText(routing);
       const hasTurnUsage=!!msg._turnUsage;
-      const compactActivityForMessage=isSimplifiedToolCalling()&&(
-        assistantThinking.has(mi)||
-        toolCallAssistantIdxs.has(mi)
-      );
+      // The activity-group summary owns the "Done in …" duration ONLY when a
+      // group is actually created. A tool-call turn always builds one. A
+      // thinking-only turn under Simplified Tool Calling now renders thinking
+      // inline (no group — see the `continue` at the activityIdxs loop, #3592),
+      // so it must keep its footer duration; suppressing it there would silently
+      // drop "Done in …" for thinking-only turns (#3592 review).
+      const compactActivityForMessage=isSimplifiedToolCalling()&&toolCallAssistantIdxs.has(mi);
       const durationText=compactActivityForMessage?'':_formatTurnDuration(msg._turnDuration);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;
       const seg=assistantSegments.get(mi);
@@ -7252,6 +7826,28 @@ function _toolDisplayName(tc){
   if(name==='subagent_progress') return 'Subagent';
   if(name==='delegate_task') return 'Delegate task';
   return name;
+}
+
+// Activity-summary detection for persisted memory/skill writes (#3340, #3544).
+// Action vocabularies match the real agent tool enums:
+//   memory.action      = add | replace | remove   (add/replace persist content → "saved")
+//   skill_manage.action= create | patch | edit | delete | write_file | remove_file
+//                        (create/patch/edit/write_file mutate a skill → "updated")
+// Deletions (memory 'remove', skill 'delete'/'remove_file') are intentionally
+// excluded so the "saved"/"updated" label verbs stay accurate; running/errored
+// calls are excluded so only completed writes are counted.
+const _MEMORY_SAVE_ACTIONS=new Set(['add','replace']);
+const _SKILL_UPDATE_ACTIONS=new Set(['create','patch','edit','write_file']);
+function _tcAction(tc){
+  return String((tc&&tc.args&&tc.args.action)||'').toLowerCase();
+}
+function _isMemorySave(tc){
+  if(!tc||tc.name!=='memory'||tc.done===false||tc.is_error) return false;
+  return _MEMORY_SAVE_ACTIONS.has(_tcAction(tc));
+}
+function _isSkillUpdate(tc){
+  if(!tc||tc.name!=='skill_manage'||tc.done===false||tc.is_error) return false;
+  return _SKILL_UPDATE_ACTIONS.has(_tcAction(tc));
 }
 function toolIcon(name){
   const icons={
@@ -7379,6 +7975,15 @@ function buildToolCard(tc){
         </div>`:''}
       </div>`:''}
     </div>`;
+  row._tcData = tc;
+  // Durable classification flags: _tcData (a JS property) does NOT survive the
+  // outerHTML/innerHTML snapshot+restore the live tool-call group uses on session
+  // switch/restore, which would make _syncToolCallGroupSummary re-count restored
+  // memory/skill rows as generic tools and silently drop the suffix. Mirror the
+  // classification onto data-* attributes so it survives serialization. (#3544)
+  if(_isMemorySave(tc)){row.setAttribute('data-memory-save','1');row.removeAttribute('data-skill-update');}
+  else if(_isSkillUpdate(tc)){row.setAttribute('data-skill-update','1');row.removeAttribute('data-memory-save');}
+  else {row.removeAttribute('data-memory-save');row.removeAttribute('data-skill-update');}
   return row;
 }
 
@@ -7428,10 +8033,25 @@ function _syncToolCallGroupSummary(group){
   const label=group.querySelector('.tool-call-group-label');
   const durationEl=group.querySelector('.tool-call-group-duration');
   if(label){
+    const rows=Array.from(group.querySelectorAll('.tool-card-row'));
+    // Prefer the live _tcData classification; fall back to the durable data-*
+    // flags for rows restored from an HTML snapshot (which drops JS properties).
+    const isMem=r=>_isMemorySave(r._tcData)||r.getAttribute('data-memory-save')==='1';
+    const isSkill=r=>_isSkillUpdate(r._tcData)||r.getAttribute('data-skill-update')==='1';
+    const memCount=rows.filter(isMem).length;
+    const skillCount=rows.filter(r=>!isMem(r)&&isSkill(r)).length;
+    const otherCount=Math.max(0, toolCount-memCount-skillCount);
+    let suffix='';
+    if(memCount) suffix+=`, ${memCount} ${memCount===1?'memory':'memories'} saved`;
+    if(skillCount) suffix+=`, ${skillCount} ${skillCount===1?'skill':'skills'} updated`;
+    const toolsPart=otherCount?`${otherCount} tool${otherCount===1?'':'s'}`:'';
     if(group.getAttribute('data-live-tool-call-group')==='1'){
-      label.textContent=toolCount?`Activity: ${toolCount} tool${toolCount===1?'':'s'}`:'Activity · Running';
-    }else if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
-    else label.textContent='Activity';
+      if(toolsPart) label.textContent=`Activity: ${toolsPart}${suffix}`;
+      else if(suffix) label.textContent=`Activity: ${suffix.slice(2)}`;
+      else label.textContent='Activity · Running';
+    }else if(toolsPart||suffix){
+      label.textContent=toolsPart?`Activity: ${toolsPart}${suffix}`:`Activity: ${suffix.slice(2)}`;
+    }else label.textContent='Activity';
     label.setAttribute('data-sweep-label', label.textContent);
   }
   if(durationEl){
@@ -8113,7 +8733,7 @@ function loadPdfInline(container){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
-          return pdfjsLib.getDocument({data:buf}).promise;
+          return pdfjsLib.getDocument({data:buf, isEvalSupported:false}).promise;
         })
         .then(pdf=>{
           if(!pdf) return;
@@ -8146,16 +8766,14 @@ function loadPdfInline(container){
       loadPdf(window._pdfjsLib);
     } else if(!_pdfjsLoading){
       _pdfjsLoading=true;
+      const _pdfSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
+      const _pdfWorker='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
+      const _pdfBlob=new Blob([`import*as p from'${_pdfSrc}';p.GlobalWorkerOptions.workerSrc='${_pdfWorker}';window._pdfjsLib=p;window._pdfjsReady=true;window.dispatchEvent(new Event('pdfjs-ready'));`],{type:'application/javascript'});
       const s=document.createElement('script');
-      s.src='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
       s.type='module';
-      s.textContent=`
-        import * as pdfjsLib from '${s.src}';
-        pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
-        window._pdfjsLib=pdfjsLib;
-        window._pdfjsReady=true;
-        window.dispatchEvent(new Event('pdfjs-ready'));
-      `;
+      const _pdfBlobUrl=URL.createObjectURL(_pdfBlob);
+      s.src=_pdfBlobUrl;
+      s.onload=()=>URL.revokeObjectURL(_pdfBlobUrl);
       document.head.appendChild(s);
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
