@@ -1088,6 +1088,7 @@ from api.config import (
     _get_session_agent_lock,
     SESSION_AGENT_LOCKS,
     SESSION_AGENT_LOCKS_LOCK,
+    CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
     load_settings,
     save_settings,
     set_hermes_default_model,
@@ -10270,7 +10271,7 @@ def _handle_live_models(handler, parsed):
                             headers={"Authorization": f"Bearer {_api_key}"},
                         )
                         
-                        with urllib.request.urlopen(_req, timeout=8) as _resp:
+                        with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
                             _body = json.loads(_resp.read())
                         
                         # Parse response: {"data": [{"id": "model1", ...}, ...]}
