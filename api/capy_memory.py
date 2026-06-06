@@ -583,6 +583,10 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         not _github_repository_artifacts_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_workflow_run_timing_route_path_matches(raw_origin_text) and (
+        _github_workflow_run_timing_path_run_id(raw_origin_text) is None
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_pages_path_matches(raw_origin_text) and (
         not _github_raw_authority_is_exact(raw_origin_text, "api.github.com")
         or not _github_pages_path_repo(raw_origin_text)
@@ -2330,6 +2334,122 @@ def _github_workflow_jobs_refresh_summary(origin_uri: str, payload: dict[str, An
         if completed:
             job_parts.append(f"completed: {completed}")
         parts.append("; ".join(job_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_workflow_run_timing_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _matches_timing_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 8
+            and path[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "actions"
+            and lowered[5] == "runs"
+            and bool(path[6])
+            and lowered[7].startswith("timing")
+        )
+
+    return _matches_timing_shape(parts.path) or _matches_timing_shape(unquote(parts.path))
+
+
+def _github_workflow_run_timing_path_info(origin_uri: str) -> tuple[str, str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+        explicit_port = parts.port is not None
+    except ValueError:
+        return None
+    if (
+        parts.scheme != "https"
+        or not _github_raw_authority_is_exact(origin_uri, "api.github.com")
+        or (parts.hostname or "") != "api.github.com"
+        or parts.username
+        or parts.password
+        or explicit_port
+        or "@" in parts.netloc
+    ):
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 8
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "actions"
+        or path[5] != "runs"
+        or path[7] != "timing"
+        or not re.fullmatch(r"[1-9][0-9]*", path[6])
+    ):
+        return None
+    return (path[2], path[3], int(path[6]))
+
+
+def _github_workflow_run_timing_path_run_id(origin_uri: str) -> int | None:
+    info = _github_workflow_run_timing_path_info(origin_uri)
+    if info is None:
+        return None
+    return info[2]
+
+
+def _github_workflow_run_timing_label_is_safe(value: Any) -> bool:
+    label = _safe_public_text(value, limit=80)
+    if not label or _refresh_value_is_blocked(label):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_. -]{0,78}[A-Za-z0-9])?", label))
+
+
+def _github_workflow_run_timing_entry_is_safe(label: Any, entry: Any) -> bool:
+    if not _github_workflow_run_timing_label_is_safe(label):
+        return False
+    if not isinstance(entry, dict):
+        return False
+    total_ms = _safe_optional_nonnegative_int(entry.get("total_ms"))
+    jobs = _safe_optional_nonnegative_int(entry.get("jobs"))
+    if total_ms is None or jobs is None:
+        return False
+    if total_ms > 100_000_000_000 or jobs > 1_000_000:
+        return False
+    return True
+
+
+def _json_payload_is_github_workflow_run_timing_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_workflow_run_timing_path_run_id(origin_uri) is None:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if _json_payload_is_feed(payload) or "items" in payload or "version" in payload:
+        return False
+    run_duration_ms = _safe_optional_nonnegative_int(payload.get("run_duration_ms"))
+    if run_duration_ms is None:
+        return False
+    billable = payload.get("billable")
+    if not isinstance(billable, dict) or not billable:
+        return False
+    return all(_github_workflow_run_timing_entry_is_safe(label, entry) for label, entry in billable.items())
+
+
+def _github_workflow_run_timing_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    run_id = _github_workflow_run_timing_path_run_id(origin_uri) or 0
+    run_duration_ms = _safe_optional_nonnegative_int(payload.get("run_duration_ms"))
+    parts = [f"GitHub workflow run #{run_id} timing"]
+    if run_duration_ms is not None:
+        parts.append(f"run duration ms: {run_duration_ms}")
+    raw_billable = payload.get("billable")
+    billable: dict[Any, Any] = raw_billable if isinstance(raw_billable, dict) else {}
+    for label, entry in list(billable.items())[:5]:
+        if not _github_workflow_run_timing_entry_is_safe(label, entry):
+            continue
+        safe_label = _safe_public_text(label, limit=80).lower()
+        total_ms = _safe_optional_nonnegative_int(entry.get("total_ms")) or 0
+        jobs = _safe_optional_nonnegative_int(entry.get("jobs")) or 0
+        parts.append(f"billable {safe_label} total ms: {total_ms}; jobs: {jobs}")
     return _bounded_refresh_summary("; ".join(parts))
 
 
@@ -8856,6 +8976,9 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         elif _json_payload_is_github_workflow_runs_metadata(origin_uri, payload):
             title = f"GitHub workflow runs {(_github_workflow_runs_path_repo(origin_uri) or source_id)}"
             summary = _github_workflow_runs_refresh_summary(origin_uri, payload)
+        elif _json_payload_is_github_workflow_run_timing_metadata(origin_uri, payload):
+            title = f"GitHub workflow run {_github_workflow_run_timing_path_run_id(origin_uri) or 0} timing"
+            summary = _github_workflow_run_timing_refresh_summary(origin_uri, payload)
         elif _json_payload_is_github_workflow_jobs_metadata(origin_uri, payload):
             title = f"GitHub workflow run {_github_workflow_jobs_path_run_id(origin_uri) or 0} jobs"
             summary = _github_workflow_jobs_refresh_summary(origin_uri, payload)
@@ -9105,6 +9228,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_repository_artifacts_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_repository_artifacts_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_workflow_run_timing_route_path_matches(raw_origin_uri) and (
+        _github_workflow_run_timing_path_run_id(raw_origin_uri) is None
+    ):
+        raise RuntimeError("refresh fetcher disabled")
     if _github_pages_path_matches(raw_origin_uri):
         if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_pages_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -9223,6 +9350,8 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_repository_artifacts_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_workflow_run_timing_path_run_id(safe_origin_uri) is not None:
+        request_accept = "application/json"
     if _github_pages_path_matches(safe_origin_uri):
         if not _github_pages_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -9300,6 +9429,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_repository_artifacts_path_repo(final_url)
             or _github_repository_artifacts_path_repo(final_url) != _github_repository_artifacts_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_workflow_run_timing_path_run_id(safe_origin_uri) is not None and (
+            _github_workflow_run_timing_path_info(final_url) is None
+            or _github_workflow_run_timing_path_info(final_url) != _github_workflow_run_timing_path_info(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_pages_path_matches(safe_origin_uri) and (
@@ -9567,6 +9701,8 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             _github_workflow_artifacts_path_run_id(safe_origin_uri) is None
             or content_type not in {"application/json", "application/feed+json"}
         ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_workflow_run_timing_path_run_id(safe_origin_uri) is not None and content_type != "application/json":
             raise RuntimeError("refresh fetcher disabled")
         raw = response.read(_MAX_REFRESH_FETCH_BYTES + 1)
         if len(raw) > _MAX_REFRESH_FETCH_BYTES:
@@ -10033,7 +10169,13 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
             except json.JSONDecodeError:
                 payload = {}
             source_id = _safe_public_id(row["source_id"], fallback="source")
-            origin_uri = _safe_origin_uri(row["origin_uri"], source_id=source_id)
+            raw_source_origin_uri = str(row["origin_uri"] or "").strip()
+            if _github_workflow_run_timing_route_path_matches(raw_source_origin_uri) and (
+                _github_workflow_run_timing_path_run_id(raw_source_origin_uri) is None
+            ):
+                origin_uri = f"capy-memory://{source_id}"
+            else:
+                origin_uri = _safe_origin_uri(raw_source_origin_uri, source_id=source_id)
             interval = _safe_refresh_interval(payload.get("refresh_interval_seconds"))
             stale = str(row["freshness_status"] or "") == "stale"
             if not stale and not _refresh_due_at(row["last_checked_at"], interval, now=checked_now):
@@ -10219,7 +10361,12 @@ def run_source_refresh_jobs(
             payload = {}
         source_id = _safe_public_id(payload.get("source_id"), fallback="source")
         raw_origin_uri = str(payload.get("fetch_origin_uri") or payload.get("origin_uri") or "").strip()
-        if _github_issue_timeline_route_path_matches(raw_origin_uri):
+        if _github_workflow_run_timing_route_path_matches(raw_origin_uri):
+            if _github_workflow_run_timing_path_run_id(raw_origin_uri) is None:
+                origin_uri = f"capy-memory://{source_id}"
+            else:
+                origin_uri = _safe_origin_uri(raw_origin_uri, source_id=source_id)
+        elif _github_issue_timeline_route_path_matches(raw_origin_uri):
             issue_timeline_origin = _github_issue_timeline_safe_origin(raw_origin_uri)
             if issue_timeline_origin:
                 origin_uri = issue_timeline_origin
