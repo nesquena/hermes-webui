@@ -36,6 +36,11 @@ def test_multi_segment_turn_jumps_to_first_assistant_segment():
 
 
 def test_question_jump_expands_windowed_history_and_highlights_question():
+    assert "function _messageVisibleIndexForRawIdx(rawIdx, visWithIdx)" in UI_JS
+    assert "function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container)" in UI_JS
+    assert "const visibleIdx=_messageVisibleIndexForRawIdx(questionRawIdx, visWithIdx);" in UI_JS
+    assert "container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container);" in UI_JS
+    assert "_messageVirtualWindowKey='';" in UI_JS
     assert "_messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount())" in UI_JS
     assert "renderMessages({ preserveScroll:true })" in UI_JS
     assert "row.scrollIntoView({block:'center',behavior:'smooth'})" in UI_JS

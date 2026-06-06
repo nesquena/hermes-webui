@@ -210,6 +210,38 @@ console.log(JSON.stringify({active, inactive}));
     assert metrics["inactive"] is None
 
 
+def test_virtual_question_jump_scroll_target_uses_visible_index_height_prefix():
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let _messageVirtualHeightCache = [100, 120, 80, 140];
+let _messageVirtualHeightCacheEntries = [];
+let _messageVirtualHeightCacheLen = 4;
+let _messageVirtualHeightCacheSrc = null;
+let _messageVirtualEstimatedRowHeight = 110;
+let _messageVirtualWindowKey = 'old';
+let S = {messages: [{}, {}, {}, {}]};
+function _messageIsRenderable(){ return true; }
+eval(extractFunc('_messageVirtualHeightEntryMatches'));
+eval(extractFunc('_syncMessageVirtualHeightCache'));
+eval(extractFunc('_messageVisibleIndexForRawIdx'));
+eval(extractFunc('_messageVirtualScrollTopForVisibleIdx'));
+const visWithIdx = [
+  {rawIdx: 10, m: S.messages[0]},
+  {rawIdx: 12, m: S.messages[1]},
+  {rawIdx: 14, m: S.messages[2]},
+  {rawIdx: 16, m: S.messages[3]},
+];
+_messageVirtualHeightCacheEntries = visWithIdx;
+_messageVirtualHeightCacheSrc = S.messages;
+const visibleIdx = _messageVisibleIndexForRawIdx(14, visWithIdx);
+const scrollTop = _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, {clientHeight: 200});
+console.log(JSON.stringify({visibleIdx, scrollTop}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["visibleIdx"] == 2
+    assert metrics["scrollTop"] == 150
+
+
 def test_height_cache_preserves_measured_prefix_across_append_only_growth():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """

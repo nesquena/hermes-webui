@@ -606,6 +606,25 @@ function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
   }
   return Math.max(0,Math.round(total));
 }
+function _messageVisibleIndexForRawIdx(rawIdx, visWithIdx){
+  const list=Array.isArray(visWithIdx)?visWithIdx:_getVisibleMessagesWithIdx();
+  for(let i=0;i<list.length;i++){
+    if(list[i]&&list[i].rawIdx===rawIdx) return i;
+  }
+  return -1;
+}
+function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container){
+  const idx=Math.max(0,Number(visibleIdx)||0);
+  _syncMessageVirtualHeightCache(visWithIdx);
+  const limit=Math.min(idx,_messageVirtualHeightCache.length);
+  let offset=0;
+  for(let i=0;i<limit;i++){
+    const cached=Number(_messageVirtualHeightCache[i]);
+    offset+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualEstimatedRowHeight;
+  }
+  const viewport=container?Math.max(0,Number(container.clientHeight)||0):0;
+  return Math.max(0,Math.round(offset-(viewport*0.35)));
+}
 function _messageVirtualKeepTailCount(){
   return Math.min(_currentMessageRenderWindowSize(), MESSAGE_RENDER_WINDOW_DEFAULT);
 }
@@ -855,8 +874,29 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     return true;
   };
   if(scrollToTarget()) return;
+  const visWithIdx=_getVisibleMessagesWithIdx();
+  const visibleIdx=_messageVisibleIndexForRawIdx(questionRawIdx, visWithIdx);
+  if(visibleIdx>=0){
+    _scrollPinned=false;
+    _messageUserUnpinned=true;
+    _programmaticScroll=true;
+    container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container);
+    _messageVirtualWindowKey='';
+    renderMessages({ preserveScroll:true });
+    requestAnimationFrame(()=>{
+      if(!scrollToTarget()&&_messageHiddenBeforeCount()>0){
+        _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+        _messageVirtualWindowKey='';
+        renderMessages({ preserveScroll:true });
+        requestAnimationFrame(scrollToTarget);
+      }
+      requestAnimationFrame(()=>{ _programmaticScroll=false; });
+    });
+    return;
+  }
   if(_messageHiddenBeforeCount()>0){
     _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+    _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
     requestAnimationFrame(scrollToTarget);
   }
@@ -8455,12 +8495,18 @@ function renderMessages(options){
   );
   let insertionAnchor=null;
   if(typeof insertionAnchorFull==='number'){
-    if(renderVisibleIdxs.length){
-      if(insertionAnchorFull<=renderVisibleIdxs[0]) insertionAnchor=0;
-      else{
-        const nextVisibleIdx=renderVisibleIdxs.findIndex(idx=>idx>=insertionAnchorFull);
-        insertionAnchor=nextVisibleIdx>=0?nextVisibleIdx:renderVisibleIdxs.length-1;
+    const hasVirtualRenderGap=renderVisibleIdxs.some((idx,pos)=>idx!==windowStart+pos);
+    if(!hasVirtualRenderGap){
+      if(insertionAnchorFull<windowStart) insertionAnchor=renderVisWithIdx.length?0:null;
+      else if(insertionAnchorFull<windowStart+renderVisWithIdx.length) insertionAnchor=insertionAnchorFull-windowStart;
+      else insertionAnchor=renderVisWithIdx.length?renderVisWithIdx.length-1:null;
+    }else if(renderVisibleIdxs.length){
+      let previousVisibleIdx=-1;
+      for(let i=0;i<renderVisibleIdxs.length;i++){
+        if(renderVisibleIdxs[i]<=insertionAnchorFull) previousVisibleIdx=i;
+        else break;
       }
+      insertionAnchor=previousVisibleIdx>=0?previousVisibleIdx:0;
     }else{
       insertionAnchor=null;
     }
