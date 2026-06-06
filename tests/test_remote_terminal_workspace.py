@@ -55,3 +55,13 @@ def test_remote_terminal_workspace_paths_outside_cwd_still_reject(monkeypatch):
 
     with pytest.raises(ValueError, match="Path does not exist"):
         workspace.resolve_trusted_workspace("/Users/other/projects/demo")
+
+
+def test_remote_terminal_workspace_system_roots_still_reject(monkeypatch):
+    monkeypatch.setattr(api_config, "get_config", lambda: _remote_config(terminal={"backend": "ssh", "cwd": "/etc"}))
+
+    with pytest.raises(ValueError, match="Path points to a system directory|Path does not exist"):
+        workspace.validate_workspace_to_add("/etc")
+
+    with pytest.raises(ValueError, match="Path points to a system directory|Path does not exist"):
+        workspace.resolve_trusted_workspace("/etc")
