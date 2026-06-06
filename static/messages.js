@@ -3340,6 +3340,8 @@ function hideApprovalCard(force=false) {
   _approvalSessionId = null;
   _resetApprovalCardState();
   card.classList.remove("visible");
+  card.classList.remove("collapsed");
+  _syncApprovalTranscriptSpace(null);
   $("approvalCmd").textContent = "";
   $("approvalDesc").textContent = "";
 }
@@ -3394,7 +3396,7 @@ function showApprovalCard(pending, pendingCount) {
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
-  const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null});
+  const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null, approval_id: pending.approval_id || null});
   const card = $("approvalCard");
   const sameApproval = card.classList.contains("visible") && _approvalSignature === sig;
   $("approvalDesc").textContent = desc;
@@ -3415,17 +3417,81 @@ function showApprovalCard(pending, pendingCount) {
   if (!sameApproval) {
     _approvalVisibleSince = Date.now();
     _clearApprovalHideTimer();
+    // A distinct approval must always render expanded — never inherit a prior
+    // approval's collapsed state, which would hide its command + action buttons. (#3515)
+    card.classList.remove("collapsed");
   }
   // Re-enable buttons in case a previous approval disabled them
   ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
     const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
   });
   card.classList.add("visible");
+  _syncApprovalCollapseButton(card);
+  _syncApprovalTranscriptSpace(card, {immediate: true});
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   const onceBtn = $("approvalBtnOnce");
   if (onceBtn && document.activeElement !== $('msg')) {
     setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
   }
+}
+
+function _syncApprovalCollapseButton(card) {
+  const collapse = $("approvalCollapse");
+  if (!collapse || !card) return;
+  const collapsed = card.classList.contains("collapsed");
+  collapse.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  // Icon swap: chevron-down when expanded (click to collapse), chevron-up when collapsed (click to expand)
+  const polyline = collapse.querySelector("svg polyline");
+  if (polyline) polyline.setAttribute("points", collapsed ? "18 15 12 9 6 15" : "6 9 12 15 18 9");
+  const label = collapsed ? "Expand approval" : "Collapse approval";
+  collapse.setAttribute("aria-label", label);
+  collapse.title = label;
+}
+
+function _approvalMessagesNearBottom(messages) {
+  if (!messages) return false;
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 150;
+}
+
+function _syncApprovalTranscriptSpace(card, opts) {
+  opts = opts || {};
+  const messages = $("messages");
+  if (!messages) return;
+  const wasNearBottom = _approvalMessagesNearBottom(messages);
+  if (!card || !card.classList.contains("visible")) {
+    messages.classList.remove("approval-open");
+    messages.classList.remove("approval-collapsed");
+    messages.style.removeProperty("--approval-card-height");
+    messages.style.removeProperty("--approval-dock-height");
+    if (wasNearBottom && typeof scrollToBottom === "function" && typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(scrollToBottom);
+    }
+    return;
+  }
+  const collapsed = card.classList.contains("collapsed");
+  messages.classList.add("approval-open");
+  messages.classList.toggle("approval-collapsed", collapsed);
+  const measure = () => {
+    if (!card.classList.contains("visible")) return;
+    const target = collapsed ? card : (card.querySelector(".approval-inner") || card);
+    const h = target && target.getBoundingClientRect().height;
+    if (h > 0) {
+      messages.style.setProperty(collapsed ? "--approval-dock-height" : "--approval-card-height", Math.ceil(h + 24) + "px");
+    }
+    if (wasNearBottom && typeof scrollToBottom === "function") scrollToBottom();
+  };
+  if (opts.immediate) measure();
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(measure);
+  setTimeout(measure, 420);
+}
+
+function toggleApprovalCardCollapsed(forceCollapsed) {
+  const card = $("approvalCard");
+  if (!card) return;
+  const collapsed = typeof forceCollapsed === "boolean" ? forceCollapsed : !card.classList.contains("collapsed");
+  card.classList.toggle("collapsed", collapsed);
+  _syncApprovalCollapseButton(card);
+  _syncApprovalTranscriptSpace(card, {immediate: true});
 }
 
 async function respondApproval(choice) {
