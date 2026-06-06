@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.286] — 2026-06-06 — Release JB (stage-r21 — sidebar tab reordering)
+
+### Added
+- **Drag-reorder for sidebar tabs.** In Settings → Appearance, the "Sidebar tabs" chips (Tasks, Kanban, Skills, Memory, Spaces, Profiles, Todos, Insights, Logs) can be dragged to reorder how they appear in the left rail and sidebar nav, persisted via a sanitized `tab_order` setting (collapses duplicates, rejects `chat`/`settings`, strips non-strings). Chat and Settings stay fixed. Reorder is pointer/desktop-based (consistent with the existing Kanban drag-and-drop); the chips remain tappable for show/hide on touch. (#3067, @ai-ag2026)
+
 ## [v0.51.285] — 2026-06-06 — Release JA (stage-r19 — update-reload server-identity race fix)
 
 ### Fixed
