@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Update reload now falls through on the first healthy uptime-only `/health` response after an identity-bearing baseline.** When the pre-update server exposed `server_started_at` but the replacement came back with only `uptime_seconds`, the browser could otherwise keep polling until timeout because there was no longer a comparable started-at field. The reload gate now treats that healthy uptime-only response as sufficient evidence that the replacement server is up. (#3619)
+
 ## [v0.51.289] — 2026-06-06 — Release JE (hotfix — sidebar ReferenceError #3696 + scope-undef prevention gate)
 
 ### Fixed

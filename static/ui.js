@@ -5808,14 +5808,13 @@ async function _waitForServerThenReload(opts){
           if(
             nextServerIdentity!==null &&
             baselineServerIdentity.serverStartedAt!==null &&
-            baselineServerIdentity.uptimeSeconds===null &&
             nextServerIdentity.serverStartedAt===null &&
             nextServerIdentity.uptimeSeconds!==null
           ){
-            // If the baseline only exposed server_started_at but the
-            // replacement health response degrades to uptime-only, there is no
-            // longer a comparable started_at field. Treat the first healthy
-            // uptime-only response as the new server instead of timing out.
+            // If the baseline exposed server_started_at but the replacement
+            // health response degrades to uptime-only, there is no longer a
+            // comparable started_at field. Treat the first healthy uptime-only
+            // response as the new server instead of timing out.
             location.reload();
             return;
           }

@@ -33,7 +33,17 @@ def read(rel):
 def extract_js_function(src: str, name: str) -> str:
     match = re.search(rf'(async\s+)?function\s+{re.escape(name)}\b', src)
     assert match, f"{name}() not found"
-    brace = src.index("{", match.start())
+    open_paren = src.index("(", match.start())
+    paren_depth = 1
+    idx = open_paren + 1
+    while paren_depth > 0 and idx < len(src):
+        ch = src[idx]
+        if ch == "(":
+            paren_depth += 1
+        elif ch == ")":
+            paren_depth -= 1
+        idx += 1
+    brace = src.index("{", idx)
     depth = 0
     end = None
     for idx in range(brace, len(src)):
@@ -1254,7 +1264,7 @@ global.fetch = async () => {{
 {identity_fn}
 {wait_fn}
 (async () => {{
-  await _waitForServerThenReload({{ interval: 1, maxMs: 20, baselineServerIdentity: {{ serverStartedAt: '1001.234', uptimeSeconds: null }} }});
+  await _waitForServerThenReload({{ interval: 1, maxMs: 20, baselineServerIdentity: {{ serverStartedAt: '1001.234', uptimeSeconds: 120 }} }});
   if (fetches !== 1) throw new Error('expected uptime-only healthy replacement to trigger reload on first probe, got '+fetches);
   if (reloads !== 1) throw new Error('expected exactly one reload when started_at degrades to uptime-only health, got '+reloads);
 }})().catch(err => {{ console.error(err.stack || err.message); process.exit(1); }});
