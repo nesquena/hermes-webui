@@ -5113,10 +5113,11 @@ async function loadProfilesPanel() {
       const isActive = p.name === activeName;
       const activeBadge = isActive ? `<span style="color:var(--link);font-size:10px;font-weight:600;margin-left:6px">${esc(t('profile_active'))}</span>` : '';
       const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
+      const hiddenBadge = p.visible === false ? ' <span class="detail-badge" title="Hidden from chat">Hidden from chat</span>' : '';
       card.innerHTML = `
         <div class="profile-card-header">
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}</div>
+            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}${hiddenBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
         </div>`;
@@ -5261,10 +5262,11 @@ function renderProfileDropdown(data) {
   const dd = $('profileDropdown');
   if (!dd) return;
   dd.innerHTML = '';
-  const profiles = data.profiles || [];
-  const active = (S.activeProfile && profiles.some(p => p.name === S.activeProfile))
+  const allProfiles = data.profiles || [];
+  const active = (S.activeProfile && allProfiles.some(p => p.name === S.activeProfile))
     ? S.activeProfile
     : (data.active || 'default');
+  const profiles = allProfiles.filter(p => p && (p.visible !== false || p.name === active));
   for (const p of profiles) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');

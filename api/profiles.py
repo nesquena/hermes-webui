@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 from api.session_events import publish_session_list_changed
 
 logger = logging.getLogger(__name__)
@@ -1094,11 +1096,27 @@ def list_profiles_api() -> list:
             'model': p.model,
             'provider': p.provider,
             'has_env': p.has_env,
+            'visible': _profile_visible_from_meta(p.path),
             'skill_count': enabled_count,
             'enabled_skills': enabled_count,
             'total_skills': total_count,
         })
     return result
+
+
+def _profile_visible_from_meta(profile_path: Path) -> bool:
+    """Return False only for an explicit boolean ``visible: false`` in profile.yaml."""
+    try:
+        meta_path = Path(profile_path) / 'profile.yaml'
+        if not meta_path.exists():
+            return True
+        data = yaml.safe_load(meta_path.read_text(encoding='utf-8'))
+    except Exception:
+        return True
+    if not isinstance(data, dict):
+        return True
+    visible = data.get('visible')
+    return visible is not False
 
 
 def _default_profile_dict() -> dict:
@@ -1113,6 +1131,7 @@ def _default_profile_dict() -> dict:
         'model': None,
         'provider': None,
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
+        'visible': True,
         'skill_count': enabled_count,
         'enabled_skills': enabled_count,
         'total_skills': compatible_count,
