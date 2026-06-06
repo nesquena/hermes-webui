@@ -6,6 +6,7 @@ Tests use a self-signed certificate generated at test time via openssl.
 import http.client
 import json
 import os
+import sys
 import ssl
 import subprocess
 import textwrap
@@ -79,6 +80,7 @@ def _start_server(port: int, cert: str = None, key: str = None) -> subprocess.Po
         [os.sys.executable, str(ROOT / "server.py")],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True,
+        **({"creationflags": 0x08000000} if sys.platform == "win32" else {}),
     )
     return proc
 

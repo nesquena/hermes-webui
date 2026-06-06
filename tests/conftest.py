@@ -636,6 +636,7 @@ def test_server():
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        **({"creationflags": 0x08000000} if sys.platform == "win32" else {}),
     )
 
     if not _wait_for_server(TEST_BASE, timeout=20):
