@@ -53,6 +53,27 @@ class TestProfileProviderResolution:
         assert result[1] == "anthropic"
         assert result[2] is True
 
+    def test_stale_openai_slash_model_with_openai_codex_profile_repairs(self):
+        """openai/... under an openai-codex profile repairs to the profile default."""
+        from api.routes import _resolve_compatible_session_model_state
+
+        with patch("api.routes.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "active_provider": "anthropic",
+                "default_model": "claude-sonnet-4.6",
+                "groups": [],
+            }
+            result = _resolve_compatible_session_model_state(
+                "openai/gpt-5.4-mini",
+                None,
+                profile_provider="openai-codex",
+                profile_default_model="gpt-5.5",
+            )
+
+        assert result[0] == "gpt-5.5"
+        assert result[1] == "openai-codex"
+        assert result[2] is True
+
     def test_stale_bare_model_with_profile_provider_repairs(self):
         """gpt-5.5 + profile_provider='anthropic' repairs because gpt-* is
         not anthropic-family."""
@@ -557,3 +578,20 @@ class TestStreamingSlashQualifiedRepair:
 
         assert model == "openai/gpt-5.4-mini"
         assert provider_context == "openrouter"
+
+    def test_streaming_repairs_openai_slash_model_under_openai_codex(self):
+        """openai/... under an openai-codex profile repairs to the profile default."""
+        from api.streaming import _apply_profile_provider_context_to_streaming_model
+
+        model, provider_context, changed = (
+            _apply_profile_provider_context_to_streaming_model(
+                "openai/gpt-5.4-mini",
+                None,
+                "openai-codex",
+                "gpt-5.5",
+            )
+        )
+
+        assert model == "gpt-5.5"
+        assert provider_context == "openai-codex"
+        assert changed is True

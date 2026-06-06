@@ -2023,6 +2023,14 @@ def _resolve_compatible_session_model_state(
             _target = _profile_default or default_model
             return _target, profile_provider, True
 
+        if (
+            "/" in model
+            and str(profile_provider).strip().lower() == "openai-codex"
+            and model_provider_from_name == "openai"
+        ):
+            _target = _profile_default or default_model
+            return _target, profile_provider, True
+
         # Slash-qualified models (e.g. openai/gpt-5.4-mini) are native IDs on
         # OpenRouter and custom providers, not cross-provider artifacts. Only
         # repair when the profile provider actually requires a different family.

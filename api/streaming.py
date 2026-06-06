@@ -127,6 +127,46 @@ def _persistent_state_changes(before: dict | None, after: dict | None) -> dict:
     return {"memory_saved": memory_changed, "skills": skills[:10]}
 
 
+def _apply_profile_provider_context_to_streaming_model(
+    model: str | None,
+    provider_context: str | None,
+    profile_provider: str | None,
+    profile_default_model: str | None,
+) -> tuple[str | None, str | None, bool]:
+    """Attach profile provider context and repair stale cross-provider models."""
+    if provider_context or not profile_provider:
+        return model, provider_context, False
+
+    provider_context = profile_provider.lower()
+    if not profile_default_model:
+        return model, provider_context, False
+
+    from api.routes import _normalize_provider_id
+
+    profile_provider_normalized = _normalize_provider_id(profile_provider)
+    model_lower = (model or "").lower()
+    for prefix in ("gpt", "claude", "gemini"):
+        if model_lower.startswith(prefix):
+            if _normalize_provider_id(prefix) != profile_provider_normalized:
+                return profile_default_model, provider_context, True
+            return model, provider_context, False
+
+    if "/" in model_lower:
+        slash_prefix = model_lower.split("/", 1)[0]
+        if provider_context == "openai-codex" and slash_prefix == "openai":
+            return profile_default_model, provider_context, True
+
+        slash_provider = _normalize_provider_id(slash_prefix)
+        if (
+            slash_provider
+            and slash_provider != profile_provider_normalized
+            and profile_provider_normalized not in {"openrouter", "custom", ""}
+        ):
+            return profile_default_model, provider_context, True
+
+    return model, provider_context, False
+
+
 def _resolve_custom_provider_runtime_overrides(
     resolved_provider: str | None,
     resolved_api_key: str | None,
@@ -4635,30 +4675,17 @@ def _run_agent_streaming(
                         _pp = (_pp_cfg.get("model", {}).get("provider") or "").strip()
                         _pp_default = (_pp_cfg.get("model", {}).get("default") or "").strip()
                         if _pp:
-                            provider_context = _pp.lower()
+                            model, provider_context, _repaired = (
+                                _apply_profile_provider_context_to_streaming_model(
+                                    model,
+                                    provider_context,
+                                    _pp,
+                                    _pp_default,
+                                )
+                            )
                             s.model_provider = provider_context
-                            # Stale-model repair: if the session model belongs to
-                            # a different provider family, substitute the profile default
-                            if _pp_default:
-                                _m_lower = (model or "").lower()
-                                from api.routes import _normalize_provider_id
-                                _pp_norm = _normalize_provider_id(_pp)
-                                _repaired = False
-                                for _prefix in ("gpt", "claude", "gemini"):
-                                    if _m_lower.startswith(_prefix):
-                                        if _normalize_provider_id(_prefix) != _pp_norm:
-                                            model = _pp_default
-                                            _repaired = True
-                                        break
-                                # Slash-qualified IDs (openai/gpt-5.4-mini) are
-                                # native on openrouter/custom but stale elsewhere
-                                if not _repaired and "/" in _m_lower:
-                                    _slash_prefix = _m_lower.split("/", 1)[0]
-                                    _slash_provider = _normalize_provider_id(_slash_prefix)
-                                    if _slash_provider and _slash_provider != _pp_norm and _pp_norm not in {"openrouter", "custom", ""}:
-                                        model = _pp_default
-                                if model != (s.model or ""):
-                                    s.model = model
+                            if _repaired and model != (s.model or ""):
+                                s.model = model
             except Exception:
                 logger.warning("profile provider read failed", exc_info=True)
 
