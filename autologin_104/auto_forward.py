@@ -1423,8 +1423,8 @@ ul li{{margin:6px 0}}
 </body></html>"""
         try:
             analysis_html.write_text(html_body)
-        except NameError:
-            pass  # _html_escape 或 analysis_html 未定義時跳過 HTML
+        except (PermissionError, OSError) as e:
+            print(f'⚠️ 無法寫入 HTML 報告：{e}')
         # 寫入空 forward_log 並結束
         history.setdefault('runs', []).append({
             'timestamp': datetime.now().isoformat(),
@@ -1534,7 +1534,7 @@ ul li{{margin:6px 0}}
         # LLM 評分（0-100，從自傳/工作描述語意取得；與規則分按權重融合）
         llm_result = None
         # 極端規則分跳過 LLM 評分以省時間：< 30（明顯不符）或 > 90（明顯符合）
-        skip_llm_extreme = (rule_score < 30 or rule_score > 90)
+        skip_llm_extreme = (rule_score < 20 or rule_score > 95)
         if use_llm and LLM_AVAILABLE and not skip_llm_extreme:
             cached_llm = (cache_entry or {}).get('llm_score') if cache_entry else None
             # 舊快取 max_score 是 20，新版是 100；若分數 ≤20 視為舊版需重算
@@ -1562,8 +1562,8 @@ ul li{{margin:6px 0}}
         # 權重融合
         if llm_result:
             cfg = llm_score.get_llm_config(profile)
-            rw = cfg.get('rule_weight', 0.6)
-            lw = cfg.get('llm_weight', 0.4)
+            rw = cfg.get('rule_weight', 0.4)
+            lw = cfg.get('llm_weight', 0.6)
             llm_pct = llm_result['score']
             combined = round(rule_score * rw + llm_pct * lw)
             result['score'] = min(100, combined)

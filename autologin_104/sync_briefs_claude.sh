@@ -75,7 +75,7 @@ if [ -n "$CLAUDE_CMD" ]; then
     $CLAUDE_CMD --print --model sonnet \
         "你是 104 招募自動化的解析引擎。請執行以下工作：
 
-1. 讀取 /Users/fongyimac/hermes-webui/autologin_104/jobs_brief/ 下所有 .docx/.txt/.md 檔（跳過 _ 和 ~\$ 開頭）
+1. 讀取 $(pwd)/jobs_brief/ 下所有 .docx/.txt/.md 檔（跳過 _ 和 ~\$ 開頭）
 2. 對每個檔案，檢查 jobs/ 裡是否已有對應 JSON（_source_brief 欄位匹配且 JSON 較新）→ 有就跳過
 3. 讀取 brief 內容（.docx 用 textutil -convert txt -stdout）
 4. 解析成結構化 JSON 寫到 jobs/<id>.json
@@ -87,7 +87,7 @@ job_id 規則：用檔名優先匹配 role（機電→jidian, 水電→shuidian,
 重要：
 - 「高雄」→「高雄市」、AutoCad→AutoCAD
 - scoring.autobio_positive 固定用 [\"認真\",\"負責\",\"細心\",\"溝通\",\"協調\",\"解決問題\",\"承擔\",\"完成\",\"用心\",\"主動\"]
-- llm 區段固定：{\"enabled\":true,\"rule_weight\":0.6,\"llm_weight\":0.4,\"scoring_model\":\"gemma4:e4b\",\"summary_model\":\"gemma4:26b\"}
+- llm 區段固定：{\"enabled\":true,\"rule_weight\":0.4,\"llm_weight\":0.6,\"scoring_model\":\"gemma4:e4b\",\"summary_model\":\"gemma4:e4b\"}
 - forward 固定：{\"format\":\"complete\",\"summary_max_chars\":980}
 - _source_brief 填入原始檔名
 
