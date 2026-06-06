@@ -4882,8 +4882,11 @@ function renderSessionListFromCache(){
         }
         if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
       };
-      // onblur: cancel only -- no accidental saves
-      inp.onblur=()=>{ if(_renamingSid===s.session_id) finish(false); };
+      // onblur: save on blur — Escape explicitly cancels. The old cancel-on-blur
+      // behavior broke rename on mobile (iPhone "Done" dismisses the keyboard,
+      // triggering blur) and was less natural on desktop too (typing a name then
+      // clicking elsewhere should save, not discard).
+      inp.onblur=()=>{ if(_renamingSid===s.session_id) finish(true); };
       title.replaceWith(inp);
       setTimeout(()=>{inp.focus();inp.select();},10);
     };
