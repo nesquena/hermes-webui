@@ -8764,6 +8764,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             data.get("payload") if "payload" in data else {},
             prompt=data.get("prompt") or "",
             session_id=data.get("session_id") or "",
+            action=name,
         )
         response = {"ok": True, "action": name, **result}
         if is_current:
@@ -8825,7 +8826,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     }:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
-        result = disable_space_for_recovery(space_id, reason=data.get("reason"))
+        result = disable_space_for_recovery(space_id, reason=data.get("reason"), action=name)
         response = {"ok": True, "action": name, **result}
         if is_current:
             response["active_space_id"] = space_id
@@ -8849,7 +8850,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     }:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
-        result = enable_space_for_recovery(space_id, reason=data.get("reason"))
+        result = enable_space_for_recovery(space_id, reason=data.get("reason"), action=name)
         response = {"ok": True, "action": name, **result}
         if is_current:
             response["active_space_id"] = space_id
@@ -8940,7 +8941,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.disablemodule",
     }:
         module_id = validate_module_id(_space_tool_module_id(data))
-        result = disable_module_for_recovery(module_id, reason=data.get("reason"))
+        result = disable_module_for_recovery(module_id, reason=data.get("reason"), action=name)
         return {"ok": True, "action": name, **result}
     if name in {
         "space.recovery.enable_module",
@@ -8956,7 +8957,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.enablemodule",
     }:
         module_id = validate_module_id(_space_tool_module_id(data))
-        result = enable_module_for_recovery(module_id, reason=data.get("reason"))
+        result = enable_module_for_recovery(module_id, reason=data.get("reason"), action=name)
         return {"ok": True, "action": name, **result}
     if name in {
         "space.recovery.repair_module",
@@ -8977,6 +8978,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             data.get("payload") if "payload" in data else {},
             prompt=data.get("prompt") or "",
             session_id=data.get("session_id") or "",
+            action=name,
         )
         return {"ok": True, "action": name, **result}
     if name in {
@@ -11803,12 +11805,17 @@ def reset_template(template: str, *, space_id: str | None = None, record_progres
     return result
 
 
-def disable_space_for_recovery(space_id: str, *, reason: Any = "") -> dict[str, Any]:
+def disable_space_for_recovery(
+    space_id: str,
+    *,
+    reason: Any = "",
+    action: str = "space.recovery.disable",
+) -> dict[str, Any]:
     """Mark an entire Space disabled from safe recovery without deleting its manifest."""
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
-    action = "space.recovery.disable"
-    preflight_receipt = _ensure_recovery_reason_prompt_preflight(action, reason)
+    safe_action = _safe_recovery_receipt_action(action, "space.recovery.disable")
+    preflight_receipt = _ensure_recovery_reason_prompt_preflight(safe_action, reason)
     space = _read_space_manifest(space_id)
     recovery = space.get("recovery") if isinstance(space.get("recovery"), dict) else {}
     recovery = dict(recovery)
@@ -11823,10 +11830,10 @@ def disable_space_for_recovery(space_id: str, *, reason: Any = "") -> dict[str, 
         {"reason": _public_recovery_reason_label(disabled_reason) if preflight_receipt else disabled_reason},
     )
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="disable")
-    prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(action)
-    autonomy_policy = _recovery_toggle_action_policy_receipt(action, preflight_receipt)
+    prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(safe_action)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action, preflight_receipt)
     output_compaction = _recovery_toggle_output_compaction_receipt(
-        action=action,
+        action=safe_action,
         space_id=saved["space_id"],
         target_kind="space",
         disabled=True,
@@ -11846,12 +11853,17 @@ def disable_space_for_recovery(space_id: str, *, reason: Any = "") -> dict[str, 
     }
 
 
-def enable_space_for_recovery(space_id: str, *, reason: Any = "") -> dict[str, Any]:
+def enable_space_for_recovery(
+    space_id: str,
+    *,
+    reason: Any = "",
+    action: str = "space.recovery.enable",
+) -> dict[str, Any]:
     """Re-enable an entire Space from safe recovery without exposing widget bodies."""
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
-    action = "space.recovery.enable"
-    preflight_receipt = _ensure_recovery_reason_prompt_preflight(action, reason)
+    safe_action = _safe_recovery_receipt_action(action, "space.recovery.enable")
+    preflight_receipt = _ensure_recovery_reason_prompt_preflight(safe_action, reason)
     space = _read_space_manifest(space_id)
     recovery = space.get("recovery") if isinstance(space.get("recovery"), dict) else {}
     recovery = dict(recovery)
@@ -11866,10 +11878,10 @@ def enable_space_for_recovery(space_id: str, *, reason: Any = "") -> dict[str, A
         {"reason": _public_recovery_reason_label(detail_reason, "enabled from recovery") if preflight_receipt else detail_reason},
     )
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="enable")
-    prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(action)
-    autonomy_policy = _recovery_toggle_action_policy_receipt(action, preflight_receipt)
+    prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(safe_action)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action, preflight_receipt)
     output_compaction = _recovery_toggle_output_compaction_receipt(
-        action=action,
+        action=safe_action,
         space_id=saved["space_id"],
         target_kind="space",
         disabled=False,
@@ -12156,11 +12168,16 @@ def _collect_recovery_module_summaries(limit: int = _RECOVERY_MODULE_SUMMARY_LIM
     return modules, total, disabled_total
 
 
-def disable_module_for_recovery(module_id: str, *, reason: Any = "") -> dict[str, Any]:
+def disable_module_for_recovery(
+    module_id: str,
+    *,
+    reason: Any = "",
+    action: str = "space.module.recovery.disable",
+) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
-    action = "space.module.recovery.disable"
-    preflight_receipt = _ensure_recovery_reason_prompt_preflight(action, reason)
+    safe_action = _safe_recovery_receipt_action(action, "space.module.recovery.disable")
+    preflight_receipt = _ensure_recovery_reason_prompt_preflight(safe_action, reason)
     mid = validate_module_id(module_id)
     module = read_recovery_module(mid)
     recovery = module.get("recovery") if isinstance(module.get("recovery"), dict) else {}
@@ -12177,17 +12194,17 @@ def disable_module_for_recovery(module_id: str, *, reason: Any = "") -> dict[str
     module["revision_event_id"] = event_id
     _atomic_write_json(_recovery_module_path(mid), module)
     summary = _module_summary(module)
-    prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(action)
+    prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(safe_action)
     progress_event = _record_space_recovery_progress_event(
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
         action="module.disable",
     )
-    autonomy_policy = _recovery_toggle_action_policy_receipt(action, preflight_receipt)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action, preflight_receipt)
     summary["prompt_preflight"] = prompt_preflight
     summary["progress_event"] = progress_event
     summary["autonomy_policy"] = autonomy_policy
     summary["output_compaction"] = _recovery_toggle_output_compaction_receipt(
-        action=action,
+        action=safe_action,
         space_id=_RECOVERY_MODULE_PROGRESS_SPACE_ID,
         target_kind="module",
         target_id=mid,
@@ -12200,11 +12217,16 @@ def disable_module_for_recovery(module_id: str, *, reason: Any = "") -> dict[str
     return summary
 
 
-def enable_module_for_recovery(module_id: str, *, reason: Any = "") -> dict[str, Any]:
+def enable_module_for_recovery(
+    module_id: str,
+    *,
+    reason: Any = "",
+    action: str = "space.module.recovery.enable",
+) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
-    action = "space.module.recovery.enable"
-    preflight_receipt = _ensure_recovery_reason_prompt_preflight(action, reason)
+    safe_action = _safe_recovery_receipt_action(action, "space.module.recovery.enable")
+    preflight_receipt = _ensure_recovery_reason_prompt_preflight(safe_action, reason)
     mid = validate_module_id(module_id)
     module = read_recovery_module(mid)
     recovery = module.get("recovery") if isinstance(module.get("recovery"), dict) else {}
@@ -12221,17 +12243,17 @@ def enable_module_for_recovery(module_id: str, *, reason: Any = "") -> dict[str,
     module["revision_event_id"] = event_id
     _atomic_write_json(_recovery_module_path(mid), module)
     summary = _module_summary(module)
-    prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(action)
+    prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(safe_action)
     progress_event = _record_space_recovery_progress_event(
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
         action="module.enable",
     )
-    autonomy_policy = _recovery_toggle_action_policy_receipt(action, preflight_receipt)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action, preflight_receipt)
     summary["prompt_preflight"] = prompt_preflight
     summary["progress_event"] = progress_event
     summary["autonomy_policy"] = autonomy_policy
     summary["output_compaction"] = _recovery_toggle_output_compaction_receipt(
-        action=action,
+        action=safe_action,
         space_id=_RECOVERY_MODULE_PROGRESS_SPACE_ID,
         target_kind="module",
         target_id=mid,
@@ -12309,6 +12331,7 @@ def queue_recovery_module_repair_event(
     *,
     prompt: str = "",
     session_id: str = "",
+    action: str = "space.module.repair.queue",
 ) -> dict[str, Any]:
     """Queue a metadata-only repair request for a quarantined generated module."""
     if not spaces_enabled():
@@ -12319,11 +12342,15 @@ def queue_recovery_module_repair_event(
     module = read_recovery_module(mid)
     name = "agent.repair"
     repair_action = "space.module.repair.queue"
-    preflight_receipt = _space_repair_prompt_preflight_receipt(
+    receipt_action = _safe_recovery_receipt_action(action, repair_action)
+    prompt_preflight = _space_repair_prompt_preflight_receipt(
         prompt,
         error_prefix="Module repair",
     ) or _space_repair_required_prompt_preflight_receipt(repair_action)
-    autonomy_policy_receipt = _space_repair_action_policy_receipt(repair_action, preflight_receipt)
+    response_prompt_preflight = copy.deepcopy(prompt_preflight)
+    response_prompt_preflight["action"] = receipt_action
+    autonomy_policy_receipt = _space_repair_action_policy_receipt(repair_action, prompt_preflight)
+    response_autonomy_policy_receipt = _space_repair_action_policy_receipt(receipt_action, response_prompt_preflight)
     prompt_preview = _space_repair_prompt_preview(prompt)
     payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
     event_details = {
@@ -12334,8 +12361,8 @@ def queue_recovery_module_repair_event(
         "session_id": _space_repair_text_summary(session_id, 120),
         "status": "queued",
     }
-    if preflight_receipt:
-        event_details["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    if prompt_preflight:
+        event_details["prompt_preflight"] = copy.deepcopy(prompt_preflight)
     if autonomy_policy_receipt:
         event_details["autonomy_policy"] = copy.deepcopy(autonomy_policy_receipt)
     event_id = _record_event(
@@ -12358,21 +12385,21 @@ def queue_recovery_module_repair_event(
         "payload_summary": payload_summary,
         "progress_event": progress_event,
         "output_compaction": _space_repair_output_compaction(
-            action=repair_action,
+            action=receipt_action,
             status="queued",
             target_kind="module",
             target_handle=f"module:{mid}",
             event_id=event_id,
-            preflight_receipt=preflight_receipt,
-            autonomy_policy_receipt=autonomy_policy_receipt,
+            preflight_receipt=response_prompt_preflight,
+            autonomy_policy_receipt=response_autonomy_policy_receipt,
             progress_event=progress_event,
             payload=payload,
         ),
     }
-    if preflight_receipt:
-        response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
-    if autonomy_policy_receipt:
-        response["autonomy_policy"] = copy.deepcopy(autonomy_policy_receipt)
+    if response_prompt_preflight:
+        response["prompt_preflight"] = copy.deepcopy(response_prompt_preflight)
+    if response_autonomy_policy_receipt:
+        response["autonomy_policy"] = copy.deepcopy(response_autonomy_policy_receipt)
     return response
 
 
@@ -13519,6 +13546,7 @@ def _space_repair_output_compaction(
     )
     if receipt.get("redaction_status") == "none":
         receipt["redaction_status"] = "metadata_only"
+    receipt["metadata_only"] = True
     return receipt
 
 
@@ -13722,6 +13750,7 @@ def queue_space_repair_event(
     *,
     prompt: str = "",
     session_id: str = "",
+    action: str = "space.repair.queue",
 ) -> dict[str, Any]:
     """Queue a metadata-only whole-Space repair request from recovery/admin UI."""
     if not spaces_enabled():
@@ -13732,11 +13761,15 @@ def queue_space_repair_event(
     _read_space_manifest(sid)
     name = "agent.repair"
     repair_action = "space.repair.queue"
-    preflight_receipt = _space_repair_prompt_preflight_receipt(
+    receipt_action = _safe_recovery_receipt_action(action, repair_action)
+    prompt_preflight = _space_repair_prompt_preflight_receipt(
         prompt,
         error_prefix="Space repair",
     ) or _space_repair_required_prompt_preflight_receipt(repair_action)
-    autonomy_policy_receipt = _space_repair_action_policy_receipt(repair_action, preflight_receipt)
+    response_prompt_preflight = copy.deepcopy(prompt_preflight)
+    response_prompt_preflight["action"] = receipt_action
+    autonomy_policy_receipt = _space_repair_action_policy_receipt(repair_action, prompt_preflight)
+    response_autonomy_policy_receipt = _space_repair_action_policy_receipt(receipt_action, response_prompt_preflight)
     prompt_preview = _space_repair_prompt_preview(prompt)
     payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
     event_details = {
@@ -13746,8 +13779,8 @@ def queue_space_repair_event(
         "session_id": _space_repair_text_summary(session_id, 120),
         "status": "queued",
     }
-    if preflight_receipt:
-        event_details["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    if prompt_preflight:
+        event_details["prompt_preflight"] = copy.deepcopy(prompt_preflight)
     if autonomy_policy_receipt:
         event_details["autonomy_policy"] = copy.deepcopy(autonomy_policy_receipt)
     event_id = _record_event(
@@ -13758,13 +13791,13 @@ def queue_space_repair_event(
     _auto_ingest_space_revision_event(event_id)
     progress_event = _record_space_repair_progress_event(sid, run_prefix="recovery.space.repair")
     output_compaction = _space_repair_output_compaction(
-        action=repair_action,
+        action=receipt_action,
         status="queued",
         target_kind="space",
         target_handle=f"space:{sid}",
         event_id=event_id,
-        preflight_receipt=preflight_receipt,
-        autonomy_policy_receipt=autonomy_policy_receipt,
+        preflight_receipt=response_prompt_preflight,
+        autonomy_policy_receipt=response_autonomy_policy_receipt,
         progress_event=progress_event,
         payload=payload,
     )
@@ -13778,8 +13811,8 @@ def queue_space_repair_event(
         "payload_summary": payload_summary,
         "progress_event": progress_event,
         "output_compaction": output_compaction,
-        **({"prompt_preflight": copy.deepcopy(preflight_receipt)} if preflight_receipt else {}),
-        **({"autonomy_policy": copy.deepcopy(autonomy_policy_receipt)} if autonomy_policy_receipt else {}),
+        **({"prompt_preflight": copy.deepcopy(response_prompt_preflight)} if response_prompt_preflight else {}),
+        **({"autonomy_policy": copy.deepcopy(response_autonomy_policy_receipt)} if response_autonomy_policy_receipt else {}),
     }
 
 

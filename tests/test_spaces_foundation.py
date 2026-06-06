@@ -4771,6 +4771,61 @@ def test_space_recovery_toggle_outputs_include_compaction_receipts_metadata_only
     assert "bearer" not in serialized
 
 
+def test_space_recovery_admin_tool_alias_receipts_use_requested_action_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "space-admin-alias-policy-lab", "name": "Space Admin Alias Policy Lab"})
+
+    disabled = spaces.run_space_tool(
+        "space.admin.disable",
+        {
+            "spaceId": created["space_id"],
+            "reason": "safe admin review note with SECRET_VALUE_DO_NOT_LEAK renderer cleanup",
+        },
+    )
+    enabled = spaces.run_space_tool(
+        "space.admin.enable",
+        {
+            "spaceId": created["space_id"],
+            "reason": "safe admin recovery complete after renderer cleanup",
+        },
+    )
+
+    serialized = json.dumps({"disabled": disabled, "enabled": enabled}, sort_keys=True).lower()
+
+    for result, action in (
+        (disabled, "space.admin.disable"),
+        (enabled, "space.admin.enable"),
+    ):
+        assert result["ok"] is True
+        assert result["action"] == action
+
+        preflight = result["prompt_preflight"]
+        assert preflight["action"] == action
+        assert preflight["boundary"] == "recovery_action"
+        assert preflight["status"] == "required"
+        assert preflight["metadata_only"] is True
+        assert preflight["raw_prompt_stored"] is False
+        assert preflight["local_only"] is True
+
+        policy = result["autonomy_policy"]
+        assert policy["action"] == action
+        assert policy["approval_gates"] == ["generated_widget_execution"]
+        assert policy["prompt_preflight_status"] == "required"
+        assert policy["model_route_hint"] == "hint:reasoning"
+        assert policy["metadata_only"] is True
+
+        compaction = result["output_compaction"]
+        assert compaction["tool"] == "capy-spaces-recovery-toggle"
+        assert compaction["command"] == action
+        assert compaction["metadata_only"] is True
+        assert f"action: {action}" in compaction["text"]
+
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
 def test_widget_recovery_enable_disable_tools_record_metadata_only_progress_events(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "widget-recovery-progress-lab", "name": "Widget Recovery Progress Lab"})
@@ -17814,6 +17869,12 @@ def test_space_tool_adapter_admin_recovery_repair_aliases_queue_metadata_only(mo
     assert queued["queued"] is True
     assert queued["event_name"] == "agent.repair"
     assert queued["prompt_preview"] == "[REDACTED]"
+    assert queued["prompt_preflight"]["action"] == "space.admin.recovery.repair_space"
+    assert queued["prompt_preflight"]["boundary"] == "space_repair_prompt"
+    assert queued["autonomy_policy"]["action"] == "space.admin.recovery.repair_space"
+    assert queued["autonomy_policy"]["metadata_only"] is True
+    assert queued["output_compaction"]["command"] == "space.admin.recovery.repair_space"
+    assert queued["output_compaction"]["metadata_only"] is True
     assert queued["payload_summary"] == {
         "action": "repair-space",
         "scope": "space-shell",
@@ -18537,6 +18598,64 @@ def test_queue_recovery_module_repair_event_metadata_only(monkeypatch, tmp_path)
     assert "repair module using safe metadata summary" not in serialized
 
 
+def test_module_recovery_admin_tool_alias_receipts_use_requested_action_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "module-admin-alias-policy-lab",
+            "name": "Module Admin Alias Policy Lab",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+            "credentials": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+
+    disabled = spaces.run_space_tool(
+        "space.admin.disable_module",
+        {"moduleId": "module-admin-alias-policy-lab", "reason": "safe admin recovery note"},
+    )
+    enabled = spaces.run_space_tool(
+        "space.admin.enable_module",
+        {"moduleId": "module-admin-alias-policy-lab", "reason": "safe recovery complete"},
+    )
+
+    serialized = json.dumps({"disabled": disabled, "enabled": enabled}, sort_keys=True).lower()
+
+    for result, action in (
+        (disabled, "space.admin.disable_module"),
+        (enabled, "space.admin.enable_module"),
+    ):
+        assert result["ok"] is True
+        assert result["action"] == action
+
+        preflight = result["prompt_preflight"]
+        assert preflight["action"] == action
+        assert preflight["boundary"] == "recovery_action"
+        assert preflight["status"] in {"required", "pass"}
+        assert preflight["metadata_only"] is True
+        assert preflight["raw_prompt_stored"] is False
+
+        policy = result["autonomy_policy"]
+        assert policy["action"] == action
+        assert policy["approval_gates"] == ["generated_widget_execution"]
+        assert policy["prompt_preflight_status"] in {"required", "pass"}
+        assert policy["model_route_hint"] == "hint:reasoning"
+        assert policy["metadata_only"] is True
+
+        compaction = result["output_compaction"]
+        assert compaction["tool"] == "capy-spaces-recovery-toggle"
+        assert compaction["command"] == action
+        assert compaction["metadata_only"] is True
+        assert f"action: {action}" in compaction["text"]
+
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
 def test_space_tool_adapter_recovery_module_repair_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.upsert_recovery_module(
@@ -18577,9 +18696,12 @@ def test_space_tool_adapter_recovery_module_repair_aliases_metadata_only(monkeyp
     assert listed["events"][0]["autonomy_policy"]["metadata_only"] is True
     assert queued["prompt_preflight"]["boundary"] == "space_repair_prompt"
     assert queued["prompt_preflight"]["status"] == "pass"
-    assert queued["autonomy_policy"]["action"] == "space.module.repair.queue"
+    assert queued["prompt_preflight"]["action"] == "space.admin.recovery.repair_module"
+    assert queued["autonomy_policy"]["action"] == "space.admin.recovery.repair_module"
     assert queued["autonomy_policy"]["approval_required"] is True
     assert queued["autonomy_policy"]["metadata_only"] is True
+    assert queued["output_compaction"]["tool"] == "capy-spaces-recovery-repair"
+    assert queued["output_compaction"]["command"] == "space.admin.recovery.repair_module"
     assert "source" not in serialized
     assert "renderer" not in serialized
     assert "bearer" not in serialized
