@@ -612,6 +612,12 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_actions_workflow_permissions_path_repo(origin_uri)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_actions_runners_route_path_matches(raw_origin_text):
+        actions_runners_repo = _github_actions_runners_path_repo(origin_uri)
+        if not _github_raw_authority_is_exact(raw_origin_text, "api.github.com") or not actions_runners_repo:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = f"github actions runners {actions_runners_repo}"
     if _github_actions_caches_route_path_matches(raw_origin_text):
         actions_caches_repo = _github_actions_caches_path_repo(origin_uri)
         if not _github_raw_authority_is_exact(raw_origin_text, "api.github.com") or not actions_caches_repo:
@@ -4819,6 +4825,186 @@ def _github_actions_workflow_permissions_refresh_summary(origin_uri: str, payloa
     )
 
 
+def _github_actions_runners_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "actions"
+        or path[5] != "runners"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_actions_runners_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _matches_runners_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 6
+            and path[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "actions"
+            and lowered[5].startswith("runners")
+        )
+
+    return _matches_runners_shape(parts.path) or _matches_runners_shape(unquote(parts.path))
+
+
+def _github_actions_runners_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_actions_runners_route_path_matches(origin_uri)
+
+
+def _safe_github_actions_runners_origin_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    match = re.fullmatch(r"github actions runners ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", text)
+    if not match:
+        return ""
+    owner, repo = match.group(1).split("/", 1)
+    if not _github_repo_path_segment_is_safe(owner) or not _github_repo_path_segment_is_safe(repo):
+        return ""
+    return text
+
+
+def _github_actions_runners_fetch_origin_from_origin_text(value: Any) -> str:
+    text = _safe_github_actions_runners_origin_text(value)
+    if not text:
+        return ""
+    repo = text.removeprefix("github actions runners ")
+    return f"https://api.github.com/repos/{repo}/actions/runners"
+
+
+_GITHUB_ACTIONS_RUNNER_STATUSES = {"online", "offline"}
+_GITHUB_ACTIONS_RUNNER_OSES = {"linux", "windows", "macos"}
+_GITHUB_ACTIONS_RUNNER_ARCHES = {"x64", "arm", "arm64"}
+
+
+def _github_actions_runner_label_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    name = value.strip()
+    if not name or name != value or len(name) > 80:
+        return False
+    if _refresh_value_is_blocked(name):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_. -]{1,80}", name))
+
+
+def _github_actions_runner_label_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    return _github_actions_runner_label_name_is_safe(row.get("name"))
+
+
+def _github_actions_runner_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    runner_id = _safe_optional_nonnegative_int(row.get("id"))
+    if runner_id is None or runner_id <= 0:
+        return False
+    name = _safe_public_text(row.get("name"), limit=120)
+    if not name or name != str(row.get("name") or "").strip() or _refresh_value_is_blocked(row.get("name")):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_. -]{1,120}", name):
+        return False
+    os_name = _safe_public_text(row.get("os"), limit=40).lower()
+    if os_name not in _GITHUB_ACTIONS_RUNNER_OSES:
+        return False
+    architecture = _safe_public_text(row.get("architecture"), limit=40).lower()
+    if architecture and architecture not in _GITHUB_ACTIONS_RUNNER_ARCHES:
+        return False
+    status = _safe_public_text(row.get("status"), limit=40).lower()
+    if status not in _GITHUB_ACTIONS_RUNNER_STATUSES:
+        return False
+    if not isinstance(row.get("busy"), bool):
+        return False
+    labels = row.get("labels")
+    if labels is not None:
+        if not isinstance(labels, list) or len(labels) > 20:
+            return False
+        if not all(_github_actions_runner_label_row_is_safe(label) for label in labels):
+            return False
+    for raw_value in (row.get("id"), row.get("name"), row.get("os"), row.get("architecture"), row.get("status")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_actions_runners_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_actions_runners_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if _json_payload_is_feed(payload) or any(key in payload for key in ("version", "items")):
+        return False
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    runners = payload.get("runners")
+    if total_count is None or not isinstance(runners, list) or len(runners) > 25:
+        return False
+    if total_count != len(runners):
+        return False
+    return all(_github_actions_runner_row_is_safe(row) for row in runners)
+
+
+def _github_actions_runners_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_actions_runners_path_repo(origin_uri) or "repository"
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count")) or 0
+    raw_rows = payload.get("runners")
+    rows = raw_rows if isinstance(raw_rows, list) else []
+    parts = [f"GitHub Actions self-hosted runners for {repo}", f"runner count: {total_count}"]
+    for row in rows[:5]:
+        if not _github_actions_runner_row_is_safe(row):
+            continue
+        row_parts = [f"runner id: {_safe_optional_nonnegative_int(row.get('id')) or 0}"]
+        name = _safe_public_text(row.get("name"), limit=120)
+        if name:
+            row_parts.append(f"name: {name}")
+        status = _safe_public_text(row.get("status"), limit=40).lower()
+        if status:
+            row_parts.append(f"status: {status}")
+        row_parts.append(f"busy: {str(bool(row.get('busy'))).lower()}")
+        os_name = _safe_public_text(row.get("os"), limit=40).lower()
+        if os_name:
+            row_parts.append(f"os: {os_name}")
+        architecture = _safe_public_text(row.get("architecture"), limit=40).lower()
+        if architecture:
+            row_parts.append(f"architecture: {architecture}")
+        labels = row.get("labels")
+        if isinstance(labels, list):
+            label_names = [
+                _safe_public_text(label.get("name"), limit=80)
+                for label in labels
+                if _github_actions_runner_label_row_is_safe(label)
+            ]
+            if label_names:
+                row_parts.append(f"labels: {', '.join(label_names[:5])}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_actions_caches_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -5062,6 +5248,9 @@ def _github_repository_custom_properties_fetch_origin_from_origin_text(value: An
 
 def _source_catalog_public_origin_uri(value: Any, *, source_id: str) -> str:
     source_id = _safe_public_id(source_id, fallback="source")
+    actions_runners_text = _safe_github_actions_runners_origin_text(value)
+    if actions_runners_text:
+        return actions_runners_text
     actions_caches_text = _safe_github_actions_caches_origin_text(value)
     if actions_caches_text:
         return actions_caches_text
@@ -5069,6 +5258,19 @@ def _source_catalog_public_origin_uri(value: Any, *, source_id: str) -> str:
     if custom_properties_text:
         return custom_properties_text
     raw_text = str(value or "").strip()
+    if _github_actions_runners_route_path_matches(raw_text):
+        try:
+            parts = urlsplit(raw_text)
+            raw_authority = parts.netloc or ""
+        except ValueError:
+            raw_authority = ""
+            parts = None
+        if parts is not None and parts.scheme == "https" and raw_authority == "api.github.com":
+            actions_runners_origin = urlunsplit(("https", "api.github.com", parts.path, "", ""))
+            actions_runners_repo = _github_actions_runners_path_repo(actions_runners_origin)
+            if actions_runners_repo:
+                return f"github actions runners {actions_runners_repo}"
+        return f"capy-memory://{source_id}"
     if _github_actions_caches_route_path_matches(raw_text):
         try:
             parts = urlsplit(raw_text)
@@ -9961,6 +10163,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_actions_workflow_permissions_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    actions_runners_repo = _github_actions_runners_path_repo(origin_uri)
+    if actions_runners_repo:
+        if not _json_payload_is_github_actions_runners_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub Actions runners {actions_runners_repo}",
+            "summary": _github_actions_runners_refresh_summary(origin_uri, payload),
+            "origin_uri": f"github actions runners {actions_runners_repo}",
+        }
+    if _github_actions_runners_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     actions_caches_repo = _github_actions_caches_path_repo(origin_uri)
     if actions_caches_repo:
         if not _json_payload_is_github_actions_caches_metadata(origin_uri, payload):
@@ -10251,6 +10465,9 @@ def _refresh_record_from_feed(source_id: str, origin_uri: str, text: str) -> dic
 
 def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[str, Any]:
     raw_origin_uri = str(origin_uri or "").strip()
+    actions_runners_fetch_origin = _github_actions_runners_fetch_origin_from_origin_text(raw_origin_uri)
+    if actions_runners_fetch_origin:
+        raw_origin_uri = actions_runners_fetch_origin
     custom_properties_fetch_origin = _github_repository_custom_properties_fetch_origin_from_origin_text(raw_origin_uri)
     if custom_properties_fetch_origin:
         raw_origin_uri = custom_properties_fetch_origin
@@ -10367,6 +10584,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
     if _github_actions_workflow_permissions_route_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_workflow_permissions_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
+    if _github_actions_runners_route_path_matches(raw_origin_uri):
+        if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_runners_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
     if _github_actions_caches_route_path_matches(raw_origin_uri):
         if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_caches_path_repo(raw_origin_uri):
@@ -10517,6 +10737,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_actions_workflow_permissions_path_matches(safe_origin_uri):
         if not _github_actions_workflow_permissions_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_actions_runners_path_matches(safe_origin_uri):
+        if not _github_actions_runners_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_actions_caches_path_matches(safe_origin_uri):
@@ -10677,6 +10901,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_actions_workflow_permissions_path_repo(final_url)
             or _github_actions_workflow_permissions_path_repo(final_url) != _github_actions_workflow_permissions_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_runners_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or not _github_actions_runners_path_repo(final_url)
+            or _github_actions_runners_path_repo(final_url) != _github_actions_runners_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_caches_path_matches(safe_origin_uri) and (
@@ -10872,6 +11102,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_workflow_permissions_path_matches(safe_origin_uri) and (
             not _github_actions_workflow_permissions_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_runners_path_matches(safe_origin_uri) and (
+            not _github_actions_runners_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -11449,9 +11684,14 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
                 payload = {}
             source_id = _safe_public_id(row["source_id"], fallback="source")
             raw_source_origin_uri = str(row["origin_uri"] or "").strip()
+            actions_runners_origin_text = _safe_github_actions_runners_origin_text(raw_source_origin_uri)
             actions_caches_origin_text = _safe_github_actions_caches_origin_text(raw_source_origin_uri)
             custom_properties_origin_text = _safe_github_repository_custom_properties_origin_text(raw_source_origin_uri)
-            if actions_caches_origin_text:
+            if actions_runners_origin_text:
+                origin_uri = actions_runners_origin_text
+            elif _github_actions_runners_route_path_matches(raw_source_origin_uri):
+                origin_uri = _source_catalog_public_origin_uri(raw_source_origin_uri, source_id=source_id)
+            elif actions_caches_origin_text:
                 origin_uri = actions_caches_origin_text
             elif _github_actions_caches_route_path_matches(raw_source_origin_uri):
                 origin_uri = _source_catalog_public_origin_uri(raw_source_origin_uri, source_id=source_id)
@@ -11658,6 +11898,9 @@ def run_source_refresh_jobs(
             payload = {}
         source_id = _safe_public_id(payload.get("source_id"), fallback="source")
         raw_origin_uri = str(payload.get("fetch_origin_uri") or payload.get("origin_uri") or "").strip()
+        actions_runners_fetch_origin = _github_actions_runners_fetch_origin_from_origin_text(raw_origin_uri)
+        if actions_runners_fetch_origin:
+            raw_origin_uri = actions_runners_fetch_origin
         actions_caches_fetch_origin = _github_actions_caches_fetch_origin_from_origin_text(raw_origin_uri)
         if actions_caches_fetch_origin:
             raw_origin_uri = actions_caches_fetch_origin
@@ -11696,6 +11939,11 @@ def run_source_refresh_jobs(
         elif _github_actions_variables_route_path_matches(raw_origin_uri) and (
             not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
             or not _github_actions_variables_path_repo(raw_origin_uri)
+        ):
+            origin_uri = f"capy-memory://{source_id}"
+        elif _github_actions_runners_route_path_matches(raw_origin_uri) and (
+            not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com")
+            or not _github_actions_runners_path_repo(raw_origin_uri)
         ):
             origin_uri = f"capy-memory://{source_id}"
         elif _github_actions_caches_route_path_matches(raw_origin_uri) and (
