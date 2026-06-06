@@ -1681,7 +1681,7 @@ def _build_nous_featured_set(
 def _strip_picker_provider_hint(model_id: str) -> str:
     mid = str(model_id or "").strip()
     if mid.startswith("@") and ":" in mid:
-        return mid[mid.rfind(":") + 1 :]
+        return mid[mid.index(":") + 1 :]
     return mid
 
 
@@ -1704,10 +1704,10 @@ def _model_matches_picker_selection(
 
     selected_provider = ""
     if selected.startswith("@") and ":" in selected:
-        selected_provider = selected[1 : selected.rfind(":")].lower()
+        selected_provider = selected[1 : selected.index(":")].lower()
     candidate_provider = str(provider_id or "").strip().lower()
     if candidate.startswith("@") and ":" in candidate:
-        candidate_provider = candidate[1 : candidate.rfind(":")].lower()
+        candidate_provider = candidate[1 : candidate.index(":")].lower()
 
     return not selected_provider or not candidate_provider or selected_provider == candidate_provider
 
