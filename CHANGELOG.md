@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.300] — 2026-06-06 — Release JP (stage-3726 — context-length indicator honors provider per-model overrides)
+
+### Fixed
+- **The context-length indicator now honors per-model `context_length` overrides configured under a specific provider.** A `providers.<name>.models.<model>.context_length` override (standard provider, no `base_url`) was invisible to the session model's context resolver, so the usage indicator showed and persisted the wrong window — and could trip auto-compression at the wrong threshold. The resolver now collects the effective provider config, base URL, and custom-provider metadata across all three paths (route load, session save, live SSE usage), resolving provider-scoped overrides by provider-name match and forwarding them as `config_context_length` (which the agent returns before any base-URL-gated probe). `custom_providers`-with-`base_url` per-model overrides continue to resolve as before. (#3726 fixes #3717, @rodboev)
+
 ## [v0.51.299] — 2026-06-06 — Release JO (stage-3713 — update flow waits for a genuinely new server instance)
 
 ### Fixed

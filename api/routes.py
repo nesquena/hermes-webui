@@ -1894,6 +1894,223 @@ def _model_matches_configured_default(
     return True
 
 
+class _ContextLengthLookupInputs:
+    __slots__ = ("config_context_length", "custom_providers", "base_url", "provider")
+
+    def __init__(
+        self,
+        *,
+        config_context_length: int | None = None,
+        custom_providers: list | None = None,
+        base_url: str = "",
+        provider: str = "",
+    ) -> None:
+        self.config_context_length = config_context_length
+        self.custom_providers = custom_providers
+        self.base_url = base_url
+        self.provider = provider
+
+
+def _positive_context_length(value) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _model_lookup_candidates(model: str) -> tuple[str, ...]:
+    raw = str(model or "").strip()
+    candidates = []
+    for candidate in (raw, _split_provider_qualified_model(raw)[0]):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+        if "/" in candidate:
+            bare = candidate.split("/", 1)[1].strip()
+            if bare and bare not in candidates:
+                candidates.append(bare)
+    return tuple(candidates)
+
+
+def _models_config_context_length(models_cfg, model: str) -> int | None:
+    candidates = _model_lookup_candidates(model)
+    if isinstance(models_cfg, dict):
+        for candidate in candidates:
+            entry = models_cfg.get(candidate)
+            raw_ctx = entry.get("context_length") if isinstance(entry, dict) else entry
+            ctx = _positive_context_length(raw_ctx)
+            if ctx is not None:
+                return ctx
+    if isinstance(models_cfg, list):
+        for entry in models_cfg:
+            if not isinstance(entry, dict):
+                continue
+            entry_model = str(entry.get("id") or entry.get("model") or entry.get("name") or "").strip()
+            if entry_model in candidates:
+                ctx = _positive_context_length(entry.get("context_length"))
+                if ctx is not None:
+                    return ctx
+    return None
+
+
+def _canonical_context_provider(value: str | None) -> str:
+    provider = _clean_session_model_provider(value) or ""
+    if not provider:
+        return ""
+    try:
+        from api.config import _resolve_provider_alias
+
+        provider = _resolve_provider_alias(provider)
+    except Exception:
+        pass
+    return str(provider or "").strip().lower()
+
+
+def _custom_provider_slug_for_context(name: object) -> str:
+    try:
+        from api.config import _custom_provider_slug_from_name
+
+        return _custom_provider_slug_from_name(name)
+    except Exception:
+        raw = str(name or "").strip().lower()
+        if not raw:
+            return ""
+        if raw.startswith("custom:"):
+            return raw
+        slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+        slug = re.sub(r"-{2,}", "-", slug)
+        return f"custom:{slug}" if slug else ""
+
+
+def _providers_match_for_context(config_key: object, requested_provider: str) -> bool:
+    if not requested_provider:
+        return False
+    raw_key = str(config_key or "").strip().lower()
+    key = _canonical_context_provider(raw_key)
+    requested = _canonical_context_provider(requested_provider)
+    return bool(
+        requested
+        and (
+            raw_key == requested
+            or key == requested
+            or raw_key == str(requested_provider or "").strip().lower()
+        )
+    )
+
+
+def _context_length_lookup_inputs_for_model(
+    model: str | None,
+    provider: str | None = None,
+    *,
+    base_url: str | None = None,
+    cfg: dict | None = None,
+) -> _ContextLengthLookupInputs:
+    """Return the effective metadata resolver inputs for a WebUI model.
+
+    ``agent.model_metadata.get_model_context_length`` understands global
+    ``config_context_length`` and custom-provider overrides, but only when the
+    matching base URL is supplied. WebUI also owns ``providers.<provider>.models``
+    overrides, so normalize those here and keep route/session-save/SSE aligned.
+    """
+    model_for_lookup = str(model or "").strip()
+    if not model_for_lookup:
+        return _ContextLengthLookupInputs()
+
+    if cfg is None:
+        try:
+            from api.config import get_config as _get_config_for_cl
+
+            cfg = _get_config_for_cl()
+        except Exception:
+            cfg = {}
+    cfg = cfg if isinstance(cfg, dict) else {}
+
+    bare_model, explicit_provider = _split_provider_qualified_model(model_for_lookup)
+    effective_provider = _canonical_context_provider(provider or explicit_provider)
+    effective_base_url = str(base_url or "").strip()
+
+    model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    if isinstance(model_cfg, dict):
+        if not effective_provider:
+            effective_provider = _canonical_context_provider(model_cfg.get("provider"))
+        if not effective_base_url:
+            effective_base_url = str(model_cfg.get("base_url") or "").strip()
+
+    custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else None
+    if not isinstance(custom_providers, list):
+        custom_providers = None
+
+    provider_context_length = None
+    providers_cfg = cfg.get("providers", {}) if isinstance(cfg, dict) else {}
+    if isinstance(providers_cfg, dict):
+        for provider_key, provider_cfg in providers_cfg.items():
+            if not isinstance(provider_cfg, dict):
+                continue
+            if not _providers_match_for_context(provider_key, effective_provider):
+                continue
+            if not effective_base_url:
+                effective_base_url = str(provider_cfg.get("base_url") or "").strip()
+            provider_context_length = _models_config_context_length(
+                provider_cfg.get("models"),
+                bare_model or model_for_lookup,
+            )
+            break
+
+    custom_context_length = None
+    if custom_providers:
+        target_base = effective_base_url.rstrip("/")
+        model_candidates = set(_model_lookup_candidates(bare_model or model_for_lookup))
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            entry_name = str(entry.get("name") or "").strip()
+            entry_slug = _custom_provider_slug_for_context(entry_name)
+            entry_base = str(entry.get("base_url") or "").strip()
+            entry_base_norm = entry_base.rstrip("/")
+            provider_matches = bool(
+                effective_provider
+                and (
+                    effective_provider == entry_slug
+                    or effective_provider == entry_name.lower()
+                    or (effective_provider == "custom" and len(custom_providers) == 1)
+                )
+            )
+            base_matches = bool(target_base and entry_base_norm and target_base == entry_base_norm)
+            model_matches = bool(model_candidates.intersection(set(_model_lookup_candidates(entry.get("model")))))
+            models_cfg = entry.get("models")
+            if isinstance(models_cfg, dict):
+                model_matches = model_matches or any(candidate in models_cfg for candidate in model_candidates)
+            if not (provider_matches or base_matches or (not effective_provider and model_matches)):
+                continue
+            if not effective_provider and entry_slug:
+                effective_provider = entry_slug
+            if not effective_base_url and entry_base:
+                effective_base_url = entry_base
+            custom_context_length = _models_config_context_length(models_cfg, bare_model or model_for_lookup)
+            break
+
+    global_context_length = None
+    if isinstance(model_cfg, dict):
+        cfg_default_model = str(model_cfg.get("default") or "").strip()
+        raw_cfg_ctx = model_cfg.get("context_length")
+        if raw_cfg_ctx is not None and (
+            not cfg_default_model
+            or _model_matches_configured_default(
+                model_for_lookup,
+                cfg_default_model,
+                effective_provider,
+            )
+        ):
+            global_context_length = _positive_context_length(raw_cfg_ctx)
+
+    return _ContextLengthLookupInputs(
+        config_context_length=provider_context_length or custom_context_length or global_context_length,
+        custom_providers=custom_providers,
+        base_url=effective_base_url,
+        provider=effective_provider,
+    )
+
+
 
 def _should_attach_codex_provider_context(model: str, raw_active_provider: str, catalog: dict) -> bool:
     """Return True when a bare Codex model needs separate provider context.
@@ -2283,43 +2500,22 @@ def _resolve_context_length_for_session_model(
         from api.config import get_config as _get_config_for_cl
 
         _cfg_for_cl = _get_config_for_cl()
-        _cfg_ctx_len_load = None
-        _cfg_custom_providers_load = None
-        try:
-            _model_cfg_load = _cfg_for_cl.get('model', {}) if isinstance(_cfg_for_cl, dict) else {}
-            if isinstance(_model_cfg_load, dict):
-                # Only apply the global model.context_length override when the
-                # session model matches model.default. Otherwise a global cap
-                # set for the default model (e.g. 232000) silently clobbers
-                # other models' real metadata (e.g. a 1M-context variant).
-                _cfg_default_model = str(_model_cfg_load.get('default') or '').strip()
-                _raw_cfg_ctx_load = _model_cfg_load.get('context_length')
-                if _raw_cfg_ctx_load is not None and (
-                    not _cfg_default_model
-                    or _model_matches_configured_default(model_for_lookup, _cfg_default_model, provider)
-                ):
-                    try:
-                        _parsed_load = int(_raw_cfg_ctx_load)
-                        if _parsed_load > 0:
-                            _cfg_ctx_len_load = _parsed_load
-                    except (TypeError, ValueError):
-                        pass
-            _raw_cp_load = _cfg_for_cl.get('custom_providers') if isinstance(_cfg_for_cl, dict) else None
-            if isinstance(_raw_cp_load, list):
-                _cfg_custom_providers_load = _raw_cp_load
-        except Exception:
-            pass
+        _ctx_lookup = _context_length_lookup_inputs_for_model(
+            model_for_lookup,
+            provider,
+            cfg=_cfg_for_cl if isinstance(_cfg_for_cl, dict) else {},
+        )
         try:
             return _get_cl(
                 model_for_lookup,
-                "",
-                config_context_length=_cfg_ctx_len_load,
-                provider=provider or "",
-                custom_providers=_cfg_custom_providers_load,
+                _ctx_lookup.base_url,
+                config_context_length=_ctx_lookup.config_context_length,
+                provider=_ctx_lookup.provider or provider or "",
+                custom_providers=_ctx_lookup.custom_providers,
             ) or 0
         except TypeError:
             # Older hermes-agent builds: legacy 2-arg form.
-            return _get_cl(model_for_lookup, "") or 0
+            return _get_cl(model_for_lookup, _ctx_lookup.base_url) or 0
     except Exception:
         return 0
 
