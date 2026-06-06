@@ -5647,6 +5647,7 @@ async function applyUpdates(){
   }
   try{
     const stashConflictMessages=[];
+    const baselineServerIdentity = await _readHealthServerIdentity();
     for(const target of targets){
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
       if(!res.ok){
@@ -5663,7 +5664,7 @@ async function applyUpdates(){
     showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload();
+    _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
     const msg=_formatUpdateApplyExceptionMessage(e);
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -5687,6 +5688,26 @@ function _showUpdateError(target,res){
     forceBtn.style.display='inline-block';
   }
 }
+function _normalizeHealthServerIdentity(rawIdentity){
+  if(rawIdentity===undefined||rawIdentity===null) return null;
+  if(typeof rawIdentity==='string'){
+    const value=rawIdentity.trim();
+    return value ? value : null;
+  }
+  const numeric=Number(rawIdentity);
+  return Number.isFinite(numeric) ? String(numeric) : null;
+}
+
+async function _readHealthServerIdentity() {
+  try {
+    const r=await fetch(new URL('health', document.baseURI||location.href).href,{cache:'no-store'});
+    if(!r.ok) return null;
+    const data=await r.json();
+    return _normalizeHealthServerIdentity(data&&data.server_started_at);
+  } catch (_) {
+    return null;
+  }
+}
 async function forceUpdate(btn){
   const target=btn&&btn.dataset.target;
   if(!target) return;
@@ -5702,6 +5723,7 @@ async function forceUpdate(btn){
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
+    const baselineServerIdentity = await _readHealthServerIdentity();
     const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
@@ -5711,7 +5733,7 @@ async function forceUpdate(btn){
     showToast('Force update applied — restarting…');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload();
+    _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
     if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
     btn.disabled=false;btn.textContent='Force update';
@@ -5726,6 +5748,7 @@ async function _waitForServerThenReload(opts){
   opts=opts||{};
   const interval=opts.interval||500;
   const maxMs=opts.maxMs||15000;
+  const baselineServerIdentity=_normalizeHealthServerIdentity(opts.baselineServerIdentity);
   window._restartingForUpdate=true;
   const msgEl=$('reconnectMsg');
   const banner=$('reconnectBanner');
@@ -5742,8 +5765,16 @@ async function _waitForServerThenReload(opts){
         let data={};
         try{ data=await r.json(); }catch(_){}
         if(data && data.status==='ok'){
-          location.reload();
-          return;
+          const nextServerIdentity=_normalizeHealthServerIdentity(data&&data.server_started_at);
+          if (baselineServerIdentity===null){
+            location.reload();
+            return;
+          }
+          if (nextServerIdentity!==null && nextServerIdentity !== baselineServerIdentity){
+            location.reload();
+            return;
+          }
+          // Keep polling while the server keeps reporting the same (pre-restart) process identity
         }
       }
     }catch(_){ /* socket closed during restart — retry */ }

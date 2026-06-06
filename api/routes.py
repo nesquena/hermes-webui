@@ -4337,6 +4337,7 @@ def _handle_health(handler, parsed):
         "active_runs": int(run_check.get("active_runs") or 0),
         "runs": run_check.get("runs", []),
         "last_run_finished_at": run_check.get("last_run_finished_at"),
+        "server_started_at": SERVER_START_TIME,
         "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
         "accept_loop": _accept_loop_health(handler),
     }

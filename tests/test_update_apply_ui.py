@@ -43,7 +43,7 @@ def test_update_apply_successful_stash_conflict_displays_recovery_message():
     message_push = body.index("stashConflictMessages.push('Update applied ('+target+'):", stash_branch)
     persistent_display = body.index("errEl.textContent=stashConflictMessages.join('\\n\\n')", message_push)
     message_join = body.index("const stashConflictMessage=stashConflictMessages.join('\\n\\n');", persistent_display)
-    restart_wait = body.index("_waitForServerThenReload();", message_join)
+    restart_wait = body.index("_waitForServerThenReload", message_join)
 
     assert messages_decl < stash_branch < message_push < persistent_display < message_join < restart_wait
     assert "showToast(stashConflictMessage||'Update applied" in body
