@@ -3,6 +3,15 @@
 
 ## [Unreleased]
 
+## [v0.51.302] — 2026-06-06 — Release JR (stage-brick — mobile/iOS breakage + large-session perf hotfixes)
+
+### Fixed
+- **Hidden notification toasts no longer block taps on mobile.** The `.toast` container stayed `pointer-events:auto` while hidden (`opacity:0`), and its fixed padding sat over the profile action buttons at the top of the mobile content view — so taps on Activate/Delete and similar controls were silently eaten by an invisible element. The toast is now `pointer-events:none` when hidden and only becomes interactive on `.toast.show`. (#3735, @timlawrenz)
+- **Renaming a conversation now works on iOS Safari.** iOS has no Enter key on the soft keyboard; tapping "Done" fires `blur`, and the old `onblur` handler *cancelled* the rename — so a mobile rename could never be saved. Blur now commits the rename (Escape still explicitly cancels), matching the more natural desktop expectation that typing a name then clicking away saves it. The same blur-saves fix applies to project create/rename, guarded by a `_finishDone` latch so the blur and the API callback can't double-fire. (#3729, @reinocheong)
+
+### Performance
+- **Loading a session with very large tool/log payloads no longer stalls the whole WebUI for many seconds.** `_matching_visible_duplicate()` eagerly casefolded and regex-tokenized every visible message key — including multi-megabyte tool outputs — on each duplicate probe, so `/api/session` could take 10s+ and block the sidebar's `/api/sessions` for ~19s. Loose-content normalization is now lazy and cached, and substring/fuzzy matching is skipped for non-exact payloads larger than 200KB; exact visible-key matches still short-circuit before the guard. (#3730, @alvistar)
+
 ## [v0.51.301] — 2026-06-06 — Release JQ (stage-3710 — hide test-helper console windows on Windows)
 
 ### Changed
