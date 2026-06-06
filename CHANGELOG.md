@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.291] — 2026-06-06 — Release JG (stage-s2 — preserve live turn content when switching away mid-stream)
+
+### Fixed
+- **Switching away from a streaming session no longer loses the in-progress thinking/tool content.** When you clicked to another chat while a session was streaming during a quiet window (mid tool-execution or silent reasoning, between content events) and then switched back, the live turn's tool cards and thinking could disappear permanently — only the elapsed-time clock survived — until the response finished and the transcript re-rendered from the server. Cause: the live-turn DOM snapshot was only captured on content/`tool_complete` SSE events, so the switch-away teardown could run with a stale-or-absent snapshot, and the switch-back fallback rebuilt an empty thinking card. `closeLiveStream()` now snapshots the live turn **before** tearing the stream down, so switching back restores the exact state shown at switch-away. (#3668)
+
 ## [v0.51.290] — 2026-06-06 — Release JF (stage-s1 — profile provider/model now respected in session resolution)
 
 ### Fixed
