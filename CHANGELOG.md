@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`/api/models/live` now probes upstream for custom providers even when `model:` is configured.** Previously, when a `custom_providers` entry had a `model:` field, the live endpoint extracted that as the model list and skipped the live `/v1/models` probe entirely. The model picker's refresh button returned only the config entry instead of the full upstream catalog. Config-specified models are now used as a fallback and merged with the live results. (#3718)
+
 ## [v0.51.292] — 2026-06-06 — Release JH (stage-s4 — compression-exhausted turns surface as errors, not fake completions)
 
 ### Fixed
