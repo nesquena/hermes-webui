@@ -1918,9 +1918,43 @@ def _should_attach_codex_provider_context(model: str, raw_active_provider: str, 
     return False
 
 
+def _read_profile_model_config(
+    session, requested_provider: str | None,
+) -> tuple[str | None, str | None]:
+    """Read model.provider and model.default from the session's profile config.
+
+    Returns (profile_provider, profile_default_model). Both are None when
+    the session has no profile, the profile config is unreadable, or an
+    explicit ``requested_provider`` is already set (profile should not
+    override explicit selections).
+    """
+    if _clean_session_model_provider(requested_provider) or not getattr(session, "profile", None):
+        return None, None
+    try:
+        from api.profiles import get_hermes_home_for_profile
+        _profile_home = get_hermes_home_for_profile(session.profile)
+        _profile_cfg_path = os.path.join(str(_profile_home), "config.yaml")
+        if not os.path.isfile(_profile_cfg_path):
+            return None, None
+        import yaml
+        with open(_profile_cfg_path, encoding="utf-8") as _f:
+            _pcfg = yaml.safe_load(_f) or {}
+        if not isinstance(_pcfg, dict):
+            return None, None
+        _provider = (_pcfg.get("model", {}).get("provider") or "").strip() or None
+        _default = (_pcfg.get("model", {}).get("default") or "").strip() or None
+        return _provider, _default
+    except Exception:
+        logger.warning("profile provider read failed for %r", getattr(session, "profile", None), exc_info=True)
+        return None, None
+
+
 def _resolve_compatible_session_model_state(
     model_id: str | None,
     model_provider: str | None = None,
+    *,
+    profile_provider: str | None = None,
+    profile_default_model: str | None = None,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -1960,6 +1994,55 @@ def _resolve_compatible_session_model_state(
 
     catalog = get_available_models()
     default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
+
+    # Profile-aware resolution: when the caller supplies profile context
+    # (not an explicit per-chat override), use the profile's provider and
+    # default model as the resolution context instead of the catalog's
+    # active_provider / default_model. This preserves the repair path
+    # (stale models still get normalized) but normalizes to the profile's
+    # default model under the profile's provider rather than the global default.
+    bare_model, explicit_provider = _split_provider_qualified_model(model) if model else ("", None)
+    if profile_provider and not explicit_provider:
+        _profile_provider_normalized = _normalize_provider_id(profile_provider)
+        _profile_default = str(profile_default_model or "").strip()
+        if not model:
+            _fallback = _profile_default or default_model
+            return _fallback, profile_provider, bool(_fallback)
+
+        model_prefix = model.split("/", 1)[0].strip().lower() if "/" in model else ""
+        model_provider_from_name = _normalize_provider_id(model_prefix) if "/" in model else ""
+
+        model_family = ""
+        model_lower = model.lower()
+        for bare_prefix in ("gpt", "claude", "gemini"):
+            if model_lower.startswith(bare_prefix):
+                model_family = _normalize_provider_id(bare_prefix)
+                break
+
+        if model_family and model_family != _profile_provider_normalized:
+            _target = _profile_default or default_model
+            return _target, profile_provider, True
+
+        if (
+            "/" in model
+            and str(profile_provider).strip().lower() == "openai-codex"
+            and model_provider_from_name == "openai"
+        ):
+            _target = _profile_default or default_model
+            return _target, profile_provider, True
+
+        # Slash-qualified models (e.g. openai/gpt-5.4-mini) are native IDs on
+        # OpenRouter and custom providers, not cross-provider artifacts. Only
+        # repair when the profile provider actually requires a different family.
+        if "/" in model and _profile_provider_normalized in {"openrouter", "custom", ""}:
+            return model, profile_provider, False
+
+        if "/" in model and model_provider_from_name and model_provider_from_name != _profile_provider_normalized:
+            _target = _profile_default or default_model
+            return _target, profile_provider, True
+
+        return model, profile_provider, False
+
     if not model:
         return default_model, requested_provider, bool(default_model)
 
@@ -2151,17 +2234,25 @@ def _resolve_effective_session_model_for_display(session) -> str:
     effective model for the response payload only and leave disk state alone.
     """
     original_model = getattr(session, "model", None) or ""
+    requested_provider = getattr(session, "model_provider", None)
+    _pp_provider, _pp_default = _read_profile_model_config(session, requested_provider)
     effective_model, _provider, _changed = _resolve_compatible_session_model_state(
         original_model or None,
-        getattr(session, "model_provider", None),
+        requested_provider,
+        profile_provider=_pp_provider,
+        profile_default_model=_pp_default,
     )
     return effective_model or original_model
 
 def _resolve_effective_session_model_provider_for_display(session) -> str | None:
     original_model = getattr(session, "model", None) or ""
+    requested_provider = getattr(session, "model_provider", None)
+    _pp_provider, _pp_default = _read_profile_model_config(session, requested_provider)
     _model, provider, _changed = _resolve_compatible_session_model_state(
         original_model or None,
-        getattr(session, "model_provider", None),
+        requested_provider,
+        profile_provider=_pp_provider,
+        profile_default_model=_pp_default,
     )
     return provider
 
@@ -11084,9 +11175,12 @@ def _handle_goal_command(handler, body):
             if "model_provider" in body
             else getattr(s, "model_provider", None)
         )
+        _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
             requested_provider,
+            profile_provider=_pp_provider,
+            profile_default_model=_pp_default,
         )
         previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
 
@@ -11132,9 +11226,12 @@ def _handle_goal_command(handler, body):
                 if "model_provider" in body
                 else getattr(s, "model_provider", None)
             )
+            _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
             model, model_provider, normalized_model = _resolve_compatible_session_model_state(
                 requested_model,
                 requested_provider,
+                profile_provider=_pp_provider,
+                profile_default_model=_pp_default,
             )
         stream_response = _start_chat_stream_for_session(
             s,
@@ -11207,10 +11304,13 @@ def _handle_chat_start(handler, body, diag=None):
             if "model_provider" in body
             else getattr(s, "model_provider", None)
         )
+        _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
         diag.stage("resolve_model_provider") if diag else None
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
             requested_provider,
+            profile_provider=_pp_provider,
+            profile_default_model=_pp_default,
         )
         from api.runtime_adapter import (
             LegacyJournalRuntimeAdapter,
@@ -11339,9 +11439,15 @@ def _handle_chat_sync(handler, body):
         return bad(handler, str(e))
     with _get_session_agent_lock(s.session_id):
         s.workspace = workspace
+        _sync_requested_provider = (
+            body.get("model_provider") if "model_provider" in body else getattr(s, "model_provider", None)
+        )
+        _pp_provider, _pp_default = _read_profile_model_config(s, _sync_requested_provider)
         model, model_provider = _resolve_compatible_session_model_state(
             body.get("model") or s.model,
-            body.get("model_provider") if "model_provider" in body else getattr(s, "model_provider", None),
+            _sync_requested_provider,
+            profile_provider=_pp_provider,
+            profile_default_model=_pp_default,
         )[:2]
         s.model = model
         s.model_provider = model_provider

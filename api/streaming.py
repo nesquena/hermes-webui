@@ -128,6 +128,83 @@ def _persistent_state_changes(before: dict | None, after: dict | None) -> dict:
     return {"memory_saved": memory_changed, "skills": skills[:10]}
 
 
+def _apply_profile_provider_context_to_streaming_model(
+    model: str | None,
+    provider_context: str | None,
+    profile_provider: str | None,
+    profile_default_model: str | None,
+) -> tuple[str | None, str | None, bool]:
+    """Attach profile provider context and repair stale cross-provider models."""
+    if provider_context or not profile_provider:
+        return model, provider_context, False
+
+    provider_context = profile_provider.lower()
+    if not profile_default_model:
+        return model, provider_context, False
+
+    from api.routes import _normalize_provider_id
+
+    profile_provider_normalized = _normalize_provider_id(profile_provider)
+    model_lower = (model or "").lower()
+    for prefix in ("gpt", "claude", "gemini"):
+        if model_lower.startswith(prefix):
+            if _normalize_provider_id(prefix) != profile_provider_normalized:
+                return profile_default_model, provider_context, True
+            return model, provider_context, False
+
+    if "/" in model_lower:
+        slash_prefix = model_lower.split("/", 1)[0]
+        if provider_context == "openai-codex" and slash_prefix == "openai":
+            return profile_default_model, provider_context, True
+
+        slash_provider = _normalize_provider_id(slash_prefix)
+        if (
+            slash_provider
+            and slash_provider != profile_provider_normalized
+            and profile_provider_normalized not in {"openrouter", "custom", ""}
+        ):
+            return profile_default_model, provider_context, True
+
+    return model, provider_context, False
+
+
+def _apply_profile_home_context_to_streaming_model(
+    model: str | None,
+    provider_context: str | None,
+    profile_home: str | None,
+    has_profile: bool,
+) -> tuple[str | None, str | None, bool]:
+    """Apply profile provider/model context from a profile config if present."""
+    if not (profile_home and has_profile and not provider_context):
+        return model, provider_context, False
+
+    try:
+        import yaml as _yaml_pp
+
+        _pp_cfg_path = Path(profile_home) / "config.yaml"
+        if not _pp_cfg_path.is_file():
+            return model, provider_context, False
+
+        _pp_cfg = _yaml_pp.safe_load(_pp_cfg_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(_pp_cfg, dict):
+            return model, provider_context, False
+
+        _pp = (_pp_cfg.get("model", {}).get("provider") or "").strip()
+        if not _pp:
+            return model, provider_context, False
+
+        _pp_default = (_pp_cfg.get("model", {}).get("default") or "").strip()
+        return _apply_profile_provider_context_to_streaming_model(
+            model,
+            provider_context,
+            _pp,
+            _pp_default,
+        )
+    except Exception:
+        logger.warning("profile provider read failed", exc_info=True)
+        return model, provider_context, False
+
+
 def _resolve_custom_provider_runtime_overrides(
     resolved_provider: str | None,
     resolved_api_key: str | None,
@@ -4629,7 +4706,20 @@ def _run_agent_streaming(
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
             patch_skill_home_modules = None
-        
+
+        # Profile-aware provider/model enrichment: when the session belongs
+        # to a profile that specifies model.provider and model.default, use
+        # those to set provider_context and repair stale models.
+        model, provider_context, _repaired = _apply_profile_home_context_to_streaming_model(
+            model=model,
+            provider_context=provider_context,
+            profile_home=_profile_home,
+            has_profile=bool(getattr(s, "profile", None)),
+        )
+        s.model_provider = provider_context
+        if _repaired and model != (s.model or ""):
+            s.model = model
+
         # Capture the resolved profile name now, while profile context is
         # reliable. Used in the compression migration block to stamp s.profile
         # on the continuation session. We resolve it here rather than calling
