@@ -93,6 +93,8 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
         return None
     candidate = Path(raw).expanduser().resolve()
     base = Path(cwd).expanduser().resolve()
+    if _is_blocked_workspace_path(candidate, raw) or _is_blocked_workspace_path(base, cwd):
+        return None
     if candidate == base or _is_within(candidate, base):
         return candidate
     return None
