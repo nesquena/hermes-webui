@@ -8,7 +8,8 @@ CSS = (REPO / "static" / "style.css").read_text()
 
 def test_message_virtualization_switches_render_messages_to_scroll_driven_window():
     assert "function _messageVirtualWindow(opts)" in UI_JS
-    assert "const virtualWindow=_currentMessageVirtualWindow(visWithIdx,renderWindowSize)" in UI_JS
+    assert "function _messageVirtualKeepTailCount()" in UI_JS
+    assert "const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount())" in UI_JS
     assert "const renderHeadVisWithIdx=visWithIdx.slice(windowStart, windowEnd)" in UI_JS
     assert "const renderTailStart=virtualWindow.virtualized?Math.max(windowEnd, virtualWindow.tailStart):windowEnd" in UI_JS
     assert "const renderTailVisWithIdx=virtualWindow.virtualized&&renderTailStart<visWithIdx.length" in UI_JS

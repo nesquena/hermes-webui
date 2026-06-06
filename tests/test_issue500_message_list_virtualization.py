@@ -107,12 +107,18 @@ def test_render_messages_uses_virtual_window_and_spacer_measurement_path():
     render_end = js.index("function _toolDisplayName", render_start)
     render_body = js[render_start:render_end]
 
-    assert "_currentMessageVirtualWindow(visWithIdx,renderWindowSize)" in render_body
+    assert "_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount())" in render_body
     assert "const renderVisibleIdxs=[" in render_body
     assert "_messageVirtualSpacer(virtualWindow.topPad,'before')" in render_body
     assert "_messageVirtualSpacer(virtualWindow.bottomPad,'after')" in render_body
     assert "_updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);" in render_body
     assert "_showEarlierRenderedMessages();" not in render_body
+    gap_reset_idx = render_body.index("currentAssistantTurn=null;", render_body.index("_messageVirtualSpacer(virtualWindow.bottomPad,'after')") - 220)
+    gap_spacer_idx = render_body.index("_messageVirtualSpacer(virtualWindow.bottomPad,'after')")
+    assert gap_reset_idx < gap_spacer_idx, (
+        "renderMessages() must reset currentAssistantTurn before inserting the "
+        "virtual gap spacer so assistant bubbles do not merge across the head/tail boundary."
+    )
 
 
 def test_measurement_uses_one_primary_row_and_adjacent_activity_siblings_only():
@@ -126,8 +132,14 @@ const nextMessage = {
 };
 const activityGroup = {
   hasAttribute(){ return false; },
+  matches(selector){ return selector === '.tool-call-group,.tool-card-row,.agent-activity-thinking,.thinking-card-row'; },
   getBoundingClientRect(){ return {height: 60}; },
-  nextElementSibling: nextMessage,
+  nextElementSibling: {
+    hasAttribute(){ return false; },
+    matches(){ return false; },
+    getBoundingClientRect(){ return {height: 5000}; },
+    nextElementSibling: nextMessage,
+  },
 };
 const primary = {
   classList: { contains(name){ return name === 'assistant-segment'; } },
@@ -146,6 +158,23 @@ console.log(JSON.stringify({
 """
     metrics = json.loads(_run_node(source))
     assert metrics["total"] == 180
+
+
+def test_virtual_keep_tail_count_stays_bounded_after_history_expands_render_window():
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+const MESSAGE_RENDER_WINDOW_DEFAULT = 50;
+let _messageRenderWindowSize = 240;
+eval(extractFunc('_currentMessageRenderWindowSize'));
+eval(extractFunc('_messageVirtualKeepTailCount'));
+console.log(JSON.stringify({
+  renderWindowSize: _currentMessageRenderWindowSize(),
+  keepTailCount: _messageVirtualKeepTailCount(),
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["renderWindowSize"] == 240
+    assert metrics["keepTailCount"] == 50
 
 
 def test_height_cache_preserves_measured_prefix_across_append_only_growth():
