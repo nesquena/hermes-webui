@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.285] — 2026-06-06 — Release JA (stage-r19 — update-reload server-identity race fix)
+
+### Fixed
+- **Don't reload the page until the *replacement* server is actually up after an update.** The post-update reload previously compared raw `/health` uptime, which couldn't distinguish a still-running old process from the restarted one (it could reload against the old process or hang). The client now reads a stable `server_started_at` identity before the update POST and reloads only once `/health` reports a *different* identity (with a null-baseline fallback). Both the force-update and regular apply paths read and pass the baseline. (#3654, @franksong2702; #874)
+
 ## [v0.51.284] — 2026-06-05 — Release IZ (stage-w4 — sidebar status labels + cron-sessions toggle)
 
 ### Added
