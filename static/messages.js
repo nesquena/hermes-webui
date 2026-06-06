@@ -658,7 +658,9 @@ async function send(){
     const _pendingPick=(typeof _readPendingSessionModel==='function')
       ? _readPendingSessionModel(activeSid)
       : null;
-    const _explicitPick=!!(_pendingPick && _pendingPick.model===_modelState.model);
+    const _explicitPick=_pendingPick
+      && _pendingPick.model===_modelState.model
+      && String(_pendingPick.model_provider||'')===String(_modelState.model_provider||'');
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
@@ -674,8 +676,8 @@ async function send(){
 
     if(startData.effective_model && S.session){
       const _sentModel=_modelState.model;
-      if(_sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
-        showToast('Model changed to '+startData.effective_model+' (provider mismatch with active profile)', 5000);
+      if(_explicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
+        showToast('Model '+_sentModel+' changed to '+startData.effective_model+' — profile provider mismatch', 5000);
       }
       S.session.model=startData.effective_model;
       S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;
