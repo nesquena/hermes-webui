@@ -105,11 +105,15 @@ def test_openrouter_overflow_preserves_hidden_tail(monkeypatch):
 
     group = _openrouter_group()
     total = len(group["models"]) + len(group.get("extra_models", []))
+    capped_total = 2 + config._OPENROUTER_FREE_TIER_AUGMENT_CAP
 
     assert len(group["models"]) == config._MODEL_PICKER_VISIBLE_TARGET
-    assert total == 42, "OpenRouter overflow models must move into extra_models, not disappear."
-    assert any(m["id"] == "vendor39/overflow-39:free" for m in group.get("extra_models", [])), (
-        "A tail free-tier model should land in extra_models once the visible picker cap is reached."
+    assert total == capped_total, "OpenRouter overflow models must move into extra_models within the capped augmentation budget."
+    assert any(m["id"] == "vendor29/overflow-29:free" for m in group.get("extra_models", [])), (
+        "The last capped free-tier model should land in extra_models once the visible picker cap is reached."
+    )
+    assert all(m["id"] != "vendor30/overflow-30:free" for bucket in ("models", "extra_models") for m in group.get(bucket, [])), (
+        "Free-tier augmentation must stop at the configured cap instead of continuing through the whole live payload."
     )
 
 

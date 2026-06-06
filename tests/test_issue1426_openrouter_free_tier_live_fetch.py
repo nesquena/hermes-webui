@@ -208,7 +208,7 @@ def test_free_tier_cap_prevents_picker_drowning(monkeypatch):
         m["id"]
         for bucket_name in ("models", "extra_models")
         for m in or_group.get(bucket_name, [])
-        if ":free" in m["id"]
+        if m["id"].startswith("vendor")
     }
     expected_ids = {
         f"vendor{i}/model-{i}:free"
