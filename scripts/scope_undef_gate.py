@@ -37,6 +37,23 @@ Usage:
 
 Exit 0 = clean (or eslint unavailable → skip). Non-zero = a new undefined /
 scope-misplaced reference that throws at runtime. DO NOT TAG/RELEASE on non-zero.
+
+Known false-negative classes (the gate is a strong net, not a proof):
+  * Name-collision shadowing — if two files both declare a top-level symbol of the
+    same name, the union includes it, so a bare cross-scope call to that name goes
+    unflagged (runtime binds to the other file's symbol = a wrong-function bug, not
+    a ReferenceError). A duplicate top-level symbol across files is itself a smell.
+  * Non-`,;`-terminated top-level destructuring (`const {a, b} = x` where `b` ends
+    the line) is not captured by the symbol regex below. None exist in the bundle
+    today; revisit the regex if that pattern is introduced.
+  * Exposure escape hatches not scanned: `globalThis.X = X`, `Object.assign(window,
+    {X})`, `(0,eval)(...)`. None used today.
+  * The allowlist is keyed by NAME, not call-site — an entry green-lights every bare
+    reference to that name everywhere. Only add an entry when EVERY call site is a
+    `window.X =` exposure or a `typeof X === 'function'` guard; otherwise fix the
+    bug (hoist / pass the value as a param), don't allowlist it. (#3696 review:
+    a `source` allowlist entry was masking a real same-class bug at messages.js:876,
+    fixed by threading `source` as a parameter instead of allowlisting.)
 """
 from __future__ import annotations
 
@@ -87,7 +104,6 @@ PROJECT_DYNAMIC_GLOBALS = {
     "placeLiveToolCardsHost": "typeof-guarded optional (ui/sessions/messages call sites)",
     "watchInflightSession": "typeof-guarded optional fallback (sessions.js)",
     "_applyMediaPlaybackPreferences": "typeof-guarded optional (ui.js / workspace.js)",
-    "source": "closure var from enclosing scope in messages.js _closeSource(source)",
 }
 
 
