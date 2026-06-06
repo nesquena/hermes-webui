@@ -377,6 +377,7 @@ const MESSAGE_RENDER_WINDOW_DEFAULT=50;
 const MESSAGE_VIRTUAL_THRESHOLD_ROWS=80;
 const MESSAGE_VIRTUAL_BUFFER_PX=900;
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT=140;
+const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 let _messageVirtualHeightCache=[];
@@ -386,6 +387,8 @@ let _messageVirtualHeightCacheSrc=null;
 let _messageVirtualEstimatedRowHeight=MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
 let _messageVirtualScrollRaf=0;
 let _messageVirtualWindowKey='';
+let _messageVirtualMeasurementCycleKey='';
+let _messageVirtualMeasurementRetryCount=0;
 // Cached visWithIdx array — invalidated when S.messages.length changes.
 let _visWithIdxCache=null;
 let _visWithIdxCacheLen=0;
@@ -402,6 +405,8 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCacheSrc=null;
   _messageVirtualEstimatedRowHeight=MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
   _messageVirtualWindowKey='';
+  _messageVirtualMeasurementCycleKey='';
+  _messageVirtualMeasurementRetryCount=0;
 }
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
@@ -506,6 +511,29 @@ function _messageVirtualWindowKeyFor(windowMetrics){
     Math.round(windowMetrics.bottomPad||0),
     windowMetrics.tailStart||0,
   ].join(':');
+}
+function _messageVirtualMeasurementCycleKeyFor(windowMetrics){
+  if(!windowMetrics) return '';
+  return [
+    windowMetrics.virtualized?1:0,
+    windowMetrics.start,
+    windowMetrics.end,
+    windowMetrics.tailStart||0,
+  ].join(':');
+}
+function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
+  const cycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
+  if(_messageVirtualMeasurementCycleKey!==cycleKey){
+    _messageVirtualMeasurementCycleKey=cycleKey;
+    _messageVirtualMeasurementRetryCount=0;
+  }
+  if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS) return;
+  _messageVirtualMeasurementRetryCount++;
+  requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true); });
+}
+function _markMessageVirtualMeasurementsSettled(windowMetrics){
+  _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
+  _messageVirtualMeasurementRetryCount=0;
 }
 function _messageVirtualHeightEntryMatches(previousEntry, nextEntry){
   return !!(
@@ -658,7 +686,9 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     _messageVirtualEstimatedRowHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
   }
   if(changed){
-    requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true); });
+    _scheduleMessageVirtualMeasurementRefresh(virtualWindow);
+  }else{
+    _markMessageVirtualMeasurementsSettled(virtualWindow);
   }
 }
 function _scheduleMessageVirtualizedRender(force){
@@ -9329,7 +9359,10 @@ function renderMessages(options){
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
   const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
-  if(hasServerOlder&&windowStart===0){
+  if(virtualWindow.virtualized&&virtualWindow.topPad>0){
+    inner.appendChild(_messageVirtualSpacer(virtualWindow.topPad,'before'));
+  }
+  if(hasServerOlder){
     const indicator=document.createElement('button');
     indicator.type='button';
     indicator.id='loadOlderIndicator';
@@ -9339,9 +9372,6 @@ function renderMessages(options){
       : (typeof t==='function'?t('load_older_messages'):'Load earlier messages');
     inner.appendChild(indicator);
     _wireMessageWindowLoadEarlierButton();
-  }
-  if(virtualWindow.virtualized&&virtualWindow.topPad>0){
-    inner.appendChild(_messageVirtualSpacer(virtualWindow.topPad,'before'));
   }
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){

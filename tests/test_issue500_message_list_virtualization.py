@@ -112,7 +112,14 @@ def test_render_messages_uses_virtual_window_and_spacer_measurement_path():
     assert "_messageVirtualSpacer(virtualWindow.topPad,'before')" in render_body
     assert "_messageVirtualSpacer(virtualWindow.bottomPad,'after')" in render_body
     assert "_updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);" in render_body
+    assert "if(hasServerOlder){" in render_body
     assert "_showEarlierRenderedMessages();" not in render_body
+    top_spacer_idx = render_body.index("_messageVirtualSpacer(virtualWindow.topPad,'before')")
+    indicator_idx = render_body.index("indicator.id='loadOlderIndicator';")
+    assert top_spacer_idx < indicator_idx, (
+        "renderMessages() must place the load-older affordance after the top "
+        "virtual spacer so it stays visible at the top of the rendered window."
+    )
     gap_reset_idx = render_body.index("currentAssistantTurn=null;", render_body.index("_messageVirtualSpacer(virtualWindow.bottomPad,'after')") - 220)
     gap_spacer_idx = render_body.index("_messageVirtualSpacer(virtualWindow.bottomPad,'after')")
     assert gap_reset_idx < gap_spacer_idx, (
@@ -222,6 +229,19 @@ console.log(JSON.stringify({
     assert len(metrics["cache"]) == 3
     assert metrics["estimated"] == 200
     assert metrics["windowKey"] == ""
+
+
+def test_measurement_refresh_budget_is_keyed_to_window_shape_not_pad_height():
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+eval(extractFunc('_messageVirtualMeasurementCycleKeyFor'));
+console.log(JSON.stringify({
+  a: _messageVirtualMeasurementCycleKeyFor({virtualized: true, start: 10, end: 20, topPad: 1000, bottomPad: 2000, tailStart: 190}),
+  b: _messageVirtualMeasurementCycleKeyFor({virtualized: true, start: 10, end: 20, topPad: 1001, bottomPad: 1999, tailStart: 190}),
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["a"] == metrics["b"]
 
 
 def test_tool_rows_do_not_carry_message_measurement_hook():
