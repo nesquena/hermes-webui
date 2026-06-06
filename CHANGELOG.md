@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.292] — 2026-06-06 — Release JH (stage-s4 — compression-exhausted turns surface as errors, not fake completions)
+
+### Fixed
+- **Context-compression-exhausted turns are no longer finalized as a falsely "completed" response.** When Hermes Agent exhausts context compression in a long tool-heavy turn, the streamed result can end on a tool result or an assistant `tool_calls` turn with no final assistant answer. WebUI previously rendered that as a settled, completed reply. It now classifies a persisted transcript that ends in a tool/tool-call/empty-assistant tail (or an internal `[CONTEXT COMPACTION — REFERENCE ONLY]` marker) — and `compression_exhausted`/`failed`/`partial` agent results — as a terminal failure and surfaces a clear error instead. The compression session-id migration and pre-compression snapshot now run **before** the terminal-failure path returns, so frontend/backend session state stays consistent when exhaustion fires after the agent rotates `session_id`. (#3316, @franksong2702; fixes #3315)
+
 ## [v0.51.291] — 2026-06-06 — Release JG (stage-s2 — preserve live turn content when switching away mid-stream)
 
 ### Fixed
