@@ -7448,13 +7448,6 @@ function renderMessages(options){
       const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
       for(const aIdx of activityIdxs){
         const cards=byAssistant[aIdx]||[];
-        if(!cards.length&&assistantThinking.has(aIdx)){
-          const anchorRow=assistantSegments.get(aIdx);
-          if(anchorRow&&window._showThinking!==false){
-            anchorRow.insertAdjacentHTML('beforeend',_thinkingCardHtml(assistantThinking.get(aIdx)));
-          }
-          continue;
-        }
         let anchorRow=assistantSegments.get(aIdx)||null;
         if(!anchorRow&&assistantIdxs.length){
           if(aIdx<assistantIdxs[0]) continue;
