@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Invisible notification toast no longer permanently intercepts clicks in the top right.** The notification toast container (`.toast`) sat at `opacity: 0` when hidden, but retained `pointer-events: auto`. Its permanent padding created an invisible click-capturing box in the top right corner that blocked interaction with UI elements underneath it on mobile devices (like the profile action buttons). The base class is now `pointer-events: none` and the `.toast.show` class restores `pointer-events: auto`.
+
 ## [v0.51.293] — 2026-06-06 — Release JI (stage-s5 — thinking card no longer renders twice)
 
 ### Fixed
