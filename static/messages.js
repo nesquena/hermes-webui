@@ -2984,7 +2984,7 @@ function showApprovalCard(pending, pendingCount) {
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
-  const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null});
+  const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null, approval_id: pending.approval_id || null});
   const card = $("approvalCard");
   const sameApproval = card.classList.contains("visible") && _approvalSignature === sig;
   $("approvalDesc").textContent = desc;
@@ -3005,6 +3005,9 @@ function showApprovalCard(pending, pendingCount) {
   if (!sameApproval) {
     _approvalVisibleSince = Date.now();
     _clearApprovalHideTimer();
+    // A distinct approval must always render expanded — never inherit a prior
+    // approval's collapsed state, which would hide its command + action buttons. (#3515)
+    card.classList.remove("collapsed");
   }
   // Re-enable buttons in case a previous approval disabled them
   ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {

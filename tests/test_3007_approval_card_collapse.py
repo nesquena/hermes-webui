@@ -34,6 +34,28 @@ def test_approval_collapsed_cleared_in_hide():
     assert 'card.classList.remove("collapsed")' in compact_js
 
 
+def test_approval_signature_includes_approval_id():
+    # A distinct queued approval must be distinguishable by approval_id so a new
+    # pending approval is not treated as the same one (which would inherit a
+    # prior collapsed state). (#3515 gate finding)
+    compact_js = _compact(MESSAGES_JS)
+    assert "approval_id:pending.approval_id||null" in compact_js
+
+
+def test_fresh_approval_renders_expanded():
+    # In showApprovalCard's !sameApproval branch the collapsed class must be
+    # cleared so a freshly displayed approval never hides its command/buttons.
+    compact_js = _compact(MESSAGES_JS)
+    marker = "if(!sameApproval){"
+    idx = compact_js.find(marker)
+    assert idx != -1, "expected the !sameApproval branch in showApprovalCard"
+    # the collapsed-clear must appear within the branch body (before its closing brace)
+    branch = compact_js[idx: idx + 400]
+    assert 'card.classList.remove("collapsed")' in branch, (
+        "a distinct approval must clear .collapsed inside the !sameApproval branch"
+    )
+
+
 def test_messages_approval_open_in_css():
     assert ".messages.approval-open" in STYLE_CSS
 
