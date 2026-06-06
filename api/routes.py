@@ -1955,6 +1955,7 @@ def _resolve_compatible_session_model_state(
     *,
     profile_provider: str | None = None,
     profile_default_model: str | None = None,
+    explicit_model_pick: bool = False,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -2020,6 +2021,9 @@ def _resolve_compatible_session_model_state(
                 break
 
         if model_family and model_family != _profile_provider_normalized:
+            if explicit_model_pick:
+                # User explicitly chose a cross-family model; honor it (#3737)
+                return model, profile_provider, False
             _target = _profile_default or default_model
             return _target, profile_provider, True
 
@@ -2117,6 +2121,9 @@ def _resolve_compatible_session_model_state(
 
     slash = model.find("/")
     if slash < 0:
+        if explicit_model_pick:
+            # User explicitly chose this model; don't second-guess (#3737)
+            return model, requested_provider, False
         model_lower = model.lower()
         for bare_prefix in ("gpt", "claude", "gemini"):
             if model_lower.startswith(bare_prefix):
@@ -11408,12 +11415,14 @@ def _handle_chat_start(handler, body, diag=None):
             else getattr(s, "model_provider", None)
         )
         _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
+        explicit_model_pick = bool(body.get("explicit_model_pick"))
         diag.stage("resolve_model_provider") if diag else None
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
             requested_provider,
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
+            explicit_model_pick=explicit_model_pick,
         )
         from api.runtime_adapter import (
             LegacyJournalRuntimeAdapter,
