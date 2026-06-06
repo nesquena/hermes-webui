@@ -134,6 +134,27 @@ def test_deduplicate_model_ids_includes_extra_models():
     assert groups[1]["extra_models"][0]["label"] == "Shared Model (Beta)"
 
 
+def test_openrouter_free_tier_selection_stays_visible_when_selected_id_is_bare():
+    ordered = [
+        {"id": f"@openrouter:vendor/model-{idx}", "label": f"Model {idx}"}
+        for idx in range(config._MODEL_PICKER_VISIBLE_TARGET)
+    ]
+    ordered.append({"id": "@openrouter:vendor/selected-model:free", "label": "Selected Free"})
+
+    visible, extra = config._split_picker_overflow_models(
+        ordered,
+        selected_model_id="vendor/selected-model:free",
+        provider_id="openrouter",
+        threshold=config._MODEL_PICKER_OVERFLOW_THRESHOLD,
+        target=config._MODEL_PICKER_VISIBLE_TARGET,
+    )
+
+    assert any(m["id"] == "@openrouter:vendor/selected-model:free" for m in visible), (
+        "A bare OpenRouter :free selection must stay visible when the selected model is in overflow."
+    )
+    assert all(m["id"] != "@openrouter:vendor/selected-model:free" for m in extra)
+
+
 _DROPDOWN_DRIVER = r"""
 const fs = require('fs');
 const ui = fs.readFileSync(process.argv[2], 'utf8');
