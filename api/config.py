@@ -5095,6 +5095,7 @@ _SETTINGS_DEFAULTS = {
     "inflight_state_max_string_chars": 60000,  # max string length kept inside a recovery snapshot field
     "inflight_state_max_json_chars": 1500000,  # max serialized recovery snapshot payload before pruning
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
+    "tab_order": [],  # user-defined sidebar/rail tab order for reorderable tabs; chat/settings stay fixed
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
@@ -5325,18 +5326,23 @@ def save_settings(settings: dict) -> dict:
                 not isinstance(v, str) or not _SETTINGS_LANG_RE.match(v)
             ):
                 continue
-            # Validate hidden_tabs: must be a list of non-empty strings.
-            # Belt-and-suspenders strip of "chat" and "settings" so a
-            # malicious POST cannot lock the user out of the always-visible
-            # nav tabs even though the client also filters them at apply time.
-            # Stage-394 follow-up to #2636 deep review.
-            if k == "hidden_tabs":
+            # Validate list-valued sidebar tab settings. Chat/settings stay fixed
+            # even if a tampered POST tries to persist them, and duplicates are
+            # collapsed while preserving the first requested order.
+            if k in {"hidden_tabs", "tab_order"}:
                 if not isinstance(v, list):
                     continue
-                v = [
-                    s for s in v
-                    if isinstance(s, str) and s.strip() and s not in {"chat", "settings"}
-                ]
+                seen = set()
+                cleaned = []
+                for s in v:
+                    if not isinstance(s, str):
+                        continue
+                    s = s.strip()
+                    if not s or s in {"chat", "settings"} or s in seen:
+                        continue
+                    seen.add(s)
+                    cleaned.append(s)
+                v = cleaned
             # Coerce bool keys
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)

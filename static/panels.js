@@ -5061,7 +5061,11 @@ function _refreshProfileSwitchBackground(gen){
     if (gen !== _profileSwitchGeneration) return;
     var hidden = (s && Array.isArray(s.hidden_tabs)) ? s.hidden_tabs : [];
     hidden = hidden.filter(function(x){ return typeof x === 'string' && x.trim(); });
+    var order = (s && Array.isArray(s.tab_order)) ? s.tab_order : [];
+    order = order.filter(function(x){ return typeof x === 'string' && x.trim(); });
     if (typeof _setHiddenTabs === 'function') _setHiddenTabs(hidden);
+    if (typeof _setTabOrder === 'function') _setTabOrder(order);
+    if (typeof _applyTabOrder === 'function') _applyTabOrder(order);
     if (typeof _applyTabVisibility === 'function') _applyTabVisibility(hidden);
   }).catch(function(){});
 }
@@ -5698,21 +5702,84 @@ let _settingsAppearanceAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
 
-// ── Sidebar tab visibility ─────────────────────────────────────────────────
+// ── Sidebar tab visibility/order ────────────────────────────────────────────
 const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
 const _HIDDEN_TABS_LS_KEY = 'hermes-webui-hidden-tabs';
+const _TAB_ORDER_LS_KEY = 'hermes-webui-tab-order';
+let _tabVisibilityDragSuppressUntil = 0;
+
+function _sanitizeTabPanelList(panels){
+  if(!Array.isArray(panels)) return [];
+  var out=[];
+  panels.forEach(function(panel){
+    if(typeof panel!=='string') return;
+    panel=panel.trim();
+    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel)) return;
+    if(out.indexOf(panel)===-1) out.push(panel);
+  });
+  return out;
+}
 
 function _getHiddenTabs(){
-  try{var h=localStorage.getItem(_HIDDEN_TABS_LS_KEY);if(h){var p=JSON.parse(h);if(Array.isArray(p))return p;}}catch(e){}
+  try{var h=localStorage.getItem(_HIDDEN_TABS_LS_KEY);if(h)return _sanitizeTabPanelList(JSON.parse(h));}catch(e){}
   return[];
 }
 
 function _setHiddenTabs(panels){
-  try{localStorage.setItem(_HIDDEN_TABS_LS_KEY,JSON.stringify(panels));}catch(e){}
+  try{localStorage.setItem(_HIDDEN_TABS_LS_KEY,JSON.stringify(_sanitizeTabPanelList(panels)));}catch(e){}
+}
+
+function _getTabOrder(){
+  try{var h=localStorage.getItem(_TAB_ORDER_LS_KEY);if(h)return _sanitizeTabPanelList(JSON.parse(h));}catch(e){}
+  return[];
+}
+
+function _setTabOrder(panels){
+  try{localStorage.setItem(_TAB_ORDER_LS_KEY,JSON.stringify(_sanitizeTabPanelList(panels)));}catch(e){}
+}
+
+function _availableSidebarPanels(){
+  var out=[];
+  var tabs=document.querySelectorAll('.rail .rail-btn.nav-tab[data-panel], .sidebar-nav .nav-tab[data-panel]');
+  tabs.forEach(function(tab){
+    var panel=tab.dataset.panel;
+    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel)) return;
+    if(tab.classList.contains('dashboard-link')||tab.hasAttribute('data-dashboard-link')) return;
+    if(out.indexOf(panel)===-1) out.push(panel);
+  });
+  return out;
+}
+
+function _orderedSidebarPanels(order){
+  var available=_availableSidebarPanels();
+  var requested=_sanitizeTabPanelList(Array.isArray(order)?order:_getTabOrder());
+  var out=[];
+  requested.forEach(function(panel){ if(available.indexOf(panel)!==-1&&out.indexOf(panel)===-1) out.push(panel); });
+  available.forEach(function(panel){ if(out.indexOf(panel)===-1) out.push(panel); });
+  return out;
+}
+
+function _applyTabOrder(order){
+  var ordered=_orderedSidebarPanels(order);
+  ['.rail','.sidebar-nav'].forEach(function(selector){
+    var container=document.querySelector(selector);
+    if(!container) return;
+    var anchor=Array.prototype.find.call(container.children,function(child){
+      if(child.classList&&child.classList.contains('rail-spacer')) return true;
+      if(child.classList&&child.classList.contains('dashboard-link')) return true;
+      if(child.hasAttribute&&child.hasAttribute('data-dashboard-link')) return true;
+      return child.dataset&&child.dataset.panel==='settings';
+    });
+    ordered.forEach(function(panel){
+      var node=container.querySelector('.nav-tab[data-panel="'+panel+'"]');
+      if(node) container.insertBefore(node,anchor||null);
+    });
+  });
 }
 
 function _applyTabVisibility(hidden){
-  if(!Array.isArray(hidden)) hidden=[];
+  hidden=_sanitizeTabPanelList(hidden);
+  _applyTabOrder(_getTabOrder());
   // Hide/unhide all [data-panel] elements (sidebar-nav buttons + rail buttons)
   document.querySelectorAll('[data-panel]').forEach(function(el){
     var panel=el.dataset.panel;
@@ -5735,14 +5802,12 @@ function _renderTabVisibilityChips(){
   var container=$('tabVisibilityChips');
   if(!container)return;
   var hidden=_getHiddenTabs();
-  // Scan rail buttons to discover all available panels (skip always-visible + dashboard-link)
-  var tabs=document.querySelectorAll('.rail .rail-btn.nav-tab[data-panel]');
+  var panels=_orderedSidebarPanels();
   container.innerHTML='';
-  tabs.forEach(function(tab){
-    var panel=tab.dataset.panel;
-    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel))return;
-    if(tab.classList.contains('dashboard-link'))return;
-    var label=tab.dataset.tooltip||tab.dataset.label||panel;
+  panels.forEach(function(panel){
+    var tab=document.querySelector('.rail .rail-btn.nav-tab[data-panel="'+panel+'"]')
+      ||document.querySelector('.sidebar-nav .nav-tab[data-panel="'+panel+'"]');
+    var label=(tab&&(tab.dataset.tooltip||tab.dataset.label))||panel;
     // Capitalize first letter
     label=label.charAt(0).toUpperCase()+label.slice(1);
     var chip=document.createElement('button');
@@ -5752,15 +5817,57 @@ function _renderTabVisibilityChips(){
     if(isOff)chip.classList.add('chip-off');
     chip.textContent=label;
     chip.setAttribute('data-tab-panel',panel);
+    chip.setAttribute('draggable','true');
     // Use role="switch" + aria-checked instead of aria-pressed so screen
     // readers narrate "Tasks switch on/off" (matches user mental model) rather
     // than "Tasks toggle button pressed/not-pressed" (where the polarity is
     // confusing because chip-off looks like the "off" state).
     chip.setAttribute('role','switch');
     chip.setAttribute('aria-checked',isOff?'false':'true');
-    chip.onclick=function(){_toggleTabVisibilityChip(panel);};
+    chip.onclick=function(){
+      if(Date.now()<_tabVisibilityDragSuppressUntil)return;
+      _toggleTabVisibilityChip(panel);
+    };
+    _wireTabChipDrag(chip,panel);
     container.appendChild(chip);
   });
+}
+
+function _wireTabChipDrag(chip,panel){
+  if(!chip)return;
+  chip.addEventListener('dragstart',function(e){
+    chip.classList.add('dragging');
+    if(e.dataTransfer){
+      e.dataTransfer.effectAllowed='move';
+      e.dataTransfer.setData('text/plain',panel);
+    }
+  });
+  chip.addEventListener('dragend',function(){chip.classList.remove('dragging');});
+  chip.addEventListener('dragover',function(e){e.preventDefault();chip.classList.add('drag-over');if(e.dataTransfer)e.dataTransfer.dropEffect='move';});
+  chip.addEventListener('dragleave',function(){chip.classList.remove('drag-over');});
+  chip.addEventListener('drop',function(e){_handleTabVisibilityChipDrop(e,panel);});
+}
+
+function _moveTabOrderPanel(sourcePanel,targetPanel){
+  if(!sourcePanel||!targetPanel||sourcePanel===targetPanel) return false;
+  var order=_orderedSidebarPanels();
+  var from=order.indexOf(sourcePanel);
+  var to=order.indexOf(targetPanel);
+  if(from===-1||to===-1) return false;
+  order.splice(from,1);
+  order.splice(to,0,sourcePanel);
+  _setTabOrder(order);
+  _applyTabOrder(order);
+  _renderTabVisibilityChips();
+  _scheduleAppearanceAutosave();
+  return true;
+}
+
+function _handleTabVisibilityChipDrop(e,targetPanel){
+  if(e){e.preventDefault();e.stopPropagation();}
+  document.querySelectorAll('.tab-visibility-chip.drag-over').forEach(function(el){el.classList.remove('drag-over');});
+  var sourcePanel=e&&e.dataTransfer?e.dataTransfer.getData('text/plain'):'';
+  if(_moveTabOrderPanel(sourcePanel,targetPanel)) _tabVisibilityDragSuppressUntil=Date.now()+250;
 }
 
 function _toggleTabVisibilityChip(panel){
@@ -5926,6 +6033,7 @@ function _appearancePayloadFromUi(){
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     activity_feed_expanded_default: !!($('settingsActivityFeedExpandedDefault')||{}).checked,
     hidden_tabs: _getHiddenTabs(),
+    tab_order: _getTabOrder(),
   };
 }
 
@@ -6214,7 +6322,7 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
-    // Tab visibility chips (dynamically populated from DOM)
+    // Tab visibility/order chips (dynamically populated from DOM)
     var hiddenTabs=[];
     if(Array.isArray(settings.hidden_tabs)){
       // Server value takes priority — even an empty array means "no tabs hidden"
@@ -6223,6 +6331,14 @@ async function loadSettingsPanel(){
       // Server has no hidden_tabs key — fall back to localStorage
       hiddenTabs=_getHiddenTabs();
     }
+    var tabOrder=[];
+    if(Array.isArray(settings.tab_order)){
+      tabOrder=settings.tab_order.filter(function(s){return typeof s==='string'&&s.trim();});
+    }else{
+      tabOrder=_getTabOrder();
+    }
+    _setTabOrder(tabOrder);
+    _applyTabOrder(tabOrder);
     _setHiddenTabs(hiddenTabs);
     _applyTabVisibility(hiddenTabs);
     _renderTabVisibilityChips();

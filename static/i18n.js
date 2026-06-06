@@ -547,7 +547,7 @@ const LOCALES = {
     settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: 'Sidebar tabs',
-    settings_desc_tab_visibility: 'Choose which tabs appear in the sidebar and rail. Chat and Settings are always visible.',
+    settings_desc_tab_visibility: 'Choose which tabs appear in the sidebar and rail. Drag chips to reorder them. Chat and Settings are always visible.',
     open_in_browser: 'Open in browser',
     settings_dropdown_conversation: 'Conversation',
     settings_dropdown_appearance: 'Appearance',
@@ -7378,7 +7378,7 @@ const LOCALES = {
     settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: 'Seitenleiste-Tabs',
-    settings_desc_tab_visibility: 'Wähle, welche Tabs in der Seitenleiste und im Rail angezeigt werden. Chat und Einstellungen sind immer sichtbar.',
+    settings_desc_tab_visibility: 'Wähle, welche Tabs in der Seitenleiste und im Rail angezeigt werden. Ziehe die Chips, um die Reihenfolge zu ändern. Chat und Einstellungen sind immer sichtbar.',
 
     workspace_drag_hint: 'Ziehen zum Neuordnen',
     workspace_reorder_failed: 'Neuordnen fehlgeschlagen',
