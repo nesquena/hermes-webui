@@ -4071,20 +4071,20 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
         if role != existing_role or not existing_content:
             continue
-        # Exact visible-key equality was checked above.  For very large payloads
-        # (tool logs / request dumps), fuzzy substring/token comparisons are both
-        # expensive and low-value; doing them repeatedly made session loading
-        # block the whole WebUI for many seconds.  Keep fuzzy matching for normal
-        # chat-sized text, but do exact-only matching for giant payloads.
+        # Exact visible-key equality was checked above. For very large payloads
+        # (tool logs / request dumps), Python-in substring and fuzzy-token
+        # comparisons are both expensive and low-value; doing them repeatedly
+        # made session loading block the whole WebUI for many seconds. Keep
+        # fuzzy matching for normal chat-sized text, but do exact-only matching
+        # for giant payloads.
         if max(len(content), len(existing_content)) > 200_000:
             continue
         if content in existing_content or existing_content in content:
             return existing_key
         if loose_content is None:
             loose_content = _loose_session_message_content(content)
-        if existing_key in loose_by_key:
-            loose_existing = loose_by_key.get(existing_key, "")
-        else:
+        loose_existing = loose_by_key.get(existing_key)
+        if loose_existing is None:
             loose_existing = _loose_session_message_content(existing_content)
             loose_by_key[existing_key] = loose_existing
         if loose_content and loose_existing and (
