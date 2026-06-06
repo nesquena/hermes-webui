@@ -1900,6 +1900,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(Number.isFinite(seq)&&seq>_lastRunJournalSeq){
       _lastRunJournalSeq=seq;
       _lastRunJournalEventId=raw;
+      // Mirror the advanced cursor onto the persisted INFLIGHT entry. persistInflightState()
+      // saves `inflight.lastRunJournalSeq`, and a hard reload / reattach reads it back as the
+      // `after_seq` replay floor (see attachLiveStream reconnecting init). Without this write
+      // the persisted seq stayed 0, so a reload restored `lastAssistantText` and then replayed
+      // the run journal from `after_seq=0` ON TOP of it — duplicating already-rendered live
+      // reply content. Throttled persist keeps this off the hot token path. (#3401 reconnect dup)
+      const inflight=INFLIGHT[activeSid];
+      if(inflight){
+        inflight.lastRunJournalSeq=seq;
+        if(typeof _throttledPersist==='function') _throttledPersist();
+      }
     }
   }
   function _runJournalReplayAfterSeq(){

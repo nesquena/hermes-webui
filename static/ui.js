@@ -6143,11 +6143,17 @@ function _assistantReasoningPayloadText(m){
     return parts.join('\n').trim();
   }
   const text=String(m.content||'');
-  const thinkMatch=text.match(/^\s*<think>([\s\S]*?)<\/think>\s*$/);
+  // Extract a LEADING thinking block even when visible answer text follows it
+  // (e.g. "<think>…</think>4"). The matching display-content stripper
+  // (_stripLeadingAssistantThinkingMarkup) is non-anchored, so the extractor must
+  // be too — a trailing `$` anchor here dropped the reasoning whenever the turn
+  // also had a visible answer, hiding the Thinking card entirely (#3401 regression
+  // vs master, which used the non-anchored form). (#3709/#3592 family)
+  const thinkMatch=text.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
   if(thinkMatch) return thinkMatch[1].trim();
-  const thoughtMatch=text.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*$/);
+  const thoughtMatch=text.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
   if(thoughtMatch) return thoughtMatch[1].trim();
-  const turnMatch=text.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*$/);
+  const turnMatch=text.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
   if(turnMatch) return turnMatch[1].trim();
   return '';
 }
@@ -8304,7 +8310,16 @@ function renderMessages(options){
     if(derived.length) S.toolCalls=derived;
     if(S._settledLiveToolMetadata) S._settledLiveToolMetadata=null;
   }
-  if(!S.busy){
+  if(!S.busy || (S.toolCalls&&S.toolCalls.length)){
+    // Rebuild settled tool/worklog/thinking nodes. The `|| (S.toolCalls.length)`
+    // arm is REQUIRED, not just `!S.busy`: when renderMessages re-runs during an
+    // active stream (e.g. switching back to an in-progress session, busy=true),
+    // the earlier innerHTML wipe removed every settled turn's worklog above the
+    // live turn. Gating purely on `!S.busy` skipped this rebuild while busy and
+    // left those prior turns' tool cards gone until the stream finished (#3401
+    // regression vs master; same content-loss-on-switch class as #3668). The
+    // `:not([data-live-thinking="1"])` / live-card guards below keep the active
+    // turn's own live nodes from being double-built.
     inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]),.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
     const byActivity = new Map();
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
