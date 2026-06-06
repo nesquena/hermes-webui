@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.293] — 2026-06-06 — Release JI (stage-s5 — thinking card no longer renders twice)
+
+### Fixed
+- **The "Thinking" card no longer renders twice on a settled turn.** For a turn that had both a tool call and reasoning (e.g. think → call a tool → answer), the thinking card could appear once inside the collapsed **Activity** group at the top of the turn and again as a stranded second card below the answer and the `Done in …` footer. The thinking-only inline render path (added in v0.51.258 for #3592) now only fires when the turn has no Activity group of its own, and when it does render inline it inserts the card **above** the answer body instead of after the footer. Thinking that echoes the visible answer on a trailing reasoning-only message is also de-duplicated against the whole turn's answer text now, not just the same message's body. Genuinely thinking-only turns still show their thinking inline (the #3592 fix is preserved, not reverted). (#3709; supersedes #3708)
+
 ## [v0.51.292] — 2026-06-06 — Release JH (stage-s4 — compression-exhausted turns surface as errors, not fake completions)
 
 ### Fixed

@@ -272,10 +272,14 @@ class TestToolCallGroupingStatic:
         assert "isSimplifiedToolCalling()" in render_fn and "assistantThinking.set(rawIdx, thinkingText)" in render_fn, (
             "Compact settled transcript rendering should preserve Thinking cards after switching sessions."
         )
-        assert "_thinkingActivityNode(thinkingText, false)" in render_fn, (
+        # #3709: the Activity disclosure now renders the TURN's merged thinking
+        # (mergedThinking — all of a turn's thinking de-duped, incl. a suppressed
+        # thinking-only sibling) rather than a single message's entry. Same node,
+        # same Activity body — only the source variable changed.
+        assert "_thinkingActivityNode(mergedThinking, false)" in render_fn, (
             "Settled Thinking cards should render inside the compact Activity disclosure."
         )
-        assert "body.appendChild(_thinkingActivityNode(thinkingText, false))" in render_fn, (
+        assert "body.appendChild(_thinkingActivityNode(mergedThinking, false))" in render_fn, (
             "Settled Thinking cards should stay inside the same Activity body as the related tools."
         )
         assert ".agent-activity-thinking:not([data-live-thinking=\"1\"])" in render_fn, (
