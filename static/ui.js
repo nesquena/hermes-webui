@@ -5790,14 +5790,18 @@ async function _waitForServerThenReload(opts){
   if(msgEl) msgEl.textContent='⏳ Restarting… please wait';
   if(banner) banner.classList.add('visible');
   const deadline=Date.now()+maxMs;
-  // Track whether we ever observed the server become unreachable. A restart
-  // outage (one or more failed /health probes) followed by a healthy response is
-  // a reliable new-instance signal even when only uptime_seconds is comparable
-  // and the replacement's uptime is not strictly lower than the captured baseline
-  // (e.g. a deployment that strips server_started_at and whose baseline uptime
-  // was very low). Without this, the uptime-only `< baseline` check could never
-  // fire and the user would be stranded on the restart banner. (#3713 Codex catch)
-  let _observedOutage=false;
+  // Track restart-outage evidence. An outage (failed or non-OK /health probes)
+  // followed by a healthy response is a reliable new-instance signal even when
+  // only uptime_seconds is comparable and the replacement's uptime is not strictly
+  // lower than the captured baseline (e.g. a deployment that strips
+  // server_started_at and whose baseline uptime was very low). We require at least
+  // TWO consecutive outage probes before trusting it, so a single transient network
+  // blip (with the OLD process still up and its uptime merely increasing) cannot
+  // trigger a premature reload onto the old server. Both thrown fetch errors AND
+  // non-OK responses (e.g. a reverse-proxy 502/503 during restart) count as outage
+  // evidence. (#3713 Codex catches)
+  let _consecutiveOutages=0;
+  const _restartOutageObserved=()=>_consecutiveOutages>=2;
   // Give the server a moment to actually begin its restart before the first
   // probe — otherwise the old process may still respond ok on the first poll.
   await new Promise(r=>setTimeout(r, interval));
@@ -5851,23 +5855,35 @@ async function _waitForServerThenReload(opts){
             return;
           }
           if(
-            _observedOutage &&
+            _restartOutageObserved() &&
             nextServerIdentity!==null &&
             baselineServerIdentity.serverStartedAt===null &&
             nextServerIdentity.serverStartedAt===null &&
             baselineServerIdentity.uptimeSeconds!==null &&
             nextServerIdentity.uptimeSeconds!==null
           ){
-            // Uptime-only on both sides AND we saw the server go unreachable and
-            // come back: that outage is the restart, so reload even though the
+            // Uptime-only on both sides AND we saw a sustained restart outage
+            // (>=2 consecutive failed/non-OK probes) before this healthy response:
+            // treat that outage as the restart, so reload even though the
             // replacement uptime is not strictly lower than a very-low baseline.
             location.reload();
             return;
           }
+          // Healthy response still describing the pre-restart process: this is the
+          // OLD server answering, so any earlier outage was a transient blip, not a
+          // restart — reset the outage evidence so it can't accumulate into a false
+          // positive across unrelated blips.
+          _consecutiveOutages=0;
           // Keep polling while /health still describes the pre-restart process.
+        }else{
+          // Reachable but not status:ok (still starting up) — counts as outage.
+          _consecutiveOutages++;
         }
+      }else{
+        // Non-OK HTTP (e.g. reverse-proxy 502/503 during restart) — outage evidence.
+        _consecutiveOutages++;
       }
-    }catch(_){ _observedOutage=true; /* socket closed during restart — retry */ }
+    }catch(_){ _consecutiveOutages++; /* socket closed during restart — retry */ }
     await new Promise(r=>setTimeout(r, interval));
   }
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';

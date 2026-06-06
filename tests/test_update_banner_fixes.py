@@ -997,21 +997,30 @@ class TestUiJsUpdateBanner:
         """Codex regression (#3713): when BOTH baseline and replacement expose only
         uptime_seconds (server_started_at stripped) and the replacement's uptime is
         NOT strictly lower than a very-low baseline, the `uptime < baseline` check
-        never fires. An observed outage (a failed /health probe) followed by a healthy
-        response is the reliable restart signal in that case — without it the user is
-        stranded on the restart banner until they manually reload."""
+        never fires. A SUSTAINED restart outage (>=2 consecutive failed/non-OK probes)
+        followed by a healthy response is the reliable restart signal in that case —
+        without it the user is stranded on the restart banner until they manually
+        reload. The >=2 threshold + outage reset on a healthy old-server response
+        prevent a single transient network blip from reloading onto the old process."""
         src = read('static/ui.js')
         fn = extract_js_function(src, '_waitForServerThenReload')
         compact = re.sub(r'\s+', '', fn)
-        # The catch arm must record that the server went unreachable.
-        assert '_observedOutage=true' in compact, (
-            "the /health probe catch arm must set _observedOutage=true so a restart "
-            "outage can be used as a new-instance signal"
+        # Outage counter incremented on thrown fetch errors AND non-OK responses.
+        assert '_consecutiveOutages++' in compact, (
+            "the /health probe must count failed/non-OK responses as outage evidence"
         )
-        # And there must be an outage-gated reload for the uptime-only-both-sides case.
-        assert '_observedOutage&&' in compact, (
-            "_waitForServerThenReload() must reload on an observed outage when only "
-            "uptime_seconds is comparable and it is not strictly lower than baseline"
+        # Sustained-outage threshold (>=2) gates the uptime-only fallback — not a single blip.
+        assert '_consecutiveOutages>=2' in compact, (
+            "the outage fallback must require >=2 consecutive outages so a single "
+            "transient blip can't trigger a premature reload onto the old server"
+        )
+        assert '_restartOutageObserved()&&' in compact, (
+            "_waitForServerThenReload() must gate the uptime-only reload on a sustained outage"
+        )
+        # Outage evidence resets when the OLD server answers healthy (blip, not restart).
+        assert '_consecutiveOutages=0' in compact, (
+            "a healthy pre-restart-process response must reset the outage counter so "
+            "unrelated blips can't accumulate into a false positive"
         )
         assert ('baselineServerIdentity.serverStartedAt===null&&nextServerIdentity.serverStartedAt===null'
                 in compact), (
