@@ -383,6 +383,7 @@ const LOCALES = {
     terminal_input_failed: 'Terminal input failed: ',
     terminal_copy_failed: 'Copy failed: ',
     terminal_error: 'Terminal error',
+    terminal_remote_backend_unsupported: 'Embedded terminal is only supported for local terminal backends.',
     workspace_empty_no_path: 'No workspace selected. Set a workspace in Settings \u2192 Workspace to browse files.',
     workspace_empty_dir: 'This workspace is empty.',
     workspace_show_hidden_files: 'Show hidden files',
