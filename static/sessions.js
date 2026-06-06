@@ -170,7 +170,6 @@ function _clearComposerDraft(sid) {
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
-const SESSION_MANUAL_STATUS_KEY = 'hermes-session-manual-status';
 let _sessionViewedCounts = null;
 let _sessionCompletionUnread = null;
 let _sessionObservedStreaming = null;
@@ -352,43 +351,6 @@ function _isSessionEffectivelyStreaming(s) {
 
 function _isServerIdleSessionRow(s) {
   return Boolean(s && s.session_id && !s.is_streaming && !s.active_stream_id && !s.pending_user_message);
-}
-
-// ── Manual session status (Todo / In Progress / Done) ─────────────────────
-const _SESSION_STATUS_VALUES = ['todo', 'in-progress', 'done'];
-
-function _getSessionManualStatuses() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SESSION_MANUAL_STATUS_KEY) || '{}');
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch (_e) { return {}; }
-}
-
-function getSessionManualStatus(sid) {
-  if (!sid) return null;
-  const val = _getSessionManualStatuses()[sid];
-  return _SESSION_STATUS_VALUES.includes(val) ? val : null;
-}
-
-function setSessionManualStatus(sid, status) {
-  if (!sid) return;
-  const map = _getSessionManualStatuses();
-  if (status && _SESSION_STATUS_VALUES.includes(status)) {
-    map[sid] = status;
-  } else {
-    delete map[sid];
-  }
-  try { localStorage.setItem(SESSION_MANUAL_STATUS_KEY, JSON.stringify(map)); } catch (_e) {}
-  renderSessionListFromCache();
-}
-
-function _cycleSessionManualStatus(session) {
-  const current = getSessionManualStatus(session.session_id);
-  const idx = _SESSION_STATUS_VALUES.indexOf(current);
-  const next = idx === -1 ? _SESSION_STATUS_VALUES[0]
-    : idx === _SESSION_STATUS_VALUES.length - 1 ? null
-    : _SESSION_STATUS_VALUES[idx + 1];
-  setSessionManualStatus(session.session_id, next);
 }
 
 function _reconcileActiveSessionIdleStateFromList(serverRows) {
@@ -3028,22 +2990,6 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
-  // Manual status picker (before danger actions)
-  if (!isExternalSession) {
-    const currentStatus = getSessionManualStatus(session.session_id);
-    for (const status of _SESSION_STATUS_VALUES) {
-      menu.appendChild(_buildSessionAction(
-        t('session_status_' + status.replace(/-/g,'_')) || status,
-        '',
-        '',
-        () => {
-          closeSessionActionMenu();
-          setSessionManualStatus(session.session_id, currentStatus === status ? null : status);
-        },
-        currentStatus === status ? 'is-active' : ''
-      ));
-    }
-  }
   if(!isExternalSession){
     if(session.worktree_path){
       menu.appendChild(_buildSessionAction(
@@ -5025,15 +4971,6 @@ function renderSessionListFromCache(){
         dot.title=proj.name;
         titleRow.appendChild(dot);
       }
-    }
-    const manualStatus = getSessionManualStatus(s.session_id);
-    if (manualStatus) {
-      const statusBadge = document.createElement('span');
-      statusBadge.className = 'session-manual-status session-manual-status--' + manualStatus;
-      statusBadge.textContent = t('session_status_' + manualStatus.replace(/-/g,'_')) || manualStatus;
-      statusBadge.title = t('session_status_click_to_change') || 'Click to change status';
-      statusBadge.onclick = (e) => { e.stopPropagation(); _cycleSessionManualStatus(s); };
-      titleRow.appendChild(statusBadge);
     }
     const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
     const showLineageMetadata=density==='detailed';
