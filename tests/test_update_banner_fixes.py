@@ -993,6 +993,32 @@ class TestUiJsUpdateBanner:
             "_waitForServerThenReload() should fallback to existing behavior when baseline is unavailable"
         )
 
+    def test_wait_for_server_reloads_on_outage_when_uptime_only_not_lower(self):
+        """Codex regression (#3713): when BOTH baseline and replacement expose only
+        uptime_seconds (server_started_at stripped) and the replacement's uptime is
+        NOT strictly lower than a very-low baseline, the `uptime < baseline` check
+        never fires. An observed outage (a failed /health probe) followed by a healthy
+        response is the reliable restart signal in that case — without it the user is
+        stranded on the restart banner until they manually reload."""
+        src = read('static/ui.js')
+        fn = extract_js_function(src, '_waitForServerThenReload')
+        compact = re.sub(r'\s+', '', fn)
+        # The catch arm must record that the server went unreachable.
+        assert '_observedOutage=true' in compact, (
+            "the /health probe catch arm must set _observedOutage=true so a restart "
+            "outage can be used as a new-instance signal"
+        )
+        # And there must be an outage-gated reload for the uptime-only-both-sides case.
+        assert '_observedOutage&&' in compact, (
+            "_waitForServerThenReload() must reload on an observed outage when only "
+            "uptime_seconds is comparable and it is not strictly lower than baseline"
+        )
+        assert ('baselineServerIdentity.serverStartedAt===null&&nextServerIdentity.serverStartedAt===null'
+                in compact), (
+            "the outage fallback must be scoped to the uptime-only-on-both-sides case"
+        )
+
+
     def test_wait_for_server_fallbacks_to_ready_on_missing_baseline(self):
         """Healthy /health should reload immediately when baseline identity is missing."""
         src = read('static/ui.js')
