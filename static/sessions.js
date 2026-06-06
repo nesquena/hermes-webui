@@ -5595,7 +5595,7 @@ function _startProjectCreate(bar, addBtn){
     }
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
-  inp.onblur=()=>finish(false);
+  inp.onblur=()=>finish(true);
   inp.addEventListener('input',()=>_resizeProjectInput(inp));
   addBtn.replaceWith(inp);
   _resizeProjectInput(inp);
@@ -5627,7 +5627,7 @@ function _startProjectRename(proj, chip){
     }
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
-  inp.onblur=()=>finish(false);
+  inp.onblur=()=>finish(true);
   inp.onclick=(e)=>e.stopPropagation();
   inp.addEventListener('input',()=>_resizeProjectInput(inp));
   chip.replaceWith(inp);
