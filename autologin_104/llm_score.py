@@ -24,7 +24,7 @@ import urllib.request
 DEFAULT_ENDPOINT = 'http://localhost:11434'
 # 實測：qwen3.5:9b 在長中文 prompt 上會回空，故改用 gemma4
 DEFAULT_SCORING_MODEL = 'gemma4:e4b'    # 9.6GB，~40s/履歷
-DEFAULT_SUMMARY_MODEL = 'gemma4:26b'    # 17GB，~80s/封信件，品質佳
+DEFAULT_SUMMARY_MODEL = 'gemma4:e4b'    # 9.6GB，~30s/封信件（從 26b 換來省 60%+ 時間）
 TIMEOUT_SECS = 300                       # 冷啟動模型載入要花較久
 
 
@@ -37,7 +37,8 @@ def ollama_call(model: str, prompt: str, want_json: bool = False,
         'model': model,
         'prompt': prompt,
         'stream': False,
-        'options': {'temperature': 0, 'num_predict': 2000},
+        'keep_alive': '30m',  # 模型載入後保留 30 分鐘，避免重複冷啟（省 30-60s/次）
+        'options': {'temperature': 0, 'num_predict': 4500},  # 新 prompt 含 jobs[] 詳析需更多 tokens
     }
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(
@@ -100,8 +101,8 @@ def get_llm_config(profile: dict) -> dict:
     cfg.setdefault('scoring_model', DEFAULT_SCORING_MODEL)
     cfg.setdefault('summary_model', DEFAULT_SUMMARY_MODEL)
     cfg.setdefault('max_score', 100)        # LLM 滿分（用於權重融合）
-    cfg.setdefault('rule_weight', 0.6)      # 規則分權重
-    cfg.setdefault('llm_weight', 0.4)       # LLM 分權重
+    cfg.setdefault('rule_weight', 0.4)      # 規則分權重
+    cfg.setdefault('llm_weight', 0.6)       # LLM 分權重
     return cfg
 
 
@@ -128,19 +129,23 @@ def score_autobiography(body: str, profile: dict) -> dict | None:
 - 期望公司類型：{construction_kw}
 - 加分建案類型：集合住宅 ({residential_kw}) > 公共工程 ({public_kw})
 
+【重要】請逐一分析履歷中每一段工作經歷（每個職位/每家公司分開分析），不要混為一談：
+- 對每段工作經歷給予 0-100 分（依「公司類型契合」「職稱契合」「工作內容相關度」「任職時長」綜合判斷）
+- 同時抽取該段的軟性訊號（負責程度、主動性、是否具體）
+
+整體評分準則（綜合所有工作經歷 + 自傳後給的最終分）：
+- 90-100：多段相關經驗 + 自傳精彩 + 操守誠信突出
+- 75-89：至少 2-3 段相關經驗 + 自傳清楚 + 態度正向
+- 60-74：1-2 段相關經驗或單段較弱 + 自傳合格
+- 40-59：經驗零散或大部分不相關 + 軟性訊號普通
+- 20-39：經驗離職務需求遠 + 自傳不利
+- 0-19：完全不符或無自傳
+
 評估重點（不要評估年資/年齡/地點，這些已經有規則處理）：
 1. 自傳是否展現積極正向工作態度（認真、負責、主動承擔、解決問題、樂於溝通協調）
 2. 工作經歷描述是否具體、能看出他完整走過建案生命週期
 3. 集合住宅／建築工程經驗是否豐富紮實（多個建案優於單一建案）
 4. 是否誠信穩定（強烈正面：明確的責任感、操守表述；負面：頻繁跳槽抱怨）
-
-評分尺度（0-100）：
-- 90-100：自傳精彩、多個完整建案週期、態度極佳、操守誠信突出
-- 75-89：自傳清楚、有建案經驗、態度正向、能看出責任感
-- 60-74：自傳合格、經驗夠用但偏短或細節不足
-- 40-59：自傳薄弱或經驗零散、軟性訊號普通
-- 20-39：自傳不利或工作經驗離職務需求遠
-- 0-19：完全不符或無自傳
 
 履歷內容：
 ---
@@ -149,11 +154,28 @@ def score_autobiography(body: str, profile: dict) -> dict | None:
 
 請輸出 JSON，格式：
 {{
-  "score": <0-100 整數>,
+  "score": <0-100 整數，所有工作經歷 + 自傳的綜合評分>,
   "level_assessment": "<主任級候選 / 副主任級候選 / 不符等級>",
-  "reasoning": "<繁體中文 80-150 字，列出加分點與扣分點>",
-  "highlights": ["<亮點1>", "<亮點2>", "<亮點3>"]
-}}"""
+  "reasoning": "<繁體中文「最多 80 字」總結>",
+  "highlights": ["<亮點1，最多 20 字>", "<亮點2，最多 20 字>", "<亮點3，最多 20 字>"],
+  "jobs": [
+    {{
+      "company": "<公司名，最多 20 字>",
+      "title": "<職稱，最多 15 字>",
+      "duration": "<任職時長例如 2年3個月>",
+      "score": <該段工作 0-100>,
+      "relevance": "<高/中/低>",
+      "summary": "<繁體中文「最多 30 字」描述該段工作與目標職缺的關聯>"
+    }}
+  ]
+}}
+
+【嚴格規則 — 必須遵守】
+1. reasoning 不可超過 80 字（會被截斷）
+2. 每個 highlight 不可超過 20 字
+3. 每個 job 的 summary 不可超過 30 字
+4. jobs 陣列「最多列前 10 段」（依時間倒序，最近的在前），早期/無相關的工作可省略
+5. 字數短才能完整輸出 JSON，務必精簡到位"""
 
     raw = ollama_call(cfg['scoring_model'], prompt, want_json=False, endpoint=cfg['endpoint'])
     if not raw:
@@ -170,6 +192,7 @@ def score_autobiography(body: str, profile: dict) -> dict | None:
             'reasoning': data.get('reasoning', ''),
             'highlights': data.get('highlights', []),
             'level_assessment': data.get('level_assessment', ''),
+            'jobs': data.get('jobs', []),  # 每段工作經歷的個別分析
         }
     except Exception as e:
         print(f'  ⚠️  LLM 評分擷取失敗: {e}')
@@ -200,10 +223,21 @@ def generate_summary(name: str, body: str, rule_result: dict,
     llm_block = ''
     if llm_score_result:
         llm_block = (
-            f"\nLLM 軟性評分：{llm_score_result['score']}/20\n"
+            f"\nLLM 軟性評分：{llm_score_result['score']}/100\n"
             f"LLM 評語：{llm_score_result.get('reasoning','')}\n"
             f"LLM 亮點：{', '.join(llm_score_result.get('highlights', []))}\n"
         )
+        # 加入每段工作經歷的個別評析
+        jobs = llm_score_result.get('jobs', [])
+        if jobs:
+            llm_block += "\n每段工作經歷分析：\n"
+            for j in jobs[:8]:  # 最多取 8 段
+                llm_block += (
+                    f"  • {j.get('company','?')} | {j.get('title','?')} | "
+                    f"{j.get('duration','?')} | 分數 {j.get('score',0)} | "
+                    f"相關度 {j.get('relevance','?')}\n"
+                    f"    {j.get('summary','')}\n"
+                )
 
     prompt = f"""你是內部人資專員，要為主管寫一封「轉寄履歷」的內部備忘文字（不是寫信給應徵者）。
 必須在 {max_chars} 字內、繁體中文、條列清楚、語氣專業務實但有溫度（不是公文）。
@@ -238,7 +272,10 @@ def generate_summary(name: str, body: str, rule_result: dict,
 
 ■風險或待確認（若有：例如純集合住宅經驗較少、駐點地{residence_kw}意願）
 
-■建議行動（1 句：是否優先邀約面試）
+■建議行動（1 句）：依匹配度判斷
+   - 匹配度 ≥ 80% → 寫「建議優先邀約面試」
+   - 匹配度 70-79% → 寫「可考慮邀約面試」
+   - 匹配度 < 70% → 寫「供參考」
 
 不要用 markdown 標題符號（#），用上面的【】和■即可。"""
 

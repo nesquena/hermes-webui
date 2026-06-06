@@ -134,7 +134,15 @@ for job in "${JOBS[@]}"; do
         echo "▶▶▶ [$job] 階段一：今日已搜過 → 跳過（用 --force-search 可強制重搜）"
     else
         echo "▶▶▶ [$job] 階段一：搜尋"
-        python3 run_search.py --job "$job" || { echo "✗ search 失敗，跳過 $job"; continue; }
+        if ! python3 run_search.py --job "$job"; then
+            echo "✗ search 失敗"
+            # search 失敗但若 candidates_raw.json 存在（即使 0 人），仍進入評分階段產出 0 人報告
+            if [ ! -f "results/${job}/candidates_raw.json" ]; then
+                echo "✗ 無 candidates_raw.json，跳過 $job"
+                continue
+            fi
+            echo "  candidates_raw.json 存在，仍進入評分階段（可能會產出 0 人提示報告）"
+        fi
     fi
 
     echo

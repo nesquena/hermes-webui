@@ -49,7 +49,7 @@ print(name)
     echo "📤 $job_id → ${GDRIVE_REPORT_DIR}/${chinese_name}/"
 
     rclone copy "$results_dir" "${RCLONE_REMOTE}:${GDRIVE_REPORT_DIR}/${chinese_name}" \
-        --filter "+ *.md" --filter "+ forward_log.json" \
+        --filter "+ *.md" --filter "+ *.html" --filter "+ forward_log.json" \
         --filter "- *" \
         --update 2>&1 | tail -5
 

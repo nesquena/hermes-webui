@@ -336,14 +336,14 @@ def normalize_to_job_profile(parsed: dict, filename_stem: str, brief_text: str) 
         'forward': {
             'format': 'complete',
             'summary_max_chars': 980,
-            'emails': ['fongchien19@gmail.com'],
+            'emails': ['i00788@fong-yi.com.tw', 'fongchien19@gmail.com', '990409@fong-yi.com.tw'],
         },
         'llm': {
             'enabled': True,
-            'rule_weight': 0.6,
-            'llm_weight': 0.4,
+            'rule_weight': 0.4,
+            'llm_weight': 0.6,
             'scoring_model': 'gemma4:e4b',
-            'summary_model': 'gemma4:26b',
+            'summary_model': 'gemma4:e4b',
         },
     }
     return profile

@@ -5,9 +5,11 @@
 # 若 Claude CLI 不可用，自動 fallback 到 Ollama（parse_job_brief.py）
 #
 # 用法：
-#   ./sync_briefs_claude.sh              # 完整流程
-#   ./sync_briefs_claude.sh --dry-run    # 只到分析（不轉寄）
-#   ./sync_briefs_claude.sh --parse-only # 只同步 + 解析
+#   ./sync_briefs_claude.sh                          # 完整流程，跑全部職缺
+#   ./sync_briefs_claude.sh jidian-tainan            # 只跑指定職缺
+#   ./sync_briefs_claude.sh --force-search jidian-tainan  # 強制重搜該職缺
+#   ./sync_briefs_claude.sh --dry-run                # 只到分析（不轉寄）
+#   ./sync_briefs_claude.sh --parse-only             # 只同步 + 解析
 #
 # 系統 crontab 範例：
 #   3 9 * * * cd /Users/fongyimac/hermes-webui/autologin_104 && ./sync_briefs_claude.sh >> logs/cron.log 2>&1
@@ -23,10 +25,15 @@ LOCAL_RESULTS_DIR="results"
 
 DRY=""
 PARSE_ONLY=0
+FORCE_SEARCH=""
+JOBS=()  # 指定的 job id（為空表示跑全部）
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY="--dry-run" ;;
         --parse-only) PARSE_ONLY=1 ;;
+        --force-search) FORCE_SEARCH="--force-search" ;;
+        --*) ;;  # 忽略其他 flag
+        *) JOBS+=("$arg") ;;  # 視為 job id
     esac
 done
 
@@ -105,7 +112,12 @@ echo
 echo "============================================="
 echo "🔍 Step 3: 搜尋 + 評分 + 轉寄"
 echo "============================================="
-./run_all.sh $DRY || echo "⚠️  run_all 部份失敗"
+if [ ${#JOBS[@]} -gt 0 ]; then
+    echo "  指定職缺：${JOBS[*]}"
+    ./run_all.sh $DRY $FORCE_SEARCH "${JOBS[@]}" || echo "⚠️  run_all 部份失敗"
+else
+    ./run_all.sh $DRY $FORCE_SEARCH || echo "⚠️  run_all 部份失敗"
+fi
 
 echo
 echo "============================================="

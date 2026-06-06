@@ -334,6 +334,348 @@ def score(candidate: dict, full_text: str, profile: dict) -> dict:
     }
 
 
+def _html_escape(s: str) -> str:
+    """簡易 HTML 跳脫，避免 XSS 與排版被破壞。"""
+    if s is None:
+        return ''
+    return (str(s)
+            .replace('&', '&amp;')
+            .replace('<', '&lt;')
+            .replace('>', '&gt;')
+            .replace('"', '&quot;')
+            .replace("'", '&#39;'))
+
+
+def _render_html_report(job_id: str, display_name: str, profile: dict,
+                        threshold: int, scored: list, log: dict,
+                        resume_cache: dict) -> str:
+    """產生 HR 友善的 HTML 報告（含列印樣式）。
+
+    Args:
+        scored: 已按分數排序的候選人 list（每項含 _result, _from_cache 等）
+        log: 本次 run 的 log，含 results[] 標記 forwarded/skipped_dup
+    """
+    today = datetime.now().strftime('%Y-%m-%d')
+    job_title = get_job_title_from_brief(profile)  # HR 原始檔名
+    threshold_priority = 80  # 與 build_summary 一致
+    threshold_consider = 70
+
+    # 統計
+    total = len(scored)
+    forwarded_count = sum(1 for x in log['results'] if x['forwarded'])
+    skipped_count = sum(1 for x in log['results'] if x['skipped_dup'])
+    threshold_count = sum(1 for c in scored if c['_result']['score'] >= threshold)
+    priority_count = sum(1 for c in scored if c['_result']['score'] >= threshold_priority)
+
+    # 建構候選人卡片 HTML
+    cards_html = []
+    for rank, c in enumerate(scored, 1):
+        r = c['_result']
+        score = r['score']
+        level = r.get('level', '')
+        rid = c['resumeId']
+        rec = next((x for x in log['results'] if x['resumeId'] == rid), {})
+
+        # 狀態 badge
+        if rec.get('forwarded'):
+            status_badge = '<span class="badge badge-forwarded">✓ 本次轉寄</span>'
+        elif rec.get('skipped_dup'):
+            status_badge = '<span class="badge badge-skipped">⏭ 已轉寄過</span>'
+        elif score >= threshold:
+            status_badge = '<span class="badge badge-threshold">○ 達門檻</span>'
+        else:
+            status_badge = '<span class="badge badge-below">—</span>'
+
+        # 推薦等級
+        if score >= threshold_priority:
+            recommend = '🔥 建議優先邀約面試'
+            card_class = 'card card-priority'
+        elif score >= threshold_consider:
+            recommend = '👍 可考慮邀約面試'
+            card_class = 'card card-consider'
+        elif score >= threshold:
+            recommend = '— 達門檻供參考'
+            card_class = 'card card-threshold'
+        else:
+            recommend = '— 供參考'
+            card_class = 'card card-below'
+
+        # LLM jobs[] 詳析
+        llm = resume_cache.get(rid, {}).get('llm_score', {}) or {}
+        jobs_data = llm.get('jobs', []) or []
+        highlights = llm.get('highlights', []) or []
+        reasoning = llm.get('reasoning', '') or ''
+
+        # 工作經歷表格
+        jobs_html = ''
+        if jobs_data:
+            jobs_rows = []
+            for j in jobs_data:
+                rel = j.get('relevance', '')
+                rel_class = {'高': 'rel-high', '中': 'rel-mid', '低': 'rel-low'}.get(rel, '')
+                jobs_rows.append(f"""
+                <tr>
+                  <td>{_html_escape(j.get('company', ''))}</td>
+                  <td>{_html_escape(j.get('title', ''))}</td>
+                  <td>{_html_escape(j.get('duration', ''))}</td>
+                  <td class="num">{_html_escape(j.get('score', ''))}</td>
+                  <td><span class="{rel_class}">{_html_escape(rel)}</span></td>
+                  <td>{_html_escape(j.get('summary', ''))}</td>
+                </tr>""")
+            jobs_html = f"""
+            <h4>工作經歷逐段分析（LLM）</h4>
+            <table class="jobs-table">
+              <thead>
+                <tr><th>公司</th><th>職稱</th><th>時長</th><th>分數</th><th>相關度</th><th>說明</th></tr>
+              </thead>
+              <tbody>{''.join(jobs_rows)}</tbody>
+            </table>"""
+
+        # 規則評分依據
+        reasons_html = ''
+        if r.get('reasons'):
+            items = ''.join(f'<li>{_html_escape(rr)}</li>' for rr in r['reasons'])
+            reasons_html = f'<h4>規則評分依據</h4><ul class="reasons">{items}</ul>'
+
+        # 亮點
+        highlights_html = ''
+        if highlights:
+            items = ''.join(f'<li>{_html_escape(h)}</li>' for h in highlights)
+            highlights_html = f'<h4>LLM 亮點摘要</h4><ul class="highlights">{items}</ul>'
+
+        reasoning_html = ''
+        if reasoning:
+            reasoning_html = f'<p class="reasoning"><strong>LLM 總評：</strong>{_html_escape(reasoning)}</p>'
+
+        # 候選人基本資料
+        rule_s = r.get('rule_score', score)
+        llm_s = r.get('llm_score', '—')
+        metrics = r.get('metrics', {}) or {}
+
+        cards_html.append(f"""
+        <article class="{card_class}">
+          <header class="card-header">
+            <div class="card-title">
+              <span class="rank">#{rank}</span>
+              <h2>{_html_escape(c.get('name', ''))}</h2>
+              <span class="level">{_html_escape(level)}</span>
+              {status_badge}
+            </div>
+            <div class="score-block">
+              <div class="score">{score}<small>%</small></div>
+              <div class="score-breakdown">規則 {rule_s} ｜ LLM {llm_s}</div>
+            </div>
+          </header>
+          <p class="recommend">{recommend}</p>
+          <dl class="meta">
+            <dt>履歷編號</dt><dd>{_html_escape(rid)}</dd>
+            <dt>年齡/性別</dt><dd>{_html_escape(c.get('age',''))} {_html_escape(c.get('gender',''))}</dd>
+            <dt>居住地</dt><dd>{_html_escape(c.get('residence',''))}</dd>
+            <dt>學歷</dt><dd>{_html_escape(c.get('education',''))}</dd>
+            <dt>希望職稱</dt><dd>{_html_escape(c.get('preferJobTitle','').replace('希望職稱 :','').strip())}</dd>
+            <dt>建築年資</dt><dd>{metrics.get('construction_years','—')} 年</dd>
+            <dt>3 年以上任職</dt><dd>{metrics.get('long_tenure_count','—')} 份</dd>
+          </dl>
+          {reasoning_html}
+          {highlights_html}
+          {jobs_html}
+          {reasons_html}
+        </article>""")
+
+    cards = '\n'.join(cards_html)
+
+    # 排序表格
+    rank_rows = []
+    for rank, c in enumerate(scored, 1):
+        r = c['_result']
+        rec = next((x for x in log['results'] if x['resumeId'] == c['resumeId']), {})
+        if rec.get('forwarded'):
+            status = '✓ 本次轉寄'
+        elif rec.get('skipped_dup'):
+            status = '⏭ 已轉寄過'
+        elif r['score'] >= threshold:
+            status = '○ 達門檻'
+        else:
+            status = '—'
+        score_class = 'score-high' if r['score'] >= 80 else ('score-mid' if r['score'] >= 70 else '')
+        rank_rows.append(f"""
+        <tr>
+          <td class="num">{rank}</td>
+          <td><a href="#cand-{c['resumeId']}">{_html_escape(c.get('name',''))}</a></td>
+          <td class="num {score_class}"><strong>{r['score']}%</strong></td>
+          <td>{_html_escape(r.get('level',''))}</td>
+          <td>{_html_escape(c.get('age',''))}</td>
+          <td>{_html_escape(c.get('residence',''))}</td>
+          <td>{status}</td>
+        </tr>""")
+    rank_table = ''.join(rank_rows)
+
+    # 完整 HTML
+    return f"""<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>{_html_escape(job_title)} - 招募分析報告 {today}</title>
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{
+    font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
+    margin: 0; padding: 30px; background: #f5f5f5; color: #222;
+    line-height: 1.6;
+  }}
+  .container {{ max-width: 1100px; margin: 0 auto; }}
+  header.report-header {{
+    background: linear-gradient(135deg, #2c5aa0, #4a7bbf);
+    color: white; padding: 30px; border-radius: 12px 12px 0 0;
+    margin-bottom: 0;
+  }}
+  header.report-header h1 {{ margin: 0 0 8px 0; font-size: 28px; }}
+  header.report-header .subtitle {{ opacity: 0.9; font-size: 14px; }}
+  .stats {{
+    background: white; padding: 20px 30px; border-radius: 0 0 12px 12px;
+    margin-bottom: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px;
+  }}
+  .stat {{ text-align: center; padding: 8px; }}
+  .stat .num {{ font-size: 28px; font-weight: bold; color: #2c5aa0; display: block; }}
+  .stat .label {{ font-size: 12px; color: #666; }}
+
+  h2.section {{
+    margin-top: 36px; padding-bottom: 8px;
+    border-bottom: 2px solid #2c5aa0; color: #2c5aa0; font-size: 20px;
+  }}
+
+  table.rank {{
+    width: 100%; border-collapse: collapse; background: white;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06); border-radius: 6px; overflow: hidden;
+  }}
+  table.rank th, table.rank td {{
+    padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee;
+  }}
+  table.rank th {{ background: #f0f4fa; color: #2c5aa0; font-weight: 600; }}
+  table.rank a {{ color: #2c5aa0; text-decoration: none; }}
+  table.rank a:hover {{ text-decoration: underline; }}
+  .num {{ text-align: center; }}
+  .score-high {{ color: #c0392b; }}
+  .score-mid {{ color: #d68910; }}
+
+  .card {{
+    background: white; padding: 24px; margin: 16px 0;
+    border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    border-left: 6px solid #ddd;
+    page-break-inside: avoid;
+  }}
+  .card-priority {{ border-left-color: #c0392b; }}
+  .card-consider {{ border-left-color: #d68910; }}
+  .card-threshold {{ border-left-color: #27ae60; }}
+  .card-below {{ border-left-color: #95a5a6; opacity: 0.85; }}
+
+  .card-header {{
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 20px; margin-bottom: 8px;
+  }}
+  .card-title {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
+  .rank {{ background: #2c5aa0; color: white; padding: 4px 10px;
+           border-radius: 12px; font-size: 13px; font-weight: bold; }}
+  .card-title h2 {{ margin: 0; font-size: 22px; }}
+  .level {{ background: #ecf0f1; padding: 4px 10px; border-radius: 12px;
+            font-size: 12px; color: #555; }}
+  .badge {{ padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }}
+  .badge-forwarded {{ background: #27ae60; color: white; }}
+  .badge-skipped {{ background: #95a5a6; color: white; }}
+  .badge-threshold {{ background: #f39c12; color: white; }}
+  .badge-below {{ background: #ecf0f1; color: #666; }}
+
+  .score-block {{ text-align: right; min-width: 100px; }}
+  .score {{ font-size: 36px; font-weight: bold; color: #2c5aa0; line-height: 1; }}
+  .score small {{ font-size: 18px; font-weight: normal; opacity: 0.7; }}
+  .score-breakdown {{ font-size: 11px; color: #888; margin-top: 4px; }}
+
+  .recommend {{
+    background: #f8f9fa; padding: 10px 14px; border-radius: 6px;
+    margin: 12px 0; font-weight: 500;
+  }}
+  .card-priority .recommend {{ background: #fdf2f0; color: #c0392b; }}
+  .card-consider .recommend {{ background: #fef5e7; color: #d68910; }}
+
+  dl.meta {{
+    display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px 12px;
+    margin: 12px 0; padding: 12px; background: #fafbfc; border-radius: 6px;
+    font-size: 13px;
+  }}
+  dl.meta dt {{ color: #888; font-weight: normal; }}
+  dl.meta dd {{ margin: 0; color: #333; }}
+
+  .reasoning {{ background: #f0f7ff; padding: 10px 14px; border-radius: 6px;
+                margin: 12px 0; font-size: 13px; color: #1a4d7d; }}
+  h4 {{ color: #2c5aa0; margin: 14px 0 8px 0; font-size: 14px; }}
+  ul.reasons, ul.highlights {{ margin: 6px 0; padding-left: 22px; font-size: 13px; }}
+  ul.reasons li, ul.highlights li {{ margin: 3px 0; }}
+
+  table.jobs-table {{
+    width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px;
+  }}
+  table.jobs-table th, table.jobs-table td {{
+    padding: 6px 8px; border-bottom: 1px solid #eee; text-align: left;
+  }}
+  table.jobs-table th {{ background: #f8f9fa; color: #555; }}
+  table.jobs-table .num {{ text-align: center; font-weight: bold; }}
+  .rel-high {{ color: #c0392b; font-weight: bold; }}
+  .rel-mid {{ color: #d68910; }}
+  .rel-low {{ color: #888; }}
+
+  footer {{ text-align: center; color: #888; font-size: 11px; margin-top: 40px; padding: 20px; }}
+
+  @media print {{
+    body {{ background: white; padding: 0; }}
+    .container {{ max-width: 100%; }}
+    header.report-header {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    .card {{ page-break-inside: avoid; border-radius: 0; box-shadow: none;
+             border: 1px solid #ddd; border-left-width: 6px; }}
+    h2.section {{ page-break-before: auto; }}
+    .stat .num {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    table.rank, table.jobs-table {{ font-size: 11px; }}
+  }}
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header class="report-header">
+    <h1>📋 {_html_escape(job_title)} — 招募分析報告</h1>
+    <div class="subtitle">
+      生成日期：{today}　｜　職缺代碼：{_html_escape(job_id)}　｜　轉寄門檻：{threshold}%
+    </div>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><span class="num">{total}</span><span class="label">候選人總數</span></div>
+    <div class="stat"><span class="num">{threshold_count}</span><span class="label">達門檻 ≥{threshold}%</span></div>
+    <div class="stat"><span class="num">{priority_count}</span><span class="label">優先邀約 ≥80%</span></div>
+    <div class="stat"><span class="num">{forwarded_count}</span><span class="label">本次轉寄</span></div>
+    <div class="stat"><span class="num">{skipped_count}</span><span class="label">已轉寄過</span></div>
+  </div>
+
+  <h2 class="section">📊 排名總覽</h2>
+  <table class="rank">
+    <thead>
+      <tr><th>#</th><th>姓名</th><th>匹配度</th><th>等級</th><th>年齡</th><th>居住地</th><th>狀態</th></tr>
+    </thead>
+    <tbody>{rank_table}</tbody>
+  </table>
+
+  <h2 class="section">📝 候選人詳情</h2>
+  {cards}
+
+  <footer>
+    由 104 自動化招募 pipeline 產生 ｜ {today}
+  </footer>
+
+</div>
+</body>
+</html>"""
+
+
 def get_job_title_from_brief(profile: dict) -> str:
     """嚴格從 _source_brief 取 HR 原始的職缺名稱（Word/txt 檔名，去掉日期和副檔名）。
     若 _source_brief 缺失則 raise — 不可 fallback 到 display_name（避免用 LLM 改寫過的名稱）。"""
@@ -382,10 +724,17 @@ def build_summary(name: str, result: dict, body: str, profile: dict) -> str:
     if bio:
         head += '■自傳節錄：\n' + bio[:200] + '...\n\n'
     head += '■評分依據：\n' + '；'.join(result['reasons'][:6])
-    if residence_kw:
-        head += f'\n\n建議優先邀約面試，確認集合住宅意願與駐點{residence_kw}條件。'
+    # 只有匹配度 ≥80% 才標「建議優先邀約面試」；70-79% 為「可考慮邀約」；<70% 為「供參考」
+    score = result.get('score', 0)
+    if score >= 80:
+        if residence_kw:
+            head += f'\n\n建議優先邀約面試，確認集合住宅意願與駐點{residence_kw}條件。'
+        else:
+            head += '\n\n建議優先邀約面試。'
+    elif score >= 70:
+        head += '\n\n可考慮邀約面試。'
     else:
-        head += '\n\n建議優先邀約面試。'
+        head += '\n\n供參考。'
     return head[:max_chars]
 
 
@@ -402,7 +751,7 @@ async def fetch_resume_text(ws_url: str, detail_url: str) -> str:
     return await cdp_eval(ws_url, "document.body.innerText") or ''
 
 
-DEFAULT_FORWARD_EMAILS = ['fongchien19@gmail.com']
+DEFAULT_FORWARD_EMAILS = ['i00788@fong-yi.com.tw', 'fongchien19@gmail.com', '990409@fong-yi.com.tw']
 
 
 async def select_contact_by_search(ws_url: str, email: str) -> bool:
@@ -624,159 +973,9 @@ async def submit_contact_picker(ws_url: str) -> bool:
     return True
 
 
-async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_url: str) -> bool:
-    """單一收件人轉寄流程（依 104 實際 HTML 結構重寫）：
-
-    1. navigate 到候選人詳情頁
-    2. 點 sidebar 的「轉寄」按鈕 → 開啟「轉寄」modal
-       - modal 含預設收件者 i00788@fong-yi.com.tw（要先移除）
-    3. 在轉寄 modal：清除預設收件者，點「收件者」aot-tag-selector → 開啟「選擇聯絡人」picker
-    4. 在 picker：搜尋 email → 勾選 checkbox → 點「送出」關閉 picker
-    5. 回到轉寄 modal：填說明 textarea
-    6. 點「發送」aot-button
-    """
+async def _search_and_check_in_picker(ws_url: str, email: str) -> bool:
+    """在已開啟的「選擇聯絡人」picker 中：清空搜尋框 → 輸入 email → 等過濾 → 勾選 row 內的 label。"""
     email_json = json.dumps(email)
-
-    # 1. navigate
-    await navigate(ws_url, detail_url)
-    btn_ready = False
-    for i in range(20):
-        await asyncio.sleep(1)
-        if await cdp_eval(ws_url, """
-            (function() {
-                const btns = document.querySelectorAll('button');
-                for (const b of btns) {
-                    if (b.offsetParent === null) continue;
-                    if ((b.textContent || '').trim() === '轉寄' && b.querySelector('.vip-icon-forward')) return true;
-                }
-                return false;
-            })()
-        """):
-            btn_ready = True
-            print(f'    ✓ sidebar 轉寄 按鈕已渲染 ({i+1}s)')
-            break
-    if not btn_ready:
-        print(f'    ✗ 等不到 sidebar 轉寄 按鈕')
-        return False
-    await asyncio.sleep(3)
-
-    # 2. 點 sidebar 的 轉寄 按鈕 → 開啟「轉寄」modal
-    btn_coords = await cdp_eval(ws_url, """
-        (function() {
-            const btns = document.querySelectorAll('button');
-            for (const b of btns) {
-                if (b.offsetParent === null) continue;
-                if ((b.textContent || '').trim() === '轉寄' && b.querySelector('.vip-icon-forward')) {
-                    const r = b.getBoundingClientRect();
-                    return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
-                }
-            }
-            return null;
-        })()
-    """)
-    if not btn_coords:
-        return False
-    bc = json.loads(btn_coords)
-
-    # 用真實滑鼠序列點擊
-    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
-        for i_id, params in enumerate([
-            {'type': 'mouseMoved', 'x': bc['x'], 'y': bc['y']},
-            {'type': 'mousePressed', 'x': bc['x'], 'y': bc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
-            {'type': 'mouseReleased', 'x': bc['x'], 'y': bc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
-        ]):
-            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
-            await ws.recv()
-            await asyncio.sleep(0.1)
-    await asyncio.sleep(2)
-
-    # 確認「轉寄」modal 開啟（標題 = "轉寄" 而非 sidebar 按鈕）
-    forward_modal = await cdp_eval(ws_url, """
-        (function() {
-            const titles = document.querySelectorAll('.modal-title');
-            for (const t of titles) {
-                if (t.offsetParent === null) continue;
-                // 取第一段文字（去掉子節點的 tip 文字）
-                const main = (t.firstChild && t.firstChild.textContent || '').trim();
-                if (main === '轉寄') return true;
-            }
-            return false;
-        })()
-    """)
-    if not forward_modal:
-        print(f'    ✗ 點 轉寄 後「轉寄」modal 未出現')
-        # debug 顯示頁面的 modal-title 文字
-        titles_dbg = await cdp_eval(ws_url, """
-            (function() {
-                return Array.from(document.querySelectorAll('.modal-title'))
-                    .filter(t => t.offsetParent !== null)
-                    .map(t => (t.textContent || '').trim().slice(0, 30));
-            })()
-        """)
-        print(f'    ↳ debug modal titles: {titles_dbg}')
-        return False
-    print(f'    📋 轉寄 modal 已開啟')
-
-    # 3. 移除已選取的收件者 tags（預設可能有 i00788 等）
-    await cdp_eval(ws_url, """
-        (function() {
-            // 找 aot-tag-selector 內的 tag (有 .vip-icon-delete)
-            const selectors = document.querySelectorAll('.aot-tag-selector');
-            for (const s of selectors) {
-                if (s.offsetParent === null) continue;
-                const deletes = s.querySelectorAll('.vip-icon-delete');
-                for (const d of deletes) d.click();
-            }
-        })()
-    """)
-    await asyncio.sleep(0.8)
-
-    # 4. 點「收件者」aot-tag-selector → 開啟「選擇聯絡人」picker
-    sel_clicked = await cdp_eval(ws_url, """
-        (function() {
-            // aot-tag-selector__input 是可點擊的觸發元素
-            const selectors = document.querySelectorAll('.aot-tag-selector__input');
-            for (const s of selectors) {
-                if (s.offsetParent === null) continue;
-                const r = s.getBoundingClientRect();
-                if (r.width < 5 || r.height < 5) continue;
-                return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
-            }
-            return null;
-        })()
-    """)
-    if not sel_clicked:
-        print(f'    ✗ 找不到 收件者 selector')
-        return False
-    sc = json.loads(sel_clicked)
-    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
-        for i_id, params in enumerate([
-            {'type': 'mouseMoved', 'x': sc['x'], 'y': sc['y']},
-            {'type': 'mousePressed', 'x': sc['x'], 'y': sc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
-            {'type': 'mouseReleased', 'x': sc['x'], 'y': sc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
-        ]):
-            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
-            await ws.recv()
-            await asyncio.sleep(0.1)
-    await asyncio.sleep(2)
-
-    # 確認「選擇聯絡人」picker 已開啟
-    picker_opened = await cdp_eval(ws_url, """
-        (function() {
-            const titles = document.querySelectorAll('.modal-title');
-            for (const t of titles) {
-                if (t.offsetParent === null) continue;
-                if ((t.textContent || '').trim() === '選擇聯絡人') return true;
-            }
-            return false;
-        })()
-    """)
-    if not picker_opened:
-        print(f'    ✗ 點 收件者 後「選擇聯絡人」picker 未開啟')
-        return False
-    print(f'    📋 選擇聯絡人 picker 已開啟')
-
-    # 5. 在 picker 搜尋輸入 email
     typed = await cdp_eval(ws_url, f"""
         (function(email) {{
             const inputs = document.querySelectorAll('input[placeholder*="輸入聯絡人"]');
@@ -793,14 +992,11 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
         }})({email_json})
     """)
     if not typed:
-        print(f'    ✗ picker 搜尋框找不到')
         return False
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(1.2)
 
-    # 6. 勾選對應的 checkbox（row 結構：col-5 checkbox + col email）
     check_result = await cdp_eval(ws_url, f"""
         (function(email) {{
-            // 找含此 email 的 row（class="row"）
             const rows = document.querySelectorAll('.mail-list .row');
             for (const row of rows) {{
                 if (row.offsetParent === null) continue;
@@ -808,40 +1004,179 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
                 const cb = row.querySelector('input[type="checkbox"]');
                 if (!cb) continue;
                 if (!cb.checked) {{
-                    // 點 label 觸發 Vue 的 v-model 更新
                     const label = cb.closest('label') || row.querySelector('label');
-                    if (label) {{
-                        label.click();
-                    }} else {{
-                        cb.click();
-                    }}
+                    if (label) {{ label.click(); }} else {{ cb.click(); }}
                 }}
-                return JSON.stringify({{ ok: true, checked: cb.checked, rowText: row.textContent.trim().slice(0, 50) }});
+                return JSON.stringify({{ ok: true, rowText: row.textContent.trim().slice(0, 50) }});
             }}
             return JSON.stringify({{ ok: false, reason: 'no matching row' }});
         }})({email_json})
     """)
     cr = json.loads(check_result or '{}')
     if not cr.get('ok'):
-        print(f'    ✗ 勾選失敗: {cr}')
         return False
-    print(f'    ☑ 已勾選聯絡人「{cr.get("rowText","")}」')
-    await asyncio.sleep(1)
+    return True
 
-    # 7. 驗證「已選取」chip 有此 email
-    in_selected = await cdp_eval(ws_url, f"""
-        (function(email) {{
-            const tags = document.querySelectorAll('.selected-list .tag .tag__content, .selected-list .tag');
-            for (const t of tags) {{
-                if ((t.textContent || '').includes(email)) return true;
-            }}
-            return false;
-        }})({email_json})
+
+async def forward_to_recipients(ws_url: str, summary: str, emails: list, detail_url: str) -> int:
+    """單一候選人轉寄給多個收件人：1 次轉寄 modal + 1 次 picker，內部依序搜尋勾選 N 個 email。
+
+    流程：
+    1. navigate 到候選人詳情頁
+    2. 點 sidebar「轉寄」→ 開啟「轉寄」modal
+    3. 移除預設收件者
+    4. 點「收件者」selector → 開啟「選擇聯絡人」picker
+    5. 對每個 email：在 picker 內搜尋 + 勾選（chip 會累積到「已選取」區）
+    6. 點「送出」關閉 picker
+    7. 回轉寄 modal 填說明
+    8. 點「發送」一次寄給所有勾選的人
+
+    回傳：實際勾選成功的人數（0 表完全失敗）
+    """
+    # 1. navigate（含 1 次重試：若首次 navigate 後 40s 仍等不到按鈕，再 navigate 一次）
+    btn_ready = False
+    for nav_attempt in range(2):
+        await navigate(ws_url, detail_url)
+        for i in range(40):  # 從 20s 提升到 40s（部分履歷頁載入較慢）
+            await asyncio.sleep(1)
+            if await cdp_eval(ws_url, """
+                (function() {
+                    const btns = document.querySelectorAll('button');
+                    for (const b of btns) {
+                        if (b.offsetParent === null) continue;
+                        if ((b.textContent || '').trim() === '轉寄' && b.querySelector('.vip-icon-forward')) return true;
+                    }
+                    return false;
+                })()
+            """):
+                btn_ready = True
+                print(f'    ✓ sidebar 轉寄 按鈕已渲染 ({i+1}s, nav #{nav_attempt+1})')
+                break
+        if btn_ready:
+            break
+        if nav_attempt == 0:
+            print(f'    ⚠️ 40s 等不到按鈕，重新 navigate 再試一次...')
+    if not btn_ready:
+        print(f'    ✗ 等不到 sidebar 轉寄 按鈕')
+        return 0
+    await asyncio.sleep(3)
+
+    # 2. 點 sidebar 轉寄 → 開「轉寄」modal
+    btn_coords = await cdp_eval(ws_url, """
+        (function() {
+            const btns = document.querySelectorAll('button');
+            for (const b of btns) {
+                if (b.offsetParent === null) continue;
+                if ((b.textContent || '').trim() === '轉寄' && b.querySelector('.vip-icon-forward')) {
+                    const r = b.getBoundingClientRect();
+                    return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
+                }
+            }
+            return null;
+        })()
     """)
-    if not in_selected:
-        print(f'    ⚠️ 勾選後「已選取」區未出現 {email}（嘗試繼續送出）')
+    if not btn_coords:
+        return 0
+    bc = json.loads(btn_coords)
+    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+        for i_id, params in enumerate([
+            {'type': 'mouseMoved', 'x': bc['x'], 'y': bc['y']},
+            {'type': 'mousePressed', 'x': bc['x'], 'y': bc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
+            {'type': 'mouseReleased', 'x': bc['x'], 'y': bc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
+        ]):
+            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
+            await ws.recv()
+            await asyncio.sleep(0.1)
+    await asyncio.sleep(2)
 
-    # 8. 點 picker 的「送出」按鈕（btn-primary btn--sm 文字為「送出」）
+    forward_modal = await cdp_eval(ws_url, """
+        (function() {
+            const titles = document.querySelectorAll('.modal-title');
+            for (const t of titles) {
+                if (t.offsetParent === null) continue;
+                const main = (t.firstChild && t.firstChild.textContent || '').trim();
+                if (main === '轉寄') return true;
+            }
+            return false;
+        })()
+    """)
+    if not forward_modal:
+        print(f'    ✗ 「轉寄」modal 未出現')
+        return 0
+    print(f'    📋 轉寄 modal 已開啟')
+
+    # 3. 移除預設收件者 tags
+    await cdp_eval(ws_url, """
+        (function() {
+            const selectors = document.querySelectorAll('.aot-tag-selector');
+            for (const s of selectors) {
+                if (s.offsetParent === null) continue;
+                const deletes = s.querySelectorAll('.vip-icon-delete');
+                for (const d of deletes) d.click();
+            }
+        })()
+    """)
+    await asyncio.sleep(0.8)
+
+    # 4. 點收件者 selector 開 picker
+    sel_clicked = await cdp_eval(ws_url, """
+        (function() {
+            const selectors = document.querySelectorAll('.aot-tag-selector__input');
+            for (const s of selectors) {
+                if (s.offsetParent === null) continue;
+                const r = s.getBoundingClientRect();
+                if (r.width < 5 || r.height < 5) continue;
+                return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
+            }
+            return null;
+        })()
+    """)
+    if not sel_clicked:
+        print(f'    ✗ 找不到 收件者 selector')
+        return 0
+    sc = json.loads(sel_clicked)
+    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+        for i_id, params in enumerate([
+            {'type': 'mouseMoved', 'x': sc['x'], 'y': sc['y']},
+            {'type': 'mousePressed', 'x': sc['x'], 'y': sc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
+            {'type': 'mouseReleased', 'x': sc['x'], 'y': sc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
+        ]):
+            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
+            await ws.recv()
+            await asyncio.sleep(0.1)
+    await asyncio.sleep(2)
+
+    picker_opened = await cdp_eval(ws_url, """
+        (function() {
+            const titles = document.querySelectorAll('.modal-title');
+            for (const t of titles) {
+                if (t.offsetParent === null) continue;
+                if ((t.textContent || '').trim() === '選擇聯絡人') return true;
+            }
+            return false;
+        })()
+    """)
+    if not picker_opened:
+        print(f'    ✗ 「選擇聯絡人」picker 未開啟')
+        return 0
+    print(f'    📋 選擇聯絡人 picker 已開啟')
+
+    # 5. 對每個 email 在 picker 內搜尋 + 勾選（chip 累積到「已選取」）
+    checked_count = 0
+    for email in emails:
+        ok = await _search_and_check_in_picker(ws_url, email)
+        if ok:
+            checked_count += 1
+            print(f'    ☑ 已勾選 {email}')
+        else:
+            print(f'    ⚠️ 找不到聯絡人 {email}（跳過）')
+        await asyncio.sleep(0.5)
+
+    if checked_count == 0:
+        print(f'    ✗ 沒有任何聯絡人成功勾選，中止')
+        return 0
+
+    # 6. 點 picker「送出」
     submit_coords = await cdp_eval(ws_url, """
         (function() {
             const btns = document.querySelectorAll('button.btn-primary, button');
@@ -857,7 +1192,7 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
     """)
     if not submit_coords:
         print(f'    ✗ 找不到 picker 送出 按鈕')
-        return False
+        return 0
     sb = json.loads(submit_coords)
     async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
         for i_id, params in enumerate([
@@ -869,12 +1204,11 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
             await ws.recv()
             await asyncio.sleep(0.1)
     await asyncio.sleep(2)
-    print(f'    ✓ 已送出 picker 選擇')
+    print(f'    ✓ 已送出 picker（{checked_count}/{len(emails)} 人勾選）')
 
-    # 9. 回到「轉寄」modal，填說明 textarea
+    # 7. 填說明 textarea
     fill_expr = """
     (function(text){
-        // 找轉寄 modal 內的 textarea
         const tas = Array.from(document.querySelectorAll('.modal-body textarea, textarea'));
         const ta = tas.find(t => t.offsetParent !== null);
         if (!ta) return 'no textarea';
@@ -892,12 +1226,12 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
             break
         await asyncio.sleep(0.5)
     if not isinstance(fill_result, int) or fill_result == 0:
-        print(f'    ✗ 找不到說明 textarea ({fill_result})')
-        return False
+        print(f'    ✗ 找不到說明 textarea')
+        return 0
     print(f'    ✓ 已填說明（{fill_result} 字）')
     await asyncio.sleep(1)
 
-    # 10. 點「發送」aot-button（custom web component，需要用座標）
+    # 8. 點「發送」
     send_coords = await cdp_eval(ws_url, """
         (function() {
             const btns = document.querySelectorAll('aot-button');
@@ -913,7 +1247,7 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
     """)
     if not send_coords:
         print(f'    ✗ 找不到 發送 aot-button')
-        return False
+        return 0
     sd = json.loads(send_coords)
     async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
         for i_id, params in enumerate([
@@ -926,35 +1260,29 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
             await asyncio.sleep(0.1)
     await asyncio.sleep(3)
     await dismiss_network_error(ws_url)
-    print(f'    ✓ 已點 發送 → {email}')
-    return True
+    print(f'    ✓ 已點 發送 → {checked_count} 個收件人')
+    return checked_count
 
 
 async def forward_resume(ws_url: str, summary: str, emails: list | None = None,
                         detail_url: str | None = None) -> bool:
-    """對 emails 中的每個收件人，各跑一次完整的轉寄流程。
-    任何一個成功就回傳 True。
+    """轉寄一份履歷給多個收件人（單次 modal，picker 內勾選多人後送出一次）。
+    任何收件人有勾選成功就回傳 True。
     """
     if emails is None:
         emails = DEFAULT_FORWARD_EMAILS
     if not detail_url:
-        print(f'  ✗ forward_resume 需要 detail_url 才能 navigate')
+        print(f'  ✗ forward_resume 需要 detail_url')
         return False
 
-    success_count = 0
-    for idx, email in enumerate(emails, 1):
-        print(f'  📨 轉寄 ({idx}/{len(emails)}) → {email}')
-        try:
-            if await forward_one_recipient(ws_url, summary, email, detail_url):
-                success_count += 1
-            else:
-                print(f'    ✗ {email} 轉寄失敗')
-        except Exception as e:
-            print(f'    ✗ {email} 轉寄錯誤: {e}')
-        await asyncio.sleep(2)
-    print(f'  ✓ 成功 {success_count}/{len(emails)}')
-    return success_count > 0
-
+    print(f'  📨 轉寄給 {len(emails)} 個收件人：{", ".join(emails)}')
+    try:
+        ok_count = await forward_to_recipients(ws_url, summary, emails, detail_url)
+    except Exception as e:
+        print(f'  ✗ 轉寄錯誤: {e}')
+        return False
+    print(f'  {"✓" if ok_count > 0 else "✗"} 成功 {ok_count}/{len(emails)}')
+    return ok_count > 0
 
 
 def load_history(log_path: Path) -> dict:
@@ -1026,6 +1354,7 @@ async def run(profile: dict, threshold: int, dry_run: bool, port: int | None,
     log_json = job_dir / 'forward_log.json'
     cache_json = job_dir / 'resume_cache.json'
     analysis_md = job_dir / f"analysis_{datetime.now().strftime('%Y%m%d')}.md"
+    analysis_html = job_dir / f"analysis_{datetime.now().strftime('%Y%m%d')}.html"
 
     print(f'✓ 職缺：{display_name} ({job_id})')
 
@@ -1037,6 +1366,76 @@ async def run(profile: dict, threshold: int, dry_run: bool, port: int | None,
     data = json.loads(candidates_json.read_text())
     candidates = data.get('candidates', [])
     print(f'✓ 共 {len(candidates)} 位人選')
+
+    # 若搜尋結果為 0 人，產出特殊訊息報告後直接結束
+    if len(candidates) == 0:
+        history = load_history(log_json)
+        already_forwarded = history['forwarded_ids']
+        msg_md = '\n'.join([
+            f'# {display_name} 人選自動化分析報告',
+            f'',
+            f'**執行時間**：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+            f'**職缺代碼**：{job_id}',
+            f'',
+            f'## ⚠️ 搜尋結果：0 位人選',
+            f'',
+            f'> **搜尋條件太過嚴格，未有人才符合**',
+            f'',
+            f'### 建議調整方向',
+            f'- 放寬年齡範圍（age_min / age_max）',
+            f'- 放寬總年資要求（work_exp_years）',
+            f'- 增加可接受的科系（majors）',
+            f'- 擴大希望工作地或居住地（work_locations / home_locations）',
+            f'- 將「最近活動日」從 7 天內改為 14 天內或 1 個月內',
+            f'- 減少必要證照數量或改為非必要條件',
+            f'',
+            f'請與 HR 主管討論後，修改 Google Drive 上的職缺需求文件，下次排程會自動套用新條件。',
+        ])
+        analysis_md.write_text(msg_md)
+        # 也產出簡易 HTML 版
+        html_body = f"""<!DOCTYPE html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<title>{display_name} - 分析報告</title>
+<style>
+body{{font-family:-apple-system,sans-serif;max-width:760px;margin:40px auto;padding:24px;color:#333}}
+h1{{color:#1e3a8a;border-bottom:3px solid #1e3a8a;padding-bottom:8px}}
+.warn{{background:#fff4e5;border-left:4px solid #ff9800;padding:16px;margin:20px 0;border-radius:4px}}
+.warn .title{{font-size:1.3em;color:#e65100;font-weight:bold;margin-bottom:8px}}
+ul li{{margin:6px 0}}
+.meta{{color:#666;font-size:0.9em}}
+</style></head><body>
+<h1>{_html_escape(display_name)} 人選自動化分析報告</h1>
+<p class="meta">執行時間：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}｜職缺代碼：{job_id}</p>
+<div class="warn">
+  <div class="title">⚠️ 搜尋結果：0 位人選</div>
+  <div>搜尋條件太過嚴格，未有人才符合</div>
+</div>
+<h3>建議調整方向</h3>
+<ul>
+  <li>放寬年齡範圍（age_min / age_max）</li>
+  <li>放寬總年資要求（work_exp_years）</li>
+  <li>增加可接受的科系（majors）</li>
+  <li>擴大希望工作地或居住地（work_locations / home_locations）</li>
+  <li>將「最近活動日」從 7 天內改為 14 天內或 1 個月內</li>
+  <li>減少必要證照數量或改為非必要條件</li>
+</ul>
+<p>請與 HR 主管討論後，修改 Google Drive 上的職缺需求文件，下次排程會自動套用新條件。</p>
+</body></html>"""
+        try:
+            analysis_html.write_text(html_body)
+        except NameError:
+            pass  # _html_escape 或 analysis_html 未定義時跳過 HTML
+        # 寫入空 forward_log 並結束
+        history.setdefault('runs', []).append({
+            'timestamp': datetime.now().isoformat(),
+            'job_id': job_id, 'threshold': threshold, 'results': [],
+            'note': '搜尋條件太過嚴格，未有人才符合',
+        })
+        save_history(log_json, already_forwarded, history['runs'])
+        print(f'\n⚠️ 搜尋條件太過嚴格，未有人才符合')
+        print(f'  → {analysis_md}')
+        print(f'  → {analysis_html}')
+        return 0
 
     history = load_history(log_json)
     already_forwarded = history['forwarded_ids']
@@ -1134,7 +1533,9 @@ async def run(profile: dict, threshold: int, dry_run: bool, port: int | None,
 
         # LLM 評分（0-100，從自傳/工作描述語意取得；與規則分按權重融合）
         llm_result = None
-        if use_llm and LLM_AVAILABLE:
+        # 極端規則分跳過 LLM 評分以省時間：< 30（明顯不符）或 > 90（明顯符合）
+        skip_llm_extreme = (rule_score < 30 or rule_score > 90)
+        if use_llm and LLM_AVAILABLE and not skip_llm_extreme:
             cached_llm = (cache_entry or {}).get('llm_score') if cache_entry else None
             # 舊快取 max_score 是 20，新版是 100；若分數 ≤20 視為舊版需重算
             if cached_llm and cached_llm.get('score', 0) > 20 and not force_refresh:
@@ -1155,6 +1556,8 @@ async def run(profile: dict, threshold: int, dry_run: bool, port: int | None,
                         save_resume_cache(cache_json, resume_cache)
                 else:
                     print(f'  🤖 LLM 評分失敗，僅用規則分')
+        elif skip_llm_extreme:
+            print(f'  ⏭ 規則分 {rule_score} 屬極端值，跳過 LLM 評分（省 ~40s）')
 
         # 權重融合
         if llm_result:
@@ -1252,6 +1655,17 @@ async def run(profile: dict, threshold: int, dry_run: bool, port: int | None,
         md_lines.append('')
 
     analysis_md.write_text('\n'.join(md_lines))
+
+    # 另外產生 HTML 版本，方便 HR 觀看與列印
+    analysis_html.write_text(_render_html_report(
+        job_id=job_id,
+        display_name=display_name,
+        profile=profile,
+        threshold=threshold,
+        scored=scored,
+        log=log,
+        resume_cache=resume_cache,
+    ))
     history['runs'].append(log)
     save_history(log_json, already_forwarded, history['runs'])
     save_resume_cache(cache_json, resume_cache)

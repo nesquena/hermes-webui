@@ -178,8 +178,9 @@ def main():
         started = time.time()
         last_output = time.time()
         grace_started = 0.0
-        idle_limit = 90
-        hard_limit = 360
+        idle_limit = 360  # 6 分鐘無 stdout 輸出才視為卡住
+        hard_limit = 600  # 總時長 10 分鐘上限
+        ws_reconnect_at = 0.0  # CDP WebSocket 重連時間（重連後若 60s 無進展就 kill）
 
         def stop(why: str, exit_code: int = 0):
             print(f'  ↳ {why}')
@@ -200,18 +201,33 @@ def main():
                         completed_local = True
                         grace_started = time.time()
                         print('  ↳ 偵測到「All phases complete」')
+                    # 偵測 CDP WebSocket 重連事件（重連後若無進展，提前 kill）
+                    if 'WebSocket reconnection attempt' in chunk:
+                        ws_reconnect_at = time.time()
 
+                # file_seen 只認「檔案有內容（count > 0 或 candidates 非空）」，避免空檔誤判
                 if not file_seen_local and LEGACY_CANDIDATES.exists():
-                    file_seen_local = True
-                    grace_started = grace_started or time.time()
-                    print('  ↳ 偵測到 candidates_raw.json 已落盤')
+                    try:
+                        import json as _json
+                        d = _json.loads(LEGACY_CANDIDATES.read_text())
+                        cnt = d.get('count', len(d.get('candidates', [])))
+                        if cnt > 0:
+                            file_seen_local = True
+                            grace_started = grace_started or time.time()
+                            print(f'  ↳ 偵測到 candidates_raw.json 已落盤（{cnt} 人）')
+                    except Exception:
+                        pass  # 檔案還在寫入或格式不完整，繼續等
 
                 now = time.time()
-                if file_seen_local and (now - grace_started) > 2:
+                if file_seen_local and (now - grace_started) > 5:
                     rc_local = stop('autologin 完成，主動 terminate')
                     break
-                if completed_local and not file_seen_local and (now - grace_started) > 30:
-                    rc_local = stop('「complete」後 30s 仍無檔，強制 kill', 124)
+                if completed_local and not file_seen_local and (now - grace_started) > 60:
+                    rc_local = stop('「complete」後 60s 仍無有效結果，強制 kill', 124)
+                    break
+                # CDP WebSocket 重連後若 60s 仍無進展，認定恢復失敗
+                if ws_reconnect_at > 0 and (now - ws_reconnect_at) > 60 and (now - last_output) > 60:
+                    rc_local = stop('CDP WebSocket 重連後 60s 無進展，視為失敗', 124)
                     break
                 if (now - last_output) > idle_limit:
                     rc_local = stop(f'閒置 {idle_limit}s 沒輸出，視為卡住', 124)
