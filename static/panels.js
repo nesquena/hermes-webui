@@ -725,9 +725,20 @@ async function _loadRunContent(jobId, filename, runId){
   const body = document.querySelector(`#${runId} .detail-run-body`);
   if (!body) return;
   const item = document.getElementById(runId);
-  if (!item.classList.contains('open')) {
-    item.classList.add('open');
+  if (item.classList.contains('open')) {
+    // Already open → collapse and return (toggle behaviour)
+    item.classList.remove('open');
+    body.classList.remove('expanded');
+    _cronExpansionSet(_cronRunExpandKey(jobId, filename), false);
+    const btn = item ? item.querySelector('.detail-expand-toggle') : null;
+    if (btn) {
+      btn.textContent = '▾';
+      btn.title = (t('cron_expand_output') || 'Expand output');
+      btn.setAttribute('aria-label', btn.title);
+    }
+    return;
   }
+  item.classList.add('open');
   body.classList.toggle('expanded', _cronExpansionGet(_cronRunExpandKey(jobId, filename)));
   body.innerHTML = `<span style="opacity:.5">${esc(t('loading'))}</span>`;
   try {
