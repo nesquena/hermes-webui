@@ -77,7 +77,7 @@ def test_tool_activity_uses_tool_cards_and_run_activity_owns_timer():
 
 
 def test_settled_activity_render_keeps_tools_bound_to_progress_bursts():
-    render_fn = UI_JS.split("if(!S.busy){", 1)[1].split("// Render per-turn duration", 1)[0]
+    render_fn = UI_JS.split("if(!S.busy || (S.toolCalls&&S.toolCalls.length)){", 1)[1].split("// Render per-turn duration", 1)[0]
     assert "_assistantAnchorForActivity" in render_fn
     assert "const byActivity = new Map()" in render_fn
     assert "tc.activityBurstId" in render_fn
@@ -217,7 +217,7 @@ assert.strictEqual(merged[0].started_at, 123);
 
 
 def test_settled_activity_render_treats_burst_zero_as_unanchored_activity():
-    render_fn = UI_JS.split("if(!S.busy){", 1)[1].split("// Render per-turn duration", 1)[0]
+    render_fn = UI_JS.split("if(!S.busy || (S.toolCalls&&S.toolCalls.length)){", 1)[1].split("// Render per-turn duration", 1)[0]
     assert "String(burstId)!=='0'" in render_fn
     assert "if(aIdx<assistantIdxs[0]) return null;" in render_fn
     assert "normalizeToken(tc.activityBurstId)" in render_fn
