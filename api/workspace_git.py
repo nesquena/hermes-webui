@@ -33,6 +33,8 @@ _GIT_ENV_SCRUB_KEYS = (
     "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_PARAMETERS",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
     "GIT_SSH",
     "GIT_SSH_COMMAND",
 )
@@ -44,6 +46,7 @@ _GIT_HARDENED_CONFIG = (
     # from turning read/status/fetch calls into host command execution.
     ("core.fsmonitor", "false"),
     ("core.sshCommand", "ssh"),
+    ("core.askPass", ""),
     ("credential.helper", ""),
     ("protocol.ext.allow", "never"),
 )
