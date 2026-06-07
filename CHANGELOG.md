@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.306] — 2026-06-06 — Release JV (stage-a2 — branchy compression lineage resolves to the freshest tip)
+
+### Fixed
+- **A conversation no longer looks missing or stale after compaction when its compression lineage branched.** When a compression parent had multiple continuation-looking children — which happens when a stale segment is resumed after a newer compressed branch already exists — the sidebar projection followed only the newest *direct* child, so it could surface a dead-end branch and hide the deeper branch that actually has the latest activity. The projection now walks every reachable continuation descendant and selects the freshest *messageful* tip by `(last_activity, depth)`, and `read_session_lineage_metadata()` exposes the same canonical `_lineage_tip_id` so the sidebar collapse and the import projection agree on which branch is live. Older/minimal `state.db` files stay compatible — `source`, `message_count`, and the `messages` table (including schemas with no `timestamp` column or an ISO-8601 *text* timestamp) are all treated as optional and can no longer collapse the lineage metadata. (#3751, @ai-ag2026)
+
 ## [v0.51.305] — 2026-06-06 — Release JU (stage-p2b — dormant unified-SessionDB adapter groundwork)
 
 ### Changed
