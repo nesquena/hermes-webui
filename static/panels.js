@@ -296,6 +296,21 @@ function _cronScheduleKindForInput(value) {
   return '';
 }
 
+function _toggleCronAgentMode() {
+  const cb = $('cronFormAgentMode');
+  const promptEl = $('cronFormPrompt');
+  const hintEl = $('cronFormNoAgentHint');
+  if (!cb) return;
+  const isAgent = cb.checked;
+  if (promptEl) {
+    promptEl.disabled = !isAgent;
+    promptEl.required = isAgent;
+    if (!isAgent) promptEl.closest('.detail-form-row').classList.add('cron-no-agent-prompt-row');
+    else promptEl.closest('.detail-form-row').classList.remove('cron-no-agent-prompt-row');
+  }
+  if (hintEl) hintEl.style.display = isAgent ? 'none' : '';
+}
+
 function _syncCronScheduleWarning() {
   const input = $('cronFormSchedule');
   const warning = $('cronFormScheduleOnceWarning');
@@ -1043,8 +1058,12 @@ async function openCronAliases(){
       </div>
     </div>`;
 
-  // Delegated event listener — no inline onclick, safe from XSS
-  body.addEventListener('click', function(e) {
+  // Delegated event listener — no inline onclick, safe from XSS.
+  // Remove any previously attached handler first to avoid duplication.
+  if (typeof body._cronAliasClickHandler === 'function') {
+    body.removeEventListener('click', body._cronAliasClickHandler);
+  }
+  body._cronAliasClickHandler = function(e) {
     var btn = e.target.closest('[data-action]');
     if (!btn) return;
     var action = btn.getAttribute('data-action');
@@ -1056,7 +1075,8 @@ async function openCronAliases(){
     else if (action === 'alias-save') saveCronAlias(value);
     else if (action === 'alias-cancel') cancelEditCronAlias(value);
     else if (action === 'alias-delete') deleteCronAlias(value);
-  });
+  };
+  body.addEventListener('click', body._cronAliasClickHandler);
 }
 
 async function addCronAlias(){
@@ -1139,6 +1159,9 @@ function openCronEdit(job){
     toast_notifications: job.toast_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
+    model: job.model || '',
+    provider: job.provider || '',
+    reasoning_effort: job.reasoning_effort || '',
     isEdit: true,
   });
   if (!_cronSkillsCache) {
@@ -1149,7 +1172,7 @@ function openCronEdit(job){
   loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', isEdit }){
+function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', model='', provider='', reasoning_effort='', isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
@@ -1195,6 +1218,14 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
         ${scriptBlock}
         ${promptBlock}
         <div class="detail-form-row">
+          <label>${esc(t('cron_mode_label') || 'Agent mode')}</label>
+          <label class="detail-form-check">
+            <input type="checkbox" id="cronFormAgentMode" ${!isNoAgent ? 'checked' : ''} onchange="_toggleCronAgentMode()">
+            <span>${esc(t('cron_agent_mode_desc') || 'Use agent (LLM) to process the prompt. Disable for script-only mode (no_agent).')}</span>
+          </label>
+          <div id="cronFormNoAgentHint" class="detail-form-hint cron-no-agent-hint" style="${isNoAgent ? '' : 'display:none'}">No-agent mode runs the configured script directly; the prompt is ignored. No-agent script: <code>${esc(script || '—')}</code></div>
+        </div>
+        <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
           <select id="cronFormDeliver">
             <option value="" disabled>loading...</option>
@@ -1231,6 +1262,46 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
   }
   const focusEl = $('cronFormName');
   if (focusEl) focusEl.focus();
+}
+
+async function _populateCronModelOptions(selectedModel, selectedProvider) {
+  const sel = $('cronFormModel');
+  if (!sel) return;
+  sel.disabled = true;
+  try {
+    const catalog = await api('/api/models');
+    const groups = catalog && catalog.groups ? catalog.groups : [];
+    sel.innerHTML = '';
+    // "Server default" option
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = t('cron_model_default') || 'Server default';
+    defaultOpt.dataset.provider = '';
+    sel.appendChild(defaultOpt);
+    for (const group of groups) {
+      const providerId = group.provider_id || group.provider || '';
+      const providerLabel = group.provider_label || providerId || '';
+      if (!group.models || !group.models.length) continue;
+      const optgroup = document.createElement('optgroup');
+      optgroup.label = providerLabel;
+      for (const m of group.models) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.label || m.id;
+        opt.dataset.provider = m.provider || providerId;
+        if (m.id === selectedModel) opt.selected = true;
+        optgroup.appendChild(opt);
+      }
+      sel.appendChild(optgroup);
+    }
+    // Select the matching option
+    if (selectedModel) {
+      sel.value = selectedModel;
+    }
+  } catch (e) {
+    sel.innerHTML = '<option value="" disabled>Failed to load models</option>';
+  }
+  sel.disabled = false;
 }
 
 async function _populateCronDeliverOptions(selectedValue, isEdit) {
@@ -1340,9 +1411,17 @@ async function saveCronForm(){
   const deliver=delivEl?delivEl.value:'local';
   const profile=profileEl?profileEl.value:'';
   const toastNotifications=toastEl?!!toastEl.checked:true;
+  const modelEl = $('cronFormModel');
+  const selectedModel = modelEl ? modelEl.value : '';
+  const selectedProvider = modelEl && modelEl.selectedOptions && modelEl.selectedOptions[0] ? (modelEl.selectedOptions[0].dataset.provider || '') : '';
+  const reasoningEl = $('cronFormReasoning');
+  const reasoningEffort = reasoningEl ? reasoningEl.value : '';
+  // Read checkbox to override: checked = agent mode, unchecked = no_agent
+  const agentModeCb = $('cronFormAgentMode');
+  const effectiveNoAgent = agentModeCb ? !agentModeCb.checked : isNoAgent;
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
-  if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
+  if(!effectiveNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
   const TELEGRAM_CHAT_RE=/^telegram:(\d+)$/i;
   const telegramChatMatch = TELEGRAM_CHAT_RE.exec(deliver || '');
   let originForSend = null;
@@ -1356,8 +1435,11 @@ async function saveCronForm(){
   }
   try{
     if (_editingCronId) {
-      const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications};
-      if (!isNoAgent) updates.prompt = prompt;
+      const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications, no_agent: effectiveNoAgent};
+      if (!effectiveNoAgent) updates.prompt = prompt;
+      if (selectedModel) { updates.model = selectedModel; updates.provider = selectedProvider; }
+      else { updates.model = ''; updates.provider = ''; }
+      updates.reasoning_effort = reasoningEffort;
       if (name) updates.name = name;
       if (deliver) updates.deliver = deliver;
       if (originForSend) updates.origin = originForSend;

@@ -2902,6 +2902,40 @@ body.resizing .sidebar{transition:none!important;}
 .tool-worklog-list .tool-card-row{
   margin:0;
 }
+/* Worklog toggle — collapsed by default, click to expand */
+.worklog-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  margin: 0 0 2px 0;
+  border-radius: 7px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--muted);
+  font-size: 13px;
+  opacity: 0.65;
+  transition: opacity 0.15s;
+}
+.worklog-toggle:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+  opacity: 1;
+}
+.worklog-toggle-icon {
+  font-size: 10px;
+  transition: transform 0.18s ease;
+  display: inline-block;
+}
+.live-worklog:not(.collapsed) .worklog-toggle-icon {
+  transform: rotate(90deg);
+}
+.worklog-toggle-label {
+  font-weight: 400;
+}
+.live-worklog.collapsed .tool-worklog-list {
+  display: none;
+}
 .tool-worklog-list .tool-card,
 :root[data-skin] .tool-worklog-list .tool-card,
 :root[data-skin] .tool-worklog-list .tool-card:hover,
