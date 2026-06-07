@@ -428,7 +428,7 @@ def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
     # INFLIGHT branch must call appendLiveToolCard
     inflight_idx = src.find("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+1600]
+    inflight_block = src[inflight_idx:inflight_idx+4200]
     assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
     assert "clearLiveToolCards" in inflight_block,         "loadSession INFLIGHT branch must clear old live cards before restoring"
 
@@ -543,6 +543,18 @@ def test_chat_start_persists_pending_turn_metadata_for_reload_recovery(cleanup_t
     assert '"pending_user_message": getattr(s, "pending_user_message", None)' in routes_src
 
 
+def test_session_detail_uses_runtime_streaming_state(cleanup_test_sessions):
+    """GET /api/session must agree with /api/sessions on live stream ownership."""
+    routes_src = (REPO_ROOT / "api/routes.py").read_text()
+    session_route = routes_src.split('if parsed.path == "/api/session":', 1)[1].split(
+        'if parsed.path == "/api/session/lineage/report":', 1
+    )[0]
+    assert "active_stream_ids = _active_stream_ids()" in session_route
+    assert "s.compact(" in session_route
+    assert "include_runtime=True" in session_route
+    assert "active_stream_ids=active_stream_ids" in session_route
+
+
 def test_reload_path_restores_pending_message_and_reattaches_live_stream(cleanup_test_sessions):
     """R15d: the frontend reload path must show the pending user turn and
     reattach to the live SSE stream after loadSession().
@@ -558,6 +570,19 @@ def test_reload_path_restores_pending_message_and_reattaches_live_stream(cleanup
             'const activeStreamId=S.session.active_stream_id||null;' in sessions_src)
     assert 'attachLiveStream(sid, activeStreamId' in sessions_src
     assert 'if (S.activeStreamId && S.activeStreamId === streamId) return;' in ui_src
+    active_branch_start = sessions_src.index("if(activeStreamId){\n      S.busy=true;")
+    active_branch_end = sessions_src.index("}else{\n      S.busy=false;", active_branch_start)
+    active_branch = sessions_src[active_branch_start:active_branch_end]
+    render_pos = active_branch.index("renderMessages(")
+    shell_pos = active_branch.index("ensureLiveWorklogShell")
+    assert render_pos < shell_pos, (
+        "Reloading an active stream must recreate the live worklog shell after "
+        "renderMessages() rebuilds msgInner; otherwise the stream stays invisible "
+        "until a session switch triggers another restore path."
+    )
+    assert "else appendThinking();" in active_branch, (
+        "Non-simplified tool-calling must keep the legacy fallback."
+    )
 
 
 # ── R16: Switching away/back must preserve live partial assistant output ─────
@@ -609,7 +634,7 @@ def test_inflight_session_state_tracks_live_tool_cards_per_session(cleanup_test_
     messages_src = (REPO_ROOT / "static/messages.js").read_text()
     sessions_src = (REPO_ROOT / "static/sessions.js").read_text()
 
-    assert "INFLIGHT[activeSid].toolCalls.push(tc);" in messages_src, \
+    assert "inflight.toolCalls.push(tc)" in messages_src, \
         "tool SSE handler must persist live tool calls onto the in-flight session"
     assert "S.toolCalls=(INFLIGHT[sid].toolCalls||[]);" in sessions_src, \
         "loadSession() must restore live tool calls from the in-flight session state"
@@ -624,7 +649,7 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
     src = (REPO_ROOT / "static/sessions.js").read_text()
     inflight_idx = src.find("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+1600]
+    inflight_block = src[inflight_idx:inflight_idx+4200]
     busy_pos = inflight_block.find("S.busy=true;")
     # #3326 added an optional {preserveScroll} arg to the INFLIGHT-branch render
     # call, so match the call form rather than the bare `renderMessages();`.
@@ -651,6 +676,34 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
         "sessions.js should centralize INFLIGHT tail merge logic for regression coverage"
     )
 
+
+def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup_test_sessions):
+    """R16d: renderMessages should not repaint transcript during session-load window.
+
+    During loadSession(sid) after the loading metadata call, S.messages is
+    intentionally empty until _ensureMessagesLoaded(sid) settles. A concurrent
+    renderMessages() must keep the existing 'Loading conversation...' placeholder
+    instead of clearing #msgInner to an empty transcript.
+    """
+    ui_src = (REPO_ROOT / "static/ui.js").read_text()
+    fn_start = ui_src.find("function renderMessages")
+    assert fn_start >= 0, "renderMessages() not found in ui.js"
+    fn_body = ui_src[fn_start:fn_start + 1400]
+
+    compact = re.sub(r"\s+", "", fn_body)
+    assert (
+        "if(_loadingSessionId===sid&&msgCount===0&&inner)return;" in compact
+    ), (
+        "renderMessages() must return early when loadSession is active for"
+        " the current sid and S.messages is still empty."
+    )
+
+    # Guard must live before render-window reset and message-filter pass.
+    reset_pos = compact.find("if(sid!==_messageRenderWindowSid)_resetMessageRenderWindow(sid);")
+    guard_pos = compact.find("if(_loadingSessionId===sid&&msgCount===0&&inner)return;")
+    assert (
+        0 <= guard_pos < reset_pos
+    ), "Session-load empty-state guard must run before render-window/state resets."
 
 
 def test_browser_session_url_accepts_api_session_id_param(cleanup_test_sessions):
@@ -705,7 +758,7 @@ def test_loadSession_inflight_sets_active_stream_before_replaying_live_tool_card
     src = (REPO_ROOT / "static/sessions.js").read_text()
     inflight_idx = src.find("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+1600]
+    inflight_block = src[inflight_idx:inflight_idx+4200]
     active_pos = inflight_block.find("S.activeStreamId=activeStreamId;")
     replay_pos = inflight_block.find("appendLiveToolCard(tc);")
     attach_pos = inflight_block.find("attachLiveStream(sid, activeStreamId")
@@ -773,12 +826,19 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
     # On initial connect it defaults to ''; on reconnect it restores from
     # INFLIGHT so the already-rendered content survives the session switch.
     assert ("let reasoningText=''" in src
-            or "let reasoningText = _lastLiveAssistant" in src), \
+            or "let reasoningText = _lastLiveAssistant" in src
+            or "let reasoningText=_lastLiveReasoning" in src), \
         "messages.js must track streamed reasoning text separately from assistant text"
-    assert ("let liveReasoningText=''" in src or "let liveReasoningText = reasoningText" in src), \
+    assert ("let liveReasoningText=''" in src
+            or "let liveReasoningText = reasoningText" in src
+            or "let liveReasoningText=_lastLiveReasoning" in src), \
         "messages.js must track the currently active reasoning segment separately from cumulative reasoning"
     assert "source.addEventListener('reasoning'" in src or 'source.addEventListener("reasoning"' in src, \
         "messages.js must listen for live reasoning SSE events"
+    assert "liveReasoningText += text" in src, \
+        "live reasoning SSE events must update the active Worklog Thinking Card text"
+    assert "_updateLiveThinkingCard(_liveThinkingText())" in src, \
+        "live reasoning SSE events must refresh the current segment's Worklog Thinking Card"
     assert "source.addEventListener('tool_complete'" in src or 'source.addEventListener("tool_complete"' in src, \
         "messages.js must listen for live tool completion SSE events"
     assert "function _parseStreamState()" in src, \
@@ -803,14 +863,15 @@ def test_messages_js_supports_interim_assistant_events(cleanup_test_sessions):
 
 
 def test_ui_js_can_upgrade_thinking_spinner_into_live_reasoning_card(cleanup_test_sessions):
-    """R19: ui.js must be able to replace the placeholder thinking spinner with
-    streamed reasoning text while a turn is in progress.
+    """R19: ui.js keeps the thinking helpers available while simplified mode
+    renders provider reasoning as a Worklog Thinking Card.
     """
     src = (REPO_ROOT / "static/ui.js").read_text()
     assert "function _thinkingMarkup(text='')" in src or 'function _thinkingMarkup(text="")' in src, \
         "ui.js must centralize thinking row markup so it can switch between spinner and live text"
-    assert "function updateThinking(text=''){appendThinking(text);}" in src or 'function updateThinking(text=""){appendThinking(text);}' in src, \
-        "ui.js must expose an updateThinking helper for live reasoning rendering"
+    assert ("function updateThinking(text='', options){appendThinking(text, options);}" in src
+            or 'function updateThinking(text="", options){appendThinking(text, options);}' in src), \
+        "ui.js must expose an updateThinking helper that preserves live Thinking placement metadata"
     assert "function finalizeThinkingCard()" in src, \
         "ui.js must expose a helper to finalize one live thinking card before starting another"
 
@@ -841,15 +902,23 @@ def test_ui_js_keeps_reasoning_only_assistant_messages_visible(cleanup_test_sess
 
 
 def test_ui_js_does_not_hide_anchor_segments_that_contain_thinking(cleanup_test_sessions):
-    """R19c2/R19c3: reasoning-only messages must remain visible through the
-    shared compact timeline activity UI, even when the anchor segment has no prose.
+    """R19c2/R19c3: reasoning-only metadata must remain preserved as a
+    collapsed Worklog Thinking Card.
     """
     src = (REPO_ROOT / "static" / "ui.js").read_text()
     compact = src.replace(' ', '').replace('\n', '')
     assert "assistantThinking.set(rawIdx,thinkingText)" in compact, \
         "renderMessages must preserve reasoning text before hiding empty anchor segments"
+    helper_start = src.find("function _worklogReasoningTextFromMessage")
+    helper_end = src.find("function _thinkingCardHtml", helper_start)
+    assert helper_start != -1 and helper_end != -1
+    helper = src[helper_start:helper_end]
+    assert "_assistantReasoningPayloadText(m)" in helper and "_stripVisibleAssistantEchoFromThinking" in helper, \
+        "provider reasoning metadata should feed the Worklog Thinking Card after exact duplicate suppression"
+    assert "data-worklog-thinking-card" in src, \
+        "Thinking Cards should be explicit Worklog items, not tool cards"
     assert "_thinkingActivityNode(thinkingText, false)" in src, \
-        "thinking-only assistant content should render as a collapsed timeline Thinking card"
+        "settled reasoning should render as a collapsed Worklog Thinking Card"
 
 
 def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_test_sessions):
@@ -872,12 +941,20 @@ def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_tes
 
 
 def test_messages_js_finalizes_thinking_card_before_tool_card(cleanup_test_sessions):
-    """R19e: later reasoning after a tool call must render in a fresh card."""
+    """R19e: later reasoning after a tool call must render in a fresh Worklog
+    Thinking Card without discarding durable reasoning.
+    """
     src = (REPO_ROOT / "static/messages.js").read_text()
-    assert "finalizeThinkingCard" in src, \
+    tool_start = src.find("source.addEventListener('tool'")
+    tool_complete_start = src.find("source.addEventListener('tool_complete'", tool_start + 1)
+    assert tool_start >= 0 and tool_complete_start > tool_start
+    body = src[tool_start:tool_complete_start]
+    assert "finalizeThinkingCard()" in body, \
         "tool handler must finalize the current live thinking card before appending a tool card"
-    assert "liveReasoningText='';" in src or 'liveReasoningText = "";' in src, \
+    assert "liveReasoningText='';" in body or 'liveReasoningText = "";' in body, \
         "tool handler must reset the active reasoning segment before post-tool reasoning arrives"
+    assert "reasoningText=''" not in body and 'reasoningText = ""' not in body, \
+        "tool handler must not discard durable reasoning already assigned to the Worklog"
 
 
 # ── R17: Stack traces must not leak to clients in 500 responses ────────────

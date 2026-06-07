@@ -1088,6 +1088,7 @@ from api.config import (
     _get_session_agent_lock,
     SESSION_AGENT_LOCKS,
     SESSION_AGENT_LOCKS_LOCK,
+    CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
     load_settings,
     save_settings,
     set_hermes_default_model,
@@ -1893,6 +1894,223 @@ def _model_matches_configured_default(
     return True
 
 
+class _ContextLengthLookupInputs:
+    __slots__ = ("config_context_length", "custom_providers", "base_url", "provider")
+
+    def __init__(
+        self,
+        *,
+        config_context_length: int | None = None,
+        custom_providers: list | None = None,
+        base_url: str = "",
+        provider: str = "",
+    ) -> None:
+        self.config_context_length = config_context_length
+        self.custom_providers = custom_providers
+        self.base_url = base_url
+        self.provider = provider
+
+
+def _positive_context_length(value) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _model_lookup_candidates(model: str) -> tuple[str, ...]:
+    raw = str(model or "").strip()
+    candidates = []
+    for candidate in (raw, _split_provider_qualified_model(raw)[0]):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+        if "/" in candidate:
+            bare = candidate.split("/", 1)[1].strip()
+            if bare and bare not in candidates:
+                candidates.append(bare)
+    return tuple(candidates)
+
+
+def _models_config_context_length(models_cfg, model: str) -> int | None:
+    candidates = _model_lookup_candidates(model)
+    if isinstance(models_cfg, dict):
+        for candidate in candidates:
+            entry = models_cfg.get(candidate)
+            raw_ctx = entry.get("context_length") if isinstance(entry, dict) else entry
+            ctx = _positive_context_length(raw_ctx)
+            if ctx is not None:
+                return ctx
+    if isinstance(models_cfg, list):
+        for entry in models_cfg:
+            if not isinstance(entry, dict):
+                continue
+            entry_model = str(entry.get("id") or entry.get("model") or entry.get("name") or "").strip()
+            if entry_model in candidates:
+                ctx = _positive_context_length(entry.get("context_length"))
+                if ctx is not None:
+                    return ctx
+    return None
+
+
+def _canonical_context_provider(value: str | None) -> str:
+    provider = _clean_session_model_provider(value) or ""
+    if not provider:
+        return ""
+    try:
+        from api.config import _resolve_provider_alias
+
+        provider = _resolve_provider_alias(provider)
+    except Exception:
+        pass
+    return str(provider or "").strip().lower()
+
+
+def _custom_provider_slug_for_context(name: object) -> str:
+    try:
+        from api.config import _custom_provider_slug_from_name
+
+        return _custom_provider_slug_from_name(name)
+    except Exception:
+        raw = str(name or "").strip().lower()
+        if not raw:
+            return ""
+        if raw.startswith("custom:"):
+            return raw
+        slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+        slug = re.sub(r"-{2,}", "-", slug)
+        return f"custom:{slug}" if slug else ""
+
+
+def _providers_match_for_context(config_key: object, requested_provider: str) -> bool:
+    if not requested_provider:
+        return False
+    raw_key = str(config_key or "").strip().lower()
+    key = _canonical_context_provider(raw_key)
+    requested = _canonical_context_provider(requested_provider)
+    return bool(
+        requested
+        and (
+            raw_key == requested
+            or key == requested
+            or raw_key == str(requested_provider or "").strip().lower()
+        )
+    )
+
+
+def _context_length_lookup_inputs_for_model(
+    model: str | None,
+    provider: str | None = None,
+    *,
+    base_url: str | None = None,
+    cfg: dict | None = None,
+) -> _ContextLengthLookupInputs:
+    """Return the effective metadata resolver inputs for a WebUI model.
+
+    ``agent.model_metadata.get_model_context_length`` understands global
+    ``config_context_length`` and custom-provider overrides, but only when the
+    matching base URL is supplied. WebUI also owns ``providers.<provider>.models``
+    overrides, so normalize those here and keep route/session-save/SSE aligned.
+    """
+    model_for_lookup = str(model or "").strip()
+    if not model_for_lookup:
+        return _ContextLengthLookupInputs()
+
+    if cfg is None:
+        try:
+            from api.config import get_config as _get_config_for_cl
+
+            cfg = _get_config_for_cl()
+        except Exception:
+            cfg = {}
+    cfg = cfg if isinstance(cfg, dict) else {}
+
+    bare_model, explicit_provider = _split_provider_qualified_model(model_for_lookup)
+    effective_provider = _canonical_context_provider(provider or explicit_provider)
+    effective_base_url = str(base_url or "").strip()
+
+    model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    if isinstance(model_cfg, dict):
+        if not effective_provider:
+            effective_provider = _canonical_context_provider(model_cfg.get("provider"))
+        if not effective_base_url:
+            effective_base_url = str(model_cfg.get("base_url") or "").strip()
+
+    custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else None
+    if not isinstance(custom_providers, list):
+        custom_providers = None
+
+    provider_context_length = None
+    providers_cfg = cfg.get("providers", {}) if isinstance(cfg, dict) else {}
+    if isinstance(providers_cfg, dict):
+        for provider_key, provider_cfg in providers_cfg.items():
+            if not isinstance(provider_cfg, dict):
+                continue
+            if not _providers_match_for_context(provider_key, effective_provider):
+                continue
+            if not effective_base_url:
+                effective_base_url = str(provider_cfg.get("base_url") or "").strip()
+            provider_context_length = _models_config_context_length(
+                provider_cfg.get("models"),
+                bare_model or model_for_lookup,
+            )
+            break
+
+    custom_context_length = None
+    if custom_providers:
+        target_base = effective_base_url.rstrip("/")
+        model_candidates = set(_model_lookup_candidates(bare_model or model_for_lookup))
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            entry_name = str(entry.get("name") or "").strip()
+            entry_slug = _custom_provider_slug_for_context(entry_name)
+            entry_base = str(entry.get("base_url") or "").strip()
+            entry_base_norm = entry_base.rstrip("/")
+            provider_matches = bool(
+                effective_provider
+                and (
+                    effective_provider == entry_slug
+                    or effective_provider == entry_name.lower()
+                    or (effective_provider == "custom" and len(custom_providers) == 1)
+                )
+            )
+            base_matches = bool(target_base and entry_base_norm and target_base == entry_base_norm)
+            model_matches = bool(model_candidates.intersection(set(_model_lookup_candidates(entry.get("model")))))
+            models_cfg = entry.get("models")
+            if isinstance(models_cfg, dict):
+                model_matches = model_matches or any(candidate in models_cfg for candidate in model_candidates)
+            if not (provider_matches or base_matches or (not effective_provider and model_matches)):
+                continue
+            if not effective_provider and entry_slug:
+                effective_provider = entry_slug
+            if not effective_base_url and entry_base:
+                effective_base_url = entry_base
+            custom_context_length = _models_config_context_length(models_cfg, bare_model or model_for_lookup)
+            break
+
+    global_context_length = None
+    if isinstance(model_cfg, dict):
+        cfg_default_model = str(model_cfg.get("default") or "").strip()
+        raw_cfg_ctx = model_cfg.get("context_length")
+        if raw_cfg_ctx is not None and (
+            not cfg_default_model
+            or _model_matches_configured_default(
+                model_for_lookup,
+                cfg_default_model,
+                effective_provider,
+            )
+        ):
+            global_context_length = _positive_context_length(raw_cfg_ctx)
+
+    return _ContextLengthLookupInputs(
+        config_context_length=provider_context_length or custom_context_length or global_context_length,
+        custom_providers=custom_providers,
+        base_url=effective_base_url,
+        provider=effective_provider,
+    )
+
+
 
 def _should_attach_codex_provider_context(model: str, raw_active_provider: str, catalog: dict) -> bool:
     """Return True when a bare Codex model needs separate provider context.
@@ -1955,6 +2173,7 @@ def _resolve_compatible_session_model_state(
     *,
     profile_provider: str | None = None,
     profile_default_model: str | None = None,
+    explicit_model_pick: bool = False,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -2020,6 +2239,9 @@ def _resolve_compatible_session_model_state(
                 break
 
         if model_family and model_family != _profile_provider_normalized:
+            if explicit_model_pick:
+                # User explicitly chose a cross-family model; honor it (#3737)
+                return model, profile_provider, False
             _target = _profile_default or default_model
             return _target, profile_provider, True
 
@@ -2117,6 +2339,9 @@ def _resolve_compatible_session_model_state(
 
     slash = model.find("/")
     if slash < 0:
+        if explicit_model_pick:
+            # User explicitly chose this model; don't second-guess (#3737)
+            return model, requested_provider, False
         model_lower = model.lower()
         for bare_prefix in ("gpt", "claude", "gemini"):
             if model_lower.startswith(bare_prefix):
@@ -2275,43 +2500,22 @@ def _resolve_context_length_for_session_model(
         from api.config import get_config as _get_config_for_cl
 
         _cfg_for_cl = _get_config_for_cl()
-        _cfg_ctx_len_load = None
-        _cfg_custom_providers_load = None
-        try:
-            _model_cfg_load = _cfg_for_cl.get('model', {}) if isinstance(_cfg_for_cl, dict) else {}
-            if isinstance(_model_cfg_load, dict):
-                # Only apply the global model.context_length override when the
-                # session model matches model.default. Otherwise a global cap
-                # set for the default model (e.g. 232000) silently clobbers
-                # other models' real metadata (e.g. a 1M-context variant).
-                _cfg_default_model = str(_model_cfg_load.get('default') or '').strip()
-                _raw_cfg_ctx_load = _model_cfg_load.get('context_length')
-                if _raw_cfg_ctx_load is not None and (
-                    not _cfg_default_model
-                    or _model_matches_configured_default(model_for_lookup, _cfg_default_model, provider)
-                ):
-                    try:
-                        _parsed_load = int(_raw_cfg_ctx_load)
-                        if _parsed_load > 0:
-                            _cfg_ctx_len_load = _parsed_load
-                    except (TypeError, ValueError):
-                        pass
-            _raw_cp_load = _cfg_for_cl.get('custom_providers') if isinstance(_cfg_for_cl, dict) else None
-            if isinstance(_raw_cp_load, list):
-                _cfg_custom_providers_load = _raw_cp_load
-        except Exception:
-            pass
+        _ctx_lookup = _context_length_lookup_inputs_for_model(
+            model_for_lookup,
+            provider,
+            cfg=_cfg_for_cl if isinstance(_cfg_for_cl, dict) else {},
+        )
         try:
             return _get_cl(
                 model_for_lookup,
-                "",
-                config_context_length=_cfg_ctx_len_load,
-                provider=provider or "",
-                custom_providers=_cfg_custom_providers_load,
+                _ctx_lookup.base_url,
+                config_context_length=_ctx_lookup.config_context_length,
+                provider=_ctx_lookup.provider or provider or "",
+                custom_providers=_ctx_lookup.custom_providers,
             ) or 0
         except TypeError:
             # Older hermes-agent builds: legacy 2-arg form.
-            return _get_cl(model_for_lookup, "") or 0
+            return _get_cl(model_for_lookup, _ctx_lookup.base_url) or 0
     except Exception:
         return 0
 
@@ -2987,8 +3191,8 @@ from api.models import (
     get_state_db_session_messages,
     get_state_db_session_summary,
     merge_session_messages_append_only,
-    _session_message_merge_key,
     _active_stream_ids,
+    _session_message_merge_key,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
@@ -3019,6 +3223,7 @@ from api.workspace import (
     validate_workspace_to_add,
     _is_blocked_system_path,
     _strip_surrounding_quotes,
+    _is_remote_terminal_backend,
     _workspace_blocked_roots,
 )
 from api.upload import handle_upload, handle_upload_extract, handle_transcribe, handle_workspace_upload
@@ -5596,7 +5801,12 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/workspaces":
         return j(
-            handler, {"workspaces": load_workspaces(), "last": get_last_workspace()}
+            handler,
+            {
+                "workspaces": load_workspaces(),
+                "last": get_last_workspace(),
+                "terminal_remote_backend": _terminal_remote_backend_enabled(),
+            },
         )
 
     if parsed.path == "/api/workspaces/suggest":
@@ -8580,7 +8790,14 @@ def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int 
         return 0
 
 
-def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
+def _replay_run_journal(
+    handler,
+    stream_id: str,
+    after_seq: int | None,
+    *,
+    max_seq: int | None = None,
+    include_stale: bool = True,
+) -> bool:
     summary = find_run_summary(stream_id)
     if not summary:
         return False
@@ -8588,6 +8805,7 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
         str(summary.get("session_id") or ""),
         stream_id,
         after_seq=after_seq,
+        max_seq=max_seq,
     )
     for entry in journal.get("events") or []:
         _sse_with_id(
@@ -8596,7 +8814,7 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
             entry.get("payload"),
             entry.get("event_id"),
         )
-    if not summary.get("terminal"):
+    if include_stale and not summary.get("terminal"):
         stale = stale_interrupted_event(
             str(summary.get("session_id") or ""),
             stream_id,
@@ -8605,6 +8823,13 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
         if stale:
             _sse_with_id(handler, stale["event"], stale["payload"], stale["event_id"])
     return True
+
+
+def _run_journal_same_run_seq(event_id: str | None, stream_id: str) -> int | None:
+    event_run_id, event_seq = _parse_run_journal_event_id(event_id)
+    if event_run_id != stream_id:
+        return None
+    return event_seq
 
 
 def _runner_stream_cursor_from_query(qs: dict) -> str | None:
@@ -8724,26 +8949,58 @@ def _handle_sse_stream(handler, parsed):
         except _CLIENT_DISCONNECT_ERRORS:
             pass
         return True
-    subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
+    if hasattr(stream, "subscribe_with_snapshot"):
+        subscriber, stream_snapshot = stream.subscribe_with_snapshot()
+    else:
+        subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
+        stream_snapshot = {}
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
     handler.end_headers()
+    replay_cutoff_seq = None
+    if qs.get("replay", [""])[0] or qs.get("after_seq", [None])[0] not in (None, "") or qs.get("after_event_id", [None])[0]:
+        snapshot_cutoff_seq = _run_journal_same_run_seq(
+            str(stream_snapshot.get("last_event_id") or ""),
+            stream_id,
+        )
+        try:
+            replayed = _replay_run_journal(
+                handler,
+                stream_id,
+                _parse_run_journal_after_seq(qs, stream_id),
+                max_seq=snapshot_cutoff_seq,
+                include_stale=False,
+            )
+            if replayed:
+                replay_cutoff_seq = snapshot_cutoff_seq
+        except _CLIENT_DISCONNECT_ERRORS:
+            raise
+        except Exception:
+            logger.debug("Failed to replay active run journal for stream %s", stream_id, exc_info=True)
     try:
         while True:
             try:
-                event, data = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
                 handler.wfile.write(b": heartbeat\n\n")
                 handler.wfile.flush()
                 continue
+            if len(item) >= 3:
+                event, data, queued_event_id = item[0], item[1], item[2]
+            else:
+                event, data = item
+                queued_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
             # Stage-364: emit `id:` from STREAM_LAST_EVENT_ID side-channel so
             # the frontend's `_lastRunJournalSeq` cursor advances during live
             # streaming. Without this, mid-stream error→replay would arrive
             # with after_seq=0 and double-render every journaled event.
-            event_id = STREAM_LAST_EVENT_ID.get(stream_id)
+            event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(stream_id)
+            event_seq = _run_journal_same_run_seq(event_id, stream_id)
+            if replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq:
+                continue
             if event_id:
                 _sse_with_id(handler, event, data, event_id)
             else:
@@ -8761,7 +9018,7 @@ def _handle_sse_stream(handler, parsed):
     return True
 
 
-def _terminal_session_and_workspace(body_or_query):
+def _terminal_session_lookup(body_or_query):
     sid = str(body_or_query.get("session_id", "")).strip()
     if not sid:
         raise ValueError("session_id required")
@@ -8769,13 +9026,33 @@ def _terminal_session_and_workspace(body_or_query):
         s = get_session(sid)
     except KeyError:
         raise KeyError("Session not found")
-    workspace = resolve_trusted_workspace(getattr(s, "workspace", "") or "")
-    return sid, workspace
+    return sid, s
+
+
+_REMOTE_TERMINAL_BACKEND_UNSUPPORTED_ERROR = "remote_terminal_backend_unsupported"
+_REMOTE_TERMINAL_BACKEND_UNSUPPORTED_MESSAGE = (
+    "Embedded terminal is only supported for local terminal backends."
+)
+
+
+def _terminal_remote_backend_enabled() -> bool:
+    terminal_cfg = get_config().get("terminal", {})
+    return _is_remote_terminal_backend(terminal_cfg)
 
 
 def _handle_terminal_start(handler, body):
     try:
-        sid, workspace = _terminal_session_and_workspace(body)
+        sid, session = _terminal_session_lookup(body)
+        if _terminal_remote_backend_enabled():
+            return j(
+                handler,
+                {
+                    "error": _REMOTE_TERMINAL_BACKEND_UNSUPPORTED_ERROR,
+                    "message": _REMOTE_TERMINAL_BACKEND_UNSUPPORTED_MESSAGE,
+                },
+                status=400,
+            )
+        workspace = resolve_trusted_workspace(getattr(session, "workspace", "") or "")
         from api.terminal import start_terminal
         term = start_terminal(
             sid,
@@ -10293,14 +10570,19 @@ def _handle_live_models(handler, parsed):
             # Fall back to the custom_providers entries from config.yaml so
             # the live-model enrichment step can add any models that weren't
             # already in the static list (issue #1619).
+            # Collect config-specified model IDs separately so they don't
+            # prevent the live fetch below from running (#3718).
+            _config_ids = []
             if provider == "custom" or provider.startswith("custom:"):
                 for _cp in _custom_provider_entries_for_request():
                     if custom_provider_entry is None:
                         custom_provider_entry = _cp
-                    ids.extend(_custom_provider_model_ids(_cp))
+                    _config_ids.extend(_custom_provider_model_ids(_cp))
             
-            # If still no ids, try fetching from base_url directly (OpenAI-compat endpoint)
-            if not ids and (provider == "custom" or provider.startswith("custom:")):
+            # Always try live fetch for custom providers — config entries are a
+            # fallback, not a replacement.  The live endpoint should return ALL
+            # models the key has access to, not just what's listed in config.yaml.
+            if provider == "custom" or provider.startswith("custom:"):
                 _base_url = None
                 _api_key = None
                 if custom_provider_entry:
@@ -10329,7 +10611,7 @@ def _handle_live_models(handler, parsed):
                             headers={"Authorization": f"Bearer {_api_key}"},
                         )
                         
-                        with urllib.request.urlopen(_req, timeout=8) as _resp:
+                        with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
                             _body = json.loads(_resp.read())
                         
                         # Parse response: {"data": [{"id": "model1", ...}, ...]}
@@ -10347,6 +10629,16 @@ def _handle_live_models(handler, parsed):
                     
                     except Exception as _fetch_err:
                         logger.debug("Live fetch from custom provider failed: %s", _fetch_err)
+                
+                # If live fetch succeeded, merge with config entries (live takes
+                # priority).  If live fetch failed, fall back to config-only list.
+                if ids:
+                    _live_set = set(ids)
+                    for _cid in _config_ids:
+                        if _cid not in _live_set:
+                            ids.append(_cid)
+                else:
+                    ids = list(_config_ids)
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider
@@ -11007,6 +11299,41 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
+def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
+    """Return whether an active_stream_id still owns this session's next turn.
+
+    ``active_stream_id`` is written before the SSE channel is registered, so a
+    very fresh pending turn must also block duplicate chat_start requests. If we
+    only check STREAMS here, a second request can race through the registration
+    gap and overwrite the sidecar owner.
+    """
+    if not stream_id:
+        return False
+    with STREAMS_LOCK:
+        if stream_id in STREAMS:
+            return True
+    try:
+        from api import config as _live_config
+        with _live_config.ACTIVE_RUNS_LOCK:
+            if stream_id in (_live_config.ACTIVE_RUNS or {}):
+                return True
+    except Exception:
+        pass
+    if getattr(session, "pending_user_message", None):
+        try:
+            from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
+            grace_seconds = float(_REPAIR_STALE_PENDING_GRACE_SECONDS)
+        except Exception:
+            grace_seconds = 30.0
+        try:
+            pending_started_at = float(getattr(session, "pending_started_at", None) or 0)
+        except Exception:
+            pending_started_at = 0.0
+        if pending_started_at and time.time() - pending_started_at < grace_seconds:
+            return True
+    return False
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -11027,10 +11354,7 @@ def _start_chat_stream_for_session(
     diag.stage("active_stream_check") if diag else None
     current_stream_id = getattr(s, "active_stream_id", None)
     if current_stream_id:
-        diag.stage("active_stream_lock_wait") if diag else None
-        with STREAMS_LOCK:
-            current_active = current_stream_id in STREAMS
-        if current_active:
+        if _active_stream_blocks_chat_start(s, current_stream_id):
             diag.stage("response_write") if diag else None
             return {
                 "error": "session already has an active stream",
@@ -11048,21 +11372,45 @@ def _start_chat_stream_for_session(
         goal_related = True
         PENDING_GOAL_CONTINUATION.discard(s.session_id)
 
-    stream_id = uuid.uuid4().hex
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
-    with session_lock:
-        diag.stage("save_pending_state") if diag else None
-        was_hidden_empty_session = _is_hidden_empty_session(s)
-        _prepare_chat_start_session_for_stream(
-            s,
-            msg=msg,
-            attachments=attachments,
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            stream_id=stream_id,
-        )
+    while True:
+        with session_lock:
+            locked_stream_id = getattr(s, "active_stream_id", None)
+            if locked_stream_id:
+                if _active_stream_blocks_chat_start(s, locked_stream_id):
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": locked_stream_id,
+                        "_status": 409,
+                    }
+                needs_stale_cleanup = True
+            else:
+                needs_stale_cleanup = False
+                stream_id = uuid.uuid4().hex
+                diag.stage("save_pending_state") if diag else None
+                was_hidden_empty_session = _is_hidden_empty_session(s)
+                _prepare_chat_start_session_for_stream(
+                    s,
+                    msg=msg,
+                    attachments=attachments,
+                    workspace=workspace,
+                    model=model,
+                    model_provider=model_provider,
+                    stream_id=stream_id,
+                )
+                break
+        if needs_stale_cleanup:
+            diag.stage("stale_stream_cleanup") if diag else None
+            cleared = _clear_stale_stream_state(s)
+            if not cleared and getattr(s, "active_stream_id", None):
+                diag.stage("response_write") if diag else None
+                return {
+                    "error": "session already has an active stream",
+                    "active_stream_id": getattr(s, "active_stream_id", None),
+                    "_status": 409,
+                }
     if was_hidden_empty_session:
         publish_session_list_changed("session_new", profile=getattr(s, "profile", None))
     diag.stage("turn_journal_submitted") if diag else None
@@ -11369,12 +11717,14 @@ def _handle_chat_start(handler, body, diag=None):
             else getattr(s, "model_provider", None)
         )
         _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
+        explicit_model_pick = bool(body.get("explicit_model_pick"))
         diag.stage("resolve_model_provider") if diag else None
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
             requested_provider,
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
+            explicit_model_pick=explicit_model_pick,
         )
         from api.runtime_adapter import (
             LegacyJournalRuntimeAdapter,

@@ -341,8 +341,12 @@ _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrup
 
 _WEBUI_PROGRESS_PROMPT = """
 WebUI progress guidance:
-- Match the normal Hermes messaging style; do not add extra status updates solely because this is a browser session.
-- For long multi-step work that uses tools, you may provide brief user-visible progress updates before continuing with tool calls.
+- Match the normal Hermes messaging style, but do not let long tool-running WebUI turns appear silent.
+- For long multi-step work that uses tools, emit brief user-visible progress updates as normal assistant content, not only as hidden reasoning.
+- Before the first tool batch in a long task, say what you are about to inspect.
+- After each meaningful batch of tool calls, say what you just confirmed and what you will check next before continuing with more tools.
+- Do not run many independent tool batches back-to-back without visible assistant text between them when the task is still ongoing.
+- Do not keep progress only in reasoning, thinking, or tool-result channels; those are not a substitute for visible interim updates.
 - Each update should say what you are about to check, what you just confirmed, or why the next tool call is needed.
 - Keep updates concise, factual, and in the user's language. One or two short sentences are enough.
 - Do not reveal hidden reasoning, chain-of-thought, private scratchpads, secrets, raw logs, or long tool output.
@@ -2983,6 +2987,37 @@ def _deduplicate_context_messages(messages):
     return deduped
 
 
+def _prune_context_tool_results_after_compression(agent, context_messages):
+    """Run the active compressor's cheap tool-result pruning on model context.
+
+    Auto-compression can happen mid-turn and then the agent may run more tools
+    before producing the final answer. Those completed tail tool results are
+    model-facing context, but they were produced after the compression pass and
+    therefore did not go through the compressor's tool-output pruning. Apply the
+    same cheap pruning once more after a confirmed compression event. This keeps
+    the visible transcript untouched while preventing the next turn from seeing
+    raw post-compression tool dumps.
+    """
+    if not context_messages:
+        return context_messages
+    compressor = getattr(agent, 'context_compressor', None)
+    prune = getattr(compressor, '_prune_old_tool_results', None)
+    if not callable(prune):
+        return context_messages
+    try:
+        pruned_messages, pruned_count = prune(
+            copy.deepcopy(context_messages),
+            protect_tail_count=getattr(compressor, 'protect_last_n', 20),
+            protect_tail_tokens=getattr(compressor, 'tail_token_budget', None),
+        )
+    except Exception:
+        logger.debug("post-compression context tool-result pruning failed", exc_info=True)
+        return context_messages
+    if not pruned_count:
+        return context_messages
+    return _deduplicate_context_messages(pruned_messages)
+
+
 def _restore_reasoning_metadata(previous_messages, updated_messages):
     """Carry forward display-only metadata lost during API-safe history sanitization.
 
@@ -4666,24 +4701,28 @@ def _run_agent_streaming(
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and event not in ('cancel', 'error'):
             return
+        event_id = None
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
-                # Stage-364: propagate journal event_id via a side-channel dict
-                # (STREAM_LAST_EVENT_ID) instead of changing the queue tuple
-                # shape — keeping the 2-tuple shape preserves backward
-                # compatibility for tests and any non-SSE queue consumer. The
-                # SSE handler reads this dict at emit time to populate `id:`
-                # on every live frame, which lets the frontend's cursor
-                # advance during live streaming and prevents replay from
-                # double-rendering tokens after a mid-stream error→reconnect.
+                # Carry the exact journal id for this queued frame. A global
+                # "latest event" side channel is still kept for legacy queues,
+                # but StreamChannel subscribers need the per-item id so a
+                # queued backlog cannot advance the browser cursor past an
+                # undelivered event.
                 event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
                 if event_id:
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
                 logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
+        if event_id and hasattr(q, "note_last_event_id"):
+            try:
+                q.note_last_event_id(event_id)
+            except Exception:
+                logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
         try:
-            q.put_nowait((event, data))
+            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+            q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put event to queue")
 
@@ -4711,7 +4750,7 @@ def _run_agent_streaming(
         if _is_compression_start:
             put('compressing', {
                 'session_id': session_id,
-                'message': 'Auto-compressing context to continue...',
+                'message': 'Compressing context',
             })
             return
         # Pass through rate-limit and fallback messages so the frontend can
@@ -6384,6 +6423,10 @@ def _run_agent_streaming(
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
+                    s.context_messages = _prune_context_tool_results_after_compression(
+                        agent,
+                        s.context_messages,
+                    )
                     visible_after = visible_messages_for_anchor(s.messages, auto_compression=True)
                     # Find the LAST [CONTEXT COMPACTION] marker in s.messages
                     # and count visible messages before it. This is the correct
@@ -6447,7 +6490,7 @@ def _run_agent_streaming(
                         'old_session_id': _compression_origin_session_id,
                         'new_session_id': _compression_continuation_session_id,
                         'continuation_session_id': _compression_continuation_session_id,
-                        'message': 'Context auto-compressed to continue the conversation',
+                        'message': 'Compression finished',
                         'usage': _live_usage_snapshot(),
                     })
 
@@ -6668,44 +6711,23 @@ def _run_agent_streaming(
                 if (not getattr(s, 'context_length', 0)) or _skip_cc_cl:
                     try:
                         from agent.model_metadata import get_model_context_length
-                        _cfg_ctx_len = None
-                        _cfg_custom_providers = None
-                        try:
-                            _model_cfg_for_ctx = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
-                            if isinstance(_model_cfg_for_ctx, dict):
-                                _raw_cfg_ctx = _model_cfg_for_ctx.get('context_length')
-                                # Default-only guard: only apply the global
-                                # model.context_length cap when the session
-                                # model equals model.default. Otherwise the
-                                # cap (e.g. 232K set for the default model)
-                                # silently shrinks other models' real metadata.
-                                _cfg_default_ctx = str(_model_cfg_for_ctx.get('default') or '').strip()
-                                _sess_model_ctx = str(getattr(agent, 'model', resolved_model or '') or '').strip()
-                                from api.routes import _model_matches_configured_default as _mmcd_ctx
-                                _apply_cfg_ctx = (
-                                    not _cfg_default_ctx
-                                    or not _sess_model_ctx
-                                    or _mmcd_ctx(_sess_model_ctx, _cfg_default_ctx, resolved_provider or '')
-                                )
-                                if _raw_cfg_ctx is not None and _apply_cfg_ctx:
-                                    try:
-                                        _parsed_cfg_ctx = int(_raw_cfg_ctx)
-                                        if _parsed_cfg_ctx > 0:
-                                            _cfg_ctx_len = _parsed_cfg_ctx
-                                    except (TypeError, ValueError):
-                                        # Invalid config — let the resolver fall
-                                        # through to provider/registry probing.
-                                        pass
-                            _raw_cp = _cfg.get('custom_providers') if isinstance(_cfg, dict) else None
-                            if isinstance(_raw_cp, list):
-                                _cfg_custom_providers = _raw_cp
-                        except Exception:
-                            pass
+                        from api.routes import _context_length_lookup_inputs_for_model
+                        _cfg_base_url = getattr(agent, 'base_url', '') or resolved_base_url or ''
+                        _ctx_lookup = _context_length_lookup_inputs_for_model(
+                            getattr(agent, 'model', resolved_model or '') or '',
+                            resolved_provider,
+                            base_url=_cfg_base_url,
+                            cfg=_cfg if isinstance(_cfg, dict) else {},
+                        )
+                        _cfg_ctx_len = _ctx_lookup.config_context_length
+                        _cfg_custom_providers = _ctx_lookup.custom_providers
+                        _cfg_base_url = _ctx_lookup.base_url or _cfg_base_url
+                        _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                         _resolved_cl = get_model_context_length(
                             getattr(agent, 'model', resolved_model or '') or '',
-                            getattr(agent, 'base_url', '') or '',
+                            _cfg_base_url,
                             config_context_length=_cfg_ctx_len,
-                            provider=resolved_provider or '',
+                            provider=_cfg_provider,
                             custom_providers=_cfg_custom_providers,
                         )
                         if _resolved_cl:
@@ -6719,7 +6741,7 @@ def _run_agent_streaming(
                             from agent.model_metadata import get_model_context_length as _legacy_cl
                             _resolved_cl = _legacy_cl(
                                 getattr(agent, 'model', resolved_model or '') or '',
-                                getattr(agent, 'base_url', '') or '',
+                                _cfg_base_url,
                             )
                             if _resolved_cl:
                                 s.context_length = _resolved_cl
@@ -6948,49 +6970,30 @@ def _run_agent_streaming(
             if not usage.get('context_length'):
                 try:
                     from agent.model_metadata import get_model_context_length as _get_cl
-                    _cfg_ctx_len = None
-                    _cfg_custom_providers = None
-                    try:
-                        _model_cfg_for_ctx = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
-                        if isinstance(_model_cfg_for_ctx, dict):
-                            _raw_cfg_ctx = _model_cfg_for_ctx.get('context_length')
-                            # Default-only guard (see #3256): the global
-                            # model.context_length cap only applies to
-                            # model.default; other models keep their real
-                            # metadata.
-                            _cfg_default_ctx = str(_model_cfg_for_ctx.get('default') or '').strip()
-                            _sess_model_ctx = str(getattr(agent, 'model', resolved_model or '') or '').strip()
-                            from api.routes import _model_matches_configured_default as _mmcd_sfb
-                            _apply_cfg_ctx = (
-                                not _cfg_default_ctx
-                                or not _sess_model_ctx
-                                or _mmcd_sfb(_sess_model_ctx, _cfg_default_ctx, resolved_provider or '')
-                            )
-                            if _raw_cfg_ctx is not None and _apply_cfg_ctx:
-                                try:
-                                    _parsed_cfg_ctx = int(_raw_cfg_ctx)
-                                    if _parsed_cfg_ctx > 0:
-                                        _cfg_ctx_len = _parsed_cfg_ctx
-                                except (TypeError, ValueError):
-                                    pass
-                        _raw_cp = _cfg.get('custom_providers') if isinstance(_cfg, dict) else None
-                        if isinstance(_raw_cp, list):
-                            _cfg_custom_providers = _raw_cp
-                    except Exception:
-                        pass
+                    from api.routes import _context_length_lookup_inputs_for_model
+                    _ctx_lookup = _context_length_lookup_inputs_for_model(
+                        getattr(agent, 'model', resolved_model or '') or '',
+                        resolved_provider,
+                        base_url=getattr(agent, 'base_url', '') or resolved_base_url or '',
+                        cfg=_cfg if isinstance(_cfg, dict) else {},
+                    )
+                    _cfg_ctx_len = _ctx_lookup.config_context_length
+                    _cfg_custom_providers = _ctx_lookup.custom_providers
+                    _cfg_base_url = _ctx_lookup.base_url
+                    _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                     try:
                         _fb_cl = _get_cl(
                             getattr(agent, 'model', resolved_model or '') or '',
-                            getattr(agent, 'base_url', '') or '',
+                            _cfg_base_url,
                             config_context_length=_cfg_ctx_len,
-                            provider=resolved_provider or '',
+                            provider=_cfg_provider,
                             custom_providers=_cfg_custom_providers,
                         )
                     except TypeError:
                         # Older hermes-agent builds: fall back to legacy 2-arg form.
                         _fb_cl = _get_cl(
                             getattr(agent, 'model', resolved_model or '') or '',
-                            getattr(agent, 'base_url', '') or '',
+                            _cfg_base_url,
                         )
                     if _fb_cl:
                         usage['context_length'] = _fb_cl
@@ -7869,6 +7872,12 @@ def cancel_stream(stream_id: str) -> bool:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
     if _emit_cancel_event and q:
+        _cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
+        if _cancel_event_id and hasattr(q, "note_last_event_id"):
+            try:
+                q.note_last_event_id(_cancel_event_id)
+            except Exception:
+                logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
             q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
         except Exception:

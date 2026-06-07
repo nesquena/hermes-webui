@@ -89,6 +89,8 @@ _spawn_queue: queue.Queue = queue.Queue()
 _spawn_supervisor_started = False
 _spawn_supervisor_lock = threading.Lock()
 _spawn_supervisor_thread: threading.Thread | None = None
+_terminal_descendant_reaper_lock = threading.Lock()
+_TERMINAL_DESCENDANT_REAPER_LIMIT = 64
 
 
 @dataclass
@@ -129,6 +131,32 @@ def _reap_abandoned_spawn(proc: subprocess.Popen) -> bool:
         print("terminal abandoned spawn cleanup failed", flush=True)
         return False
     return True
+
+
+def _reap_terminal_descendants(
+    terminal_pgid: int,
+    limit: int = _TERMINAL_DESCENDANT_REAPER_LIMIT,
+) -> int:
+    """Reap exited descendants that still belong to a terminal-owned process group."""
+    if not _TERMINAL_SUPPORTED:
+        return 0
+    try:
+        terminal_pgid = abs(int(terminal_pgid))
+    except (TypeError, ValueError):
+        return 0
+    if terminal_pgid <= 0:
+        return 0
+    reaped = 0
+    with _terminal_descendant_reaper_lock:
+        for _ in range(max(0, int(limit))):
+            try:
+                pid, _status = os.waitpid(-terminal_pgid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                break
+            if pid == 0:
+                break
+            reaped += 1
+    return reaped
 
 
 def _spawn_supervisor_loop() -> None:
@@ -248,6 +276,7 @@ def _reader_loop(term: TerminalSession) -> None:
     finally:
         term.closed.set()
         code = term.proc.poll()
+        _reap_terminal_descendants(term.proc.pid)
         term.put_output("terminal_closed", {"exit_code": code})
 
 
@@ -416,6 +445,7 @@ def close_terminal(session_id: str) -> bool:
             os.close(term.master_fd)
         except OSError:
             pass
+        _reap_terminal_descendants(term.proc.pid)
     return True
 
 

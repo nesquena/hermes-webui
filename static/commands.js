@@ -572,13 +572,23 @@ async function cmdWorkspace(args){
 }
 
 async function cmdTerminal(){
+  let data=null;
+  try{
+    data=await api('/api/workspaces');
+    if(typeof syncTerminalBackendState==='function') syncTerminalBackendState(data);
+    if(data&&data.terminal_remote_backend){
+      const msg=typeof _terminalRemoteBackendUnsupportedMessage==='function'
+        ? _terminalRemoteBackendUnsupportedMessage()
+        : 'Embedded terminal is only supported for local terminal backends.';
+      showToast(msg,3200,'warning');
+      if(typeof syncTerminalButton==='function') syncTerminalButton();
+      return;
+    }
+  }catch(_){}
   if(!S.session&&typeof newSession==='function'){
     if(!S._profileSwitchWorkspace&&!S._profileDefaultWorkspace){
-      try{
-        const data=await api('/api/workspaces');
-        const first=(data.workspaces||[])[0];
-        S._profileSwitchWorkspace=data.last||(first&&first.path)||null;
-      }catch(_){}
+      const first=(data&&data.workspaces||[])[0];
+      S._profileSwitchWorkspace=(data&&data.last)||(first&&first.path)||null;
     }
     await newSession();
     if(typeof renderSessionList==='function') await renderSessionList();

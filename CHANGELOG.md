@@ -14,6 +14,94 @@
 - Custom logo deletion now uses the capped JSON body reader, so malformed or oversized `Content-Length` values are rejected before reading the request body.
 - Custom logo favicon updates now leave the default HTML favicon and apple-touch-icon links intact when custom logos are disabled.
 
+## [v0.51.306] — 2026-06-06 — Release JV (stage-a2 — branchy compression lineage resolves to the freshest tip)
+
+### Fixed
+- **A conversation no longer looks missing or stale after compaction when its compression lineage branched.** When a compression parent had multiple continuation-looking children — which happens when a stale segment is resumed after a newer compressed branch already exists — the sidebar projection followed only the newest *direct* child, so it could surface a dead-end branch and hide the deeper branch that actually has the latest activity. The projection now walks every reachable continuation descendant and selects the freshest *messageful* tip by `(last_activity, depth)`, and `read_session_lineage_metadata()` exposes the same canonical `_lineage_tip_id` so the sidebar collapse and the import projection agree on which branch is live. Older/minimal `state.db` files stay compatible — `source`, `message_count`, and the `messages` table (including schemas with no `timestamp` column or an ISO-8601 *text* timestamp) are all treated as optional and can no longer collapse the lineage metadata. (#3751, @ai-ag2026)
+
+## [v0.51.305] — 2026-06-06 — Release JU (stage-p2b — dormant unified-SessionDB adapter groundwork)
+
+### Changed
+- **Added the first, dormant slice of the unified-SessionDB migration (no runtime behavior change).** A new `SessionDB`-shaped adapter over the existing WebUI JSON session store lands behind an experimental flag (`experimental.unified_session_db`, default `false`). No runtime session call site is rewired — `is_unified_session_db_enabled()` has no live callers — so WebUI persistence is byte-for-byte unchanged until a later migration PR deliberately opts in. This is intentionally the lowest-risk first step toward expressing WebUI session access behind a stable adapter contract before any CLI/WebUI storage unification. Ships the adapter, the dormant config flag, an architecture doc, and adapter tests. (#3720 advances #3383, @rodboev)
+
+## [v0.51.304] — 2026-06-06 — Release JT (stage-p2a — un-held terminal reaper fix + opt-in Docker GPU image)
+
+### Fixed
+- **Embedded-terminal descendants are now reaped without clobbering unrelated subprocess exit codes.** Terminal descendants reparented to the WebUI process could linger as zombies. The reaper now runs `os.waitpid(-terminal_pgid, WNOHANG)` scoped to the terminal's own process group (terminals spawn with `start_new_session=True`, so the child's PID is its PGID) instead of a process-wide `waitpid(-1)` — the latter could reap an unrelated WebUI subprocess (update/git/provider) before its owner called `.wait()`, silently coercing that child's real exit code to `0`. Bounded by a 64-iteration limit, lock-guarded, and run on both reader cleanup and terminal close. (#3725 fixes #2577, @rodboev)
+
+### Added
+- **Optional GPU runtime image path.** The default image stays CPU-only. Building with `--build-arg INSTALL_GPU_LIBS=1` installs VA-API user-space libraries for users passing through host GPU devices, and `docker_init.bash` now preserves Docker `--group-add` supplemental device groups (e.g. `render`/`video` for `/dev/dri` access) when dropping privileges to the runtime user. With the default `INSTALL_GPU_LIBS=0` this is a no-op. (#3721 addresses #3243, @rodboev)
+
+## [v0.51.303] — 2026-06-06 — Release JS (stage-p1a — low-risk fixes: cron toggle, config var expansion, git-discard hardening)
+
+### Fixed
+- **Clicking an already-open cron run row now collapses it instead of re-fetching.** `_loadRunContent()` only ever expanded a run's output, so tapping an open row issued a pointless re-fetch. It now toggles — an open row collapses (clearing its expansion state and resetting the toggle button) and returns early. (#3732, @mysoul12138)
+
+### Added
+- **`config.yaml` now expands `${VAR}` references against the environment at load time in the WebUI.** hermes-agent already supported `${ENV_VAR}` substitution, but the WebUI's own config loader stored the raw dict, leaving literal `${...}` strings in values. Both WebUI config load paths now recursively expand `${VAR}` from `os.environ`; an unset variable is left untouched (`${VAR}` preserved). (#3736, @Carry00)
+
+### Security
+- **`git_discard(delete_untracked=true)` now deletes untracked files through the anchored workspace helpers, closing a validation-to-use symlink-swap window.** The discard previously validated the path with `safe_resolve_ws` and then deleted with raw `shutil.rmtree` / `Path.unlink`, so a workspace-controlled path component swapped to a symlink between validation and deletion could escape the workspace. Untracked deletes now go through `rmtree_anchored` / `unlink_anchored` (rejecting a swapped component at delete time) while preserving the prior tolerance for a benign concurrent-removal race. (#3702, @Hinotoi-agent)
+
+## [v0.51.302] — 2026-06-06 — Release JR (stage-brick — mobile/iOS breakage + large-session perf hotfixes)
+
+### Fixed
+- **Hidden notification toasts no longer block taps on mobile.** The `.toast` container stayed `pointer-events:auto` while hidden (`opacity:0`), and its fixed padding sat over the profile action buttons at the top of the mobile content view — so taps on Activate/Delete and similar controls were silently eaten by an invisible element. The toast is now `pointer-events:none` when hidden and only becomes interactive on `.toast.show`. (#3735, @timlawrenz)
+- **Renaming a conversation now works on iOS Safari.** iOS has no Enter key on the soft keyboard; tapping "Done" fires `blur`, and the old `onblur` handler *cancelled* the rename — so a mobile rename could never be saved. Blur now commits the rename (Escape still explicitly cancels), matching the more natural desktop expectation that typing a name then clicking away saves it. The same blur-saves fix applies to project create/rename, guarded by a `_finishDone` latch so the blur and the API callback can't double-fire. (#3729, @reinocheong)
+
+### Performance
+- **Loading a session with very large tool/log payloads no longer stalls the whole WebUI for many seconds.** `_matching_visible_duplicate()` eagerly casefolded and regex-tokenized every visible message key — including multi-megabyte tool outputs — on each duplicate probe, so `/api/session` could take 10s+ and block the sidebar's `/api/sessions` for ~19s. Loose-content normalization is now lazy and cached, and substring/fuzzy matching is skipped for non-exact payloads larger than 200KB; exact visible-key matches still short-circuit before the guard. (#3730, @alvistar)
+
+## [v0.51.301] — 2026-06-06 — Release JQ (stage-3710 — hide test-helper console windows on Windows)
+
+### Changed
+- **Developer experience (Windows):** the test suite's long-lived helper subprocesses (main test server, browser-smoke server, TLS helper, and the `ctl` test helpers) now spawn with `CREATE_NO_WINDOW` on Windows, so a local `pytest` run no longer pops up several focus-stealing console windows. Windows-only (`sys.platform == "win32"` guard); no behavior change on macOS/Linux. (#3710 fixes #3706, @rodboev)
+
+## [v0.51.300] — 2026-06-06 — Release JP (stage-3726 — context-length indicator honors provider per-model overrides)
+
+### Fixed
+- **The context-length indicator now honors per-model `context_length` overrides configured under a specific provider.** A `providers.<name>.models.<model>.context_length` override (standard provider, no `base_url`) was invisible to the session model's context resolver, so the usage indicator showed and persisted the wrong window — and could trip auto-compression at the wrong threshold. The resolver now collects the effective provider config, base URL, and custom-provider metadata across all three paths (route load, session save, live SSE usage), resolving provider-scoped overrides by provider-name match and forwarding them as `config_context_length` (which the agent returns before any base-URL-gated probe). `custom_providers`-with-`base_url` per-model overrides continue to resolve as before. (#3726 fixes #3717, @rodboev)
+
+## [v0.51.299] — 2026-06-06 — Release JO (stage-3713 — update flow waits for a genuinely new server instance)
+
+### Fixed
+- **"Update now" no longer reloads onto the old server process (or shows a premature error toast).** The post-update reload waited for the first healthy `/health` response, but didn't confirm the server *instance* had actually changed — so on a slow restart the client could reload too early and land back on the old process, or surface an upgrade error that resolved itself after a manual refresh. The update trigger now captures a baseline server identity (from `/health`'s already-present `server_started_at` / `SERVER_START_TIME`) and `_waitForServerThenReload()` only reloads once it observes a *changed* identity. (#3713 fixes #3619, @rodboev)
+
+## [v0.51.298] — 2026-06-06 — Release JN (stage-3719 — live model probe for custom providers with model config)
+
+### Fixed
+- **`/api/models/live` now probes the upstream `/v1/models` endpoint for custom providers even when a `model:` is configured.** When a `custom_providers` entry had a `model:` field, the live handler added that config model to the `ids` list *before* the `if not ids:` guard that triggers the live fetch — so the probe was skipped and Settings' "refresh models" returned only the single config entry instead of the full upstream catalog (e.g. a LiteLLM proxy exposing 50+ models showed just one). Config models are now collected separately and the live fetch always runs for custom providers; live results take priority and config entries are merged in as a fallback (and used as the full list if the fetch fails). The static `/api/models` endpoint already handled this correctly. (#3719 fixes #3718, @DanielMaly)
+
+## [v0.51.297] — 2026-06-06 — Release JM (stage-3711 — terminal remote-backend guard)
+
+### Fixed
+- **The embedded `/terminal` no longer fails late and opaquely on remote terminal backends.** With an SSH/Docker terminal backend, `/api/terminal/start` still funneled the request into the local PTY spawn path and failed deep inside `start_terminal()`. The route now rejects non-local backends deliberately at the boundary and surfaces the same state early in the `/terminal` slash-command UX, so users get a clear "not available for this backend" signal instead of an opaque failure. (#3711 fixes #3673, @rodboev)
+
+## [v0.51.296] — 2026-06-06 — Release JL (stage-3731 — remote-workspace blocked-root security fix)
+
+### Security
+- **Remote-terminal workspace resolution now rejects blocked system roots.** `_remote_terminal_workspace_candidate()` returned early for paths under the configured remote terminal cwd *before* the blocked-root guard ran, so an SSH/remote terminal profile whose target-side cwd was a system directory (e.g. `/etc`) could have that root accepted as a local workspace — after which workspace file helpers (which treat `s.workspace` as a local `Path`) could read local system files. The blocked-root guard now runs for both the candidate and the base path, so registration and trusted-workspace resolution reject these roots consistently. (#3731, @Hinotoi-agent)
+
+## [v0.51.295] — 2026-06-06 — Release JK (stage-3739/3742 — model-pick revert fix + session-status revert)
+
+### Fixed
+- **The composer model picker no longer silently reverts your selection on send.** When you explicitly picked a model whose family differed from the active profile's provider (e.g. a `gpt-*` model under an `anthropic`-bound profile), the server's profile-aware resolution (v0.51.290, #3448) rewrote it to the profile default and the dropdown snapped back with no warning. An explicit pick is now honored across both resolution paths (the profile-provider branch and the legacy bare-prefix branch), and if the model genuinely must change (a real provider mismatch) a toast explains it instead of silently swapping. The legitimate stale-session repair path is preserved. (#3739 fixes #3737, @someaka)
+
+### Removed
+- **Reverted the manual per-session status labels (Todo / In Progress / Done).** The feature added in v0.51.284 (#3570) stored the chosen status only in browser `localStorage`, keyed by session id, with no server-side backing — so labels silently did not persist across browsers or devices (a user who labeled sessions on one machine saw none of them after switching to a laptop). It also rendered the three statuses as flat top-level entries in the session context menu alongside Copy/Rename/Pin/etc., which crowded the root menu. Removed entirely for now (JS state + cycle logic, context-menu entries, sidebar badge render, CSS, and all locale strings); the feature can be reintroduced later with proper server-side persistence and a less intrusive menu treatment. (reverts #3570)
+
+
+## [v0.51.294] — 2026-06-06 — Release JJ (stage-3401 — live-to-final assistant reply redesign)
+
+### Changed
+- **Redesigned the live-to-final assistant reply experience for running sessions** (first slice of the #3400 roadmap). During a running turn, visible process text stays the primary timeline; tool activity and reasoning render as quiet sibling items in a folded **Worklog**; and when the turn settles, implementation detail collapses into a compact activity summary above the final answer. Stream ownership, reconnect/replay, auto-compression status, and session-switching now reconstruct the same structure rather than competing for the surface. Strengthens the visible-progress prompt contract so long tool-running turns don't appear silent. (#3401, @franksong2702; refs #3400, supersedes #3015)
+
+### Fixed
+- Inline `<think>…</think>` reasoning followed by a visible answer now renders its Thinking card again (the reasoning extractor was over-anchored and dropped it).
+- Reconnecting or reloading an in-progress turn no longer duplicates already-rendered live reply content (the run-journal replay cursor is now persisted, so replay resumes from the correct point instead of replaying from the start over restored text).
+- Switching back to an in-progress session no longer drops prior settled turns' tool/worklog cards while the new turn is still streaming.
+- Restored the Neon skin styling (its CSS had been dropped while it remained selectable).
+
 ## [v0.51.293] — 2026-06-06 — Release JI (stage-s5 — thinking card no longer renders twice)
 
 ### Fixed
@@ -37,6 +125,15 @@
 ## [v0.51.289] — 2026-06-06 — Release JE (hotfix — sidebar ReferenceError #3696 + scope-undef prevention gate)
 
 ### Fixed
+- **Live stream turns show the bottom timer immediately after starting.** The
+  first chat-start path now places the live footer timer as soon as the backend
+  returns `stream_id` and `pending_started_at`, instead of only restoring it
+  after a session switch or reconnect. Reloading a currently running session
+  also recreates the live worklog shell after the transcript DOM rebuild, so the
+  stream no longer stays invisible until you switch away and back. Live replay
+  cursors now stay tied to each queued SSE frame instead of the latest global
+  stream event, so reconnects cannot skip queued live output. (#3401,
+  @franksong2702)
 - **Sidebar no longer crashes with `ReferenceError: _sessionAttentionState is not defined`.** The session-attention helper was declared *inside* `renderSessionListFromCache()` and relied on function hoisting, but the top-level `_sidebarRowHasVisibleMessages` (reached via `renderSessionListFromCache` → `_partitionSidebarSessionRows`) called it bare — and hoisting is scoped to the enclosing function, so every sidebar cache-render threw and the session list went blank. `_sessionAttentionState` is now a top-level function reachable by both call sites. Regressed in #3672 (v0.51.269). (#3696)
 - **Stale-stream terminal events no longer risk a `ReferenceError: source is not defined`.** `_bailOutOfTerminalEventsFromStaleStream` (declared inside `attachLiveStream`) called `_closeSource(source)` against a `source` that was not in its lexical scope — it would have thrown on the late-finalizing-stream path when the user is back in an active session. `source` is now threaded as an explicit parameter. Found by the new scope gate below during review. (#3696)
 

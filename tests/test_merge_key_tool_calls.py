@@ -10,6 +10,7 @@ a single key, losing tool calls during merge.
 """
 from __future__ import annotations
 
+from api import models
 from api.models import (
     _matching_visible_duplicate,
     _session_message_dedup_key,
@@ -130,3 +131,43 @@ class TestMergeToolCallsEndToEnd:
         msg = {"role": "assistant", "content": "hello", "timestamp": 1000}
         result = merge_session_messages_append_only([msg], [msg])
         assert len(result) == 1
+
+
+# ── large-payload duplicate matching performance ────────────────────────────
+
+
+class TestVisibleDuplicateLargePayloadPerformance:
+    def test_large_nonmatching_payload_skips_loose_normalizer(self, monkeypatch):
+        """Giant tool/log payloads must not be regex-tokenized for fuzzy matching.
+
+        Exact visible-key equality is checked before this path. For non-exact
+        multi-hundred-KB payloads, fuzzy substring/token matching is too costly
+        for the /api/session hot path and low-value for deduplication.
+        """
+        def fail_if_called(_content):
+            raise AssertionError("large payloads should not hit loose normalizer")
+
+        monkeypatch.setattr(models, "_loose_session_message_content", fail_if_called)
+
+        large_state = ("state output\n" * 25_000).strip()
+        large_sidecar = ("sidecar output\n" * 25_000).strip()
+        visible_key = ("assistant", large_state, "")
+        sidecar_key = ("assistant", large_sidecar, "")
+
+        assert _matching_visible_duplicate(visible_key, {sidecar_key}) is None
+
+    def test_small_nonmatching_payload_keeps_loose_matching(self, monkeypatch):
+        """The large-payload guard must not disable legacy fuzzy matching."""
+        calls = []
+
+        def counted_loose(content):
+            calls.append(content)
+            return " ".join(str(content).lower().replace(",", "").replace("!", "").split())
+
+        monkeypatch.setattr(models, "_loose_session_message_content", counted_loose)
+
+        visible_key = ("assistant", "hello world", "")
+        sidecar_key = ("assistant", "HELLO, WORLD!!", "")
+
+        assert _matching_visible_duplicate(visible_key, {sidecar_key}) == sidecar_key
+        assert len(calls) == 2

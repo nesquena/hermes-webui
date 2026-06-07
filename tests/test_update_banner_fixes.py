@@ -30,6 +30,35 @@ def read(rel):
     return (REPO / rel).read_text(encoding='utf-8')
 
 
+def extract_js_function(src: str, name: str) -> str:
+    match = re.search(rf'(async\s+)?function\s+{re.escape(name)}\b', src)
+    assert match, f"{name}() not found"
+    open_paren = src.index("(", match.start())
+    paren_depth = 1
+    idx = open_paren + 1
+    while paren_depth > 0 and idx < len(src):
+        ch = src[idx]
+        if ch == "(":
+            paren_depth += 1
+        elif ch == ")":
+            paren_depth -= 1
+        idx += 1
+    brace = src.index("{", idx)
+    depth = 0
+    end = None
+    for idx in range(brace, len(src)):
+        ch = src[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+    assert end is not None, f"{name}() body was not balanced"
+    return src[match.start():end]
+
+
 # ── api/updates.py ────────────────────────────────────────────────────────────
 
 class TestUpdateChecker:
@@ -671,6 +700,21 @@ class TestForceUpdateRoute:
         )
 
 
+class TestHealthRouteContract:
+    def test_health_payload_includes_server_started_at(self):
+        src = read('api/routes.py')
+        health_start = src.index('def _handle_health')
+        payload_start = src.index('payload = {', health_start)
+        payload_end = src.index('if "oldest_run_age_seconds" in run_check:', payload_start)
+        payload = src[payload_start:payload_end]
+        assert '"server_started_at": SERVER_START_TIME' in payload, (
+            "/health must expose server_started_at sourced from SERVER_START_TIME"
+        )
+        assert '"uptime_seconds": round(time.time() - SERVER_START_TIME, 1)' in payload, (
+            "/health must keep exposing uptime_seconds alongside server_started_at"
+        )
+
+
 class TestUpdateSummaryRouteModelSelection:
     """Update summaries should use a known text auxiliary model before main model fallback."""
 
@@ -934,37 +978,62 @@ class TestUiJsUpdateBanner:
 
     def test_wait_for_server_requires_new_process_identity(self):
         src = read('static/ui.js')
-        m = re.search(r'function\s+_waitForServerThenReload\b.*?\n\}', src, re.DOTALL)
-        assert m, "_waitForServerThenReload() not found"
-        fn = m.group(0)
+        fn = extract_js_function(src, '_waitForServerThenReload')
         assert 'baselineServerIdentity' in fn, (
             "_waitForServerThenReload() should capture and compare a baseline process identity"
         )
-        assert 'nextServerIdentity!==null&&nextServerIdentity!==baselineServerIdentity' in fn.replace(' ', ''), (
-            "_waitForServerThenReload() should only reload when health process identity changes"
+        compact = re.sub(r'\s+', '', fn)
+        assert 'baselineServerIdentity.serverStartedAt!==null&&nextServerIdentity.serverStartedAt!==null&&nextServerIdentity.serverStartedAt!==baselineServerIdentity.serverStartedAt' in compact, (
+            "_waitForServerThenReload() should compare server_started_at when it is available"
         )
-        assert 'baselineServerIdentity===null' in fn.replace(' ', ''), (
+        assert 'baselineServerIdentity.uptimeSeconds!==null&&nextServerIdentity.uptimeSeconds!==null&&nextServerIdentity.uptimeSeconds<baselineServerIdentity.uptimeSeconds' in compact, (
+            "_waitForServerThenReload() should fall back to uptime_seconds when server_started_at is unavailable"
+        )
+        assert 'baselineServerIdentity===null' in compact, (
             "_waitForServerThenReload() should fallback to existing behavior when baseline is unavailable"
         )
+
+    def test_wait_for_server_reloads_on_outage_when_uptime_only_not_lower(self):
+        """Codex regression (#3713): when BOTH baseline and replacement expose only
+        uptime_seconds (server_started_at stripped) and the replacement's uptime is
+        NOT strictly lower than a very-low baseline, the `uptime < baseline` check
+        never fires. A SUSTAINED restart outage (>=2 consecutive failed/non-OK probes)
+        followed by a healthy response is the reliable restart signal in that case —
+        without it the user is stranded on the restart banner until they manually
+        reload. The >=2 threshold + outage reset on a healthy old-server response
+        prevent a single transient network blip from reloading onto the old process."""
+        src = read('static/ui.js')
+        fn = extract_js_function(src, '_waitForServerThenReload')
+        compact = re.sub(r'\s+', '', fn)
+        # Outage counter incremented on thrown fetch errors AND non-OK responses.
+        assert '_consecutiveOutages++' in compact, (
+            "the /health probe must count failed/non-OK responses as outage evidence"
+        )
+        # Sustained-outage threshold (>=2) gates the uptime-only fallback — not a single blip.
+        assert '_consecutiveOutages>=2' in compact, (
+            "the outage fallback must require >=2 consecutive outages so a single "
+            "transient blip can't trigger a premature reload onto the old server"
+        )
+        assert '_restartOutageObserved()&&' in compact, (
+            "_waitForServerThenReload() must gate the uptime-only reload on a sustained outage"
+        )
+        # Outage evidence resets when the OLD server answers healthy (blip, not restart).
+        assert '_consecutiveOutages=0' in compact, (
+            "a healthy pre-restart-process response must reset the outage counter so "
+            "unrelated blips can't accumulate into a false positive"
+        )
+        assert ('baselineServerIdentity.serverStartedAt===null&&nextServerIdentity.serverStartedAt===null'
+                in compact), (
+            "the outage fallback must be scoped to the uptime-only-on-both-sides case"
+        )
+
 
     def test_wait_for_server_fallbacks_to_ready_on_missing_baseline(self):
         """Healthy /health should reload immediately when baseline identity is missing."""
         src = read('static/ui.js')
-        start = src.index("async function _waitForServerThenReload")
-        brace = src.index("{", start)
-        depth = 0
-        end = None
-        for idx in range(brace, len(src)):
-            ch = src[idx]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    end = idx + 1
-                    break
-        assert end is not None, "_waitForServerThenReload body was not balanced"
-        fn = src[start:end]
+        normalize_fn = extract_js_function(src, '_normalizeHealthServerIdentity')
+        identity_fn = extract_js_function(src, '_healthResponseServerIdentity')
+        wait_fn = extract_js_function(src, '_waitForServerThenReload')
 
         script = f"""
 let now = 0;
@@ -973,9 +1042,6 @@ let fetches = 0;
 const responses = [
   {{ ok: true, data: {{ status: 'ok', server_started_at: null, uptime_seconds: 120 }} }},
 ];
-const _normalizeHealthServerIdentity = (rawIdentity) => rawIdentity===undefined||rawIdentity===null ? null :
-  (typeof rawIdentity==='string' ? (rawIdentity.trim() ? rawIdentity.trim() : null) :
-   Number.isFinite(Number(rawIdentity)) ? String(Number(rawIdentity)) : null);
 global.window = {{}};
 global.document = {{ baseURI: 'http://127.0.0.1:8788/' }};
 global.location = {{ reload: () => {{ reloads += 1; }} }};
@@ -991,7 +1057,9 @@ global.fetch = async () => {{
     json: async () => next.data,
   }};
 }};
-{fn}
+{normalize_fn}
+{identity_fn}
+{wait_fn}
 (async () => {{
   await _waitForServerThenReload({{ interval: 1, maxMs: 10, baselineServerIdentity: null }});
   if (fetches !== 1) throw new Error('expected fallback baseline to reload on first healthy probe, got '+fetches);
@@ -1003,21 +1071,9 @@ global.fetch = async () => {{
     def test_wait_for_server_ignores_old_identity_and_reloads_on_new_identity(self):
         """Healthy /health from the old process should not reload until identity changes."""
         src = read('static/ui.js')
-        start = src.index("async function _waitForServerThenReload")
-        brace = src.index("{", start)
-        depth = 0
-        end = None
-        for idx in range(brace, len(src)):
-            ch = src[idx]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    end = idx + 1
-                    break
-        assert end is not None, "_waitForServerThenReload body was not balanced"
-        fn = src[start:end]
+        normalize_fn = extract_js_function(src, '_normalizeHealthServerIdentity')
+        identity_fn = extract_js_function(src, '_healthResponseServerIdentity')
+        wait_fn = extract_js_function(src, '_waitForServerThenReload')
 
         script = f"""
 let now = 0;
@@ -1028,9 +1084,6 @@ const responses = [
   {{ ok: true, data: {{ status: 'ok', server_started_at: '1001.234', uptime_seconds: 2000 }} }},
   {{ ok: true, data: {{ status: 'ok', server_started_at: '1001.235', uptime_seconds: 2010 }} }},
 ];
-const _normalizeHealthServerIdentity = (rawIdentity) => rawIdentity===undefined||rawIdentity===null ? null :
-  (typeof rawIdentity==='string' ? (rawIdentity.trim() ? rawIdentity.trim() : null) :
-   Number.isFinite(Number(rawIdentity)) ? String(Number(rawIdentity)) : null);
 global.window = {{}};
 global.document = {{ baseURI: 'http://127.0.0.1:8788/' }};
 global.location = {{ reload: () => {{ reloads += 1; }} }};
@@ -1046,11 +1099,209 @@ global.fetch = async () => {{
     json: async () => next.data,
   }};
 }};
-{fn}
+{normalize_fn}
+{identity_fn}
+{wait_fn}
 (async () => {{
-  await _waitForServerThenReload({{ interval: 1, maxMs: 20, baselineServerIdentity: '1001.234' }});
+  await _waitForServerThenReload({{ interval: 1, maxMs: 20, baselineServerIdentity: {{ serverStartedAt: '1001.234', uptimeSeconds: 999 }} }});
   if (fetches !== 3) throw new Error('expected old-process health to be ignored before identity changes, got '+fetches);
   if (reloads !== 1) throw new Error('expected exactly one reload after new identity, got '+reloads);
+}})().catch(err => {{ console.error(err.stack || err.message); process.exit(1); }});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_wait_for_server_falls_back_to_uptime_when_started_at_is_missing(self):
+        src = read('static/ui.js')
+        normalize_fn = extract_js_function(src, '_normalizeHealthServerIdentity')
+        identity_fn = extract_js_function(src, '_healthResponseServerIdentity')
+        wait_fn = extract_js_function(src, '_waitForServerThenReload')
+
+        script = f"""
+let now = 0;
+let reloads = 0;
+let fetches = 0;
+const responses = [
+  {{ ok: true, data: {{ status: 'ok', server_started_at: null, uptime_seconds: 120 }} }},
+  {{ ok: true, data: {{ status: 'ok', server_started_at: null, uptime_seconds: 2 }} }},
+];
+global.window = {{}};
+global.document = {{ baseURI: 'http://127.0.0.1:8788/' }};
+global.location = {{ reload: () => {{ reloads += 1; }} }};
+global.$ = () => null;
+global.Date = {{ now: () => now }};
+global.setTimeout = (cb, ms) => {{ now += ms || 0; cb(); return 0; }};
+global.fetch = async () => {{
+  fetches += 1;
+  const next = responses.shift();
+  if (!next) throw new Error('unexpected extra fetch');
+  return {{
+    ok: next.ok,
+    json: async () => next.data,
+  }};
+}};
+{normalize_fn}
+{identity_fn}
+{wait_fn}
+(async () => {{
+  await _waitForServerThenReload({{ interval: 1, maxMs: 20, baselineServerIdentity: {{ serverStartedAt: null, uptimeSeconds: 120 }} }});
+  if (fetches !== 2) throw new Error('expected uptime fallback to wait for a lower uptime, got '+fetches);
+  if (reloads !== 1) throw new Error('expected exactly one reload after uptime fallback identified a new process, got '+reloads);
+}})().catch(err => {{ console.error(err.stack || err.message); process.exit(1); }});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_wait_for_server_accepts_new_started_at_when_baseline_lacked_one(self):
+        src = read('static/ui.js')
+        normalize_fn = extract_js_function(src, '_normalizeHealthServerIdentity')
+        identity_fn = extract_js_function(src, '_healthResponseServerIdentity')
+        wait_fn = extract_js_function(src, '_waitForServerThenReload')
+
+        script = f"""
+let now = 0;
+let reloads = 0;
+let fetches = 0;
+const responses = [
+  {{ ok: true, data: {{ status: 'ok', server_started_at: '1001.300', uptime_seconds: 120 }} }},
+];
+global.window = {{}};
+global.document = {{ baseURI: 'http://127.0.0.1:8788/' }};
+global.location = {{ reload: () => {{ reloads += 1; }} }};
+global.$ = () => null;
+global.Date = {{ now: () => now }};
+global.setTimeout = (cb, ms) => {{ now += ms || 0; cb(); return 0; }};
+global.fetch = async () => {{
+  fetches += 1;
+  const next = responses.shift();
+  if (!next) throw new Error('unexpected extra fetch');
+  return {{
+    ok: next.ok,
+    json: async () => next.data,
+  }};
+}};
+{normalize_fn}
+{identity_fn}
+{wait_fn}
+(async () => {{
+  await _waitForServerThenReload({{ interval: 1, maxMs: 20, baselineServerIdentity: {{ serverStartedAt: null, uptimeSeconds: 120 }} }});
+  if (fetches !== 1) throw new Error('expected new server_started_at to trigger reload on first healthy probe, got '+fetches);
+  if (reloads !== 1) throw new Error('expected exactly one reload when replacement server exposes server_started_at, got '+reloads);
+}})().catch(err => {{ console.error(err.stack || err.message); process.exit(1); }});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_wait_for_server_reloads_when_replacement_health_has_no_identity_fields(self):
+        src = read('static/ui.js')
+        normalize_fn = extract_js_function(src, '_normalizeHealthServerIdentity')
+        identity_fn = extract_js_function(src, '_healthResponseServerIdentity')
+        wait_fn = extract_js_function(src, '_waitForServerThenReload')
+
+        script = f"""
+let now = 0;
+let reloads = 0;
+let fetches = 0;
+const responses = [
+  {{ ok: true, data: {{ status: 'ok', server_started_at: null, uptime_seconds: null }} }},
+];
+global.window = {{}};
+global.document = {{ baseURI: 'http://127.0.0.1:8788/' }};
+global.location = {{ reload: () => {{ reloads += 1; }} }};
+global.$ = () => null;
+global.Date = {{ now: () => now }};
+global.setTimeout = (cb, ms) => {{ now += ms || 0; cb(); return 0; }};
+global.fetch = async () => {{
+  fetches += 1;
+  const next = responses.shift();
+  if (!next) throw new Error('unexpected extra fetch');
+  return {{
+    ok: next.ok,
+    json: async () => next.data,
+  }};
+}};
+{normalize_fn}
+{identity_fn}
+{wait_fn}
+(async () => {{
+  await _waitForServerThenReload({{ interval: 1, maxMs: 20, baselineServerIdentity: {{ serverStartedAt: '1001.234', uptimeSeconds: null }} }});
+  if (fetches !== 1) throw new Error('expected identity-less healthy replacement to trigger reload on first probe, got '+fetches);
+  if (reloads !== 1) throw new Error('expected exactly one reload when replacement health exposes no identity fields, got '+reloads);
+}})().catch(err => {{ console.error(err.stack || err.message); process.exit(1); }});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_wait_for_server_reloads_when_full_baseline_loses_all_identity_fields(self):
+        src = read('static/ui.js')
+        normalize_fn = extract_js_function(src, '_normalizeHealthServerIdentity')
+        identity_fn = extract_js_function(src, '_healthResponseServerIdentity')
+        wait_fn = extract_js_function(src, '_waitForServerThenReload')
+
+        script = f"""
+let now = 0;
+let reloads = 0;
+let fetches = 0;
+const responses = [
+  {{ ok: true, data: {{ status: 'ok', server_started_at: null, uptime_seconds: null }} }},
+];
+global.window = {{}};
+global.document = {{ baseURI: 'http://127.0.0.1:8788/' }};
+global.location = {{ reload: () => {{ reloads += 1; }} }};
+global.$ = () => null;
+global.Date = {{ now: () => now }};
+global.setTimeout = (cb, ms) => {{ now += ms || 0; cb(); return 0; }};
+global.fetch = async () => {{
+  fetches += 1;
+  const next = responses.shift();
+  if (!next) throw new Error('unexpected extra fetch');
+  return {{
+    ok: next.ok,
+    json: async () => next.data,
+  }};
+}};
+{normalize_fn}
+{identity_fn}
+{wait_fn}
+(async () => {{
+  await _waitForServerThenReload({{ interval: 1, maxMs: 20, baselineServerIdentity: {{ serverStartedAt: '1001.234', uptimeSeconds: 120 }} }});
+  if (fetches !== 1) throw new Error('expected full-baseline identity loss to trigger reload on first probe, got '+fetches);
+  if (reloads !== 1) throw new Error('expected exactly one reload when replacement health drops all identity fields after a full baseline, got '+reloads);
+}})().catch(err => {{ console.error(err.stack || err.message); process.exit(1); }});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_wait_for_server_reloads_when_baseline_started_at_degrades_to_uptime_only(self):
+        src = read('static/ui.js')
+        normalize_fn = extract_js_function(src, '_normalizeHealthServerIdentity')
+        identity_fn = extract_js_function(src, '_healthResponseServerIdentity')
+        wait_fn = extract_js_function(src, '_waitForServerThenReload')
+
+        script = f"""
+let now = 0;
+let reloads = 0;
+let fetches = 0;
+const responses = [
+  {{ ok: true, data: {{ status: 'ok', server_started_at: null, uptime_seconds: 12 }} }},
+];
+global.window = {{}};
+global.document = {{ baseURI: 'http://127.0.0.1:8788/' }};
+global.location = {{ reload: () => {{ reloads += 1; }} }};
+global.$ = () => null;
+global.Date = {{ now: () => now }};
+global.setTimeout = (cb, ms) => {{ now += ms || 0; cb(); return 0; }};
+global.fetch = async () => {{
+  fetches += 1;
+  const next = responses.shift();
+  if (!next) throw new Error('unexpected extra fetch');
+  return {{
+    ok: next.ok,
+    json: async () => next.data,
+  }};
+}};
+{normalize_fn}
+{identity_fn}
+{wait_fn}
+(async () => {{
+  await _waitForServerThenReload({{ interval: 1, maxMs: 20, baselineServerIdentity: {{ serverStartedAt: '1001.234', uptimeSeconds: 120 }} }});
+  if (fetches !== 1) throw new Error('expected uptime-only healthy replacement to trigger reload on first probe, got '+fetches);
+  if (reloads !== 1) throw new Error('expected exactly one reload when started_at degrades to uptime-only health, got '+reloads);
 }})().catch(err => {{ console.error(err.stack || err.message); process.exit(1); }});
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
@@ -1081,6 +1332,31 @@ global.fetch = async () => {{
         assert force_body.index('_readHealthServerIdentity()') < force_body.index("const res=await api('/api/updates/force'"), (
             "forceUpdate() must capture baseline before force POST"
         )
+
+    def test_health_identity_helper_prefers_server_started_at_and_keeps_uptime_fallback(self):
+        src = read('static/ui.js')
+        normalize_fn = extract_js_function(src, '_normalizeHealthServerIdentity')
+        identity_fn = extract_js_function(src, '_healthResponseServerIdentity')
+
+        script = f"""
+{normalize_fn}
+{identity_fn}
+const preferred = _healthResponseServerIdentity({{ server_started_at: '1001.234', uptime_seconds: 900 }});
+if (!preferred || preferred.serverStartedAt !== '1001.234') {{
+  throw new Error('expected server_started_at to be the preferred identity field');
+}}
+if (preferred.uptimeSeconds !== 900) {{
+  throw new Error('expected uptime_seconds to remain available for fallback comparisons');
+}}
+const fallback = _healthResponseServerIdentity({{ server_started_at: null, uptime_seconds: 120 }});
+if (!fallback || fallback.serverStartedAt !== null || fallback.uptimeSeconds !== 120) {{
+  throw new Error('expected uptime_seconds fallback identity when server_started_at is unavailable');
+}}
+if (_healthResponseServerIdentity({{ server_started_at: null, uptime_seconds: null }}) !== null) {{
+  throw new Error('expected null identity when /health exposes neither started_at nor uptime');
+}}
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
     def test_refresh_session_handles_restart_mode(self):
         """When _restartingForUpdate flag is set, refreshSession() must do a

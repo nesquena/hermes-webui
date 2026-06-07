@@ -66,6 +66,80 @@ isolated Hermes home and follow
 > for a one-off root run, use `sudo -E docker compose up -d` and verify the
 > rendered mount with `docker compose config` first.
 
+## Optional GPU runtime image
+
+The default Hermes WebUI Docker image stays CPU-only. GPU user-space packages
+are installed only when you build a custom image with the opt-in build arg:
+
+```bash
+docker build --build-arg INSTALL_GPU_LIBS=1 -t hermes-webui:gpu .
+```
+
+That build path installs VA-API basics (`libva2`, `vainfo`), AMD Mesa VA-API
+drivers (`mesa-va-drivers`), and the Intel non-free media driver when that
+package is available from the configured Debian repositories. NVIDIA host
+runtime tooling is not installed into the app image; use the NVIDIA Container
+Toolkit on the host and pass GPUs through at runtime.
+
+GPU passthrough still depends on host drivers, Docker runtime support, and
+device mappings. The commands below are configuration guidance for a suitable
+Linux Docker host; they are not a claim that native GPU passthrough was verified
+in this workspace.
+
+### Intel and AMD VA-API
+
+Expose the host render devices and add the runtime user to the common video and
+render groups:
+
+```bash
+docker run --rm \
+  --device /dev/dri:/dev/dri \
+  --group-add video \
+  --group-add render \
+  hermes-webui:gpu vainfo
+```
+
+For Compose, add the same mapping to a custom service definition:
+
+```yaml
+services:
+  hermes-webui:
+    image: hermes-webui:gpu
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+```
+
+`vainfo` should list the VA-API driver and supported profiles when the host
+driver stack and container permissions are correct. The container entrypoint
+preserves Docker-provided supplemental groups before it drops privileges to the
+`hermeswebui` runtime user, so the WebUI process keeps access to `/dev/dri`.
+
+### NVIDIA
+
+Install and configure the NVIDIA Container Toolkit on the host first, then use
+Docker's GPU runtime flag:
+
+```bash
+docker run --rm --gpus all hermes-webui:gpu nvidia-smi
+```
+
+For Compose, use a custom service with GPU access enabled:
+
+```yaml
+services:
+  hermes-webui:
+    image: hermes-webui:gpu
+    gpus: all
+```
+
+If `nvidia-smi` is unavailable or reports no devices, fix the host NVIDIA driver
+and container toolkit setup before debugging Hermes WebUI. The container image
+only supplies the WebUI plus optional user-space media libraries; it cannot
+provide host kernel drivers or the NVIDIA runtime.
+
 ## Scheduled jobs and the gateway daemon
 
 **Symptom**: Cron jobs created in the Tasks panel never fire. System Settings or Tasks shows:
@@ -347,6 +421,7 @@ volumes:
 - #1399 — UID alignment in compose files (fixed in v0.50.260 via PR #1428 + this guide)
 - #3012 — host `localhost` API URLs fail from Docker containers (use `host.docker.internal` / `host.containers.internal`)
 - #3006 — `sudo docker compose` can mount `/root/.hermes` instead of the user's Hermes home
+- #3243 — optional GPU runtime image/docs for containerized acceleration workloads
 - #858 — two-container `/opt/hermes` path confusion
 - #681 — tools running in WebUI container, not agent container (architectural)
 - #668 — auto-detect UID/GID from mounted volume

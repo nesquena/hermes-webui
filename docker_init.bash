@@ -264,6 +264,29 @@ if [ "A${whoami}" == "Aroot" ]; then
   chmod 600 "$ENV_FILE" || error_exit "Failed to secure $ENV_FILE"
   export _HW_ROOT_ENV_PATH="$ENV_FILE"
 
+  # Preserve Docker --group-add supplemental groups (for example render/video
+  # for /dev/dri GPU access) when dropping privileges. `su` rebuilds the target
+  # user's groups from /etc/group, so host-passed numeric groups must be made
+  # visible to hermeswebui before re-entering as the runtime user.
+  for gid in $(id -G); do
+    if [ "$gid" = "0" ] || [ "$gid" = "$WANTED_GID" ]; then
+      continue
+    fi
+    group_name="$(getent group "$gid" | cut -d: -f1 || true)"
+    if [ -z "$group_name" ]; then
+      group_name="hostgpu${gid}"
+      groupadd -g "$gid" "$group_name" 2>/dev/null || true
+      group_name="$(getent group "$gid" | cut -d: -f1 || true)"
+    fi
+    if [ -z "$group_name" ]; then
+      echo "!! WARNING: Could not create supplemental group for GID $gid; GPU device access may be unavailable"
+      continue
+    fi
+    if [ -n "$group_name" ]; then
+      usermod -a -G "$group_name" hermeswebui 2>/dev/null || echo "!! WARNING: Could not add hermeswebui to supplemental group $group_name ($gid)"
+    fi
+  done
+
   # restart the script as hermeswebui set with the correct UID/GID this time
   echo "-- Restarting as hermeswebui user with UID ${WANTED_UID} GID ${WANTED_GID}"
   exec su -s /bin/bash -c "exec \"${script_fullname}\"" hermeswebui || error_exit "subscript failed"

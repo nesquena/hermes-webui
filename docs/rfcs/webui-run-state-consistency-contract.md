@@ -89,6 +89,16 @@ while WebUI still has multiple overlapping state stores.
    reference cards are recovery/handoff material. They must not be treated as a
    new user request, active-turn content, or the default visible explanation for
    the current answer.
+   Automatic compression may appear during a live turn only as a quiet,
+   non-interactive context divider in the Worklog timeline, not as a clickable
+   tool row. It should use action wording: `Compressing context` while active
+   and `Context auto-compressed` when the agent has continued past the
+   compression barrier or when a completion event arrives. The timer is
+   diagnostic detail, not the source of truth for the divider's running state.
+   Later tool, reasoning, or interim assistant events prove the compression
+   barrier has passed even if no explicit completion event was delivered.
+   Settled final history should omit live-only automatic-compression rows unless
+   there is a user-visible recovery or error state to explain.
 7. **Observation has a degraded path.** Long-running or many-session observation
    should expose enough heartbeat/degraded status that the UI does not appear
    silent and ordinary APIs do not stall behind active streams.

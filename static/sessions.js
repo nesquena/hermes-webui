@@ -170,7 +170,6 @@ function _clearComposerDraft(sid) {
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
-const SESSION_MANUAL_STATUS_KEY = 'hermes-session-manual-status';
 let _sessionViewedCounts = null;
 let _sessionCompletionUnread = null;
 let _sessionObservedStreaming = null;
@@ -354,43 +353,6 @@ function _isServerIdleSessionRow(s) {
   return Boolean(s && s.session_id && !s.is_streaming && !s.active_stream_id && !s.pending_user_message);
 }
 
-// ── Manual session status (Todo / In Progress / Done) ─────────────────────
-const _SESSION_STATUS_VALUES = ['todo', 'in-progress', 'done'];
-
-function _getSessionManualStatuses() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SESSION_MANUAL_STATUS_KEY) || '{}');
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch (_e) { return {}; }
-}
-
-function getSessionManualStatus(sid) {
-  if (!sid) return null;
-  const val = _getSessionManualStatuses()[sid];
-  return _SESSION_STATUS_VALUES.includes(val) ? val : null;
-}
-
-function setSessionManualStatus(sid, status) {
-  if (!sid) return;
-  const map = _getSessionManualStatuses();
-  if (status && _SESSION_STATUS_VALUES.includes(status)) {
-    map[sid] = status;
-  } else {
-    delete map[sid];
-  }
-  try { localStorage.setItem(SESSION_MANUAL_STATUS_KEY, JSON.stringify(map)); } catch (_e) {}
-  renderSessionListFromCache();
-}
-
-function _cycleSessionManualStatus(session) {
-  const current = getSessionManualStatus(session.session_id);
-  const idx = _SESSION_STATUS_VALUES.indexOf(current);
-  const next = idx === -1 ? _SESSION_STATUS_VALUES[0]
-    : idx === _SESSION_STATUS_VALUES.length - 1 ? null
-    : _SESSION_STATUS_VALUES[idx + 1];
-  setSessionManualStatus(session.session_id, next);
-}
-
 function _reconcileActiveSessionIdleStateFromList(serverRows) {
   if (!S || !S.session || !S.session.session_id) return false;
   if (typeof _sendInProgress !== 'undefined' && _sendInProgress) return false;
@@ -413,8 +375,23 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   }
   _sessionStreamingById.set(sid, false);
   _forgetObservedStreamingSession(sid);
+  if (typeof hideApprovalCard==='function') hideApprovalCard(true);
+  if (typeof hideLiveRunStatus==='function') hideLiveRunStatus(sid);
+  if (typeof clearLiveToolCards==='function') clearLiveToolCards();
   if (changed&&typeof updateSendBtn==='function') updateSendBtn();
+  if (changed&&typeof _scheduleActiveSessionIdleReload==='function') _scheduleActiveSessionIdleReload(sid);
   return changed;
+}
+
+function _scheduleActiveSessionIdleReload(sid) {
+  if(!sid) return;
+  setTimeout(async () => {
+    if(!S||!S.session||S.session.session_id !== sid) return;
+    if(S.busy || S.activeStreamId) return;
+    try{
+      await loadSession(sid, {force:true, externalRefreshReason:'idle-reconcile'});
+    }catch(_){}
+  },0);
 }
 
 function _purgeStaleInflightEntries() {
@@ -456,6 +433,25 @@ function _rememberRenderedStreamingState(s, isStreaming) {
   if (!s || !s.session_id || !isStreaming) return;
   _sessionStreamingById.set(s.session_id, true);
   _rememberObservedStreamingSession(s);
+}
+
+function _inflightHasVisibleLiveState(inflight) {
+  if (!inflight || typeof inflight !== 'object') return false;
+  if (String(inflight.lastAssistantText || '').trim()) return true;
+  if (String(inflight.lastReasoningText || '').trim()) return true;
+  if (String(inflight.liveTurnHtml || '').trim()) return true;
+  if (Array.isArray(inflight.toolCalls) && inflight.toolCalls.length) return true;
+  if (Array.isArray(inflight.activityBurstAnchors) && inflight.activityBurstAnchors.length) return true;
+  if (Array.isArray(inflight.messages)) {
+    return inflight.messages.some((msg) => {
+      if (!msg || msg.role !== 'assistant') return false;
+      const content = msg.content;
+      if (typeof content === 'string') return content.trim();
+      if (Array.isArray(content)) return content.length > 0;
+      return Boolean(content);
+    });
+  }
+  return false;
 }
 
 function _rememberRenderedSessionSnapshot(s) {
@@ -746,8 +742,10 @@ async function loadSession(sid){
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
   // refresh paths pass {force:true} when external state.db changes arrive.
-  // Legacy invariant kept for static regression tests: if(currentSid===sid) return
-  if(currentSid===sid && !forceReload) return;
+  // Do not no-op a same-session click while another load is in flight: the
+  // previous transcript may already have been cleared for the pending switch.
+  // Static force-reload invariant: if(currentSid===sid && !forceReload) return;
+  if(currentSid===sid && !forceReload && !_loadingSessionId) return;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
@@ -914,22 +912,46 @@ async function loadSession(sid){
         todos:Array.isArray(stored.todos)?stored.todos:null,
         todoStateMeta:stored.todoStateMeta||null,
         reattach:true,
+        lastAssistantText:String(stored.lastAssistantText||''),
+        lastReasoningText:String(stored.lastReasoningText||''),
+        lastRunJournalSeq:Number(stored.lastRunJournalSeq||0)||0,
+        journalReplayFromStart:!!stored.journalReplayFromStart,
+        currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
+        currentLiveSegmentSeq:Number(stored.currentLiveSegmentSeq||0)||0,
+        activityBurstAnchors:Array.isArray(stored.activityBurstAnchors)?stored.activityBurstAnchors:[],
       };
     }
   }
 
+  if(INFLIGHT[sid]&&INFLIGHT[sid].journalReplayFromStart&&activeStreamId){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+
+  if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid])){
+    // A stale cursor-only INFLIGHT entry is worse than no cache: replay would
+    // resume after lastRunJournalSeq while the pane has no prose/tool DOM to
+    // preserve, making a session switch look like the live turn vanished.
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+
   if(INFLIGHT[sid]){
-    const inflightMessages=INFLIGHT[sid].messages||[];
-    S.messages=[];
+    _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
+    const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
     S.toolCalls=[];
     try {
       await _ensureMessagesLoaded(sid);
     } catch(e) {
       S.messages=inflightMessages;
     }
+    const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
+    if(liveTailPrepared){
+      S.messages=_dropCurrentTurnAssistantMessages(S.messages);
+    }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
-    if(_mergePendingSessionMessage(S.session,S.messages)){
+    if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
     }
     // Refresh todos from cold-load or persisted INFLIGHT before painting.
@@ -939,26 +961,55 @@ async function loadSession(sid){
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
+    if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
+      INFLIGHT[sid].reattach=false;
+      if (_loadingSessionId !== sid) return;
+      attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
+    }
     syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
-    const restoredLiveTurn=typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
+    if(typeof ensureRunActivityForCurrentTurn==='function') ensureRunActivityForCurrentTurn();
+    const hasStructuredLiveState=!!(INFLIGHT[sid]&&(
+      String(INFLIGHT[sid].lastAssistantText||'').trim()||
+      String(INFLIGHT[sid].lastReasoningText||'').trim()||
+      (Array.isArray(INFLIGHT[sid].activityBurstAnchors)&&INFLIGHT[sid].activityBurstAnchors.length)||
+      (Array.isArray(INFLIGHT[sid].toolCalls)&&INFLIGHT[sid].toolCalls.length)
+    ));
+    let restoredLiveTurn=false;
+    if(typeof restoreLiveTurnHtmlForSession==='function'){
+      if(!hasStructuredLiveState){
+        restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+      }else{
+        const liveTurn=document.getElementById('liveAssistantTurn');
+        const hasCurrentWorklogContent=!!(liveTurn&&liveTurn.querySelector(
+          '.live-worklog[data-live-worklog-shell="1"] .tool-card-row,'+
+          '.live-worklog[data-live-worklog-shell="1"] .wl-reason,'+
+          '.tool-call-group[data-live-tool-worklog-group="1"] .tool-card-row,'+
+          '.tool-call-group[data-live-tool-worklog-group="1"] .wl-reason,'+
+          '.tool-call-group[data-live-tool-call-group="1"] .tool-card-row,'+
+          '.tool-call-group[data-live-tool-call-group="1"] .wl-reason'
+        ));
+        if(hasCurrentWorklogContent) restoredLiveTurn=true;
+        else restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+      }
+    }
     if(!restoredLiveTurn){
-      appendThinking();
       clearLiveToolCards();
       if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+      else appendThinking();
       for(const tc of (S.toolCalls||[])){
         if(tc&&tc.name) appendLiveToolCard(tc);
       }
+    }
+    if(typeof ensureLiveWorklogShell==='function'){
+      const liveTurn=document.getElementById('liveAssistantTurn');
+      if(!liveTurn||!liveTurn.querySelector('.tool-call-group[data-tool-worklog-group="1"]')) ensureLiveWorklogShell();
     }
     loadDir('.');
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
     if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
-    if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
-      INFLIGHT[sid].reattach=false;
-      if (_loadingSessionId !== sid) return;
-      attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
-    }
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
@@ -1020,16 +1071,20 @@ async function loadSession(sid){
     if(activeStreamId){
       S.busy=true;
       S.activeStreamId=activeStreamId;
+      if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
+      else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
       updateSendBtn();
       setStatus('');
       setComposerStatus('');
-      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);appendThinking();loadDir('.');
+      // syncTopbar();renderMessages();appendThinking();loadDir('.');
+      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+      else appendThinking();
+      loadDir('.');
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
       if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
-      if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
-      else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
     }else{
       S.busy=false;
       S.activeStreamId=null;
@@ -1714,21 +1769,300 @@ function _sameTranscriptMessage(a,b){
   return false;
 }
 
+function _currentTurnAssistantText(messages){
+  const list=Array.isArray(messages)?messages:[];
+  let start=-1;
+  for(let i=list.length-1;i>=0;i--){
+    if(list[i]&&list[i].role==='user'){start=i;break;}
+  }
+  const parts=[];
+  for(let i=start+1;i<list.length;i++){
+    const msg=list[i];
+    if(!msg||msg.role!=='assistant'||msg._live) continue;
+    const text=_messageComparableText(msg);
+    if(text) parts.push(text);
+  }
+  return parts.join('\n\n').trim();
+}
+
+function _compactTranscriptText(text){
+  return String(text||'').replace(/\s+/g,' ').trim();
+}
+
+function _dropCurrentTurnAssistantMessages(messages){
+  const list=Array.isArray(messages)?messages:[];
+  let start=-1;
+  for(let i=list.length-1;i>=0;i--){
+    if(list[i]&&list[i].role==='user'){start=i;break;}
+  }
+  if(start<0) return list;
+  return list.filter((msg,idx)=>idx<=start||!(msg&&msg.role==='assistant'));
+}
+
+function _ensureInflightLiveAssistantMessage(inflight){
+  if(!inflight) return false;
+  const text=String(inflight.lastAssistantText||'').trim();
+  const reasoning=String(inflight.lastReasoningText||'').trim();
+  if(!text&&!reasoning) return false;
+  if(!Array.isArray(inflight.messages)) inflight.messages=[];
+  let live=null;
+  for(let i=inflight.messages.length-1;i>=0;i--){
+    const msg=inflight.messages[i];
+    if(msg&&msg.role==='assistant'&&msg._live){live=msg;break;}
+  }
+  if(live){
+    const liveText=_messageComparableText(live);
+    if(text&&(!liveText||text.startsWith(liveText)||text.length>liveText.length)){
+      live.content=text;
+    }
+    if(reasoning&&!live.reasoning) live.reasoning=reasoning;
+    return true;
+  }
+  inflight.messages.push({
+    role:'assistant',
+    content:text,
+    reasoning:reasoning||undefined,
+    _live:true,
+    _ts:Date.now()/1000,
+  });
+  return true;
+}
+
+function _projectInflightMessagesForActivityBursts(inflight){
+  const messages=Array.isArray(inflight&&inflight.messages)?inflight.messages:[];
+  const anchors=Array.isArray(inflight&&inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[];
+  if(!anchors.length) return messages;
+  let liveIdx=-1;
+  for(let i=messages.length-1;i>=0;i--){
+    const msg=messages[i];
+    if(msg&&msg.role==='assistant'&&msg._live){liveIdx=i;break;}
+  }
+  if(liveIdx<0) return messages;
+  let liveTailStartIdx=liveIdx;
+  while(liveTailStartIdx>0){
+    const prev=messages[liveTailStartIdx-1];
+    if(!(prev&&prev.role==='assistant'&&prev._live)) break;
+    liveTailStartIdx-=1;
+  }
+  const live=messages[liveIdx];
+  const text=_messageComparableText(live);
+  if(!text) return messages;
+  const priorLiveTexts=messages.slice(liveTailStartIdx,liveIdx)
+    .filter(m=>m&&m.role==='assistant'&&m._live)
+    .map(m=>_messageComparableText(m))
+    .filter(Boolean);
+  const liveTailIsAccumulator=priorLiveTexts.length>0&&priorLiveTexts.every(part=>
+    _compactTranscriptText(text).includes(_compactTranscriptText(part))
+  );
+  const replaceStartIdx=liveTailIsAccumulator?liveTailStartIdx:liveIdx;
+  if(priorLiveTexts.length&&!liveTailIsAccumulator) return messages;
+  const cleanAnchors=anchors
+    .map(a=>({id:Number(a&&a.id),textEnd:Number(a&&a.textEnd)}))
+    .filter(a=>Number.isFinite(a.id)&&Number.isFinite(a.textEnd)&&a.textEnd>0)
+    .sort((a,b)=>a.textEnd-b.textEnd||a.id-b.id);
+  const aliasBurstIds=new Map();
+  const fallbackBurstId = Number(inflight.currentActivityBurstId||0)||0;
+  aliasBurstIds.set(0,fallbackBurstId);
+  let lastVisibleBurstId=null;
+  let lastVisibleTextEnd=0;
+  const visibleAnchors=[];
+  for(const anchor of cleanAnchors){
+    const end=Math.min(text.length,anchor.textEnd);
+    if(end<=lastVisibleTextEnd){
+      if(lastVisibleBurstId!==null) aliasBurstIds.set(anchor.id,lastVisibleBurstId);
+      continue;
+    }
+    visibleAnchors.push(anchor);
+    lastVisibleBurstId=anchor.id;
+    lastVisibleTextEnd=end;
+  }
+
+  if(visibleAnchors.length&&Number.isFinite(visibleAnchors[0].id)) aliasBurstIds.set(0,visibleAnchors[0].id);
+  if(!visibleAnchors.length){
+    const firstVisibleBurstId=Number(cleanAnchors[0]&&cleanAnchors[0].id);
+    const fallbackAnchorId=Number.isFinite(firstVisibleBurstId)?firstVisibleBurstId:fallbackBurstId;
+    if(fallbackAnchorId!==fallbackBurstId) aliasBurstIds.set(0,fallbackAnchorId);
+    const projected=[{...live,content:text,_activityBurstId:fallbackAnchorId}];
+
+    const baselineSeq=Number(inflight.currentLiveSegmentSeq);
+    const existingSeqs=messages
+      .filter(m=>m&&m._live&&Number.isFinite(Number(m._liveSegmentSeq)))
+      .map(m=>Number(m._liveSegmentSeq));
+    const baseFromMessages=existingSeqs.length
+      ? existingSeqs.reduce((acc,n)=>Math.max(acc,n),-Infinity)
+      : 0;
+    const firstSeq=(Number.isFinite(baselineSeq)&&baselineSeq>0)
+      ? baselineSeq
+      : (Number.isFinite(baseFromMessages)&&baseFromMessages>0)
+        ? baseFromMessages
+        : 1;
+    projected.forEach((seg,i)=>{
+      seg._liveSegmentSeq=i===0?firstSeq:1+i;
+    });
+    if(Array.isArray(inflight.toolCalls)){
+      const segmentSeqByBurstId=new Map();
+      segmentSeqByBurstId.set(String(fallbackAnchorId),firstSeq);
+      projected.forEach(seg=>{
+        const bid=Number(seg&&seg._activityBurstId);
+        const seq=Number(seg&&seg._liveSegmentSeq);
+        if(!Number.isFinite(bid)||!Number.isFinite(seq)) return;
+        const key=String(bid);
+        const current=segmentSeqByBurstId.get(key);
+        if(current===undefined||seq>current) segmentSeqByBurstId.set(key,seq);
+      });
+
+      const validSeqs=new Set(segmentSeqByBurstId.values());
+      const canonicalBurstId=(value)=>{
+        const bid=Number(value);
+        if(!Number.isFinite(bid)) return null;
+        if(aliasBurstIds.has(bid)) return aliasBurstIds.get(bid);
+        return bid;
+      };
+
+      inflight.toolCalls.forEach(tc=>{
+        if(!tc) return;
+        if(tc.activityBurstId!==undefined&&tc.activityBurstId!==null){
+          const current=Number(tc.activityBurstId);
+          if(aliasBurstIds.has(current)) tc.activityBurstId=aliasBurstIds.get(current);
+        }
+        const segSeq=Number(tc.activitySegmentSeq);
+        if(Number.isFinite(segSeq)&&validSeqs.has(segSeq)) return;
+        const canonical=canonicalBurstId(tc.activityBurstId);
+        if(!Number.isFinite(canonical)){
+          if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+          return;
+        }
+        const mappedSeq=segmentSeqByBurstId.get(String(canonical));
+        if(Number.isFinite(mappedSeq)) tc.activitySegmentSeq=mappedSeq;
+        else if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+      });
+    }
+    return [...messages.slice(0,replaceStartIdx),...projected,...messages.slice(liveIdx+1)];
+  }
+  const projected=[];
+  let prev=0;
+  for(let i=0;i<visibleAnchors.length;i++){
+    const anchor=visibleAnchors[i];
+    const end=Math.max(prev,Math.min(text.length,anchor.textEnd));
+    const part=text.slice(prev,end).trim();
+    if(part) projected.push({...live,content:part,_activityBurstId:anchor.id});
+    else{
+      const fallbackAnchor = visibleAnchors[i+1] || visibleAnchors[i-1];
+      if(fallbackAnchor && Number.isFinite(anchor.id)&&Number.isFinite(fallbackAnchor.id)){
+        aliasBurstIds.set(anchor.id,fallbackAnchor.id);
+      }
+    }
+    prev=end;
+  }
+  const tail=text.slice(prev).trim();
+  if(tail) projected.push({...live,content:tail,_activityBurstId:Number(inflight.currentActivityBurstId||0)||0});
+  if(!projected.length) return messages;
+
+  const baselineSeq=Number(inflight.currentLiveSegmentSeq);
+  const existingSeqs=messages
+    .filter(m=>m&&m._live&&Number.isFinite(Number(m._liveSegmentSeq)))
+    .map(m=>Number(m._liveSegmentSeq));
+  const baseFromMessages=existingSeqs.length
+    ? existingSeqs.reduce((acc,n)=>Math.max(acc,n),-Infinity)
+    : 0;
+  const endSeq=(Number.isFinite(baselineSeq)&&baselineSeq>0)
+    ? baselineSeq
+    : (Number.isFinite(baseFromMessages)&&baseFromMessages>0)
+      ? baseFromMessages
+      : projected.length;
+  let firstSeq=endSeq-projected.length+1;
+  if(!Number.isFinite(firstSeq)||firstSeq<1) firstSeq=1;
+  projected.forEach((seg,i)=>{
+    const seq=firstSeq+i;
+    seg._liveSegmentSeq=seq;
+  });
+  if(Number.isFinite(firstSeq) && projected.length){
+    inflight.currentLiveSegmentSeq=projected[projected.length-1]._liveSegmentSeq;
+  }
+
+  const segmentSeqByBurstId=new Map();
+  projected.forEach(seg=>{
+    const bid=Number(seg&&seg._activityBurstId);
+    const seq=Number(seg&&seg._liveSegmentSeq);
+    if(!Number.isFinite(bid)||!Number.isFinite(seq)) return;
+    const key=String(bid);
+    const current=segmentSeqByBurstId.get(key);
+    if(current===undefined||seq>current) segmentSeqByBurstId.set(key,seq);
+  });
+
+  const canonicalBurstId = (value)=>{
+    const bid=Number(value);
+    if(!Number.isFinite(bid)) return null;
+    if(aliasBurstIds.has(bid)) return aliasBurstIds.get(bid);
+    return bid;
+  };
+
+  const validSeqs=new Set(segmentSeqByBurstId.values());
+
+  if(Array.isArray(inflight.toolCalls)){
+    inflight.toolCalls.forEach(tc=>{
+      if(!tc) return;
+      if(tc.activityBurstId!==undefined&&tc.activityBurstId!==null){
+        const current=Number(tc.activityBurstId);
+        if(aliasBurstIds.has(current)) tc.activityBurstId=aliasBurstIds.get(current);
+      }
+      const segSeq=Number(tc.activitySegmentSeq);
+      if(Number.isFinite(segSeq)&&validSeqs.has(segSeq)) return;
+      const canonical=canonicalBurstId(tc.activityBurstId);
+      if(!Number.isFinite(canonical)){
+        if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+        return;
+      }
+      const mappedSeq=segmentSeqByBurstId.get(String(canonical));
+      if(Number.isFinite(mappedSeq)) tc.activitySegmentSeq=mappedSeq;
+      else if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+    });
+  }
+  return [...messages.slice(0,replaceStartIdx),...projected,...messages.slice(liveIdx+1)];
+}
+
+function _prepareRunningLiveTail(baseMessages,inflightMessages){
+  const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
+  const liveMessages=inflight.filter(m=>m&&m.role==='assistant'&&m._live);
+  if(liveMessages.length>1) return liveMessages.some(m=>!!_messageComparableText(m));
+  const live=liveMessages[0]||null;
+  if(!live) return false;
+  const liveText=_messageComparableText(live);
+  const persistedText=_currentTurnAssistantText(baseMessages);
+  if(persistedText){
+    const compactPersisted=_compactTranscriptText(persistedText);
+    const compactLive=_compactTranscriptText(liveText);
+    if(!liveText || persistedText.startsWith(liveText)){
+      live.content=persistedText;
+    }else if(liveText.startsWith(persistedText)){
+      const extra=liveText.slice(persistedText.length).trim();
+      if(extra&&compactPersisted.includes(_compactTranscriptText(extra))){
+        live.content=persistedText;
+      }
+    }else if(compactPersisted===compactLive){
+      live.content=persistedText;
+    }
+  }
+  return !!_messageComparableText(live);
+}
+
 function _mergeInflightTailMessages(baseMessages, inflightMessages){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
-  let liveIdx=-1;
-  for(let i=inflight.length-1;i>=0;i--){
-    if(inflight[i]&&inflight[i]._live){liveIdx=i;break;}
+  let firstLiveIdx=-1;
+  for(let i=0;i<inflight.length;i++){
+    if(inflight[i]&&inflight[i]._live){firstLiveIdx=i;break;}
   }
-  if(liveIdx<0) return base;
-  let start=liveIdx;
-  if(liveIdx>0&&inflight[liveIdx-1]&&inflight[liveIdx-1].role==='user') start=liveIdx-1;
+  if(firstLiveIdx<0) return base;
+  let start=firstLiveIdx;
+  if(firstLiveIdx>0&&inflight[firstLiveIdx-1]&&inflight[firstLiveIdx-1].role==='user') start=firstLiveIdx-1;
   const tail=inflight.slice(start).filter(m=>m&&m.role);
   const merged=[...base];
   for(const msg of tail){
-    const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,msg));
-    if(!duplicate) merged.push(msg);
+    let candidate=msg;
+    if(!candidate) continue;
+    const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
+    if(!duplicate) merged.push(candidate);
   }
   return merged;
 }
@@ -2655,22 +2989,6 @@ function _openSessionActionMenu(session, anchorEl){
         }
       }
     ));
-  }
-  // Manual status picker (before danger actions)
-  if (!isExternalSession) {
-    const currentStatus = getSessionManualStatus(session.session_id);
-    for (const status of _SESSION_STATUS_VALUES) {
-      menu.appendChild(_buildSessionAction(
-        t('session_status_' + status.replace(/-/g,'_')) || status,
-        '',
-        '',
-        () => {
-          closeSessionActionMenu();
-          setSessionManualStatus(session.session_id, currentStatus === status ? null : status);
-        },
-        currentStatus === status ? 'is-active' : ''
-      ));
-    }
   }
   if(!isExternalSession){
     if(session.worktree_path){
@@ -4654,15 +4972,6 @@ function renderSessionListFromCache(){
         titleRow.appendChild(dot);
       }
     }
-    const manualStatus = getSessionManualStatus(s.session_id);
-    if (manualStatus) {
-      const statusBadge = document.createElement('span');
-      statusBadge.className = 'session-manual-status session-manual-status--' + manualStatus;
-      statusBadge.textContent = t('session_status_' + manualStatus.replace(/-/g,'_')) || manualStatus;
-      statusBadge.title = t('session_status_click_to_change') || 'Click to change status';
-      statusBadge.onclick = (e) => { e.stopPropagation(); _cycleSessionManualStatus(s); };
-      titleRow.appendChild(statusBadge);
-    }
     const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
     const showLineageMetadata=density==='detailed';
     const lineageKey=_sidebarLineageKeyForRow(s);
@@ -4882,8 +5191,11 @@ function renderSessionListFromCache(){
         }
         if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
       };
-      // onblur: cancel only -- no accidental saves
-      inp.onblur=()=>{ if(_renamingSid===s.session_id) finish(false); };
+      // onblur: save on blur — Escape explicitly cancels. The old cancel-on-blur
+      // behavior broke rename on mobile (iPhone "Done" dismisses the keyboard,
+      // triggering blur) and was less natural on desktop too (typing a name then
+      // clicking elsewhere should save, not discard).
+      inp.onblur=()=>{ if(_renamingSid===s.session_id) finish(true); };
       title.replaceWith(inp);
       setTimeout(()=>{inp.focus();inp.select();},10);
     };
@@ -5574,10 +5886,19 @@ function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.placeholder='Project name';
+  let _finishDone=false;
   const finish=async(save)=>{
+    if(_finishDone) return;
+    _finishDone=true;
     if(save&&inp.value.trim()){
       const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
-      await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
+      try{
+        await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
+      }catch(e){
+        _finishDone=false;
+        showToast('Project create failed: '+(e.message||e));
+        return;
+      }
       await renderSessionList();
       showToast('Project created');
     }else{
@@ -5592,7 +5913,7 @@ function _startProjectCreate(bar, addBtn){
     }
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
-  inp.onblur=()=>finish(false);
+  inp.onblur=()=>finish(true);
   inp.addEventListener('input',()=>_resizeProjectInput(inp));
   addBtn.replaceWith(inp);
   _resizeProjectInput(inp);
@@ -5603,13 +5924,17 @@ function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.value=proj.name;
+  let _finishDone=false;
   const finish=async(save)=>{
+    if(_finishDone) return;
+    _finishDone=true;
     if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
       try {
         await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
         await renderSessionList();
         showToast('Project renamed');
       } catch(e) {
+        _finishDone=false;
         showToast('Rename failed: '+(e.message||e));
       }
     }else{
@@ -5624,7 +5949,7 @@ function _startProjectRename(proj, chip){
     }
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
-  inp.onblur=()=>finish(false);
+  inp.onblur=()=>finish(true);
   inp.onclick=(e)=>e.stopPropagation();
   inp.addEventListener('input',()=>_resizeProjectInput(inp));
   chip.replaceWith(inp);
