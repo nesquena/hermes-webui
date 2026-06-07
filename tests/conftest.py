@@ -795,6 +795,39 @@ def test_server():
 
 # ── Self-heal: ensure the test server is alive before every test ──────────────
 
+_SERVER_DEPENDENT_MODULES: dict[str, bool] = {}
+# Precise markers — a bare "base_url" substring over-matches YAML config strings
+# like `base_url: http://...` inside pure-unit tests, so we look for the real
+# server-usage shapes: the TEST_BASE/_pytest_port imports, an HTTP call, or the
+# base_url FIXTURE used as a test arg (`(base_url` / `, base_url`).
+_SERVER_DEP_MARKERS = ("TEST_BASE", "_pytest_port", "urlopen(", "_post(", "(base_url", ", base_url")
+
+
+def _module_depends_on_server(module) -> bool:
+    """True if a test module actually talks to the live server.
+
+    ``test_server`` is session-scoped + autouse, so it appears in EVERY test's
+    ``request.fixturenames`` — meaning a fixturenames check can't distinguish
+    server tests from pure-unit tests (Codex caught this). Instead, detect an
+    explicit dependency by scanning the test module's source once for the markers
+    real HTTP tests use (they import ``TEST_BASE`` / ``base_url`` / ``_pytest_port``
+    or call ``urlopen``/``_post``). Cached per module path.
+    """
+    path = getattr(module, "__file__", None)
+    if not path:
+        return True  # can't tell — be safe and guard it
+    cached = _SERVER_DEPENDENT_MODULES.get(path)
+    if cached is not None:
+        return cached
+    try:
+        src = pathlib.Path(path).read_text(encoding="utf-8", errors="ignore")
+        result = any(marker in src for marker in _SERVER_DEP_MARKERS)
+    except Exception:
+        result = True
+    _SERVER_DEPENDENT_MODULES[path] = result
+    return result
+
+
 @pytest.fixture(autouse=True)
 def _ensure_test_server_alive(request):
     """Respawn the shared test server if it died, BEFORE each test runs.
@@ -807,18 +840,13 @@ def _ensure_test_server_alive(request):
     later HTTP-dependent test. The check is cheap: a fast /health probe, only
     escalating to a respawn when the server is actually down.
 
-    Skipped for tests that don't use the server (no ``test_server``/``base_url``
-    in their fixture closure) to avoid adding a probe to pure-unit tests.
+    Skipped for pure-unit tests that don't talk to the server — detected by
+    scanning the test module's source for server markers, NOT by
+    ``request.fixturenames`` (which always contains the autouse session
+    ``test_server`` fixture and so can't discriminate — Codex finding).
     """
     global _TEST_SERVER_PROC
-    # Only guard tests that actually depend on the live server.
-    closure = getattr(request, "fixturenames", ())
-    if "test_server" not in closure and "base_url" not in closure:
-        yield
-        return
-
-    if _TEST_SERVER_ENV is None:
-        # Session boot fixture hasn't run (shouldn't happen for server tests).
+    if _TEST_SERVER_ENV is None or not _module_depends_on_server(request.module):
         yield
         return
 
