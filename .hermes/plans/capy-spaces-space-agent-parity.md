@@ -301,6 +301,7 @@ Recent completed slices:
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub milestone-list API payloads (`/repos/{owner}/{repo}/milestones`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from the safe repository path, milestone count, bounded milestone numbers/titles/states/open and closed issue counts, due dates, and updated timestamps while omitting milestone descriptions, row URLs, API-auth/query/fragment markers, prompt-injection text, raw prompt fields, and secret-like fixture values from receipts/search/vault output.
   - JSON Feed bypass payloads, malformed rows, unsafe repo path segments, blocked title/state/timestamp values, invalid counts, and non-allow-listed hosts fail closed without creating vault records.
+  - Source registration now also downgrades route-shaped lookalike hosts, malformed milestone tails, and encoded milestone suffixes to local `capy-memory://...` origins before jobs are queued, preventing invalid milestone sources from retaining raw API routes, query/fragment markers, tokens, or raw-prompt markers in durable source/job rows.
 
 - `feat(capy-memory): ingest GitHub label-list metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub label-list API payloads (`/repos/{owner}/{repo}/labels`) produce metadata-only advisory summaries.

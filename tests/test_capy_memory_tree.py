@@ -15140,6 +15140,128 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_milestones_malfo
     assert "raw-prompt" not in serialized
 
 
+@pytest.mark.parametrize("source_id, origin_uri", [
+    ("github-milestones-lookalike-host", "https://api.github.com.evil.test/repos/capy/spaces/milestones?access_token=***#raw-prompt"),
+    ("github-milestones-malformed-tail", "https://api.github.com/repos/capy/spaces/milestones/7?access_token=***#raw-prompt"),
+    ("github-milestones-encoded-suffix", "https://api.github.com/repos/capy/spaces/milestones%2F7?access_token=***#raw-prompt"),
+])
+def test_register_source_reference_fail_closes_github_milestones_route_abuse(
+    tmp_path, monkeypatch, source_id, origin_uri
+):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+
+    receipt = register_source_reference({
+        "source_id": source_id,
+        "title": "GitHub Milestones Route Abuse",
+        "origin_uri": origin_uri,
+    })
+    jobs = list_source_refresh_jobs(limit=5)
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        row = conn.execute(
+            "SELECT origin_uri FROM sources WHERE source_id = ?",
+            (source_id,),
+        ).fetchone()
+        payload_row = conn.execute(
+            "SELECT payload_json FROM jobs WHERE job_id = ?",
+            (receipt["job_id"],),
+        ).fetchone()
+
+    serialized = json.dumps({
+        "jobs": jobs,
+        "payload_json": payload_row[0],
+        "receipt": receipt,
+        "source_origin": row[0],
+    }, sort_keys=True).lower()
+
+    assert receipt["origin_uri"] == f"capy-memory://{source_id}"
+    assert jobs["jobs"][0]["origin_uri"] == f"capy-memory://{source_id}"
+    assert row[0] == f"capy-memory://{source_id}"
+    assert json.loads(payload_row[0])["origin_uri"] == f"capy-memory://{source_id}"
+    assert "api.github.com.evil.test" not in serialized
+    assert "milestones/7" not in serialized
+    assert "milestones%2f7" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_register_source_reference_keeps_non_github_milestone_shaped_source(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+
+    receipt = register_source_reference({
+        "source_id": "external-milestone-feed",
+        "title": "External Milestone Feed",
+        "origin_uri": "https://example.com/repos/capy/spaces/milestones?access_token=***#raw-prompt",
+    })
+    jobs = list_source_refresh_jobs(limit=5)
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        row = conn.execute(
+            "SELECT origin_uri FROM sources WHERE source_id = ?",
+            ("external-milestone-feed",),
+        ).fetchone()
+        payload_row = conn.execute(
+            "SELECT payload_json FROM jobs WHERE job_id = ?",
+            (receipt["job_id"],),
+        ).fetchone()
+
+    expected_origin = "https://example.com/repos/capy/spaces/milestones"
+    serialized = json.dumps({
+        "jobs": jobs,
+        "payload_json": payload_row[0],
+        "receipt": receipt,
+        "source_origin": row[0],
+    }, sort_keys=True).lower()
+
+    assert receipt["origin_uri"] == expected_origin
+    assert jobs["jobs"][0]["origin_uri"] == expected_origin
+    assert row[0] == expected_origin
+    assert json.loads(payload_row[0])["origin_uri"] == expected_origin
+    assert "capy-memory://external-milestone-feed" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_register_source_reference_keeps_github_content_path_with_milestones_filename(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+
+    receipt = register_source_reference({
+        "source_id": "github-contents-milestones-plan",
+        "title": "GitHub Contents Milestones Plan",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/contents/docs/milestones%20plan.md?access_token=***#raw-prompt",
+    })
+    jobs = list_source_refresh_jobs(limit=5)
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        row = conn.execute(
+            "SELECT origin_uri FROM sources WHERE source_id = ?",
+            ("github-contents-milestones-plan",),
+        ).fetchone()
+        payload_row = conn.execute(
+            "SELECT payload_json FROM jobs WHERE job_id = ?",
+            (receipt["job_id"],),
+        ).fetchone()
+
+    expected_origin = "https://api.github.com/repos/capy/spaces/contents/docs/milestones%20plan.md"
+    serialized = json.dumps({
+        "jobs": jobs,
+        "payload_json": payload_row[0],
+        "receipt": receipt,
+        "source_origin": row[0],
+    }, sort_keys=True).lower()
+
+    assert receipt["origin_uri"] == expected_origin
+    assert jobs["jobs"][0]["origin_uri"] == expected_origin
+    assert row[0] == expected_origin
+    assert json.loads(payload_row[0])["origin_uri"] == expected_origin
+    assert "capy-memory://github-contents-milestones-plan" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_run_source_refresh_jobs_default_fetcher_ingests_github_environments_metadata_only(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))

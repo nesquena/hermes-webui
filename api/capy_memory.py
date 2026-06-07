@@ -596,6 +596,15 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_rulesets_path_repo(origin_uri)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if (
+        _github_milestones_route_path_matches(raw_origin_text)
+        and _github_raw_hostname_looks_like(raw_origin_text, "api.github.com")
+        and (
+            not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+            or not _github_milestones_path_repo(origin_uri)
+        )
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_repository_events_path_matches(raw_origin_text) and (
         not _github_repository_events_path_repo(raw_origin_text)
     ):
@@ -4899,12 +4908,10 @@ def _github_milestones_path_repo(origin_uri: str) -> str:
     return f"{path[2]}/{path[3]}"
 
 
-def _github_milestones_path_matches(origin_uri: str) -> bool:
+def _github_milestones_route_path_matches(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
     except ValueError:
-        return False
-    if (parts.hostname or "").strip().lower() != "api.github.com":
         return False
 
     def _segments_match(path_segments: list[str]) -> bool:
@@ -4922,7 +4929,17 @@ def _github_milestones_path_matches(origin_uri: str) -> bool:
     decoded_path = unquote(parts.path).split("/")
     if _segments_match(decoded_path):
         return True
-    return any(segment.lower().startswith("milestones%") for segment in raw_path)
+    return False
+
+
+def _github_milestones_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_milestones_route_path_matches(origin_uri)
 
 
 def _github_milestone_title_is_safe(value: Any) -> bool:
@@ -8354,6 +8371,19 @@ def _github_raw_hostname_is_exact(origin_uri: str, expected_host: str) -> bool:
         return False
     raw_host = raw_host.split(":", 1)[0]
     return raw_host == expected_host
+
+
+def _github_raw_hostname_looks_like(origin_uri: str, expected_host: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    raw_host = (parts.netloc or "").rsplit("@", 1)[-1]
+    if raw_host.startswith("["):
+        return False
+    raw_host = raw_host.split(":", 1)[0].strip().lower()
+    expected = expected_host.strip().lower()
+    return raw_host == expected or raw_host.startswith(f"{expected}.")
 
 
 def _github_raw_authority_is_exact(origin_uri: str, expected_host: str) -> bool:
