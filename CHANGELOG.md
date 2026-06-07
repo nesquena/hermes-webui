@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.319] — 2026-06-07 — Release KI (Phase 3 light — refresh stale continuation metadata)
+
+### Fixed
+- **A compression continuation no longer looks like it lost recent messages when `_index.json` is stale.** Complementing the snapshot-side fix, the sidebar now also refreshes a continuation row's sidecar metadata when the row is part of a compression lineage and its sidecar file is newer than the indexed timestamp — so recent turns that landed in the sidecar after the last index write are reflected in the row's count/last-activity instead of showing a stale (lower) message count. The refresh stays scoped to lineage-shaped rows, so ordinary sidebar polls don't hydrate every historical transcript. (#3789, refs #3740, @ai-ag2026)
+
 ## [v0.51.318] — 2026-06-07 — Release KH (Phase 3 light — warm account-usage probe worker pool)
 
 ### Changed
