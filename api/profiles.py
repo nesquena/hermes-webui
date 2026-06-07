@@ -1005,10 +1005,13 @@ _SKILLS_STATS_CACHE_TTL = 8.0  # seconds
 # Cache for the full list_profiles_api() result to avoid repeated expensive
 # hermes_cli.profiles.list_profiles() calls (each takes ~6-13s due to
 # find_alias_for_profile scanning all files in ~/.local/bin per profile).
-_LIST_PROFILES_CACHE: list | None = None
+# NOTE: gateway_running in cached data can be stale for up to _LIST_PROFILES_CACHE_TTL
+# seconds after a gateway starts/stops — acceptable trade-off for instant profile list.
+_LIST_PROFILES_CACHE: list[dict[str, object]] | None = None
 _LIST_PROFILES_CACHE_ACTIVE: str | None = None
 _LIST_PROFILES_CACHE_TS: float = 0.0
 _LIST_PROFILES_CACHE_TTL = 30.0  # seconds — profiles change rarely
+_LIST_PROFILES_CACHE_LOCK = threading.Lock()
 
 
 def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
@@ -1093,16 +1096,18 @@ def list_profiles_api() -> list:
     import time
     now = time.time()
 
-    # Return cached result if still fresh
-    if (_LIST_PROFILES_CACHE is not None
-            and now - _LIST_PROFILES_CACHE_TS < _LIST_PROFILES_CACHE_TTL):
-        # Update just the active flag (cheap) without re-scanning
-        active = get_active_profile_name()
-        if active != _LIST_PROFILES_CACHE_ACTIVE:
-            for p in _LIST_PROFILES_CACHE:
-                p['is_active'] = p['name'] == active
-            _LIST_PROFILES_CACHE_ACTIVE = active
-        return _LIST_PROFILES_CACHE
+    # Return cached result if still fresh (thread-safe, returns defensive copy)
+    with _LIST_PROFILES_CACHE_LOCK:
+        if (_LIST_PROFILES_CACHE is not None
+                and now - _LIST_PROFILES_CACHE_TS < _LIST_PROFILES_CACHE_TTL):
+            # Update just the active flag (cheap) without re-scanning
+            active = get_active_profile_name()
+            if active != _LIST_PROFILES_CACHE_ACTIVE:
+                for p in _LIST_PROFILES_CACHE:
+                    p['is_active'] = p['name'] == active
+                _LIST_PROFILES_CACHE_ACTIVE = active
+            # Return a shallow copy so callers cannot corrupt the cache
+            return [dict(p) for p in _LIST_PROFILES_CACHE]
 
     try:
         from hermes_cli.profiles import list_profiles
@@ -1130,9 +1135,12 @@ def list_profiles_api() -> list:
             'total_skills': total_count,
         })
 
-    _LIST_PROFILES_CACHE = result
-    _LIST_PROFILES_CACHE_ACTIVE = active
-    _LIST_PROFILES_CACHE_TS = now
+    # Atomic cache write: timestamp first so concurrent readers never see
+    # a non-None cache with a zero/stale timestamp (avoids spurious stampede).
+    with _LIST_PROFILES_CACHE_LOCK:
+        _LIST_PROFILES_CACHE_TS = now
+        _LIST_PROFILES_CACHE_ACTIVE = active
+        _LIST_PROFILES_CACHE = result
     return result
 
 
@@ -1507,7 +1515,10 @@ def create_profile_api(name: str, clone_from: str = None,
                        model_provider: str = None) -> dict:
     """Create a new profile. Returns the new profile info dict."""
     global _LIST_PROFILES_CACHE
-    _LIST_PROFILES_CACHE = None  # invalidate profile list cache
+    with _LIST_PROFILES_CACHE_LOCK:
+        _LIST_PROFILES_CACHE = None
+        _LIST_PROFILES_CACHE_ACTIVE = None
+        _LIST_PROFILES_CACHE_TS = 0.0
     _validate_profile_name(name)
     # Defense-in-depth: validate clone_from here too, even though routes.py
     # also validates it. Any caller that bypasses the HTTP layer gets protection.
@@ -1607,7 +1618,10 @@ def create_profile_api(name: str, clone_from: str = None,
 def delete_profile_api(name: str) -> dict:
     """Delete a profile. Switches to default first if it's the active one."""
     global _LIST_PROFILES_CACHE
-    _LIST_PROFILES_CACHE = None  # invalidate profile list cache
+    with _LIST_PROFILES_CACHE_LOCK:
+        _LIST_PROFILES_CACHE = None
+        _LIST_PROFILES_CACHE_ACTIVE = None
+        _LIST_PROFILES_CACHE_TS = 0.0
     if _is_root_profile(name):
         raise ValueError("Cannot delete the default profile.")
     _validate_profile_name(name)
