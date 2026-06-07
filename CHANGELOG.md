@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+## [v0.51.316] — 2026-06-07 — Release KF (Phase 2 — Polish locale + agent-source dependency audit)
+
+### Added
+- **Polish (pl) language support.** Adds a full Polish translation set to the in-app localization, a Polish login-page locale, and resolver coverage for `pl` / `pl-PL` / `pl_PL`, with parity tests asserting the new locale is complete and actually translated (not English fallthrough). (#3781, @leszek3737)
+
+### Changed
+- **Documented the WebUI → hermes-agent source-dependency contract.** Adds a deterministic, repo-relative audit script (`scripts/audit_agent_source_dependencies.py`) that classifies how the WebUI depends on the agent source tree, an architecture/contract doc, and a regression test pinning the dependency classes. Read-only tooling and docs — no runtime behavior change; groundwork for cleaner agent/WebUI packaging boundaries. (#3723, @rodboev)
+
 ## [v0.51.315] — 2026-06-07 — Release KE (test infra — cross-platform workspace-fallback tests)
 
 ### Changed
