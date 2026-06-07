@@ -26,6 +26,8 @@ _ALLOWED_EXTENSIONS = {".png", ".svg", ".ico"}
 # 256x256 px at 4 bytes/pixel RGBA is roughly 262 KB uncompressed.
 # 200 KB after PNG compression is generous headroom.
 _MAX_LOGO_BYTES = 200 * 1024
+_MAX_LOGO_MULTIPART_OVERHEAD_BYTES = 8 * 1024
+_MAX_LOGO_UPLOAD_REQUEST_BYTES = _MAX_LOGO_BYTES + _MAX_LOGO_MULTIPART_OVERHEAD_BYTES
 
 # Max pixel dimension for raster logo images.
 _MAX_LOGO_DIMENSION = 256
@@ -264,10 +266,16 @@ def handle_logo_upload(handler) -> bool:
     from api.upload import parse_multipart
 
     content_type = handler.headers.get("Content-Type", "")
-    content_length = int(handler.headers.get("Content-Length", "0"))
+    try:
+        content_length = int(handler.headers.get("Content-Length", "0") or 0)
+    except (TypeError, ValueError):
+        return bad(handler, "Invalid Content-Length")
 
     if not content_type.startswith("multipart/form-data"):
         return bad(handler, "Expected multipart/form-data")
+
+    if content_length > _MAX_LOGO_UPLOAD_REQUEST_BYTES:
+        return j(handler, {"error": _logo_requirements()}, status=413)
 
     try:
         fields, files = parse_multipart(handler.rfile, content_type, content_length)

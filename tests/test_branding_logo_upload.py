@@ -213,6 +213,36 @@ def test_logo_delete_rejects_oversized_content_length_without_reading():
     assert b"Request body too large" in bytes(handler.body)
 
 
+def test_logo_upload_rejects_oversized_multipart_length_without_reading():
+    class RejectRead:
+        def read(self, _length):
+            raise AssertionError("oversized logo upload must be rejected before reading")
+
+    handler = SimpleNamespace(
+        headers={
+            "Content-Type": "multipart/form-data; boundary=logo-boundary",
+            "Content-Length": str(branding._MAX_LOGO_UPLOAD_REQUEST_BYTES + 1),
+        },
+        rfile=RejectRead(),
+        sent_headers={},
+        status=None,
+        body=bytearray(),
+    )
+
+    class Writer:
+        def write(self, data):
+            handler.body.extend(data)
+
+    handler.wfile = Writer()
+    handler.send_response = lambda status: setattr(handler, "status", status)
+    handler.send_header = lambda key, value: handler.sent_headers.setdefault(key, value)
+    handler.end_headers = lambda: None
+
+    branding.handle_logo_upload(handler)
+    assert handler.status == 413
+    assert b"Logo must be PNG, SVG, or ICO" in bytes(handler.body)
+
+
 def test_custom_logo_dom_hooks_exist():
     html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
 
