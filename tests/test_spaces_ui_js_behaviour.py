@@ -1831,7 +1831,69 @@ global.fetch = async function(path, opts = {}) {
     });
   }
   if (path === 'api/spaces/widget/delete') {
-    return response({ deleted: true, space_id: 'lab', widget_id: 'weather', revision_event_id: 'rev3' });
+    return response({
+      deleted: true,
+      space_id: 'lab',
+      widget_id: 'weather',
+      revision_event_id: 'rev3',
+      prompt_preflight: {
+        status: 'pass',
+        boundary: 'creator_commit',
+        severity: 'none',
+        checks: ['widget_delete_approval_required', 'prompt_injection_preflight_required'],
+        metadata_only: true,
+        local_only: true,
+        raw_prompt_stored: false,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      autonomy_policy: {
+        available: true,
+        action: 'space.widget.delete',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['creator_commit'],
+        prompt_preflight_status: 'pass',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-widget-delete',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'widget.delete:lab',
+        redaction_status: 'metadata-only',
+        metadata_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      output_compaction: {
+        tool: 'capy-spaces-tool-action',
+        command: 'space.widget.delete',
+        exit_status: 0,
+        original_chars: 512,
+        compacted_chars: 256,
+        redaction_status: 'metadata_only',
+        rules_applied: ['cap_section_chars', 'redact_unsafe_markers'],
+        text: 'space_action: space.widget.delete\nprogress_run_id: widget.delete:lab',
+        retained_artifact_handles: [
+          { kind: 'space', handle: 'space:lab', label: 'Space action metadata' },
+          { kind: 'widget', handle: 'widget:lab:weather', label: 'Widget delete metadata' },
+        ],
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+    });
   }
   if (path === 'api/spaces/data/delete') {
     return response({
@@ -4761,8 +4823,41 @@ def test_spaces_ui_delete_widget_confirm_posts_to_delete_and_refreshes_widgets(d
     assert out["dialogs"][0]["title"] == "Delete widget?"
     assert out["dialogs"][0]["confirmLabel"] == "Delete widget"
     assert post["method"] == "POST"
-    assert json.loads(post["body"]) == {"space_id": "lab", "widget_id": "weather"}
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "include_safety_receipts": True,
+    }
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+
+
+def test_spaces_ui_delete_widget_confirm_renders_metadata_only_safety_receipt(driver_path):
+    out = _run_spaces_scenario(driver_path, "deleteWidgetConfirmed")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/delete")
+    html = out["rootHtml"]
+
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "include_safety_receipts": True,
+    }
+    assert "Widget delete receipt" in html
+    assert "Confirmed widget deletion completed with metadata-only policy and progress evidence." in html
+    assert "Prompt preflight" in html
+    assert "Status: pass" in html
+    assert "Boundary: creator_commit" in html
+    assert "Action: space.widget.delete" in html
+    assert "Model route hint: hint:reasoning" in html
+    assert "Widget delete progress" in html
+    assert "run widget.delete:lab" in html
+    assert "Compaction evidence" in html
+    assert "Command: space.widget.delete" in html
+    assert "widget:lab:weather" in html
+    assert "Raw output, prompt bodies, widget bodies, and sensitive values remain omitted from this receipt." in html
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
 
 
 def test_spaces_ui_edit_widget_prefills_safe_metadata_form_without_fetching_renderer(driver_path):

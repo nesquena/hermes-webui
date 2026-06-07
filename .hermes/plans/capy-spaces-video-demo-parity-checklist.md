@@ -29,6 +29,8 @@ Recent safe adapter progress:
 
 - Confirmed shared data slot deletion now shows the same metadata-only safety receipt envelope in the Space detail UI and direct `/api/spaces/data/delete` route as the tool aliases: required prompt-preflight, `space.shared_slot.delete` autonomy-policy, `shared-slot.delete:<space_id>` progress, and compaction evidence without exposing raw slot values, renderer/source/API-auth fields, prompts, scripts, secrets, or bearer-like fixture values.
 
+- Confirmed widget deletion now requests and renders the backend metadata-only safety receipt envelope after the widget manager refresh: prompt-preflight, `space.widget.delete` autonomy-policy, `widget.delete:<space_id>` progress, and compaction evidence without exposing raw prompts, renderer/source/API-auth fields, scripts, secrets, or deleted widget bodies.
+
 - Confirmed Space deletion now shows a metadata-only safety receipt after the Spaces home refresh, including prompt-preflight, autonomy-policy, `space.delete:<space_id>` progress, and compaction evidence without exposing raw prompts, renderer/source/API-auth fields, scripts, secrets, unsafe paths, or deleted widget bodies.
 
 - WebUI streaming runs now emit metadata-only `run.started`, `run.completed`, and `run.failed` lifecycle progress events with safe `webui.run:<stream>` run ids, so product-home progress can show browser-originated autonomous turns as active/completed runs without persisting user prompts, assistant text, tool payloads, provider credentials, renderer/source fields, scripts, or secret-looking fixture values.

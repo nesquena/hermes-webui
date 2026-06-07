@@ -1466,6 +1466,26 @@
     if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
+  function renderWidgetDeleteReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Widget delete progress');
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !compaction) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Widget delete receipt</h3>' +
+      '<div class="capy-spaces-muted">Confirmed widget deletion completed with metadata-only policy and progress evidence. Raw widget bodies, prompts, implementation fields, and secrets stay omitted.</div>' +
+      preflight + policy + progress + compaction + '</div>';
+  }
+
+  function prependWidgetDeleteReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderWidgetDeleteReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
   function renderSystemWidgetUpsertReceipt(data){
     const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
     if (!result) return '';
@@ -3820,8 +3840,10 @@
       if (!spaceId || !widgetId || typeof showConfirmDialog !== 'function') return;
       const ok = await showConfirmDialog({title: 'Delete widget?', message: 'Delete widget "'+widgetId+'"? This removes it from the active Space manifest, with revision history preserved.', confirmLabel: 'Delete widget', danger: true, focusCancel: true});
       if (!ok) return;
-      await postSpacesJson('api/spaces/widget/delete', {space_id: spaceId, widget_id: widgetId});
+      const deleteResult = await postSpacesJson('api/spaces/widget/delete', {space_id: spaceId, widget_id: widgetId, include_safety_receipts: true});
       await loadSpaceWidgets(spaceId);
+      prependWidgetDeleteReceipt(deleteResult || {});
+      return;
     }
   }
 
