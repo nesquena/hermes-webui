@@ -76,6 +76,103 @@ let _selectedTextReplyText='';
 let _selectedTextReplyRaf=0;
 const _persistentStateToastSeen=new Set();
 
+function enhanceMarkdownTables(root){
+  if(!root||!root.querySelectorAll) return;
+  const scope=root;
+  const tables=scope.querySelectorAll('.msg-body table:not([data-markdown-table-enhanced])');
+  const sortLabel=typeof t==='function'?t('markdown_table_sort_column'):'Sort column';
+  const filterLabel=typeof t==='function'?t('markdown_table_filter'):'Filter table';
+  tables.forEach((table)=>{
+    if(table.closest('.csv-table-wrap')) return;
+    const headRows=table.tHead?Array.from(table.tHead.rows):[];
+    const body=table.tBodies&&table.tBodies.length?table.tBodies[0]:table;
+    const bodyRows=Array.from(body.rows||[]).filter((row)=>row.parentElement===body);
+    const headerRow=headRows[0]||table.querySelector('tr');
+    if(!headerRow||!bodyRows.length) return;
+    table.setAttribute('data-markdown-table-enhanced','1');
+    bodyRows.forEach((row,idx)=>{ row.dataset.markdownTableOriginalIndex=String(idx); });
+
+    if(bodyRows.length>=4&&table.parentElement){
+      const filter=document.createElement('input');
+      filter.type='search';
+      filter.className='markdown-table-filter';
+      filter.placeholder=filterLabel;
+      filter.setAttribute('aria-label',filterLabel);
+      filter.autocomplete='off';
+      filter.spellcheck=false;
+      filter.addEventListener('input',()=>{
+        const query=_markdownTableText(filter.value).toLowerCase();
+        bodyRows.forEach((row)=>{
+          row.hidden=!!query&&!_markdownTableText(row.textContent).toLowerCase().includes(query);
+        });
+      });
+      table.parentElement.insertBefore(filter,table);
+    }
+
+    Array.from(headerRow.cells||[]).forEach((cell,colIdx)=>{
+      const button=document.createElement('button');
+      button.type='button';
+      button.className='markdown-table-sort';
+      const columnName=_markdownTableText(cell.textContent)||String(colIdx+1);
+      const columnSortLabel=`${sortLabel}: ${columnName}`;
+      button.setAttribute('aria-label',columnSortLabel);
+      button.title=columnSortLabel;
+      cell.setAttribute('aria-sort','none');
+      const label=document.createElement('span');
+      label.className='markdown-table-sort-label';
+      while(cell.firstChild) label.appendChild(cell.firstChild);
+      const indicator=document.createElement('span');
+      indicator.className='markdown-table-sort-indicator';
+      indicator.setAttribute('aria-hidden','true');
+      button.appendChild(label);
+      button.appendChild(indicator);
+      button.addEventListener('click',()=>{
+        const nextDir=table.dataset.markdownTableSortCol===String(colIdx)&&table.dataset.markdownTableSortDir==='asc'?'desc':'asc';
+        table.dataset.markdownTableSortCol=String(colIdx);
+        table.dataset.markdownTableSortDir=nextDir;
+        Array.from(headerRow.cells||[]).forEach((other)=>{
+          other.setAttribute('aria-sort','none');
+        });
+        cell.setAttribute('aria-sort',nextDir==='asc'?'ascending':'descending');
+        const rows=Array.from(body.rows||[]).filter((row)=>row.parentElement===body);
+        rows.sort((a,b)=>{
+          const av=_markdownTableCellText(a.cells[colIdx]);
+          const bv=_markdownTableCellText(b.cells[colIdx]);
+          const cmp=av.localeCompare(bv,undefined,{numeric:true,sensitivity:'base'});
+          if(cmp!==0) return nextDir==='asc'?cmp:-cmp;
+          const ai=Number(a.dataset.markdownTableOriginalIndex||0);
+          const bi=Number(b.dataset.markdownTableOriginalIndex||0);
+          return ai-bi;
+        });
+        rows.forEach((row)=>body.appendChild(row));
+      });
+      cell.appendChild(button);
+    });
+  });
+}
+
+function _markdownTableText(value){
+  return String(value||'').replace(/\s+/g,' ').trim();
+}
+
+function _markdownTableCellText(cell){
+  return _markdownTableText(cell?cell.textContent:'');
+}
+
+window.enhanceMarkdownTables=enhanceMarkdownTables;
+
+(function _wireMarkdownTableEnhancer(){
+  if(typeof window==='undefined'||typeof window.renderMessages!=='function'||window.renderMessages._markdownTablesEnhanced) return;
+  const baseRenderMessages=window.renderMessages;
+  window.renderMessages=function(...args){
+    const result=baseRenderMessages.apply(this,args);
+    const inner=typeof $==='function'?$('msgInner'):document.getElementById('msgInner');
+    enhanceMarkdownTables(inner);
+    return result;
+  };
+  window.renderMessages._markdownTablesEnhanced=true;
+})();
+
 function _persistentToastText(value){
   if(value===null||value===undefined)return '';
   if(typeof value==='string')return value;
@@ -1521,7 +1618,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{window.smd.parser_end(_smdParser);}catch(_){}
       // parser_end may flush remaining markdown that creates new links/images —
       // re-sanitize the body before the DOM is handed off to highlightCode / renderMessages.
-      if(assistantBody){_sanitizeSmdLinks(assistantBody);}
+      if(assistantBody){_sanitizeSmdLinks(assistantBody);enhanceMarkdownTables(assistantBody);}
     }
     _smdParser=null;
     _smdWrittenLen=0;

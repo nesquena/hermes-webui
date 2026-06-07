@@ -1667,6 +1667,18 @@
   .msg-body th{background:rgba(255,255,255,.07);padding:6px 10px;text-align:left;font-weight:600;border:1px solid var(--border2);}
   .msg-body td{padding:5px 10px;border:1px solid rgba(255,255,255,.06);}
   .msg-body tr:nth-child(even){background:rgba(255,255,255,.03);}
+  .markdown-table-filter{display:block;width:min(260px,100%);margin:8px 0 4px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--text);font:inherit;font-size:12px;}
+  .markdown-table-filter:focus{outline:1px solid var(--accent);outline-offset:1px;}
+  .markdown-table-sort{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:20px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;text-align:left;cursor:pointer;}
+  .markdown-table-sort:focus-visible{outline:1px solid var(--accent);outline-offset:2px;}
+  .markdown-table-sort-label{min-width:0;overflow-wrap:anywhere;}
+  .markdown-table-sort-indicator{flex:0 0 10px;color:var(--muted);font-size:10px;line-height:1;text-align:center;}
+  /* Neutral (unsorted) affordance: a faint up/down glyph so it's discoverable
+     that the header is clickable/sortable. Becomes a solid ▲/▼ when active. */
+  .markdown-table-sort-indicator::before{content:"\2195";opacity:0.45;}
+  .markdown-table-sort:hover .markdown-table-sort-indicator::before{opacity:0.8;}
+  .msg-body th[aria-sort="ascending"] .markdown-table-sort-indicator::before{content:"\25B2";opacity:1;}
+  .msg-body th[aria-sort="descending"] .markdown-table-sort-indicator::before{content:"\25BC";opacity:1;}
   /* #486: inline code inside table cells needs scaled sizing to avoid overflow/clipping */
   .msg-body td code,.msg-body th code{font-size:0.85em;padding:1px 4px;vertical-align:baseline;}
   /* KaTeX math rendering */
