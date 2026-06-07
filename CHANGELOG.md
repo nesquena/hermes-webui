@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.307] — 2026-06-06 — Release JW (stage-a3 — onboarding forwarded-IP spoof fix + update-check CSRF hardening)
+
+### Security
+- **Unauthenticated first-run onboarding no longer trusts spoofable forwarded IP headers.** The local-network gate that lets onboarding run without a password now ignores `X-Forwarded-For` / `X-Real-IP` by default (a direct client can set them to a private address to bypass the gate), trusting them only when `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` is explicitly set behind a trusted reverse proxy — and then using the rightmost, proxy-appended hop. When forwarded headers are present but untrusted, the request is treated as coming through a proxy and is denied (the raw socket is the proxy's, not the client's), so a public client behind any reverse proxy can't be read as local. **Reverse-proxy deployments that run onboarding without a password must set `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` (or `HERMES_WEBUI_ONBOARDING_OPEN=1`).** Direct loopback clients are unaffected. (#3758, @fantasticsquirrel)
+- **Update checks that hit the network/git are now CSRF-safe.** `GET /api/updates/check` is cache-only (no network or git mutation), so a state-changing update fetch can't be triggered by a bare cross-site navigation; the forced refresh moved to `POST /api/updates/check {force:true}`. Docker init env logging also masks `PASSWORD`/`SECRET`/`CREDENTIAL`/`COOKIE`/`SESSION` key names in addition to `TOKEN`/`API`/`KEY`. (Minor behavior tightening: `HERMES_WEBUI_ONBOARDING_OPEN` now only bypasses for canonical truthy values `1`/`true`/`yes`/`on` rather than any non-empty value.) (#3758, @fantasticsquirrel)
+
 ## [v0.51.306] — 2026-06-06 — Release JV (stage-a2 — branchy compression lineage resolves to the freshest tip)
 
 ### Fixed
