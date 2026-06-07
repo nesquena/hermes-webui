@@ -3853,6 +3853,10 @@ main.main > #mainPlugin{display:none;}
   .provider-quota-pool-row-head span{white-space:normal;}
   .provider-quota-pool-windows{grid-template-columns:1fr;}
 }
+.provider-cost-chart-wrap{width:100%;margin-top:12px;}
+.provider-cost-chart-title{font-size:11px;font-weight:650;color:var(--muted);margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.provider-cost-chart-pace{font-weight:400;color:var(--text);}
+.provider-cost-chart-bars{height:80px;}
 .provider-card{
   border:1px solid var(--border);
   border-radius:12px;
