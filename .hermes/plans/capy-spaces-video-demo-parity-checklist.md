@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- Source current-space id helper coverage now includes metadata-only safety receipts for `space.spaces.currentId`, preserving the active/current Space id payload while adding prompt-preflight, autonomy-policy, progress, and compaction evidence without a synthetic Space id or renderer/source/API-auth/raw-prompt/script/bearer/secret leakage.
+
 - Source Capy Spaces health helpers now include metadata-only safety receipts for `space.api.health` and `space.health`, preserving the safe health/schema/Space-count payload while adding prompt-preflight, autonomy-policy, progress, and compaction evidence without a synthetic Space id or renderer/source/API-auth/raw-prompt/script/secret leakage.
 
 - Source widget SDK runtime compatibility coverage now includes metadata-only safety receipts for `space.spaces.widgetApiVersion`, preserving the safe `widget_api_version`/runtime payload while adding prompt-preflight, autonomy-policy, progress, and compaction evidence without a synthetic Space id or renderer/source/API-auth/raw-prompt/script/secret leakage.

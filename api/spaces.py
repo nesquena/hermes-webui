@@ -7497,6 +7497,7 @@ def _record_widget_sdk_helper_progress_event(action: str) -> dict[str, Any]:
         "space.spaces.getrenderedwidgetsize": "widget.sdk:rendered-size",
         "space.spaces.normalizespaceid": "spaces.sdk:id",
         "space.spaces.normalizewidgetid": "spaces.sdk:id",
+        "space.spaces.currentid": "space.current:id",
     }
     run_id = action_run_ids.get(lookup_action, "widget.sdk:helper")
     try:
@@ -7839,7 +7840,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name == "space.spaces.currentid":
         current_id = _space_tool_current_id(data)
         space_id = validate_space_id(current_id) if current_id else None
-        return {"ok": True, "action": name, "active_space_id": space_id, "current_id": space_id}
+        return {
+            "ok": True,
+            "action": name,
+            "active_space_id": space_id,
+            "current_id": space_id,
+            **_space_widget_sdk_helper_receipt_envelope(name),
+        }
     if name in {
         "browser.open",
         "space.browser.open",
