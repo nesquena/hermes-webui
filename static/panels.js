@@ -6902,6 +6902,10 @@ async function _refreshProviderQuota(card,button){
     const fresh=_buildProviderQuotaCard(next);
     if(fresh){
       card.replaceWith(fresh);
+      // Re-render the 7-day spend chart onto the rebuilt card — the quota
+      // refresh replaces the whole card, which would otherwise drop the chart
+      // until the next full panel reload (#3600).
+      renderProviderCostChart(fresh); // async, fire-and-forget
       if(typeof showToast==='function') showToast(failed?t('provider_quota_refresh_failed'):t('provider_quota_refresh_succeeded'));
       return;
     }
