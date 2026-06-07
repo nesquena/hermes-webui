@@ -3547,6 +3547,155 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_issue_comments_j
     assert "raw-prompt" not in serialized
 
 
+@pytest.mark.parametrize("origin_uri", [
+    "https://api.github.com/repos/capy/spaces/issues/42/comments/extra?access_token=***#raw-prompt",
+    "https://api.github.com/repos/capy/spaces/pulls/42/comments%2Fextra?access_token=***#raw-prompt",
+    "https://api.github.com/repos/capy/spaces/issues/42%252Fcomments?access_token=***#raw-prompt",
+    "https://api.github.com/repos/capy/spaces/issues/comments?access_token=***#raw-prompt",
+    "https://api.github.com/repos/capy/spaces/issues/comments/123?access_token=***#raw-prompt",
+    "https://api.github.com/repos/capy/spaces/pulls/comments?access_token=***#raw-prompt",
+])
+def test_run_source_refresh_jobs_rejects_github_issue_comments_malformed_routes_before_fetch(tmp_path, monkeypatch, origin_uri):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    source_id = "github-issue-comments-malformed-" + ("pull" if "/pulls/" in origin_uri else "issue")
+    register_source_reference({
+        "source_id": source_id,
+        "title": "GitHub Issue Comments Malformed Route",
+        "origin_uri": origin_uri,
+    })
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("malformed GitHub issue/PR comments route must fail closed before fetch")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert calls == []
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / f"{source_id}.md").exists()
+    assert "api.github.com/repos/capy/spaces" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_register_source_reference_fail_closes_github_issue_comments_uppercase_host(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+
+    receipt = register_source_reference({
+        "source_id": "github-issue-comments-uppercase-host",
+        "title": "GitHub Issue Comments Uppercase Host",
+        "origin_uri": "https://API.GITHUB.COM/repos/capy/spaces/issues/42/comments?access_token=***#raw-prompt",
+    })
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("non-canonical GitHub issue-comments host must not be fetched")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    jobs = list_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"receipt": receipt, "result": result, "jobs": jobs}, sort_keys=True).lower()
+
+    assert receipt["origin_uri"] == "capy-memory://github-issue-comments-uppercase-host"
+    assert jobs["jobs"][0]["origin_uri"] == "capy-memory://github-issue-comments-uppercase-host"
+    assert calls == []
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-issue-comments-uppercase-host.md").exists()
+    assert "api.github.com/repos/capy/spaces/issues" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_register_source_reference_fail_closes_github_issue_comments_lookalike_host(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com.evil.test")
+    init_memory_tree()
+
+    receipt = register_source_reference({
+        "source_id": "github-issue-comments-lookalike-host",
+        "title": "GitHub Issue Comments Lookalike Host",
+        "origin_uri": "https://api.github.com.evil.test/repos/capy/spaces/issues/42/comments?access_token=***#raw-prompt",
+    })
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("lookalike GitHub issue-comments host must not be fetched")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"receipt": receipt, "result": result}, sort_keys=True).lower()
+
+    assert receipt["origin_uri"] == "capy-memory://github-issue-comments-lookalike-host"
+    assert calls == []
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-issue-comments-lookalike-host.md").exists()
+    assert "api.github.com.evil.test" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_fail_closes_legacy_github_issue_comments_uppercase_host_payload(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-issue-comments-legacy-uppercase-host",
+        "title": "GitHub Issue Comments Legacy Uppercase Host",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/issues/42/comments",
+    })
+    legacy_payload = {
+        "source_id": "github-issue-comments-legacy-uppercase-host",
+        "origin_uri": "https://API.GITHUB.COM/repos/capy/spaces/issues/42/comments?access_token=***#raw-prompt",
+        "refresh_interval_seconds": 3600,
+    }
+    with capy_memory._connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET payload_json = ?, status = 'pending', attempts = 0 WHERE job_id = ?",
+            (json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")), receipt["job_id"]),
+        )
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("legacy uppercase GitHub issue-comments host must not be fetched")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert calls == []
+    assert not (root / "vault" / "github-issue-comments-legacy-uppercase-host.md").exists()
+    assert "api.github.com" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 COMMIT_COMMENTS_SHA = "1234567890abcdef1234567890abcdef12345678"
 
 

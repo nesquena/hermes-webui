@@ -487,6 +487,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         origin_uri = f"capy-memory://{source_id}"
     if _github_issue_events_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_issue_comments_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or _github_issue_comments_path_info(origin_uri) is None
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_issue_labels_path_matches(raw_origin_text) and not _github_raw_authority_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
     if _github_latest_release_path_matches(raw_origin_text) and (
@@ -7609,6 +7614,47 @@ def _github_issue_comments_path_info(origin_uri: str) -> tuple[str, int] | None:
     return kind, int(path[5])
 
 
+def _github_issue_comments_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _candidate_paths(raw_path: str) -> list[str]:
+        paths = [raw_path]
+        current = raw_path
+        for _ in range(2):
+            decoded = unquote(current)
+            if decoded == current:
+                break
+            paths.append(decoded)
+            current = decoded
+        return paths
+
+    def _matches_issue_comments_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        exact_or_suffixed_comments = (
+            len(path) >= 7
+            and path[0] == ""
+            and len(lowered) > 6
+            and lowered[1] == "repos"
+            and lowered[4] in {"issues", "pulls"}
+            and lowered[6].startswith("comments")
+        )
+        missing_number_comments = (
+            len(path) >= 6
+            and path[0] == ""
+            and len(lowered) > 5
+            and lowered[1] == "repos"
+            and lowered[4] in {"issues", "pulls"}
+            and lowered[5].startswith("comments")
+        )
+        return exact_or_suffixed_comments or missing_number_comments
+
+    return any(_matches_issue_comments_shape(path) for path in _candidate_paths(parts.path))
+
+
 def _github_comment_login_is_safe(value: Any) -> bool:
     login = _safe_public_text(value, limit=80)
     if not login or _refresh_value_is_blocked(login):
@@ -11431,6 +11477,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_pull_requested_reviewers_path_info(raw_origin_uri) is None
         ):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_issue_comments_path_matches(raw_origin_uri):
+        issue_comments_origin = _safe_origin_uri(raw_origin_uri, source_id=_safe_public_id(source_id, fallback="source"))
+        if (
+            not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
+            or _github_issue_comments_path_info(issue_comments_origin) is None
+        ):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_contents_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or _github_contents_path_info(raw_origin_uri) is None:
             raise RuntimeError("refresh fetcher disabled")
@@ -11760,6 +11813,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         ):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_issue_comments_path_matches(safe_origin_uri):
+        if (
+            _github_issue_comments_path_info(safe_origin_uri) is None
+            or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com")
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_commit_comments_path_matches(safe_origin_uri):
         if (
             _github_commit_comments_path_info(safe_origin_uri) is None
@@ -11952,6 +12012,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_secret_scanning_alerts_path_repo(final_url) != _github_secret_scanning_alerts_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_issue_comments_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or _github_issue_comments_path_info(final_url) is None
+            or _github_issue_comments_path_info(final_url) != _github_issue_comments_path_info(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
         if _github_commit_comments_path_matches(safe_origin_uri) and (
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or _github_commit_comments_path_info(final_url) is None
@@ -11989,6 +12055,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if _github_issue_labels_path_matches(safe_origin_uri) and (
             _github_issue_labels_path_info(safe_origin_uri) is None
             or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com")
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_issue_comments_path_matches(safe_origin_uri) and (
+            _github_issue_comments_path_info(safe_origin_uri) is None
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -13064,6 +13135,11 @@ def run_source_refresh_jobs(
             else:
                 origin_uri = environment_variables_origin
         elif _github_issue_labels_path_matches(raw_origin_uri) and not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com"):
+            origin_uri = f"capy-memory://{source_id}"
+        elif _github_issue_comments_path_matches(raw_origin_uri) and (
+            not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
+            or _github_issue_comments_path_info(_safe_origin_uri(raw_origin_uri, source_id=source_id)) is None
+        ):
             origin_uri = f"capy-memory://{source_id}"
         elif _github_collaborators_path_matches(raw_origin_uri) and (
             not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")

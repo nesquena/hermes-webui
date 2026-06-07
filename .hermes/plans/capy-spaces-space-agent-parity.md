@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `fix(capy-memory): harden GitHub issue comments routes`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving malformed, missing-number, encoded/double-encoded, and lookalike-host GitHub issue/pull-request comments routes fail closed before fetch, and non-canonical uppercase `api.github.com` authorities are downgraded to local `capy-memory://` origins before jobs can persist raw API URLs.
+  - The exact `/repos/{owner}/{repo}/{issues|pulls}/{number}/comments` metadata parser still ingests safe comment ids, commenters, and timestamps, while malformed routes, query/fragment auth markers, raw prompt markers, comments bodies, renderer/source/html/script fields, and secret-looking fixture values stay out of fetches, receipts, search, and vault output.
+
 - `feat(spaces): add widget read safety receipts`
   - Added RED/GREEN backend coverage proving source-style and current-space widget read/get helpers now return metadata-only prompt-preflight, autonomy-policy, progress, and output-compaction receipts while preserving sanitized widget detail payloads and unsafe revision-event redaction.
   - Widget reads use `widget.read:<space_id>` progress ids, now cover legacy generic `widget.read`/`widget.get` aliases, share the allow-listed prompt metadata summarizer with widget list/detail surfaces, keep renderer/source/API-auth/raw-prompt/script/nested-prompt-metadata/revision-escape/secret fixture values out of serialized responses and compaction text, and read the target widget before recording progress so missing-widget reads cannot emit false `tool.completed` telemetry.
