@@ -14,6 +14,7 @@
 - Custom logo uploads now reject oversized multipart requests before reading the body, returning 413 for requests that cannot fit the 200 KB logo limit plus form framing overhead.
 - Custom logo deletion now uses the capped JSON body reader, so malformed or oversized `Content-Length` values are rejected before reading the request body.
 - Custom logo favicon updates now leave the default HTML favicon and apple-touch-icon links intact when custom logos are disabled.
+- Custom logo rendering now restores the default logo and favicon set when custom logos are disabled or a cached uploaded logo fails to load.
 
 ## [v0.51.306] — 2026-06-06 — Release JV (stage-a2 — branchy compression lineage resolves to the freshest tip)
 

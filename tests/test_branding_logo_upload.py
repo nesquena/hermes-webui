@@ -275,9 +275,24 @@ def test_custom_logo_favicon_uses_resolved_theme_variant():
     assert "if(typeof _systemThemeMq.addEventListener==='function')" in js
     assert "else if(typeof _systemThemeMq.addListener==='function')" in js
     assert "_setFavicon(src);" in js
+    assert "_restoreDefaultFavicons();" in js
     assert "_setFavicon(lightSrc);" not in js
     assert "_setFavicon('static/favicon.svg')" not in js
     assert "window._customLogoDarkMode" in js
+
+
+def test_custom_logo_disable_and_load_error_restore_defaults():
+    js = (Path(__file__).parents[1] / "static" / "boot.js").read_text(encoding="utf-8")
+
+    assert "function _restoreDefaultFavicons()" in js
+    assert "href:'static/favicon.svg'" in js
+    assert "href:'static/favicon-32.png'" in js
+    assert "href:'static/favicon.ico'" in js
+    assert "href:'static/apple-touch-icon.png'" in js
+    assert "img.onerror=function()" in js
+    assert "if(img.dataset.customLogoSrc===src) _handleCustomLogoLoadError(src);" in js
+    assert "if(document.documentElement.dataset.customLogoSrc!==failedSrc) return;" in js
+    assert "document.documentElement.removeAttribute('data-custom-logo-src');" in js
 
 
 def test_custom_logo_upload_cache_busting_contract():

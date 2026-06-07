@@ -1862,6 +1862,7 @@ function applyCustomLogo(settings){
 
   if(!enabled||!lightPath){
     _setCustomLogoSrc('');
+    _restoreDefaultFavicons();
     document.documentElement.removeAttribute('data-custom-logo-mode');
     document.documentElement.removeAttribute('data-custom-logo-src');
     return;
@@ -1881,9 +1882,15 @@ function applyCustomLogo(settings){
     document.documentElement.classList.toggle('has-custom-logo',hasCustom);
     document.querySelectorAll('.custom-logo-img').forEach(function(img){
       if(hasCustom){
+        img.dataset.customLogoSrc=src;
+        img.onerror=function(){
+          if(img.dataset.customLogoSrc===src) _handleCustomLogoLoadError(src);
+        };
         img.src=src;
         img.removeAttribute('hidden');
       }else{
+        img.onerror=null;
+        img.removeAttribute('data-custom-logo-src');
         img.removeAttribute('src');
         img.setAttribute('hidden','');
       }
@@ -1892,6 +1899,31 @@ function applyCustomLogo(settings){
       mark.classList.toggle('is-hidden',hasCustom);
       if(hasCustom) mark.setAttribute('hidden','');
       else mark.removeAttribute('hidden');
+    });
+  }
+
+  function _handleCustomLogoLoadError(failedSrc){
+    if(document.documentElement.dataset.customLogoSrc!==failedSrc) return;
+    _setCustomLogoSrc('');
+    _restoreDefaultFavicons();
+    document.documentElement.removeAttribute('data-custom-logo-mode');
+    document.documentElement.removeAttribute('data-custom-logo-src');
+  }
+
+  function _restoreDefaultFavicons(){
+    document.querySelectorAll('link[rel~=\"icon\"], link[rel=\"shortcut icon\"], link[rel=\"apple-touch-icon\"], link[rel~=\"apple-touch-icon\"]').forEach(function(l){l.remove();});
+    [
+      {rel:'icon',type:'image/svg+xml',href:'static/favicon.svg'},
+      {rel:'icon',type:'image/png',sizes:'32x32',href:'static/favicon-32.png'},
+      {rel:'shortcut icon',href:'static/favicon.ico'},
+      {rel:'apple-touch-icon',sizes:'512x512',href:'static/apple-touch-icon.png'},
+    ].forEach(function(meta){
+      var link=document.createElement('link');
+      link.rel=meta.rel;
+      if(meta.type) link.type=meta.type;
+      if(meta.sizes) link.setAttribute('sizes',meta.sizes);
+      link.href=meta.href;
+      document.head.appendChild(link);
     });
   }
 
