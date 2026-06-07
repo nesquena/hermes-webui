@@ -4360,6 +4360,41 @@ function renderSessionListFromCache(){
       };
       chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
       chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
+      // Touch long-press → context menu (mobile UX, #3733)
+      let _lpTimer=null;
+      let _lpHandled=false;
+      let _lpStartX=0,_lpStartY=0;
+      chip.addEventListener('touchstart',(e)=>{
+        const t=e.changedTouches&&e.changedTouches[0];
+        if(!t) return;
+        _lpHandled=false;_lpStartX=t.clientX;_lpStartY=t.clientY;
+        chip.classList.add('long-pressing');
+        _lpTimer=setTimeout(()=>{
+          _lpHandled=true;
+          chip.classList.remove('long-pressing');
+          clearTimeout(_pClickTimer);_pClickTimer=null;
+          const syn={clientX:t.clientX,clientY:t.clientY,preventDefault:()=>{}};
+          _showProjectContextMenu(syn,p,chip);
+        },500);
+      },{passive:true});
+      chip.addEventListener('touchmove',(e)=>{
+        if(!_lpTimer) return;
+        const t=e.changedTouches&&e.changedTouches[0];
+        if(!t) return;
+        if(Math.abs(t.clientX-_lpStartX)>10||Math.abs(t.clientY-_lpStartY)>10){
+          clearTimeout(_lpTimer);_lpTimer=null;
+          chip.classList.remove('long-pressing');
+        }
+      },{passive:true});
+      chip.addEventListener('touchend',(e)=>{
+        clearTimeout(_lpTimer);_lpTimer=null;
+        chip.classList.remove('long-pressing');
+        if(_lpHandled){e.preventDefault();e.stopPropagation();}
+      },{passive:false});
+      chip.addEventListener('touchcancel',()=>{
+        clearTimeout(_lpTimer);_lpTimer=null;_lpHandled=false;
+        chip.classList.remove('long-pressing');
+      },{passive:true});
       bar.appendChild(chip);
     }
     // Create button
