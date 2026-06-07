@@ -750,6 +750,7 @@ function _setCronHeaderButtons(mode, job) {
     show(editBtn); show(dupBtn); show(delBtn); hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create' || mode === 'edit') {
     hide(runBtn); hide(pauseBtn); hide(resumeBtn); hide(editBtn); hide(dupBtn); hide(delBtn);
+    hide(aliasesBtn);
     show(cancelBtn); show(saveBtn);
   } else if (mode === 'aliases') {
     hide(runBtn); hide(pauseBtn); hide(resumeBtn); hide(editBtn); hide(dupBtn); hide(delBtn); hide(saveBtn);
