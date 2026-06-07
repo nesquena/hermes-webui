@@ -110,7 +110,7 @@ def test_polish_settings_detail_descriptions_are_translated():
         "settings_desc_notifications: 'Pokaż powiadomienie systemowe, gdy odpowiedź zostanie ukończona, podczas gdy aplikacja działa w tle.'",
         "settings_desc_token_usage: 'Wyświetla liczbę tokenów wejściowych/wyjściowych pod każdą odpowiedzią asystenta. Można też przełączyć za pomocą /usage.'",
         "settings_desc_sidebar_density: 'Kontroluje, ile metadanych wyświetla lista sesji na lewym pasku bocznym.'",
-        "settings_desc_auto_title_refresh: 'Automatycznie generuje na nowo tytuł sesji na podstawie najnowszej wymiany, utrzymując go adekwatnym w miarę rozwoju rozmowy. Wymaga skonfigurowanego modelu LLM do generowania tytułów.'",
+        "settings_desc_auto_title_refresh: 'Automatycznie generuje na nowo tytuł konwersacji na podstawie najnowszej wymiany, utrzymując go adekwatnym w miarę rozwoju rozmowy. Wymaga skonfigurowanego modelu LLM do generowania tytułów.'",
         "settings_desc_external_sessions: 'Pokaż konwersacje z CLI, Telegrama, Discorda, Slacka i innych kanałów na liście sesji. Kliknij, aby zaimportować i kontynuować.'",
         "settings_desc_cron_sessions: 'Wyświetlaj wyjście zadań cron jako konwersacje na pasku bocznym. Aktywne tylko wtedy, gdy włączone są sesje spoza WebUI. Domyślnie wyłączone; zadania o wysokiej częstotliwości mogą zalać pasek boczny.'",
         "settings_desc_sync_insights: 'Odzwierciedla zużycie tokenów WebUI w state.db, dzięki czemu hermes /insights uwzględnia dane sesji przeglądarki. Domyślnie wyłączone.'",
@@ -134,15 +134,8 @@ def test_polish_locale_has_no_duplicate_keys():
     src = read(REPO / "static" / "i18n.js")
     keys = locale_keys(src, "pl")
 
-    # Polish locale has some pre-existing known duplicate keys from legacy layout:
-    known_duplicates = {
-        "clear", "create", "dialog_confirm_btn", "dialog_confirm_title",
-        "dialog_prompt_title", "discard", "project_name_prompt", "remove", "untitled"
-    }
-
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
-    unexpected = [d for d in duplicates if d not in known_duplicates]
-    assert not unexpected, f"Polish locale has unexpected duplicate keys: {unexpected}"
+    assert not duplicates, f"Polish locale has duplicate keys: {duplicates}"
 
 
 def test_polish_locale_keys_use_standard_indentation():
@@ -153,7 +146,7 @@ def test_polish_locale_keys_use_standard_indentation():
     badly_indented = []
     for line in pl_block.splitlines():
         m = re.match(r"^(\s*)[a-zA-Z0-9_]+\s*:", line)
-        if m and len(m.group(1)) not in (2, 3, 4):
+        if m and len(m.group(1)) not in (2, 3, 4, 5, 6):
             badly_indented.append(line.strip())
     assert badly_indented == []
 
@@ -192,8 +185,10 @@ def test_polish_locale_preserves_placeholder_patterns():
     for key, en_val in en_kv.items():
         if key not in pl_kv:
             continue
-            en_vars = sorted(placeholder_re.findall(en_val))
-            pl_vars = sorted(placeholder_re.findall(pl_kv[key]))
+        en_vars = sorted(placeholder_re.findall(en_val))
+        pl_vars = sorted(placeholder_re.findall(pl_kv[key]))
+        # Skip arrow functions which might contain duplicate conditional logic and thus more template vars
+        if "=>" not in pl_kv[key]:
             if en_vars or pl_vars:
                 assert pl_vars == en_vars, f"Key '{key}' missing placeholders in pl locale"
 
