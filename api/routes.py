@@ -1467,6 +1467,11 @@ def _is_plugin_null_origin(handler, path: str) -> bool:
     return path.startswith("/api/plugins/") and handler.headers.get("Origin") == "null"
 
 
+def _is_plugin_request(handler, path: str) -> bool:
+    """Plugin iframe fetch sets X-Plugin-Request header; CSRF can't forge it."""
+    return path.startswith("/api/plugins/") and handler.headers.get("X-Plugin-Request") == "1"
+
+
 def _dispatch_plugin_subprocess(handler, plugin_name: str, sub_route: str, method: str, parsed) -> bool:
     """Proxy a plugin API request to a subprocess via stdin/stdout JSON.
 
@@ -1546,8 +1551,7 @@ def _dispatch_plugin_subprocess(handler, plugin_name: str, sub_route: str, metho
         kl = k.lower()
         if kl in _allowed_resp or kl.startswith("x-"):
             handler.send_header(k, v)
-    if "content-length" not in {hk.lower() for hk in resp_headers}:
-        handler.send_header("Content-Length", str(len(resp_body)))
+    handler.send_header("Content-Length", str(len(resp_body)))
     handler.end_headers()
     handler.wfile.write(resp_body)
     return True
@@ -6223,6 +6227,7 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Plugin pages (HTML shell) ──
     from api.plugins import PLUGIN_MANIFESTS, _PLUGIN_STATIC_ROOTS
+    _FETCH_WRAPPER = b'<script>(function(){var _f=fetch;window.fetch=function(u,o){o=o||{};o.headers=o.headers||new Headers();if(!o.headers.has("X-Plugin-Request")&&u.indexOf("/api/plugins/")===0)o.headers.set("X-Plugin-Request","1");return _f(u,o)}})()</script>'
     for name, manifest in PLUGIN_MANIFESTS.items():
         tab = manifest.get("tab", {})
         tab_path = tab.get("path", f"/{name}")
@@ -6236,6 +6241,7 @@ def handle_get(handler, parsed) -> bool:
                 index_html = dashboard_dir / "dist" / "index.html"
                 if index_html.is_file():
                     data = index_html.read_bytes()
+                    data = data.replace(b"</head>", _FETCH_WRAPPER + b"</head>")
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
                     handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
@@ -6248,6 +6254,7 @@ def handle_get(handler, parsed) -> bool:
                 static_html = plugin_root / "static" / "index.html"
                 if static_html.is_file():
                     data = static_html.read_bytes()
+                    data = data.replace(b"</head>", _FETCH_WRAPPER + b"</head>")
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
                     handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
@@ -6264,18 +6271,19 @@ def handle_get(handler, parsed) -> bool:
                     name_escaped = html.escape(name)
                     css_tag = f'<link rel="stylesheet" href="/dashboard-plugins/{name_escaped}/{css}">' if css else ""
                     html_content = (
-                        f"<!doctype html>\n"
-                        f"<html lang=\"en\">\n"
-                        f"<head>\n"
-                        f"  <meta charset=\"utf-8\">\n"
-                        f"  <title>{label}</title>\n"
-                        f"  {css_tag}\n"
-                        f"</head>\n"
-                        f"<body>\n"
-                        f'  <div id="pluginPageContainer"></div>\n'
+                        '<!doctype html>\n'
+                        "<html lang=\"en\">\n"
+                        "<head>\n"
+                        '  <meta charset="utf-8">\n'
+                        f'  <title>{label}</title>\n'
+                        f'  {css_tag}\n'
+                        '  <script>(function(){{var _f=fetch;window.fetch=function(u,o){{o=o||{{}};o.headers=o.headers||new Headers();if(!o.headers.has("X-Plugin-Request")&&u.indexOf("/api/plugins/")===0)o.headers.set("X-Plugin-Request","1");return _f(u,o)}}}})()</script>\n'
+                        '</head>\n'
+                        '<body>\n'
+                        '  <div id="pluginPageContainer"></div>\n'
                         f'  <script src="/dashboard-plugins/{name_escaped}/dist/index.js"></script>\n'
-                        f"</body>\n"
-                        f"</html>\n"
+                        '</body>\n'
+                        '</html>\n'
                     ).encode("utf-8")
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
@@ -6307,7 +6315,7 @@ def handle_post(handler, parsed) -> bool:
     # is intentionally unauthenticated for browser-generated violation reports.
     if diag:
         diag.stage("csrf")
-    if not _csrf_exempt_path(parsed.path) and not _is_plugin_null_origin(handler, parsed.path) and not _check_csrf(handler):
+    if not _csrf_exempt_path(parsed.path) and not _is_plugin_request(handler, parsed.path) and not _check_csrf(handler):
         try:
             return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
         finally:
