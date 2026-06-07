@@ -3,7 +3,7 @@
 
 ## [Unreleased]
 
-## [v0.51.318] — 2026-06-07 — Release KH (test infra — self-healing shared test server)
+## [v0.51.319] — 2026-06-07 — Release KI (test infra — self-healing shared test server)
 
 ### Changed
 - **The pytest test-server fixture no longer cascades into mass `ConnectionRefused` failures when the server dies mid-run.** The session-scoped test server can be reaped partway through a run (a process-group signal from the harness, an OOM, a crash) — its log showed clean responses then silence (reaped, not crashed) — after which every subsequent HTTP-dependent test failed with `ConnectionRefused` (the v0.51.314 fix only covered boot-time failures). A function-scoped autouse fixture now health-checks the server before each server-dependent test and respawns it once if it's down, so any mid-session loss recovers with a single respawn instead of a cascade. Server-dependency is detected by scanning the test module's source for usage markers (not the always-present autouse fixture closure). Test-harness only; no shipped application change. (internal)
