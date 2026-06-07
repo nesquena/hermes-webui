@@ -45,10 +45,16 @@ _GIT_HARDENED_CONFIG = (
     # restored sessions, or mounted workspaces. Keep repo-local configuration
     # from turning read/status/fetch calls into host command execution.
     ("core.fsmonitor", "false"),
+    # Force the unmodified system ssh binary rather than clearing it — an empty
+    # value would break legitimate ssh fetches, while "ssh" overrides any
+    # repo-local core.sshCommand that points at an attacker helper.
     ("core.sshCommand", "ssh"),
     ("core.askPass", ""),
     ("credential.helper", ""),
     ("protocol.ext.allow", "never"),
+    # Neutralize repo-local core.gitProxy, which specifies an external proxy
+    # command reachable on `git fetch` against a git:// remote.
+    ("core.gitProxy", ""),
 )
 
 
