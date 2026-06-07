@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.312] — 2026-06-07 — Release KB (brick-wave — purge stale bytecode after self-update)
+
+### Fixed
+- **Self-update no longer fails with an `AttributeError` on the first chat after restarting.** `POST /api/updates/apply` runs `git pull --ff-only` then `os.execv()` to restart with fresh code, but `os.execv()` replaces the process image without touching the on-disk `__pycache__/` bytecode cache. When a pull writes new `.py` files whose mtime lands within the same second as the pre-existing `.pyc` files, CPython can trust the stale cache and serve an old class definition — so a method added in the same update appears missing and the next chat raises `AttributeError`. The restart path now deletes all `__pycache__/` directories under the agent and WebUI repos right before `os.execv()`, forcing clean recompilation on the next startup. (#3774, @bambalados)
+
 ## [v0.51.311] — 2026-06-07 — Release KA (brick-wave — workspace Git RCE hardening + stale-snapshot sidebar visibility)
 
 ### Security

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -1025,6 +1026,34 @@ def summarize_update_payload(updates: dict, llm_callback=None, *, target: str | 
 # ── Self-update application ───────────────────────────────────────────────────
 
 
+def _purge_agent_pycache(repo_dir: Path) -> None:
+    """Delete all __pycache__ dirs under *repo_dir* so the next import
+    recompiles from source, avoiding stale-bytecode errors after git pull.
+
+    ``os.execv()`` replaces the process image but does not touch the
+    on-disk bytecode cache.  When a ``git pull`` writes new ``.py`` files
+    whose mtime lands within the same second as the pre-existing ``.pyc``
+    files, CPython may trust the stale cache and serve an old class
+    definition.  The mismatch between cached class symbols and newly-imported
+    supporting modules causes ``AttributeError`` (e.g. a method added in
+    the same update is missing from the cached ``AIAgent`` class).
+
+    This is safe to call right before ``os.execv()`` because the current
+    process is about to be replaced — losing the bytecode cache is harmless
+    and forces a clean recompilation on the next startup.
+    """
+    if repo_dir is None or not repo_dir.exists():
+        return
+    try:
+        for pycache in repo_dir.rglob("__pycache__"):
+            try:
+                shutil.rmtree(pycache, ignore_errors=True)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
 def _schedule_restart(delay: float = 2.0) -> None:
     """Re-exec this process after *delay* seconds.
 
@@ -1061,6 +1090,14 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # released atomically by the kernel.
         with _apply_lock:
             _wait_until_restart_safe()
+            # Purge bytecode caches so the new process imports from
+            # current source.  Without this, Python may serve stale .pyc
+            # files whose mtime matches the just-pulled .py files,
+            # causing AttributeError when new methods are missing from
+            # cached class definitions.
+            if _AGENT_DIR is not None:
+                _purge_agent_pycache(Path(_AGENT_DIR))
+            _purge_agent_pycache(REPO_ROOT)
             try:
                 # Re-exec into the just-pulled image.
                 #
