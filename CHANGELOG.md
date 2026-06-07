@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.315] — 2026-06-07 — Release KE (test infra — cross-platform workspace-fallback tests)
+
+### Changed
+- **Workspace-fallback tests are now cross-platform and deterministic.** Three tests simulated an unusable/unwritable workspace path by hard-coding a POSIX path (`/definitely/not/usable`) or by `chmod`-ing a temp dir read-only — which silently no-ops when the suite runs as root and is meaningless on Windows. They now simulate the failure by monkeypatching `_ensure_workspace_dir` / `Path.mkdir`, so the assertions hold identically on every platform and under any uid. Test-harness only; no shipped behavior change. (#3780 / #3771, @rodboev)
+
 ## [v0.51.314] — 2026-06-07 — Release KD (test infra — reliable test-server boot + diagnostics)
 
 ### Changed
