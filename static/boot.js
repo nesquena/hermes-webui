@@ -1609,7 +1609,7 @@ function _setResolvedTheme(isDark){
   if(typeof applyCustomLogo==='function'){
     // Use stored logo paths so theme switch picks the right variant
     applyCustomLogo({
-      custom_logo_enabled: !!window._customLogoEnabled || (window._customLogoLightPath?true:false),
+      custom_logo_enabled: !!window._customLogoEnabled,
       custom_logo_dark_mode: !!window._customLogoDarkMode,
       custom_logo_light_path: window._customLogoLightPath||'',
       custom_logo_dark_path: window._customLogoDarkPath||'',
@@ -1636,7 +1636,7 @@ function _syncSystemThemeFromMedia(){
     _setResolvedTheme(matches);
   }else if(typeof applyCustomLogo==='function'){
     applyCustomLogo({
-      custom_logo_enabled: !!window._customLogoEnabled || (window._customLogoLightPath?true:false),
+      custom_logo_enabled: !!window._customLogoEnabled,
       custom_logo_dark_mode: !!window._customLogoDarkMode,
       custom_logo_light_path: window._customLogoLightPath||'',
       custom_logo_dark_path: window._customLogoDarkPath||'',

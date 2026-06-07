@@ -272,6 +272,7 @@ def test_custom_logo_favicon_uses_resolved_theme_variant():
     assert "dataset.customLogoMode" in js
     assert "function _customLogoNeedsSystemPoll" in js
     assert "if(_systemThemeMq&&_customLogoNeedsSystemPoll())" in js
+    assert "!!window._customLogoEnabled || (window._customLogoLightPath?true:false)" not in js
     assert "if(typeof _systemThemeMq.addEventListener==='function')" in js
     assert "else if(typeof _systemThemeMq.addListener==='function')" in js
     assert "_setFavicon(src);" in js
