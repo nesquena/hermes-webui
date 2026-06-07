@@ -7830,6 +7830,12 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 500)
 
     if parsed.path == "/api/onboarding/complete":
+        # Marking onboarding complete flips the first-run wizard off (persists
+        # onboarding_completed=True). Gate it on the same local-network check as
+        # the other onboarding mutators so an unauthenticated public client on a
+        # passwordless bind can't hide the first-run wizard. (#3765)
+        if not _onboarding_gate_allows(handler):
+            return bad(handler, "Onboarding is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
         return j(handler, complete_onboarding())
 
     if parsed.path == "/api/onboarding/probe":

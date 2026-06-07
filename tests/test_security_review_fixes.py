@@ -176,3 +176,48 @@ def test_onboarding_direct_loopback_without_forwarded_headers_is_local(monkeypat
 
     handler_public = _Handler(client_ip="8.8.8.8", headers={})
     assert routes._onboarding_request_is_local(handler_public) is False
+
+
+def test_onboarding_complete_is_gated_against_public_clients(monkeypatch):
+    """POST /api/onboarding/complete flips the first-run wizard off
+    (onboarding_completed=True). On a passwordless bind it must be gated on the
+    same local-network check as setup/oauth/probe, so an unauthenticated public
+    client can't hide the wizard. (#3765 — sibling-path gap left by #3758.)
+    """
+    from api import routes
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setenv("HERMES_WEBUI_ONBOARDING_OPEN", "")
+    monkeypatch.delenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", raising=False)
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+
+    called = {"n": 0}
+    def fake_complete():
+        called["n"] += 1
+        return {"completed": True}
+    monkeypatch.setattr(routes, "complete_onboarding", fake_complete)
+
+    # Public client (no forwarded headers) → 403, complete_onboarding NOT called
+    pub = _Handler(client_ip="8.8.8.8", body=b"{}", headers={"Content-Length": "2"})
+    routes.handle_post(pub, SimpleNamespace(path="/api/onboarding/complete", query=""))
+    assert pub.status == 403
+    assert called["n"] == 0
+
+    # Genuine loopback client → allowed
+    loop = _Handler(client_ip="127.0.0.1", body=b"{}", headers={"Content-Length": "2"})
+    routes.handle_post(loop, SimpleNamespace(path="/api/onboarding/complete", query=""))
+    assert loop.status == 200
+    assert called["n"] == 1
+
+
+def test_onboarding_complete_allowed_when_auth_enabled(monkeypatch):
+    """With auth configured, onboarding endpoints are reachable normally."""
+    from api import routes
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: True)
+    monkeypatch.setattr(routes, "complete_onboarding", lambda: {"completed": True})
+
+    h = _Handler(client_ip="8.8.8.8", body=b"{}", headers={"Content-Length": "2"})
+    routes.handle_post(h, SimpleNamespace(path="/api/onboarding/complete", query=""))
+    assert h.status == 200
