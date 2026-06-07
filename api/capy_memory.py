@@ -563,6 +563,16 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_traffic_clones_path_repo(origin_uri)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_traffic_popular_paths_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_traffic_popular_paths_path_repo(origin_uri)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
+    if _github_traffic_popular_referrers_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_traffic_popular_referrers_path_repo(origin_uri)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_license_path_matches(raw_origin_text):
         source_refresh_kind = "github_license"
         terminal_refresh_failure = True
@@ -3885,6 +3895,90 @@ def _github_traffic_clones_path_repo(origin_uri: str) -> str:
     return _github_traffic_path_repo(origin_uri, "clones")
 
 
+def _github_traffic_popular_path_matches(origin_uri: str, leaf: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 7
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "traffic"
+            and lowered[5] == "popular"
+            and lowered[6] == leaf
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    decoded_lower = [segment.lower() for segment in decoded_path]
+    if (
+        len(decoded_path) >= 7
+        and decoded_path[0] == ""
+        and decoded_lower[1] == "repos"
+        and any("%" in segment for segment in raw_path[4:7])
+        and decoded_lower[4].startswith("traffic")
+        and decoded_lower[5].startswith("popular")
+        and decoded_lower[6].startswith(leaf)
+    ):
+        return True
+    lowered_raw = [segment.lower() for segment in raw_path]
+    if len(raw_path) < 7 or raw_path[0] != "" or lowered_raw[1] != "repos":
+        return False
+    if lowered_raw[4].startswith("traffic%"):
+        return True
+    if lowered_raw[4] == "traffic" and lowered_raw[5].startswith("popular%"):
+        return True
+    return lowered_raw[4] == "traffic" and lowered_raw[5] == "popular" and lowered_raw[6].startswith(f"{leaf}%")
+
+
+def _github_traffic_popular_path_repo(origin_uri: str, leaf: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "traffic"
+        or path[5] != "popular"
+        or path[6] != leaf
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_traffic_popular_paths_path_matches(origin_uri: str) -> bool:
+    return _github_traffic_popular_path_matches(origin_uri, "paths")
+
+
+def _github_traffic_popular_paths_path_repo(origin_uri: str) -> str:
+    return _github_traffic_popular_path_repo(origin_uri, "paths")
+
+
+def _github_traffic_popular_referrers_path_matches(origin_uri: str) -> bool:
+    return _github_traffic_popular_path_matches(origin_uri, "referrers")
+
+
+def _github_traffic_popular_referrers_path_repo(origin_uri: str) -> str:
+    return _github_traffic_popular_path_repo(origin_uri, "referrers")
+
+
 def _github_traffic_view_row_is_safe(row: Any) -> bool:
     if not isinstance(row, dict):
         return False
@@ -3974,6 +4068,125 @@ def _github_traffic_clones_refresh_summary(origin_uri: str, payload: dict[str, A
         count = _safe_optional_nonnegative_int(row.get("count")) or 0
         uniques = _safe_optional_nonnegative_int(row.get("uniques")) or 0
         parts.append(f"{timestamp}; clones: {count}; uniques: {uniques}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_traffic_popular_value_has_urlish_marker(value: str) -> bool:
+    text = value.strip()
+    if _REFRESH_TITLE_BLOCKED_VALUE_RE.search(text):
+        return True
+    if re.search(r"[A-Za-z0-9._%+-]+:[^@\s/]+@", text):
+        return True
+    if re.search(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:[/:.]|$)", text):
+        return True
+    if re.search(r"(?<![\w.])localhost(?::\d+)?(?:[/:.]|$)", text, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _github_traffic_popular_referrer_is_internal(referrer: str) -> bool:
+    normalized = referrer.strip().strip(".").lower()
+    if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", normalized):
+        return True
+    if re.fullmatch(r"(?:0x[0-9a-f]+|\d{8,})", normalized):
+        return True
+    if normalized == "localhost" or normalized.endswith(".localhost") or normalized.endswith(".localdomain"):
+        return True
+    if normalized.endswith(".local") or normalized.endswith(".internal"):
+        return True
+    if re.search(r"(?:^|[.-])(?:\d{1,3}\.){3}\d{1,3}(?:[.-]|$)", normalized):
+        return True
+    if re.search(r"(?:^|[.-])(?:\d{1,3}-){3}\d{1,3}(?:[.-]|$)", normalized):
+        return True
+    return False
+
+
+def _github_traffic_popular_path_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict) or set(row) - {"path", "title", "count", "uniques"}:
+        return False
+    raw_path = row.get("path")
+    raw_title = row.get("title")
+    if not isinstance(raw_path, str) or not isinstance(raw_title, str):
+        return False
+    if len(raw_path) > 160 or len(raw_title) > 160:
+        return False
+    path = _safe_public_text(raw_path, limit=160)
+    title = _safe_public_text(raw_title, limit=160)
+    if not path or path != raw_path.strip() or not path.startswith("/") or "//" in path or not title:
+        return False
+    if ":" in path or "@" in path or _github_traffic_popular_value_has_urlish_marker(path):
+        return False
+    if title != raw_title.strip() or _github_traffic_popular_value_has_urlish_marker(title):
+        return False
+    if _safe_optional_nonnegative_int(row.get("count")) is None:
+        return False
+    if _safe_optional_nonnegative_int(row.get("uniques")) is None:
+        return False
+    for raw_value in (raw_path, raw_title, row.get("count"), row.get("uniques")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_traffic_popular_paths_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_traffic_popular_paths_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list) or len(payload) > 25:
+        return False
+    return all(_github_traffic_popular_path_row_is_safe(row) for row in payload)
+
+
+def _github_traffic_popular_paths_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_traffic_popular_paths_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_traffic_popular_path_row_is_safe(row)]
+    parts = [f"GitHub traffic popular paths for {repo}", f"path count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        path = _safe_public_text(row.get("path"), limit=160)
+        title = _safe_public_text(row.get("title"), limit=160)
+        count = _safe_optional_nonnegative_int(row.get("count")) or 0
+        uniques = _safe_optional_nonnegative_int(row.get("uniques")) or 0
+        parts.append(f"path: {path}; title: {title}; count: {count}; uniques: {uniques}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_traffic_popular_referrer_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict) or set(row) - {"referrer", "count", "uniques"}:
+        return False
+    raw_referrer = row.get("referrer")
+    if not isinstance(raw_referrer, str) or len(raw_referrer) > 160:
+        return False
+    referrer = _safe_public_text(raw_referrer, limit=160)
+    if not referrer or referrer != raw_referrer.strip() or ":" in referrer or "/" in referrer or "@" in referrer:
+        return False
+    if _github_traffic_popular_referrer_is_internal(referrer):
+        return False
+    if _safe_optional_nonnegative_int(row.get("count")) is None:
+        return False
+    if _safe_optional_nonnegative_int(row.get("uniques")) is None:
+        return False
+    for raw_value in (raw_referrer, row.get("count"), row.get("uniques")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_traffic_popular_referrers_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_traffic_popular_referrers_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list) or len(payload) > 25:
+        return False
+    return all(_github_traffic_popular_referrer_row_is_safe(row) for row in payload)
+
+
+def _github_traffic_popular_referrers_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_traffic_popular_referrers_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_traffic_popular_referrer_row_is_safe(row)]
+    parts = [f"GitHub traffic popular referrers for {repo}", f"referrer count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        referrer = _safe_public_text(row.get("referrer"), limit=160)
+        count = _safe_optional_nonnegative_int(row.get("count")) or 0
+        uniques = _safe_optional_nonnegative_int(row.get("uniques")) or 0
+        parts.append(f"referrer: {referrer}; count: {count}; uniques: {uniques}")
     return _bounded_refresh_summary("; ".join(parts))
 
 
@@ -9978,6 +10191,30 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_traffic_clones_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    traffic_popular_paths_repo = _github_traffic_popular_paths_path_repo(origin_uri)
+    if traffic_popular_paths_repo:
+        if not _json_payload_is_github_traffic_popular_paths_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub traffic popular paths {traffic_popular_paths_repo}",
+            "summary": _github_traffic_popular_paths_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_traffic_popular_paths_path_matches(origin_uri):
+        raise ValueError("refresh failed")
+    traffic_popular_referrers_repo = _github_traffic_popular_referrers_path_repo(origin_uri)
+    if traffic_popular_referrers_repo:
+        if not _json_payload_is_github_traffic_popular_referrers_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub traffic popular referrers {traffic_popular_referrers_repo}",
+            "summary": _github_traffic_popular_referrers_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_traffic_popular_referrers_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     code_frequency_repo = _github_code_frequency_path_repo(origin_uri)
     if code_frequency_repo:
         if not _json_payload_is_github_code_frequency_metadata(origin_uri, payload):
@@ -11118,6 +11355,14 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_traffic_clones_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_traffic_popular_paths_path_matches(safe_origin_uri):
+        if not _github_traffic_popular_paths_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_traffic_popular_referrers_path_matches(safe_origin_uri):
+        if not _github_traffic_popular_referrers_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_environment_secrets_path_matches(safe_origin_uri):
         if _github_environment_secrets_path_info(safe_origin_uri) is None or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -11295,6 +11540,18 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_repository_artifacts_path_repo(final_url)
             or _github_repository_artifacts_path_repo(final_url) != _github_repository_artifacts_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_traffic_popular_paths_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_traffic_popular_paths_path_repo(final_url)
+            or _github_traffic_popular_paths_path_repo(final_url) != _github_traffic_popular_paths_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_traffic_popular_referrers_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_traffic_popular_referrers_path_repo(final_url)
+            or _github_traffic_popular_referrers_path_repo(final_url) != _github_traffic_popular_referrers_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_workflow_run_timing_path_run_id(safe_origin_uri) is not None and (
@@ -11501,6 +11758,16 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_traffic_clones_path_matches(safe_origin_uri) and (
             not _github_traffic_clones_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_traffic_popular_paths_path_matches(safe_origin_uri) and (
+            not _github_traffic_popular_paths_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_traffic_popular_referrers_path_matches(safe_origin_uri) and (
+            not _github_traffic_popular_referrers_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
