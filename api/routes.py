@@ -9730,7 +9730,7 @@ def _handle_tts(handler, parsed):
             return _bad(handler, "ELEVENLABS_API_KEY not configured", 503)
 
         # Resolve voice_id from Hermes config.yaml → env fallback
-        voice_id = "gJlzF5JxsCvM5hQAoRyD"  # sensible default (Hermy voice)
+        voice_id = "pNInz6obpgDQGcFmaJgB"  # Adam (same default as hermes-agent config.yaml)
         model_id = "eleven_multilingual_v2"
         try:
             from api.config import get_config
