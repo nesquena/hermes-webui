@@ -7480,6 +7480,29 @@ def _record_resolve_app_url_progress_event(action: str) -> dict[str, Any]:
         }
 
 
+def _record_widget_sdk_helper_progress_event(action: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress receipt for no-space widget SDK helpers."""
+    safe_action = _context_value(action, 120) or "space.spaces.widgethelper"
+    action_run_ids = {
+        "space.spaces.sizetotoken": "widget.sdk:size",
+    }
+    run_id = action_run_ids.get(safe_action, "widget.sdk:helper")
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({"event_type": "tool.completed", "run_id": run_id})
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
 def _space_path_helper_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
     """Return metadata-only evidence that logical path helpers require browser/development preflight."""
     safe_action = _context_value(action, 120) or "space.spaces.buildspacepath"
@@ -7507,6 +7530,42 @@ def _space_path_helper_action_policy_receipt(action: str, preflight_receipt: dic
     return action_policy_receipt(
         action,
         approval_gates=["destructive_external_action"],
+        prompt_preflight_status=status,
+        model_route_hint="hint:fast",
+    )
+
+
+def _space_widget_sdk_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only evidence for Space Agent-style widget SDK read helpers."""
+    safe_action = _context_value(action, 120) or "space.spaces.widgethelper"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "browser_surface",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": [
+            "widget_sdk_helper_preflight_required",
+            "metadata_only_payload_required",
+            "prompt_injection_preflight_required",
+        ],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _space_widget_sdk_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return metadata-only policy evidence for Space Agent-style widget SDK helpers."""
+    from api.capy_policy import action_policy_receipt
+
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
+    return action_policy_receipt(
+        action,
+        approval_gates=["creator_commit"],
         prompt_preflight_status=status,
         model_route_hint="hint:fast",
     )
@@ -8071,7 +8130,26 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             ),
         }
     if name == "space.spaces.sizetotoken":
-        return {"ok": True, "action": name, **_space_tool_size_to_token(data), "mode": "metadata-only"}
+        size_payload = _space_tool_size_to_token(data)
+        prompt_preflight = _space_widget_sdk_required_prompt_preflight_receipt(name)
+        autonomy_policy = _space_widget_sdk_action_policy_receipt(name, prompt_preflight)
+        progress_event = _record_widget_sdk_helper_progress_event(name)
+        return {
+            "ok": True,
+            "action": name,
+            **size_payload,
+            "mode": "metadata-only",
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                widget_count=0,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+                include_widget_count=False,
+            ),
+        }
     if name == "space.spaces.defaultwidgetsize":
         size = dict(_SOURCE_WIDGET_DEFAULT_SIZE)
         return {"ok": True, "action": name, "token": f"{size['cols']}x{size['rows']}", "size": size, "mode": "metadata-only"}

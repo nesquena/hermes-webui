@@ -4532,13 +4532,24 @@ def test_space_tool_adapter_supports_source_size_to_token_helper_metadata_only(m
     )
     serialized = json.dumps([from_preset, from_object, from_invalid_with_fallback]).lower()
 
-    assert from_preset == {
-        "ok": True,
-        "action": "space.spaces.sizetotoken",
-        "token": f"{12}x{4}",
-        "size": {"cols": 12, "rows": 4},
-        "mode": "metadata-only",
-    }
+    assert from_preset["ok"] is True
+    assert from_preset["action"] == "space.spaces.sizetotoken"
+    assert from_preset["token"] == f"{12}x{4}"
+    assert from_preset["size"] == {"cols": 12, "rows": 4}
+    assert from_preset["mode"] == "metadata-only"
+    assert from_preset["prompt_preflight"]["metadata_only"] is True
+    assert from_preset["prompt_preflight"]["raw_prompt_stored"] is False
+    assert from_preset["autonomy_policy"]["action"] == "space.spaces.sizetotoken"
+    assert from_preset["autonomy_policy"]["prompt_preflight_status"] == from_preset["prompt_preflight"]["status"]
+    assert from_preset["progress_event"]["family"] == "tool"
+    assert from_preset["progress_event"]["run_id"] == "widget.sdk:size"
+    assert "space_id" not in from_preset["progress_event"]
+    assert from_preset["progress_event"]["redaction_status"] == "metadata_only"
+    assert from_preset["output_compaction"]["metadata_only"] is True
+    assert from_preset["output_compaction"]["command"] == "space.spaces.sizetotoken"
+    compaction_handles = json.dumps(from_preset["output_compaction"].get("artifact_handles", []), sort_keys=True).lower()
+    assert "space:widget-sdk" not in compaction_handles
+    assert "widget-sdk" not in json.dumps(from_preset["output_compaction"], sort_keys=True).lower()
     assert from_object["token"] == f"{24}x{1}"
     assert from_object["size"] == {"cols": 24, "rows": 1}
     assert from_invalid_with_fallback["token"] == f"{4}x{2}"
