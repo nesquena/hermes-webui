@@ -13432,7 +13432,9 @@ def _development_tool_prompt_preflight_corpus(action: str, payload: dict[str, An
 
     high_risk_keys = {
         "api_auth",
+        "apiauth",
         "api_key",
+        "apikey",
         "args",
         "argv",
         "auth",
@@ -13446,6 +13448,8 @@ def _development_tool_prompt_preflight_corpus(action: str, payload: dict[str, An
         "message",
         "messages",
         "prompt",
+        "raw_prompt",
+        "rawprompt",
         "renderer",
         "script",
         "source",
@@ -13455,38 +13459,87 @@ def _development_tool_prompt_preflight_corpus(action: str, payload: dict[str, An
         "text",
         "token",
     }
-    credential_keys = {"api_auth", "api_key", "auth", "authorization", "token"}
-    parts: list[str] = [_context_value(action, 120) or "space.development.action"]
+    credential_keys = {"api_auth", "apiauth", "api_key", "apikey", "auth", "authorization", "token"}
+    executable_marker_keys = {"html", "raw_prompt", "rawprompt", "renderer", "script", "source", "prompt"}
+    parts: list[str] = []
+    total_chars = 0
+    max_chars = 24000
+    max_parts = 1000
+    max_nodes = 1000
+    visited_nodes = 0
+    truncated = False
 
-    def collect(value: Any, *, key: str = "", depth: int = 0) -> None:
-        if depth > 8 or len(parts) >= 200:
+    def normalize_key(key: str) -> str:
+        text = str(key or "").strip()
+        snake = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", text).lower()
+        snake = re.sub(r"[^a-z0-9]+", "_", snake).strip("_")
+        return snake
+
+    def append_part(value: Any, *, limit: int = 2000) -> None:
+        nonlocal total_chars, truncated
+        if len(parts) >= max_parts or total_chars >= max_chars:
+            truncated = True
             return
-        normalized_key = str(key or "").strip().lower()
+        raw_text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(raw_text) > limit:
+            truncated = True
+        text = _context_value(value, limit)
+        if not text:
+            return
+        remaining = max_chars - total_chars
+        if remaining <= 0:
+            truncated = True
+            return
+        if len(text) > remaining:
+            text = text[:remaining]
+            truncated = True
+        parts.append(text)
+        total_chars += len(text)
+
+    append_part(action or "space.development.action", limit=120)
+
+    def collect(value: Any, *, key: str = "", depth: int = 0, inherited_high_risk: bool = False) -> None:
+        nonlocal truncated, visited_nodes
+        visited_nodes += 1
+        if depth > 8 or len(parts) >= max_parts or total_chars >= max_chars or visited_nodes > max_nodes:
+            truncated = True
+            return
+        normalized_key = normalize_key(key)
+        current_high_risk = inherited_high_risk or normalized_key in high_risk_keys
         if isinstance(value, dict):
             for child_key, child_value in value.items():
+                visited_nodes += 1
+                if visited_nodes > max_nodes:
+                    truncated = True
+                    break
                 child_key_text = str(child_key or "")
-                if child_key_text.strip().lower() in high_risk_keys:
-                    parts.append(child_key_text)
-                    if child_key_text.strip().lower() in credential_keys:
-                        parts.append("credential")
-                    collect(child_value, key=child_key_text, depth=depth + 1)
-                elif isinstance(child_value, (dict, list, tuple)):
-                    collect(child_value, key=child_key_text, depth=depth + 1)
+                child_key_normalized = normalize_key(child_key_text)
+                child_high_risk = current_high_risk or child_key_normalized in high_risk_keys
+                if child_high_risk:
+                    if child_key_normalized in credential_keys:
+                        append_part("credential", limit=40)
+                    elif child_key_normalized in executable_marker_keys:
+                        append_part(child_key_normalized, limit=80)
+                if child_high_risk or isinstance(child_value, (dict, list, tuple)):
+                    collect(child_value, key=child_key_text, depth=depth + 1, inherited_high_risk=child_high_risk)
+                if truncated:
+                    break
             return
         if isinstance(value, (list, tuple)):
-            sequence = list(value)
-            if len(sequence) > 160:
-                sequence = sequence[:80] + sequence[-80:]
-            for item in sequence:
-                collect(item, key=normalized_key, depth=depth + 1)
+            for item in value:
+                collect(item, key=normalized_key, depth=depth + 1, inherited_high_risk=current_high_risk)
+                if truncated:
+                    break
             return
-        if normalized_key not in high_risk_keys:
+        if not current_high_risk:
             return
         text = str(value or "")
         if text.strip():
-            parts.append(text[:2000])
+            append_part(text, limit=2000)
 
     collect(payload)
+    if truncated:
+        parts.append("raw_prompt")
     return "\n".join(parts)
 
 

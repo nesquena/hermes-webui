@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `fix(spaces): harden development tool preflight scanning`
+  - Added RED/GREEN backend coverage proving receipt-only development terminal/shell actions block hostile prompt text hidden in the middle of large high-risk payload lists, compact/camelCase raw prompt/API-key aliases, oversized sparse lists, and wide sparse dict payloads.
+  - Hardened the internal-only development-tool preflight corpus to scan a full bounded high-risk payload traversal with max char/part/node caps and fail-closed truncation, while keeping public receipts metadata-only and still refusing command execution, filesystem writes, raw request storage, and raw prompt/credential/source/renderer leakage.
+
 - `feat(spaces): show shared data delete receipts`
   - Added RED/GREEN backend route and real-`static/spaces.js` coverage proving confirmed shared-data slot deletion now returns and renders metadata-only prompt-preflight, action-policy, progress, and compaction receipt evidence through the direct Space detail UI path.
   - Kept direct-route and DOM output safe: hostile raw slot values, renderer/script, API-auth, bearer, raw-prompt, and secret fixture fields stay absent while the visible receipt shows `space.shared_slot.delete`, `hint:summarize`, `shared-slot.delete:<space_id>`, and bounded compaction evidence.
