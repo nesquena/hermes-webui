@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.308] — 2026-06-07 — Release JX (consistency — gate onboarding-complete like its siblings)
+
+### Changed
+- **`/api/onboarding/complete` now applies the same local-network gate as the other onboarding endpoints, for consistency.** `oauth/start`, `setup`, and `probe` already refused unauthenticated non-local requests; `complete` (which persists `onboarding_completed=true` to hide the first-run wizard) did not, so all four onboarding mutators now behave alike — `complete` returns 403 unless the request is local, auth is enabled, or `HERMES_WEBUI_ONBOARDING_OPEN=1`. This is a consistency tidy, **not** a security boundary: the same flag is still settable via `POST /api/settings` (one of ~25 settings keys broadly writable on a passwordless public bind), and the real protection for a public bind is to run with authentication or refuse the bind. Low impact regardless — the flag only toggles a UI wizard, not credentials or access. (#3765, surfaced by the #3758 release gate)
+
 ## [v0.51.307] — 2026-06-06 — Release JW (stage-a3 — onboarding forwarded-IP spoof fix + update-check CSRF hardening)
 
 ### Security
