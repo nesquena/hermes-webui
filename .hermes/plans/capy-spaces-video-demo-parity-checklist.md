@@ -3,13 +3,15 @@
 Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y
 Transcript duration: 46:51
 Created: 2026-04-27
-Last implementation-status update: 2026-06-03
+Last implementation-status update: 2026-06-07
 
 ## Current parity implementation notes
 
 Capy Spaces now has implemented foundation slices, so this checklist is no longer purely architectural. Keep status conservative: metadata-only demo smokes and UI affordances are useful progress, but they are not full Space Agent video parity until the acceptance criteria below pass end-to-end on Brendan's Mac Studio.
 
 Recent safe adapter progress:
+
+- Source Capy Spaces health helpers now include metadata-only safety receipts for `space.api.health` and `space.health`, preserving the safe health/schema/Space-count payload while adding prompt-preflight, autonomy-policy, progress, and compaction evidence without a synthetic Space id or renderer/source/API-auth/raw-prompt/script/secret leakage.
 
 - Source widget SDK runtime compatibility coverage now includes metadata-only safety receipts for `space.spaces.widgetApiVersion`, preserving the safe `widget_api_version`/runtime payload while adding prompt-preflight, autonomy-policy, progress, and compaction evidence without a synthetic Space id or renderer/source/API-auth/raw-prompt/script/secret leakage.
 

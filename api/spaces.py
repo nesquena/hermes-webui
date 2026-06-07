@@ -7602,6 +7602,81 @@ def _space_widget_sdk_helper_receipt_envelope(action: str) -> dict[str, Any]:
     }
 
 
+def _record_space_api_health_progress_event(action: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress receipt for no-space health checks."""
+    run_id = "space.health:api"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({"event_type": "tool.completed", "run_id": run_id})
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
+def _space_api_health_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only evidence for Capy Spaces health tool checks."""
+    safe_action = _context_value(action, 120) or "space.api.health"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "browser_surface",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": [
+            "health_tool_preflight_required",
+            "metadata_only_payload_required",
+            "prompt_injection_preflight_required",
+        ],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _space_api_health_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return metadata-only policy evidence for Capy Spaces health checks."""
+    from api.capy_policy import action_policy_receipt
+
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
+    return action_policy_receipt(
+        action,
+        approval_gates=["creator_commit"],
+        prompt_preflight_status=status,
+        model_route_hint="hint:fast",
+    )
+
+
+def _space_api_health_receipt_envelope(action: str, *, space_count: int) -> dict[str, Any]:
+    """Return metadata-only receipts for no-space Capy Spaces health checks."""
+    prompt_preflight = _space_api_health_required_prompt_preflight_receipt(action)
+    autonomy_policy = _space_api_health_action_policy_receipt(action, prompt_preflight)
+    progress_event = _record_space_api_health_progress_event(action)
+    return {
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "output_compaction": _space_tool_action_output_compaction_receipt(
+            action=action,
+            widget_count=0,
+            space_count=space_count,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+            include_widget_count=False,
+        ),
+    }
+
+
 def _space_tool_resolve_app_url(payload: dict[str, Any]) -> str:
     """Resolve a Space Agent-style logical app path without exposing raw unsafe inputs."""
     raw = payload.get("logicalPath") or payload.get("logical_path") or payload.get("path") or ""
@@ -7674,6 +7749,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     data = payload if isinstance(payload, dict) else {}
 
     if name in {"space.api.health", "space.health"}:
+        spaces = list_spaces()
+        space_count = len(spaces)
         return {
             "ok": True,
             "action": name,
@@ -7682,12 +7759,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "mode": "metadata-only",
             "schema_version": SCHEMA_VERSION,
             "enabled": True,
-            "space_count": len(list_spaces()),
+            "space_count": space_count,
             "responsibilities": [
                 "metadata-only space and widget manifests",
                 "revision history and safe recovery",
                 "agent-mediated widget events",
             ],
+            **_space_api_health_receipt_envelope(name, space_count=space_count),
         }
 
     if name in {"space.list", "space.spaces", "space.spaces.list", "space.spaces.listspaces"}:

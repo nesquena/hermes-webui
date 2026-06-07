@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): add health safety receipts`
+  - Added RED/GREEN backend coverage proving `space.api.health` and `space.health` now return metadata-only prompt-preflight, autonomy-policy, progress, and output-compaction receipts while preserving the functional Capy Spaces health payload.
+  - Health progress uses the neutral no-space `space.health:api` run id, includes only Space count/action metadata in compaction evidence, and keeps renderer/source/API-auth/raw-prompt/script/secret fixture values out of serialized responses and compaction text.
+
 - `feat(spaces): add widget API version safety receipts`
   - Added RED/GREEN backend coverage proving the no-space `space.spaces.widgetApiVersion` helper now returns metadata-only prompt-preflight, autonomy-policy, progress, and output-compaction receipts while preserving the functional `widget_api_version` and runtime metadata-only payload.
   - Helper progress uses the neutral action-scoped `widget.sdk:helper` run id without a synthetic Space id and keeps renderer/source/API-auth/raw-prompt/script/secret fixture values out of serialized responses and compaction text.
