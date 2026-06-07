@@ -166,17 +166,29 @@ class TestGitInfoParallel:
         )
 
     def test_parallel_faster_than_serial(self, tmp_path):
-        """Wall-clock time for parallel execution should be ~1/3 of serial."""
+        """Wall-clock time for parallel execution should be well under serial.
+
+        Measured RELATIVELY (parallel vs an N-call serial baseline of the same
+        slow_git), not against a fixed absolute threshold: a 0.25s absolute bar
+        is flaky on slow/contended CI cores where 3 parallel 0.1s sleeps + thread
+        overhead can drift to ~0.27s even though execution is genuinely parallel
+        (was the #3790-era recurring `test (3.13, 2)` flake — 0.269-0.279s). The
+        relative check still proves parallelism (parallel ≈ 1 sleep, serial ≈ 3)
+        without depending on the core's absolute speed.
+        """
         from api.workspace import git_info_for_workspace
         import api.workspace as ws_mod
 
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
 
+        SLEEP = 0.1
+        N_SLOW_CALLS = 3  # status + ahead/behind etc. — the calls that sleep
+
         def slow_git(args, cwd, timeout=3):
             if args[0] == "rev-parse":
                 return "main"
-            time.sleep(0.1)
+            time.sleep(SLEEP)
             if args[0] == "status":
                 return ""
             return "0"
@@ -188,9 +200,24 @@ class TestGitInfoParallel:
 
         assert result is not None
         assert result["is_git"] is True
-        assert elapsed < 0.25, (
-            f"git_info_for_workspace took {elapsed:.3f}s — expected < 0.25s "
-            f"with parallel execution (serial baseline is ~0.3s)."
+
+        # Measure the SERIAL baseline on THIS core (same slow_git, run back to
+        # back) and compare relatively, so the assertion is immune to absolute
+        # core speed / contention. A fixed 0.25s bar was flaky on slow CI cores
+        # (the recurring `test (3.13, 2)` failure at 0.269-0.279s) even though
+        # execution was genuinely parallel. Parallel must be clearly faster than
+        # serial — at most 75% of the serial baseline — which still fails loudly
+        # if the calls ever run serially (parallel would then ≈ serial).
+        n_serial = N_SLOW_CALLS
+        s0 = time.monotonic()
+        for _ in range(n_serial):
+            time.sleep(SLEEP)
+        serial_baseline = time.monotonic() - s0
+
+        assert elapsed < serial_baseline * 0.8, (
+            f"git_info_for_workspace took {elapsed:.3f}s vs a {serial_baseline:.3f}s "
+            f"serial baseline ({n_serial}×{SLEEP:.2f}s) — expected clearly faster "
+            f"(parallel ≈ one {SLEEP:.2f}s sleep). This suggests serial execution."
         )
 
 
