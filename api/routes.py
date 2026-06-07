@@ -2863,7 +2863,7 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None) -> tu
                 start_idx = max(0, end_idx - limit)
                 window = source[start_idx:end_idx]
                 break
-    if limit > 1 and window:
+    if limit > 1 and window and msg_before is None:
         # ``msg_limit`` is a raw-message transport cap, but the WebUI renders a
         # filtered transcript: role=tool rows, empty separator assistants, and
         # compression markers can all disappear. A long tool-heavy tail can
@@ -2871,13 +2871,23 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None) -> tu
         # messages plus a huge "Load earlier" button. Expand the raw window
         # backwards until it contains roughly ``limit`` renderable transcript
         # rows, while keeping the raw offset cursor honest.
+        #
+        # Scoped to the COLD-LOAD path (``msg_before is None``): a "Load earlier"
+        # paginated fetch carries an explicit ``msg_before`` cursor and must keep
+        # the raw transport cap so one click can't pull the whole transcript back
+        # in a tool-heavy session (the cap's purpose). Cold loads are the only
+        # place the "1-2 visible messages" cliff happens.
         renderable_count = sum(1 for msg in window if _message_counts_as_renderable_for_window(msg))
-        target_renderable = min(limit, sum(1 for msg in source if _message_counts_as_renderable_for_window(msg)))
-        while start_idx > 0 and renderable_count < target_renderable:
-            start_idx -= 1
-            if _message_counts_as_renderable_for_window(source[start_idx]):
-                renderable_count += 1
-        window = source[start_idx:end_idx]
+        if renderable_count < limit:
+            target_renderable = min(
+                limit,
+                sum(1 for msg in source if _message_counts_as_renderable_for_window(msg)),
+            )
+            while start_idx > 0 and renderable_count < target_renderable:
+                start_idx -= 1
+                if _message_counts_as_renderable_for_window(source[start_idx]):
+                    renderable_count += 1
+            window = source[start_idx:end_idx]
     return window, start_idx
 
 

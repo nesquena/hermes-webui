@@ -78,3 +78,24 @@ def test_all_tool_session_keeps_tail_fallback():
 
     assert [m["content"] for m in window] == ["tool 3", "tool 4", "tool 5"]
     assert offset == 3
+
+
+def test_cold_load_expands_but_caps_at_total_renderable():
+    """Cold-load expansion stops at the session's total renderable count.
+
+    When the whole session has fewer renderable rows than msg_limit, the
+    backward walk must terminate at index 0 (not loop forever) and return the
+    full source.
+    """
+    messages = [
+        {"role": "user", "content": "only-user"},
+    ] + [
+        {"role": "tool", "content": f"tool {idx}"}
+        for idx in range(8)
+    ]
+
+    window, offset = _message_window_for_display(messages, msg_limit=5)
+
+    # Only 1 renderable row in the whole session → expand back to index 0.
+    assert offset == 0
+    assert window[0]["content"] == "only-user"
