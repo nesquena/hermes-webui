@@ -1832,8 +1832,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _streamFadePauseAfter(text, paragraphBreakIndex){
     if(paragraphBreakIndex>=0) return 90;
     const trimmed=String(text||'').trimEnd();
-    if(/[.!?]["')\]]*$/.test(trimmed)) return 45;
-    if(/[:;]["')\]]*$/.test(trimmed)) return 30;
+    if(/[.!?]["\x27)\]]*$/.test(trimmed)) return 45;
+    if(/[:;]["\x27)\]]*$/.test(trimmed)) return 30;
     return 0;
   }
   function _streamFadeNextText(targetText){
@@ -2292,7 +2292,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Throttling to 66ms intervals prevents this pileup without noticeable
     // visual degradation — streaming text updates still feel immediate.
     // performance.now() is monotonic so tab suspend/resume and NTP adjustments
-    // can't produce negative or enormous deltas.
+    // cannot produce negative or enormous deltas.
     const sinceLastMs=performance.now()-_lastRenderMs;
     const _doRender=()=>{
       _pendingRafHandle=null;
@@ -2433,9 +2433,45 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _completeAutomaticCompressionOnLiveProgress(activeSid);
       ensureAssistantRow(true);
+      if(assistantRow) assistantRow.setAttribute('data-interim','1');
       _flushPendingSegmentRender({force:true});
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
+      // Collapse old interim notes once more than INTERIM_COLLAPSE_THRESHOLD accumulate.
+      const INTERIM_COLLAPSE_THRESHOLD=3;
+      if(visibleInterimSnippets.length>INTERIM_COLLAPSE_THRESHOLD&&assistantRow){
+        const blocks=assistantRow.parentElement;
+        if(blocks){
+          const allInterim=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
+          const toHide=allInterim.slice(0,allInterim.length-INTERIM_COLLAPSE_THRESHOLD);
+          let toggle=blocks.querySelector('.interim-collapse-toggle');
+          if(!toggle){
+            toggle=document.createElement('span');
+            toggle.className='interim-collapse-toggle';
+            toggle.addEventListener('click',()=>{
+              const hidden=blocks.querySelectorAll('.interim-collapsed');
+              if(hidden.length){
+                hidden.forEach(el=>el.classList.remove('interim-collapsed'));
+                toggle.dataset.expanded='1';
+                toggle.textContent='Collapse';
+              } else {
+                const all=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
+                const rehide=all.slice(0,all.length-INTERIM_COLLAPSE_THRESHOLD);
+                rehide.forEach(el=>el.classList.add('interim-collapsed'));
+                toggle.dataset.expanded='';
+                toggle.textContent='Show '+rehide.length+' earlier update'+(rehide.length===1?'':'s');
+              }
+            });
+            if(toHide.length) toHide[0].before(toggle);
+          }
+          // Skip re-collapse when the user expanded manually; always update the stored count.
+          if(!toggle.dataset.expanded){
+            toHide.forEach(el=>el.classList.add('interim-collapsed'));
+          }
+          const stillHidden=blocks.querySelectorAll('[data-interim="1"].interim-collapsed').length;
+          if(stillHidden) toggle.textContent='Show '+stillHidden+' earlier update'+(stillHidden===1?'':'s');
+        }
+      }
       recordActivityBoundary();
       _resetAssistantSegment();
       _scheduleRender();

@@ -5327,3 +5327,14 @@ main.main.showing-logs > #mainLogs{display:flex;}
 }
 
 #composerMobileCtxBadge { display: none !important; }
+
+/* Interim progress note collapse (#2403) */
+.interim-collapsed { display: none; }
+.interim-collapse-toggle {
+  cursor: pointer;
+  color: var(--accent-color, #4a9eff);
+  font-size: 0.85em;
+  margin: 4px 0;
+  display: block;
+}
+.interim-collapse-toggle:hover { text-decoration: underline; }
