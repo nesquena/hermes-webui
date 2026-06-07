@@ -24,6 +24,7 @@ let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
+let _cronAliasPreviousDetailId = null; // cron job ID to restore after closing alias manager
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
@@ -528,7 +529,10 @@ async function loadCrons(animate) {
     // Re-render current detail with fresh data if we have one and we're not in a form
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
       const refreshed = _cronList.find(j => j.id === _currentCronDetail.id);
-      if (refreshed) _renderCronDetail(refreshed);
+      if (refreshed) {
+        await _resolveCronDeliverLabel(refreshed);
+        _renderCronDetail(refreshed);
+      }
       else _clearCronDetail();
     }
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
@@ -710,8 +714,15 @@ function _setCronHeaderButtons(mode, job) {
   const delBtn = $('btnDeleteTaskDetail');
   const cancelBtn = $('btnCancelTaskDetail');
   const saveBtn = $('btnSaveTaskDetail');
+  const aliasesBtn = $('btnAliasesTaskDetail');
   const hide = b => b && (b.style.display = 'none');
   const show = b => b && (b.style.display = '');
+  // Always show Aliases button in the empty/read states
+  if (aliasesBtn) show(aliasesBtn);
+  // Restore Cancel button to its normal behaviour (overridden in aliases mode)
+  if (cancelBtn && mode !== 'aliases') {
+    cancelBtn.onclick = cancelCronForm;
+  }
   if (mode === 'read') {
     show(runBtn);
     const status = job ? _cronStatusMeta(job) : null;
@@ -725,6 +736,19 @@ function _setCronHeaderButtons(mode, job) {
   } else if (mode === 'create' || mode === 'edit') {
     hide(runBtn); hide(pauseBtn); hide(resumeBtn); hide(editBtn); hide(dupBtn); hide(delBtn);
     show(cancelBtn); show(saveBtn);
+  } else if (mode === 'aliases') {
+    hide(runBtn); hide(pauseBtn); hide(resumeBtn); hide(editBtn); hide(dupBtn); hide(delBtn); hide(saveBtn);
+    show(cancelBtn);
+    // Override Cancel to close aliases and return to the previous cron detail
+    if (cancelBtn) cancelBtn.onclick = () => {
+      _cronMode = null;
+      if (_cronAliasPreviousDetailId) {
+        openCronDetail(_cronAliasPreviousDetailId);
+        _cronAliasPreviousDetailId = null;
+      } else {
+        _clearCronDetail();
+      }
+    };
   } else {
     [runBtn,pauseBtn,resumeBtn,editBtn,dupBtn,delBtn,cancelBtn,saveBtn].forEach(hide);
   }
@@ -826,7 +850,23 @@ async function _loadRunContent(jobId, filename, runId){
   }
 }
 
-function openCronDetail(id, el){
+async function _resolveCronDeliverLabel(job){
+  let optionsCache = _cronDeliveryOptionsCache;
+  if (!optionsCache) {
+    try {
+      const opts = await api('/api/crons/delivery-options');
+      optionsCache = (opts && Array.isArray(opts.platforms)) ? opts.platforms : [];
+      _cronDeliveryOptionsCache = optionsCache;
+    } catch (_) {
+      optionsCache = [];
+    }
+  }
+  const deliver = job.deliver || 'local';
+  const match = (optionsCache || []).find(p => p.value === deliver);
+  job.deliver_label = match ? match.label : deliver;
+}
+
+async function openCronDetail(id, el){
   const job = _cronList ? _cronList.find(j => j.id === id) : null;
   if (!job) return;
   document.querySelectorAll('.cron-item').forEach(e => e.classList.remove('active'));
@@ -839,6 +879,7 @@ function openCronDetail(id, el){
   _cronPreFormDetail = null;
   _editingCronId = null;
   _stopCronWatch();
+  await _resolveCronDeliverLabel(job);
   _renderCronDetail(job);
   _checkCronWatchOnDetail(id);
 }
@@ -935,6 +976,137 @@ function openCronCreate(){
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
   loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
+}
+
+async function openCronAliases(){
+  // Switch to tasks panel then render alias management view
+  if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
+  _cronAliasPreviousDetailId = _cronAliasPreviousDetailId || (_currentCronDetail ? _currentCronDetail.id : null);
+  _currentCronDetail = null;
+  _cronMode = 'aliases';
+  _stopCronWatch();
+  const title = $('taskDetailTitle');
+  const body = $('taskDetailBody');
+  const empty = $('taskDetailEmpty');
+  if (!title || !body) return;
+  title.textContent = 'Delivery Aliases';
+  if (empty) empty.style.display = 'none';
+  body.style.display = '';
+
+  // Show only relevant header buttons
+  _setCronHeaderButtons('aliases');
+
+  // Fetch aliases from API
+  let aliases = [];
+  try {
+    const res = await api('/api/crons/delivery-aliases');
+    aliases = (res && Array.isArray(res.aliases)) ? res.aliases : [];
+  } catch (_) { aliases = []; }
+
+  const rows = aliases.length === 0
+    ? `<div style="color:var(--muted);padding:12px 0">No custom aliases yet. Add one below.</div>`
+    : aliases.map(a => `
+      <div class="detail-row" style="align-items:center" id="alias-row-${esc(a.value)}">
+        <div class="detail-row-value" style="flex:1"><code>${esc(a.value)}</code> → <strong class="alias-label-text">${esc(a.label)}</strong></div>
+        <input type="text" class="alias-label-input" id="alias-input-${esc(a.value)}" value="${esc(a.label)}" style="display:none;flex:1;margin-right:8px">
+        <button type="button" class="cron-btn alias-edit-btn" onclick="editCronAlias('${esc(a.value)}')" title="Edit label" style="margin-left:8px">✎</button>
+        <button type="button" class="cron-btn alias-save-btn" onclick="saveCronAlias('${esc(a.value)}')" title="Save" style="display:none;margin-left:8px;background:var(--accent);color:#fff">✓</button>
+        <button type="button" class="cron-btn alias-cancel-btn" onclick="cancelEditCronAlias('${esc(a.value)}')" title="Cancel" style="display:none;margin-left:4px">✕</button>
+        <button type="button" class="cron-btn" onclick="deleteCronAlias('${esc(a.value)}')" title="Remove alias" style="margin-left:4px">✕</button>
+      </div>`).join('');
+
+  body.innerHTML = `
+    <div class="main-view-content">
+      <div class="detail-card">
+        <div class="detail-card-title">Manage Delivery Aliases</div>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">
+          Aliases let you assign friendly names to delivery targets (e.g. <code>telegram:1442670692 → Laurent (perso)</code>).
+          They appear in the cron job <em>Deliver output to</em> dropdown.
+          Stored in <code>~/.hermes/delivery_aliases.yaml</code> — safe across WebUI updates.
+        </p>
+        ${rows}
+      </div>
+      <div class="detail-card">
+        <div class="detail-card-title">Add Alias</div>
+        <div class="detail-form-row">
+          <label for="aliasValue">Value (target)</label>
+          <input type="text" id="aliasValue" placeholder="telegram:1442670692" style="width:100%;box-sizing:border-box">
+        </div>
+        <div class="detail-form-row">
+          <label for="aliasLabel">Label (display name)</label>
+          <input type="text" id="aliasLabel" placeholder="Laurent (perso)" style="width:100%;box-sizing:border-box">
+        </div>
+        <div style="margin-top:12px">
+          <button type="button" class="cron-btn run" onclick="addCronAlias()">Add Alias</button>
+        </div>
+        <div id="aliasError" class="detail-form-error" style="display:none;margin-top:8px"></div>
+      </div>
+    </div>`;
+}
+
+async function addCronAlias(){
+  const valEl = $('aliasValue');
+  const lblEl = $('aliasLabel');
+  const errEl = $('aliasError');
+  if (!valEl || !lblEl) return;
+  const value = valEl.value.trim();
+  const label = lblEl.value.trim();
+  if (!value || !label) { if (errEl) { errEl.textContent='Both fields are required'; errEl.style.display=''; } return; }
+  if (errEl) errEl.style.display = 'none';
+  try {
+    await api('/api/crons/delivery-aliases', {method:'POST', body: JSON.stringify({value, label})});
+    showToast('Alias added');
+    // Invalidate delivery options cache so dropdowns refresh
+    _cronDeliveryOptionsCache = null;
+    openCronAliases();
+  } catch(e) { if (errEl) { errEl.textContent=e.message; errEl.style.display=''; } }
+}
+
+async function deleteCronAlias(value){
+  if (!confirm(`Delete alias '${value}'?`)) return;
+  try {
+    await api('/api/crons/delivery-aliases/delete', {method:'POST', body: JSON.stringify({value})});
+    showToast('Alias removed');
+    _cronDeliveryOptionsCache = null;
+    openCronAliases();
+  } catch(e) { showToast('Delete failed: ' + e.message, 4000); }
+}
+
+function editCronAlias(value){
+  const row = document.getElementById('alias-row-' + value);
+  if (!row) return;
+  row.querySelector('.alias-label-text').style.display = 'none';
+  row.querySelector('.alias-label-input').style.display = '';
+  row.querySelector('.alias-edit-btn').style.display = 'none';
+  row.querySelector('.alias-save-btn').style.display = '';
+  row.querySelector('.alias-cancel-btn').style.display = '';
+  const input = document.getElementById('alias-input-' + value);
+  if (input) { input.focus(); input.select(); }
+}
+
+function cancelEditCronAlias(value){
+  const row = document.getElementById('alias-row-' + value);
+  if (!row) return;
+  const input = document.getElementById('alias-input-' + value);
+  if (input) input.value = row.querySelector('.alias-label-text').textContent;
+  row.querySelector('.alias-label-text').style.display = '';
+  row.querySelector('.alias-label-input').style.display = 'none';
+  row.querySelector('.alias-edit-btn').style.display = '';
+  row.querySelector('.alias-save-btn').style.display = 'none';
+  row.querySelector('.alias-cancel-btn').style.display = 'none';
+}
+
+async function saveCronAlias(value){
+  const input = document.getElementById('alias-input-' + value);
+  if (!input) return;
+  const label = input.value.trim();
+  if (!label) { showToast('Label cannot be empty', 3000); return; }
+  try {
+    await api('/api/crons/delivery-aliases/update', {method:'POST', body: JSON.stringify({value, label})});
+    showToast('Alias updated');
+    _cronDeliveryOptionsCache = null;
+    openCronAliases();
+  } catch(e) { showToast('Update failed: ' + e.message, 4000); }
 }
 
 function openCronEdit(job){
@@ -1156,12 +1328,24 @@ async function saveCronForm(){
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
+  const TELEGRAM_CHAT_RE=/^telegram:(\d+)$/i;
+  const telegramChatMatch = TELEGRAM_CHAT_RE.exec(deliver || '');
+  let originForSend = null;
+  if (telegramChatMatch) {
+    originForSend = {
+      platform: 'telegram',
+      chat_id: telegramChatMatch[1],
+      chat_name: '',
+      thread_id: null,
+    };
+  }
   try{
     if (_editingCronId) {
       const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications};
       if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       if (deliver) updates.deliver = deliver;
+      if (originForSend) updates.origin = originForSend;
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
       _editingCronId = null;
