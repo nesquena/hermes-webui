@@ -590,10 +590,17 @@ def _spawn_test_server(boot_attempts: int = 2):
     popen_extra = {}
     if sys.platform == "win32":
         popen_extra["creationflags"] = subprocess.CREATE_NO_WINDOW
-    else:
-        # Detach into a new session/process-group so group-directed signals
-        # (pytest group SIGTERM, job-control) can't reap the server.
-        popen_extra["start_new_session"] = True
+    # NOTE: deliberately NOT using start_new_session=True. It detaches the server
+    # from the pytest process group, which sounds protective (a group-directed
+    # SIGTERM can't reap it) but on the GitHub-Actions runner it regressed CI:
+    # the runner's end-of-step "Cleaning up orphan processes" pass plus the
+    # parent-death-signal bootstrap interact badly with a detached session leader,
+    # and the sharded job died during session setup before any test ran (verified:
+    # local sharded run is green, CI shard consistently red ONLY with this flag).
+    # The self-heal fixture below already recovers the ACTUAL observed failure mode
+    # (server reaped mid-run while pytest survives -> ConnectionRefused cascade) by
+    # respawning before the next test, environment-agnostically, so the flag's
+    # marginal benefit isn't worth the CI regression.
 
     for _attempt in range(1, boot_attempts + 1):
         with open(_TEST_SERVER_LOG, "w", encoding="utf-8") as _logf:
