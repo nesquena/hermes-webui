@@ -12778,12 +12778,13 @@ def _handle_cron_delivery_options(handler):
         platforms.append({"value": name, "label": name.capitalize()})
 
     # ── Load delivery aliases ──────────────────────────────────────────────
-    # Primary source: ~/.hermes/delivery_aliases.yaml (survives updates)
+    # Primary source: <hermes-home>/delivery_aliases.yaml (survives updates)
     # Fallback: DELIVERY_ALIASES in .env (pre-4.x compatibility)
     import os
+    from api.profiles import get_active_hermes_home
 
     aliases_loaded = False
-    yaml_path = os.path.expanduser("~/.hermes/delivery_aliases.yaml")
+    yaml_path = str(get_active_hermes_home() / "delivery_aliases.yaml")
     try:
         import yaml
         if os.path.isfile(yaml_path):
@@ -12795,8 +12796,9 @@ def _handle_cron_delivery_options(handler):
                 if val and lbl:
                     platforms.append({"value": val, "label": lbl})
             aliases_loaded = True
-    except Exception:
-        pass
+    except (yaml.YAMLError, OSError) as e:
+        import logging
+        logging.getLogger("hermes").error("Failed to load delivery aliases from %s: %s", yaml_path, e)
 
     if not aliases_loaded:
         raw = os.getenv("DELIVERY_ALIASES", "").strip()
@@ -12816,10 +12818,11 @@ def _handle_cron_delivery_options(handler):
 # ── Delivery alias CRUD ─────────────────────────────────────────────────
 
 def _load_delivery_aliases_yaml():
-    """Load delivery aliases from ~/.hermes/delivery_aliases.yaml.
+    """Load delivery aliases from <hermes-home>/delivery_aliases.yaml.
     Returns (aliases_list, yaml_path_str)."""
     import os
-    path = os.path.expanduser("~/.hermes/delivery_aliases.yaml")
+    from api.profiles import get_active_hermes_home
+    path = str(get_active_hermes_home() / "delivery_aliases.yaml")
     if not os.path.isfile(path):
         return [], path
     try:
@@ -12827,7 +12830,9 @@ def _load_delivery_aliases_yaml():
         with open(path, "r") as f:
             data = yaml.safe_load(f) or {}
         return data.get("aliases", []) or [], path
-    except Exception:
+    except (yaml.YAMLError, OSError) as e:
+        import logging
+        logging.getLogger("hermes").error("Failed to load delivery aliases from %s: %s", path, e)
         return [], path
 
 def _save_delivery_aliases_yaml(aliases, path):
@@ -12847,7 +12852,9 @@ def _save_delivery_aliases_yaml(aliases, path):
             f.write("\n")
             yaml.safe_dump({"aliases": aliases}, f, allow_unicode=True, sort_keys=False)
         return True
-    except Exception:
+    except (yaml.YAMLError, OSError) as e:
+        import logging
+        logging.getLogger("hermes").error("Failed to save delivery aliases to %s: %s", path, e)
         return False
 
 def _handle_cron_delivery_aliases_list(handler):
@@ -12856,10 +12863,10 @@ def _handle_cron_delivery_aliases_list(handler):
     return j(handler, {"aliases": aliases})
 
 def _validate_alias_value(value):
-    """Reject values that contain spaces or don't follow platform:id pattern."""
+    """Reject values that don't follow platform:id pattern (e.g. telegram:123456789)."""
     import re
-    if not re.match(r'^[^\s]+$', value):
-        return False, "Value must not contain whitespace characters"
+    if not re.match(r'^[a-z]+:[^\s]+$', value):
+        return False, "Value must follow platform:id format (e.g. telegram:123456789)"
     return True, None
 
 def _handle_cron_delivery_aliases_add(handler, body):

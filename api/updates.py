@@ -357,16 +357,7 @@ def _detect_agent_version() -> str:
 
 
 # Resolved once at import time — tags cannot change without a process restart.
-_RAW_VERSION: str = _detect_webui_version()
-# Append a hash of hotfix-editable static files so any edit busts browser cache
-import hashlib
-_static_root = REPO_ROOT / 'static'
-_hotfix_files = [_static_root / 'panels.js', _static_root / 'style.css']
-_hotfix_hash = hashlib.md5()
-for _f in _hotfix_files:
-    if _f.exists():
-        _hotfix_hash.update(_f.read_bytes())
-WEBUI_VERSION: str = _RAW_VERSION + '+' + _hotfix_hash.hexdigest()[:8]
+WEBUI_VERSION: str = _detect_webui_version()
 AGENT_VERSION: str = _detect_agent_version()
 
 
