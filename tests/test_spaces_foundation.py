@@ -12758,6 +12758,25 @@ def test_space_tool_adapter_supports_widget_see_and_reload_aliases_metadata_only
     assert seen["action"] == "space.widget.see"
     assert seen["widget"]["id"] == "weather-card"
     assert seen["contract"]["mode"] == "sandbox-contract-draft"
+    for see_result in (seen, current_seen):
+        assert see_result["prompt_preflight"]["action"] == see_result["action"]
+        assert see_result["prompt_preflight"]["boundary"] == "widget_runtime_prompt"
+        assert see_result["prompt_preflight"]["status"] == "required"
+        assert see_result["prompt_preflight"]["metadata_only"] is True
+        assert see_result["prompt_preflight"]["raw_prompt_stored"] is False
+        assert see_result["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+        assert see_result["autonomy_policy"]["prompt_preflight_status"] == "required"
+        assert see_result["autonomy_policy"]["metadata_only"] is True
+        assert see_result["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+        assert see_result["progress_event"]["event_type"] == "tool.completed"
+        assert see_result["progress_event"]["family"] == "tool"
+        assert see_result["progress_event"]["run_id"] == f"widget.see:{created['space_id']}"
+        assert see_result["progress_event"]["redaction_status"] == "metadata_only"
+        see_compaction_text = see_result["output_compaction"]["text"].lower()
+        assert see_result["output_compaction"]["metadata_only"] is True
+        assert "prompt_preflight_status: required" in see_compaction_text
+        assert "model_route_hint: hint:reasoning" in see_compaction_text
+        assert "progress_run_id: widget.see:widget-see-reload-lab" in see_compaction_text
     assert current_seen["widget"] == seen["widget"]
     assert current_seen["contract"] == seen["contract"]
     assert reloaded["ok"] is True

@@ -7847,6 +7847,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
         widget = read_widget(space_id, widget_id)
+        prompt_preflight = _widget_reload_required_prompt_preflight_receipt(name)
+        autonomy_policy = _widget_reload_action_policy_receipt(name, prompt_preflight)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.see")
         return {
             "ok": True,
             "action": name,
@@ -7854,10 +7857,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widget": read_widget_detail(space_id, widget_id),
             "contract": _widget_runtime_contract_summary(widget),
             "events": list_widget_events(space_id, widget_id, data.get("limit", 5)),
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=1,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
             ),
         }
     if name in {"space.widget.runtime_contract", "space.current.widget.runtime_contract", "widget.runtime_contract"}:
@@ -13678,6 +13686,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "widget.delete",
         "widget.events",
         "widget.patch",
+        "widget.see",
         "widget.blueprint.create",
         "widget.blueprint.define",
         "widget.blueprint.preview",
