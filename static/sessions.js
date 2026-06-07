@@ -1685,9 +1685,15 @@ async function _ensureMessagesLoaded(sid) {
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
   const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';
+  // expand_renderable=1 is sent ONLY here, on the initial cold load: it tells
+  // the server to expand the tail window backward until it holds ~msg_limit
+  // *renderable* rows so a tool-heavy session doesn't open showing 1-2 visible
+  // messages (#3790). The "Load earlier" path (_loadOlderMessages) deliberately
+  // omits it to keep its raw transport cap.
+  const expandParam = reloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}`);
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`);
   } finally {
     _clearSameSessionForceReloadHint(sid);
   }
@@ -1756,6 +1762,7 @@ async function _ensureMessagesLoaded(sid) {
       scheduleTodosRefresh();
     }
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
+    if(typeof syncTopbar==='function') syncTopbar();
   }
 }
 

@@ -2833,7 +2833,7 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     return bool(role and role != "tool")
 
 
-def _message_window_for_display(messages, msg_limit=None, msg_before=None) -> tuple[list, int]:
+def _message_window_for_display(messages, msg_limit=None, msg_before=None, expand_renderable=False) -> tuple[list, int]:
     """Return a paginated message window plus its offset in ``messages``.
 
     The normal fast path is a raw tail window. If that window contains no
@@ -2863,6 +2863,33 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None) -> tu
                 start_idx = max(0, end_idx - limit)
                 window = source[start_idx:end_idx]
                 break
+    if limit > 1 and window and expand_renderable:
+        # ``msg_limit`` is a raw-message transport cap, but the WebUI renders a
+        # filtered transcript: role=tool rows, empty separator assistants, and
+        # compression markers can all disappear. A long tool-heavy tail can
+        # therefore produce a cold reload that visibly contains only one or two
+        # messages plus a huge "Load earlier" button. Expand the raw window
+        # backwards until it contains roughly ``limit`` renderable transcript
+        # rows, while keeping the raw offset cursor honest.
+        #
+        # Gated behind the explicit ``expand_renderable`` flag, which the
+        # frontend sends ONLY on the initial cold-load fetch. It must NOT apply
+        # to the "Load earlier" cumulative path (which re-requests with a larger
+        # msg_limit and no msg_before) nor the msg_before fallback page — those
+        # keep the raw transport cap so one scroll-up can't pull a whole
+        # tool-heavy transcript back in a single response. Cold loads are the
+        # only place the "1-2 visible messages" cliff happens.
+        renderable_count = sum(1 for msg in window if _message_counts_as_renderable_for_window(msg))
+        if renderable_count < limit:
+            target_renderable = min(
+                limit,
+                sum(1 for msg in source if _message_counts_as_renderable_for_window(msg)),
+            )
+            while start_idx > 0 and renderable_count < target_renderable:
+                start_idx -= 1
+                if _message_counts_as_renderable_for_window(source[start_idx]):
+                    renderable_count += 1
+            window = source[start_idx:end_idx]
     return window, start_idx
 
 
@@ -5362,6 +5389,14 @@ def handle_get(handler, parsed) -> bool:
             msg_before = int(_msg_before) if _msg_before else None
         except (ValueError, TypeError):
             msg_before = None
+        # ?expand_renderable=1 — sent ONLY by the initial cold-load fetch. When
+        # set, the tail window is expanded backward until it holds ~msg_limit
+        # *renderable* rows (tool/separator/compression rows are UI-filtered) so
+        # a tool-heavy session doesn't cold-load showing 1-2 visible messages.
+        # The "Load earlier" cumulative path and msg_before pages do NOT send it,
+        # keeping their raw transport cap (#3790).
+        _expand_renderable = query.get("expand_renderable", [None])[0]
+        expand_renderable = str(_expand_renderable).strip() in ("1", "true", "True")
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
@@ -5446,6 +5481,7 @@ def handle_get(handler, parsed) -> bool:
                     _all_msgs,
                     msg_limit=msg_limit,
                     msg_before=msg_before,
+                    expand_renderable=expand_renderable,
                 )
                 if msg_before is not None:
                     _before_idx = max(0, min(int(msg_before), len(_all_msgs)))
