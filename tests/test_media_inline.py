@@ -526,6 +526,64 @@ class TestMediaEndpointUnit(unittest.TestCase):
                     h4.status, 403,
                     "profile webui_state/sessions/*.json must be denied")
 
+    def test_media_allowed_roots_env_var_serves_outside_hermes_root(self):
+        """MEDIA_ALLOWED_ROOTS must still allow legitimate outside-root media."""
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            class _W:
+                def write(self_inner, b):
+                    pass
+                def flush(self_inner):
+                    pass
+            wfile = _W()
+            headers = {}
+
+        png_bytes = (
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
+            b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00'
+            b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+        )
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as extra:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            outside_root = pathlib.Path(extra).resolve()
+            image = outside_root / "settings_artifact.png"
+            image.write_bytes(png_bytes)
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "HERMES_HOME": str(hermes_home),
+                    "MEDIA_ALLOWED_ROOTS": str(outside_root),
+                },
+            ), mock.patch.object(
+                routes, "get_last_workspace", lambda: str(hermes_home / "workspace")
+            ), mock.patch(
+                "api.auth.is_auth_enabled", lambda: False
+            ):
+                handler = _Handler()
+                routes._handle_media(
+                    handler,
+                    SimpleNamespace(
+                        query=f"path={urllib.parse.quote(str(image))}&inline=1",
+                        path="/api/media",
+                    ),
+                )
+
+            self.assertEqual(
+                handler.status, 200,
+                "MEDIA_ALLOWED_ROOTS media outside Hermes roots must still serve",
+            )
+
     def test_media_endpoints_advertise_byte_range_support(self):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         self.assertIn("Accept-Ranges", routes_src)
@@ -744,14 +802,9 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         finally:
             sess_file.unlink(missing_ok=True)
 
-    def test_deny_list_does_not_overblock_legitimate_media(self):
-        """#3234 follow-up: the state/private-file deny-list must NOT block ordinary
-        media that merely shares a sensitive basename but lives OUTSIDE any
-        Hermes state root (e.g. a user artifact in the test workspace named settings.json).
-
-        The deny is scoped to files under a Hermes root; a test-workspace PNG named
-        settings.png — or even settings.json — is the user's own content and
-        must still be served (200), not 403.
+    def test_deny_list_does_not_overblock_active_workspace_media(self):
+        """#3234 follow-up: workspace media with a sensitive-looking basename must
+        still serve when it lives under the active workspace carve-out.
         """
         png_bytes = (
             b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
@@ -759,7 +812,9 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
         )
         # A test-workspace artifact whose stem collides with a denied basename
-        # must still serve because the workspace is not a Hermes state root.
+        # must still serve because the active workspace carve-out allows
+        # legitimate user media even when the test workspace lives under
+        # TEST_STATE_DIR.
         with tempfile.NamedTemporaryFile(
             suffix=".png",
             prefix="settings_artifact_",
@@ -774,7 +829,7 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             )
             self.assertEqual(
                 status, 200,
-                f"a test-workspace PNG outside any Hermes root must serve, got {status}",
+                f"a test-workspace PNG under the active workspace must serve, got {status}",
             )
             self.assertIn("image/png", headers.get("Content-Type", ""))
         finally:

@@ -107,7 +107,7 @@ def test_env_var_workspace_takes_priority_over_passed_raw(monkeypatch, tmp_path)
 
 def test_ensure_workspace_dir_returns_false_for_unwritable_path(monkeypatch, tmp_path):
     """_ensure_workspace_dir returns False for a path that can't be created."""
-    def fail_mkdir(self, parents=False, exist_ok=False):
+    def fail_mkdir(self, mode=0o777, parents=False, exist_ok=False):
         raise PermissionError("simulated create failure")
 
     monkeypatch.setattr(Path, "mkdir", fail_mkdir)
