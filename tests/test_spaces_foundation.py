@@ -14740,6 +14740,14 @@ def test_spaces_data_delete_route_removes_slot_without_echoing_raw_payload(monke
     assert status == 200
     assert body["deleted"] is True
     assert body["key"] == "research-summary"
+    assert body["prompt_preflight"]["boundary"] == "shared_data_slot"
+    assert body["prompt_preflight"]["status"] == "required"
+    assert body["autonomy_policy"]["action"] == "space.shared_slot.delete"
+    assert body["autonomy_policy"]["model_route_hint"] == "hint:summarize"
+    assert body["progress_event"]["event_type"] == "tool.completed"
+    assert body["progress_event"]["run_id"] == "shared-slot.delete:shared-data-route-lab"
+    assert body["output_compaction"]["command"] == "space.data.delete"
+    assert body["output_compaction"]["metadata_only"] is True
     assert spaces.list_shared_data_slots(created["space_id"]) == []
     assert "steal" not in serialized
     assert "<script" not in serialized

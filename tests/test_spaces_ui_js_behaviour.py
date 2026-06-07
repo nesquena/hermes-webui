@@ -1834,7 +1834,69 @@ global.fetch = async function(path, opts = {}) {
     return response({ deleted: true, space_id: 'lab', widget_id: 'weather', revision_event_id: 'rev3' });
   }
   if (path === 'api/spaces/data/delete') {
-    return response({ deleted: true, space_id: 'lab', key: 'research-summary', revision_event_id: 'rev-data-delete', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+    return response({
+      deleted: true,
+      space_id: 'lab',
+      key: 'research-summary',
+      revision_event_id: 'rev-data-delete',
+      prompt_preflight: {
+        status: 'required',
+        boundary: 'shared_data_slot',
+        severity: 'none',
+        checks: ['prompt_injection_preflight_required'],
+        metadata_only: true,
+        local_only: true,
+        raw_prompt_stored: false,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      autonomy_policy: {
+        available: true,
+        action: 'space.shared_slot.delete',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['creator_commit'],
+        prompt_preflight_status: 'required',
+        model_route_hint: 'hint:summarize',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-shared-data-delete',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'shared-slot.delete:lab',
+        redaction_status: 'metadata-only',
+        metadata_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      output_compaction: {
+        tool: 'capy-spaces-tool-action',
+        command: 'space.shared_slot.delete',
+        exit_status: 0,
+        original_chars: 512,
+        compacted_chars: 304,
+        redaction_status: 'metadata_only',
+        rules_applied: ['cap_section_chars', 'redact_unsafe_markers'],
+        text: 'space_action: space.shared_slot.delete\nprogress_run_id: shared-slot.delete:lab',
+        retained_artifact_handles: [
+          { kind: 'space', handle: 'space:lab', label: 'Space action metadata' },
+          { kind: 'shared_data_slot', handle: 'shared-data:lab:research-summary', label: 'Shared data slot metadata' },
+        ],
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK'
+    });
   }
   if (path === 'api/spaces/checkpoint') {
     const body = opts.body ? JSON.parse(opts.body) : {};
@@ -7615,10 +7677,18 @@ def test_spaces_ui_delete_shared_data_confirm_posts_key_only_and_refreshes_detai
     assert out["calls"][-3]["path"] == "api/spaces/revisions?space_id=lab&limit=10"
     assert out["calls"][-2]["path"] == "api/spaces/memory?space_id=lab"
     assert out["calls"][-1]["path"] == "api/capy-progress/status?space_id=lab"
+    assert "Shared data delete receipt" in out["rootHtml"]
+    assert "space.shared_slot.delete" in out["rootHtml"]
+    assert "Model route hint: hint:summarize" in out["rootHtml"]
+    assert "Shared data delete progress" in out["rootHtml"]
+    assert "run shared-slot.delete:lab" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 512 chars" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
+    assert "raw_prompt" not in out["rootHtml"]
 
 
 def test_spaces_ui_space_detail_checkpoints_explicit_space_with_shared_prompt_metadata_only(driver_path):

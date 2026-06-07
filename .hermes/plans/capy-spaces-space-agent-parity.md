@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): show shared data delete receipts`
+  - Added RED/GREEN backend route and real-`static/spaces.js` coverage proving confirmed shared-data slot deletion now returns and renders metadata-only prompt-preflight, action-policy, progress, and compaction receipt evidence through the direct Space detail UI path.
+  - Kept direct-route and DOM output safe: hostile raw slot values, renderer/script, API-auth, bearer, raw-prompt, and secret fixture fields stay absent while the visible receipt shows `space.shared_slot.delete`, `hint:summarize`, `shared-slot.delete:<space_id>`, and bounded compaction evidence.
+
 - `feat(spaces): show delete safety receipts`
   - Added RED/GREEN real-`static/spaces.js` coverage proving confirmed Space deletion now preserves and renders the backend `prompt_preflight`, `autonomy_policy`, `progress_event`, and `output_compaction` receipt after the Spaces home refresh.
   - Kept the destructive-delete UI receipt metadata-only: hostile raw prompt, renderer/script, API-auth, secret, unsafe path, and unsafe compaction-artifact fixture fields stay absent from the DOM while the visible card shows preflight, policy, delete progress, and compaction evidence.

@@ -1446,6 +1446,26 @@
     if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
+  function renderSharedDataDeleteReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Shared data delete progress');
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !compaction) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Shared data delete receipt</h3>' +
+      '<div class="capy-spaces-muted">Confirmed shared data slot deletion completed with metadata-only policy and progress evidence. Raw slot values, prompts, implementation fields, and secrets stay omitted.</div>' +
+      preflight + policy + progress + compaction + '</div>';
+  }
+
+  function prependSharedDataDeleteReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderSharedDataDeleteReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
   function renderSystemWidgetUpsertReceipt(data){
     const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
     if (!result) return '';
@@ -3621,8 +3641,9 @@
       if (!spaceId || !dataKey || typeof showConfirmDialog !== 'function') return;
       const ok = await showConfirmDialog({title: 'Delete shared data slot?', message: 'Delete shared data slot "'+dataKey+'" from space "'+spaceId+'"? Raw data is not displayed in this UI.', confirmLabel: 'Delete data slot', danger: true, focusCancel: true});
       if (!ok) return;
-      await postSpacesJson('api/spaces/data/delete', {space_id: spaceId, key: dataKey});
+      const deleteDataResult = await postSpacesJson('api/spaces/data/delete', {space_id: spaceId, key: dataKey});
       await openSpaceDetail(spaceId);
+      prependSharedDataDeleteReceipt(deleteDataResult || {});
       return;
     }
     if (action === 'checkpointSpace') {

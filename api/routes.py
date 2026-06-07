@@ -5725,7 +5725,7 @@ def handle_post(handler, parsed) -> bool:
             key = body.get("key")
             if not space_id or not key:
                 return bad(handler, "Missing space_id or key")
-            return j(handler, capy_spaces.delete_shared_data_slot(space_id, key))
+            return j(handler, capy_spaces.run_space_tool("space.data.delete", {"space_id": space_id, "key": key}))
         except RuntimeError as e:
             return bad(handler, str(e), 403)
         except ValueError as e:
