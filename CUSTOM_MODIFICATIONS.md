@@ -41,8 +41,9 @@
 
 **Fichier de config :** `/opt/hermes-webui/.env`
 ```
-DELIVERY_ALIASES="Telegram laurent:telegram:1442670692,Telegram idswood:telegram:8904829809"
+DELIVERY_ALIASES="Nom d'alias:telegram:<CHAT_ID>,..."
 ```
+> ⚠️ Les vrais chat_id sont dans le `.env` du serveur, pas dans ce repo public.
 
 ### 2. Protection par mot de passe (nginx)
 
