@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.310] — 2026-06-07 — Release JZ (stage-3760 — long-press project chips to delete on touch)
+
+### Fixed
+- **Project chips can now be managed on touch devices.** The project filter chips in the sidebar exposed Rename / Color / Delete only through the right-click context menu, which has no touch equivalent — so on phones/tablets there was no way to delete a project and the list grew forever. A 500ms long-press now opens the same context menu (mirroring the existing session-item long-press): a >10px drag cancels it, a short tap still filters, and the synthetic click after the press is suppressed. The chip shows accent + slight-scale feedback while held, and native callout/selection is disabled so it doesn't compete with the gesture. Includes a multi-touch correctness fix (a second finger / stray touchstart can no longer orphan the press timer and pop the menu after the gesture was cancelled). Verified live: long-press opens the menu once, short tap doesn't, and the multi-touch-then-cancel case no longer fires. (#3760, @reinocheong)
+
 ## [v0.51.309] — 2026-06-07 — Release JY (stage-a5b — restore reconnect replays live tool cards)
 
 ### Fixed
