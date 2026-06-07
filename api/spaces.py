@@ -178,6 +178,7 @@ _WIDGET_DETAIL_METADATA_FIELDS = (
     "kanban",
     "prompt",
 )
+_WIDGET_PROMPT_METADATA_FIELDS = ("placeholder", "suggested_event")
 
 
 def spaces_enabled() -> bool:
@@ -1719,11 +1720,49 @@ def _widget_detail_metadata(widget: dict[str, Any]) -> dict[str, Any]:
     for field in _WIDGET_DETAIL_METADATA_FIELDS:
         if field not in widget:
             continue
-        summary = _payload_summary(widget.get(field))
+        if field == "prompt":
+            summary = _widget_prompt_metadata_summary(widget.get(field))
+        else:
+            summary = _payload_summary(widget.get(field))
         if summary in ({}, [], ""):
             continue
         metadata[field] = summary
     return metadata
+
+
+def _widget_prompt_metadata_summary(prompt: Any) -> dict[str, Any]:
+    """Return allow-listed prompt metadata without arbitrary prompt text."""
+    if prompt in (None, "", {}, [], ()):  # Empty prompt metadata should remain omitted.
+        return {}
+    if isinstance(prompt, dict):
+        safe_metadata: dict[str, Any] = {}
+        for raw_key in _WIDGET_PROMPT_METADATA_FIELDS:
+            if raw_key not in prompt:
+                continue
+            summary = _widget_prompt_metadata_value_summary(prompt.get(raw_key))
+            if summary in ({}, [], ""):
+                continue
+            safe_metadata[raw_key] = summary
+        if safe_metadata:
+            return safe_metadata
+    return {
+        "present": True,
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+    }
+
+
+def _widget_prompt_metadata_value_summary(value: Any) -> Any:
+    """Summarize allow-listed prompt metadata values without nested prompt text."""
+    if value in (None, "", {}, [], ()):  # Empty prompt metadata should remain omitted.
+        return {}
+    if isinstance(value, (dict, list, tuple)):
+        return {
+            "present": True,
+            "metadata_only": True,
+            "raw_prompt_stored": False,
+        }
+    return _payload_summary(value)
 
 
 def _widget_runtime_contract_summary(widget: dict[str, Any]) -> dict[str, Any]:
@@ -8165,29 +8204,47 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.spaces.readwidget", "space.spaces.getwidget"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
+        widget_detail = read_widget_detail(space_id, widget_id)
+        prompt_preflight = _widget_reload_required_prompt_preflight_receipt(name)
+        autonomy_policy = _widget_reload_action_policy_receipt(name, prompt_preflight)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.read")
         return {
             "ok": True,
             "action": name,
             "space_id": space_id,
-            "widget": read_widget_detail(space_id, widget_id),
+            "widget": widget_detail,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=1,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
             ),
         }
     if name in {"space.widget.read", "space.widget.get", "space.current.widget.read", "space.current.widget.get", "space.current.readwidget", "space.current.getwidget"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
+        widget_detail = read_widget_detail(space_id, widget_id)
+        prompt_preflight = _widget_reload_required_prompt_preflight_receipt(name)
+        autonomy_policy = _widget_reload_action_policy_receipt(name, prompt_preflight)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.read")
         return {
             "ok": True,
             "action": name,
             "active_space_id": space_id,
-            "widget": read_widget_detail(space_id, widget_id),
+            "widget": widget_detail,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=1,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
             ),
         }
     if name in {"space.widget.see", "space.current.widget.see", "space.current.seewidget", "widget.see"}:
@@ -9663,14 +9720,23 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"widget.read", "widget.get"}:
         space_id = validate_space_id(data.get("space_id"))
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        widget_detail = read_widget_detail(space_id, widget_id)
+        prompt_preflight = _widget_reload_required_prompt_preflight_receipt(name)
+        autonomy_policy = _widget_reload_action_policy_receipt(name, prompt_preflight)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.read")
         return {
             "ok": True,
             "action": name,
-            "widget": read_widget_detail(space_id, widget_id),
+            "widget": widget_detail,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=1,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
             ),
         }
     if name in {"widget.patch", "space.widget.patch", "space.current.widget.patch"}:
@@ -10963,7 +11029,10 @@ def list_widgets(space_id: str) -> list[dict[str, Any]]:
             metadata: dict[str, Any] = {}
             for field in ("weather", "event_bridge", "prompt"):
                 if isinstance(widget.get(field), dict):
-                    field_summary = _payload_summary(widget.get(field))
+                    if field == "prompt":
+                        field_summary = _widget_prompt_metadata_summary(widget.get(field))
+                    else:
+                        field_summary = _payload_summary(widget.get(field))
                     if field_summary not in ({}, [], ""):
                         metadata[field] = field_summary
             if metadata:
@@ -14149,6 +14218,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "widget.delete",
         "widget.events",
         "widget.patch",
+        "widget.read",
         "widget.see",
         "widget.blueprint.create",
         "widget.blueprint.define",

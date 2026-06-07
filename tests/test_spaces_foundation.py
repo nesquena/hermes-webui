@@ -106,6 +106,31 @@ def _assert_space_collection_read_receipts(
         assert f"widget_count: {widget_count}" in response["output_compaction"]["text"]
 
 
+def _assert_widget_read_receipts(response, *, action, run_id, space_id, widget_count=1):
+    assert response["prompt_preflight"]["action"] == action
+    assert response["prompt_preflight"]["boundary"] == "widget_runtime_prompt"
+    assert response["prompt_preflight"]["status"] == "required"
+    assert response["prompt_preflight"]["metadata_only"] is True
+    assert response["prompt_preflight"]["raw_prompt_stored"] is False
+    assert response["autonomy_policy"]["action"] == action
+    assert response["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+    assert response["autonomy_policy"]["prompt_preflight_status"] == response["prompt_preflight"]["status"]
+    assert response["autonomy_policy"]["metadata_only"] is True
+    assert response["progress_event"]["event_type"] == "tool.completed"
+    assert response["progress_event"]["family"] == "tool"
+    assert response["progress_event"]["run_id"] == run_id
+    assert response["progress_event"]["space_id"] == space_id
+    assert response["progress_event"]["redaction_status"] == "metadata_only"
+    assert response["output_compaction"]["tool"] == "capy-spaces-tool-action"
+    assert response["output_compaction"]["command"] == action
+    assert response["output_compaction"]["metadata_only"] is True
+    assert response["output_compaction"]["redaction_status"] == "metadata_only"
+    assert "prompt_preflight_status: required" in response["output_compaction"]["text"]
+    assert f"space_id: {space_id}" in response["output_compaction"]["text"]
+    assert f"widget_count: {widget_count}" in response["output_compaction"]["text"]
+    assert f"progress_run_id: {run_id}" in response["output_compaction"]["text"]
+
+
 def test_load_spaces_isolates_progress_event_log(monkeypatch, tmp_path):
     _load_spaces(monkeypatch, tmp_path, enabled=True)
     from api.capy_progress import progress_events_log_path
@@ -1939,7 +1964,24 @@ def test_public_widget_detail_redacts_unsafe_revision_event_id(monkeypatch, tmp_
     )
     spaces.upsert_widget(
         created["space_id"],
-        {"id": "unsafe-widget", "kind": "status", "title": "Unsafe Widget"},
+        {
+            "id": "unsafe-widget",
+            "kind": "status",
+            "title": "Unsafe Widget",
+            "prompt": {
+                "raw": "RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
+                "text": "SECRET_PROMPT_DO_NOT_LEAK",
+                "label": "RAW_PROMPT_LABEL_DO_NOT_LEAK",
+                "placeholder": {"instruction": "RAW_PROMPT_PLACEHOLDER_NESTED_DO_NOT_LEAK"},
+                "template": {
+                    "instruction": "RAW_PROMPT_NESTED_INSTRUCTION_DO_NOT_LEAK",
+                    "content": "RAW_PROMPT_NESTED_CONTENT_DO_NOT_LEAK",
+                },
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+        },
     )
     manifest_path = spaces._manifest_path(created["space_id"])
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1956,23 +1998,129 @@ def test_public_widget_detail_redacts_unsafe_revision_event_id(monkeypatch, tmp_
         "space.spaces.readWidget",
         {"spaceId": created["space_id"], "widgetId": "unsafe-widget"},
     )
+    tool_get = spaces.run_space_tool(
+        "space.spaces.getWidget",
+        {"spaceId": created["space_id"], "widgetId": "unsafe-widget"},
+    )
+    widget_read = spaces.run_space_tool(
+        "space.widget.read",
+        {"spaceId": created["space_id"], "widgetId": "unsafe-widget"},
+    )
+    legacy_widget_get = spaces.run_space_tool(
+        "widget.get",
+        {"space_id": created["space_id"], "widget_id": "unsafe-widget"},
+    )
     current_read = spaces.run_space_tool(
         "space.current.readWidget",
         {"activeSpaceId": created["space_id"], "widgetId": "unsafe-widget"},
     )
+    current_get = spaces.run_space_tool(
+        "space.current.getWidget",
+        {"activeSpaceId": created["space_id"], "widgetId": "unsafe-widget"},
+    )
     serialized = json.dumps(
-        {"safe_detail": safe_detail, "unsafe_detail": unsafe_detail, "tool_read": tool_read, "current_read": current_read},
+        {
+            "safe_detail": safe_detail,
+            "unsafe_detail": unsafe_detail,
+            "tool_read": tool_read,
+            "tool_get": tool_get,
+            "widget_read": widget_read,
+            "legacy_widget_get": legacy_widget_get,
+            "current_read": current_read,
+            "current_get": current_get,
+        },
         sort_keys=True,
     ).lower()
 
     assert safe_detail["revision_event_id"] == safe_widget_revision
     assert "revision_event_id" not in unsafe_detail
     assert tool_read["widget"] == unsafe_detail
+    assert tool_get["widget"] == unsafe_detail
+    assert widget_read["widget"] == unsafe_detail
+    assert legacy_widget_get["widget"] == unsafe_detail
     assert current_read["widget"] == unsafe_detail
+    assert current_get["widget"] == unsafe_detail
+    _assert_widget_read_receipts(
+        tool_read,
+        action="space.spaces.readwidget",
+        run_id=f"widget.read:{created['space_id']}",
+        space_id=created["space_id"],
+    )
+    _assert_widget_read_receipts(
+        tool_get,
+        action="space.spaces.getwidget",
+        run_id=f"widget.read:{created['space_id']}",
+        space_id=created["space_id"],
+    )
+    _assert_widget_read_receipts(
+        widget_read,
+        action="space.widget.read",
+        run_id=f"widget.read:{created['space_id']}",
+        space_id=created["space_id"],
+    )
+    _assert_widget_read_receipts(
+        legacy_widget_get,
+        action="widget.get",
+        run_id=f"widget.read:{created['space_id']}",
+        space_id=created["space_id"],
+    )
+    _assert_widget_read_receipts(
+        current_read,
+        action="space.current.readwidget",
+        run_id=f"widget.read:{created['space_id']}",
+        space_id=created["space_id"],
+    )
+    _assert_widget_read_receipts(
+        current_get,
+        action="space.current.getwidget",
+        run_id=f"widget.read:{created['space_id']}",
+        space_id=created["space_id"],
+    )
     assert safe_widget_revision in serialized
     assert unsafe_widget_revision not in serialized
     assert "../" not in serialized
     assert "escape" not in serialized
+    assert "raw_prompt_sentinel_do_not_leak" not in serialized
+    assert "secret_prompt_do_not_leak" not in serialized
+    assert "raw_prompt_label_do_not_leak" not in serialized
+    assert "raw_prompt_placeholder_nested_do_not_leak" not in serialized
+    assert "raw_prompt_nested_instruction_do_not_leak" not in serialized
+    assert "raw_prompt_nested_content_do_not_leak" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert '"renderer"' not in serialized
+    assert '"source"' not in serialized
+    assert "api_key" not in serialized
+
+
+def test_widget_read_missing_widget_does_not_emit_false_completion(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-read-missing-lab", "name": "Widget Read Missing Lab"})
+    from api.capy_progress import progress_status
+
+    with pytest.raises(FileNotFoundError):
+        spaces.run_space_tool(
+            "space.widget.read",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "missing-widget",
+                "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "raw_prompt": "RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
+            },
+        )
+
+    status = progress_status(space_id=created["space_id"])
+    recent_serialized = json.dumps(status["recent_events"], sort_keys=True).lower()
+
+    assert not any(event.get("run_id") == f"widget.read:{created['space_id']}" for event in status["recent_events"])
+    assert "tool.completed" not in recent_serialized
+    assert "secret_value_do_not_leak" not in recent_serialized
+    assert "raw_prompt_sentinel_do_not_leak" not in recent_serialized
+    assert "<script" not in recent_serialized
+    assert "renderer" not in recent_serialized
+    assert "api_key" not in recent_serialized
 
 
 def test_native_widget_mutations_can_return_metadata_only_safety_receipts(monkeypatch, tmp_path):
@@ -3258,6 +3406,11 @@ def test_space_tool_adapter_supports_source_widget_list_and_read_helpers_metadat
             "title": "Notes Card",
             "layout": {"x": 2, "y": 3, "w": 7, "h": 4},
             "notes": {"body": "safe metadata note", "format": "markdown"},
+            "prompt": {
+                "raw": "RAW_PROMPT_LIST_SENTINEL_DO_NOT_LEAK",
+                "placeholder": {"instruction": "RAW_PROMPT_LIST_NESTED_DO_NOT_LEAK"},
+                "template": {"content": "RAW_PROMPT_LIST_TEMPLATE_DO_NOT_LEAK"},
+            },
             "renderer": "<script>stored()</script>",
             "html": "<img src=x onerror=steal()>",
             "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "token": "SECRET_TOKEN"},
@@ -3287,6 +3440,15 @@ def test_space_tool_adapter_supports_source_widget_list_and_read_helpers_metadat
             "title": "Notes Card",
             "kind": "notes",
             "layout": {"x": 2, "y": 3, "w": 7, "h": 4, "minimized": False},
+            "metadata": {
+                "prompt": {
+                    "placeholder": {
+                        "present": True,
+                        "metadata_only": True,
+                        "raw_prompt_stored": False,
+                    }
+                }
+            },
         }
     ]
     assert listed["output_compaction"]["metadata_only"] is True
@@ -3297,11 +3459,15 @@ def test_space_tool_adapter_supports_source_widget_list_and_read_helpers_metadat
     assert read_by_id["space_id"] == created["space_id"]
     assert read_by_id["widget"]["id"] == "notes-card"
     assert read_by_id["widget"]["metadata"]["notes"] == {"body": "safe metadata note", "format": "markdown"}
+    assert read_by_id["widget"]["metadata"]["prompt"] == listed["widgets"][0]["metadata"]["prompt"]
     assert read_by_id["output_compaction"]["metadata_only"] is True
     assert read_by_id["output_compaction"]["redaction_status"] == "metadata_only"
     assert read_by_get_alias["widget"] == read_by_id["widget"]
     assert read_by_get_alias["output_compaction"]["metadata_only"] is True
     assert "stored()" not in serialized
+    assert "raw_prompt_list_sentinel_do_not_leak" not in serialized
+    assert "raw_prompt_list_nested_do_not_leak" not in serialized
+    assert "raw_prompt_list_template_do_not_leak" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
