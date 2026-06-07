@@ -357,7 +357,7 @@ class TestMessagePaginationBackend:
             {"role": "assistant", "content": "Tail answer"},
         ])
 
-        window, offset = _message_window_for_display(messages, msg_limit=30)
+        window, offset = _message_window_for_display(messages, msg_limit=30, expand_renderable=True)
         renderable = [m for m in window if _message_counts_as_renderable_for_window(m)]
 
         assert offset < len(messages) - 30
