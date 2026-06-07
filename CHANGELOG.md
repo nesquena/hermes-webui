@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Long, tool-heavy transcripts now cold-load with a useful visible tail instead of only one or two rendered messages.** `GET /api/session` expands the raw tail window backward until it contains the requested number of renderable user/assistant rows, while preserving the raw pagination cursor, and the frontend resyncs the topbar after lazy message loading updates the server-side total.
+
 ## [v0.51.318] — 2026-06-07 — Release KH (Phase 3 light — warm account-usage probe worker pool)
 
 ### Changed
