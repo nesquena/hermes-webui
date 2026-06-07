@@ -1078,6 +1078,7 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     monkeypatch.setenv("SSH_ASKPASS", "/tmp/evil-ssh-askpass")
     monkeypatch.setenv("GIT_SSH", "/tmp/evil-ssh")
     monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /tmp/evil-key")
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
 
     env = _clean_git_env({"GIT_INDEX_FILE": "/tmp/hermes-index"})
 
@@ -1093,6 +1094,7 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     assert "SSH_ASKPASS" not in env
     assert "GIT_SSH" not in env
     assert "GIT_SSH_COMMAND" not in env
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert env["GIT_INDEX_FILE"] == "/tmp/hermes-index"
 
 

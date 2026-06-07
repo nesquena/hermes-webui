@@ -78,6 +78,7 @@ def _clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     for key in list(env):
         if key.startswith(_GIT_ENV_SCRUB_PREFIXES):
             env.pop(key, None)
+    env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
 

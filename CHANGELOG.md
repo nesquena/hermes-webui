@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Security
+- **Workspace Git operations now run with hardened Git config and non-interactive authentication defaults.** WebUI ignores repository-local executable Git config such as `core.fsmonitor`, `core.askPass`, `credential.helper`, and `protocol.ext.allow=always`, removes inherited askpass/SSH command environment overrides, and sets `GIT_TERMINAL_PROMPT=0` so private HTTPS remotes fail fast instead of blocking on a prompt. Private HTTPS remotes that rely on a stored credential helper should use an SSH remote or another externally authenticated transport from WebUI.
+
 ## [v0.51.310] — 2026-06-07 — Release JZ (stage-3760 — long-press project chips to delete on touch)
 
 ### Fixed
