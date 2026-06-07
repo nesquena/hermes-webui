@@ -869,7 +869,7 @@ def test_load_session_restores_worklog_shell_before_reattach_replay():
     clear_pos = fallback_block.find("clearLiveToolCards();")
     shell_pos = fallback_block.find("ensureLiveWorklogShell()")
     legacy_pos = fallback_block.find("else appendThinking();")
-    replay_pos = fallback_block.find("appendLiveToolCard(tc);")
+    replay_pos = fallback_block.find("replayPersistedLiveToolCards();")
     invariant_pos = fallback_block.find("!liveTurn||!liveTurn.querySelector")
     assert clear_pos != -1, "fallback must clear stale live tool DOM first"
     assert shell_pos != -1, "fallback must restore a quiet live Worklog shell"
@@ -878,6 +878,57 @@ def test_load_session_restores_worklog_shell_before_reattach_replay():
     assert invariant_pos != -1, "reattach must enforce a Worklog shell even after an empty restored snapshot"
     assert clear_pos < shell_pos < replay_pos
     assert replay_pos < invariant_pos
+
+
+def test_restore_succeeded_reconnect_replays_tool_cards():
+    """When reconnect replay succeeds in restoring the live turn HTML, tool cards
+    are still repainted from the persisted live-call list instead of waiting for a
+    future SSE event to reintroduce them."""
+    body = _function_body(SESSIONS_JS, "loadSession")
+    replay_fn = body.find("const replayPersistedLiveToolCards=(opts)=>{")
+    reattach_pos = body.find("if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function')")
+    restore_pos = body.find("if(typeof restoreLiveTurnHtmlForSession==='function'){", reattach_pos if reattach_pos != -1 else 0)
+    fallback_pos = body.find("if(!restoredLiveTurn){", restore_pos)
+    restore_replay_pos = body.find("if(restoredLiveTurn&&didReconnect){", restore_pos)
+    restore_replay_block = body[restore_replay_pos:fallback_pos]
+    helper_replay_call = restore_replay_block.find("replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});")
+    assert reattach_pos != -1, "loadSession must keep the reconnect reattach branch"
+    assert replay_fn != -1, "loadSession should extract live tool replay into a helper"
+    assert restore_pos != -1, "loadSession must still execute restoreLiveTurnHtmlForSession"
+    assert reattach_pos > replay_fn, "live-tool replay helper must be defined before reattach branch"
+    assert restore_pos > reattach_pos, "restore/fallback branch should be after reattach handling in INFLIGHT flow"
+    assert restore_replay_pos != -1, "restored live turns must explicitly replay tools on reconnect"
+    assert helper_replay_call != -1, "replay helper must be executed so reconnect can repopulate tool cards"
+    assert replay_fn < restore_replay_pos < fallback_pos, "restore+reconnect replay should run before fallback"
+    assert restore_replay_block.strip().startswith("if(restoredLiveTurn&&didReconnect){")
+    assert (
+        "if(restoredLiveTurn&&didReconnect){"
+        "replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});"
+        "}"
+    ) in re.sub(r"\s+", "", restore_replay_block)
+
+
+def test_restore_succeeded_reconnect_skips_unkeyed_restored_tool_duplicates():
+    """Restored snapshots can already contain legacy tool rows without live tids.
+
+    Replaying an unkeyed persisted tool over that restored DOM would append a
+    duplicate, so the restore-success reconnect path should only replay unkeyed
+    tools when the restored turn has no visible tool rows to preserve.
+    """
+    body = _function_body(SESSIONS_JS, "loadSession")
+    replay_fn = body.find("const replayPersistedLiveToolCards=(opts)=>{")
+    restore_replay_pos = body.find("if(restoredLiveTurn&&didReconnect){")
+    fallback_pos = body.find("if(!restoredLiveTurn){", restore_replay_pos)
+    assert replay_fn != -1, "loadSession should keep replay options on the helper"
+    assert "const liveToolReplayId=(tc)=>" in body
+    assert "tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id" in body
+    helper_block = body[replay_fn:restore_replay_pos]
+    assert "skipUnkeyedRestoredDuplicates" in helper_block
+    assert "restoredLiveTurn.querySelector('.tool-card-row')" in helper_block
+    assert "hasRestoredLiveToolRows&&!liveToolReplayId(tc)" in helper_block
+    restore_block = body[restore_replay_pos:fallback_pos]
+    assert "replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});" in restore_block
+    assert "replayPersistedLiveToolCards();" in body[fallback_pos:body.find("loadDir('.')", fallback_pos)]
 
 
 def test_merge_inflight_tail_preserves_all_segmented_live_progress():

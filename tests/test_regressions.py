@@ -760,12 +760,12 @@ def test_loadSession_inflight_sets_active_stream_before_replaying_live_tool_card
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+4200]
     active_pos = inflight_block.find("S.activeStreamId=activeStreamId;")
-    replay_pos = inflight_block.find("appendLiveToolCard(tc);")
+    replay_pos = inflight_block.find("const replayPersistedLiveToolCards=(opts)=>{")
     attach_pos = inflight_block.find("attachLiveStream(sid, activeStreamId")
     assert active_pos >= 0, "loadSession INFLIGHT branch must restore S.activeStreamId"
     assert replay_pos >= 0, "loadSession INFLIGHT branch must replay persisted live tool cards"
     assert active_pos < replay_pos, \
-        "S.activeStreamId must be restored before appendLiveToolCard() replays persisted tools"
+        "S.activeStreamId must be restored before replaying persisted tools"
     assert attach_pos < 0 or active_pos < attach_pos, \
         "S.activeStreamId should also be restored before SSE reattach can deliver more tool events"
 

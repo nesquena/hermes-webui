@@ -16,6 +16,21 @@
 - Custom logo favicon updates now leave the default HTML favicon and apple-touch-icon links intact when custom logos are disabled.
 - Custom logo rendering now restores the default logo and favicon set when custom logos are disabled or a cached uploaded logo fails to load.
 
+## [v0.51.310] — 2026-06-07 — Release JZ (stage-3760 — long-press project chips to delete on touch)
+
+### Fixed
+- **Project chips can now be managed on touch devices.** The project filter chips in the sidebar exposed Rename / Color / Delete only through the right-click context menu, which has no touch equivalent — so on phones/tablets there was no way to delete a project and the list grew forever. A 500ms long-press now opens the same context menu (mirroring the existing session-item long-press): a >10px drag cancels it, a short tap still filters, and the synthetic click after the press is suppressed. The chip shows accent + slight-scale feedback while held, and native callout/selection is disabled so it doesn't compete with the gesture. Includes a multi-touch correctness fix (a second finger / stray touchstart can no longer orphan the press timer and pop the menu after the gesture was cancelled). Verified live: long-press opens the menu once, short tap doesn't, and the multi-touch-then-cancel case no longer fires. (#3760, @reinocheong)
+
+## [v0.51.309] — 2026-06-07 — Release JY (stage-a5b — restore reconnect replays live tool cards)
+
+### Fixed
+- **Switching back to a long-running session during reconnect no longer drops the live tool cards.** After the #3401 live-to-final redesign (epic #3400), when a running session was restored from its in-memory live-turn snapshot and then reattached to the SSE stream, the restore-success path skipped replaying persisted live tool calls — so you'd return to restored live text and thinking but an empty Worklog until a later SSE event or the final render rebuilt the turn. The persisted tool-card replay now also runs on the restore-success + reconnect path (not only the fallback path). To avoid double-painting, an unkeyed persisted tool is skipped when the restored snapshot already shows tool rows, `appendLiveToolCard()` dedupes across all known tool-id aliases (`tid`/`id`/`tool_call_id`/`tool_use_id`/`call_id`), and both replay sites pass the session/stream ownership guard so a switched-away session can't repaint stale tools. (#3763 fixes #3707, @franksong2702)
+
+## [v0.51.308] — 2026-06-07 — Release JX (consistency — gate onboarding-complete like its siblings)
+
+### Changed
+- **`/api/onboarding/complete` now applies the same local-network gate as the other onboarding endpoints, for consistency.** `oauth/start`, `setup`, and `probe` already refused unauthenticated non-local requests; `complete` (which persists `onboarding_completed=true` to hide the first-run wizard) did not, so all four onboarding mutators now behave alike — `complete` returns 403 unless the request is local, auth is enabled, or `HERMES_WEBUI_ONBOARDING_OPEN=1`. This is a consistency tidy, **not** a security boundary: the same flag is still settable via `POST /api/settings` (one of ~25 settings keys broadly writable on a passwordless public bind), and the real protection for a public bind is to run with authentication or refuse the bind. Low impact regardless — the flag only toggles a UI wizard, not credentials or access. (#3765, surfaced by the #3758 release gate)
+
 ## [v0.51.307] — 2026-06-06 — Release JW (stage-a3 — onboarding forwarded-IP spoof fix + update-check CSRF hardening)
 
 ### Security

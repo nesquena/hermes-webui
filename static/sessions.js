@@ -961,9 +961,24 @@ async function loadSession(sid){
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
+    const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
+    const replayPersistedLiveToolCards=(opts)=>{
+      const liveToolCalls=Array.isArray(S.toolCalls)
+        ? S.toolCalls
+        : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);
+      const skipUnkeyedRestoredDuplicates=!!(opts&&opts.skipUnkeyedRestoredDuplicates);
+      const restoredLiveTurn=skipUnkeyedRestoredDuplicates?document.getElementById('liveAssistantTurn'):null;
+      const hasRestoredLiveToolRows=!!(restoredLiveTurn&&restoredLiveTurn.querySelector('.tool-card-row'));
+      for(const tc of (liveToolCalls||[])){
+        if(skipUnkeyedRestoredDuplicates&&hasRestoredLiveToolRows&&!liveToolReplayId(tc)) continue;
+        if(tc&&tc.name) appendLiveToolCard(tc,{sessionId:sid,streamId:activeStreamId});
+      }
+    };
+    let didReconnect=false;
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
       if (_loadingSessionId !== sid) return;
+      didReconnect=true;
       attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
     }
     syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
@@ -992,14 +1007,15 @@ async function loadSession(sid){
         else restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
       }
     }
+    if(restoredLiveTurn&&didReconnect){
+      replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});
+    }
     if(!restoredLiveTurn){
       clearLiveToolCards();
       if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
       if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
       else appendThinking();
-      for(const tc of (S.toolCalls||[])){
-        if(tc&&tc.name) appendLiveToolCard(tc);
-      }
+      replayPersistedLiveToolCards();
     }
     if(typeof ensureLiveWorklogShell==='function'){
       const liveTurn=document.getElementById('liveAssistantTurn');
@@ -4678,6 +4694,50 @@ function renderSessionListFromCache(){
       };
       chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
       chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
+      // Touch long-press → context menu (mobile UX: project chips can only be
+      // deleted via the right-click menu, which has no touch equivalent).
+      let _lpTimer=null;
+      let _lpHandled=false;
+      let _lpStartX=0,_lpStartY=0;
+      chip.addEventListener('touchstart',(e)=>{
+        const t=e.changedTouches&&e.changedTouches[0];
+        if(!t) return;
+        // Clear any in-flight timer before scheduling a new one, mirroring the
+        // session-item long-press path (_clearLongPressTimer). Without this a
+        // second finger / stray touchstart orphans the prior timer, which then
+        // fires unsuppressed ~500ms later and pops the menu after the gesture
+        // was cancelled.
+        if(_lpTimer){clearTimeout(_lpTimer);_lpTimer=null;}
+        _lpHandled=false;_lpStartX=t.clientX;_lpStartY=t.clientY;
+        chip.classList.add('long-pressing');
+        _lpTimer=setTimeout(()=>{
+          _lpTimer=null;
+          if(_lpHandled) return;  // already consumed by another gesture — stale fire is a no-op
+          _lpHandled=true;
+          chip.classList.remove('long-pressing');
+          clearTimeout(_pClickTimer);_pClickTimer=null;
+          const syn={clientX:t.clientX,clientY:t.clientY,preventDefault:()=>{}};
+          _showProjectContextMenu(syn,p,chip);
+        },500);
+      },{passive:true});
+      chip.addEventListener('touchmove',(e)=>{
+        if(!_lpTimer) return;
+        const t=e.changedTouches&&e.changedTouches[0];
+        if(!t) return;
+        if(Math.abs(t.clientX-_lpStartX)>10||Math.abs(t.clientY-_lpStartY)>10){
+          clearTimeout(_lpTimer);_lpTimer=null;
+          chip.classList.remove('long-pressing');
+        }
+      },{passive:true});
+      chip.addEventListener('touchend',(e)=>{
+        clearTimeout(_lpTimer);_lpTimer=null;
+        chip.classList.remove('long-pressing');
+        if(_lpHandled){e.preventDefault();e.stopPropagation();}
+      },{passive:false});
+      chip.addEventListener('touchcancel',()=>{
+        clearTimeout(_lpTimer);_lpTimer=null;_lpHandled=false;
+        chip.classList.remove('long-pressing');
+      },{passive:true});
       bar.appendChild(chip);
     }
     // Create button
