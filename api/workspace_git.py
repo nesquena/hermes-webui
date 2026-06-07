@@ -33,9 +33,27 @@ _GIT_ENV_SCRUB_KEYS = (
     "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_PARAMETERS",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
 )
 _GIT_ENV_SCRUB_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 _HERMES_BRANCH_SWITCH_STASH_PREFIX = "hermes-webui branch switch"
+_GIT_HARDENED_CONFIG = (
+    # Workspace Git operations can run against repositories provided by agents,
+    # restored sessions, or mounted workspaces. Keep repo-local configuration
+    # from turning read/status/fetch calls into host command execution.
+    ("core.fsmonitor", "false"),
+    ("core.sshCommand", "ssh"),
+    ("protocol.ext.allow", "never"),
+)
+
+
+def _hardened_git_argv(args: list[str]) -> list[str]:
+    argv = ["git"]
+    for key, value in _GIT_HARDENED_CONFIG:
+        argv.extend(["-c", f"{key}={value}"])
+    argv.extend(args)
+    return argv
 
 
 def workspace_git_destructive_enabled() -> bool:
@@ -140,7 +158,7 @@ def _run_git(
     run_env = _clean_git_env(env)
     try:
         result = subprocess.run(
-            ["git", *args],
+            _hardened_git_argv(args),
             cwd=str(cwd),
             shell=False,
             capture_output=True,
@@ -1047,12 +1065,12 @@ def _selected_temp_index_env(ctx: GitContext, specs: list[str]) -> tuple[dict[st
 def _selected_files(ctx: GitContext, paths: Iterable[str]) -> tuple[list[str], list[str], list[dict]]:
     requested = _clean_paths(paths)
     requested_specs = [_repo_rel(ctx, path) for path in requested]
-    workspace_paths = [_workspace_rel(ctx, spec) or path for spec, path in zip(requested_specs, requested)]
+    workspace_paths = [_workspace_rel(ctx, spec) or path for spec, path in zip(requested_specs, requested, strict=True)]
     status = git_status(ctx.workspace)
     by_path = {f["path"]: f for f in status.get("files", [])}
     specs: list[str] = []
     selected = []
-    for path, repo_rel in zip(workspace_paths, requested_specs):
+    for path, repo_rel in zip(workspace_paths, requested_specs, strict=True):
         state = by_path.get(path)
         if not state:
             continue
