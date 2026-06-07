@@ -13548,6 +13548,167 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_participation_fe
 
 
 
+def test_run_source_refresh_jobs_default_fetcher_ingests_github_code_frequency_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-code-frequency-source-refresh",
+        "title": "GitHub Code Frequency Source Refresh",
+        "origin_uri": "https://ghp_SECRET_VALUE_DO_NOT_LEAK@api.github.com/repos/capy/spaces/stats/code_frequency?access_token=placeholder#raw-prompt",
+    })
+    github_code_frequency_body = json.dumps([
+        [1780272000, 12, -3],
+        [1780876800, 0, 0],
+        [1781481600, 4, -6],
+    ]).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_code_frequency_body
+
+    def fake_open(request, *, timeout):
+        calls.append({
+            "url": request.full_url,
+            "timeout": timeout,
+            "accept": request.get_header("Accept"),
+        })
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-code-frequency-source-refresh.md").read_text(encoding="utf-8").lower()
+    search = search_memory("net lines changed: 7", limit=5)
+    serialized = json.dumps({"receipt": receipt, "result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [{
+        "url": "https://api.github.com/repos/capy/spaces/stats/code_frequency",
+        "timeout": 8,
+        "accept": "application/json",
+    }]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    assert search["results"][0]["source_id"] == "github-code-frequency-source-refresh"
+    assert "github code frequency for capy/spaces" in persisted
+    assert "weeks: 3" in persisted
+    assert "additions: 16" in persisted
+    assert "deletions: 9" in persisted
+    assert "net lines changed: 7" in persisted
+    for unsafe in (
+        "secret_value_do_not_leak",
+        "access_token",
+        "raw-prompt",
+        "ghp_",
+        "api_key",
+        "ignore previous instructions",
+        "renderer",
+        "<script",
+        "\"1780272000\"",
+    ):
+        assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+@pytest.mark.parametrize("malformed_payload", [
+    {"version": "https://jsonfeed.org/version/1.1", "items": [{"summary": "Safe-looking code frequency feed"}]},
+    [[1780272000, 12, "-3"]],
+    [[1780272000, True, -3]],
+    [[1780272000, 12, 3]],
+    [[1780272000, 12, -3, "extra"]],
+])
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_frequency_malformed_payloads(
+    tmp_path, monkeypatch, malformed_payload
+):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-code-frequency-malformed",
+        "title": "GitHub Code Frequency Malformed",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/stats/code_frequency?access_token=placeholder#raw-prompt",
+    })
+    body = json.dumps(malformed_payload).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"result": result, "jobs": list_source_refresh_jobs(limit=5)}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-code-frequency-malformed.md").exists()
+    assert "safe-looking code frequency feed" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+@pytest.mark.parametrize("malformed_path", [
+    "stats%2Fcode_frequency",
+    "stats/%63ode_frequency",
+    "stats%00/code_frequency",
+    "stats/code_frequency%00x",
+])
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_frequency_encoded_route_text_bypass(
+    tmp_path, monkeypatch, malformed_path
+):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    safe_suffix = re.sub(r"[^a-z0-9]+", "-", malformed_path.lower()).strip("-") or "route"
+    source_id = f"github-code-frequency-encoded-{safe_suffix}"
+    register_source_reference({
+        "source_id": source_id,
+        "title": "GitHub Code Frequency Encoded Text Bypass",
+        "origin_uri": f"https://api.github.com/repos/capy/spaces/{malformed_path}?token=placeholder#raw-prompt",
+    })
+    calls = []
+
+    def fake_open(*_args, **_kwargs):
+        calls.append("called")
+        raise AssertionError("malformed code-frequency route must fail before fetch")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert calls == []
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / f"{source_id}.md").exists()
+    assert "token=placeholder" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+
 def test_run_source_refresh_jobs_default_fetcher_ingests_github_milestones_metadata_only(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
