@@ -3,6 +3,17 @@
 
 ## [Unreleased]
 
+## [v0.51.303] — 2026-06-06 — Release JS (stage-p1a — low-risk fixes: cron toggle, config var expansion, git-discard hardening)
+
+### Fixed
+- **Clicking an already-open cron run row now collapses it instead of re-fetching.** `_loadRunContent()` only ever expanded a run's output, so tapping an open row issued a pointless re-fetch. It now toggles — an open row collapses (clearing its expansion state and resetting the toggle button) and returns early. (#3732, @mysoul12138)
+
+### Added
+- **`config.yaml` now expands `${VAR}` references against the environment at load time in the WebUI.** hermes-agent already supported `${ENV_VAR}` substitution, but the WebUI's own config loader stored the raw dict, leaving literal `${...}` strings in values. Both WebUI config load paths now recursively expand `${VAR}` from `os.environ`; an unset variable is left untouched (`${VAR}` preserved). (#3736, @Carry00)
+
+### Security
+- **`git_discard(delete_untracked=true)` now deletes untracked files through the anchored workspace helpers, closing a validation-to-use symlink-swap window.** The discard previously validated the path with `safe_resolve_ws` and then deleted with raw `shutil.rmtree` / `Path.unlink`, so a workspace-controlled path component swapped to a symlink between validation and deletion could escape the workspace. Untracked deletes now go through `rmtree_anchored` / `unlink_anchored` (rejecting a swapped component at delete time) while preserving the prior tolerance for a benign concurrent-removal race. (#3702, @Hinotoi-agent)
+
 ## [v0.51.302] — 2026-06-06 — Release JR (stage-brick — mobile/iOS breakage + large-session perf hotfixes)
 
 ### Fixed
