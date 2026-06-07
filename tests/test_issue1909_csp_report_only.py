@@ -24,7 +24,7 @@ def test_handler_adds_content_security_policy_report_only(monkeypatch):
     policy = headers["Content-Security-Policy-Report-Only"]
     assert "default-src 'self'" in policy
     assert "object-src 'none'" in policy
-    assert "frame-ancestors 'self'" in policy
+    assert "frame-ancestors 'none'" in policy
     assert "base-uri 'self'" in policy
     assert "report-uri /api/csp-report" in policy
     assert "report-to csp-endpoint" in policy
@@ -43,7 +43,8 @@ def test_csp_report_only_keeps_legacy_inline_allowances_for_current_ui():
     # unsafe-eval was dropped after Opus stage-339 verification — no production
     # JS uses eval(), new Function(), or string-form setTimeout/setInterval.
     assert "'unsafe-eval'" not in policy
-    assert "img-src 'self' data: blob:" in policy
+    assert "img-src 'self' data:" in policy
+    assert "font-src 'self' data: https://fonts.gstatic.com" in policy
     assert "connect-src 'self'" in policy
 
 

@@ -3,6 +3,21 @@
 
 ## [Unreleased]
 
+## [v0.51.317] — 2026-06-07 — Release KG (Phase 3 light — align CSP enforcement with report policy)
+
+### Fixed
+- **The enforced Content-Security-Policy now honors the same `connect-src` sources as the report-only policy.** The enforced CSP header used a narrow `connect-src` (`'self'` + jsdelivr) and ignored both the local-dev `127.0.0.1`/`localhost` sources and the `HERMES_WEBUI_CSP_CONNECT_EXTRA` allowlist, while the report-only policy honored them — so a connect source could pass report-only yet be blocked by the enforced policy. Both policies are now built from one shared template with the same validated `connect-src` (report-only just appends `report-uri`/`report-to`), and the policy builder moved from `server.py` into `api/helpers.py` so it's unit-testable. As part of the alignment the enforced policy's `connect-src` gains the local-dev http/ws origins + operator `HERMES_WEBUI_CSP_CONNECT_EXTRA` allowlist and `media-src` matches the shared template; `object-src 'none'` and `frame-ancestors 'none'` are now enforced. (#3727 / #1909, @rodboev)
+
+## [v0.51.316] — 2026-06-07 — Release KF (Phase 2 — agent-source dependency audit contract)
+
+### Changed
+- **Documented the WebUI → hermes-agent source-dependency contract.** Adds a deterministic, repo-relative audit script (`scripts/audit_agent_source_dependencies.py`) that classifies how the WebUI depends on the agent source tree, an architecture/contract doc, and a regression test pinning the dependency classes. Read-only tooling and docs — no runtime behavior change; groundwork for cleaner agent/WebUI packaging boundaries. (#3723, @rodboev)
+
+## [v0.51.315] — 2026-06-07 — Release KE (test infra — cross-platform workspace-fallback tests)
+
+### Changed
+- **Workspace-fallback tests are now cross-platform and deterministic.** Three tests simulated an unusable/unwritable workspace path by hard-coding a POSIX path (`/definitely/not/usable`) or by `chmod`-ing a temp dir read-only — which silently no-ops when the suite runs as root and is meaningless on Windows. They now simulate the failure by monkeypatching `_ensure_workspace_dir` / `Path.mkdir`, so the assertions hold identically on every platform and under any uid. Test-harness only; no shipped behavior change. (#3780 / #3771, @rodboev)
+
 ## [v0.51.314] — 2026-06-07 — Release KD (test infra — reliable test-server boot + diagnostics)
 
 ### Changed

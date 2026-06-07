@@ -12,7 +12,7 @@ def test_csp_connect_src_default_header_unchanged(monkeypatch):
 
     assert (
         "connect-src 'self' http://127.0.0.1:* http://localhost:* "
-        "ws://127.0.0.1:* ws://localhost:*; "
+        "ws://127.0.0.1:* ws://localhost:* https://cdn.jsdelivr.net; "
     ) in policy
 
 
@@ -28,7 +28,7 @@ def test_csp_connect_src_includes_valid_extra_origins(monkeypatch):
 
     assert (
         "connect-src 'self' http://127.0.0.1:* http://localhost:* "
-        "ws://127.0.0.1:* ws://localhost:* "
+        "ws://127.0.0.1:* ws://localhost:* https://cdn.jsdelivr.net "
         "https://metrics.example.com wss://events.example.com:443; "
     ) in policy
 

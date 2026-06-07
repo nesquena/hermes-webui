@@ -2,11 +2,14 @@
 Hermes Web UI -- HTTP helper functions.
 """
 import json as _json
+import logging
 import os
 import re as _re
 import ssl
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
+
+logger = logging.getLogger(__name__)
 
 
 # Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
@@ -49,21 +52,81 @@ def safe_resolve(root: Path, requested: str) -> Path:
     return resolved
 
 
+_CSP_CONNECT_BASE = (
+    "'self' http://127.0.0.1:* http://localhost:* "
+    "ws://127.0.0.1:* ws://localhost:*"
+)
+_CSP_EXTRA_CONNECT_RE = _re.compile(
+    r"^(?:https?|wss?)://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
+)
+_CSP_HEADER_NAME = 'Content-Security-Policy'
+_CSP_SHARED_POLICY_TEMPLATE = (
+    "default-src 'self' https://*.cloudflareaccess.com; "
+    "object-src 'none'; "
+    "frame-ancestors 'none'; "
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
+    "worker-src blob: 'self' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+    "img-src 'self' data: https: blob:; "
+    "font-src 'self' data: https://fonts.gstatic.com; "
+    "media-src 'self' data: blob:; "
+    "connect-src {connect_src}; "
+    "manifest-src 'self' https://*.cloudflareaccess.com; "
+    "base-uri 'self'; form-action 'self'"
+)
+
+
+def _valid_csp_extra_connect_source(source: str) -> bool:
+    match = _CSP_EXTRA_CONNECT_RE.fullmatch(source)
+    if not match:
+        return False
+    port = match.group("port")
+    if not port or port == "*":
+        return True
+    try:
+        return 1 <= int(port) <= 65535
+    except ValueError:
+        return False
+
+
+def _csp_extra_connect_src() -> str:
+    raw = os.getenv("HERMES_WEBUI_CSP_CONNECT_EXTRA", "").strip()
+    if not raw:
+        return ""
+    sources = raw.split()
+    if not sources or any(not _valid_csp_extra_connect_source(src) for src in sources):
+        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_CONNECT_EXTRA value")
+        return ""
+    return " " + " ".join(sources)
+
+
+def _csp_connect_src(extra_connect_src: str = "") -> str:
+    return f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"
+
+
+def _build_csp_enforced_policy(extra_connect_src: str | None = None) -> str:
+    if extra_connect_src is None:
+        extra_connect_src = _csp_extra_connect_src()
+    return _CSP_SHARED_POLICY_TEMPLATE.format(
+        connect_src=_csp_connect_src(extra_connect_src)
+    )
+
+
+def _build_csp_report_only_policy(extra_connect_src: str | None = None) -> str:
+    return (
+        _build_csp_enforced_policy(extra_connect_src)
+        + "; report-uri /api/csp-report; report-to csp-endpoint"
+    )
+
+
 def _security_headers(handler):
     """Add security headers to every response."""
+    extra_connect_src = _csp_extra_connect_src()
+    handler._csp_extra_connect_src = extra_connect_src
     handler.send_header('X-Content-Type-Options', 'nosniff')
     handler.send_header('X-Frame-Options', 'DENY')
     handler.send_header('Referrer-Policy', 'same-origin')
-    handler.send_header(
-        'Content-Security-Policy',
-        "default-src 'self' https://*.cloudflareaccess.com; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
-        "worker-src blob: 'self' https://cdn.jsdelivr.net; "
-        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-        "img-src 'self' data: https: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://cdn.jsdelivr.net; "
-        "manifest-src 'self' https://*.cloudflareaccess.com; "
-        "base-uri 'self'; form-action 'self'"
-    )
+    handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src))
     handler.send_header(
         'Permissions-Policy',
         'camera=(), microphone=(self), geolocation=(), clipboard-write=(self)'
