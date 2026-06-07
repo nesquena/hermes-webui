@@ -686,6 +686,19 @@ def _ignored_agent_update_info() -> dict:
     return {'name': 'agent', 'behind': 0, 'ignored': True}
 
 
+def cached_update_status(*, include_agent=True):
+    """Return cached update status without performing network or git mutations."""
+    include_agent = bool(include_agent)
+    with _cache_lock:
+        cached = dict(_update_cache)
+    if cached.get('include_agent') != include_agent:
+        cached['include_agent'] = include_agent
+        if not include_agent:
+            cached['agent'] = _ignored_agent_update_info()
+    cached['cached'] = True
+    return cached
+
+
 def check_for_updates(force=False, *, include_agent=True):
     """Return cached update status for webui and agent repos."""
     global _check_in_progress
