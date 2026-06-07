@@ -9267,10 +9267,21 @@ def test_space_tool_adapter_supports_source_normalize_id_helpers_metadata_only(m
     )
     serialized = json.dumps([space_id, widget_id, fallback_space, fallback_widget]).lower()
 
-    assert space_id == {"ok": True, "action": "space.spaces.normalizespaceid", "id": "creme-weather-widget", "normalize": {"mode": "metadata-only"}}
+    assert space_id["ok"] is True
+    assert space_id["action"] == "space.spaces.normalizespaceid"
+    assert space_id["id"] == "creme-weather-widget"
+    assert space_id["normalize"] == {"mode": "metadata-only"}
     assert widget_id["id"] == "notes-widget-1"
     assert fallback_space["id"] == "untitled-space"
     assert fallback_widget["id"] == "fallback-widget"
+    for response, action in [
+        (space_id, "space.spaces.normalizespaceid"),
+        (widget_id, "space.spaces.normalizewidgetid"),
+        (fallback_space, "space.spaces.normalizespaceid"),
+        (fallback_widget, "space.spaces.normalizewidgetid"),
+    ]:
+        _assert_widget_sdk_helper_receipts(response, action=action, run_id="spaces.sdk:id")
+    assert "progress_run_id: spaces.sdk:id" in space_id["output_compaction"]["text"]
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized

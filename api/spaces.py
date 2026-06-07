@@ -7495,6 +7495,8 @@ def _record_widget_sdk_helper_progress_event(action: str) -> dict[str, Any]:
         "space.spaces.parsewidgetpositiontoken": "widget.sdk:position",
         "space.spaces.clampwidgetposition": "widget.sdk:position",
         "space.spaces.getrenderedwidgetsize": "widget.sdk:rendered-size",
+        "space.spaces.normalizespaceid": "spaces.sdk:id",
+        "space.spaces.normalizewidgetid": "spaces.sdk:id",
     }
     run_id = action_run_ids.get(lookup_action, "widget.sdk:helper")
     try:
@@ -8137,7 +8139,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         }
     if name in {"space.spaces.normalizespaceid", "space.spaces.normalizewidgetid"}:
         kind = "space" if name.endswith("spaceid") else "widget"
-        return {"ok": True, "action": name, **_space_tool_normalize_id_payload(kind, data)}
+        return {
+            "ok": True,
+            "action": name,
+            **_space_tool_normalize_id_payload(kind, data),
+            **_space_widget_sdk_helper_receipt_envelope(name),
+        }
     if name == "space.spaces.resolveappurl":
         prompt_preflight = _space_resolve_app_url_required_prompt_preflight_receipt(name)
         resolved_url = _space_tool_resolve_app_url(data)
