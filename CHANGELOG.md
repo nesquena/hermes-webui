@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.318] — 2026-06-07 — Release KH (Phase 3 light — warm account-usage probe worker pool)
+
+### Changed
+- **Account-usage quota probes now reuse a warm worker pool instead of spawning a fresh interpreter per probe.** Quota checks for the providers that need an isolated subprocess previously started a new Python interpreter — and re-imported the agent account-usage stack — on every uncached probe, which is slow when the quota UI is opened across several profiles/providers. A profile-home-keyed pool of persistent warm workers (with a 5-minute idle shutdown) eliminates the repeated spawn/import overhead while keeping every existing safety property: the concurrency semaphore cap, the LRU result cache, the parent-death-signal hardening, and subprocess env scrubbing. Workers are invalidated when provider credentials change so a child process can't retain stale keys, contention falls back to a one-shot probe, and all workers are cleaned up at process exit. (#3722 / #1912, @rodboev)
+
 ## [v0.51.317] — 2026-06-07 — Release KG (Phase 3 light — align CSP enforcement with report policy)
 
 ### Fixed
