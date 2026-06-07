@@ -612,8 +612,15 @@ def _spawn_test_server(boot_attempts: int = 2):
                 stderr=subprocess.STDOUT,
                 **popen_extra,
             )
-        # 45s: server.py imports the full hermes-agent (import-heavy under load).
-        ok, reason = _wait_for_server(TEST_BASE, timeout=45, proc=proc, log_path=_TEST_SERVER_LOG)
+        # IMPORTANT — keep the TOTAL boot time (all attempts) under the pytest
+        # per-test timeout (CI runs `pytest --timeout=60`). pytest-timeout's
+        # signal method applies to session-fixture SETUP too, charged against the
+        # first test, so a boot that exceeds 60s gets the whole pytest process
+        # SIGALRM-killed right after collection — the "collected N items then
+        # Post job cleanup, no test output" CI failure. 25s/attempt × 2 ≈ 50s
+        # (+overhead) stays safely under 60s while still giving an import-heavy
+        # cold boot ample headroom (historically boot completes in <20s).
+        ok, reason = _wait_for_server(TEST_BASE, timeout=25, proc=proc, log_path=_TEST_SERVER_LOG)
         if ok:
             return proc, ""
         last_reason = reason
