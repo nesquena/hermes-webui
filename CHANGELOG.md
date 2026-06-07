@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.313] — 2026-06-07 — Release KC (instant profile switcher — skip the per-profile alias scan)
+
+### Fixed
+- **The profile switcher in the composer footer now opens instantly instead of hanging for several seconds.** Building the profile list called into the agent's `list_profiles()`, which runs `find_alias_for_profile()` once per profile — and that scans every file in the wrapper directory (`~/.local/bin`) and reads each one in full, including large CLI binaries. On a machine with big binaries on `PATH` that is hundreds of MB of reads per profile, so the dropdown blocked for many seconds on every open. The WebUI never uses that alias data, so it now builds the profile list from the cheap per-profile metadata directly and skips the alias scan entirely, with a short in-memory cache so rapid re-opens are free and a graceful fallback to the original path if those internals are unavailable. New profiles still appear immediately and switching between them works as before. (closes #3772 by a different approach)
+
 ## [v0.51.312] — 2026-06-07 — Release KB (brick-wave — purge stale bytecode after self-update)
 
 ### Fixed
