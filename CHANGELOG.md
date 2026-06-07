@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Compression continuations now refresh stale sidebar metadata from their sidecar before rendering session counts.** A visible continuation row whose `_index.json` entry lagged behind its sidecar could keep reporting an old `message_count`, making the newest turns look missing even though the sidecar still contained them. The refresh remains scoped to lineage-shaped rows whose sidecar is newer than the index timestamp so ordinary sidebar polls do not hydrate every historical transcript. (#3740)
+
 ## [v0.51.318] — 2026-06-07 — Release KH (Phase 3 light — warm account-usage probe worker pool)
 
 ### Changed
