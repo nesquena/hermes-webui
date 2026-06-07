@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+## [v0.51.311] — 2026-06-07 — Release KA (brick-wave — workspace Git RCE hardening + stale-snapshot sidebar visibility)
+
+### Security
+- **Workspace Git operations now run with hardened Git config and non-interactive authentication defaults.** A malicious or restored workspace repository could turn read-only `git status` / default-enabled `git fetch --prune` into host command execution via repository-local executable config (`core.fsmonitor`, `core.askPass`, `credential.helper`, `protocol.ext.allow=always`). WebUI now passes hardened `-c` overrides on every workspace Git subprocess to ignore that repo-local executable config, removes inherited `GIT_ASKPASS` / `SSH_ASKPASS` / `GIT_SSH` / `GIT_SSH_COMMAND` env overrides, and sets `GIT_TERMINAL_PROMPT=0` so private HTTPS remotes fail fast instead of blocking on an interactive prompt. Private HTTPS remotes that rely on a stored credential helper should use an SSH remote or another externally authenticated transport from WebUI. (#3769, @Hinotoi-agent)
+
+### Fixed
+- **The sidebar no longer hides fuller pre-compression snapshots when `_index.json` is stale.** Snapshot rows now refresh their sidecar metadata before lineage visibility chooses between an archived parent and its continuation, and `GET /api/session` stitches the archived snapshot parent into the merged display transcript, so conversations whose parent sidecar received later transcript rows do not appear to lose messages after compaction. Adds regression coverage for a stale `_index.json` hiding the fuller pre-compression sidecar. (#3770, @ai-ag2026)
+
 ## [v0.51.310] — 2026-06-07 — Release JZ (stage-3760 — long-press project chips to delete on touch)
 
 ### Fixed
