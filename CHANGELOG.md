@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.305] — 2026-06-06 — Release JU (stage-p2b — dormant unified-SessionDB adapter groundwork)
+
+### Changed
+- **Added the first, dormant slice of the unified-SessionDB migration (no runtime behavior change).** A new `SessionDB`-shaped adapter over the existing WebUI JSON session store lands behind an experimental flag (`experimental.unified_session_db`, default `false`). No runtime session call site is rewired — `is_unified_session_db_enabled()` has no live callers — so WebUI persistence is byte-for-byte unchanged until a later migration PR deliberately opts in. This is intentionally the lowest-risk first step toward expressing WebUI session access behind a stable adapter contract before any CLI/WebUI storage unification. Ships the adapter, the dormant config flag, an architecture doc, and adapter tests. (#3720 advances #3383, @rodboev)
+
 ## [v0.51.304] — 2026-06-06 — Release JT (stage-p2a — un-held terminal reaper fix + opt-in Docker GPU image)
 
 ### Fixed
