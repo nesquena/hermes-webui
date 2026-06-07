@@ -5218,6 +5218,84 @@ def _record_space_demo_suite_progress_event(event_type: str) -> dict[str, Any]:
         }
 
 
+def _record_space_demo_catalog_progress_event() -> dict[str, Any]:
+    """Best-effort metadata-only progress receipt for demo catalog reads."""
+    run_id = "space-demo:list"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({"event_type": "tool.completed", "run_id": run_id})
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
+def _space_demo_catalog_output_compaction(
+    *, action: str, demos: list[dict[str, Any]], autonomy_policy: dict[str, Any], progress_event: dict[str, Any]
+) -> dict[str, Any]:
+    """Return bounded metadata-only compaction evidence for demo catalog reads."""
+    from api.capy_compaction import compact_output
+
+    safe_action = _context_value(action, 120) or "space.demo.list"
+    demo_names = []
+    for item in demos[:20]:
+        if not isinstance(item, dict):
+            continue
+        safe_demo = _context_value(item.get("demo"), 120)
+        if safe_demo:
+            demo_names.append(safe_demo)
+    route_hint = _payload_text_summary(autonomy_policy.get("model_route_hint") or "hint:reasoning", 80) or "hint:reasoning"
+    progress_run_id = _payload_text_summary(progress_event.get("run_id") or "space-demo:list", 160) or "space-demo:list"
+    receipt = compact_output(
+        "\n".join(
+            [
+                "Capy Spaces demo catalog metadata-only receipt",
+                f"space_action: {safe_action}",
+                f"demo_count: {len(demos)}",
+                f"demo_ids: {', '.join(demo_names)}",
+                f"prompt_preflight_status: {autonomy_policy.get('prompt_preflight_status') or 'required'}",
+                f"model_route_hint: {route_hint}",
+                f"progress_run_id: {progress_run_id}",
+                "metadata_only: true",
+                "raw_prompt_stored: false",
+            ]
+        ),
+        tool="capy-spaces-demo-catalog",
+        command=safe_action,
+        exit_status=0,
+        max_chars=700,
+    )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
+def _space_demo_catalog_receipt_envelope(action: str, demos: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return metadata-only trust receipts for demo catalog list tool calls."""
+    prompt_preflight = _space_demo_required_prompt_preflight_receipt(action, boundary="space_demo_list")
+    autonomy_policy = _space_demo_action_policy_receipt_for_action(action)
+    progress_event = _record_space_demo_catalog_progress_event()
+    return {
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "output_compaction": _space_demo_catalog_output_compaction(
+            action=action,
+            demos=demos,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+        ),
+    }
+
+
 def space_demo_run_all() -> dict[str, Any]:
     """Run every metadata-only Space Agent video parity smoke fixture."""
     _record_space_demo_suite_progress_event("run.started")
@@ -7814,7 +7892,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             ),
         }
     if name in {"space.demo.list", "space.demo.runs"}:
-        return {"ok": True, "action": name, "demos": list_space_demo_runs()}
+        demos = list_space_demo_runs()
+        return {"ok": True, "action": name, "demos": demos, **_space_demo_catalog_receipt_envelope(name, demos)}
     if name in {"space.demo.run", "space_demo_run"}:
         demo_name = data.get("demo") or data.get("name") or data.get("demo_name") or ""
         return {"action": name, **space_demo_run(demo_name)}
