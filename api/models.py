@@ -2610,11 +2610,16 @@ def _row_may_need_sidecar_metadata_refresh(
     )
     if is_runtime_row:
         return True
+    sid = str(session.get('session_id') or '')
     if not session.get('pre_compression_snapshot'):
-        return False
+        lineage_shaped = bool(
+            session.get('parent_session_id')
+            or session.get('_lineage_root_id')
+            or session.get('_compression_segment_count')
+        )
+        return bool(lineage_shaped and sid and _sidecar_mtime_after_index_timestamp(session))
     if session.get('message_count') is None or session.get('last_message_at') is None:
         return True
-    sid = str(session.get('session_id') or '')
     return bool(sid and stale_snapshot_ids and sid in stale_snapshot_ids)
 
 

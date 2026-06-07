@@ -779,8 +779,8 @@ def test_all_sessions_sidecar_refresh_stays_metadata_only(monkeypatch):
     assert rows[0]["last_message_at"] == 102.0
 
 
-def test_all_sessions_does_not_refresh_lineage_rows_from_sidecars(monkeypatch):
-    """Lineage rows are enriched from state.db; do not read every sidecar per poll."""
+def test_all_sessions_does_not_refresh_fresh_lineage_rows_from_sidecars(monkeypatch):
+    """Fresh lineage rows are enriched from state.db; do not read every sidecar per poll."""
     _write_index_file(
         models.SESSION_INDEX_FILE,
         [
@@ -789,8 +789,8 @@ def test_all_sessions_does_not_refresh_lineage_rows_from_sidecars(monkeypatch):
                 "title": "Lineage Row",
                 "message_count": 7,
                 "created_at": 100.0,
-                "updated_at": 101.0,
-                "last_message_at": 101.0,
+                "updated_at": time.time() + 60.0,
+                "last_message_at": time.time() + 60.0,
                 "pinned": False,
                 "archived": False,
                 "parent_session_id": "parent_sid",
@@ -813,11 +813,60 @@ def test_all_sessions_does_not_refresh_lineage_rows_from_sidecars(monkeypatch):
     )
     monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
 
-    with patch.object(Session, "load_metadata_only", side_effect=AssertionError("lineage rows must not refresh sidecars")):
+    with patch.object(Session, "load_metadata_only", side_effect=AssertionError("fresh lineage rows must not refresh sidecars")):
         rows = models.all_sessions()
 
     assert rows[0]["session_id"] == "lineage_sid"
     assert rows[0]["message_count"] == 7
+
+
+def test_all_sessions_refreshes_stale_visible_continuation_metadata(monkeypatch):
+    """A visible continuation whose sidecar advanced after _index.json must refresh metadata.
+
+    Compression lineage rows can remain the active sidebar representative while
+    their sidecar gains the latest assistant turn. If the index row stays stale,
+    the sidebar/topbar reports an old message count and the UI can look like the
+    newest messages disappeared.
+    """
+    session = Session(
+        session_id="stale_visible_child",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "first", "timestamp": 100.0},
+            {"role": "assistant", "content": "second", "timestamp": 101.0},
+            {"role": "user", "content": "latest", "timestamp": 102.0},
+            {"role": "assistant", "content": "latest answer", "timestamp": 103.0},
+        ],
+        parent_session_id="snapshot_parent",
+        updated_at=103.0,
+        last_message_at=103.0,
+    )
+    session.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "stale_visible_child",
+                "title": "Long Conversation",
+                "message_count": 2,
+                "created_at": 100.0,
+                "updated_at": 100.0,
+                "last_message_at": 100.0,
+                "pinned": False,
+                "archived": False,
+                "parent_session_id": "snapshot_parent",
+                "_lineage_root_id": "snapshot_parent",
+                "_compression_segment_count": 2,
+            }
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert rows[0]["session_id"] == "stale_visible_child"
+    assert rows[0]["message_count"] == 4
+    assert rows[0]["last_message_at"] == 103.0
 
 
 def test_load_metadata_only_skips_index_read_when_sidecar_has_message_count(monkeypatch):
