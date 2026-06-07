@@ -1188,6 +1188,10 @@ def list_profiles_api() -> list:
     if rows is None:
         # Fallback: cheap helpers unavailable — use the original (slow) path,
         # or the default-only dict if hermes_cli isn't importable at all.
+        logger.debug(
+            "list_profiles_api: fast path unavailable, falling back to "
+            "upstream list_profiles() (slower)"
+        )
         try:
             from hermes_cli.profiles import list_profiles
             infos = list_profiles()
@@ -1219,7 +1223,6 @@ def list_profiles_api() -> list:
 
     active = get_active_profile_name()
     return [{**p, 'is_active': p['name'] == active} for p in rows]
-
 
 
 def _profile_visible_from_meta(profile_path: Path) -> bool:
