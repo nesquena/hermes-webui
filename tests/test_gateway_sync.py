@@ -427,6 +427,144 @@ def test_compression_chain_collapses_to_latest_tip_in_sidebar():
         post('/api/settings', {'show_cli_sessions': False})
 
 
+def test_compression_lineage_prefers_freshest_descendant_over_newer_direct_sibling():
+    """A later-started stale sibling must not hide a deeper active branch."""
+    conn = _ensure_state_db()
+    ids_to_remove = (
+        'branch_root_001',
+        'branch_old_mid_001',
+        'branch_fresh_tip_001',
+        'branch_empty_stale_tip_001',
+        'branch_newer_direct_sibling_001',
+    )
+    t0 = time.time() - 800
+    try:
+        _insert_agent_session_row(
+            conn,
+            'branch_root_001',
+            title='Qwen Routing Audit',
+            started_at=t0,
+            ended_at=t0 + 100,
+            end_reason='compression',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            'branch_old_mid_001',
+            title='Qwen Routing Audit #2',
+            started_at=t0 + 101,
+            parent_session_id='branch_root_001',
+            ended_at=t0 + 200,
+            end_reason='compression',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            'branch_newer_direct_sibling_001',
+            title='Qwen Routing Audit #3 stale sibling',
+            started_at=t0 + 150,
+            parent_session_id='branch_root_001',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            'branch_fresh_tip_001',
+            title='Qwen Routing Audit #4 freshest tip',
+            started_at=t0 + 500,
+            parent_session_id='branch_old_mid_001',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            'branch_empty_stale_tip_001',
+            title='Qwen Routing Audit #5 empty stale tip',
+            started_at=t0 + 700,
+            parent_session_id='branch_old_mid_001',
+            messages=0,
+        )
+        conn.execute(
+            "UPDATE sessions SET message_count = 3 WHERE id = ?",
+            ('branch_empty_stale_tip_001',),
+        )
+        conn.commit()
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {s.get('session_id') for s in data.get('sessions', [])}
+        tip = next((s for s in data.get('sessions', []) if s.get('session_id') == 'branch_fresh_tip_001'), None)
+
+        assert 'branch_fresh_tip_001' in ids
+        assert 'branch_newer_direct_sibling_001' not in ids
+        assert 'branch_empty_stale_tip_001' not in ids
+        assert tip is not None
+        assert tip.get('title') == 'Qwen Routing Audit'
+        assert abs(tip.get('updated_at') - (t0 + 501)) < 0.01
+        assert tip.get('_lineage_root_id') == 'branch_root_001'
+        assert tip.get('_lineage_tip_id') == 'branch_fresh_tip_001'
+        assert tip.get('_compression_segment_count') == 5
+
+        from api.agent_sessions import read_importable_agent_session_rows
+
+        rows = read_importable_agent_session_rows(_get_state_db_path(), limit=None)
+        projected_tip = next((row for row in rows if row.get('id') == 'branch_fresh_tip_001'), None)
+        assert projected_tip is not None
+        assert projected_tip.get('_lineage_root_id') == 'branch_root_001'
+        assert projected_tip.get('_lineage_tip_id') == 'branch_fresh_tip_001'
+        assert projected_tip.get('_compression_segment_count') == 5
+
+        from api.agent_sessions import read_session_lineage_metadata
+
+        metadata = read_session_lineage_metadata(
+            _get_state_db_path(),
+            {'branch_old_mid_001', 'branch_fresh_tip_001', 'branch_empty_stale_tip_001', 'branch_newer_direct_sibling_001'},
+        )
+        assert metadata['branch_old_mid_001'].get('_lineage_tip_id') == 'branch_fresh_tip_001'
+        assert metadata['branch_empty_stale_tip_001'].get('_lineage_tip_id') == 'branch_fresh_tip_001'
+        assert metadata['branch_newer_direct_sibling_001'].get('_lineage_tip_id') == 'branch_fresh_tip_001'
+        assert metadata['branch_newer_direct_sibling_001'].get('_compression_segment_count') == 5
+    finally:
+        try:
+            _remove_test_sessions(conn, *ids_to_remove)
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_compression_projection_handles_deep_lineage_iteratively():
+    """Very deep compression chains should not depend on Python recursion depth."""
+    from api.agent_sessions import _project_agent_session_rows
+
+    rows = []
+    previous = None
+    for idx in range(1100):
+        sid = f'deep_chain_{idx:04d}'
+        started_at = float(idx * 2)
+        rows.append({
+            'id': sid,
+            'title': 'Deep Chain' if idx == 0 else f'Deep Chain #{idx + 1}',
+            'source': 'cli',
+            'started_at': started_at,
+            'parent_session_id': previous,
+            'ended_at': started_at + 1 if idx < 1099 else None,
+            'end_reason': 'compression' if idx < 1099 else None,
+            'actual_message_count': 1,
+            'actual_user_message_count': 1,
+            'message_count': 1,
+            'last_activity': started_at + 0.5,
+        })
+        previous = sid
+
+    projected = _project_agent_session_rows(rows)
+
+    assert len(projected) == 1
+    assert projected[0]['id'] == 'deep_chain_1099'
+    assert projected[0]['_lineage_root_id'] == 'deep_chain_0000'
+    assert projected[0]['_lineage_tip_id'] == 'deep_chain_1099'
+    assert projected[0]['_compression_segment_count'] == 1100
+
+
 def test_compression_chain_with_empty_latest_tip_falls_back_to_latest_importable_segment():
     """Empty latest tips should not make the whole conversation disappear."""
     conn = _ensure_state_db()
