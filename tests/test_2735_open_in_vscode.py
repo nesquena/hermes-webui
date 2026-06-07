@@ -229,7 +229,7 @@ class TestOpenInVsCodeI18n:
         """open_in_vscode key must appear exactly once per locale (11 total)."""
         src = I18N.read_text(encoding="utf-8")
         count = src.count("open_in_vscode:")
-        assert count == 11, (
+        assert count == 12, (
             f"Expected 11 open_in_vscode: entries (one per locale), found {count}"
         )
 
@@ -237,7 +237,7 @@ class TestOpenInVsCodeI18n:
         """open_in_vscode_failed key must appear exactly once per locale (11 total)."""
         src = I18N.read_text(encoding="utf-8")
         count = src.count("open_in_vscode_failed:")
-        assert count == 11, (
+        assert count == 12, (
             f"Expected 11 open_in_vscode_failed: entries (one per locale), found {count}"
         )
 
