@@ -249,6 +249,18 @@ else:
     _HERMES_FOUND = False
 
 # ── Config file (reloadable -- supports profile switching) ──────────────────
+
+def _expand_env_vars(obj):
+    """Recursively expand ${VAR} references in config values using os.environ."""
+    if isinstance(obj, str):
+        return re.sub(r"\${([^}]+)}", lambda m: os.environ.get(m.group(1), m.group(0)), obj)
+    if isinstance(obj, dict):
+        return {k: _expand_env_vars(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_env_vars(item) for item in obj]
+    return obj
+
+
 _cfg_cache = {}
 _cfg_lock = threading.Lock()
 _cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
@@ -372,7 +384,7 @@ def reload_config() -> None:
             if config_path.exists():
                 loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
-                    _cfg_cache.update(loaded)
+                    _cfg_cache.update(_expand_env_vars(loaded))
                     try:
                         _cfg_mtime = Path(config_path).stat().st_mtime
                     except OSError:
@@ -399,7 +411,7 @@ def _load_yaml_config_file(config_path: Path) -> dict:
         return {}
     try:
         loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        return loaded if isinstance(loaded, dict) else {}
+        return _expand_env_vars(loaded) if isinstance(loaded, dict) else {}
     except Exception:
         logger.debug("Failed to parse yaml config from %s", config_path)
         return {}
