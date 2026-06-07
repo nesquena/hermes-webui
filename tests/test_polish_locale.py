@@ -142,12 +142,12 @@ def test_polish_locale_keys_use_standard_indentation():
     src = read(REPO / "static" / "i18n.js")
     pl_block = extract_locale_block(src, "pl")
 
-    # Reject 1-space indentation. Keys must be indented with either 2, 3, or 4 spaces.
+    # Enforce strict 4-space indentation for keys.
     badly_indented = []
     for line in pl_block.splitlines():
         m = re.match(r"^(\s*)[a-zA-Z0-9_]+\s*:", line)
-        if m and len(m.group(1)) not in (2, 3, 4, 5, 6):
-            badly_indented.append(line.strip())
+        if m and len(m.group(1)) != 4:
+            badly_indented.append(f"{len(m.group(1))} spaces: {line.strip()}")
     assert badly_indented == []
 
 
