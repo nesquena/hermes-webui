@@ -292,6 +292,33 @@ def test_git_status_reports_untracked_files_inside_directories(tmp_path):
     assert not (nested / "a.txt").exists()
 
 
+def test_git_discard_untracked_file_tolerates_concurrent_missing_file(tmp_path, monkeypatch):
+    import api.workspace_git as workspace_git
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    transient = repo / "transient.txt"
+    transient.write_text("gone soon\n", encoding="utf-8")
+
+    original_unlink_anchored = workspace_git.unlink_anchored
+    raced = {"seen": False}
+
+    def remove_before_unlink(root, target):
+        if target == transient:
+            raced["seen"] = True
+            transient.unlink()
+        return original_unlink_anchored(root, target)
+
+    monkeypatch.setattr(workspace_git, "unlink_anchored", remove_before_unlink)
+
+    status = workspace_git.git_discard(repo, ["transient.txt"], delete_untracked=True)
+
+    assert raced["seen"] is True
+    assert not transient.exists()
+    assert status["totals"]["changed"] == 0
+
+
 def test_git_status_reports_ignored_files_without_counting_them_as_changed(tmp_path):
     from api.workspace_git import git_status
 
@@ -827,6 +854,48 @@ def test_git_routes_selected_commit_and_structured_error(cleanup_test_sessions):
     assert committed["ok"] is True
     assert committed["paths"] == ["selected.txt"]
     assert _git(repo, "show", "--name-only", "--format=", "HEAD").splitlines() == ["selected.txt"]
+
+
+def test_git_discard_untracked_delete_uses_anchored_unlink_after_validation_race(tmp_path, monkeypatch):
+    import os
+    import shutil
+
+    import api.workspace_git as workspace_git
+    from api.workspace import safe_resolve_ws as real_safe_resolve_ws
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    _commit_all(repo)
+
+    (repo / "d").mkdir()
+    (repo / "d" / "f").write_text("workspace untracked\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "f"
+    victim.write_text("outside victim\n", encoding="utf-8")
+
+    state = {"calls": 0, "swapped": False}
+
+    def racing_safe_resolve(root, requested):
+        target = real_safe_resolve_ws(root, requested)
+        if requested == "d/f":
+            state["calls"] += 1
+        # git_discard validates once for the Git pathspec and once immediately
+        # before deletion. Race the second validation-to-use window.
+        if requested == "d/f" and state["calls"] == 2 and not state["swapped"]:
+            shutil.rmtree(repo / "d")
+            os.symlink(outside, repo / "d")
+            state["swapped"] = True
+        return target
+
+    monkeypatch.setattr(workspace_git, "safe_resolve_ws", racing_safe_resolve)
+
+    with pytest.raises(ValueError, match="Path traversal blocked"):
+        workspace_git.git_discard(repo, ["d/f"], delete_untracked=True)
+
+    assert state["swapped"] is True
+    assert victim.exists()
+    assert victim.read_text(encoding="utf-8") == "outside victim\n"
 
 
 def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeypatch):
