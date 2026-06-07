@@ -12839,7 +12839,7 @@ def _save_delivery_aliases_yaml(aliases, path):
         with open(path, "w") as f:
             f.write("# Delivery aliases for Hermes cron jobs\n")
             f.write("# Format: list of {value, label} pairs\n")
-            f.write("# value: the actual delivery target (e.g., telegram:1442670692)\n")
+            f.write("# value: the actual delivery target (e.g., telegram:123456789)\n")
             f.write("# label: the user-friendly name shown in the UI dropdown\n")
             f.write("#\n")
             f.write("# This file persists across Hermes WebUI updates.\n")

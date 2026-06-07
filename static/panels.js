@@ -1020,7 +1020,7 @@ async function openCronAliases(){
       <div class="detail-card">
         <div class="detail-card-title">Manage Delivery Aliases</div>
         <p style="color:var(--muted);font-size:12px;margin-bottom:12px">
-          Aliases let you assign friendly names to delivery targets (e.g. <code>telegram:1442670692 → Laurent (perso)</code>).
+          Aliases let you assign friendly names to delivery targets (e.g. <code>telegram:123456789 → Mon alias</code>).
           They appear in the cron job <em>Deliver output to</em> dropdown.
           Stored in <code>~/.hermes/delivery_aliases.yaml</code> — safe across WebUI updates.
         </p>
@@ -1030,7 +1030,7 @@ async function openCronAliases(){
         <div class="detail-card-title">Add Alias</div>
         <div class="detail-form-row">
           <label for="aliasValue">Value (target)</label>
-          <input type="text" id="aliasValue" placeholder="telegram:1442670692" style="width:100%;box-sizing:border-box">
+          <input type="text" id="aliasValue" placeholder="telegram:123456789" style="width:100%;box-sizing:border-box">
         </div>
         <div class="detail-form-row">
           <label for="aliasLabel">Label (display name)</label>

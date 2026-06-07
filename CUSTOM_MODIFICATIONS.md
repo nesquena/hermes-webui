@@ -1,7 +1,7 @@
 # Hermes WebUI — Mise à jour et modifications custom
 
 **Date :** 7 juin 2026
-**VPS :** idswood.fr (45.147.98.34)
+**VPS :** idswood.fr
 **Branche :** `custom-telegram-delivery`
 
 ---
