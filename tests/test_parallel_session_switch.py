@@ -333,6 +333,8 @@ class TestMessagePaginationBackend:
 
     def test_messages_offset_initial_load(self):
         """_messages_offset = index of first returned message in full array."""
+        from api.routes import _message_counts_as_renderable_for_window, _message_window_for_display
+
         session = self._make_session(100)
         msg_limit = 30
         all_msgs = session.messages
@@ -341,6 +343,28 @@ class TestMessagePaginationBackend:
         offset = len(all_msgs) - len(truncated)
         assert offset == 70
         assert truncated[0]["content"] == "Message 70"
+
+        messages = [
+            {"role": "user", "content": f"Visible {i}"}
+            for i in range(35)
+        ]
+        messages.extend(
+            {"role": "tool", "content": f"hidden tool payload {i}"}
+            for i in range(28)
+        )
+        messages.extend([
+            {"role": "user", "content": "Tail question"},
+            {"role": "assistant", "content": "Tail answer"},
+        ])
+
+        window, offset = _message_window_for_display(messages, msg_limit=30)
+        renderable = [m for m in window if _message_counts_as_renderable_for_window(m)]
+
+        assert offset < len(messages) - 30
+        assert len(renderable) == 30
+        assert renderable[0]["content"] == "Visible 7"
+        assert renderable[-2]["content"] == "Tail question"
+        assert renderable[-1]["content"] == "Tail answer"
 
     def test_messages_offset_with_msg_before(self):
         """_messages_offset for msg_before=50, msg_limit=30."""

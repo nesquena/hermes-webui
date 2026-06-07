@@ -1756,6 +1756,7 @@ async function _ensureMessagesLoaded(sid) {
       scheduleTodosRefresh();
     }
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
+    if(typeof syncTopbar==='function') syncTopbar();
   }
 }
 
