@@ -7497,6 +7497,97 @@ def _json_payload_is_github_issue_comments_metadata(origin_uri: str, payload: An
     return all(_github_comment_row_is_safe(row) for row in payload)
 
 
+def _github_commit_comments_path_info(origin_uri: str) -> tuple[str, str] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or lowered[4] != "commits"
+        or not re.fullmatch(r"[A-Fa-f0-9]{40}", path[5])
+        or lowered[6] != "comments"
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", path[5].lower()
+
+
+def _github_commit_comments_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _matches_commit_comments_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 7
+            and path[0] == ""
+            and len(lowered) > 6
+            and lowered[1] == "repos"
+            and lowered[4] == "commits"
+            and lowered[6].startswith("comments")
+        )
+
+    return _matches_commit_comments_shape(parts.path) or _matches_commit_comments_shape(unquote(parts.path))
+
+
+def _json_payload_is_github_commit_comments_metadata(origin_uri: str, payload: Any) -> bool:
+    path_info = _github_commit_comments_path_info(origin_uri)
+    if path_info is None:
+        return False
+    _repo, sha = path_info
+    if not isinstance(payload, list):
+        return False
+    for row in payload:
+        if not _github_comment_row_is_safe(row):
+            return False
+        commit_id = row.get("commit_id") if isinstance(row, dict) else None
+        if _is_present_public_value(commit_id) and str(commit_id).lower() != sha:
+            return False
+    return True
+
+
+def _github_commit_comments_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo, sha = _github_commit_comments_path_info(origin_uri) or ("repository", "")
+    safe_rows = [row for row in payload if _github_comment_row_is_safe(row)]
+    commenters: list[str] = []
+    row_summaries: list[str] = []
+    for row in safe_rows:
+        user = row.get("user") if isinstance(row.get("user"), dict) else {}
+        login = _safe_public_text(user.get("login") if isinstance(user, dict) else "", limit=80)
+        comment_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        created = _safe_public_text(row.get("created_at"), limit=80)
+        updated = _safe_public_text(row.get("updated_at"), limit=80)
+        if login and login not in commenters:
+            commenters.append(login)
+        row_parts = [f"comment {comment_id}"]
+        if login:
+            row_parts[-1] = f"comment {comment_id} by {login}"
+        if created:
+            row_parts.append(f"created: {created}")
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        if len(row_summaries) < 5:
+            row_summaries.append("; ".join(row_parts))
+    parts = [f"GitHub commit {sha[:12]} comments for {repo}", f"comment count: {len(payload)}"]
+    if commenters:
+        parts.append(f"commenters: {', '.join(commenters[:5])}")
+    parts.extend(row_summaries)
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_issue_comments_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
     kind, number = _github_issue_comments_path_info(origin_uri) or ("issue", 0)
     safe_rows = [row for row in payload if _github_comment_row_is_safe(row)]
@@ -10303,6 +10394,21 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    commit_comments_path_info = _github_commit_comments_path_info(origin_uri)
+    if commit_comments_path_info is not None:
+        if not _json_payload_is_github_commit_comments_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        repo, sha = commit_comments_path_info
+        title = f"GitHub commit comments {repo} {sha[:12]}"
+        summary = _github_commit_comments_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_commit_comments_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     pulls_repo = _github_pulls_path_repo(origin_uri)
     if pulls_repo:
         if not _json_payload_is_github_pulls_metadata(origin_uri, payload):
@@ -11484,6 +11590,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         ):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_commit_comments_path_matches(safe_origin_uri):
+        if (
+            _github_commit_comments_path_info(safe_origin_uri) is None
+            or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com")
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     request_url = safe_origin_uri
     if _github_secret_scanning_alerts_path_matches(safe_origin_uri):
         # GitHub returns raw secret literals by default; force the documented
@@ -11660,6 +11773,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_secret_scanning_alerts_path_repo(final_url) != _github_secret_scanning_alerts_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_commit_comments_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or _github_commit_comments_path_info(final_url) is None
+            or _github_commit_comments_path_info(final_url) != _github_commit_comments_path_info(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
         content_type = _refresh_content_type(response.headers)
         if content_type not in _REFRESH_ALLOWED_CONTENT_TYPES:
             raise RuntimeError("refresh fetcher disabled")
@@ -11707,6 +11826,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if _github_commit_statuses_path_matches(safe_origin_uri) and (
             _github_commit_statuses_path_info(safe_origin_uri) is None
             or content_type not in {"application/json", "application/feed+json"}
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_commit_comments_path_matches(safe_origin_uri) and (
+            _github_commit_comments_path_info(safe_origin_uri) is None
+            or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_topics_path_repo(safe_origin_uri) and content_type != "application/json":
