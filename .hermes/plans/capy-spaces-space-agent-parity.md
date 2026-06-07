@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): add widget SDK helper safety receipts`
+  - Added RED/GREEN backend coverage proving no-space size, position, and rendered-size SDK helpers now return metadata-only prompt-preflight, autonomy-policy, progress, and output-compaction receipts while preserving their token/size/position payloads.
+  - Helper progress uses safe action-scoped `widget.sdk:size`, `widget.sdk:position`, and `widget.sdk:rendered-size` run ids without space ids or raw renderer/source/API-auth/script fixture leakage.
+
 - `feat(capy-memory): ingest GitHub commit-comments metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub commit-comments API payloads (`/repos/{owner}/{repo}/commits/{sha}/comments`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, commit SHA prefix, comment count, bounded commenter logins, comment ids, and safe timestamps while omitting raw comment bodies, diff hunks, file paths, URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.

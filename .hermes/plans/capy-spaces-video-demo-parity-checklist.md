@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- No-space widget SDK size, position, and rendered-size helpers now return metadata-only prompt-preflight, autonomy-policy, progress, and output-compaction receipts beside their existing token/size/position payloads; progress run ids stay action-scoped (`widget.sdk:size`, `widget.sdk:position`, `widget.sdk:rendered-size`) and omit space ids/raw renderer/source/API-auth/script fixture values.
+
 - GitHub commit-comments source-refresh metadata now has a narrow JSON-only parser for exact `/repos/{owner}/{repo}/commits/{sha}/comments` API payloads, making commit discussion freshness visible only from safe repository path, commit SHA prefix, comment count, bounded commenter logins, comment ids, and timestamps while query/fragment origins sanitize to the exact safe fetch route, JSON Feed bypass payloads fail closed, and raw comment bodies, diff hunks, file paths, URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-looking fixture values remain omitted from receipts/search/vault output.
 
 - GitHub milestone-list source registration now fail-closes route-shaped lookalike hosts, malformed milestone tails, and encoded milestone suffixes to local `capy-memory://...` origins before refresh jobs are queued, so invalid `/repos/{owner}/{repo}/milestones` source rows cannot retain raw API routes, query/fragment markers, access tokens, raw prompts, or lookalike-host origins.

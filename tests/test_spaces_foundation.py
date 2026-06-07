@@ -23,6 +23,31 @@ def _load_spaces(monkeypatch, tmp_path, enabled=True):
     return importlib.reload(spaces)
 
 
+def _assert_widget_sdk_helper_receipts(response, *, action, run_id):
+    assert response["prompt_preflight"]["action"] == action
+    assert response["prompt_preflight"]["boundary"] == "browser_surface"
+    assert response["prompt_preflight"]["status"] == "required"
+    assert response["prompt_preflight"]["metadata_only"] is True
+    assert response["prompt_preflight"]["raw_prompt_stored"] is False
+    assert response["autonomy_policy"]["action"] == action
+    assert response["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert response["autonomy_policy"]["prompt_preflight_status"] == response["prompt_preflight"]["status"]
+    assert response["autonomy_policy"]["metadata_only"] is True
+    assert response["progress_event"]["event_type"] == "tool.completed"
+    assert response["progress_event"]["family"] == "tool"
+    assert response["progress_event"]["run_id"] == run_id
+    assert "space_id" not in response["progress_event"]
+    assert "token" not in response["progress_event"]["run_id"].lower()
+    assert response["progress_event"]["redaction_status"] == "metadata_only"
+    assert response["output_compaction"]["tool"] == "capy-spaces-tool-action"
+    assert response["output_compaction"]["command"] == action
+    assert response["output_compaction"]["metadata_only"] is True
+    assert response["output_compaction"]["redaction_status"] == "metadata_only"
+    assert f"progress_run_id: {run_id}" in response["output_compaction"]["text"]
+    assert "space_id:" not in response["output_compaction"]["text"]
+    assert "widget_count:" not in response["output_compaction"]["text"]
+
+
 def test_load_spaces_isolates_progress_event_log(monkeypatch, tmp_path):
     _load_spaces(monkeypatch, tmp_path, enabled=True)
     from api.capy_progress import progress_events_log_path
@@ -4537,16 +4562,11 @@ def test_space_tool_adapter_supports_source_size_to_token_helper_metadata_only(m
     assert from_preset["token"] == f"{12}x{4}"
     assert from_preset["size"] == {"cols": 12, "rows": 4}
     assert from_preset["mode"] == "metadata-only"
-    assert from_preset["prompt_preflight"]["metadata_only"] is True
-    assert from_preset["prompt_preflight"]["raw_prompt_stored"] is False
-    assert from_preset["autonomy_policy"]["action"] == "space.spaces.sizetotoken"
-    assert from_preset["autonomy_policy"]["prompt_preflight_status"] == from_preset["prompt_preflight"]["status"]
-    assert from_preset["progress_event"]["family"] == "tool"
-    assert from_preset["progress_event"]["run_id"] == "widget.sdk:size"
-    assert "space_id" not in from_preset["progress_event"]
-    assert from_preset["progress_event"]["redaction_status"] == "metadata_only"
-    assert from_preset["output_compaction"]["metadata_only"] is True
-    assert from_preset["output_compaction"]["command"] == "space.spaces.sizetotoken"
+    _assert_widget_sdk_helper_receipts(
+        from_preset,
+        action="space.spaces.sizetotoken",
+        run_id="widget.sdk:size",
+    )
     compaction_handles = json.dumps(from_preset["output_compaction"].get("artifact_handles", []), sort_keys=True).lower()
     assert "space:widget-sdk" not in compaction_handles
     assert "widget-sdk" not in json.dumps(from_preset["output_compaction"], sort_keys=True).lower()
@@ -4569,11 +4589,15 @@ def test_space_tool_adapter_supports_source_widget_size_sdk_helpers_metadata_onl
 
     default_size = spaces.run_space_tool(
         "space.spaces.defaultWidgetSize",
-        {"renderer": "<script>steal()</script>", "api_key": "***"},
+        {
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
     )
     normalized = spaces.run_space_tool(
         "space.spaces.normalizeWidgetSize",
-        {"size": ["9", "999"], "fallback": {"cols": 2, "rows": 7}, "source": "SECRET_SOURCE"},
+        {"size": ["9", "999"], "fallback": {"cols": 2, "rows": 7}, "source": "SECRET_SOURCE_DO_NOT_LEAK"},
     )
     parsed = spaces.run_space_tool(
         "space.spaces.parseWidgetSizeToken",
@@ -4581,34 +4605,54 @@ def test_space_tool_adapter_supports_source_widget_size_sdk_helpers_metadata_onl
     )
     invalid_with_fallback = spaces.run_space_tool(
         "space.spaces.parseWidgetSizeToken",
-        {"token": "not-a-token", "fallback": "tall", "token_secret": "***"},
+        {"token": "not-a-token", "fallback": "tall", "token_secret": "SECRET_VALUE_DO_NOT_LEAK"},
     )
     serialized = json.dumps([default_size, normalized, parsed, invalid_with_fallback]).lower()
 
-    assert default_size == {
-        "ok": True,
-        "action": "space.spaces.defaultwidgetsize",
-        "token": "6x3",
-        "size": {"cols": 6, "rows": 3},
-        "mode": "metadata-only",
-    }
-    assert normalized == {
-        "ok": True,
-        "action": "space.spaces.normalizewidgetsize",
-        "token": "9x24",
-        "size": {"cols": 9, "rows": 24},
-        "mode": "metadata-only",
-    }
+    assert default_size["ok"] is True
+    assert default_size["action"] == "space.spaces.defaultwidgetsize"
+    assert default_size["token"] == "6x3"
+    assert default_size["size"] == {"cols": 6, "rows": 3}
+    assert default_size["mode"] == "metadata-only"
+    _assert_widget_sdk_helper_receipts(
+        default_size,
+        action="space.spaces.defaultwidgetsize",
+        run_id="widget.sdk:size",
+    )
+    assert normalized["ok"] is True
+    assert normalized["action"] == "space.spaces.normalizewidgetsize"
+    assert normalized["token"] == "9x24"
+    assert normalized["size"] == {"cols": 9, "rows": 24}
+    assert normalized["mode"] == "metadata-only"
+    _assert_widget_sdk_helper_receipts(
+        normalized,
+        action="space.spaces.normalizewidgetsize",
+        run_id="widget.sdk:size",
+    )
     assert parsed["token"] == "17x6"
     assert parsed["size"] == {"cols": 17, "rows": 6}
+    _assert_widget_sdk_helper_receipts(
+        parsed,
+        action="space.spaces.parsewidgetsizetoken",
+        run_id="widget.sdk:size",
+    )
     assert invalid_with_fallback["token"] == "4x5"
     assert invalid_with_fallback["size"] == {"cols": 4, "rows": 5}
+    _assert_widget_sdk_helper_receipts(
+        invalid_with_fallback,
+        action="space.spaces.parsewidgetsizetoken",
+        run_id="widget.sdk:size",
+    )
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized
     assert '"html":' not in serialized
     assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
     assert "secret" not in serialized
     assert '"source":' not in serialized
 
@@ -4664,7 +4708,12 @@ def test_space_tool_adapter_supports_source_position_layout_helpers_metadata_onl
     )
     tokenized = spaces.run_space_tool(
         "space.spaces.positionToToken",
-        {"position": {"x": 5, "y": -9999}, "source": "SECRET_SOURCE", "api_key": "***"},
+        {
+            "position": {"x": 5, "y": -9999},
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
     )
     rendered = spaces.run_space_tool(
         "space.spaces.getRenderedWidgetSize",
@@ -4672,39 +4721,57 @@ def test_space_tool_adapter_supports_source_position_layout_helpers_metadata_onl
     )
     invalid_with_fallback = spaces.run_space_tool(
         "space.spaces.normalizeWidgetPosition",
-        {"position": "not-a-position", "fallback": "9,-9999", "token_secret": "***"},
+        {"position": "not-a-position", "fallback": "9,-9999", "token_secret": "SECRET_VALUE_DO_NOT_LEAK"},
     )
     serialized = json.dumps([normalized, tokenized, rendered, invalid_with_fallback]).lower()
 
-    assert normalized == {
-        "ok": True,
-        "action": "space.spaces.normalizewidgetposition",
-        "token": "-4096,42",
-        "position": {"col": -4096, "row": 42},
-        "mode": "metadata-only",
-    }
-    assert tokenized == {
-        "ok": True,
-        "action": "space.spaces.positiontotoken",
-        "token": "5,-4096",
-        "position": {"col": 5, "row": -4096},
-        "mode": "metadata-only",
-    }
-    assert rendered == {
-        "ok": True,
-        "action": "space.spaces.getrenderedwidgetsize",
-        "token": "8x1",
-        "size": {"cols": 8, "rows": 1},
-        "mode": "metadata-only",
-    }
+    assert normalized["ok"] is True
+    assert normalized["action"] == "space.spaces.normalizewidgetposition"
+    assert normalized["token"] == "-4096,42"
+    assert normalized["position"] == {"col": -4096, "row": 42}
+    assert normalized["mode"] == "metadata-only"
+    _assert_widget_sdk_helper_receipts(
+        normalized,
+        action="space.spaces.normalizewidgetposition",
+        run_id="widget.sdk:position",
+    )
+    assert tokenized["ok"] is True
+    assert tokenized["action"] == "space.spaces.positiontotoken"
+    assert tokenized["token"] == "5,-4096"
+    assert tokenized["position"] == {"col": 5, "row": -4096}
+    assert tokenized["mode"] == "metadata-only"
+    _assert_widget_sdk_helper_receipts(
+        tokenized,
+        action="space.spaces.positiontotoken",
+        run_id="widget.sdk:position",
+    )
+    assert rendered["ok"] is True
+    assert rendered["action"] == "space.spaces.getrenderedwidgetsize"
+    assert rendered["token"] == "8x1"
+    assert rendered["size"] == {"cols": 8, "rows": 1}
+    assert rendered["mode"] == "metadata-only"
+    _assert_widget_sdk_helper_receipts(
+        rendered,
+        action="space.spaces.getrenderedwidgetsize",
+        run_id="widget.sdk:rendered-size",
+    )
     assert invalid_with_fallback["token"] == "9,-4096"
     assert invalid_with_fallback["position"] == {"col": 9, "row": -4096}
+    _assert_widget_sdk_helper_receipts(
+        invalid_with_fallback,
+        action="space.spaces.normalizewidgetposition",
+        run_id="widget.sdk:position",
+    )
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized
     assert '"html":' not in serialized
     assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
     assert "secret" not in serialized
     assert '"source":' not in serialized
 
@@ -4715,7 +4782,11 @@ def test_space_tool_adapter_supports_source_position_sdk_helpers_metadata_only(m
 
     default_position = spaces.run_space_tool(
         "space.spaces.defaultWidgetPosition",
-        {"renderer": "<script>steal()</script>", "api_key": "***"},
+        {
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
     )
     parsed = spaces.run_space_tool(
         "space.spaces.parseWidgetPositionToken",
@@ -4723,48 +4794,66 @@ def test_space_tool_adapter_supports_source_position_sdk_helpers_metadata_only(m
     )
     fallback = spaces.run_space_tool(
         "space.spaces.parseWidgetPositionToken",
-        {"token": "not-a-position", "fallback": [9, -9999], "token_secret": "***"},
+        {"token": "not-a-position", "fallback": [9, -9999], "token_secret": "SECRET_VALUE_DO_NOT_LEAK"},
     )
     clamped = spaces.run_space_tool(
         "space.spaces.clampWidgetPosition",
         {
             "position": {"col": 4096, "row": 4096},
             "size": {"cols": 24, "rows": 3},
-            "source": "SECRET_SOURCE",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
         },
     )
     serialized = json.dumps([default_position, parsed, fallback, clamped]).lower()
 
-    assert default_position == {
-        "ok": True,
-        "action": "space.spaces.defaultwidgetposition",
-        "token": "0,0",
-        "position": {"col": 0, "row": 0},
-        "mode": "metadata-only",
-    }
-    assert parsed == {
-        "ok": True,
-        "action": "space.spaces.parsewidgetpositiontoken",
-        "token": "17,-4096",
-        "position": {"col": 17, "row": -4096},
-        "mode": "metadata-only",
-    }
+    assert default_position["ok"] is True
+    assert default_position["action"] == "space.spaces.defaultwidgetposition"
+    assert default_position["token"] == "0,0"
+    assert default_position["position"] == {"col": 0, "row": 0}
+    assert default_position["mode"] == "metadata-only"
+    _assert_widget_sdk_helper_receipts(
+        default_position,
+        action="space.spaces.defaultwidgetposition",
+        run_id="widget.sdk:position",
+    )
+    assert parsed["ok"] is True
+    assert parsed["action"] == "space.spaces.parsewidgetpositiontoken"
+    assert parsed["token"] == "17,-4096"
+    assert parsed["position"] == {"col": 17, "row": -4096}
+    assert parsed["mode"] == "metadata-only"
+    _assert_widget_sdk_helper_receipts(
+        parsed,
+        action="space.spaces.parsewidgetpositiontoken",
+        run_id="widget.sdk:position",
+    )
     assert fallback["token"] == "9,-4096"
     assert fallback["position"] == {"col": 9, "row": -4096}
-    assert clamped == {
-        "ok": True,
-        "action": "space.spaces.clampwidgetposition",
-        "token": "4073,4094",
-        "position": {"col": 4073, "row": 4094},
-        "size": {"cols": 24, "rows": 3},
-        "mode": "metadata-only",
-    }
+    _assert_widget_sdk_helper_receipts(
+        fallback,
+        action="space.spaces.parsewidgetpositiontoken",
+        run_id="widget.sdk:position",
+    )
+    assert clamped["ok"] is True
+    assert clamped["action"] == "space.spaces.clampwidgetposition"
+    assert clamped["token"] == "4073,4094"
+    assert clamped["position"] == {"col": 4073, "row": 4094}
+    assert clamped["size"] == {"cols": 24, "rows": 3}
+    assert clamped["mode"] == "metadata-only"
+    _assert_widget_sdk_helper_receipts(
+        clamped,
+        action="space.spaces.clampwidgetposition",
+        run_id="widget.sdk:position",
+    )
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized
     assert '"html":' not in serialized
     assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
     assert "secret" not in serialized
     assert '"source":' not in serialized
 

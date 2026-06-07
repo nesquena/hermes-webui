@@ -7483,10 +7483,20 @@ def _record_resolve_app_url_progress_event(action: str) -> dict[str, Any]:
 def _record_widget_sdk_helper_progress_event(action: str) -> dict[str, Any]:
     """Best-effort metadata-only progress receipt for no-space widget SDK helpers."""
     safe_action = _context_value(action, 120) or "space.spaces.widgethelper"
+    lookup_action = str(safe_action).lower()
     action_run_ids = {
         "space.spaces.sizetotoken": "widget.sdk:size",
+        "space.spaces.defaultwidgetsize": "widget.sdk:size",
+        "space.spaces.normalizewidgetsize": "widget.sdk:size",
+        "space.spaces.parsewidgetsizetoken": "widget.sdk:size",
+        "space.spaces.defaultwidgetposition": "widget.sdk:position",
+        "space.spaces.normalizewidgetposition": "widget.sdk:position",
+        "space.spaces.positiontotoken": "widget.sdk:position",
+        "space.spaces.parsewidgetpositiontoken": "widget.sdk:position",
+        "space.spaces.clampwidgetposition": "widget.sdk:position",
+        "space.spaces.getrenderedwidgetsize": "widget.sdk:rendered-size",
     }
-    run_id = action_run_ids.get(safe_action, "widget.sdk:helper")
+    run_id = action_run_ids.get(lookup_action, "widget.sdk:helper")
     try:
         from api.capy_progress import record_progress_event
 
@@ -7569,6 +7579,25 @@ def _space_widget_sdk_action_policy_receipt(action: str, preflight_receipt: dict
         prompt_preflight_status=status,
         model_route_hint="hint:fast",
     )
+
+
+def _space_widget_sdk_helper_receipt_envelope(action: str) -> dict[str, Any]:
+    """Return metadata-only safety receipts for no-space widget SDK helpers."""
+    prompt_preflight = _space_widget_sdk_required_prompt_preflight_receipt(action)
+    autonomy_policy = _space_widget_sdk_action_policy_receipt(action, prompt_preflight)
+    progress_event = _record_widget_sdk_helper_progress_event(action)
+    return {
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "output_compaction": _space_tool_action_output_compaction_receipt(
+            action=action,
+            widget_count=0,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+            include_widget_count=False,
+        ),
+    }
 
 
 def _space_tool_resolve_app_url(payload: dict[str, Any]) -> str:
@@ -8131,43 +8160,81 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         }
     if name == "space.spaces.sizetotoken":
         size_payload = _space_tool_size_to_token(data)
-        prompt_preflight = _space_widget_sdk_required_prompt_preflight_receipt(name)
-        autonomy_policy = _space_widget_sdk_action_policy_receipt(name, prompt_preflight)
-        progress_event = _record_widget_sdk_helper_progress_event(name)
         return {
             "ok": True,
             "action": name,
             **size_payload,
             "mode": "metadata-only",
-            "prompt_preflight": prompt_preflight,
-            "autonomy_policy": autonomy_policy,
-            "progress_event": progress_event,
-            "output_compaction": _space_tool_action_output_compaction_receipt(
-                action=name,
-                widget_count=0,
-                autonomy_policy=autonomy_policy,
-                progress_event=progress_event,
-                include_widget_count=False,
-            ),
+            **_space_widget_sdk_helper_receipt_envelope(name),
         }
     if name == "space.spaces.defaultwidgetsize":
         size = dict(_SOURCE_WIDGET_DEFAULT_SIZE)
-        return {"ok": True, "action": name, "token": f"{size['cols']}x{size['rows']}", "size": size, "mode": "metadata-only"}
+        return {
+            "ok": True,
+            "action": name,
+            "token": f"{size['cols']}x{size['rows']}",
+            "size": size,
+            "mode": "metadata-only",
+            **_space_widget_sdk_helper_receipt_envelope(name),
+        }
     if name == "space.spaces.normalizewidgetsize":
-        return {"ok": True, "action": name, **_space_tool_size_to_token(data), "mode": "metadata-only"}
+        return {
+            "ok": True,
+            "action": name,
+            **_space_tool_size_to_token(data),
+            "mode": "metadata-only",
+            **_space_widget_sdk_helper_receipt_envelope(name),
+        }
     if name == "space.spaces.parsewidgetsizetoken":
-        return {"ok": True, "action": name, **_space_tool_parse_widget_size_token(data), "mode": "metadata-only"}
+        return {
+            "ok": True,
+            "action": name,
+            **_space_tool_parse_widget_size_token(data),
+            "mode": "metadata-only",
+            **_space_widget_sdk_helper_receipt_envelope(name),
+        }
     if name == "space.spaces.defaultwidgetposition":
         position = dict(_SOURCE_WIDGET_DEFAULT_POSITION)
-        return {"ok": True, "action": name, "token": f"{position['col']},{position['row']}", "position": position, "mode": "metadata-only"}
+        return {
+            "ok": True,
+            "action": name,
+            "token": f"{position['col']},{position['row']}",
+            "position": position,
+            "mode": "metadata-only",
+            **_space_widget_sdk_helper_receipt_envelope(name),
+        }
     if name in {"space.spaces.normalizewidgetposition", "space.spaces.positiontotoken"}:
-        return {"ok": True, "action": name, **_space_tool_position_to_token(data), "mode": "metadata-only"}
+        return {
+            "ok": True,
+            "action": name,
+            **_space_tool_position_to_token(data),
+            "mode": "metadata-only",
+            **_space_widget_sdk_helper_receipt_envelope(name),
+        }
     if name == "space.spaces.parsewidgetpositiontoken":
-        return {"ok": True, "action": name, **_space_tool_parse_widget_position_token(data), "mode": "metadata-only"}
+        return {
+            "ok": True,
+            "action": name,
+            **_space_tool_parse_widget_position_token(data),
+            "mode": "metadata-only",
+            **_space_widget_sdk_helper_receipt_envelope(name),
+        }
     if name == "space.spaces.clampwidgetposition":
-        return {"ok": True, "action": name, **_space_tool_clamp_widget_position(data), "mode": "metadata-only"}
+        return {
+            "ok": True,
+            "action": name,
+            **_space_tool_clamp_widget_position(data),
+            "mode": "metadata-only",
+            **_space_widget_sdk_helper_receipt_envelope(name),
+        }
     if name == "space.spaces.getrenderedwidgetsize":
-        return {"ok": True, "action": name, **_space_tool_get_rendered_widget_size(data), "mode": "metadata-only"}
+        return {
+            "ok": True,
+            "action": name,
+            **_space_tool_get_rendered_widget_size(data),
+            "mode": "metadata-only",
+            **_space_widget_sdk_helper_receipt_envelope(name),
+        }
     if name == "space.spaces.buildcenteredfirstfitlayout":
         first_fit_layout = _space_tool_build_centered_first_fit_layout(data)
         prompt_preflight_receipt = _space_layout_resolve_prompt_preflight_receipt(first_fit_layout, data)
