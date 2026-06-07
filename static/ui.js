@@ -2330,6 +2330,7 @@ let _messageUserUnpinned=false;
 let _bottomSettleToken=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
 let _touchStartY=null;
+let _newMessageCueVisible=false;
 function _cancelBottomSettle(){ _bottomSettleToken++; }
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
@@ -2360,6 +2361,46 @@ function _recordNonMessageScrollIntent(e){
 function _recentNonMessageScrollIntent(){
   return performance.now()-_lastNonMessageScrollIntentMs<NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS;
 }
+function _setScrollToBottomCueText(btn, textKey, labelKey){
+  if(!btn) return;
+  const label=btn.querySelector('.session-jump-btn__text');
+  if(label){
+    label.setAttribute('data-i18n',textKey);
+    label.textContent=(typeof t==='function')?t(textKey):label.textContent;
+  }
+  btn.setAttribute('data-i18n-aria-label',labelKey);
+  btn.setAttribute('data-i18n-title',labelKey);
+  const accessible=(typeof t==='function')?t(labelKey):btn.getAttribute('aria-label')||'';
+  if(accessible){
+    btn.setAttribute('aria-label',accessible);
+    btn.setAttribute('title',accessible);
+  }
+}
+function _syncScrollToBottomCue(show, opts){
+  const btn=$('scrollToBottomBtn');
+  if(!btn) return;
+  const newMessage=!!(opts&&opts.newMessage);
+  btn.classList.toggle('scroll-to-bottom-btn--new-message',newMessage);
+  if(newMessage) _setScrollToBottomCueText(btn,'session_new_message','session_new_message_label');
+  else _setScrollToBottomCueText(btn,'session_jump_end','session_jump_end_label');
+  btn.style.display=show?'flex':'none';
+}
+function _showNewMessageScrollCue(){
+  _newMessageCueVisible=true;
+  _syncScrollToBottomCue(true,{newMessage:true});
+}
+function _clearNewMessageScrollCue(){
+  _newMessageCueVisible=false;
+  _syncScrollToBottomCue(false,{newMessage:false});
+}
+function _maybeShowNewMessageScrollCue(scrollSnapshot){
+  const el=document.getElementById('messages');
+  if(!el||!scrollSnapshot) return;
+  const previousHeight=Number(scrollSnapshot.scrollHeight)||0;
+  const distance=el.scrollHeight-el.scrollTop-el.clientHeight;
+  if(el.scrollHeight>previousHeight+24 && distance>80) _showNewMessageScrollCue();
+  else _syncScrollToBottomCue(distance>80,{newMessage:_newMessageCueVisible});
+}
 if(typeof document!=='undefined'){
   document.addEventListener('wheel',_recordNonMessageScrollIntent,{capture:true,passive:true});
   document.addEventListener('touchmove',_recordNonMessageScrollIntent,{capture:true,passive:true});
@@ -2373,6 +2414,7 @@ if(typeof document!=='undefined'){
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
 function _resetScrollDirectionTracker(){
+  _clearNewMessageScrollCue();
   _lastScrollTop=null;
   _messageUserUnpinned=false;
   _scrollPinned=true;
@@ -2380,6 +2422,7 @@ function _resetScrollDirectionTracker(){
   _touchStartY=null;
 }
 function _resetStreamScrollFollow(){
+  _clearNewMessageScrollCue();
   _messageUserUnpinned=false;
   _scrollPinned=true;
   _nearBottomCount=0;
@@ -2495,9 +2538,9 @@ if(typeof window!=='undefined'){
         _nearBottomCount=0;
         _scrollPinned=false;
       }
-      const btn=$('scrollToBottomBtn');
+      if(nearBottom) _clearNewMessageScrollCue();
       const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
-      if(btn) btn.style.display=showBottomButton?'flex':'none';
+      _syncScrollToBottomCue(showBottomButton,{newMessage:_newMessageCueVisible});
       if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
       // Prefetch older messages before the reader hits the hard top. Prepending
       // then preserving scrollTop is seamless only if there is runway left for
@@ -2992,6 +3035,7 @@ function scrollIfPinned(){
   _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
+  _clearNewMessageScrollCue();
   _scrollPinned=true;
   _messageUserUnpinned=false;
   // Write the first bottom position synchronously. A final renderMessages()
@@ -3000,8 +3044,7 @@ function scrollToBottom(){
   // them before the viewport ever reaches the bottom.
   _setMessageScrollToBottom();
   _settleMessageScrollToBottom(true);
-  const btn=$('scrollToBottomBtn');
-  if(btn) btn.style.display='none';
+  _syncScrollToBottomCue(false,{newMessage:false});
   if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
 }
 
@@ -7694,6 +7737,7 @@ function _captureMessageScrollSnapshot(){
   return {
     top:el.scrollTop,
     bottom,
+    scrollHeight:el.scrollHeight,
     pinned:_shouldFollowMessagesOnDomReplace(),
     userUnpinned:_messageUserUnpinned,
   };
@@ -7741,8 +7785,11 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // pinned users stay at bottom; users who manually scrolled up get their
   // pre-render scrollTop restored after the DOM replacement.
   if(preserveScroll){
-    if(_followMessagesAfterDomReplace()) return;
-    _restoreMessageScrollSnapshot(scrollSnapshot);
+    if(_scrollPinned) scrollIfPinned();
+    else {
+      _restoreMessageScrollSnapshot(scrollSnapshot);
+      _maybeShowNewMessageScrollCue(scrollSnapshot);
+    }
     return;
   }
   if(S.activeStreamId){

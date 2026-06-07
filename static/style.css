@@ -1589,6 +1589,8 @@
   /* Overlay scroll controls so they do not affect the transcript's native scroll geometry. */
   .scroll-to-bottom-btn{position:absolute;right:20px;bottom:16px;width:32px;height:32px;border-radius:50%;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:10;transition:color .12s,border-color .12s,background .12s,transform .12s;}
   .scroll-to-bottom-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);}
+  .scroll-to-bottom-btn.scroll-to-bottom-btn--new-message{width:auto;min-width:32px;max-width:min(220px,calc(100% - 40px));border-radius:999px;font-size:12px;font-weight:600;gap:5px;padding:0 11px;color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
+  .scroll-to-bottom-btn.scroll-to-bottom-btn--new-message .session-jump-btn__text{display:inline;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .session-jump-btn__text{display:none;}
   .session-jump-btn{position:absolute;right:20px;height:32px;border-radius:999px;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;padding:0 11px;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:11;transition:color .12s,border-color .12s,background .12s,opacity .12s,transform .12s;}
   .session-jump-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);transform:translateY(-1px);}
