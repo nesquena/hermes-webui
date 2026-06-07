@@ -1951,6 +1951,11 @@ global.fetch = async function(path, opts = {}) {
         retained_artifact_handles: [
           { kind: 'space', handle: 'space:lab', label: 'Space action metadata' },
           { kind: 'shared_data_slot', handle: 'shared-data:lab:research-summary', label: 'Shared data slot metadata' },
+          { kind: 'shared_data_slot', handle: 'shared-data:lab:script', label: 'Shared data slot metadata' },
+          { kind: 'shared_data_slot', handle: 'shared-data:lab:source-code', label: 'Shared data slot metadata' },
+          { kind: 'shared_data_slot', handle: 'shared-data:lab:token', label: 'Shared data slot metadata' },
+          { kind: 'shared_data_slot', handle: 'shared-data:lab:research-summary:extra', label: 'Shared data slot metadata' },
+          { kind: 'shared_data_slot', handle: 'shared-data:'+'a'.repeat(64)+':'+'b'.repeat(80)+':token', label: 'Shared data slot metadata' },
         ],
         raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
         renderer: '<script>bad()</script>',
@@ -7779,6 +7784,14 @@ def test_spaces_ui_delete_shared_data_confirm_posts_key_only_and_refreshes_detai
     assert "run shared-slot.delete:lab" in out["rootHtml"]
     assert "Compaction evidence" in out["rootHtml"]
     assert "Original output: 512 chars" in out["rootHtml"]
+    assert "Artifacts: 2" in out["rootHtml"]
+    assert "space · space:lab · Space action metadata" in out["rootHtml"]
+    assert "shared_data_slot · shared-data:lab:research-summary · Shared data slot metadata" in out["rootHtml"]
+    assert "shared-data:lab:script" not in out["rootHtml"]
+    assert "shared-data:lab:source-code" not in out["rootHtml"]
+    assert "shared-data:lab:token" not in out["rootHtml"]
+    assert "shared-data:lab:research-summary:extra" not in out["rootHtml"]
+    assert "aaaaaaaaaaaaaaaa" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]

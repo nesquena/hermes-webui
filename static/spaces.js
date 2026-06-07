@@ -872,11 +872,18 @@
     commandRows.push('<div class="capy-spaces-muted">Redaction: '+escapeHtml(redaction)+' · Redacted: '+String(redactedCount)+' · Compacted: '+escapeHtml(compactedLabel)+'</div>');
     const artifactRows = artifacts.slice(0, 8).map(function(item){
       const entry = item && typeof item === 'object' && !Array.isArray(item) ? item : {};
+      const rawHandle = String(entry.handle == null ? '' : entry.handle).replace(/\s+/g, ' ').trim();
       const kind = safeDisplayMetadataText(entry.kind || '', '');
-      const handle = safeDisplayMetadataText(entry.handle || '', '');
+      const handle = safeDisplayMetadataText(rawHandle, '');
       const label = safeDisplayMetadataText(entry.label || '', '');
       if (!kind || !handle || !label || kind === '[REDACTED]' || handle === '[REDACTED]' || label === '[REDACTED]') return '';
-      if (unsafeEvidenceText(kind) || unsafeEvidenceText(handle) || unsafeEvidenceText(label)) return '';
+      const sharedDataHandleMatch = rawHandle === handle ? handle.match(/^shared-data:([a-z0-9_.-]{1,64}):([a-z0-9_.-]{1,80})$/i) : null;
+      const unsafeSharedDataHandleSegment = sharedDataHandleMatch && /api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|(?:^|[_\-\s<>.:/])(?:html|script|source|body|code)(?:$|[_\-\s<>.:/])|sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|gh[ousr]_[A-Za-z0-9]{10,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{10,}|SG\.[A-Za-z0-9_-]{10,}/i.test(sharedDataHandleMatch[1]+' '+sharedDataHandleMatch[2]);
+      const safeSharedDataSlotArtifact = kind === 'shared_data_slot' &&
+        !!sharedDataHandleMatch &&
+        !unsafeSharedDataHandleSegment &&
+        label === 'Shared data slot metadata';
+      if (!safeSharedDataSlotArtifact && (unsafeEvidenceText(kind) || unsafeEvidenceText(handle) || unsafeEvidenceText(label))) return '';
       if (!/^[a-z0-9_.:-]{1,40}$/i.test(kind) || !/^[a-z0-9_.:\/-]{1,160}$/i.test(handle) || handle.indexOf('..') !== -1 || handle.indexOf('//') !== -1 || handle.indexOf('\\') !== -1) return '';
       return '<div class="capy-spaces-muted">'+escapeHtml(kind+' · '+handle+' · '+label)+'</div>';
     }).filter(Boolean);
