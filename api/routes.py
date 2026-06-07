@@ -1459,13 +1459,21 @@ def _csrf_exempt_path(path: str) -> bool:
         "/api/csp-report",
     }:
         return True
-    # Sandboxed iframes send origin 'null'; exempt plugin API from CSRF.
-    if path.startswith("/api/plugins/"):
-        return True
     return False
 
 
+def _is_plugin_null_origin(handler, path: str) -> bool:
+    """A sandboxed plugin iframe sends Origin: null — accept it."""
+    return path.startswith("/api/plugins/") and handler.headers.get("Origin") == "null"
+
+
 def _dispatch_plugin_subprocess(handler, plugin_name: str, sub_route: str, method: str, parsed) -> bool:
+    """Proxy a plugin API request to a subprocess via stdin/stdout JSON.
+
+    Each plugin is a single subprocess with a per-plugin pipe lock, so
+    requests are serial: one slow handler blocks all others for up to
+    PIPE_TIMEOUT (30s). Future versions may add concurrency per plugin.
+    """
     import base64
     import binascii
     import json as _json
@@ -6299,7 +6307,7 @@ def handle_post(handler, parsed) -> bool:
     # is intentionally unauthenticated for browser-generated violation reports.
     if diag:
         diag.stage("csrf")
-    if not _csrf_exempt_path(parsed.path) and not _check_csrf(handler):
+    if not _csrf_exempt_path(parsed.path) and not _is_plugin_null_origin(handler, parsed.path) and not _check_csrf(handler):
         try:
             return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
         finally:

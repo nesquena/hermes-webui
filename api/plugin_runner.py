@@ -135,8 +135,24 @@ def main():
     plugin_name = os.environ.get("HERMES_PLUGIN_NAME", "unknown")
     plugin_dir = os.environ.get("HERMES_PLUGIN_DIR", "")
 
+    # Apply resource limits to this process (POSIX; silently skipped elsewhere)
+    for name, value in {
+        "RLIMIT_AS": 512 * 1024 * 1024, "RLIMIT_NPROC": 64,
+        "RLIMIT_NOFILE": 256, "RLIMIT_CPU": 300,
+    }.items():
+        try:
+            import resource
+            soft, hard = resource.getrlimit(getattr(resource, name))
+            resource.setrlimit(getattr(resource, name), (min(value, hard), hard))
+        except (OSError, ValueError, AttributeError, ImportError):
+            pass
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
+
     out = os.fdopen(os.dup(sys.stdout.fileno()), "w")
-    sys.stdout = sys.stderr
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
 
     def send(data):
         out.write(json.dumps(data) + "\n")

@@ -19,13 +19,6 @@ PLUGIN_PROCESSES: dict[str, subprocess.Popen] = {}
 _PROCESS_LOCK = threading.Lock()
 _PIPE_LOCKS: dict[str, threading.Lock] = {}
 
-DEFAULT_PLUGIN_RLIMITS = {
-    "RLIMIT_AS":      512 * 1024 * 1024,  # 512 MB virtual memory
-    "RLIMIT_NPROC":   64,                  # max child processes
-    "RLIMIT_NOFILE":  256,                 # max open files
-    "RLIMIT_CPU":     300,                 # 5 min CPU time (infinite loop guard)
-}
-
 # Environment variable prefixes allowed in plugin subprocess
 _ENV_ALLOWED_PREFIXES = {
     "HERMES_HOME",
@@ -52,22 +45,6 @@ def _build_plugin_env(plugin_name: str, plugin_dir: Path) -> dict:
     env["HERMES_PLUGIN_DIR"] = str(plugin_dir)
     env["PYTHONUNBUFFERED"] = "1"
     return env
-
-
-def _apply_rlimits():
-    import resource
-    try:
-        os.setpgrp()
-    except OSError:
-        pass
-
-    for rlimit_name, value in DEFAULT_PLUGIN_RLIMITS.items():
-        try:
-            rlimit_const = getattr(resource, rlimit_name)
-            soft, hard = resource.getrlimit(rlimit_const)
-            resource.setrlimit(rlimit_const, (min(value, hard), hard))
-        except (OSError, ValueError, AttributeError):
-            pass
 
 
 def get_plugin_pipe_lock(plugin_name: str) -> threading.Lock:
@@ -125,11 +102,10 @@ def spawn_plugin(plugin_name: str, plugin_dir: Path) -> subprocess.Popen | None:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
-                preexec_fn=_apply_rlimits,
                 text=False,
             )
 
-# Wait for ready signal from the subprocess
+            # Wait for ready signal from the subprocess
             if proc.stdout is not None:
                 try:
                     import json as _json
@@ -181,7 +157,8 @@ def get_plugin_process(plugin_name: str) -> subprocess.Popen | None:
             "Plugin subprocess %s exited (code=%d)", plugin_name, proc.returncode,
         )
         with _PROCESS_LOCK:
-            PLUGIN_PROCESSES.pop(plugin_name, None)
+            if PLUGIN_PROCESSES.get(plugin_name) is proc:
+                PLUGIN_PROCESSES.pop(plugin_name, None)
         return None
     return proc
 
