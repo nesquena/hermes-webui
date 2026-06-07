@@ -33,7 +33,7 @@ def test_session_jump_buttons_are_opt_in_and_keep_existing_bottom_button():
 
     scroll_listener = UI_JS[UI_JS.index("el.addEventListener('scroll'") : UI_JS.index("})();", UI_JS.index("el.addEventListener('scroll'"))]
     assert "const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80" in scroll_listener
-    assert "if(btn) btn.style.display=showBottomButton?'flex':'none'" in scroll_listener
+    assert "_syncScrollToBottomCue(showBottomButton,{newMessage:_newMessageCueVisible})" in scroll_listener
     assert "!_isSessionJumpButtonsEnabled()||_scrollPinned" not in UI_JS
 
 
