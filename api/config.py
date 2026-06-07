@@ -626,6 +626,29 @@ def verify_hermes_imports() -> tuple:
             # Capture the full error message so startup logs show WHY
             # (e.g. pydantic_core .so mismatch) instead of just the name.
             errors[mod] = f"{type(e).__name__}: {e}"
+
+    # Defense-in-depth: verify key symbols exist on the imported class.
+    # Catches stale-bytecode issues where the module imports successfully
+    # but the class definition is from an older cached .pyc that lacks
+    # newly-added methods.  The most common trigger is a WebUI self-update
+    # where os.execv() replaces the process but __pycache__/ bytecode
+    # survives on disk.
+    if "run_agent" not in missing:
+        try:
+            from run_agent import AIAgent
+            _required_methods = ["_apply_user_default_headers"]
+            for method in _required_methods:
+                if not hasattr(AIAgent, method):
+                    key = f"run_agent.AIAgent.{method}"
+                    missing.append(key)
+                    errors[key] = (
+                        "Method missing — likely stale .pyc bytecode cache. "
+                        "Delete __pycache__/ in the agent repo and restart."
+                    )
+        except Exception as e:
+            missing.append("run_agent.AIAgent")
+            errors["run_agent.AIAgent"] = f"{type(e).__name__}: {e}"
+
     return (len(missing) == 0), missing, errors
 
 
