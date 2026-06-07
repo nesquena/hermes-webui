@@ -94,53 +94,58 @@ def test_gemma_turn_content_removal_uses_replace_not_slice():
 
 
 def test_message_reasoning_payload_detection_is_leading_only():
-    """Persisted literal tag discussion later in content must not create a thinking card."""
+    """Browser runtime should use the shared extractor, with a leading-only fallback regex."""
     idx = UI_JS.find("function _messageHasReasoningPayload(m)")
     assert idx >= 0, "_messageHasReasoningPayload function not found in ui.js"
-    block = UI_JS[idx:idx+500]
+    block = UI_JS[idx:idx+800]
+    assert "window._extractInlineThinkingFromContentForRender" in block, (
+        "_messageHasReasoningPayload must use the shared extractor in browser runtimes"
+    )
+    assert "return !!(split&&split.reasoning);" in block, (
+        "_messageHasReasoningPayload must treat extracted reasoning as the browser truth source"
+    )
     assert "return /^\\s*(?:<think>" in block, (
-        "_messageHasReasoningPayload must only detect leading provider thinking wrappers"
+        "_messageHasReasoningPayload must keep the leading-only regex as a non-browser fallback"
     )
 
 
 # ── messages.js: streaming render path ───────────────────────────────────────
 
-def test_stream_display_trims_before_startswith():
-    """_streamDisplay in messages.js must call .trimStart() before .startsWith() check."""
+def test_stream_display_uses_shared_inline_thinking_extractor():
+    """_streamDisplay in messages.js must share inline thinking extraction semantics."""
     fn_idx = MSG_JS.find("function _streamDisplay()")
     assert fn_idx >= 0, "_streamDisplay function not found in messages.js"
     fn_end = MSG_JS.find("\n  }", fn_idx) + 4
     fn_body = MSG_JS[fn_idx:fn_end]
-    assert "trimStart()" in fn_body, \
-        "_streamDisplay must call trimStart() to handle models that emit leading whitespace before <think>"
+    assert "_extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true}).content" in fn_body, \
+        "_streamDisplay must route through the shared inline thinking extractor"
 
 
-def test_stream_display_uses_trimmed_for_startswith():
-    """_streamDisplay must check trimmed.startsWith(open), not raw.startsWith(open)."""
-    fn_idx = MSG_JS.find("function _streamDisplay()")
-    fn_end = MSG_JS.find("\n  }", fn_idx) + 4
+def test_shared_extractor_scans_known_open_tags():
+    """Shared extractor must still match known provider thinking wrappers."""
+    fn_idx = MSG_JS.find("function _extractInlineThinkingFromContent(")
+    fn_end = MSG_JS.find("\n}", fn_idx) + 2
     fn_body = MSG_JS[fn_idx:fn_end]
-    assert "trimmed.startsWith(open)" in fn_body, \
-        "_streamDisplay must use trimmed.startsWith(open) not raw.startsWith(open)"
+    assert "text.startsWith(candidate.open,index)" in fn_body, \
+        "Shared extractor must match complete known thinking open tags"
 
 
-def test_stream_display_partial_tag_uses_trimmed():
-    """The partial-tag guard in _streamDisplay must also use trimmed, not raw."""
-    fn_idx = MSG_JS.find("function _streamDisplay()")
-    fn_end = MSG_JS.find("\n  }", fn_idx) + 4
+def test_shared_extractor_hides_partial_tag_prefixes():
+    """The partial-tag guard must hide incomplete provider thinking tags."""
+    fn_idx = MSG_JS.find("function _extractInlineThinkingFromContent(")
+    fn_end = MSG_JS.find("\n}", fn_idx) + 2
     fn_body = MSG_JS[fn_idx:fn_end]
-    assert "open.startsWith(trimmed)" in fn_body, \
-        "Partial-tag guard must use open.startsWith(trimmed) not open.startsWith(raw)"
+    assert "candidate.open.startsWith(rest)" in fn_body, \
+        "Partial-tag guard must hide incomplete provider thinking tag prefixes"
 
 
-def test_stream_display_trims_return_after_close():
-    """After stripping a completed think block, _streamDisplay must trim leading whitespace from the result."""
-    fn_idx = MSG_JS.find("function _streamDisplay()")
-    fn_end = MSG_JS.find("\n  }", fn_idx) + 4
+def test_shared_extractor_trims_visible_content_after_leading_block():
+    """After stripping a leading think block, visible content must trim leading whitespace."""
+    fn_idx = MSG_JS.find("function _extractInlineThinkingFromContent(")
+    fn_end = MSG_JS.find("\n}", fn_idx) + 2
     fn_body = MSG_JS[fn_idx:fn_end]
-    # The return after finding close must strip whitespace from the result
-    assert ".replace(/^" in fn_body and "s+/,'')" in fn_body, \
-        "_streamDisplay must strip leading whitespace from content after the closing think tag"
+    assert "visible.join('').replace(/^\\s+/,'')" in fn_body, \
+        "Shared extractor must strip leading whitespace from visible content after extraction"
 
 
 # ── Regression: existing anchored patterns must be gone ──────────────────────

@@ -106,6 +106,92 @@ let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';
 let _selectedTextReplyRaf=0;
 const _persistentStateToastSeen=new Set();
+const _thinkPairs=[
+  {open:'<think>',close:'</think>'},
+  {open:'<|channel>thought\n',close:'<channel|>'},
+  {open:'<|turn|>thinking\n',close:'<turn|>'}
+];
+
+function _thinkingFenceMarkerAt(text, index){
+  if(index>0&&text[index-1]!=='\n') return '';
+  if(text.startsWith('```',index)) return '```';
+  if(text.startsWith('~~~',index)) return '~~~';
+  return '';
+}
+
+function _mergeInlineThinkingReasoning(existingReasoning, extractedParts){
+  let out=String(existingReasoning||'').trim();
+  (Array.isArray(extractedParts)?extractedParts:[]).forEach(function(part){
+    const item=String(part||'').trim();
+    if(!item) return;
+    if(!out){out=item;return;}
+    if(out===item||out.split('\n\n').some(function(existing){return existing.trim()===item;})) return;
+    out += '\n\n' + item;
+  });
+  return out;
+}
+
+function _extractInlineThinkingFromContent(rawContent, existingReasoning, options){
+  const text=String(rawContent||'');
+  if(!text){
+    const reasoning=String(existingReasoning||'').trim();
+    return {reasoning,content:text,thinkingText:reasoning,displayText:text,inThinking:false};
+  }
+  const visible=[];
+  const extracted=[];
+  let cursor=0;
+  let index=0;
+  let fence='';
+  let inThinking=false;
+  while(index<text.length){
+    const marker=_thinkingFenceMarkerAt(text,index);
+    if(marker) fence=(fence===marker)?'':(fence||marker);
+    if(!fence){
+      let pair=null;
+      for(const candidate of _thinkPairs){
+        if(text.startsWith(candidate.open,index)){pair=candidate;break;}
+      }
+      if(pair){
+        visible.push(text.slice(cursor,index));
+        const closeIndex=text.indexOf(pair.close,index+pair.open.length);
+        if(closeIndex===-1){
+          const partial=text.slice(index+pair.open.length);
+          if(partial) extracted.push(partial);
+          inThinking=true;
+          cursor=text.length;
+          index=text.length;
+          break;
+        }
+        extracted.push(text.slice(index+pair.open.length,closeIndex));
+        index=closeIndex+pair.close.length;
+        cursor=index;
+        continue;
+      }
+      for(const candidate of _thinkPairs){
+        const rest=text.slice(index);
+        if(rest.length<candidate.open.length&&candidate.open.startsWith(rest)){
+          visible.push(text.slice(cursor,index));
+          inThinking=true;
+          cursor=text.length;
+          index=text.length;
+          break;
+        }
+      }
+      if(index>=text.length) break;
+    }
+    index++;
+  }
+  if(cursor<text.length) visible.push(text.slice(cursor));
+  const content=visible.join('').replace(/^\s+/,'');
+  const reasoning=_mergeInlineThinkingReasoning(existingReasoning,extracted);
+  return {reasoning,content,thinkingText:reasoning,displayText:content,inThinking};
+}
+
+if(typeof window!=='undefined'){
+  window._extractInlineThinkingFromContentForRender=function(rawContent, existingReasoning){
+    return _extractInlineThinkingFromContent(rawContent, existingReasoning, {streaming:false});
+  };
+}
 
 function enhanceMarkdownTables(root){
   if(!root||!root.querySelectorAll) return;
@@ -1104,13 +1190,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // On reconnect, the assistantBody already has partial smd-rendered content.
   // We clear it on first new token and restart the parser from the reconnect point.
   let _smdReconnect=reconnecting;
-  // Thinking tag patterns for streaming display
-  const _thinkPairs=[
-    {open:'<think>',close:'</think>'},
-    {open:'<|channel>thought\n',close:'<channel|>'},
-    {open:'<|turn|>thinking\n',close:'<turn|>'}  // Gemma 4
-  ];
-
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
@@ -1268,30 +1347,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // reasoning channel, which would otherwise bloat the persisted session
   // message by 30-50% and miss the m.reasoning field used by the thinking card.
   function _splitThinkFromContent(rawContent, existingReasoning){
-    const text=String(rawContent||'');
-    if(!text) return {reasoning:existingReasoning||'', content:text};
-    // Extract exactly ONE leading think block (after lstrip), matching the
-    // streaming renderer's _streamDisplay/_parseStreamState semantics EXACTLY —
-    // both strip only the first leading block. A closed <think>...</think> that
-    // appears MID-BODY is, by the renderer's definition, visible content (e.g. a
-    // literal tag inside a fenced code block); a whole-body scan would silently
-    // move it into m.reasoning. And looping multiple leading blocks here (when the
-    // renderer strips only one) would make persisted/reload content diverge from
-    // the live stream. So: leading, single, partial-open left intact (#3455 review, Codex).
-    let extracted='';
-    let remaining=text;
-    const trimmed=text.trimStart();
-    for(const {open,close} of _thinkPairs){
-      if(!trimmed.startsWith(open)) continue;
-      const ci=trimmed.indexOf(close,open.length);
-      if(ci===-1) break; // partial open — leave intact for the live renderer
-      extracted=trimmed.slice(open.length,ci);
-      remaining=trimmed.slice(ci+close.length).replace(/^\s+/,'');
-      break;
-    }
-    if(!extracted) return {reasoning:existingReasoning||'', content:rawContent};
-    const finalReasoning=existingReasoning?existingReasoning+'\n\n'+extracted:extracted;
-    return {reasoning:finalReasoning, content:remaining};
+    return _extractInlineThinkingFromContent(rawContent, existingReasoning, {streaming:false});
   }
   function syncInflightAssistantMessage(){
     const inflight=INFLIGHT[activeSid];
@@ -1541,57 +1597,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return s.trim();
   }
   function _streamDisplay(){
-    const raw=_stripXmlToolCalls(assistantText);
-    // Always run think-block stripping even when reasoningText is populated.
-    // Some providers emit reasoning content via on_reasoning AND wrap it in
-    // <think> tags in the token stream — the early-return caused the thinking
-    // card and main response to show identical content (closes #852).
-    for(const {open,close} of _thinkPairs){
-      // Trim leading whitespace before checking for the open tag — some models
-      // (e.g. MiniMax) emit newlines before <think>.
-      const trimmed=raw.trimStart();
-      if(trimmed.startsWith(open)){
-        const ci=trimmed.indexOf(close,open.length);
-        if(ci!==-1){
-          // Thinking block complete — strip it, show the rest
-          return trimmed.slice(ci+close.length).replace(/^\s+/,'');
-        }
-        // Still inside thinking block — show placeholder
-        return '';
-      }
-      // Hide partial tag prefixes while streaming so users don't see
-      // `<thi`, `<think`, etc. before the model finishes the token.
-      if(open.startsWith(trimmed)) return '';
-    }
-    return raw;
+    return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true}).content;
   }
   function _parseStreamState(){
-    const raw=_stripXmlToolCalls(assistantText);
-    if(reasoningText){
-      return {thinkingText:liveReasoningText, displayText:_streamDisplay(), inThinking:false};
-    }
-    for(const {open,close} of _thinkPairs){
-      const trimmed=raw.trimStart();
-      if(trimmed.startsWith(open)){
-        const ci=trimmed.indexOf(close,open.length);
-        if(ci!==-1){
-          return {
-            thinkingText: trimmed.slice(open.length, ci).trim(),
-            displayText: trimmed.slice(ci+close.length).replace(/^\s+/,''),
-            inThinking:false,
-          };
-        }
-        return {
-          thinkingText: trimmed.slice(open.length).trim(),
-          displayText:'',
-          inThinking:true,
-        };
-      }
-      if(open.startsWith(trimmed)){
-        return {thinkingText:'', displayText:'', inThinking:true};
-      }
-    }
-    return {thinkingText:'', displayText:raw, inThinking:false};
+    return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true});
   }
   function _renderLiveThinking(parsed){
     if(window._showThinking===false){removeThinking();return;}

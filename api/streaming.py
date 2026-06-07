@@ -1489,47 +1489,96 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
     return parts if image_count else workspace_ctx + msg_text
 
 
-def _split_thinking_from_content(raw_content, existing_reasoning=''):
-    """Split a single LEADING <think> block out of assistant content.
+_INLINE_THINKING_TAG_PAIRS = (
+    ('<think>', '</think>'),
+    ('<|channel>thought\n', '<channel|>'),
+    ('<|turn|>thinking\n', '<turn|>'),
+)
 
-    Server-side twin of the JS ``_splitThinkFromContent`` (static/messages.js).
-    Inline-thinking providers (e.g. MiniMax-M3, OpenAI-compat) leave the thinking
-    trace inside the saved ``m['content']``, bloating session files 30-50% and
-    bypassing the ``m['reasoning']`` field the thinking card reads on reload
-    (#3455). This extracts exactly ONE leading block (after lstrip) — matching the
-    live renderer's _streamDisplay/_parseStreamState semantics — so a closed
-    ``<think>...</think>`` that appears MID-BODY (e.g. a literal tag in a fenced
-    code block) stays visible content and is never moved into reasoning, and a
-    partial/unclosed block is left intact.
 
-    Returns ``(content, reasoning)``. ``reasoning`` merges ``existing_reasoning``
-    (e.g. from a separate on_reasoning stream) with the extracted block.
-    """
+def _inline_thinking_fence_marker_at(text, index):
+    if index > 0 and text[index - 1] != '\n':
+        return ''
+    if text.startswith('```', index):
+        return '```'
+    if text.startswith('~~~', index):
+        return '~~~'
+    return ''
+
+
+def _merge_inline_thinking_reasoning(existing_reasoning, extracted_parts):
+    out = str(existing_reasoning or '').strip()
+    for part in extracted_parts or ():
+        item = str(part or '').strip()
+        if not item:
+            continue
+        if not out:
+            out = item
+            continue
+        if out == item or any(existing.strip() == item for existing in out.split('\n\n')):
+            continue
+        out = out + '\n\n' + item
+    return out
+
+
+def _extract_inline_thinking_from_content(raw_content, existing_reasoning=''):
     text = '' if raw_content is None else str(raw_content)
     if not text:
-        return text, (existing_reasoning or '')
-    # Leading-only, single block — same three tag pairs as the JS helper.
-    _pairs = (
-        ('<think>', '</think>'),
-        ('<|channel>thought\n', '<channel|>'),
-        ('<|turn|>thinking\n', '<turn|>'),
+        return text, str(existing_reasoning or '').strip()
+    visible = []
+    extracted = []
+    cursor = 0
+    index = 0
+    fence = ''
+    length = len(text)
+    while index < length:
+        marker = _inline_thinking_fence_marker_at(text, index)
+        if marker:
+            fence = '' if fence == marker else (fence or marker)
+        if not fence:
+            pair = None
+            for open_tag, close_tag in _INLINE_THINKING_TAG_PAIRS:
+                if text.startswith(open_tag, index):
+                    pair = (open_tag, close_tag)
+                    break
+            if pair:
+                open_tag, close_tag = pair
+                visible.append(text[cursor:index])
+                close_index = text.find(close_tag, index + len(open_tag))
+                if close_index == -1:
+                    partial = text[index + len(open_tag):]
+                    if partial:
+                        extracted.append(partial)
+                    cursor = length
+                    index = length
+                    break
+                extracted.append(text[index + len(open_tag):close_index])
+                index = close_index + len(close_tag)
+                cursor = index
+                continue
+            for open_tag, _close_tag in _INLINE_THINKING_TAG_PAIRS:
+                rest = text[index:]
+                if len(rest) < len(open_tag) and open_tag.startswith(rest):
+                    visible.append(text[cursor:index])
+                    cursor = length
+                    index = length
+                    break
+            if index >= length:
+                break
+        index += 1
+    if cursor < length:
+        visible.append(text[cursor:])
+    content = ''.join(visible).lstrip()
+    reasoning = _merge_inline_thinking_reasoning(existing_reasoning, extracted)
+    return content, reasoning
+
+
+def _split_thinking_from_content(raw_content, existing_reasoning=''):
+    """Split inline thinking blocks out of assistant content for persistence."""
+    return _extract_inline_thinking_from_content(
+        raw_content,
+        existing_reasoning=existing_reasoning,
     )
-    trimmed = text.lstrip()
-    extracted = ''
-    remaining = text
-    for open_tag, close_tag in _pairs:
-        if not trimmed.startswith(open_tag):
-            continue
-        ci = trimmed.find(close_tag, len(open_tag))
-        if ci == -1:
-            break  # partial open — leave intact
-        extracted = trimmed[len(open_tag):ci]
-        remaining = trimmed[ci + len(close_tag):].lstrip()
-        break
-    if not extracted:
-        return raw_content, (existing_reasoning or '')
-    final_reasoning = (existing_reasoning + '\n\n' + extracted) if existing_reasoning else extracted
-    return remaining, final_reasoning
 
 
 def _strip_thinking_markup(text: str) -> str:
@@ -6570,14 +6619,11 @@ def _run_agent_streaming(
                 # memory until the next turn's save, and the last-turn thinking card
                 # is lost when the user reloads immediately after a response.
                 #
-                # #3455: also split any inline leading <think> block out of the saved
+                # #3455/#3599: split inline thinking blocks out of the saved
                 # assistant content into m['reasoning'] (server-side twin of the JS
                 # _splitThinkFromContent). Inline-thinking providers (e.g. MiniMax-M3)
                 # otherwise leave the thinking trace in m['content'], bloating the
                 # persisted session file 30-50% and bypassing the thinking card. The
-                # split is leading-only/single-block so mid-body literal tags (e.g. in
-                # a fenced code block) stay visible content.
-                #
                 # #3587: use per-message segments so intermediate assistant turns
                 # (before tool calls) each receive their own reasoning trace rather
                 # than all reasoning being written only to the last assistant message.

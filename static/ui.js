@@ -6203,6 +6203,10 @@ function _messageHasReasoningPayload(m){
   if(!m||m.role!=='assistant') return false;
   if(m.reasoning||m.reasoning_content||m.thinking||m._reasoning) return true;
   if(Array.isArray(m.content)) return m.content.some(p=>p&&(p.type==='thinking'||p.type==='reasoning'));
+  if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
+    const split=window._extractInlineThinkingFromContentForRender(String(m.content||''),'');
+    return !!(split&&split.reasoning);
+  }
   return /^\s*(?:<think>[\s\S]*?<\/think>|<\|channel\|?>thought\n?[\s\S]*?<channel\|>|<\|turn\|>thinking\n[\s\S]*?<turn\|>)/.test(String(m.content||''));
 }
 function _isAssistantEmptyPlaceholderContent(m, content){
@@ -6285,6 +6289,10 @@ function _assistantReasoningPayloadText(m){
     return parts.join('\n').trim();
   }
   const text=String(m.content||'');
+  if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
+    const split=window._extractInlineThinkingFromContentForRender(text,'');
+    if(split&&String(split.reasoning||'').trim()) return String(split.reasoning).trim();
+  }
   // Extract a LEADING thinking block even when visible answer text follows it
   // (e.g. "<think>…</think>4"). The matching display-content stripper
   // (_stripLeadingAssistantThinkingMarkup) is non-anchored, so the extractor must
@@ -6315,7 +6323,14 @@ function _assistantVisibleContentForReasoningCompare(m){
   if(Array.isArray(content)){
     content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
   }
-  if(typeof content==='string') content=_stripLeadingAssistantThinkingMarkup(content);
+  if(typeof content==='string'){
+    if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
+      const split=window._extractInlineThinkingFromContentForRender(content,'');
+      content=split&&typeof split.content==='string'?split.content:_stripLeadingAssistantThinkingMarkup(content);
+    } else {
+      content=_stripLeadingAssistantThinkingMarkup(content);
+    }
+  }
   if(_isMarkerOnlyAssistantCompressionMessage(m)){
     content='**Error:** No response received after context compression. Please retry.';
   }
@@ -8072,23 +8087,30 @@ function renderMessages(options){
     if(Array.isArray(content)){
       content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
     }
-    if(!thinkingText && typeof content==='string'){
-      const thinkMatch=content.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
-      if(thinkMatch){
-        content=content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'').trimStart();
-      }
-      if(!thinkingText){
-        // Historical name "gemmaMatch" refers to MiniMax <|channel>thought format.
-        const gemmaMatch=content.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
-        if(gemmaMatch){
-          content=content.replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'').trimStart();
+    if(typeof content==='string'){
+      if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
+        const split=window._extractInlineThinkingFromContentForRender(content, thinkingText);
+        thinkingText=split.reasoning||thinkingText;
+        content=split.content;
+      }else if(!thinkingText){
+        const thinkMatch=content.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
+        if(thinkMatch){
+          thinkingText=thinkMatch[1].trim();
+          content=content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'').trimStart();
         }
-      }
-      if(!thinkingText){
-        // Gemma 4 uses asymmetric <|turn|>thinking\n...<turn|> delimiters.
-        const gemmaTurnMatch=content.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
-        if(gemmaTurnMatch){
-          content=content.replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trimStart();
+        if(!thinkingText){
+          const gemmaMatch=content.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
+          if(gemmaMatch){
+            thinkingText=gemmaMatch[1].trim();
+            content=content.replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'').trimStart();
+          }
+        }
+        if(!thinkingText){
+          const gemmaTurnMatch=content.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
+          if(gemmaTurnMatch){
+            thinkingText=gemmaTurnMatch[1].trim();
+            content=content.replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trimStart();
+          }
         }
       }
     }
