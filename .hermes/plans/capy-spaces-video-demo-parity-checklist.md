@@ -27,6 +27,8 @@ Recent safe adapter progress:
 
 - Space Agent package import compaction receipts now preserve the metadata-only import prompt-preflight status alongside package format, Space id, widget count, policy/model-route, and progress evidence, matching export receipt parity without rendering package YAML, generated widget bodies, renderer/source/API-auth fields, scripts, or secret-looking fixture values.
 
+- Confirmed Space deletion now shows a metadata-only safety receipt after the Spaces home refresh, including prompt-preflight, autonomy-policy, `space.delete:<space_id>` progress, and compaction evidence without exposing raw prompts, renderer/source/API-auth fields, scripts, secrets, unsafe paths, or deleted widget bodies.
+
 - WebUI streaming runs now emit metadata-only `run.started`, `run.completed`, and `run.failed` lifecycle progress events with safe `webui.run:<stream>` run ids, so product-home progress can show browser-originated autonomous turns as active/completed runs without persisting user prompts, assistant text, tool payloads, provider credentials, renderer/source fields, scripts, or secret-looking fixture values.
 
 - Creator-preview Memory assist now preserves and displays the Memory Tree advisory/no-authority envelope at both the card and per-hit levels, including `untrusted_advisory` authority, cannot-bypass-safety-gates status, and required prompt-preflight/approval/sandbox-preview/visual-QA/rollback-recovery gates while omitting empty or hostile memory hits.

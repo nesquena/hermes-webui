@@ -1426,6 +1426,26 @@
     if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
+  function renderSpaceDeleteReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Delete progress');
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !compaction) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Space delete receipt</h3>' +
+      '<div class="capy-spaces-muted">Confirmed Space deletion completed with metadata-only policy and progress evidence. Raw widget bodies, prompts, implementation fields, and secrets stay omitted.</div>' +
+      preflight + policy + progress + compaction + '</div>';
+  }
+
+  function prependSpaceDeleteReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderSpaceDeleteReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
   function renderSystemWidgetUpsertReceipt(data){
     const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
     if (!result) return '';
@@ -3570,8 +3590,9 @@
       if (typeof showConfirmDialog !== 'function') return;
       const ok = await showConfirmDialog({title: 'Delete Capy Space?', message: 'Delete space "'+spaceId+'"? This removes its manifest and widgets.', confirmLabel: 'Delete', danger: true, focusCancel: true});
       if (!ok) return;
-      await postSpacesJson('api/spaces/delete', {space_id: spaceId});
+      const deleteResult = await postSpacesJson('api/spaces/delete', {space_id: spaceId});
       await loadCapySpaces();
+      prependSpaceDeleteReceipt(deleteResult || {});
       return;
     }
     if (action === 'restoreRevision') {

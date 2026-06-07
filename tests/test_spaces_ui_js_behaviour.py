@@ -2542,7 +2542,69 @@ global.fetch = async function(path, opts = {}) {
     return response({ space: { space_id: 'lab', name: 'Lab Edited', description: 'Updated', widget_count: 1, revision_event_id: 'rev5' } });
   }
   if (path === 'api/spaces/delete') {
-    return response({ deleted: true, space_id: 'lab', revision_event_id: 'rev6' });
+    return response({
+      deleted: true,
+      space_id: 'lab',
+      revision_event_id: 'rev6',
+      prompt_preflight: {
+        status: 'pass',
+        boundary: 'creator_commit',
+        severity: 'low',
+        categories: ['prompt_injection_scan', 'secret_scan'],
+        checks: ['prompt_injection_scan', 'secret_scan'],
+        metadata_only: true,
+        raw_prompt_stored: false,
+        local_only: true,
+        prompt_hash: 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      autonomy_policy: {
+        available: true,
+        action: 'space.delete',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['creator_commit'],
+        prompt_preflight_status: 'pass',
+        model_route_hint: 'hint:fast',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-space-delete',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'space.delete:lab',
+        redaction_status: 'metadata_only',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      output_compaction: {
+        original_chars: 1200,
+        compacted_chars: 360,
+        compacted: true,
+        redaction_status: 'metadata_only',
+        redacted_count: 3,
+        rules_applied: ['retain_artifact_handles', 'redact_unsafe_markers', 'api_key'],
+        command: 'space.delete',
+        retained_artifact_handles: [
+          {kind: 'revision', handle: 'rev6', label: 'Space delete revision'},
+          {kind: 'file', handle: '/Users/secret/path', label: 'SECRET_VALUE_DO_NOT_LEAK'},
+        ],
+        text: 'space_action: space.delete\nprogress_run_id: space.delete:lab\nrenderer: <script>bad()</script>\napi_key: SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+    });
   }
   if (path === 'api/spaces/activate') {
     return response({ ok: true, session: { session_id: 'session-123', active_space_id: 'lab' } });
@@ -6775,6 +6837,29 @@ def test_spaces_ui_delete_space_posts_to_delete_and_refreshes_spaces(driver_path
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab"}
     assert out["calls"][-1]["path"] == "api/spaces"
+    assert "Space delete receipt" in out["rootHtml"]
+    assert "Confirmed Space deletion completed with metadata-only policy and progress evidence." in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Status: pass" in out["rootHtml"]
+    assert "Boundary: creator_commit" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Action: space.delete" in out["rootHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in out["rootHtml"]
+    assert "Delete progress" in out["rootHtml"]
+    assert "tool.completed" in out["rootHtml"]
+    assert "run space.delete:lab" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 1200 chars · Compacted output: 360 chars · Redaction: metadata_only" in out["rootHtml"]
+    assert "Command: space.delete" in out["rootHtml"]
+    assert "Rules: retain_artifact_handles, redact_unsafe_markers" in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "Artifacts: 1" in out["rootHtml"]
+    assert "revision · rev6 · Space delete revision" in out["rootHtml"]
+    assert "raw_prompt" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+    assert "/Users/secret/path" not in out["rootHtml"]
 
 
 def test_spaces_ui_activate_space_posts_current_session_without_widget_code(driver_path):

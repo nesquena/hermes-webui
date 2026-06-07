@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): show delete safety receipts`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving confirmed Space deletion now preserves and renders the backend `prompt_preflight`, `autonomy_policy`, `progress_event`, and `output_compaction` receipt after the Spaces home refresh.
+  - Kept the destructive-delete UI receipt metadata-only: hostile raw prompt, renderer/script, API-auth, secret, unsafe path, and unsafe compaction-artifact fixture fields stay absent from the DOM while the visible card shows preflight, policy, delete progress, and compaction evidence.
+
 - `feat(capy-memory): ingest GitHub code-frequency metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub code-frequency API payloads (`/repos/{owner}/{repo}/stats/code_frequency`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, week count, total additions, total deletions, net changed lines, and active-week count while omitting raw URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
