@@ -260,6 +260,9 @@ class TestToolCallGroupingStatic:
         assert "data-live-tid" in live_fn, (
             "Live grouping must preserve data-live-tid so tool_start/tool_complete updates still replace the correct card."
         )
+        assert "tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id" in live_fn, (
+            "Live replay should replace restored cards for all known tool id aliases, not only tc.tid."
+        )
 
     def test_activity_disclosure_state_is_session_and_turn_scoped(self):
         helper = _function_body(UI_JS, "ensureActivityGroup")

@@ -9219,7 +9219,7 @@ function appendLiveToolCard(tc){
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return;
-  const tid=tc.tid||'';
+  const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
   const children=Array.from(inner.children);
   const burstId=tc.activityBurstId!==undefined&&tc.activityBurstId!==null&&String(tc.activityBurstId)!=='0'?String(tc.activityBurstId):'';
   const segmentSeq=tc.activitySegmentSeq!==undefined&&tc.activitySegmentSeq!==null&&String(tc.activitySegmentSeq)!=='0'?String(tc.activitySegmentSeq):'';

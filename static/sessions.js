@@ -961,9 +961,24 @@ async function loadSession(sid){
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
+    const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
+    const replayPersistedLiveToolCards=(opts)=>{
+      const liveToolCalls=Array.isArray(S.toolCalls)
+        ? S.toolCalls
+        : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);
+      const skipUnkeyedRestoredDuplicates=!!(opts&&opts.skipUnkeyedRestoredDuplicates);
+      const restoredLiveTurn=skipUnkeyedRestoredDuplicates?document.getElementById('liveAssistantTurn'):null;
+      const hasRestoredLiveToolRows=!!(restoredLiveTurn&&restoredLiveTurn.querySelector('.tool-card-row'));
+      for(const tc of (liveToolCalls||[])){
+        if(skipUnkeyedRestoredDuplicates&&hasRestoredLiveToolRows&&!liveToolReplayId(tc)) continue;
+        if(tc&&tc.name) appendLiveToolCard(tc,{sessionId:sid,streamId:activeStreamId});
+      }
+    };
+    let didReconnect=false;
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
       if (_loadingSessionId !== sid) return;
+      didReconnect=true;
       attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
     }
     syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
@@ -992,14 +1007,15 @@ async function loadSession(sid){
         else restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
       }
     }
+    if(restoredLiveTurn&&didReconnect){
+      replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});
+    }
     if(!restoredLiveTurn){
       clearLiveToolCards();
       if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
       if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
       else appendThinking();
-      for(const tc of (S.toolCalls||[])){
-        if(tc&&tc.name) appendLiveToolCard(tc);
-      }
+      replayPersistedLiveToolCards();
     }
     if(typeof ensureLiveWorklogShell==='function'){
       const liveTurn=document.getElementById('liveAssistantTurn');
