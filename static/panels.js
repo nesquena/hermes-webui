@@ -7571,7 +7571,7 @@ async function checkUpdatesNow(){
   if(label) label.textContent=t('settings_checking');
   if(status) status.textContent='';
   try {
-    const data=await api('/api/updates/check?force=1',{timeoutMs:60000});
+    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify({force:true}),timeoutMs:60000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
