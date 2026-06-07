@@ -558,6 +558,72 @@ def _server_boot_diagnostic(headline, log_path):
 
 # ── Session-scoped test server ────────────────────────────────────────────────
 
+# Module state shared between the session-scoped boot fixture and the
+# function-scoped self-heal fixture below. The fully-built spawn env is stashed
+# at boot so a mid-session respawn doesn't have to rebuild it.
+_TEST_SERVER_ENV: dict | None = None
+_TEST_SERVER_LOG = None
+_TEST_SERVER_PROC = None
+
+
+def _spawn_test_server(boot_attempts: int = 2):
+    """Spawn the isolated test server, retrying on early-death/bind failure.
+
+    Returns ``(proc, "")`` on success or ``(None, reason)`` if every attempt
+    failed. Used both for the initial session boot and for mid-session respawns
+    by the self-heal fixture.
+
+    CRITICAL — ``start_new_session=True`` (POSIX) puts the server in its OWN
+    process group / session so a signal delivered to the pytest process group
+    (e.g. the SIGTERM that the MCP/CI harness can send to the whole group, or a
+    shell job-control signal) does NOT reap the shared test server out from
+    under the suite. Before this, a group-directed signal killed the server
+    mid-run and every subsequent HTTP-dependent test cascaded with
+    ConnectionRefused — hundreds of opaque failures from one external signal
+    that had nothing to do with any test. The server's own clean log (no
+    traceback, just a normal request then silence) was the tell that it was
+    reaped, not crashed.
+    """
+    assert _TEST_SERVER_ENV is not None, "_spawn_test_server called before env was built"
+    proc = None
+    last_reason = ""
+    popen_extra = {}
+    if sys.platform == "win32":
+        popen_extra["creationflags"] = subprocess.CREATE_NO_WINDOW
+    else:
+        # Detach into a new session/process-group so group-directed signals
+        # (pytest group SIGTERM, job-control) can't reap the server.
+        popen_extra["start_new_session"] = True
+
+    for _attempt in range(1, boot_attempts + 1):
+        with open(_TEST_SERVER_LOG, "w", encoding="utf-8") as _logf:
+            proc = subprocess.Popen(
+                [VENV_PYTHON, str(SERVER_SCRIPT)],
+                cwd=WORKDIR,
+                env=_TEST_SERVER_ENV,
+                stdout=_logf,
+                stderr=subprocess.STDOUT,
+                **popen_extra,
+            )
+        # 45s: server.py imports the full hermes-agent (import-heavy under load).
+        ok, reason = _wait_for_server(TEST_BASE, timeout=45, proc=proc, log_path=_TEST_SERVER_LOG)
+        if ok:
+            return proc, ""
+        last_reason = reason
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        if _attempt < boot_attempts:
+            try:
+                subprocess.run(['fuser', '-k', f'{TEST_PORT}/tcp'], capture_output=True, timeout=5)
+            except Exception:
+                pass
+            time.sleep(1.0)
+    return None, last_reason
+
+
 @pytest.fixture(scope="session", autouse=True)
 def test_server():
     """
@@ -680,6 +746,11 @@ def test_server():
     if HERMES_AGENT:
         env["HERMES_WEBUI_AGENT_DIR"] = str(HERMES_AGENT)
 
+    # Stash the fully-built spawn env on the module so the self-heal fixture can
+    # respawn the server mid-session without rebuilding it.
+    global _TEST_SERVER_ENV, _TEST_SERVER_LOG, _TEST_SERVER_PROC
+    _TEST_SERVER_ENV = env
+
     # Capture server stdout/stderr to a temp log instead of DEVNULL so a boot
     # failure (import error, port-bind race, traceback) is diagnosable. Without
     # this, _wait_for_server could only report a bare "did not start" timeout
@@ -687,47 +758,16 @@ def test_server():
     # hundreds of opaque failures from a single root cause.
     import tempfile as _tempfile
     _server_log = pathlib.Path(_tempfile.gettempdir()) / f"hermes-webui-test-server-{TEST_PORT}.log"
+    _TEST_SERVER_LOG = _server_log
 
     # Boot the server, retrying once if it dies early or fails to bind. Boot
     # failures here are most often transient (a port not yet released by a prior
     # session, a momentary import hiccup under load), so one clean retry with a
     # fresh port-kill turns an intermittent cascade into a reliable start.
-    proc = None
-    boot_attempts = 2
-    last_reason = ""
-    for _attempt in range(1, boot_attempts + 1):
-        with open(_server_log, "w", encoding="utf-8") as _logf:
-            proc = subprocess.Popen(
-                [VENV_PYTHON, str(SERVER_SCRIPT)],
-                cwd=WORKDIR,
-                env=env,
-                stdout=_logf,
-                stderr=subprocess.STDOUT,
-                **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
-            )
-        # 45s (up from 20s): server.py imports the full hermes-agent, which is
-        # import-heavy and can exceed 20s on a loaded runner — the old timeout
-        # turned a slow-but-fine boot into a whole-suite failure.
-        ok, reason = _wait_for_server(TEST_BASE, timeout=45, proc=proc, log_path=_server_log)
-        if ok:
-            break
-        last_reason = reason
-        # Tear down the failed attempt and free the port before retrying.
-        try:
-            proc.kill()
-            proc.wait(timeout=5)
-        except Exception:
-            pass
-        if _attempt < boot_attempts:
-            try:
-                import subprocess as _sp2
-                _sp2.run(['fuser', '-k', f'{TEST_PORT}/tcp'], capture_output=True, timeout=5)
-            except Exception:
-                pass
-            time.sleep(1.0)
-    else:
+    proc, last_reason = _spawn_test_server(boot_attempts=2)
+    if proc is None:
         pytest.fail(
-            f"Test server on port {TEST_PORT} did not start after {boot_attempts} attempts.\n"
+            f"Test server on port {TEST_PORT} did not start after 2 attempts.\n"
             f"  reason    : {last_reason}\n"
             f"  server.py : {SERVER_SCRIPT}\n"
             f"  python    : {VENV_PYTHON}\n"
@@ -735,19 +775,85 @@ def test_server():
             f"  workdir   : {WORKDIR}\n"
             f"  log       : {_server_log}\n"
         )
+    _TEST_SERVER_PROC = proc
 
     yield proc
 
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    proc = _TEST_SERVER_PROC  # may have been replaced by a mid-session respawn
+    if proc is not None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
     try:
         shutil.rmtree(TEST_STATE_DIR)
     except Exception:
         pass
+
+
+# ── Self-heal: ensure the test server is alive before every test ──────────────
+
+@pytest.fixture(autouse=True)
+def _ensure_test_server_alive(request):
+    """Respawn the shared test server if it died, BEFORE each test runs.
+
+    Defense-in-depth on top of ``start_new_session`` isolation: even if the
+    server process is lost mid-session for any reason (external signal, OOM, a
+    crash), this autouse fixture detects the dead/unreachable server and respawns
+    it once before the next test — so a single death recovers with one respawn
+    instead of cascading into hundreds of ConnectionRefused failures across every
+    later HTTP-dependent test. The check is cheap: a fast /health probe, only
+    escalating to a respawn when the server is actually down.
+
+    Skipped for tests that don't use the server (no ``test_server``/``base_url``
+    in their fixture closure) to avoid adding a probe to pure-unit tests.
+    """
+    global _TEST_SERVER_PROC
+    # Only guard tests that actually depend on the live server.
+    closure = getattr(request, "fixturenames", ())
+    if "test_server" not in closure and "base_url" not in closure:
+        yield
+        return
+
+    if _TEST_SERVER_ENV is None:
+        # Session boot fixture hasn't run (shouldn't happen for server tests).
+        yield
+        return
+
+    proc = _TEST_SERVER_PROC
+    dead = proc is None or proc.poll() is not None
+    healthy = False
+    if not dead:
+        try:
+            with urllib.request.urlopen(TEST_BASE + "/health", timeout=2) as r:
+                healthy = json.loads(r.read()).get("status") == "ok"
+        except Exception:
+            healthy = False
+
+    if dead or not healthy:
+        # Free the port if a half-dead process is still holding it, then respawn.
+        try:
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+        except Exception:
+            pass
+        try:
+            subprocess.run(['fuser', '-k', f'{TEST_PORT}/tcp'], capture_output=True, timeout=5)
+        except Exception:
+            pass
+        time.sleep(0.5)
+        new_proc, reason = _spawn_test_server(boot_attempts=2)
+        if new_proc is None:
+            pytest.fail(
+                f"Test server on port {TEST_PORT} could not be respawned mid-session.\n"
+                f"  reason : {reason}\n"
+                f"  log    : {_TEST_SERVER_LOG}\n"
+            )
+        _TEST_SERVER_PROC = new_proc
+    yield
 
 
 # ── Test base URL ─────────────────────────────────────────────────────────────

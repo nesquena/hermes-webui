@@ -80,3 +80,43 @@ def test_server_boot_diagnostic_reports_empty_output(tmp_path):
     log.write_text("", encoding="utf-8")
     msg = conftest._server_boot_diagnostic("hl", str(log))
     assert "no output" in msg
+
+
+def test_self_heal_respawns_killed_server_mid_session(base_url):
+    """Killing the shared test server mid-session must NOT cascade.
+
+    Reproduces the exact failure that motivated the self-heal + new-session
+    isolation: the shared server dies partway through the suite (here we kill it
+    outright), and every subsequent HTTP-dependent test would otherwise fail with
+    ConnectionRefused. The autouse `_ensure_test_server_alive` fixture must detect
+    the dead server and respawn it before the next test, so this test (which
+    depends on `base_url`) still gets a live server.
+
+    NOTE: this test deliberately kills the session server. The autouse fixture
+    runs at the START of each test, so by the time THIS test body runs the server
+    is already healthy; we kill it, then assert the NEXT request after a manual
+    heal succeeds — mirroring what the fixture does for the following test.
+    """
+    import json as _json
+    import urllib.request as _ur
+    import tests.conftest as _c
+
+    # Sanity: server is up right now (the autouse fixture guarantees it).
+    with _ur.urlopen(base_url + "/health", timeout=5) as r:
+        assert _json.loads(r.read()).get("status") == "ok"
+
+    # Kill it the way an external group-signal would (hard kill the process).
+    proc = _c._TEST_SERVER_PROC
+    assert proc is not None
+    proc.kill()
+    proc.wait(timeout=5)
+    assert proc.poll() is not None  # confirmed dead
+
+    # Invoke the same heal path the autouse fixture uses for the next test.
+    new_proc, reason = _c._spawn_test_server(boot_attempts=2)
+    assert new_proc is not None, f"respawn failed: {reason}"
+    _c._TEST_SERVER_PROC = new_proc
+
+    # The respawned server serves requests again — no cascade.
+    with _ur.urlopen(base_url + "/health", timeout=10) as r:
+        assert _json.loads(r.read()).get("status") == "ok"
