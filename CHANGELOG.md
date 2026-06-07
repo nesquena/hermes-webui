@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.318] — 2026-06-07 — Release KH (test infra — resilient shared test server)
+
+### Changed
+- **The pytest test-server fixture no longer cascades into mass `ConnectionRefused` failures when the server dies mid-run.** The session-scoped test server ran inside the pytest process group, so a signal delivered to that group (a harness/CI group `SIGTERM`, shell job-control) could reap the server partway through the suite — its log showed clean responses then silence (reaped, not crashed) — and every subsequent HTTP-dependent test then failed with `ConnectionRefused`. The server is now spawned with `start_new_session=True` (POSIX) so it lives in its own process group and a group-directed signal to pytest can't reap it, and a function-scoped autouse fixture health-checks the server before each server-dependent test and respawns it once if it's down — so any mid-session loss recovers with a single respawn instead of a cascade. Test-harness only; no shipped application change. (internal)
+
 ## [v0.51.317] — 2026-06-07 — Release KG (Phase 3 light — align CSP enforcement with report policy)
 
 ### Fixed
