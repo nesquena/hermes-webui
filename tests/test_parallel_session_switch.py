@@ -166,15 +166,24 @@ class TestGitInfoParallel:
         )
 
     def test_parallel_faster_than_serial(self, tmp_path):
-        """Wall-clock time for parallel execution should be well under serial.
+        """Parallel execution is provably concurrent (deterministic, not timed).
 
-        Measured RELATIVELY (parallel vs an N-call serial baseline of the same
-        slow_git), not against a fixed absolute threshold: a 0.25s absolute bar
-        is flaky on slow/contended CI cores where 3 parallel 0.1s sleeps + thread
-        overhead can drift to ~0.27s even though execution is genuinely parallel
-        (was the #3790-era recurring `test (3.13, 2)` flake — 0.269-0.279s). The
-        relative check still proves parallelism (parallel ≈ 1 sleep, serial ≈ 3)
-        without depending on the core's absolute speed.
+        Previously this asserted wall-clock `elapsed < 0.25s` to prove the 3 git
+        calls run in parallel. That wall-clock race is fundamentally flaky on
+        shared/contended CI runners: the recurring `test (3.13, 2)` failure saw
+        the "parallel" run measure 0.27-0.33s — at or above the 0.30s serial
+        baseline — not because the code serialized, but because thread scheduling
+        itself stalls under CPU starvation, so NO timing threshold (absolute or
+        relative-to-serial) is reliable there.
+
+        Proof of concurrency belongs to a deterministic primitive, not a stopwatch:
+        a threading.Barrier(3) only releases once all three workers have ARRIVED
+        simultaneously — it is impossible to satisfy under serial execution (the
+        first worker would block forever waiting for the other two). If the calls
+        ran serially this test would time out and fail; passing proves real
+        overlap regardless of core speed. (test_git_commands_run_concurrently uses
+        the same primitive; this keeps a second pin on the parallelism invariant
+        without the flaky wall-clock assertion.)
         """
         from api.workspace import git_info_for_workspace
         import api.workspace as ws_mod
@@ -182,42 +191,31 @@ class TestGitInfoParallel:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
 
-        SLEEP = 0.1
-        N_SLOW_CALLS = 3  # status + ahead/behind etc. — the calls that sleep
+        # Barrier(3) is releasable ONLY if all 3 workers run at once.
+        barrier = threading.Barrier(3, timeout=5)
+        arrived = {"n": 0}
+        lock = threading.Lock()
 
-        def slow_git(args, cwd, timeout=3):
+        def concurrent_git(args, cwd, timeout=3):
             if args[0] == "rev-parse":
                 return "main"
-            time.sleep(SLEEP)
+            with lock:
+                arrived["n"] += 1
+            # Serial execution can never get 3 threads here at once → deadlock →
+            # BrokenBarrierError/timeout → test fails. Concurrent execution passes.
+            barrier.wait(timeout=3)
             if args[0] == "status":
                 return ""
             return "0"
 
-        with patch.object(ws_mod, "_run_git", side_effect=slow_git):
-            t0 = time.monotonic()
+        with patch.object(ws_mod, "_run_git", side_effect=concurrent_git):
             result = git_info_for_workspace(tmp_path)
-            elapsed = time.monotonic() - t0
 
         assert result is not None
         assert result["is_git"] is True
-
-        # Measure the SERIAL baseline on THIS core (same slow_git, run back to
-        # back) and compare relatively, so the assertion is immune to absolute
-        # core speed / contention. A fixed 0.25s bar was flaky on slow CI cores
-        # (the recurring `test (3.13, 2)` failure at 0.269-0.279s) even though
-        # execution was genuinely parallel. Parallel must be clearly faster than
-        # serial — at most 75% of the serial baseline — which still fails loudly
-        # if the calls ever run serially (parallel would then ≈ serial).
-        n_serial = N_SLOW_CALLS
-        s0 = time.monotonic()
-        for _ in range(n_serial):
-            time.sleep(SLEEP)
-        serial_baseline = time.monotonic() - s0
-
-        assert elapsed < serial_baseline * 0.8, (
-            f"git_info_for_workspace took {elapsed:.3f}s vs a {serial_baseline:.3f}s "
-            f"serial baseline ({n_serial}×{SLEEP:.2f}s) — expected clearly faster "
-            f"(parallel ≈ one {SLEEP:.2f}s sleep). This suggests serial execution."
+        assert arrived["n"] == 3, (
+            f"Expected 3 concurrent git calls, got {arrived['n']} — "
+            f"suggests serial execution."
         )
 
 
