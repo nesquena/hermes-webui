@@ -1,7 +1,7 @@
 # Hermes WebUI — Mise à jour et modifications custom
 
 **Date :** 7 juin 2026
-**VPS :** idswood.fr
+**VPS :** [redacted]
 **Branche :** `custom-telegram-delivery`
 
 ---
@@ -48,8 +48,8 @@ DELIVERY_ALIASES="Nom d'alias:telegram:<CHAT_ID>,..."
 ### 2. Protection par mot de passe (nginx)
 
 **Fichiers :**
-- `/etc/nginx/sites-available/hermes.idsworld.fr` — ajout `auth_basic` + exemption `.well-known`
-- `/etc/nginx/.htpasswd-hermes` — utilisateur `laurent`
+- `/etc/nginx/sites-available/<subdomain>` — ajout `auth_basic` + exemption `.well-known`
+- `/etc/nginx/.htpasswd-<service>` — utilisateur configuré
 
 ### 3. Autres ajustements
 
@@ -73,7 +73,7 @@ git stash pop
 bash ctl.sh restart
 
 # 4. Vérifier
-curl -sk -o /dev/null -w "%{http_code}" https://hermes.idsworld.fr/ -u "laurent:<mdp>"
+curl -sk -o /dev/null -w "%{http_code}" https://<deploy-url>/ -u "<username>:<password>"
 # → 200
 ```
 
@@ -83,4 +83,4 @@ curl -sk -o /dev/null -w "%{http_code}" https://hermes.idsworld.fr/ -u "laurent:
 
 - **Repo upstream :** https://github.com/nesquena/hermes-webui
 - **Fork :** https://github.com/ideesimple/hermes-webui (branche `custom-telegram-delivery`)
-- **WebUI :** https://hermes.idsworld.fr
+- **WebUI :** https://<deploy-url>

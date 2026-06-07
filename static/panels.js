@@ -1006,13 +1006,13 @@ async function openCronAliases(){
   const rows = aliases.length === 0
     ? `<div style="color:var(--muted);padding:12px 0">No custom aliases yet. Add one below.</div>`
     : aliases.map(a => `
-      <div class="detail-row" style="align-items:center" id="alias-row-${esc(a.value)}">
+      <div class="detail-row alias-management-row" style="align-items:center" data-alias-value="${esc(a.value)}">
         <div class="detail-row-value" style="flex:1"><code>${esc(a.value)}</code> → <strong class="alias-label-text">${esc(a.label)}</strong></div>
-        <input type="text" class="alias-label-input" id="alias-input-${esc(a.value)}" value="${esc(a.label)}" style="display:none;flex:1;margin-right:8px">
-        <button type="button" class="cron-btn alias-edit-btn" onclick="editCronAlias('${esc(a.value)}')" title="Edit label" style="margin-left:8px">✎</button>
-        <button type="button" class="cron-btn alias-save-btn" onclick="saveCronAlias('${esc(a.value)}')" title="Save" style="display:none;margin-left:8px;background:var(--accent);color:#fff">✓</button>
-        <button type="button" class="cron-btn alias-cancel-btn" onclick="cancelEditCronAlias('${esc(a.value)}')" title="Cancel" style="display:none;margin-left:4px">✕</button>
-        <button type="button" class="cron-btn" onclick="deleteCronAlias('${esc(a.value)}')" title="Remove alias" style="margin-left:4px">✕</button>
+        <input type="text" class="alias-label-input" value="${esc(a.label)}" style="display:none;flex:1;margin-right:8px">
+        <button type="button" class="cron-btn alias-edit-btn" data-action="alias-edit" title="Edit label" style="margin-left:8px">✎</button>
+        <button type="button" class="cron-btn alias-save-btn" data-action="alias-save" title="Save" style="display:none;margin-left:8px;background:var(--accent);color:#fff">✓</button>
+        <button type="button" class="cron-btn alias-cancel-btn" data-action="alias-cancel" title="Cancel" style="display:none;margin-left:4px">✕</button>
+        <button type="button" class="cron-btn" data-action="alias-delete" title="Remove alias" style="margin-left:4px">✕</button>
       </div>`).join('');
 
   body.innerHTML = `
@@ -1037,11 +1037,26 @@ async function openCronAliases(){
           <input type="text" id="aliasLabel" placeholder="Laurent (perso)" style="width:100%;box-sizing:border-box">
         </div>
         <div style="margin-top:12px">
-          <button type="button" class="cron-btn run" onclick="addCronAlias()">Add Alias</button>
+          <button type="button" class="cron-btn run" data-action="alias-add">Add Alias</button>
         </div>
         <div id="aliasError" class="detail-form-error" style="display:none;margin-top:8px"></div>
       </div>
     </div>`;
+
+  // Delegated event listener — no inline onclick, safe from XSS
+  body.addEventListener('click', function(e) {
+    var btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    var action = btn.getAttribute('data-action');
+    if (action === 'alias-add') { addCronAlias(); return; }
+    var row = btn.closest('[data-alias-value]');
+    if (!row) return;
+    var value = row.getAttribute('data-alias-value');
+    if (action === 'alias-edit') editCronAlias(value);
+    else if (action === 'alias-save') saveCronAlias(value);
+    else if (action === 'alias-cancel') cancelEditCronAlias(value);
+    else if (action === 'alias-delete') deleteCronAlias(value);
+  });
 }
 
 async function addCronAlias(){
@@ -1073,21 +1088,21 @@ async function deleteCronAlias(value){
 }
 
 function editCronAlias(value){
-  const row = document.getElementById('alias-row-' + value);
+  var row = document.querySelector('[data-alias-value="' + CSS.escape(value) + '"]');
   if (!row) return;
   row.querySelector('.alias-label-text').style.display = 'none';
   row.querySelector('.alias-label-input').style.display = '';
   row.querySelector('.alias-edit-btn').style.display = 'none';
   row.querySelector('.alias-save-btn').style.display = '';
   row.querySelector('.alias-cancel-btn').style.display = '';
-  const input = document.getElementById('alias-input-' + value);
+  var input = row.querySelector('.alias-label-input');
   if (input) { input.focus(); input.select(); }
 }
 
 function cancelEditCronAlias(value){
-  const row = document.getElementById('alias-row-' + value);
+  var row = document.querySelector('[data-alias-value="' + CSS.escape(value) + '"]');
   if (!row) return;
-  const input = document.getElementById('alias-input-' + value);
+  var input = row.querySelector('.alias-label-input');
   if (input) input.value = row.querySelector('.alias-label-text').textContent;
   row.querySelector('.alias-label-text').style.display = '';
   row.querySelector('.alias-label-input').style.display = 'none';
@@ -1097,7 +1112,7 @@ function cancelEditCronAlias(value){
 }
 
 async function saveCronAlias(value){
-  const input = document.getElementById('alias-input-' + value);
+  var input = document.querySelector('[data-alias-value="' + CSS.escape(value) + '"] .alias-label-input');
   if (!input) return;
   const label = input.value.trim();
   if (!label) { showToast('Label cannot be empty', 3000); return; }

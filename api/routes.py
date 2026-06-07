@@ -12855,12 +12855,22 @@ def _handle_cron_delivery_aliases_list(handler):
     aliases, _ = _load_delivery_aliases_yaml()
     return j(handler, {"aliases": aliases})
 
+def _validate_alias_value(value):
+    """Reject values that contain spaces or don't follow platform:id pattern."""
+    import re
+    if not re.match(r'^[^\s]+$', value):
+        return False, "Value must not contain whitespace characters"
+    return True, None
+
 def _handle_cron_delivery_aliases_add(handler, body):
     """POST /api/crons/delivery-aliases — add an alias."""
     value = (body.get("value") or "").strip()
     label = (body.get("label") or "").strip()
     if not value or not label:
         return bad(handler, "Both 'value' and 'label' are required")
+    valid, err = _validate_alias_value(value)
+    if not valid:
+        return bad(handler, err)
     aliases, path = _load_delivery_aliases_yaml()
     # Prevent duplicates
     for entry in aliases:
@@ -12877,6 +12887,9 @@ def _handle_cron_delivery_aliases_update(handler, body):
     label = (body.get("label") or "").strip()
     if not value or not label:
         return bad(handler, "Both 'value' and 'label' are required")
+    valid, err = _validate_alias_value(value)
+    if not valid:
+        return bad(handler, err)
     aliases, path = _load_delivery_aliases_yaml()
     found = False
     for entry in aliases:
