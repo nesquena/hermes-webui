@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Security
+- Hardened unauthenticated first-run onboarding gates so spoofed `X-Forwarded-For` / `X-Real-IP` headers are ignored unless `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` is explicitly set behind a trusted proxy.
+- Docker startup now refuses public binds without authentication by default via `HERMES_WEBUI_REQUIRE_AUTH_FOR_PUBLIC_BIND=1`, and Docker init logs now mask password/secret-like environment variable names.
+- Update checks that perform git/network refreshes now use `POST /api/updates/check`; `GET /api/updates/check` is cache-only.
+- `/api/media` no longer treats all of `/tmp` as a default allowed root; temporary artifacts require an exact session `MEDIA:` grant or an explicit `MEDIA_ALLOWED_ROOTS` operator allow-list.
+
 ## [v0.51.303] — 2026-06-06 — Release JS (stage-p1a — low-risk fixes: cron toggle, config var expansion, git-discard hardening)
 
 ### Fixed

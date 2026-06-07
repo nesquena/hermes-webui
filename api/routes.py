@@ -1558,6 +1558,56 @@ def _client_ip_for_rate_limit(handler) -> str:
     return "unknown"
 
 
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _request_client_ip(handler) -> str:
+    try:
+        address = getattr(handler, "client_address", None)
+        if address:
+            return str(address[0] or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _onboarding_request_is_local(handler) -> bool:
+    """Return True when an unauthenticated onboarding request is local/private.
+
+    Forwarded client-IP headers are ignored by default because direct clients can
+    spoof them. Operators behind a trusted reverse proxy may opt in with
+    HERMES_WEBUI_TRUST_FORWARDED_FOR=1, matching the explicit forwarded-header
+    trust model used elsewhere in the server.
+    """
+    import ipaddress
+
+    candidates = []
+    if _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR"):
+        candidates.extend([
+            handler.headers.get("X-Forwarded-For", "").split(",")[0].strip(),
+            handler.headers.get("X-Real-IP", "").strip(),
+        ])
+    candidates.append(_request_client_ip(handler))
+    for raw in candidates:
+        if not raw:
+            continue
+        try:
+            addr = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        return bool(addr.is_loopback or addr.is_private)
+    return False
+
+
+def _onboarding_gate_allows(handler) -> bool:
+    from api.auth import is_auth_enabled
+
+    if is_auth_enabled() or _truthy_env("HERMES_WEBUI_ONBOARDING_OPEN"):
+        return True
+    return _onboarding_request_is_local(handler)
+
+
 def _csp_report_rate_limited(handler, *, now: float | None = None) -> bool:
     now = time.time() if now is None else now
     key = _client_ip_for_rate_limit(handler)
@@ -5879,7 +5929,6 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"disabled": True})
         include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         qs = parse_qs(parsed.query)
-        force = qs.get("force", ["0"])[0] == "1"
         # ?simulate=1 returns fake behind counts for UI testing (localhost only)
         if (
             qs.get("simulate", ["0"])[0] == "1"
@@ -5910,9 +5959,9 @@ def handle_get(handler, parsed) -> bool:
                     "checked_at": 0,
                 },
             )
-        from api.updates import check_for_updates
+        from api.updates import cached_update_status
 
-        return j(handler, check_for_updates(force=force, include_agent=include_agent_updates))
+        return j(handler, cached_update_status(include_agent=include_agent_updates))
 
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
@@ -6482,6 +6531,16 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
+
+    if parsed.path == "/api/updates/check":
+        settings = load_settings()
+        if not settings.get("check_for_updates", True):
+            return j(handler, {"disabled": True})
+        include_agent_updates = not bool(settings.get("ignore_agent_updates"))
+        force = bool(body.get("force", False))
+        from api.updates import check_for_updates
+
+        return j(handler, check_for_updates(force=force, include_agent=include_agent_updates))
 
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery
@@ -7707,20 +7766,8 @@ def handle_post(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/onboarding/oauth/start":
-        from api.auth import is_auth_enabled
-        import os as _os
-        if not is_auth_enabled() and not _os.getenv("HERMES_WEBUI_ONBOARDING_OPEN"):
-            import ipaddress
-            try:
-                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-                _xri = handler.headers.get("X-Real-IP", "").strip()
-                _raw = handler.client_address[0]
-                addr = ipaddress.ip_address(_xff or _xri or _raw)
-                is_local = addr.is_loopback or addr.is_private
-            except ValueError:
-                is_local = False
-            if not is_local:
-                return bad(handler, "Onboarding OAuth is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
+        if not _onboarding_gate_allows(handler):
+            return bad(handler, "Onboarding OAuth is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
         try:
             return j(handler, start_onboarding_oauth_flow(body), extra_headers={"Cache-Control": "no-store"})
         except ValueError as e:
@@ -7742,22 +7789,8 @@ def handle_post(handler, parsed) -> bool:
         # carries the real origin IP — read it first before falling back to the raw socket addr.
         # HERMES_WEBUI_ONBOARDING_OPEN=1 lets operators on remote servers explicitly bypass
         # the check when they control network access themselves (e.g. firewall + VPN).
-        from api.auth import is_auth_enabled
-        import os as _os
-        if not is_auth_enabled() and not _os.getenv("HERMES_WEBUI_ONBOARDING_OPEN"):
-            import ipaddress
-            try:
-                # Prefer forwarded headers set by reverse proxies
-                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-                _xri = handler.headers.get("X-Real-IP", "").strip()
-                _raw = handler.client_address[0]
-                _ip_str = _xff or _xri or _raw
-                addr = ipaddress.ip_address(_ip_str)
-                is_local = addr.is_loopback or addr.is_private
-            except ValueError:
-                is_local = False
-            if not is_local:
-                return bad(handler, "Onboarding setup is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
+        if not _onboarding_gate_allows(handler):
+            return bad(handler, "Onboarding setup is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
         try:
             return j(handler, apply_onboarding_setup(body))
         except ValueError as e:
@@ -7775,21 +7808,8 @@ def handle_post(handler, parsed) -> bool:
         # Read-only: no config.yaml or .env writes happen here.  Same local-
         # network gate as /api/onboarding/setup (also writing-adjacent in
         # spirit because it carries an api_key the user typed).
-        from api.auth import is_auth_enabled
-        import os as _os
-        if not is_auth_enabled() and not _os.getenv("HERMES_WEBUI_ONBOARDING_OPEN"):
-            import ipaddress
-            try:
-                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-                _xri = handler.headers.get("X-Real-IP", "").strip()
-                _raw = handler.client_address[0]
-                _ip_str = _xff or _xri or _raw
-                addr = ipaddress.ip_address(_ip_str)
-                is_local = addr.is_loopback or addr.is_private
-            except ValueError:
-                is_local = False
-            if not is_local:
-                return bad(handler, "Onboarding probe is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
+        if not _onboarding_gate_allows(handler):
+            return bad(handler, "Onboarding probe is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
         provider = str((body or {}).get("provider") or "").strip().lower()
         base_url = str((body or {}).get("base_url") or "")
         api_key = str((body or {}).get("api_key") or "").strip() or None
@@ -9685,12 +9705,15 @@ def _handle_media(handler, parsed):
     except Exception:
         return bad(handler, "Invalid path", 400)
 
-    # Allowed roots: hermes home, /tmp, and active workspace.
+    # Allowed roots: hermes home and active workspace. Do not allow all of /tmp
+    # by default: other local users/processes commonly place sensitive scratch
+    # files there. Temporary chat artifacts should be served via exact session
+    # MEDIA: tokens, or operators can opt into explicit roots with
+    # MEDIA_ALLOWED_ROOTS.
     # Intentionally NOT the entire home dir — that would expose ~/.ssh,
     # ~/.aws, browser profiles, etc. to any authenticated user.
     allowed_roots = [
         _HERMES_HOME.resolve(),
-        Path("/tmp").resolve(),
         (_HOME / ".hermes").resolve(),
     ]
     # Also allow the active workspace directory (where screenshots land)
