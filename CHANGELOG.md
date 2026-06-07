@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **The sidebar no longer hides fuller pre-compression snapshots when `_index.json` is stale.** Snapshot rows now refresh their sidecar metadata before lineage visibility chooses between an archived parent and its continuation, so conversations whose parent sidecar received later transcript rows do not appear to lose messages after compaction.
+
 ## [v0.51.310] — 2026-06-07 — Release JZ (stage-3760 — long-press project chips to delete on touch)
 
 ### Fixed
