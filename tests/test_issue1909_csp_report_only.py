@@ -24,7 +24,7 @@ def test_handler_adds_content_security_policy_report_only(monkeypatch):
     policy = headers["Content-Security-Policy-Report-Only"]
     assert "default-src 'self'" in policy
     assert "object-src 'none'" in policy
-    assert "frame-ancestors 'self'" in policy
+    assert "frame-ancestors 'none'" in policy
     assert "base-uri 'self'" in policy
     assert "report-uri /api/csp-report" in policy
     assert "report-to csp-endpoint" in policy

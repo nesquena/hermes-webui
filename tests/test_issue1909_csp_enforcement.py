@@ -48,7 +48,7 @@ def test_security_helper_sends_enforcing_csp_with_hardening_directives(monkeypat
     assert "worker-src blob: 'self' https://cdn.jsdelivr.net" in policy
     assert "font-src 'self' data: https://fonts.gstatic.com" in policy
     assert "object-src 'none'" in policy
-    assert "frame-ancestors 'self'" in policy
+    assert "frame-ancestors 'none'" in policy
     assert "media-src 'self' data: blob:" in policy
     assert "connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* https://cdn.jsdelivr.net" in policy
 
