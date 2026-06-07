@@ -32,7 +32,13 @@ WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8
 
 
 def _media_fixture_dir() -> pathlib.Path:
-    fixture_dir = TEST_WORKSPACE / "media-fixtures"
+    # Dot-prefixed so the persistent fixture dir stays OUT of
+    # /api/workspaces/suggest's default (non-hidden) results — otherwise it
+    # pollutes the shared TEST_WORKSPACE and breaks sibling tests that assert an
+    # exact workspace-suggestion set (e.g. test_sprint5
+    # test_workspace_suggest_hidden_dirs_only_when_requested). Kept under
+    # TEST_WORKSPACE (a MEDIA_ALLOWED_ROOT) and Windows-portable (no /tmp).
+    fixture_dir = TEST_WORKSPACE / ".media-fixtures"
     fixture_dir.mkdir(parents=True, exist_ok=True)
     return fixture_dir
 
