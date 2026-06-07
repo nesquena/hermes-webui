@@ -7720,6 +7720,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "action": name,
             "widget_api_version": 1,
             "runtime": {"mode": "metadata-only", "executed": False},
+            **_space_widget_sdk_helper_receipt_envelope(name),
         }
     if name == "space.spaces.byid":
         spaces = list_spaces()

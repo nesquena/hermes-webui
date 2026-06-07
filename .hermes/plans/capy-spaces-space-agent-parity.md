@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): add widget API version safety receipts`
+  - Added RED/GREEN backend coverage proving the no-space `space.spaces.widgetApiVersion` helper now returns metadata-only prompt-preflight, autonomy-policy, progress, and output-compaction receipts while preserving the functional `widget_api_version` and runtime metadata-only payload.
+  - Helper progress uses the neutral action-scoped `widget.sdk:helper` run id without a synthetic Space id and keeps renderer/source/API-auth/raw-prompt/script/secret fixture values out of serialized responses and compaction text.
+
 - `feat(spaces): add normalize id safety receipts`
   - Added RED/GREEN backend coverage proving `space.spaces.normalizeSpaceId` and `space.spaces.normalizeWidgetId` now return metadata-only prompt-preflight, autonomy-policy, progress, and output-compaction receipts while preserving normalized ID/fallback behavior.
   - Helper progress uses the safe action-scoped `spaces.sdk:id` run id without a synthetic Space id and keeps renderer/html/source/API-auth/script/token/secret fixture values out of serialized responses and compaction text.
