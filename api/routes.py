@@ -4503,7 +4503,12 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/capy-memory/source/refresh":
         try:
-            from api.capy_memory import _safe_public_id, _source_refresh_output_compaction_receipt, run_source_refresh_jobs
+            from api.capy_memory import (
+                _record_manual_source_refresh_progress,
+                _safe_public_id,
+                _source_refresh_output_compaction_receipt,
+                run_source_refresh_jobs,
+            )
 
             target_source_id = _safe_public_id(body.get("source_id"), fallback="") if body.get("source_id") is not None else ""
             if body.get("source_id") is not None and not target_source_id:
@@ -4525,12 +4530,12 @@ def handle_post(handler, parsed) -> bool:
                 if not isinstance(job, dict):
                     continue
                 safe_job = {}
-                for key in ("job_id", "source_id", "status", "error", "origin_uri"):
+                for key in ("job_id", "source_id", "status", "error"):
                     value = job.get(key)
                     if value is None:
                         continue
                     text = " ".join(str(value).split()).strip()[:240]
-                    if _capy_refresh_re.search(r"(api[_-]?key|authorization|bearer\s+|cookie\s*[:=]|credential|password|secret|token|ghp_[a-z0-9_]+|github_pat_|sk-[a-z0-9_-]{8,}|akia[0-9a-z]{12,}|https?://[^/\s:@]+:[^/\s@]+@|<script|</script|javascript:|onerror|onload|renderer|raw[_-]?prompt)", text, _capy_refresh_re.I):
+                    if _capy_refresh_re.search(r"(https?://|api[_-]?key|authorization|bearer\s+|cookie\s*[:=]|credential|password|secret|token|ghp_[a-z0-9_]+|github_pat_|sk-[a-z0-9_-]{8,}|akia[0-9a-z]{12,}|<script|</script|javascript:|onerror|onload|renderer|raw[_-]?prompt)", text, _capy_refresh_re.I):
                         text = "[REDACTED]"
                     safe_job[key] = text
                 preflight = job.get("prompt_preflight")
@@ -4573,6 +4578,33 @@ def handle_post(handler, parsed) -> bool:
                 model_route_hint="hint:summarize",
             )
             command = "capy.memory.refresh_one" if target_source_id else "capy.memory.refresh"
+            progress_event = _record_manual_source_refresh_progress()
+            safe_progress_event = None
+            if isinstance(progress_event, dict):
+                event_type = str(progress_event.get("event_type") or "").strip().lower()
+                family = str(progress_event.get("family") or "").strip().lower()
+                run_id = _safe_public_id(progress_event.get("run_id"), fallback="")
+                event_id = _safe_public_id(progress_event.get("event_id"), fallback="")
+                created_at = str(progress_event.get("created_at") or "").strip()
+                safe_created_at = created_at if _capy_refresh_re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z", created_at) else ""
+                if (
+                    event_type == "run.completed"
+                    and family == "run"
+                    and run_id == "source-refresh.manual"
+                    and event_id
+                    and safe_created_at
+                    and progress_event.get("redaction_status") == "metadata_only"
+                ):
+                    safe_progress_event = {
+                        "stored": progress_event.get("stored") is True,
+                        "queued": progress_event.get("queued") is True,
+                        "event_id": event_id,
+                        "event_type": event_type,
+                        "family": family,
+                        "run_id": run_id,
+                        "created_at": safe_created_at,
+                        "redaction_status": "metadata_only",
+                    }
             response_payload = {
                 "ok": True,
                 "processed": processed,
@@ -4586,6 +4618,8 @@ def handle_post(handler, parsed) -> bool:
                     target_source_id=target_source_id or None,
                 ),
             }
+            if safe_progress_event:
+                response_payload["progress_event"] = safe_progress_event
             if target_source_id:
                 response_payload["target_source_id"] = target_source_id
             j(handler, response_payload)

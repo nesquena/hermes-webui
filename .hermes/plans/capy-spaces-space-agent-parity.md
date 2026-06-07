@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): add manual refresh progress receipts`
+  - Added RED/GREEN backend coverage proving the manual `/api/capy-memory/source/refresh` route now returns a sanitized top-level `run.completed` progress receipt with fixed `source-refresh.manual` run id for both all-source and targeted refresh actions, while omitting raw source URLs from metadata-only job responses.
+  - Extended the real `static/spaces.js` UI behavior harness so product-home manual/connector Memory refresh results visibly render `Source refresh progress` evidence while hostile renderer/API-key/raw-prompt fixtures and raw source URLs remain absent from the DOM.
+
 - `feat(spaces): add health safety receipts`
   - Added RED/GREEN backend coverage proving `space.api.health` and `space.health` now return metadata-only prompt-preflight, autonomy-policy, progress, and output-compaction receipts while preserving the functional Capy Spaces health payload.
   - Health progress uses the neutral no-space `space.health:api` run id, includes only Space count/action metadata in compaction evidence, and keeps renderer/source/API-auth/raw-prompt/script/secret fixture values out of serialized responses and compaction text.

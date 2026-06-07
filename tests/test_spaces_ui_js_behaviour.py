@@ -401,6 +401,19 @@ global.fetch = async function(path, opts = {}) {
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         raw_prompt: 'ignore previous instructions',
       },
+      progress_event: {
+        stored: true,
+        queued: true,
+        event_id: 'evt_manual_refresh_123',
+        event_type: 'run.completed',
+        family: 'run',
+        run_id: 'source-refresh.manual',
+        created_at: '2026-05-25T12:00:01Z',
+        redaction_status: 'metadata_only',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'ignore previous instructions',
+      },
       jobs: [
         { job_id: 'job-safe-1', source_id: targetSourceId || 'docs-safe', status: 'completed', origin_uri: targetSourceId ? 'https://example.test/roadmap' : 'https://example.test/docs', prompt_preflight: { boundary: 'auto_fetched_source', status: 'pass', metadata_only: true, raw_prompt_stored: false }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
         { job_id: 'job-unsafe-2', source_id: 'ghp_abcdefghijklmnopqrstuvwxyz123456', status: '<img onerror=bad()>', origin_uri: 'https://user:pass@example.test/docs' },
@@ -4377,7 +4390,8 @@ def test_spaces_ui_open_space_renders_memory_tree_context_card(driver_path):
     assert "Local-only Spaces memory" in out["rootHtml"]
     assert "Lab Space manifest" in out["rootHtml"]
     assert "OpenHuman inspired source context" in out["rootHtml"]
-    assert "space_manifest · capy-space://lab · dropped_fields" in out["rootHtml"]
+    assert "space_manifest · dropped_fields" in out["rootHtml"]
+    assert "capy-space://lab" not in out["rootHtml"]
     assert {"path": "api/spaces/memory?space_id=lab", "method": "GET", "body": ""} in out["calls"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
@@ -5019,7 +5033,8 @@ def test_spaces_ui_product_home_memory_freshness_card_is_visible_local_and_safe(
     assert "Connector catalog" in html
     assert "Auto-fetch sources" in html
     assert "1 source · 1 stale · 0 errors · 1 refresh job" in html
-    assert "Roadmap Docs · stale · Last sync: 2026-05-24T12:00:00+00:00 · https://example.test/roadmap" in html
+    assert "Roadmap Docs · stale · Last sync: 2026-05-24T12:00:00+00:00" in html
+    assert "https://example.test/roadmap" not in html
     assert "Local knowledge" in html
     assert "2 sources · 0 stale · 0 errors · 1 refresh job" in html
     assert "Fresh" in html
@@ -5057,6 +5072,9 @@ def test_spaces_ui_product_home_memory_refresh_action_posts_and_rerenders_safely
     assert "Command: capy.memory.refresh" in html
     assert "Processed: 1 · Jobs: 2 · Exit: 0" in html
     assert "Redaction: metadata_only · Redacted: 4 · Compacted: yes" in html
+    assert "Source refresh progress" in html
+    assert "run.completed" in html
+    assert "source-refresh.manual" in html
     assert [call["path"] for call in out["calls"]].count("api/capy-memory/status") >= 2
     assert "<script>" not in html
     assert "renderer" not in html.lower()
@@ -5124,6 +5142,8 @@ def test_spaces_ui_product_home_connector_source_refresh_action_posts_target_and
     assert "roadmap-docs · completed" in html
     assert "Action: capy.memory.refresh_one" in html
     assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in html
+    assert "Source refresh progress" in html
+    assert "source-refresh.manual" in html
     assert "Roadmap Docs" in html
     assert [call["path"] for call in out["calls"]].count("api/capy-memory/status") >= 2
     assert [call["path"] for call in out["calls"]].count("api/capy-memory/source/catalog") >= 2

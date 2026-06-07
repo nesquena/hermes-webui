@@ -12659,21 +12659,39 @@ def _record_source_refresh_progress(event_type: str, *, source_id: str, job_id: 
         return
 
 
-def _record_scheduled_source_refresh_progress() -> dict[str, Any]:
-    """Best-effort metadata-only progress receipt for the scheduled source-refresh tick."""
+def _record_source_refresh_route_progress(run_id: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress receipt for source-refresh route actions."""
+    safe_run_id = str(run_id or "").strip()
+    if safe_run_id not in {"source-refresh.manual", "source-refresh.scheduled"}:
+        safe_run_id = "source-refresh.manual"
     try:
         from api.capy_progress import record_progress_event
 
-        return record_progress_event({"event_type": "run.completed", "run_id": "source-refresh.scheduled"})
-    except Exception:  # noqa: BLE001 - progress telemetry must not fail scheduled refresh work.
+        return record_progress_event({"event_type": "run.completed", "run_id": safe_run_id})
+    except Exception:  # noqa: BLE001 - progress telemetry must not fail refresh work.
+        fallback_created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        fallback_run_fragment = safe_run_id.replace("source-refresh", "refresh").replace(".", "_").replace("-", "_")
+        fallback_event_id = f"evt_{fallback_run_fragment}_{uuid.uuid4().hex[:12]}"
         return {
             "stored": False,
             "queued": False,
+            "event_id": fallback_event_id,
             "event_type": "run.completed",
             "family": "run",
-            "run_id": "source-refresh.scheduled",
+            "run_id": safe_run_id,
+            "created_at": fallback_created_at,
             "redaction_status": "metadata_only",
         }
+
+
+def _record_manual_source_refresh_progress() -> dict[str, Any]:
+    """Best-effort metadata-only progress receipt for manual source refresh."""
+    return _record_source_refresh_route_progress("source-refresh.manual")
+
+
+def _record_scheduled_source_refresh_progress() -> dict[str, Any]:
+    """Best-effort metadata-only progress receipt for the scheduled source-refresh tick."""
+    return _record_source_refresh_route_progress("source-refresh.scheduled")
 
 
 def _refresh_due_at(last_checked_at: Any, refresh_interval_seconds: Any, *, now: str) -> bool:

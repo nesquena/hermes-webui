@@ -259,9 +259,8 @@
     const name = safeDisplayMetadataText(source && source.display_name, 'source') || 'source';
     const freshness = safeConnectorFreshness(source && source.freshness_status);
     const lastSync = safeDisplayMetadataText((source && (source.last_checked_at || source.last_ingested_at)) || '', '') || '';
-    const origin = safeDisplayMetadataText(source && source.origin_uri, '') || '';
-    const parts = [name, freshness, lastSync ? 'Last sync: '+lastSync : '', origin].filter(Boolean);
-    const action = sourceId && /^https?:\/\//i.test(origin) ? '<button type="button" class="capy-spaces-btn capy-spaces-source-refresh-btn" data-capy-action="refreshMemorySource" data-source-id="'+escapeHtml(sourceId)+'">Refresh</button>' : '';
+    const parts = [name, freshness, lastSync ? 'Last sync: '+lastSync : ''].filter(Boolean);
+    const action = sourceId ? '<button type="button" class="capy-spaces-btn capy-spaces-source-refresh-btn" data-capy-action="refreshMemorySource" data-source-id="'+escapeHtml(sourceId)+'">Refresh</button>' : '';
     return '<li><span>'+parts.map(function(part){ return escapeHtml(part); }).join(' · ')+'</span>'+action+'</li>';
   }
 
@@ -1644,9 +1643,8 @@
       const title = safeDisplayMetadataText(item.title || item.source_id || 'Memory source', 'Memory source') || 'Memory source';
       const snippet = safeDisplayMetadataText(item.snippet || '', '') || '';
       const sourceType = safeDisplayMetadataText(item.source_type || 'source', 'source') || 'source';
-      const origin = safeDisplayMetadataText(item.origin_uri || '', '') || '';
       const redaction = safeDisplayMetadataText(item.redaction_status || 'none', 'none') || 'none';
-      const meta = [sourceType, origin, redaction].filter(Boolean).join(' · ');
+      const meta = [sourceType, redaction].filter(Boolean).join(' · ');
       return '<div class="capy-spaces-widget capy-spaces-memory-source"><div><strong>'+escapeHtml(title)+'</strong>' +
         (snippet ? '<div class="capy-spaces-muted">'+escapeHtml(snippet)+'</div>' : '') +
         '<div class="capy-spaces-muted">'+escapeHtml(meta)+'</div></div></div>';

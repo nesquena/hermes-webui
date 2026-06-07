@@ -566,7 +566,6 @@ def test_capy_memory_source_refresh_route_runs_bounded_metadata_only_jobs(monkey
             "source_id": "docs-safe",
             "status": "completed",
             "error": "",
-            "origin_uri": "https://example.test/docs",
             "prompt_preflight": {
                 "boundary": "auto_fetched_source",
                 "status": "pass",
@@ -575,6 +574,8 @@ def test_capy_memory_source_refresh_route_runs_bounded_metadata_only_jobs(monkey
             },
         }
     ]
+    assert "origin_uri" not in serialized
+    assert "https://example.test/docs" not in serialized
     policy = payload["autonomy_policy"]
     assert policy["available"] is True
     assert policy["action"] == "capy.memory.refresh"
@@ -584,6 +585,15 @@ def test_capy_memory_source_refresh_route_runs_bounded_metadata_only_jobs(monkey
     assert policy["model_route_hint"] == "hint:summarize"
     assert policy["metadata_only"] is True
     assert policy["local_only"] is True
+    progress_event = payload["progress_event"]
+    assert progress_event["event_type"] == "run.completed"
+    assert progress_event["family"] == "run"
+    assert progress_event["run_id"] == "source-refresh.manual"
+    assert progress_event["redaction_status"] == "metadata_only"
+    assert progress_event["stored"] is True
+    assert progress_event["queued"] is True
+    rows = _progress_log_rows(progress_events_log_path())
+    assert any(row.get("run_id") == "source-refresh.manual" for row in rows)
     compaction = payload["output_compaction"]
     assert compaction["tool"] == "capy-memory-source-refresh"
     assert compaction["command"] == "capy.memory.refresh"
@@ -607,8 +617,8 @@ def test_capy_memory_source_refresh_route_redacts_allowed_fields_and_bounds_resp
             "job_id": f"job-{idx}",
             "source_id": "ghp_abcdefghijklmnopqrstuvwxyz123456" if idx == 0 else f"docs-{idx}",
             "status": "completed",
-            "error": "https://user:pass@example.test/path" if idx == 0 else "",
-            "origin_uri": "sk-SECRET_VALUE_DO_NOT_LEAK" if idx == 0 else "https://example.test/docs",
+            "error": "https://example.test/plain-source" if idx == 0 else "",
+            "origin_uri": "sk-SEC...LEAK" if idx == 0 else "https://example.test/docs",
         }
         for idx in range(30)
     ]
@@ -624,11 +634,47 @@ def test_capy_memory_source_refresh_route_redacts_allowed_fields_and_bounds_resp
     assert len(payload["jobs"]) == 25
     assert payload["jobs"][0]["source_id"] == "[REDACTED]"
     assert payload["jobs"][0]["error"] == "[REDACTED]"
-    assert payload["jobs"][0]["origin_uri"] == "[REDACTED]"
+    assert "origin_uri" not in payload["jobs"][0]
+    assert "origin_uri" not in serialized
+    assert "https://example.test/docs" not in serialized
+    assert "https://example.test/plain-source" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "ghp_" not in serialized
     assert "sk-" not in serialized
     assert "user:pass" not in serialized
+
+
+def test_capy_memory_source_refresh_route_returns_progress_receipt_when_progress_store_fails(monkeypatch):
+    from api import capy_progress as capy_progress_mod
+    from api import routes
+
+    def fail_record_progress_event(_event):
+        raise RuntimeError("progress store unavailable")
+
+    monkeypatch.setattr(capy_progress_mod, "record_progress_event", fail_record_progress_event)
+    monkeypatch.setattr(
+        capy_memory,
+        "run_source_refresh_jobs",
+        lambda *, limit=5: {
+            "processed": 1,
+            "jobs": [{"job_id": "job-safe-1", "source_id": "docs-safe", "status": "completed"}],
+        },
+    )
+    handler = _FakeJsonHandler({"limit": 1})
+
+    assert routes.handle_post(handler, urlparse("http://example.test/api/capy-memory/source/refresh")) is True
+    payload = handler.json_body()
+
+    assert handler.status == 200
+    progress_event = payload["progress_event"]
+    assert progress_event["event_type"] == "run.completed"
+    assert progress_event["family"] == "run"
+    assert progress_event["run_id"] == "source-refresh.manual"
+    assert progress_event["redaction_status"] == "metadata_only"
+    assert progress_event["stored"] is False
+    assert progress_event["queued"] is False
+    assert progress_event["event_id"].startswith("evt_refresh_manual_")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z", progress_event["created_at"])
 
 
 def test_capy_memory_source_refresh_route_can_target_one_source_metadata_only(monkeypatch):
@@ -667,9 +713,16 @@ def test_capy_memory_source_refresh_route_can_target_one_source_metadata_only(mo
     assert payload["target_source_id"] == "roadmap-docs"
     assert payload["processed"] == 1
     assert payload["jobs"][0]["source_id"] == "roadmap-docs"
+    assert "origin_uri" not in serialized
+    assert "https://example.test/roadmap" not in serialized
     assert payload["autonomy_policy"]["action"] == "capy.memory.refresh_one"
     assert payload["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
     assert payload["autonomy_policy"]["metadata_only"] is True
+    progress_event = payload["progress_event"]
+    assert progress_event["event_type"] == "run.completed"
+    assert progress_event["family"] == "run"
+    assert progress_event["run_id"] == "source-refresh.manual"
+    assert progress_event["redaction_status"] == "metadata_only"
     compaction = payload["output_compaction"]
     assert compaction["tool"] == "capy-memory-source-refresh"
     assert compaction["command"] == "capy.memory.refresh_one"
