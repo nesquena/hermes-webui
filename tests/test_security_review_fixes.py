@@ -59,6 +59,18 @@ def test_onboarding_local_gate_uses_forwarded_ip_when_explicitly_trusted(monkeyp
     assert routes._onboarding_request_is_local(handler) is True
 
 
+def test_onboarding_trusted_forwarded_for_uses_proxy_appended_rightmost_ip(monkeypatch):
+    from api import routes
+
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    handler = _Handler(
+        client_ip="10.0.0.10",
+        headers={"X-Forwarded-For": "127.0.0.1, 8.8.8.8"},
+    )
+
+    assert routes._onboarding_request_is_local(handler) is False
+
+
 def test_docker_env_log_obfuscates_password_and_secret_names():
     src = Path("docker_init.bash").read_text(encoding="utf-8")
     line = next(l for l in src.splitlines() if l.startswith("export ENV_OBFUSCATE_PART="))
@@ -89,6 +101,26 @@ def test_get_update_check_returns_cache_without_fetch(monkeypatch):
     handler = _Handler(client_ip="127.0.0.1")
     routes.handle_get(handler, urlsplit("/api/updates/check?force=1"))
     assert handler.status == 200
+
+
+def test_cached_update_status_does_not_drop_agent_info_when_reenabled(monkeypatch):
+    from api import updates
+
+    cached_agent = {"name": "agent", "behind": 2}
+    monkeypatch.setattr(
+        updates,
+        "_update_cache",
+        {
+            "webui": {"name": "webui", "behind": 0},
+            "agent": cached_agent,
+            "checked_at": 123,
+            "include_agent": False,
+        },
+    )
+
+    result = updates.cached_update_status(include_agent=True)
+
+    assert result["agent"] == cached_agent
 
 
 def test_post_update_check_performs_forced_fetch(monkeypatch):

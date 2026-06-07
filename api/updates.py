@@ -693,7 +693,8 @@ def cached_update_status(*, include_agent=True):
         cached = dict(_update_cache)
     if cached.get('include_agent') != include_agent:
         cached['include_agent'] = include_agent
-        cached['agent'] = _ignored_agent_update_info() if not include_agent else None
+        if not include_agent:
+            cached['agent'] = _ignored_agent_update_info()
     cached['cached'] = True
     return cached
 

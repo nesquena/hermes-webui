@@ -1585,7 +1585,7 @@ def _onboarding_request_is_local(handler) -> bool:
     candidates = []
     if _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR"):
         candidates.extend([
-            handler.headers.get("X-Forwarded-For", "").split(",")[0].strip(),
+            handler.headers.get("X-Forwarded-For", "").split(",")[-1].strip(),
             handler.headers.get("X-Real-IP", "").strip(),
         ])
     candidates.append(_request_client_ip(handler))
