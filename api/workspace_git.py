@@ -44,6 +44,7 @@ _GIT_HARDENED_CONFIG = (
     # from turning read/status/fetch calls into host command execution.
     ("core.fsmonitor", "false"),
     ("core.sshCommand", "ssh"),
+    ("credential.helper", ""),
     ("protocol.ext.allow", "never"),
 )
 
