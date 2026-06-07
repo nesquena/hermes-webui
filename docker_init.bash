@@ -19,7 +19,7 @@ ok_exit() {
 # Ignore list: variables to ignore when loading environment variables from user to user
 export ENV_IGNORELIST="HOME PWD USER SHLVL TERM OLDPWD SHELL _ SUDO_COMMAND HOSTNAME LOGNAME MAIL SUDO_GID SUDO_UID SUDO_USER CHECK_NV_CUDNN_VERSION VIRTUAL_ENV VIRTUAL_ENV_PROMPT ENV_IGNORELIST ENV_OBFUSCATE_PART"
 # Obfuscate part: part of the key to obfuscate when loading environment variables from user to user, ex: HF_TOKEN, ...
-export ENV_OBFUSCATE_PART="TOKEN API KEY"
+export ENV_OBFUSCATE_PART="TOKEN API KEY PASSWORD SECRET CREDENTIAL COOKIE SESSION"
 
 # Check for ENV_IGNORELIST and ENV_OBFUSCATE_PART
 if [ -z "${ENV_IGNORELIST+x}" ]; then error_exit "ENV_IGNORELIST not set"; fi

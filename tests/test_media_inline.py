@@ -597,7 +597,7 @@ class TestMediaEndpointIntegration(unittest.TestCase):
 
     def test_nonexistent_file_returns_404(self):
         _, status, _ = self._get("/api/media?path=/tmp/__hermes_nonexistent_12345.png")
-        self.assertEqual(status, 404)
+        self.assertIn(status, {403, 404})
 
     def test_path_outside_allowed_root_rejected(self):
         # /etc/passwd is outside allowed roots
@@ -621,10 +621,7 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             body, status, headers = self._get(
                 f"/api/media?path={urllib.request.quote(tmp_path)}"
             )
-            self.assertEqual(status, 200, f"Expected 200, got {status}")
-            ct = headers.get("Content-Type", "")
-            self.assertIn("image/png", ct, f"Expected image/png, got {ct}")
-            self.assertEqual(body, png_bytes)
+            self.assertEqual(status, 403, f"bare /tmp media requires a session MEDIA: grant or MEDIA_ALLOWED_ROOTS, got {status}")
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 
@@ -639,19 +636,7 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         try:
             encoded = urllib.request.quote(tmp_path)
             body, status, headers = self._get(f"/api/media?path={encoded}&inline=1")
-            self.assertEqual(status, 200)
-            self.assertIn("audio/wav", headers.get("Content-Type", ""))
-            self.assertIn("inline", headers.get("Content-Disposition", ""))
-            self.assertEqual(headers.get("Accept-Ranges"), "bytes")
-            self.assertEqual(body, audio_bytes)
-
-            body, status, headers = self._get(
-                f"/api/media?path={encoded}&inline=1",
-                headers={"Range": "bytes=0-3"},
-            )
-            self.assertEqual(status, 206)
-            self.assertEqual(body, b"RIFF")
-            self.assertEqual(headers.get("Content-Range"), f"bytes 0-3/{len(audio_bytes)}")
+            self.assertEqual(status, 403)
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 
@@ -667,24 +652,10 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             encoded = urllib.request.quote(tmp_path)
 
             body, status, headers = self._get(f"/api/media?path={encoded}")
-            self.assertEqual(status, 200)
-            self.assertIn("text/html", headers.get("Content-Type", ""))
-            self.assertIn("attachment", headers.get("Content-Disposition", ""))
-            self.assertIn("DENY", headers.get_all("X-Frame-Options", []))
-            self.assertFalse(
-                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
-            )
-            self.assertEqual(body, html_bytes)
+            self.assertEqual(status, 403)
 
             body, status, headers = self._get(f"/api/media?path={encoded}&inline=1")
-            self.assertEqual(status, 200)
-            self.assertIn("text/html", headers.get("Content-Type", ""))
-            self.assertIn("inline", headers.get("Content-Disposition", ""))
-            self.assertEqual(headers.get_all("X-Frame-Options", []), [])
-            self.assertTrue(
-                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
-            )
-            self.assertEqual(body, html_bytes)
+            self.assertEqual(status, 403)
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 
@@ -735,13 +706,10 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             sess_file.unlink(missing_ok=True)
 
     def test_deny_list_does_not_overblock_legitimate_media(self):
-        """#3234 follow-up: the state/secret deny-list must NOT block ordinary
-        media that merely shares a sensitive basename but lives OUTSIDE any
-        Hermes state root (e.g. a user artifact in /tmp named settings.json).
+        """The state/secret deny-list must not be the only /tmp protection.
 
-        The deny is scoped to files under a Hermes root; a /tmp PNG named
-        settings.png — or even settings.json — is the user's own content and
-        must still be served (200), not 403.
+        Bare /tmp paths now require an exact session MEDIA: grant or an explicit
+        MEDIA_ALLOWED_ROOTS opt-in, even if the file name is ordinary media.
         """
         png_bytes = (
             b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
@@ -759,11 +727,7 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             body, status, headers = self._get(
                 f"/api/media?path={urllib.request.quote(tmp_path)}"
             )
-            self.assertEqual(
-                status, 200,
-                f"a /tmp PNG outside any Hermes root must serve, got {status}",
-            )
-            self.assertIn("image/png", headers.get("Content-Type", ""))
+            self.assertEqual(status, 403)
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 

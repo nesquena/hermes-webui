@@ -522,6 +522,25 @@ def _log_shutdown_audit(reason: str = "serve_forever_exit") -> None:
     )
 
 
+def _public_bind_requires_auth(host: str, *, within_container: bool, auth_enabled: bool) -> bool:
+    """Whether startup should refuse a public bind without authentication.
+
+    This is opt-in for bare-metal/dev hosts, but Docker enables it by default in
+    the image because container networking commonly publishes 0.0.0.0 beyond the
+    local machine.
+    """
+    if auth_enabled:
+        return False
+    if host in ('127.0.0.1', '::1', 'localhost'):
+        return False
+    flag = os.getenv('HERMES_WEBUI_REQUIRE_AUTH_FOR_PUBLIC_BIND', '').strip().lower()
+    if flag in ('0', 'false', 'no', 'off'):
+        return False
+    if flag in ('1', 'true', 'yes', 'on'):
+        return True
+    return bool(within_container)
+
+
 def _abort_if_already_serving(host: str, port: int) -> None:
     """Refuse to start if a live HTTP server is already responding on this port."""
     probe_host = '127.0.0.1' if host in ('0.0.0.0', '', '::') else host
@@ -588,16 +607,24 @@ def main() -> None:
     if within_container:
         print('[ok] Running within container.', flush=True)
 
-    # Security: warn if binding non-loopback without authentication
+    # Security: warn/refuse if binding non-loopback without authentication
     from api.auth import is_auth_enabled
-    if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
+    auth_enabled = is_auth_enabled()
+    if _public_bind_requires_auth(HOST, within_container=within_container, auth_enabled=auth_enabled):
+        print(f'[!!] FATAL: Refusing to bind {HOST} without authentication.', flush=True)
+        print(f'     Set HERMES_WEBUI_PASSWORD, configure a password in settings,', flush=True)
+        print(f'     bind to 127.0.0.1, or explicitly set', flush=True)
+        print(f'     HERMES_WEBUI_REQUIRE_AUTH_FOR_PUBLIC_BIND=0 if another layer', flush=True)
+        print(f'     already enforces access control.', flush=True)
+        sys.exit(1)
+    if HOST not in ('127.0.0.1', '::1', 'localhost') and not auth_enabled:
         print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
         print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
         print(f'     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
         print(f'     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
         if within_container:
             print(f'     Note: You are running within a container, must bind to 0.0.0.0 (IPv4) or :: (IPv6) to publish the port.', flush=True)
-    elif not is_auth_enabled():
+    elif not auth_enabled:
         print(f'  [tip] No password set. Any process on this machine can read sessions', flush=True)
         print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
         print(f'        enable authentication.', flush=True)
