@@ -320,6 +320,22 @@ def _get_config_path() -> Path:
 
 _WEBUI_SESSION_SAVE_MODES = {"deferred", "eager"}
 _DEFAULT_WEBUI_SESSION_SAVE_MODE = "deferred"
+_DEFAULT_EXPERIMENTAL_CONFIG = {
+    # Dormant first slice for the unified SessionDB migration. Runtime WebUI
+    # session call sites must continue using the existing JSON paths unless a
+    # later PR deliberately enables and wires this flag.
+    "unified_session_db": False,
+}
+
+
+def _apply_config_defaults(config_data: dict) -> None:
+    """Populate documented default-only config keys in-place."""
+    experimental = config_data.get("experimental")
+    if not isinstance(experimental, dict):
+        experimental = {}
+        config_data["experimental"] = experimental
+    for key, value in _DEFAULT_EXPERIMENTAL_CONFIG.items():
+        experimental.setdefault(key, value)
 
 
 def get_config() -> dict:
@@ -367,6 +383,19 @@ def get_webui_session_save_mode(config_data: dict | None = None) -> str:
     return _DEFAULT_WEBUI_SESSION_SAVE_MODE
 
 
+def is_unified_session_db_enabled(config_data: dict | None = None) -> bool:
+    """Return the dormant unified-session-db feature flag.
+
+    The default is intentionally false so adding the JSON adapter cannot change
+    runtime persistence until a later migration PR switches call sites.
+    """
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    experimental = active_cfg.get("experimental", {}) if isinstance(active_cfg, dict) else {}
+    if not isinstance(experimental, dict):
+        return False
+    return experimental.get("unified_session_db") is True
+
+
 def reload_config() -> None:
     """Reload config.yaml from the active profile's directory."""
     global _cfg_mtime, _cfg_path, _cfg_fingerprint
@@ -391,6 +420,7 @@ def reload_config() -> None:
                         _cfg_mtime = 0.0
         except Exception:
             logger.debug("Failed to load yaml config from %s", config_path)
+        _apply_config_defaults(_cfg_cache)
         _cfg_fingerprint = _fingerprint_config(_cfg_cache)
         # Bust the models cache so the next request sees fresh config values.
         # Only delete the disk cache when config has actually changed -- not on
