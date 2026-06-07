@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.320] — 2026-06-07 — Release KJ (Phase 2 — Polish (pl) language support)
+
+### Added
+- **Polish (pl) language support.** Adds a complete Polish translation set to the in-app localization, a Polish login-page locale, and resolver coverage for `pl` / `pl-PL` / `pl_PL`, with the locale registered consistently across every key group (appearance skins, approval/clarify prompts, tooltips, cache-usage labels, profile skill counts) and parity tests asserting the new locale is complete and actually translated. (#3781, @leszek3737)
+
 ## [v0.51.319] — 2026-06-07 — Release KI (Phase 3 light — refresh stale continuation metadata)
 
 ### Fixed
