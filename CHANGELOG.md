@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.323] — 2026-06-07 — Release KM (7-day provider spend chart)
+
+### Added
+- **The Active Provider Quota card now shows a 7-day spend bar chart with a projected monthly pace** (OpenRouter). Daily spend deltas render as a small bar chart with a "Monthly pace" estimate; a graceful "not enough data yet" message shows until two daily snapshots exist. (#3600, @rodboev)
+
 ## [v0.51.322] — 2026-06-07 — Release KL (sortable + filterable markdown tables)
 
 ### Added
