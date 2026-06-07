@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.314] — 2026-06-07 — Release KD (test infra — reliable test-server boot + diagnostics)
+
+### Changed
+- **The pytest test-server fixture now boots reliably and reports WHY it failed.** Previously the session-scoped server subprocess sent its stdout/stderr to `/dev/null` and was waited on for a fixed 20s with no check for early death — so a slow import-heavy boot (or a transient port-bind race) timed out opaquely and every HTTP-dependent test then cascaded into hundreds of `ConnectionRefused` failures with no clue as to the cause. The fixture now captures server output to a temp log, polls the subprocess for early exit (failing fast instead of waiting out the timeout), raises the boot timeout to 45s, retries once with a fresh port-kill on failure, and surfaces the tail of the captured server log in the `pytest.fail` message. This is test-harness-only; it does not affect the shipped application. (internal)
+
 ## [v0.51.313] — 2026-06-07 — Release KC (instant profile switcher — skip the per-profile alias scan)
 
 ### Fixed
