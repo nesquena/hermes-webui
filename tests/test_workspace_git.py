@@ -1,11 +1,13 @@
 import json
 import pathlib
 import subprocess
+import threading
 import types
 import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 
 import pytest
@@ -898,6 +900,169 @@ def test_git_discard_untracked_delete_uses_anchored_unlink_after_validation_race
     assert victim.read_text(encoding="utf-8") == "outside victim\n"
 
 
+def test_git_status_ignores_repo_local_fsmonitor_command(tmp_path):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("executable fsmonitor helper setup is POSIX-only")
+
+    from api.workspace_git import git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    marker = tmp_path / "fsmonitor-ran"
+    helper = tmp_path / "fsmonitor_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('fsmonitor executed', encoding='utf-8')\n"
+        "print('')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    _git(repo, "config", "core.fsmonitor", f"{sys.executable} {helper} {marker}")
+
+    status = git_status(repo)
+
+    assert status["is_git"] is True
+    assert not marker.exists()
+
+
+def test_git_fetch_blocks_repo_local_ext_transport_execution(tmp_path):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("ext transport helper setup is POSIX-only")
+
+    from api.workspace_git import GitWorkspaceError, git_fetch
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    marker = tmp_path / "ext-transport-ran"
+    helper = tmp_path / "ext_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('ext executed: ' + ' '.join(sys.argv[2:]), encoding='utf-8')\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    _git(repo, "config", "protocol.ext.allow", "always")
+    _git(repo, "remote", "add", "origin", f"ext::{sys.executable} {helper} {marker} %S foo")
+
+    with pytest.raises(GitWorkspaceError) as exc:
+        git_fetch(repo)
+
+    assert exc.value.code == "git_failed"
+    assert not marker.exists()
+
+
+def test_git_fetch_blocks_repo_local_credential_helper_execution(tmp_path):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("executable credential helper setup is POSIX-only")
+
+    from api.workspace_git import GitWorkspaceError, git_fetch
+
+    class AuthRequiredHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="hermes-test"')
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            del format, args
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    marker = tmp_path / "credential-helper-ran"
+    helper = tmp_path / "credential_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('credential helper executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), AuthRequiredHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/repo.git"
+        _git(repo, "remote", "add", "origin", url)
+        _git(repo, "config", "credential.helper", f"!{sys.executable} {helper} {marker}")
+
+        with pytest.raises(GitWorkspaceError) as exc:
+            git_fetch(repo)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert exc.value.code == "auth_failed"
+    assert not marker.exists()
+
+
+def test_git_fetch_blocks_repo_local_askpass_execution(tmp_path):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("executable askpass helper setup is POSIX-only")
+
+    from api.workspace_git import GitWorkspaceError, git_fetch
+
+    class AuthRequiredHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="hermes-test"')
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            del format, args
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    marker = tmp_path / "askpass-ran"
+    helper = tmp_path / "askpass_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('askpass executed', encoding='utf-8')\n"
+        "print('pw')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), AuthRequiredHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/repo.git"
+        _git(repo, "remote", "add", "origin", url)
+        _git(repo, "config", "core.askPass", f"{sys.executable} {helper} {marker}")
+
+        with pytest.raises(GitWorkspaceError) as exc:
+            git_fetch(repo)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert exc.value.code == "auth_failed"
+    assert not marker.exists()
+
+
 def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeypatch):
     from api.workspace_git import _clean_git_env
 
@@ -909,6 +1074,11 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "ssh -i /tmp/evil-key")
     monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.sshCommand=ssh -i /tmp/evil-key'")
+    monkeypatch.setenv("GIT_ASKPASS", "/tmp/evil-askpass")
+    monkeypatch.setenv("SSH_ASKPASS", "/tmp/evil-ssh-askpass")
+    monkeypatch.setenv("GIT_SSH", "/tmp/evil-ssh")
+    monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /tmp/evil-key")
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
 
     env = _clean_git_env({"GIT_INDEX_FILE": "/tmp/hermes-index"})
 
@@ -920,6 +1090,11 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     assert "GIT_CONFIG_KEY_0" not in env
     assert "GIT_CONFIG_VALUE_0" not in env
     assert "GIT_CONFIG_PARAMETERS" not in env
+    assert "GIT_ASKPASS" not in env
+    assert "SSH_ASKPASS" not in env
+    assert "GIT_SSH" not in env
+    assert "GIT_SSH_COMMAND" not in env
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert env["GIT_INDEX_FILE"] == "/tmp/hermes-index"
 
 
