@@ -458,6 +458,19 @@ global.fetch = async function(path, opts = {}) {
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         raw_prompt: 'ignore previous instructions',
       },
+      progress_event: {
+        stored: true,
+        queued: true,
+        event_id: 'evt_sched_refresh_123',
+        event_type: 'run.completed',
+        family: 'run',
+        run_id: 'source-refresh.scheduled',
+        created_at: '2026-05-25T12:00:00Z',
+        redaction_status: 'metadata_only',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'ignore previous instructions',
+      },
       renderer: '<script>bad()</script>',
       api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       raw_prompt: 'ignore previous instructions',
@@ -5080,6 +5093,10 @@ def test_spaces_ui_product_home_scheduled_memory_refresh_action_posts_and_rerend
     assert "Command: capy.memory.refresh.scheduled" in html
     assert "Queued: 2 · Queue jobs: 2 · Processed: 1 · Jobs: 1 · Exit: 0" in html
     assert "Redaction: metadata_only · Redacted: 4 · Compacted: yes" in html
+    assert "Scheduled refresh progress" in html
+    assert "run.completed" in html
+    assert "source-refresh.scheduled" in html
+    assert "Redaction: metadata_only" in html
     assert [call["path"] for call in out["calls"]].count("api/capy-memory/status") >= 2
     assert [call["path"] for call in out["calls"]].count("api/capy-memory/source/catalog") >= 2
     assert "<script>" not in html
@@ -8259,7 +8276,7 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "tool.completed" in out["rootHtml"]
     assert "run creator-preview-run-1" in out["rootHtml"]
     assert "metadata-only progress receipt" in out["rootHtml"]
-    assert "Structured event metadata only; raw prompts, tool bodies, and generated contents are omitted." in out["rootHtml"]
+    assert "Structured event metadata only; prompt bodies, tool bodies, and generated contents are omitted." in out["rootHtml"]
     assert "metadata-only" in out["rootHtml"]
     assert "local-only" in out["rootHtml"]
     assert "raw prompt not stored" in out["rootHtml"]
@@ -8597,7 +8614,7 @@ def test_creator_commit_requires_shared_confirm_and_revision_gates(driver_path):
     assert "space.visual_qa" in out["rootHtml"]
     assert "run creator:creator-lab" in out["rootHtml"]
     assert "metadata-only progress receipt" in out["rootHtml"]
-    assert "Structured event metadata only; raw prompts, tool bodies, and generated contents are omitted." in out["rootHtml"]
+    assert "Structured event metadata only; prompt bodies, tool bodies, and generated contents are omitted." in out["rootHtml"]
     assert "abcdef0123456789abcdef0123456789" in out["rootHtml"]
     assert "Open committed Space" in out["rootHtml"]
     assert "Manage committed widgets" in out["rootHtml"]

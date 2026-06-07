@@ -311,6 +311,7 @@
       (queueRows ? '<ul>'+queueRows+'</ul>' : '') +
       (jobRows ? '<ul>'+jobRows+'</ul>' : '') +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
+      renderPackageProgressEvidence(result && result.progress_event, isScheduled ? 'Scheduled refresh progress' : 'Source refresh progress') +
       renderCompactionEvidence(result && (result.output_compaction || result.compaction)) +
       '</div>';
   }
@@ -1402,7 +1403,7 @@
     const safeTitle = safeDisplayMetadataText(title || 'Package progress', 'Package progress') || 'Package progress';
     return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(safeTitle)+'</strong>' +
       '<div class="capy-spaces-muted">'+escapeHtml(details.join(' · '))+'</div>' +
-      '<div class="capy-spaces-muted">Structured event metadata only; raw prompts, tool bodies, and generated contents are omitted.</div>' +
+      '<div class="capy-spaces-muted">Structured event metadata only; prompt bodies, tool bodies, and generated contents are omitted.</div>' +
       '</div></div></div>';
   }
 

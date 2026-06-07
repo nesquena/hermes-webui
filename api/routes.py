@@ -4398,6 +4398,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/capy-memory/source/refresh/scheduled":
         try:
             from api.capy_memory import (
+                _safe_public_id,
                 _safe_source_refresh_public_jobs,
                 _safe_source_refresh_public_output_compaction,
                 scheduled_source_refresh_tick,
@@ -4466,6 +4467,32 @@ def handle_post(handler, parsed) -> bool:
                 output_compaction = _safe_source_refresh_public_output_compaction(result.get("output_compaction"))
                 if output_compaction:
                     safe_payload["output_compaction"] = output_compaction
+                progress_event = result.get("progress_event")
+                if isinstance(progress_event, dict):
+                    event_type = str(progress_event.get("event_type") or "").strip().lower()
+                    family = str(progress_event.get("family") or "").strip().lower()
+                    run_id = _safe_public_id(progress_event.get("run_id"), fallback="")
+                    event_id = _safe_public_id(progress_event.get("event_id"), fallback="")
+                    created_at = str(progress_event.get("created_at") or "").strip()
+                    safe_created_at = created_at if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z", created_at) else ""
+                    if (
+                        event_type == "run.completed"
+                        and family == "run"
+                        and run_id == "source-refresh.scheduled"
+                        and event_id
+                        and safe_created_at
+                        and progress_event.get("redaction_status") == "metadata_only"
+                    ):
+                        safe_payload["progress_event"] = {
+                            "stored": progress_event.get("stored") is True,
+                            "queued": progress_event.get("queued") is True,
+                            "event_id": event_id,
+                            "event_type": event_type,
+                            "family": family,
+                            "run_id": run_id,
+                            "created_at": safe_created_at,
+                            "redaction_status": "metadata_only",
+                        }
             j(handler, safe_payload)
             return True
         except ValueError as exc:

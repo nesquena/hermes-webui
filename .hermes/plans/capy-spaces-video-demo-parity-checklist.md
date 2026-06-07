@@ -39,6 +39,8 @@ Recent safe adapter progress:
 
 - WebUI streaming runs now emit metadata-only `run.started`, `run.completed`, and `run.failed` lifecycle progress events with safe `webui.run:<stream>` run ids, so product-home progress can show browser-originated autonomous turns as active/completed runs without persisting user prompts, assistant text, tool payloads, provider credentials, renderer/source fields, scripts, or secret-looking fixture values.
 
+- Scheduled Memory Tree source-refresh ticks now emit and return a metadata-only `run.completed` progress receipt with the fixed `source-refresh.scheduled` run id after queue/run completion, making autonomous refresh scheduler activity visible in the product progress stream without storing source URLs, job payloads, raw prompts, renderer/source fields, scripts, or credentials.
+
 - Creator-preview Memory assist now preserves and displays the Memory Tree advisory/no-authority envelope at both the card and per-hit levels, including `untrusted_advisory` authority, cannot-bypass-safety-gates status, and required prompt-preflight/approval/sandbox-preview/visual-QA/rollback-recovery gates while omitting empty or hostile memory hits.
 
 - Public Memory Tree retrieval now returns explicit advisory/no-authority metadata on `search_memory`, `/api/capy-memory/search`, `relevant_memory_for_space`, and `/api/spaces/memory` payloads and hits, making retrieved snippets visibly metadata-only, untrusted advisory context that cannot bypass prompt-preflight, approval, sandbox-preview, visual-QA, or rollback/recovery gates.

@@ -12659,6 +12659,23 @@ def _record_source_refresh_progress(event_type: str, *, source_id: str, job_id: 
         return
 
 
+def _record_scheduled_source_refresh_progress() -> dict[str, Any]:
+    """Best-effort metadata-only progress receipt for the scheduled source-refresh tick."""
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({"event_type": "run.completed", "run_id": "source-refresh.scheduled"})
+    except Exception:  # noqa: BLE001 - progress telemetry must not fail scheduled refresh work.
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "run.completed",
+            "family": "run",
+            "run_id": "source-refresh.scheduled",
+            "redaction_status": "metadata_only",
+        }
+
+
 def _refresh_due_at(last_checked_at: Any, refresh_interval_seconds: Any, *, now: str) -> bool:
     safe_checked_at = _safe_iso_timestamp(last_checked_at)
     if not safe_checked_at:
@@ -13436,6 +13453,7 @@ def scheduled_source_refresh_tick(*, limit: int = 25, now: str | None = None) ->
         jobs=jobs,
         policy=policy,
     )
+    progress_event = _record_scheduled_source_refresh_progress()
     return {
         "ok": True,
         "local_only": True,
@@ -13447,6 +13465,7 @@ def scheduled_source_refresh_tick(*, limit: int = 25, now: str | None = None) ->
         "jobs": jobs,
         "autonomy_policy": policy,
         "output_compaction": output_compaction,
+        "progress_event": progress_event,
     }
 
 

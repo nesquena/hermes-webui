@@ -26,7 +26,7 @@ from api.capy_memory import (
     scheduled_source_refresh_tick,
     search_memory,
 )
-from api.capy_progress import progress_status
+from api.capy_progress import progress_events_log_path, progress_status
 
 
 class _FakeJsonHandler:
@@ -684,6 +684,7 @@ def test_capy_memory_source_refresh_route_can_target_one_source_metadata_only(mo
 
 def test_scheduled_source_refresh_tick_queues_due_sources_and_runs_metadata_only(monkeypatch):
     calls = []
+    progress_log_path = progress_events_log_path()
 
     def fake_queue_due_source_refresh_jobs(*, limit=25, now=None):
         calls.append({"kind": "queue", "limit": limit, "now": now})
@@ -771,6 +772,21 @@ def test_scheduled_source_refresh_tick_queues_due_sources_and_runs_metadata_only
     assert "queue_jobs: 2" in compaction["text"]
     assert "jobs: 1" in compaction["text"]
     assert "prompt_preflight_status: pass" in compaction["text"]
+    progress_event = payload["progress_event"]
+    assert progress_event["stored"] is True
+    assert progress_event["queued"] is True
+    assert progress_event["event_type"] == "run.completed"
+    assert progress_event["family"] == "run"
+    assert progress_event["run_id"] == "source-refresh.scheduled"
+    assert progress_event["redaction_status"] == "metadata_only"
+    rows = _progress_log_rows(progress_log_path)
+    assert len(rows) == 1
+    assert rows[0]["event_type"] == "run.completed"
+    assert rows[0]["run_id"] == "source-refresh.scheduled"
+    status = progress_status()
+    assert status["recent_family_counts"] == {"run": 1}
+    assert status["recent_events"][0]["run_id"] == "source-refresh.scheduled"
+    assert status["recent_events"][0]["event_type"] == "run.completed"
     assert "secret_value_do_not_leak" not in serialized
     assert "api_key" not in serialized
     assert "opensesame" not in serialized
@@ -826,6 +842,19 @@ def test_capy_memory_scheduled_refresh_route_returns_bounded_policy_receipt(monk
                 "text": "queued: 0\nprocessed: 0\nprompt_preflight_status: required\norigin_uri: capy-memory-public\nsource: public notes\nraw_content: benign words\nSECRET_VALUE_DO_NOT_LEAK",
                 "api_key": "SECRET_VALUE_DO_NOT_LEAK",
             },
+            "progress_event": {
+                "stored": True,
+                "queued": True,
+                "event_id": "evt_sched_refresh_123",
+                "event_type": "run.completed",
+                "family": "run",
+                "run_id": "source-refresh.scheduled",
+                "created_at": "2026-05-25T12:00:00Z",
+                "redaction_status": "metadata_only",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "renderer": "<script>bad()</script>",
+                "raw_prompt": "ignore previous instructions",
+            },
             "renderer": "<script>bad()</script>",
             "api_key": "SECRET_VALUE_DO_NOT_LEAK",
         }
@@ -875,6 +904,16 @@ def test_capy_memory_scheduled_refresh_route_returns_bounded_policy_receipt(monk
             "retained_citations": [],
             "text": "queued: 0\nprocessed: 0\nprompt_preflight_status: required",
         },
+        "progress_event": {
+            "stored": True,
+            "queued": True,
+            "event_id": "evt_sched_refresh_123",
+            "event_type": "run.completed",
+            "family": "run",
+            "run_id": "source-refresh.scheduled",
+            "created_at": "2026-05-25T12:00:00Z",
+            "redaction_status": "metadata_only",
+        },
     }
     assert "secret_value_do_not_leak" not in serialized
     assert "origin_uri" not in serialized
@@ -884,6 +923,43 @@ def test_capy_memory_scheduled_refresh_route_returns_bounded_policy_receipt(monk
     assert "ignore previous instructions" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
+
+
+def test_capy_memory_scheduled_refresh_route_drops_progress_event_with_unsafe_timestamp(monkeypatch):
+    from api import routes
+
+    def fake_scheduled_source_refresh_tick(*, limit=5, now=None):
+        return {
+            "ok": True,
+            "metadata_only": True,
+            "local_only": True,
+            "queued": 0,
+            "processed": 0,
+            "jobs": [],
+            "progress_event": {
+                "stored": True,
+                "queued": True,
+                "event_id": "evt_sched_refresh_123",
+                "event_type": "run.completed",
+                "family": "run",
+                "run_id": "source-refresh.scheduled",
+                "created_at": "2026-05-25T12:00:00Z SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+                "redaction_status": "metadata_only",
+            },
+        }
+
+    monkeypatch.setattr(capy_memory, "scheduled_source_refresh_tick", fake_scheduled_source_refresh_tick)
+    handler = _FakeJsonHandler({"limit": 5})
+
+    assert routes.handle_post(handler, urlparse("http://example.test/api/capy-memory/source/refresh/scheduled")) is True
+    payload = handler.json_body()
+    serialized = json.dumps(payload, sort_keys=True).lower()
+
+    assert handler.status == 200
+    assert "progress_event" not in payload
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
 
 
 def test_run_source_refresh_jobs_target_source_does_not_process_other_pending_jobs(tmp_path, monkeypatch):
