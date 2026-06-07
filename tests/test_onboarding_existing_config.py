@@ -33,14 +33,16 @@ _needs_yaml = pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed —
 # ---------------------------------------------------------------------------
 
 
-def _make_status(*, config_exists: bool, chat_ready: bool, onboarding_done: bool = False):
+def _make_status(
+    *, tmp_path: pathlib.Path, config_exists: bool, chat_ready: bool, onboarding_done: bool = False
+):
     """Call get_onboarding_status() with a controlled filesystem + settings."""
     import importlib
 
     # Import fresh copies each call so module-level state doesn't bleed across
     import api.onboarding as mod
 
-    fake_config_path = pathlib.Path("/tmp/_test_config.yaml")
+    fake_config_path = tmp_path / "_test_config.yaml"
 
     settings = {"onboarding_completed": onboarding_done}
 
@@ -55,7 +57,7 @@ def _make_status(*, config_exists: bool, chat_ready: bool, onboarding_done: bool
         "current_provider": "openrouter" if chat_ready else None,
         "current_model": "anthropic/claude-sonnet-4.6" if chat_ready else None,
         "current_base_url": None,
-        "env_path": "/tmp/.hermes_test/.env",
+        "env_path": str(tmp_path / ".hermes_test" / ".env"),
     }
 
     with (
@@ -81,42 +83,47 @@ def _make_status(*, config_exists: bool, chat_ready: bool, onboarding_done: bool
 
 
 class TestOnboardingGate:
-    def test_config_exists_and_chat_ready_returns_completed_true(self):
+    def test_config_exists_and_chat_ready_returns_completed_true(self, tmp_path):
         """Primary fix: existing valid config → wizard must NOT fire."""
-        result = _make_status(config_exists=True, chat_ready=True)
+        result = _make_status(tmp_path=tmp_path, config_exists=True, chat_ready=True)
         assert result["completed"] is True, (
             "Wizard fired for existing Hermes user! "
             "config.yaml + chat_ready must auto-complete onboarding."
         )
 
-    def test_no_config_returns_completed_false(self):
+    def test_no_config_returns_completed_false(self, tmp_path):
         """Fresh install with no config → wizard should fire."""
-        result = _make_status(config_exists=False, chat_ready=False)
+        result = _make_status(tmp_path=tmp_path, config_exists=False, chat_ready=False)
         assert result["completed"] is False, (
             "Fresh install must show the wizard (completed should be False)."
         )
 
-    def test_config_exists_but_not_chat_ready_still_shows_wizard(self):
+    def test_config_exists_but_not_chat_ready_still_shows_wizard(self, tmp_path):
         """Broken/incomplete config (config.yaml exists but chat_ready=False) →
         still show wizard so the user can fix it."""
-        result = _make_status(config_exists=True, chat_ready=False)
+        result = _make_status(tmp_path=tmp_path, config_exists=True, chat_ready=False)
         # Should NOT be auto-completed — config is present but broken
         assert result["completed"] is False, (
             "Broken config (chat_ready=False) must still show the wizard."
         )
 
-    def test_onboarding_done_flag_always_respected(self):
+    def test_onboarding_done_flag_always_respected(self, tmp_path):
         """If user already completed onboarding in settings, never show wizard."""
-        result = _make_status(config_exists=False, chat_ready=False, onboarding_done=True)
+        result = _make_status(
+            tmp_path=tmp_path,
+            config_exists=False,
+            chat_ready=False,
+            onboarding_done=True,
+        )
         assert result["completed"] is True
 
-    def test_config_exists_always_exposed_in_system(self):
+    def test_config_exists_always_exposed_in_system(self, tmp_path):
         """config_exists must still appear in the response system block."""
-        result = _make_status(config_exists=True, chat_ready=True)
+        result = _make_status(tmp_path=tmp_path, config_exists=True, chat_ready=True)
         assert "config_exists" in result["system"]
         assert result["system"]["config_exists"] is True
 
-    def test_persist_failure_does_not_break_status_endpoint(self):
+    def test_persist_failure_does_not_break_status_endpoint(self, tmp_path):
         """save_settings() failure (read-only FS, disk full) must not turn the
         status endpoint into a 500.  The persistence-across-restart guarantee
         degrades but `completed` still reflects the live `config_auto_completed`
@@ -133,9 +140,9 @@ class TestOnboardingGate:
             "current_provider": "openrouter",
             "current_model": "anthropic/claude-sonnet-4.6",
             "current_base_url": None,
-            "env_path": "/tmp/.hermes_test/.env",
+            "env_path": str(tmp_path / ".hermes_test" / ".env"),
         }
-        fake_config_path = pathlib.Path("/tmp/_test_config.yaml")
+        fake_config_path = tmp_path / "_test_config.yaml"
 
         with (
             mock.patch.object(mod, "load_settings", return_value=settings),
@@ -164,10 +171,10 @@ class TestOnboardingGate:
 class TestApplyOnboardingSetupGuard:
     """Fix #2: apply_onboarding_setup must not silently overwrite config.yaml."""
 
-    def _call_setup(self, body: dict, config_yaml_exists: bool):
+    def _call_setup(self, tmp_path: pathlib.Path, body: dict, config_yaml_exists: bool):
         import api.onboarding as mod
 
-        fake_config_path = pathlib.Path("/tmp/_test_config.yaml")
+        fake_config_path = tmp_path / "_test_config.yaml"
 
         with (
             mock.patch.object(mod, "_get_config_path", return_value=fake_config_path),
@@ -175,9 +182,10 @@ class TestApplyOnboardingSetupGuard:
         ):
             return mod.apply_onboarding_setup(body)
 
-    def test_setup_blocked_when_config_exists_without_confirm(self):
+    def test_setup_blocked_when_config_exists_without_confirm(self, tmp_path):
         """Must return an error dict (not raise) if config.yaml exists and no confirm_overwrite."""
         result = self._call_setup(
+            tmp_path,
             {
                 "provider": "openrouter",
                 "model": "anthropic/claude-sonnet-4.6",
@@ -192,12 +200,12 @@ class TestApplyOnboardingSetupGuard:
         assert result.get("requires_confirm") is True
 
     @_needs_yaml
-    def test_setup_allowed_with_confirm_overwrite(self):
+    def test_setup_allowed_with_confirm_overwrite(self, tmp_path):
         """With confirm_overwrite=True, setup may proceed (will hit real logic)."""
         import api.onboarding as mod
         import tempfile
 
-        fake_config_path = pathlib.Path("/tmp/_test_config_confirm.yaml")
+        fake_config_path = tmp_path / "_test_config_confirm.yaml"
         fake_config_path.unlink(missing_ok=True)  # start clean
         try:
             with tempfile.TemporaryDirectory() as tmp_home:
@@ -223,18 +231,18 @@ class TestApplyOnboardingSetupGuard:
             fake_config_path.unlink(missing_ok=True)
 
     @_needs_yaml
-    def test_setup_allowed_when_no_config_exists(self):
+    def test_setup_allowed_when_no_config_exists(self, tmp_path):
         """Fresh install: no config.yaml → setup proceeds normally (no blocking error)."""
         import api.onboarding as mod
         import tempfile
 
-        fake_config_path = pathlib.Path("/tmp/_test_config_fresh.yaml")
+        fake_config_path = tmp_path / "_test_config_fresh.yaml"
         fake_config_path.unlink(missing_ok=True)
         try:
             with tempfile.TemporaryDirectory() as tmp_home:
                 tmp_home_path = pathlib.Path(tmp_home)
-                # Redirect both config path and hermes home so writes stay in /tmp,
-                # never touching the real ~/.hermes/.env.
+                # Redirect both config path and hermes home into temp dirs so the
+                # test never touches the real ~/.hermes/.env.
                 with (
                     mock.patch.object(mod, "_get_config_path", return_value=fake_config_path),
                     mock.patch.object(mod, "_get_active_hermes_home", return_value=tmp_home_path),
