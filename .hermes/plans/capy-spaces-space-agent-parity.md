@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): add collection read safety receipts`
+  - Added RED/GREEN backend coverage proving Space collection/current read helpers (`space.list`, `space.spaces.listSpaces`, `space.spaces.items`, `space.spaces.all`, `space.spaces.byId`, `space.current.get`, and `space.spaces.getCurrentSpace`) now return metadata-only prompt-preflight, autonomy-policy, progress, and output-compaction receipts while preserving sanitized list/current Space payloads.
+  - Collection reads use the neutral `space.collection:list` progress id, selected current reads use `space.current.read:<space_id>`, no-current reads use `space.current.read:none`, and hostile renderer/source/html/API-auth/raw-prompt/bearer/secret fixture values stay out of serialized responses and compaction text.
+
 - `feat(spaces): add current id safety receipts`
   - Added RED/GREEN backend coverage proving `space.spaces.currentId` now returns metadata-only prompt-preflight, autonomy-policy, progress, and output-compaction receipts while preserving the functional active/current Space id payload.
   - Helper progress uses the action-scoped `space.current:id` run id without a synthetic Space id and keeps renderer/source/API-auth/raw-prompt/script/bearer/secret fixture values out of serialized responses and compaction text.

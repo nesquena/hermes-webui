@@ -7756,6 +7756,100 @@ def _space_api_health_receipt_envelope(action: str, *, space_count: int) -> dict
     }
 
 
+def _record_space_collection_read_progress_event(
+    action: str,
+    *,
+    space_id: str | None = None,
+    current_read: bool = False,
+) -> dict[str, Any]:
+    """Best-effort metadata-only progress receipt for Space collection/current reads."""
+    if space_id:
+        return _record_space_tool_progress_event(space_id, run_prefix="space.current.read")
+    run_id = "space.current.read:none" if current_read else "space.collection:list"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({"event_type": "tool.completed", "run_id": run_id})
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
+def _space_collection_read_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only evidence for Space collection/current read helpers."""
+    safe_action = _context_value(action, 120) or "space.collection.read"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "space_collection_read",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": [
+            "space_collection_read_preflight_required",
+            "metadata_only_payload_required",
+            "prompt_injection_preflight_required",
+        ],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _space_collection_read_action_policy_receipt(
+    action: str, preflight_receipt: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Return metadata-only policy evidence for Space collection/current reads."""
+    from api.capy_policy import action_policy_receipt
+
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
+    return action_policy_receipt(
+        action,
+        approval_gates=["creator_commit"],
+        prompt_preflight_status=status,
+        model_route_hint="hint:fast",
+    )
+
+
+def _space_collection_read_receipt_envelope(
+    action: str,
+    *,
+    space_count: int | None = None,
+    space_id: str | None = None,
+    widget_count: int | None = None,
+    current_read: bool = False,
+) -> dict[str, Any]:
+    """Return metadata-only receipts for Space collection/current read tool calls."""
+    prompt_preflight = _space_collection_read_required_prompt_preflight_receipt(action)
+    autonomy_policy = _space_collection_read_action_policy_receipt(action, prompt_preflight)
+    progress_event = _record_space_collection_read_progress_event(
+        action, space_id=space_id, current_read=current_read
+    )
+    return {
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "output_compaction": _space_tool_action_output_compaction_receipt(
+            action=action,
+            space_id=space_id,
+            widget_count=widget_count,
+            space_count=space_count,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+            include_widget_count=widget_count is not None,
+        ),
+    }
+
+
 def _space_tool_resolve_app_url(payload: dict[str, Any]) -> str:
     """Resolve a Space Agent-style logical app path without exposing raw unsafe inputs."""
     raw = payload.get("logicalPath") or payload.get("logical_path") or payload.get("path") or ""
@@ -7853,11 +7947,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "ok": True,
             "action": name,
             "spaces": spaces,
-            "output_compaction": _space_tool_action_output_compaction_receipt(
-                action=name,
-                space_count=len(spaces),
-                include_widget_count=False,
-            ),
+            **_space_collection_read_receipt_envelope(action=name, space_count=len(spaces)),
         }
     if name in {"space.spaces.items", "space.spaces.all"}:
         spaces = list_spaces()
@@ -7865,11 +7955,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "ok": True,
             "action": name,
             "spaces": spaces,
-            "output_compaction": _space_tool_action_output_compaction_receipt(
-                action=name,
-                space_count=len(spaces),
-                include_widget_count=False,
-            ),
+            **_space_collection_read_receipt_envelope(action=name, space_count=len(spaces)),
         }
     if name == "space.spaces.widgetapiversion":
         return {
@@ -7885,11 +7971,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "ok": True,
             "action": name,
             "spaces_by_id": {space["space_id"]: space for space in spaces},
-            "output_compaction": _space_tool_action_output_compaction_receipt(
-                action=name,
-                space_count=len(spaces),
-                include_widget_count=False,
-            ),
+            **_space_collection_read_receipt_envelope(action=name, space_count=len(spaces)),
         }
     if name in {"space.demo.list", "space.demo.runs"}:
         demos = list_space_demo_runs()
@@ -7902,7 +7984,17 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.current", "space.current.get", "space.spaces.current", "space.spaces.getcurrentspace"}:
         current_id = _space_tool_current_id(data)
         if not current_id:
-            return {"ok": True, "action": name, "active_space_id": None, "space": None}
+            return {
+                "ok": True,
+                "action": name,
+                "active_space_id": None,
+                "space": None,
+                **_space_collection_read_receipt_envelope(
+                    action=name,
+                    widget_count=0,
+                    current_read=True,
+                ),
+            }
         space_id = validate_space_id(current_id)
         space = read_space_detail(space_id)
         return {
@@ -7910,7 +8002,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "action": name,
             "active_space_id": space_id,
             "space": space,
-            "output_compaction": _space_tool_action_output_compaction_receipt(
+            **_space_collection_read_receipt_envelope(
                 action=name,
                 space_id=space_id,
                 widget_count=len(space.get("widgets") or []),
@@ -14045,6 +14137,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "shared-slot.get",
         "shared-slot.delete",
         "space.create",
+        "space.current.read",
         "space.delete",
         "space.duplicate",
         "space.open",
