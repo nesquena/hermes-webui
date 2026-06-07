@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.309] — 2026-06-07 — Release JY (stage-a5b — restore reconnect replays live tool cards)
+
+### Fixed
+- **Switching back to a long-running session during reconnect no longer drops the live tool cards.** After the #3401 live-to-final redesign (epic #3400), when a running session was restored from its in-memory live-turn snapshot and then reattached to the SSE stream, the restore-success path skipped replaying persisted live tool calls — so you'd return to restored live text and thinking but an empty Worklog until a later SSE event or the final render rebuilt the turn. The persisted tool-card replay now also runs on the restore-success + reconnect path (not only the fallback path). To avoid double-painting, an unkeyed persisted tool is skipped when the restored snapshot already shows tool rows, `appendLiveToolCard()` dedupes across all known tool-id aliases (`tid`/`id`/`tool_call_id`/`tool_use_id`/`call_id`), and both replay sites pass the session/stream ownership guard so a switched-away session can't repaint stale tools. (#3763 fixes #3707, @franksong2702)
+
 ## [v0.51.308] — 2026-06-07 — Release JX (consistency — gate onboarding-complete like its siblings)
 
 ### Changed
