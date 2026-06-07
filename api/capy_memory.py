@@ -617,6 +617,14 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         _github_workflow_run_timing_path_run_id(raw_origin_text) is None
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_workflow_timing_route_path_matches(raw_origin_text):
+        workflow_timing_origin = _github_workflow_timing_fetch_origin(raw_origin_text)
+        workflow_timing_public_origin = _github_workflow_timing_public_origin(workflow_timing_origin)
+        if not workflow_timing_origin or not workflow_timing_public_origin:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = workflow_timing_public_origin
+            fetch_origin_uri = workflow_timing_origin
     if _github_workflow_attempt_jobs_route_path_matches(raw_origin_text) and (
         _github_workflow_attempt_jobs_path_info(raw_origin_text) is None
     ):
@@ -2822,6 +2830,122 @@ def _github_workflow_run_timing_refresh_summary(origin_uri: str, payload: dict[s
         total_ms = _safe_optional_nonnegative_int(entry.get("total_ms")) or 0
         jobs = _safe_optional_nonnegative_int(entry.get("jobs")) or 0
         parts.append(f"billable {safe_label} total ms: {total_ms}; jobs: {jobs}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_workflow_timing_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _matches_timing_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 8
+            and path[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "actions"
+            and lowered[5] == "workflows"
+            and bool(path[6])
+            and lowered[7].startswith("timing")
+        )
+
+    return _matches_timing_shape(parts.path) or _matches_timing_shape(unquote(parts.path))
+
+
+def _github_workflow_timing_path_info(origin_uri: str) -> tuple[str, str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+        explicit_port = parts.port is not None
+    except ValueError:
+        return None
+    if (
+        parts.scheme != "https"
+        or not _github_raw_authority_is_exact(origin_uri, "api.github.com")
+        or (parts.hostname or "") != "api.github.com"
+        or parts.username
+        or parts.password
+        or explicit_port
+        or "@" in parts.netloc
+    ):
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 8
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "actions"
+        or path[5] != "workflows"
+        or path[7] != "timing"
+        or not re.fullmatch(r"[1-9][0-9]*", path[6])
+    ):
+        return None
+    return (path[2], path[3], int(path[6]))
+
+
+
+def _github_workflow_timing_fetch_origin(origin_uri: str) -> str:
+    info = _github_workflow_timing_path_info(origin_uri)
+    if info is None:
+        return ""
+    owner, repo, workflow_id = info
+    return f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow_id}/timing"
+
+
+def _github_workflow_timing_public_origin(origin_uri: str) -> str:
+    info = _github_workflow_timing_path_info(origin_uri)
+    if info is None:
+        return ""
+    owner, repo, workflow_id = info
+    return f"github workflow timing {owner}/{repo} {workflow_id}"
+
+
+def _github_workflow_timing_entry_is_safe(label: Any, entry: Any) -> bool:
+    if not _github_workflow_run_timing_label_is_safe(label):
+        return False
+    if not isinstance(entry, dict):
+        return False
+    total_ms = _safe_optional_nonnegative_int(entry.get("total_ms"))
+    if total_ms is None or total_ms > 100_000_000_000:
+        return False
+    return True
+
+
+def _json_payload_is_github_workflow_timing_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_workflow_timing_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if _json_payload_is_feed(payload) or any(
+        key in payload for key in ("items", "version", "summary", "content_html", "content_text")
+    ):
+        return False
+    billable = payload.get("billable")
+    if not isinstance(billable, dict) or not billable:
+        return False
+    return all(_github_workflow_timing_entry_is_safe(label, entry) for label, entry in billable.items())
+
+
+def _github_workflow_timing_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    owner, repo, workflow_id = _github_workflow_timing_path_info(origin_uri) or ("", "", 0)
+    repository = f"{owner}/{repo}" if owner and repo else "unknown"
+    parts = [
+        f"GitHub workflow {repository} #{workflow_id} timing",
+        f"repository: {repository}",
+        f"workflow id: {workflow_id}",
+    ]
+    raw_billable = payload.get("billable")
+    billable: dict[Any, Any] = raw_billable if isinstance(raw_billable, dict) else {}
+    for label, entry in list(billable.items())[:5]:
+        if not _github_workflow_timing_entry_is_safe(label, entry):
+            continue
+        safe_label = _safe_public_text(label, limit=80).lower()
+        total_ms = _safe_optional_nonnegative_int(entry.get("total_ms")) or 0
+        parts.append(f"billable {safe_label} total ms: {total_ms}")
     return _bounded_refresh_summary("; ".join(parts))
 
 
@@ -5885,6 +6009,12 @@ def _source_catalog_public_origin_uri(value: Any, *, source_id: str) -> str:
         custom_properties_repo = _github_repository_custom_properties_path_repo(custom_properties_origin or "")
         if custom_properties_origin and custom_properties_repo:
             return f"github repository custom properties {custom_properties_repo}"
+        return f"capy-memory://{source_id}"
+    if _github_workflow_timing_route_path_matches(raw_text):
+        workflow_timing_origin = _github_workflow_timing_fetch_origin(raw_text)
+        workflow_timing_public_origin = _github_workflow_timing_public_origin(workflow_timing_origin)
+        if workflow_timing_origin and workflow_timing_public_origin:
+            return workflow_timing_public_origin
         return f"capy-memory://{source_id}"
     return _safe_origin_uri(value, source_id=source_id)
 
@@ -11088,6 +11218,10 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         elif _json_payload_is_github_workflow_runs_metadata(origin_uri, payload):
             title = f"GitHub workflow runs {(_github_workflow_runs_path_repo(origin_uri) or source_id)}"
             summary = _github_workflow_runs_refresh_summary(origin_uri, payload)
+        elif _json_payload_is_github_workflow_timing_metadata(origin_uri, payload):
+            workflow_timing_info = _github_workflow_timing_path_info(origin_uri) or ("", "", 0)
+            title = f"GitHub workflow {workflow_timing_info[0]}/{workflow_timing_info[1]} {workflow_timing_info[2]} timing"
+            summary = _github_workflow_timing_refresh_summary(origin_uri, payload)
         elif _json_payload_is_github_workflow_run_timing_metadata(origin_uri, payload):
             title = f"GitHub workflow run {_github_workflow_run_timing_path_run_id(origin_uri) or 0} timing"
             summary = _github_workflow_run_timing_refresh_summary(origin_uri, payload)
@@ -11393,6 +11527,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         _github_workflow_run_timing_path_run_id(raw_origin_uri) is None
     ):
         raise RuntimeError("refresh fetcher disabled")
+    if _github_workflow_timing_route_path_matches(raw_origin_uri) and (
+        _github_workflow_timing_path_info(raw_origin_uri) is None
+    ):
+        raise RuntimeError("refresh fetcher disabled")
     if _github_workflow_attempt_jobs_route_path_matches(raw_origin_uri) and (
         _github_workflow_attempt_jobs_path_info(raw_origin_uri) is None
     ):
@@ -11577,6 +11715,8 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_workflow_run_timing_path_run_id(safe_origin_uri) is not None:
         request_accept = "application/json"
+    if _github_workflow_timing_path_info(safe_origin_uri) is not None:
+        request_accept = "application/json"
     if _github_workflow_attempt_jobs_route_path_matches(safe_origin_uri):
         if _github_workflow_attempt_jobs_path_info(safe_origin_uri) is None:
             raise RuntimeError("refresh fetcher disabled")
@@ -11702,6 +11842,15 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_workflow_run_timing_path_info(final_url) != _github_workflow_run_timing_path_info(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_workflow_timing_path_info(safe_origin_uri) is not None:
+            expected_workflow_timing_origin = _github_workflow_timing_fetch_origin(safe_origin_uri)
+            final_workflow_timing_origin = _github_workflow_timing_fetch_origin(final_url)
+            if (
+                not final_workflow_timing_origin
+                or final_workflow_timing_origin != expected_workflow_timing_origin
+                or final_url != expected_workflow_timing_origin
+            ):
+                raise RuntimeError("refresh fetcher disabled")
         if _github_workflow_attempt_jobs_route_path_matches(safe_origin_uri) and (
             _github_workflow_attempt_jobs_path_info(final_url) is None
             or _github_workflow_attempt_jobs_path_info(final_url) != _github_workflow_attempt_jobs_path_info(safe_origin_uri)
@@ -12087,6 +12236,8 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_workflow_run_timing_path_run_id(safe_origin_uri) is not None and content_type != "application/json":
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_workflow_timing_path_info(safe_origin_uri) is not None and content_type != "application/json":
             raise RuntimeError("refresh fetcher disabled")
         raw = response.read(_MAX_REFRESH_FETCH_BYTES + 1)
         if len(raw) > _MAX_REFRESH_FETCH_BYTES:
@@ -12557,6 +12708,9 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
             actions_runners_origin_text = _safe_github_actions_runners_origin_text(raw_source_origin_uri)
             actions_caches_origin_text = _safe_github_actions_caches_origin_text(raw_source_origin_uri)
             custom_properties_origin_text = _safe_github_repository_custom_properties_origin_text(raw_source_origin_uri)
+            workflow_timing_fetch_origin = _github_workflow_timing_fetch_origin(
+                str(payload.get("fetch_origin_uri") or "")
+            ) or _github_workflow_timing_fetch_origin(str(payload.get("origin_uri") or ""))
             if actions_runners_origin_text:
                 origin_uri = actions_runners_origin_text
             elif _github_actions_runners_route_path_matches(raw_source_origin_uri):
@@ -12567,6 +12721,8 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
                 origin_uri = _source_catalog_public_origin_uri(raw_source_origin_uri, source_id=source_id)
             elif custom_properties_origin_text:
                 origin_uri = custom_properties_origin_text
+            elif workflow_timing_fetch_origin:
+                origin_uri = _github_workflow_timing_public_origin(workflow_timing_fetch_origin)
             elif _github_repository_custom_properties_route_path_matches(raw_source_origin_uri):
                 custom_properties_origin = _github_repository_custom_properties_safe_origin(raw_source_origin_uri)
                 custom_properties_repo = _github_repository_custom_properties_path_repo(custom_properties_origin or "")
@@ -12578,6 +12734,13 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
                 _github_workflow_run_timing_path_run_id(raw_source_origin_uri) is None
             ):
                 origin_uri = f"capy-memory://{source_id}"
+            elif _github_workflow_timing_route_path_matches(raw_source_origin_uri):
+                workflow_timing_fetch_origin = _github_workflow_timing_fetch_origin(raw_source_origin_uri)
+                workflow_timing_public_origin = _github_workflow_timing_public_origin(workflow_timing_fetch_origin)
+                if workflow_timing_fetch_origin and workflow_timing_public_origin:
+                    origin_uri = workflow_timing_public_origin
+                else:
+                    origin_uri = f"capy-memory://{source_id}"
             else:
                 origin_uri = _safe_origin_uri(raw_source_origin_uri, source_id=source_id)
             interval = _safe_refresh_interval(payload.get("refresh_interval_seconds"))
@@ -12599,6 +12762,8 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
             deploy_keys_fetch_origin = _github_deploy_keys_safe_origin(str(payload.get("fetch_origin_uri") or ""))
             if deploy_keys_fetch_origin and _github_deploy_keys_path_repo(deploy_keys_fetch_origin):
                 updated_payload["fetch_origin_uri"] = deploy_keys_fetch_origin
+            if workflow_timing_fetch_origin and _github_workflow_timing_path_info(workflow_timing_fetch_origin) is not None:
+                updated_payload["fetch_origin_uri"] = workflow_timing_fetch_origin
             cursor = conn.execute(
                 """
                 UPDATE jobs
@@ -12794,6 +12959,12 @@ def run_source_refresh_jobs(
                 origin_uri = f"capy-memory://{source_id}"
             else:
                 origin_uri = _safe_origin_uri(raw_origin_uri, source_id=source_id)
+        elif _github_workflow_timing_route_path_matches(raw_origin_uri):
+            workflow_timing_origin = _github_workflow_timing_fetch_origin(raw_origin_uri)
+            if workflow_timing_origin:
+                origin_uri = workflow_timing_origin
+            else:
+                origin_uri = f"capy-memory://{source_id}"
         elif _github_issue_timeline_route_path_matches(raw_origin_uri):
             issue_timeline_origin = _github_issue_timeline_safe_origin(raw_origin_uri)
             if issue_timeline_origin:
@@ -12900,12 +13071,23 @@ def run_source_refresh_jobs(
             origin_uri = f"capy-memory://{source_id}"
         else:
             origin_uri = _safe_origin_uri(raw_origin_uri, source_id=source_id)
+        record_origin_uri = origin_uri
+        if _github_workflow_timing_path_info(origin_uri) is not None:
+            workflow_timing_public_origin = _github_workflow_timing_public_origin(origin_uri)
+            if workflow_timing_public_origin:
+                record_origin_uri = workflow_timing_public_origin
         try:
             _record_source_refresh_progress("memory.ingest.started", source_id=source_id, job_id=job_id)
             if not _source_refresh_allowed(origin_uri):
                 raise ValueError("refresh failed")
             fetched = fetch(source_id=source_id, origin_uri=origin_uri)
-            record = _source_refresh_record(source_id, origin_uri, fetched)
+            fetched_for_record = fetched
+            if record_origin_uri != origin_uri and isinstance(fetched, dict):
+                fetched_for_record = dict(fetched)
+                fetched_for_record["origin_uri"] = record_origin_uri
+            record = _source_refresh_record(source_id, origin_uri, fetched_for_record)
+            if record_origin_uri != origin_uri:
+                record["origin_uri"] = record_origin_uri
             from api.capy_policy import prompt_preflight, resolve_model_route_hint
 
             model_route_resolution = (
@@ -12928,6 +13110,8 @@ def run_source_refresh_jobs(
                 summarizer=active_summarizer,
                 model_route_resolution=model_route_resolution,
             )
+            if record_origin_uri != origin_uri:
+                record["origin_uri"] = record_origin_uri
             summarized_preflight = prompt_preflight(
                 record.get("prompt_preflight_text") or record.get("markdown", ""),
                 boundary="auto_fetched_source",

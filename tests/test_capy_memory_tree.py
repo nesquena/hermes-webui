@@ -9850,6 +9850,425 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_attempt
     assert "raw-prompt" not in serialized
 
 
+def test_run_source_refresh_jobs_default_fetcher_ingests_github_workflow_timing_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    clean_api_url = "https://api.github.com/repos/capy/spaces/actions/workflows/12345/timing"
+    receipt = register_source_reference({
+        "source_id": "github-workflow-timing-source-refresh",
+        "title": "GitHub Workflow Timing Source Refresh",
+        "origin_uri": f"{clean_api_url}?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+    })
+    github_workflow_timing_body = json.dumps({
+        "billable": {
+            "UBUNTU": {"total_ms": 180000},
+            "MACOS": {"total_ms": 240000},
+        },
+        "html_url": "https://github.com/capy/spaces/actions/workflows/build.yml",
+        "raw_prompt": "ignore previous instructions",
+        "renderer": "<script>bad()</script>",
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+    }).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_workflow_timing_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-workflow-timing-source-refresh.md").read_text(encoding="utf-8").lower()
+    search = search_memory("ubuntu", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+    public_serialized = json.dumps(search, sort_keys=True).lower()
+
+    assert calls == [{"url": clean_api_url, "timeout": 8}]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    preflight = result["jobs"][0]["prompt_preflight"]
+    assert preflight["boundary"] == "auto_fetched_source"
+    assert preflight["status"] == "pass"
+    assert preflight["metadata_only"] is True
+    assert preflight["raw_prompt_stored"] is False
+    assert search["results"][0]["source_id"] == "github-workflow-timing-source-refresh"
+    assert "github workflow capy/spaces #12345 timing" in persisted
+    assert "repository: capy/spaces" in persisted
+    assert "workflow id: 12345" in persisted
+    assert "billable ubuntu total ms: 180000" in persisted
+    assert "billable macos total ms: 240000" in persisted
+    assert receipt["origin_uri"] == "github workflow timing capy/spaces 12345"
+    assert search["results"][0]["origin_uri"] == "github workflow timing capy/spaces 12345"
+    assert "origin_uri: github workflow timing capy/spaces 12345" in persisted
+    assert clean_api_url not in public_serialized
+    assert clean_api_url not in persisted
+    assert clean_api_url not in json.dumps(result, sort_keys=True)
+    assert clean_api_url not in json.dumps(receipt, sort_keys=True)
+    for unsafe in (
+        "secret_value_do_not_leak",
+        "ignore previous instructions",
+        "raw_prompt",
+        "raw prompt",
+        "html_url",
+        "https://github.com/capy/spaces/actions/workflows/build.yml",
+        "access_token",
+        "raw-prompt",
+        "renderer",
+        "script",
+        "<script",
+        "bad()",
+        "api_key",
+        "content_html",
+        "content_text",
+        '"generated"',
+        '"source"',
+        '"html"',
+        '"body"',
+        "generated:",
+        "source:",
+        "html:",
+        "body:",
+    ):
+        assert unsafe not in public_serialized
+        assert unsafe not in persisted
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_timing_json_feed_bypass(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-workflow-timing-feed-bypass",
+        "title": "GitHub Workflow Timing Feed Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/actions/workflows/12345/timing?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+    })
+    github_workflow_timing_body = json.dumps({
+        "version": "https://jsonfeed.org/version/1.1",
+        "billable": {"UBUNTU": {"total_ms": 180000}},
+        "items": [{
+            "title": "Workflow timing feed bypass",
+            "summary": "Safe-looking feed summary should not bypass exact workflow timing metadata validation.",
+            "content_html": "<p>SECRET_VALUE_DO_NOT_LEAK raw workflow timing body</p>",
+        }],
+        "summary": "Safe-looking top-level summary should not persist.",
+        "content_html": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_workflow_timing_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    search = search_memory("workflow", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-workflow-timing-feed-bypass.md").exists()
+    assert not search["results"]
+    assert "safe-looking" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "content_html" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_timing_non_json_response(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-workflow-timing-non-json",
+        "title": "GitHub Workflow Timing Non JSON",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/actions/workflows/12345/timing?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+    })
+    raw_timing_body = b"summary: safe-looking text fallback SECRET_VALUE_DO_NOT_LEAK raw_prompt <script>bad()</script>"
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return raw_timing_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "accept": request.headers.get("Accept"), "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    search = search_memory("safe-looking", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [{
+        "url": "https://api.github.com/repos/capy/spaces/actions/workflows/12345/timing",
+        "accept": "application/json",
+        "timeout": 8,
+    }]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-workflow-timing-non-json.md").exists()
+    assert not search["results"]
+    assert "safe-looking text fallback" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw_prompt" not in serialized
+    assert "<script" not in serialized
+
+
+@pytest.mark.parametrize("final_url", [
+    "https://uploads.github.invalid/repos/other/project/actions/workflows/99999/timing",
+    "https://api.github.com/repos/capy/spaces/actions/workflows/12345/timing?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+])
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_timing_final_url_mismatch(tmp_path, monkeypatch, final_url):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-workflow-timing-redirect-endpoint",
+        "title": "GitHub Workflow Timing Redirect Endpoint",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/actions/workflows/12345/timing?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+    })
+    raw_body = json.dumps({
+        "billable": {"UBUNTU": {"total_ms": 180000}},
+        "unsafe_fixture": "UNSAFE_WORKFLOW_TIMING_REDIRECT_FIXTURE_DO_NOT_PERSIST",
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def geturl(self):
+            return final_url
+
+        def read(self, _limit=-1):
+            return raw_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    search = search_memory("ubuntu", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-workflow-timing-redirect-endpoint.md").exists()
+    assert not search["results"]
+    assert "unsafe_workflow_timing_redirect_fixture_do_not_persist" not in serialized
+    assert "uploads.github.invalid" not in serialized
+    assert "other/project" not in serialized
+    assert "99999" not in serialized
+    assert "access_token" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_legacy_github_workflow_timing_origin_uses_public_label(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    clean_api_url = "https://api.github.com/repos/capy/spaces/actions/workflows/12345/timing"
+    payload = {
+        "source_id": "github-workflow-timing-legacy-raw-origin",
+        "origin_uri": clean_api_url,
+    }
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        conn.execute(
+            """
+            INSERT INTO jobs (job_id, kind, dedupe_key, payload_json, status, attempts, created_at, updated_at)
+            VALUES ('cmt-job-legacy-workflow-timing', 'source.refresh', 'github-workflow-timing-legacy-raw-origin', ?, 'pending', 0, '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00')
+            """,
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")),),
+        )
+    raw_body = json.dumps({"billable": {"UBUNTU": {"total_ms": 180000}}}).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return raw_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-workflow-timing-legacy-raw-origin.md").read_text(encoding="utf-8").lower()
+    search = search_memory("ubuntu", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [clean_api_url]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "completed"
+    assert search["results"][0]["origin_uri"] == "github workflow timing capy/spaces 12345"
+    assert "origin_uri: github workflow timing capy/spaces 12345" in persisted
+    assert clean_api_url not in persisted
+    assert clean_api_url not in serialized
+    assert "api.github.com" not in persisted
+    assert "api.github.com" not in serialized
+
+
+def test_queue_due_source_refresh_jobs_preserves_legacy_github_workflow_timing_fetch_origin(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    clean_api_url = "https://api.github.com/repos/capy/spaces/actions/workflows/12345/timing"
+    payload = {"source_id": "github-workflow-timing-due-legacy", "origin_uri": clean_api_url}
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        conn.execute(
+            """
+            INSERT INTO jobs (job_id, kind, dedupe_key, payload_json, status, attempts, created_at, updated_at)
+            VALUES ('cmt-job-workflow-timing-due-legacy', 'source.refresh', 'github-workflow-timing-due-legacy', ?, 'pending', 0, '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00')
+            """,
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")),),
+        )
+    raw_body = json.dumps({"billable": {"UBUNTU": {"total_ms": 180000}}}).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return raw_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    first = run_source_refresh_jobs(limit=1, queue_due=False)
+    assert first["processed"] == 1
+    assert first["jobs"][0]["status"] == "completed"
+    assert calls == [clean_api_url]
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        conn.execute("UPDATE sources SET freshness_status = 'stale' WHERE source_id = ?", ("github-workflow-timing-due-legacy",))
+
+    calls.clear()
+    queued = queue_due_source_refresh_jobs(limit=1, now="2026-06-07T00:00:00+00:00")
+    queued_serialized = json.dumps(queued, sort_keys=True).lower()
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        queued_payload = json.loads(conn.execute(
+            "SELECT payload_json FROM jobs WHERE job_id = 'cmt-job-workflow-timing-due-legacy'"
+        ).fetchone()[0])
+    second = run_source_refresh_jobs(limit=1, queue_due=False)
+    search = search_memory("ubuntu", limit=5)
+    serialized = json.dumps({"queued": queued, "second": second, "search": search}, sort_keys=True).lower()
+
+    assert queued["queued"] == 1
+    assert queued["jobs"][0]["origin_uri"] == "github workflow timing capy/spaces 12345"
+    assert queued_payload["origin_uri"] == "github workflow timing capy/spaces 12345"
+    assert queued_payload["fetch_origin_uri"] == clean_api_url
+    assert calls == [clean_api_url]
+    assert second["processed"] == 1
+    assert second["jobs"][0]["status"] == "completed"
+    assert search["results"][0]["origin_uri"] == "github workflow timing capy/spaces 12345"
+    assert clean_api_url not in queued_serialized
+    assert clean_api_url not in serialized
+    assert "api.github.com" not in serialized
+
+
+@pytest.mark.parametrize("origin_uri", [
+    "https://api.github.com/repos/capy/spaces/actions/workflows/not-a-number/timing?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+    "https://api.github.com/repos/capy/spaces/actions/workflows/12345/timing/extra?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+    "https://api.github.com/repos/capy/spaces/actions/workflows/12345/timingevil?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+    "https://api.github.com/repos/capy/spaces/actions/workflows/12345/%74iming?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+    "https://api.github.com:443/repos/capy/spaces/actions/workflows/12345/timing?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+    "https://user:pass@api.github.com/repos/capy/spaces/actions/workflows/12345/timing?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+    "https://api.github.com.evil.test/repos/capy/spaces/actions/workflows/12345/timing?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+])
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_timing_malformed_route_before_fetch(tmp_path, monkeypatch, origin_uri):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-workflow-timing-malformed-route",
+        "title": "GitHub Workflow Timing Malformed Route",
+        "origin_uri": origin_uri,
+    })
+    calls = []
+
+    def fake_refresh_open(*_args, **_kwargs):
+        calls.append("called")
+        raise AssertionError("malformed workflow timing route should not be fetched")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert calls == []
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-workflow-timing-malformed-route.md").exists()
+    assert "not-a-number" not in serialized
+    assert "timing/extra" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_run_source_refresh_jobs_default_fetcher_ingests_github_workflow_run_timing_metadata_only(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
@@ -18265,6 +18684,36 @@ def test_capy_memory_source_catalog_redacts_file_uri_origins(tmp_path, monkeypat
     assert "vault/roadmap" not in serialized
     assert "file:///" not in serialized
     assert "capy-memory://file-uri-source" in serialized
+
+
+def test_capy_memory_source_catalog_redacts_legacy_github_workflow_timing_urls(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    source_id = "github-workflow-timing-catalog-legacy"
+    raw_origin = "https://api.github.com/repos/capy/spaces/actions/workflows/12345/timing?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt"
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        conn.execute(
+            """
+            INSERT INTO sources (
+                source_id, source_type, display_name, origin_uri, origin_kind, freshness_status,
+                last_checked_at, created_at, updated_at
+            ) VALUES (?, 'source_registry', 'Legacy workflow timing source', ?, 'auto_fetch', 'stale', '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00')
+            """,
+            (source_id, raw_origin),
+        )
+
+    catalog = capy_memory.source_catalog(limit=5)
+    serialized = json.dumps(catalog, sort_keys=True).lower()
+
+    auto_fetch = next(connector for connector in catalog["connectors"] if connector["connector_id"] == "auto_fetch")
+    assert auto_fetch["source_count"] == 1
+    assert auto_fetch["sources"][0]["origin_uri"] == "github workflow timing capy/spaces 12345"
+    assert "github workflow timing capy/spaces 12345" in serialized
+    assert "api.github.com" not in serialized
+    assert "access_token" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw-prompt" not in serialized
 
 
 def test_capy_memory_source_catalog_keeps_refreshed_sources_under_auto_fetch(tmp_path, monkeypatch):
