@@ -2612,6 +2612,17 @@ def _row_may_need_sidecar_metadata_refresh(
         return True
     sid = str(session.get('session_id') or '')
     if not session.get('pre_compression_snapshot'):
+        # Refresh a stale-indexed COMPRESSION CONTINUATION row from its sidecar.
+        # Gate tightly: a plain /branch fork also carries parent_session_id
+        # (#1342) but has no compression sidecar drift to correct, and its file
+        # mtime routinely exceeds the indexed logical last_message_at — so
+        # including forks here would call load_metadata_only() on every fork row
+        # on every /api/sessions poll (the molasses #3770 guards against, per the
+        # #3789 release gate). Exclude session_source == 'fork'
+        # (the marker /api/session/branch stamps; see _is_continuation_session)
+        # so only true continuations are eligible.
+        if str(session.get('session_source') or '').strip().lower() == 'fork':
+            return False
         lineage_shaped = bool(
             session.get('parent_session_id')
             or session.get('_lineage_root_id')

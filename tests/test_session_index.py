@@ -869,6 +869,61 @@ def test_all_sessions_refreshes_stale_visible_continuation_metadata(monkeypatch)
     assert rows[0]["last_message_at"] == 103.0
 
 
+def test_all_sessions_does_not_refresh_plain_branch_fork_from_sidecar(monkeypatch):
+    """A plain /branch fork (session_source='fork') must NOT trigger a sidecar refresh.
+
+    Forks carry parent_session_id (#1342) but have no compression sidecar drift
+    to correct. Including them in the continuation refresh gate would call
+    load_metadata_only() on every fork row on every /api/sessions poll (the
+    molasses #3770 guards against). The gate must exclude session_source='fork'
+    so a fork's stale-looking index row is left alone.
+    """
+    session = Session(
+        session_id="plain_fork_child",
+        title="Forked Conversation",
+        messages=[
+            {"role": "user", "content": "a", "timestamp": 100.0},
+            {"role": "assistant", "content": "b", "timestamp": 101.0},
+            {"role": "user", "content": "c", "timestamp": 102.0},
+            {"role": "assistant", "content": "d", "timestamp": 103.0},
+        ],
+        parent_session_id="some_parent",
+        session_source="fork",
+        updated_at=103.0,
+        last_message_at=103.0,
+    )
+    session.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "plain_fork_child",
+                "title": "Forked Conversation",
+                "message_count": 2,
+                "created_at": 100.0,
+                "updated_at": 100.0,
+                "last_message_at": 100.0,
+                "pinned": False,
+                "archived": False,
+                "parent_session_id": "some_parent",
+                "session_source": "fork",
+            }
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    # A fork that has not been hydrated must not be promoted from the (stale)
+    # indexed count — the row stays as the index reports it (no sidecar refresh).
+    def _fail_load(_sid):
+        raise AssertionError("plain fork must not trigger load_metadata_only refresh")
+
+    monkeypatch.setattr(models.Session, "load_metadata_only", staticmethod(_fail_load))
+
+    rows = models.all_sessions()
+    fork_row = next(r for r in rows if r["session_id"] == "plain_fork_child")
+    assert fork_row["message_count"] == 2  # left at the indexed value, not refreshed
+
+
 def test_load_metadata_only_skips_index_read_when_sidecar_has_message_count(monkeypatch):
     """Modern sidecars already carry message_count; avoid an _index.json read per row."""
     session = Session(
