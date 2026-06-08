@@ -1638,6 +1638,21 @@
     const results = Array.isArray(memoryData && memoryData.results) ? memoryData.results.slice(0, 5) : [];
     const localOnly = memoryData && memoryData.local_only !== false;
     const unavailable = memoryData && memoryData.unavailable === true;
+    const authority = safeDisplayMetadataText(memoryData && memoryData.context_authority || '', '').replace(/_/g, ' ');
+    const requiredGates = Array.isArray(memoryData && memoryData.required_gates) ? memoryData.required_gates.slice(0, 8).map(function(gate){
+      return safeDisplayMetadataText(gate, '').replace(/_/g, ' ');
+    }).filter(Boolean) : [];
+    let advisoryRow = '';
+    if (memoryData && (memoryData.metadata_only === true || memoryData.advisory_context === true || authority || memoryData.can_bypass_safety_gates === false || requiredGates.length)) {
+      const trustFlags = [];
+      if (memoryData.metadata_only === true) trustFlags.push('metadata-only');
+      if (memoryData.advisory_context === true) trustFlags.push('advisory context only');
+      if (authority) trustFlags.push('Authority: '+authority);
+      if (memoryData.can_bypass_safety_gates === false) trustFlags.push('cannot bypass safety gates');
+      if (requiredGates.length) trustFlags.push('Required gates: '+requiredGates.join(', '));
+      advisoryRow = '<div class="capy-spaces-widget capy-spaces-memory-trust-boundary"><div><strong>Memory trust boundary</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(trustFlags.join(' · '))+'</div></div></div>';
+    }
     const rows = results.length ? results.map(function(item){
       if (!item || typeof item !== 'object') return '';
       const title = safeDisplayMetadataText(item.title || item.source_id || 'Memory source', 'Memory source') || 'Memory source';
@@ -1652,7 +1667,7 @@
     const status = unavailable ? 'Memory route unavailable; continuing without context.' : (localOnly ? 'Local-only Spaces memory' : 'Spaces memory');
     return '<div class="capy-spaces-card capy-spaces-memory-context"><h3>Memory Tree context</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(status)+' · metadata-only snippets · generated code and credentials remain redacted.</div>' +
-      '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
+      '<div class="capy-spaces-widget-list">'+advisoryRow+rows+'</div></div>';
   }
 
   function renderSpaceProgressContext(progressData, expectedSpaceId){
