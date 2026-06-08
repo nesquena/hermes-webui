@@ -944,6 +944,67 @@ def test_load_metadata_only_skips_index_read_when_sidecar_has_message_count(monk
     assert meta.compact()["message_count"] == 1
 
 
+
+
+def test_all_sessions_reuses_loaded_index_counts_for_legacy_sidecar_refresh(monkeypatch):
+    """Refreshing multiple legacy lineage rows must not parse _index.json per row."""
+    index_file = models.SESSION_INDEX_FILE
+    rows = []
+    for sid, count in (("legacy_lineage_a", 3), ("legacy_lineage_b", 4)):
+        payload = {
+            "session_id": sid,
+            "title": sid,
+            "workspace": "/tmp",
+            "model": "test",
+            "created_at": 100.0,
+            "updated_at": 200.0,
+            "pinned": False,
+            "archived": False,
+            "parent_session_id": "lineage_parent",
+            "messages": [{"role": "user", "content": "legacy"}],
+            "tool_calls": [],
+        }
+        # Deliberately bypass Session.save(): pre-fix legacy sidecars do not have
+        # a persisted message_count field in their metadata prefix.
+        (models.SESSION_DIR / f"{sid}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        rows.append({
+            "session_id": sid,
+            "title": sid,
+            "workspace": "/tmp",
+            "model": "test",
+            "created_at": 100.0,
+            "updated_at": 100.0,
+            "last_message_at": 100.0,
+            "message_count": count,
+            "pinned": False,
+            "archived": False,
+            "parent_session_id": "lineage_parent",
+        })
+    _write_index_file(index_file, rows)
+
+    original_read_text = Path.read_text
+    index_reads = 0
+
+    def _counting_read_text(self, *args, **kwargs):
+        nonlocal index_reads
+        if self == index_file:
+            index_reads += 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _counting_read_text)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    result = models.all_sessions()
+
+    counts = {row["session_id"]: row["message_count"] for row in result}
+    assert counts["legacy_lineage_a"] == 3
+    assert counts["legacy_lineage_b"] == 4
+    assert index_reads == 1
+
+
 def test_session_save_does_not_persist_metadata_message_count_hint():
     s = Session(
         session_id="sess_private_hint",

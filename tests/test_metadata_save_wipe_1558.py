@@ -348,6 +348,37 @@ def test_recover_all_sessions_on_startup_is_idempotent_no_op_on_clean_state(temp
     assert live_before == live_after
 
 
+def test_recover_all_sessions_on_startup_does_not_read_live_files_without_backup(temp_session_dir, monkeypatch):
+    """Clean live sidecars without .bak are not recovery candidates at startup."""
+    clean_sid = _make_session_on_disk(temp_session_dir, sid="clean_no_bak", n_msgs=500)
+    backed_sid = _make_session_on_disk(temp_session_dir, sid="backed_candidate", n_msgs=4)
+    clean_path = temp_session_dir / f"{clean_sid}.json"
+    backed_path = temp_session_dir / f"{backed_sid}.json"
+    backed_path.with_suffix('.json.bak').write_text(
+        backed_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    import api.session_recovery as sr
+
+    real_msg_count = sr._msg_count
+    msg_count_paths = []
+
+    def tracking_msg_count(path):
+        msg_count_paths.append(path)
+        return real_msg_count(path)
+
+    monkeypatch.setattr(sr, "_msg_count", tracking_msg_count)
+
+    result = sr.recover_all_sessions_on_startup(temp_session_dir)
+
+    assert result["restored"] == 0
+    assert result["scanned"] == 2
+    assert clean_path not in msg_count_paths
+    assert backed_path in msg_count_paths
+    assert backed_path.with_suffix('.json.bak') in msg_count_paths
+
+
 def test_recover_all_sessions_on_startup_skips_non_session_index_json(temp_session_dir):
     """Regression for v0.50.284 startup: ``_index.json`` is a top-level list
     (not a dict), and the recovery scanner globs ``*.json``. Without the
