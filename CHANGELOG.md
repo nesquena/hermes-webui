@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A background-task wakeup is no longer lost when the server-side wakeup turn races a human turn during session teardown.** The turn-teardown idle-hook atomically claims the deferred wakeup and discards the pending marker before starting the wakeup turn; if that turn then `409`s on a concurrent `/api/chat/start`, the wakeup is now re-queued (`record_deferred_wakeup`) so a later teardown or the next-turn drain redelivers it, instead of being dropped permanently. Re-queue is idempotent per `process_id`. (#2971)
+
 ## [v0.51.326] — 2026-06-08 — Release KP (mic STT probe + journal cleanup + schema guard + help hover)
 
 ### Fixed

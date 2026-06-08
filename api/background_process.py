@@ -818,7 +818,9 @@ def _process_one(evt: dict) -> None:
                     session_id,
                 )
             else:
-                _start_server_side_wakeup_turn(session_id, wakeup_prompt)
+                _start_server_side_wakeup_turn(
+                    session_id, wakeup_prompt, process_id
+                )
     except Exception:
         logger.warning(
             "server-side wakeup dispatch failed for session %s", session_id, exc_info=True
@@ -935,12 +937,15 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
             prompt = str((entry or {}).get("wakeup_prompt") or "").strip()
             if not prompt:
                 continue
+            entry_pid = str((entry or {}).get("process_id") or "")
             # Same server-side wakeup path the idle branch uses. It spawns its
             # own daemon thread, so the teardown thread never blocks. The
             # process_id is already in BG_TASK_COMPLETE_EVENTS_SEEN +
             # registry _completion_consumed (set in _process_one before the
-            # defer), so no other path re-delivers it.
-            _start_server_side_wakeup_turn(session_id, prompt)
+            # defer), so no other path re-delivers it. We pass process_id so a
+            # 409 race inside the wakeup turn re-queues the SAME entry (atomic
+            # claim + per-process dedupe ⇒ exactly-once, never a double-fire).
+            _start_server_side_wakeup_turn(session_id, prompt, entry_pid)
             started += 1
         if started:
             logger.info(
@@ -986,7 +991,9 @@ def _session_has_active_turn(session_id: str) -> bool:
     return False
 
 
-def _start_server_side_wakeup_turn(session_id: str, wakeup_prompt: str) -> None:
+def _start_server_side_wakeup_turn(
+    session_id: str, wakeup_prompt: str, process_id: str = ""
+) -> None:
     """Start an agent turn server-side for a process_complete wakeup (Option Z).
 
     Runs on a short-lived daemon thread so the drain loop NEVER blocks:
@@ -998,11 +1005,22 @@ def _start_server_side_wakeup_turn(session_id: str, wakeup_prompt: str) -> None:
       - ``start_session_turn`` → ``_start_chat_stream_for_session`` serializes
         on the per-session agent lock and returns ``_status=409`` if a turn is
         already active. A human ``/api/chat/start`` racing this wakeup wins
-        (one starts, the other 409s). On 409 the PENDING_BG_TASK_COMPLETIONS
-        marker is left intact (the 409 returns before the marker discard), so
-        PR #2279's next-turn drain still delivers the wakeup.
+        (one starts, the other 409s). On 409 we re-queue the prompt via
+        ``record_deferred_wakeup`` (see below) so the racing turn's own
+        teardown idle-hook — or PR #2279's next-turn drain — redelivers it.
       - ``BG_TASK_COMPLETE_EVENTS_SEEN`` already deduped this process_id in
         ``_process_one`` before we were called, so a process wakes at most once.
+
+    Why re-queue on 409 instead of trusting the PENDING marker: this helper is
+    called from two sites. The idle branch of ``_process_one`` leaves the
+    PENDING_BG_TASK_COMPLETIONS marker intact, but the teardown-hook caller
+    ``drain_deferred_wakeups_for_session`` has ALREADY atomically claimed the
+    deferred entry and discarded the marker before spawning this thread. So in
+    the teardown path a 409 would otherwise lose the wakeup permanently —
+    nothing is left to drain. Re-queuing here is uniformly correct: it is
+    idempotent per ``process_id`` (``record_deferred_wakeup`` dedupes) and the
+    claim in ``claim_deferred_wakeups`` is atomic, so re-queue can never cause
+    a double delivery.
     """
 
     def _runner() -> None:
@@ -1014,9 +1032,14 @@ def _start_server_side_wakeup_turn(session_id: str, wakeup_prompt: str) -> None:
             )
             status = int((resp or {}).get("_status", 200) or 200)
             if status == 409:
+                # Lost the race to an active turn. Re-queue so a later teardown
+                # idle-hook (or the next-turn drain) redelivers; without this,
+                # a 409 in the teardown-hook caller path — which already claimed
+                # the entry and discarded the PENDING marker — drops the wakeup.
+                record_deferred_wakeup(session_id, process_id, wakeup_prompt)
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
-                    "PENDING_BG_TASK_COMPLETIONS marker will drain on next turn",
+                    "re-queued deferred wakeup for teardown/next-turn redelivery",
                     session_id,
                 )
             elif status >= 400:
