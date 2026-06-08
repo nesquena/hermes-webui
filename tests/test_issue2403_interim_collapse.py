@@ -149,3 +149,56 @@ class TestInterimCollapseCSS:
         assert ".interim-collapse-toggle:hover" in css, (
             "style.css must define a :hover rule for .interim-collapse-toggle"
         )
+
+
+class TestInterimCollapseSurvivesLiveTurnRestore:
+    """Regression guard (#3574 deep-review, Codex catch): the collapse toggle
+    must use a DELEGATED document-level click handler, NOT a per-element
+    addEventListener. The live turn's DOM is snapshotted/restored via
+    outerHTML/innerHTML on session switch (snapshotLiveTurnHtmlForSession /
+    restoreLiveTurnHtmlForSession), which strips element-attached listeners.
+    A per-element listener would leave a restored toggle inert and collapsed
+    interim notes permanently unreachable for the rest of the turn.
+    """
+
+    def test_delegated_document_click_handler_present(self):
+        src = read("static/messages.js")
+        assert "function _interimCollapseDelegatedClick" in src, (
+            "interim-collapse toggle must be handled by the delegated "
+            "_interimCollapseDelegatedClick handler so it survives a live-turn "
+            "DOM restore (innerHTML rebuild strips per-element listeners)."
+        )
+        assert "document.addEventListener('click', _interimCollapseDelegatedClick)" in src, (
+            "the delegated interim-collapse handler must be registered at the "
+            "document level (not on the toggle element)."
+        )
+
+    def test_delegated_handler_resolves_toggle_via_closest(self):
+        src = read("static/messages.js")
+        handler_start = src.index("function _interimCollapseDelegatedClick")
+        handler = src[handler_start:handler_start + 900]
+        assert ".closest('.interim-collapse-toggle')" in handler, (
+            "delegated handler must resolve the clicked toggle via "
+            "closest('.interim-collapse-toggle') so clicks on the toggle (or "
+            "its children) route correctly."
+        )
+
+    def test_toggle_creation_does_not_attach_per_element_listener(self):
+        """The toggle-creation block must NOT bind a click listener directly on
+        the element — that is the bug the delegated handler replaces."""
+        src = read("static/messages.js")
+        handler = _extract_interim_handler(src)
+        assert "toggle.addEventListener('click'" not in handler, (
+            "toggle must not use a per-element click listener (lost on live-turn "
+            "DOM restore); use the delegated document handler instead."
+        )
+
+    def test_toggle_carries_threshold_data_attribute(self):
+        """State must live in the DOM (data-threshold) so the stateless delegated
+        handler works on both freshly-created and restored toggles."""
+        src = read("static/messages.js")
+        assert "toggle.dataset.threshold" in src, (
+            "toggle must carry data-threshold so the delegated handler can "
+            "recompute the collapse set without closure state after a restore."
+        )
+

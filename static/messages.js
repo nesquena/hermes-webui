@@ -66,6 +66,37 @@ function _deferStreamErrorIfOffline(){
 
 document.addEventListener('visibilitychange', _markActiveSessionViewedOnReturn);
 window.addEventListener('focus', _markActiveSessionViewedOnReturn);
+
+// Delegated click handler for the interim-progress-note collapse toggle (#2403).
+// Delegation (not a per-element listener) is required because the live turn's
+// DOM is snapshotted/restored via outerHTML/innerHTML on session switch
+// (snapshotLiveTurnHtmlForSession / restoreLiveTurnHtmlForSession in ui.js),
+// which strips element listeners. A document-level handler survives the
+// restore so a restored toggle stays interactive and collapsed notes never
+// become permanently unreachable. State lives in the DOM (presence of
+// .interim-collapsed + data-threshold on the toggle), so the handler is
+// stateless and works on freshly-created and restored toggles alike.
+function _interimCollapseDelegatedClick(e){
+  const toggle=e.target&&e.target.closest?e.target.closest('.interim-collapse-toggle'):null;
+  if(!toggle) return;
+  const blocks=toggle.parentElement;
+  if(!blocks) return;
+  const threshold=parseInt(toggle.dataset.threshold,10)||3;
+  const hidden=blocks.querySelectorAll('.interim-collapsed');
+  if(hidden.length){
+    hidden.forEach(el=>el.classList.remove('interim-collapsed'));
+    toggle.dataset.expanded='1';
+    toggle.textContent='Collapse';
+  } else {
+    const all=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
+    const rehide=all.slice(0,all.length-threshold);
+    rehide.forEach(el=>el.classList.add('interim-collapsed'));
+    toggle.dataset.expanded='';
+    toggle.textContent='Show '+rehide.length+' earlier update'+(rehide.length===1?'':'s');
+  }
+}
+document.addEventListener('click', _interimCollapseDelegatedClick);
+
 // TTS: pause speech synthesis when user focuses the composer (#499)
 const _msgEl=document.getElementById('msg');
 if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
@@ -2448,20 +2479,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(!toggle){
             toggle=document.createElement('span');
             toggle.className='interim-collapse-toggle';
-            toggle.addEventListener('click',()=>{
-              const hidden=blocks.querySelectorAll('.interim-collapsed');
-              if(hidden.length){
-                hidden.forEach(el=>el.classList.remove('interim-collapsed'));
-                toggle.dataset.expanded='1';
-                toggle.textContent='Collapse';
-              } else {
-                const all=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
-                const rehide=all.slice(0,all.length-INTERIM_COLLAPSE_THRESHOLD);
-                rehide.forEach(el=>el.classList.add('interim-collapsed'));
-                toggle.dataset.expanded='';
-                toggle.textContent='Show '+rehide.length+' earlier update'+(rehide.length===1?'':'s');
-              }
-            });
+            // No per-element listener: clicks are handled by a delegated
+            // document-level handler (see _interimCollapseDelegatedClick) so
+            // the toggle keeps working after a live-turn DOM restore
+            // (snapshotLiveTurnHtmlForSession/restoreLiveTurnHtmlForSession
+            // rebuild via innerHTML, which would drop a direct listener and
+            // leave the collapsed notes permanently unreachable). The
+            // threshold rides on the markup so the handler stays stateless.
+            toggle.dataset.threshold=String(INTERIM_COLLAPSE_THRESHOLD);
             if(toHide.length) toHide[0].before(toggle);
           }
           // Skip re-collapse when the user expanded manually; always update the stored count.
