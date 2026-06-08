@@ -5024,9 +5024,14 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
         # model. Serve a network-free minimal catalog instead and let a later
         # human request do the real live rebuild.
         if prefer_cache:
-            with _cache_build_cv:
-                _cache_build_in_progress = False
-                _cache_build_cv.notify_all()
+            # NOTE (Greptile P1): do NOT touch _cache_build_in_progress here.
+            # This branch never set the flag (only the cold path below does),
+            # and `should_wait` is sampled outside the lock (line ~4964). A
+            # concurrent cold-path caller can flip the flag to True after our
+            # sample but before we acquire the lock; clearing it here would
+            # prematurely release that rebuild's serialization, waking waiters
+            # to an empty cache and triggering a second live rebuild. Just
+            # serve the network-free minimal catalog and leave the flag alone.
             return copy.deepcopy(_minimal_static_models_catalog())
 
         # Cold path: full rebuild — only one thread reaches here at a time

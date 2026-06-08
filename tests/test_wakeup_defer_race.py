@@ -396,3 +396,138 @@ def test_multistream_guard_only_fires_when_truly_idle(monkeypatch):
             cfg.ACTIVE_RUNS.pop(stream_b, None)
         bp.unregister_process_session(sid)
         _reset_cfg_state()
+
+
+# --------------------------------------------------------------------------
+# Test 6 — 409 during the teardown-hook path re-queues the wakeup (Greptile
+# PR #2971 r3371737184). The teardown hook ATOMICALLY CLAIMS the deferred
+# entry and DISCARDS the PENDING marker BEFORE spawning the wakeup thread. So
+# if start_session_turn then 409s (a human /api/chat/start raced in between),
+# both the marker and the claimed prompt are gone — the wakeup would be lost
+# forever unless the 409 path re-queues it. This test pins that re-queue.
+# --------------------------------------------------------------------------
+
+
+def test_teardown_409_requeues_wakeup_so_it_is_not_lost(monkeypatch):
+    """drain_deferred_wakeups_for_session claims the entry + discards the
+    PENDING marker, then the spawned wakeup turn 409s on a racing human turn.
+    The 409 branch must re-queue via record_deferred_wakeup so a later teardown
+    (or next-turn drain) redelivers it. Without the fix the wakeup is dropped.
+    """
+    from api import background_process as bp, config as cfg
+
+    fake = _FakeProcessRegistry()
+    fake.register("proc-409-1", "sess-409")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    # start_session_turn 409s — a human /api/chat/start won the per-session lock.
+    holder = _install_fake_start_session_turn(monkeypatch, status=409)
+
+    sid = "sess-409"
+    stream_id = "stream-409-1"
+    bp.register_process_session(sid, sid)
+    try:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+        bp._process_one(_completion_evt("proc-409-1", sid))
+        assert sid in cfg.DEFERRED_PROCESS_WAKEUPS
+
+        # Turn tears down → teardown hook claims the entry, discards the marker,
+        # and spawns the wakeup turn (which 409s).
+        cfg.unregister_active_run(stream_id)
+        assert bp.drain_deferred_wakeups_for_session(sid) == 1
+        assert _wait_for_wakeup(holder)
+        assert len(holder["calls"]) == 1
+
+        # The 409 must have RE-QUEUED the entry rather than dropping it. Poll
+        # briefly: the re-queue runs on the same daemon thread right after the
+        # recorded call, so it may land a hair after the event fires.
+        import time as _t
+        for _ in range(50):
+            with cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+                if cfg.DEFERRED_PROCESS_WAKEUPS.get(sid):
+                    break
+            _t.sleep(0.02)
+        with cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
+            requeued = cfg.DEFERRED_PROCESS_WAKEUPS.get(sid) or []
+        assert requeued, (
+            "409 in the teardown-hook path DROPPED the wakeup — it must "
+            "re-queue via record_deferred_wakeup so it is not lost"
+        )
+        # Re-queue is idempotent per process_id: exactly one entry, same id.
+        assert len(requeued) == 1
+        assert requeued[0].get("process_id") == "proc-409-1"
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
+# --------------------------------------------------------------------------
+# Test 7 — Greptile P1: multiple deferred wakeups in one teardown. Only the
+# FIRST starts a turn (the rest would 409 racing the per-session agent lock);
+# entries 2..N must be re-deferred, not lost, and drain on later teardowns.
+# --------------------------------------------------------------------------
+
+
+def test_multiple_deferred_wakeups_each_survive_across_teardowns(monkeypatch):
+    """N>=2 bg tasks complete during one active turn → all deferred. A single
+    teardown drain must NOT fire N racing daemon threads (only one wins the
+    agent lock; the losers 409 and, since the entries were already popped,
+    their prompts would be lost forever). The fix starts exactly one wakeup
+    and re-defers the remainder, so each subsequent teardown delivers the
+    next — every prompt is eventually delivered exactly once.
+    """
+    from api import background_process as bp, config as cfg
+
+    fake = _FakeProcessRegistry()
+    for pid in ("proc-A", "proc-B", "proc-C"):
+        fake.register(pid, "sess-multi-defer")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    holder = _install_fake_start_session_turn(monkeypatch)
+
+    sid = "sess-multi-defer"
+    stream_id = "stream-multi-defer"
+    bp.register_process_session(sid, sid)
+    try:
+        # A turn is active; three fast bg tasks all complete inside it → defer.
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+        for pid in ("proc-A", "proc-B", "proc-C"):
+            bp._process_one(_completion_evt(pid, sid))
+        assert len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid, [])) == 3
+
+        # Turn teardown → idle. Drain reports exactly ONE wakeup started, and
+        # the other two are re-deferred (not popped-and-lost).
+        cfg.unregister_active_run(stream_id)
+        assert bp._session_has_active_turn(sid) is False
+        assert bp.drain_deferred_wakeups_for_session(sid) == 1
+        assert _wait_for_wakeup(holder)
+        assert len(holder["calls"]) == 1
+        assert len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid, [])) == 2
+
+        # Second teardown delivers the next, third delivers the last.
+        holder["event"].clear()
+        assert bp.drain_deferred_wakeups_for_session(sid) == 1
+        assert _wait_for_wakeup(holder)
+        assert len(holder["calls"]) == 2
+        assert len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid, [])) == 1
+
+        holder["event"].clear()
+        assert bp.drain_deferred_wakeups_for_session(sid) == 1
+        assert _wait_for_wakeup(holder)
+        assert len(holder["calls"]) == 3
+        assert sid not in cfg.DEFERRED_PROCESS_WAKEUPS
+
+        # All three distinct prompts delivered exactly once, no duplicates.
+        delivered = {c["message"] for c in holder["calls"]}
+        assert len(delivered) == 3
+        # Nothing left → a final drain is a no-op (no wakeup loop).
+        assert bp.drain_deferred_wakeups_for_session(sid) == 0
+    finally:
+        with cfg.ACTIVE_RUNS_LOCK:
+            cfg.ACTIVE_RUNS.pop(stream_id, None)
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()

@@ -2308,12 +2308,26 @@ def _resolve_compatible_session_model_state(
     # kwargs so it stays signature-compatible with the many tests that stub
     # get_available_models as a zero-arg callable. Only the server-side wakeup
     # path (prefer_cached_catalog=True) opts into the cache-only mode. Some
-    # tests monkeypatch get_available_models as a zero-arg callable, so keep
-    # the cache-preference call signature-compatible on TypeError.
+    # tests monkeypatch get_available_models as a zero-arg callable, so probe
+    # the (possibly monkeypatched) signature for ``prefer_cache`` rather than
+    # catching TypeError — a blanket ``except TypeError`` would also swallow a
+    # genuine TypeError raised *inside* get_available_models(prefer_cache=True)
+    # and silently fall back to the slow live provider rebuild that
+    # prefer_cached_catalog=True is meant to avoid.
     if prefer_cached_catalog:
+        import inspect as _inspect
+
         try:
+            _gam_accepts_prefer_cache = (
+                "prefer_cache" in _inspect.signature(get_available_models).parameters
+            )
+        except (TypeError, ValueError):
+            # Builtins / C-callables can refuse introspection; assume the
+            # zero-arg stub shape in that case.
+            _gam_accepts_prefer_cache = False
+        if _gam_accepts_prefer_cache:
             catalog = get_available_models(prefer_cache=True)
-        except TypeError:
+        else:
             catalog = get_available_models()
     else:
         catalog = get_available_models()
@@ -10646,46 +10660,62 @@ def _handle_session_sse_stream(handler, parsed):
 
     from api.streaming import _sse
 
-    # Push an initial frame so the client has confirmation the channel is
-    # live (mirrors approval/clarify which send an 'initial' frame). No
-    # snapshot data is needed — this channel only carries forward-looking
-    # events, not pending state.
-    _sse(handler, 'initial', {"session_id": sid})
-
-    # ── Open-tab live-view self-heal (root cause: lost server_turn_started) ──
-    # The `server_turn_started` fan-out (routes.start_session_turn) is a
-    # fire-and-forget SessionChannel.emit with NO replay buffer: it reaches
-    # only the subscribers connected at the exact emit instant. A tab whose
-    # per-session EventSource was momentarily absent at that instant — a
-    # transient SSE drop, a reverse-proxy idle-timeout, or browser
-    # connection-pool starvation (all common behind a corporate proxy) —
-    # misses the frame permanently, so a SERVER-initiated wakeup turn never
-    # renders live and the user must hard-refresh (the reported defect). The
-    # server-side wakeup itself ran and persisted fine; only the live-view
-    # was lost. On (re)subscribe, if the session has a live run RIGHT NOW,
-    # replay a synthetic `server_turn_started` to THIS new subscriber so the
-    # open tab attaches its existing chat-stream renderer (attachLiveStream)
-    # and self-heals with no refresh. `recovered: True` lets the frontend
-    # use the replay (reconnecting) attach so the renderer picks up the
-    # in-progress stream from the run journal rather than expecting token 0.
-    # Idempotent: the frontend dedupes by (session_id, stream_id) — if the
-    # original frame WAS delivered this is a harmless no-op there.
+    # NOTE: ``q = ch.subscribe(...)`` above acquires a subscriber slot that
+    # MUST be released on every exit path. The initial-frame write and the
+    # on-subscribe recovery replay below both call ``_sse``, which can raise
+    # a member of ``_CLIENT_DISCONNECT_ERRORS`` (BrokenPipeError /
+    # ConnectionResetError) if the client drops immediately after the SSE
+    # headers are sent. If that happened outside a try/finally the
+    # ``ch.unsubscribe(q)`` cleanup would be skipped, permanently leaking a
+    # subscriber. Because ``SessionChannel.reaper_should_collect()`` refuses
+    # to collect any channel with ``sub_count > 0``, a single ghost
+    # subscriber blocks the reaper forever and the channel zombies in
+    # SESSION_CHANNELS. So everything from the initial frame onward runs
+    # inside one try/finally that unconditionally unsubscribes.
     try:
-        recover_stream_id = active_stream_id_for_session(sid)
-        if recover_stream_id:
-            _sse(handler, 'server_turn_started', {
-                "session_id": sid,
-                "stream_id": recover_stream_id,
-                "source": "subscribe_recovery",
-                "recovered": True,
-            })
-    except Exception:
-        logger.debug(
-            "session-stream on-subscribe recovery failed for %s", sid,
-            exc_info=True,
-        )
+        # Push an initial frame so the client has confirmation the channel is
+        # live (mirrors approval/clarify which send an 'initial' frame). No
+        # snapshot data is needed — this channel only carries forward-looking
+        # events, not pending state.
+        _sse(handler, 'initial', {"session_id": sid})
 
-    try:
+        # ── Open-tab live-view self-heal (root cause: lost server_turn_started) ──
+        # The `server_turn_started` fan-out (routes.start_session_turn) is a
+        # fire-and-forget SessionChannel.emit with NO replay buffer: it reaches
+        # only the subscribers connected at the exact emit instant. A tab whose
+        # per-session EventSource was momentarily absent at that instant — a
+        # transient SSE drop, a reverse-proxy idle-timeout, or browser
+        # connection-pool starvation (all common behind a corporate proxy) —
+        # misses the frame permanently, so a SERVER-initiated wakeup turn never
+        # renders live and the user must hard-refresh (the reported defect). The
+        # server-side wakeup itself ran and persisted fine; only the live-view
+        # was lost. On (re)subscribe, if the session has a live run RIGHT NOW,
+        # replay a synthetic `server_turn_started` to THIS new subscriber so the
+        # open tab attaches its existing chat-stream renderer (attachLiveStream)
+        # and self-heals with no refresh. `recovered: True` lets the frontend
+        # use the replay (reconnecting) attach so the renderer picks up the
+        # in-progress stream from the run journal rather than expecting token 0.
+        # Idempotent: the frontend dedupes by (session_id, stream_id) — if the
+        # original frame WAS delivered this is a harmless no-op there.
+        try:
+            recover_stream_id = active_stream_id_for_session(sid)
+            if recover_stream_id:
+                _sse(handler, 'server_turn_started', {
+                    "session_id": sid,
+                    "stream_id": recover_stream_id,
+                    "source": "subscribe_recovery",
+                    "recovered": True,
+                })
+        except _CLIENT_DISCONNECT_ERRORS:
+            # Client vanished mid-recovery — re-raise so the outer handler
+            # treats it as a normal disconnect and the finally still cleans up.
+            raise
+        except Exception:
+            logger.debug(
+                "session-stream on-subscribe recovery failed for %s", sid,
+                exc_info=True,
+            )
+
         while True:
             try:
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)

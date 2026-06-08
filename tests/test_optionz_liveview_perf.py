@@ -368,7 +368,7 @@ def test_session_sse_handler_wires_on_subscribe_recovery():
     # The recovery must be inside the session SSE handler and use the
     # recovered marker so the frontend uses the replay attach path.
     handler_ix = src.index("def _handle_session_sse_stream")
-    handler_src = src[handler_ix:handler_ix + 4000]
+    handler_src = src[handler_ix:handler_ix + 6000]
     assert "active_stream_id_for_session" in handler_src
     assert '"recovered": True' in handler_src
     assert "server_turn_started" in handler_src
