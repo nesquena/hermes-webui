@@ -1209,7 +1209,29 @@ class TestFrontendModelProviderState:
         body = src[start:src.index("const data=await api('/api/session/new'", start)]
         assert "profile:S.activeProfile||'default'" in body
         assert "reqBody.model=newModelState.model" in body
-        assert "reqBody.model_provider=newModelState.model_provider||null" in body
+        # Behavior contract (replaces the old literal-string pin
+        # `reqBody.model_provider=newModelState.model_provider||null`,
+        # which became a change-detector once the #2518 follow-up added
+        # a fallback chain — see AGENTS.md "Don't write change-detector
+        # tests"): reqBody.model_provider must source from
+        # newModelState.model_provider first, with the active provider
+        # and prev-session fallbacks wired in after. The block may
+        # gate the fallbacks behind a guard (e.g. the slash-slug
+        # _bareModel ternary from PR #3410) but the ordering and
+        # source names are part of the contract.
+        provider_assignment = body[body.index("reqBody.model_provider="):].split(";", 1)[0]
+        assert "newModelState.model_provider" in provider_assignment
+        assert "_fallbackProvider" in provider_assignment
+        assert "window._activeProvider" in body
+        assert "S.session&&S.session.model_provider" in body
+        pos_explicit = body.index("newModelState.model_provider")
+        pos_active = body.index("window._activeProvider")
+        pos_prev = body.index("S.session&&S.session.model_provider")
+        assert pos_explicit < pos_active < pos_prev, (
+            "Fallback chain order broken: explicit > _activeProvider > "
+            "prev-session must hold so /api/session/new hits the fast "
+            "path whenever a usable default exists (#2518 follow-up)."
+        )
 
     def test_ui_has_json_model_state_storage(self):
         src = _read("static/ui.js")
@@ -1419,6 +1441,43 @@ def test_custom_namespace_model_always_preserved_on_custom_provider(monkeypatch)
 
     assert changed is False
     assert effective == "custom/my-local-llm"
+
+
+def test_explicit_pick_survives_profile_family_mismatch():
+    """When explicit_model_pick=True, a cross-family bare model survives
+    the profile-aware normalization instead of being rewritten to the
+    profile default (#3737)."""
+    import api.routes as routes
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "gpt-5.4-mini",
+        None,
+        profile_provider="anthropic",
+        profile_default_model="claude-sonnet-4",
+        explicit_model_pick=True,
+    )
+
+    assert changed is False, "explicit pick must not be normalized"
+    assert effective == "gpt-5.4-mini", "user's model must survive"
+    assert provider == "anthropic", "profile provider context preserved"
+
+
+def test_explicit_pick_false_allows_profile_family_normalization():
+    """Without explicit_model_pick, the same cross-family model IS rewritten
+    to the profile default (existing behavior, must not regress)."""
+    import api.routes as routes
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "gpt-5.4-mini",
+        None,
+        profile_provider="anthropic",
+        profile_default_model="claude-sonnet-4",
+        explicit_model_pick=False,
+    )
+
+    assert changed is True, "stale model must be normalized"
+    assert effective == "claude-sonnet-4", "rewritten to profile default"
+    assert provider == "anthropic", "profile provider context preserved"
 
 
 def test_stale_ui_js_does_not_inject_unavailable_option():

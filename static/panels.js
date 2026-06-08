@@ -58,7 +58,9 @@ function syncAppTitlebar() {
     mainText = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
     const vis = Array.isArray(S.messages) ? S.messages.filter(m => m && m.role && m.role !== 'tool') : [];
     if (typeof t === 'function') subText = t('n_messages', vis.length);
-    if (S.session.is_cli_session) sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
+    sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
+    // Recovered sidecars stamp source_label 'WebUI' (api/session_recovery.py); don't badge a native session as its own source (#3338).
+    if (/^webui$/i.test(sourceLabel)) sourceLabel = '';
   } else {
     const key = APP_TITLEBAR_KEYS[panel];
     mainText = key && typeof t === 'function' ? t(key) : (panel.charAt(0).toUpperCase() + panel.slice(1));
@@ -243,7 +245,7 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs'].forEach(p => {
+    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -428,17 +430,34 @@ function _cronDiagnostics(job) {
   return JSON.stringify(fields, null, 2);
 }
 
+function _gatewayStatusReason(status) {
+  const health = status && typeof status.health === 'object' ? status.health : null;
+  if (!health) return '';
+  return typeof health.reason === 'string' ? health.reason.trim() : '';
+}
+
 function _cronGatewayNoticeHtml(status) {
   if (!status || (status.configured && status.running)) return '';
+  const reason = _gatewayStatusReason(status);
+  const isStaleMetadata = reason === 'gateway_stale_running_state';
+  const isRemoteUnreachable = reason === 'remote_gateway_unreachable';
   const notConfigured = !status.configured;
   const title = notConfigured
     ? 'Gateway not configured'
-    : 'Gateway not running';
+    : isStaleMetadata
+      ? 'Gateway metadata stale'
+      : isRemoteUnreachable
+        ? 'Gateway endpoint not reachable'
+        : 'Gateway not running';
   const body = notConfigured
     ? 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon. If this is a single-container Docker install, jobs can be created and run manually here, but scheduled ticks need a gateway container or `hermes gateway` running outside the WebUI.'
-    : 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon to be running. Start the gateway container or `hermes gateway` before relying on offline scheduled runs.';
+    : isStaleMetadata
+      ? 'The gateway is marked as configured, but its health metadata has gone stale. In Docker, scheduled jobs require a live gateway daemon that refreshes runtime metadata while ticking cron.'
+      : isRemoteUnreachable
+        ? 'The gateway health endpoint is not reachable from WebUI. Verify the configured gateway URL env var (`GATEWAY_HEALTH_URL`, `HERMES_GATEWAY_HEALTH_URL`, `HERMES_API_URL`, or `HERMES_WEBUI_GATEWAY_BASE_URL`) points to a reachable gateway service and network path before relying on cron ticking.'
+        : 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon to be running. Start the gateway container or `hermes gateway` before relying on offline scheduled runs.';
   const docsHref = 'https://github.com/nesquena/hermes-webui/blob/master/docs/docker.md#scheduled-jobs-and-the-gateway-daemon';
-  const helpLink = notConfigured
+  const helpLink = notConfigured || isRemoteUnreachable || isStaleMetadata
     ? `<p><a href="${docsHref}" target="_blank" rel="noopener">How to enable scheduled jobs in Docker ↗</a></p>`
     : '';
   return `
@@ -706,9 +725,20 @@ async function _loadRunContent(jobId, filename, runId){
   const body = document.querySelector(`#${runId} .detail-run-body`);
   if (!body) return;
   const item = document.getElementById(runId);
-  if (!item.classList.contains('open')) {
-    item.classList.add('open');
+  if (item.classList.contains('open')) {
+    // Already open → collapse and return (toggle behaviour)
+    item.classList.remove('open');
+    body.classList.remove('expanded');
+    _cronExpansionSet(_cronRunExpandKey(jobId, filename), false);
+    const btn = item ? item.querySelector('.detail-expand-toggle') : null;
+    if (btn) {
+      btn.textContent = '▾';
+      btn.title = (t('cron_expand_output') || 'Expand output');
+      btn.setAttribute('aria-label', btn.title);
+    }
+    return;
   }
+  item.classList.add('open');
   body.classList.toggle('expanded', _cronExpansionGet(_cronRunExpandKey(jobId, filename)));
   body.innerHTML = `<span style="opacity:.5">${esc(t('loading'))}</span>`;
   try {
@@ -2647,38 +2677,86 @@ async function loadKanbanTask(taskId){
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
 
+// Phase 2: Single-source-of-truth render.
+//
+// Reads `S.todos` (set by the `todo_state` SSE listener, INFLIGHT
+// restore, or session cold-load — see _hydrateTodosFromSession in
+// ui.js).  When `S.todoStateMeta` is null we have never seen an
+// explicit signal and fall through to the legacy reverse-scan over
+// settled tool messages — this keeps the panel populated against
+// pre-Phase-1 servers and during the upgrade window.
+//
+// The render is short-circuited via `_todosLastRenderedHash` (defined
+// in ui.js): repeated emissions that yield identical DOM are no-ops.
+// Coalescing of bursty live updates happens upstream in
+// scheduleTodosRefresh().
 function loadTodos() {
   const panel = $('todoPanel');
   if (!panel) return;
-  const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;
-  // Parse the most recent todo state from message history
-  let todos = [];
-  for (let i = sourceMessages.length - 1; i >= 0; i--) {
-    const m = sourceMessages[i];
-    if (m && m.role === 'tool') {
-      try {
-        const d = JSON.parse(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
-        if (d && Array.isArray(d.todos) && d.todos.length) {
-          todos = d.todos;
-          break;
-        }
-      } catch(e) {}
-    }
+
+  let todos;
+  if (S.todoStateMeta) {
+    todos = Array.isArray(S.todos) ? S.todos : [];
+  } else {
+    todos = _legacyTodosFromMessages();
   }
+
   if (!todos.length) {
+    if (typeof _todosLastRenderedHash !== 'undefined' && _todosLastRenderedHash === '__empty__') return;
     panel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:4px 0">${esc(t('todos_no_active'))}</div>`;
+    if (typeof _todosLastRenderedHash !== 'undefined') _todosLastRenderedHash = '__empty__';
     return;
   }
+
+  if (typeof _todosHash === 'function' && typeof _todosLastRenderedHash !== 'undefined') {
+    const hash = _todosHash(todos);
+    if (hash === _todosLastRenderedHash) return;
+    _todosLastRenderedHash = hash;
+  }
+
   const statusIcon = {pending:li('square',14), in_progress:li('loader',14), completed:li('check',14), cancelled:li('x',14)};
   const statusColor = {pending:'var(--muted)', in_progress:'var(--blue)', completed:'rgba(100,200,100,.8)', cancelled:'rgba(200,100,100,.5)'};
-  panel.innerHTML = todos.map(t => `
+  // Single innerHTML join is the cheapest correct way to materialize
+  // ~10–50 leaf nodes.  All user-controlled content goes through esc().
+  panel.innerHTML = todos.map(td => `
     <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[t.status]||'var(--muted)'}">${statusIcon[t.status]||li('square',14)}</span>
+      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[td.status]||'var(--muted)'}">${statusIcon[td.status]||li('square',14)}</span>
       <div style="flex:1;min-width:0">
-        <div style="font-size:13px;color:${t.status==='completed'?'var(--muted)':t.status==='in_progress'?'var(--text)':'var(--text)'};${t.status==='completed'?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(t.content)}</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(t.id)} · ${esc(t.status)}</div>
+        <div style="font-size:13px;color:${td.status==='completed'?'var(--muted)':td.status==='in_progress'?'var(--text)':'var(--text)'};${td.status==='completed'?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(td.content)}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(td.status)}</div>
       </div>
     </div>`).join('');
+}
+
+// Legacy fallback: reverse-scan settled tool messages for the most
+// recent {"todos":[...]} payload.  Used only when no `todo_state`
+// signal has been seen for the current session — primarily during
+// upgrade windows where the server has not yet been redeployed with
+// Phase 1.  Once Phase 1 is universally deployed and a stabilization
+// period has passed, this can be removed (Phase 3).
+//
+// Variable name `sourceMessages` is preserved verbatim from the
+// original loadTodos() implementation so the matching regression
+// test (R-todo-survive-refresh in tests/test_regressions.py) keeps
+// catching any future refactor that drops the raw-session-messages
+// fallback. See the test for the exact contract.
+function _legacyTodosFromMessages() {
+  const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;
+  if (!Array.isArray(sourceMessages)) return [];
+  for (let i = sourceMessages.length - 1; i >= 0; i--) {
+    const m = sourceMessages[i];
+    if (!m || m.role !== 'tool') continue;
+    let content = m.content;
+    if (typeof content !== 'string') {
+      try { content = JSON.stringify(content); } catch (_) { continue; }
+    }
+    if (!content || content.indexOf('"todos"') < 0) continue;
+    try {
+      const d = JSON.parse(content);
+      if (d && Array.isArray(d.todos)) return d.todos;
+    } catch (_) {}
+  }
+  return [];
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -4327,8 +4405,10 @@ function syncWorkspaceDisplays(){
 async function loadWorkspaceList(){
   try{
     const data = await api('/api/workspaces');
+    if(typeof syncTerminalBackendState==='function') syncTerminalBackendState(data);
     _workspaceList = data.workspaces || [];
     syncWorkspaceDisplays();
+    if(typeof syncTerminalButton==='function') syncTerminalButton();
     return data;
   }catch(e){ return {workspaces:[], last:''}; }
 }
@@ -4994,7 +5074,11 @@ function _refreshProfileSwitchBackground(gen){
     if (gen !== _profileSwitchGeneration) return;
     var hidden = (s && Array.isArray(s.hidden_tabs)) ? s.hidden_tabs : [];
     hidden = hidden.filter(function(x){ return typeof x === 'string' && x.trim(); });
+    var order = (s && Array.isArray(s.tab_order)) ? s.tab_order : [];
+    order = order.filter(function(x){ return typeof x === 'string' && x.trim(); });
     if (typeof _setHiddenTabs === 'function') _setHiddenTabs(hidden);
+    if (typeof _setTabOrder === 'function') _setTabOrder(order);
+    if (typeof _applyTabOrder === 'function') _applyTabOrder(order);
     if (typeof _applyTabVisibility === 'function') _applyTabVisibility(hidden);
   }).catch(function(){});
 }
@@ -5035,17 +5119,18 @@ async function loadProfilesPanel() {
       const meta = [];
       if (p.model) meta.push(p.model.split('/').pop());
       if (p.provider) meta.push(p.provider);
-      if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
+      if (p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
       const gwDot = p.gateway_running
         ? `<span class="profile-opt-badge running" title="${esc(t('profile_gateway_running'))}"></span>`
         : `<span class="profile-opt-badge stopped" title="${esc(t('profile_gateway_stopped'))}"></span>`;
       const isActive = p.name === activeName;
       const activeBadge = isActive ? `<span style="color:var(--link);font-size:10px;font-weight:600;margin-left:6px">${esc(t('profile_active'))}</span>` : '';
       const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
+      const hiddenBadge = p.visible === false ? ' <span class="detail-badge" title="Hidden from chat">Hidden from chat</span>' : '';
       card.innerHTML = `
         <div class="profile-card-header">
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}</div>
+            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}${hiddenBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
         </div>`;
@@ -5109,7 +5194,7 @@ function _renderProfileDetail(p, activeName){
   if (p.provider) rows.push(`<div class="detail-row"><div class="detail-row-label">Provider</div><div class="detail-row-value">${esc(p.provider)}</div></div>`);
   if (p.base_url) rows.push(`<div class="detail-row"><div class="detail-row-label">Base URL</div><div class="detail-row-value"><code>${esc(p.base_url)}</code></div></div>`);
   rows.push(`<div class="detail-row"><div class="detail-row-label">API key</div><div class="detail-row-value">${p.has_env ? esc(t('profile_api_keys_configured')) : '<span style="color:var(--muted)">Not configured</span>'}</div></div>`);
-  if (typeof p.skill_count === 'number') rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(t('profile_skill_count', p.skill_count))}</div></div>`);
+  if (p.total_skills && p.total_skills > 0) rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`))}</div></div>`);
   if (p.default_workspace) rows.push(`<div class="detail-row"><div class="detail-row-label">Default space</div><div class="detail-row-value"><code>${esc(p.default_workspace)}</code></div></div>`);
   body.innerHTML = `
     <div class="main-view-content">
@@ -5190,16 +5275,17 @@ function renderProfileDropdown(data) {
   const dd = $('profileDropdown');
   if (!dd) return;
   dd.innerHTML = '';
-  const profiles = data.profiles || [];
-  const active = (S.activeProfile && profiles.some(p => p.name === S.activeProfile))
+  const allProfiles = data.profiles || [];
+  const active = (S.activeProfile && allProfiles.some(p => p.name === S.activeProfile))
     ? S.activeProfile
     : (data.active || 'default');
+  const profiles = allProfiles.filter(p => p && (p.visible !== false || p.name === active));
   for (const p of profiles) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
     const meta = [];
     if (p.model) meta.push(p.model.split('/').pop());
-    if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
+    if (p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
     const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';
@@ -5278,6 +5364,7 @@ async function switchToProfile(name) {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }) });
     if (_switchGen !== _profileSwitchGeneration) return;
     S.activeProfile = data.active || name;
+    S.activeProfileIsDefault = !!data.is_default;
 
     // Update composer placeholder and title bar while the core profile-switch
     // state is still close to the profile API response.
@@ -5322,7 +5409,17 @@ async function switchToProfile(name) {
       if (S.session && !sessionInProgress) {
         S.session.model = modelToUse;
         S.session.model_provider = modelState.model_provider||providerId||null;
+        S.session.profile = data.active || name;
       }
+    }
+    // #3331 follow-up (Codex gate): retag the in-memory session's profile on
+    // ANY profile switch, even when the switched-to profile returns no
+    // default_model (empty session / model-less profile). Without this the
+    // profile chip + project-picker filter keep the stale profile after a
+    // switch to a model-less profile. Guarded by !sessionInProgress like the
+    // model patch above (don't touch a session about to be replaced).
+    if (S.session && !sessionInProgress) {
+      S.session.profile = data.active || name;
     }
 
     // ── Apply workspace ────────────────────────────────────────────────────
@@ -5571,7 +5668,18 @@ async function loadMemory(force) {
 // Drag and drop
 const wrap=$('composerWrap');let dragCounter=0;
 document.addEventListener('dragover',e=>e.preventDefault());
-document.addEventListener('dragenter',e=>{e.preventDefault();if(e.dataTransfer.types.includes('Files')||e.dataTransfer.types.includes('application/ws-path')){dragCounter++;wrap.classList.add('drag-over');}});
+document.addEventListener('dragenter',e=>{e.preventDefault();
+  const isWsPath=e.dataTransfer.types.includes('application/ws-path');
+  const isFiles=e.dataTransfer.types.includes('Files');
+  if(isFiles||isWsPath){
+    dragCounter++;
+    // Context-aware hint: a workspace-file drag inserts an @path reference;
+    // an OS-file drag attaches the file to the message.
+    const hint=$('dropHintText');
+    if(hint) hint.textContent=isWsPath?'Drop to insert workspace reference':'Drop files to attach';
+    wrap.classList.add('drag-over');
+  }
+});
 document.addEventListener('dragleave',e=>{dragCounter--;if(dragCounter<=0){dragCounter=0;wrap.classList.remove('drag-over');}});
 document.addEventListener('drop',e=>{
   e.preventDefault();dragCounter=0;wrap.classList.remove('drag-over');
@@ -5609,21 +5717,84 @@ let _settingsAppearanceAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
 
-// ── Sidebar tab visibility ─────────────────────────────────────────────────
+// ── Sidebar tab visibility/order ────────────────────────────────────────────
 const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
 const _HIDDEN_TABS_LS_KEY = 'hermes-webui-hidden-tabs';
+const _TAB_ORDER_LS_KEY = 'hermes-webui-tab-order';
+let _tabVisibilityDragSuppressUntil = 0;
+
+function _sanitizeTabPanelList(panels){
+  if(!Array.isArray(panels)) return [];
+  var out=[];
+  panels.forEach(function(panel){
+    if(typeof panel!=='string') return;
+    panel=panel.trim();
+    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel)) return;
+    if(out.indexOf(panel)===-1) out.push(panel);
+  });
+  return out;
+}
 
 function _getHiddenTabs(){
-  try{var h=localStorage.getItem(_HIDDEN_TABS_LS_KEY);if(h){var p=JSON.parse(h);if(Array.isArray(p))return p;}}catch(e){}
+  try{var h=localStorage.getItem(_HIDDEN_TABS_LS_KEY);if(h)return _sanitizeTabPanelList(JSON.parse(h));}catch(e){}
   return[];
 }
 
 function _setHiddenTabs(panels){
-  try{localStorage.setItem(_HIDDEN_TABS_LS_KEY,JSON.stringify(panels));}catch(e){}
+  try{localStorage.setItem(_HIDDEN_TABS_LS_KEY,JSON.stringify(_sanitizeTabPanelList(panels)));}catch(e){}
+}
+
+function _getTabOrder(){
+  try{var h=localStorage.getItem(_TAB_ORDER_LS_KEY);if(h)return _sanitizeTabPanelList(JSON.parse(h));}catch(e){}
+  return[];
+}
+
+function _setTabOrder(panels){
+  try{localStorage.setItem(_TAB_ORDER_LS_KEY,JSON.stringify(_sanitizeTabPanelList(panels)));}catch(e){}
+}
+
+function _availableSidebarPanels(){
+  var out=[];
+  var tabs=document.querySelectorAll('.rail .rail-btn.nav-tab[data-panel], .sidebar-nav .nav-tab[data-panel]');
+  tabs.forEach(function(tab){
+    var panel=tab.dataset.panel;
+    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel)) return;
+    if(tab.classList.contains('dashboard-link')||tab.hasAttribute('data-dashboard-link')) return;
+    if(out.indexOf(panel)===-1) out.push(panel);
+  });
+  return out;
+}
+
+function _orderedSidebarPanels(order){
+  var available=_availableSidebarPanels();
+  var requested=_sanitizeTabPanelList(Array.isArray(order)?order:_getTabOrder());
+  var out=[];
+  requested.forEach(function(panel){ if(available.indexOf(panel)!==-1&&out.indexOf(panel)===-1) out.push(panel); });
+  available.forEach(function(panel){ if(out.indexOf(panel)===-1) out.push(panel); });
+  return out;
+}
+
+function _applyTabOrder(order){
+  var ordered=_orderedSidebarPanels(order);
+  ['.rail','.sidebar-nav'].forEach(function(selector){
+    var container=document.querySelector(selector);
+    if(!container) return;
+    var anchor=Array.prototype.find.call(container.children,function(child){
+      if(child.classList&&child.classList.contains('rail-spacer')) return true;
+      if(child.classList&&child.classList.contains('dashboard-link')) return true;
+      if(child.hasAttribute&&child.hasAttribute('data-dashboard-link')) return true;
+      return child.dataset&&child.dataset.panel==='settings';
+    });
+    ordered.forEach(function(panel){
+      var node=container.querySelector('.nav-tab[data-panel="'+panel+'"]');
+      if(node) container.insertBefore(node,anchor||null);
+    });
+  });
 }
 
 function _applyTabVisibility(hidden){
-  if(!Array.isArray(hidden)) hidden=[];
+  hidden=_sanitizeTabPanelList(hidden);
+  _applyTabOrder(_getTabOrder());
   // Hide/unhide all [data-panel] elements (sidebar-nav buttons + rail buttons)
   document.querySelectorAll('[data-panel]').forEach(function(el){
     var panel=el.dataset.panel;
@@ -5646,14 +5817,12 @@ function _renderTabVisibilityChips(){
   var container=$('tabVisibilityChips');
   if(!container)return;
   var hidden=_getHiddenTabs();
-  // Scan rail buttons to discover all available panels (skip always-visible + dashboard-link)
-  var tabs=document.querySelectorAll('.rail .rail-btn.nav-tab[data-panel]');
+  var panels=_orderedSidebarPanels();
   container.innerHTML='';
-  tabs.forEach(function(tab){
-    var panel=tab.dataset.panel;
-    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel))return;
-    if(tab.classList.contains('dashboard-link'))return;
-    var label=tab.dataset.tooltip||tab.dataset.label||panel;
+  panels.forEach(function(panel){
+    var tab=document.querySelector('.rail .rail-btn.nav-tab[data-panel="'+panel+'"]')
+      ||document.querySelector('.sidebar-nav .nav-tab[data-panel="'+panel+'"]');
+    var label=(tab&&(tab.dataset.tooltip||tab.dataset.label))||panel;
     // Capitalize first letter
     label=label.charAt(0).toUpperCase()+label.slice(1);
     var chip=document.createElement('button');
@@ -5663,15 +5832,57 @@ function _renderTabVisibilityChips(){
     if(isOff)chip.classList.add('chip-off');
     chip.textContent=label;
     chip.setAttribute('data-tab-panel',panel);
+    chip.setAttribute('draggable','true');
     // Use role="switch" + aria-checked instead of aria-pressed so screen
     // readers narrate "Tasks switch on/off" (matches user mental model) rather
     // than "Tasks toggle button pressed/not-pressed" (where the polarity is
     // confusing because chip-off looks like the "off" state).
     chip.setAttribute('role','switch');
     chip.setAttribute('aria-checked',isOff?'false':'true');
-    chip.onclick=function(){_toggleTabVisibilityChip(panel);};
+    chip.onclick=function(){
+      if(Date.now()<_tabVisibilityDragSuppressUntil)return;
+      _toggleTabVisibilityChip(panel);
+    };
+    _wireTabChipDrag(chip,panel);
     container.appendChild(chip);
   });
+}
+
+function _wireTabChipDrag(chip,panel){
+  if(!chip)return;
+  chip.addEventListener('dragstart',function(e){
+    chip.classList.add('dragging');
+    if(e.dataTransfer){
+      e.dataTransfer.effectAllowed='move';
+      e.dataTransfer.setData('text/plain',panel);
+    }
+  });
+  chip.addEventListener('dragend',function(){chip.classList.remove('dragging');});
+  chip.addEventListener('dragover',function(e){e.preventDefault();chip.classList.add('drag-over');if(e.dataTransfer)e.dataTransfer.dropEffect='move';});
+  chip.addEventListener('dragleave',function(){chip.classList.remove('drag-over');});
+  chip.addEventListener('drop',function(e){_handleTabVisibilityChipDrop(e,panel);});
+}
+
+function _moveTabOrderPanel(sourcePanel,targetPanel){
+  if(!sourcePanel||!targetPanel||sourcePanel===targetPanel) return false;
+  var order=_orderedSidebarPanels();
+  var from=order.indexOf(sourcePanel);
+  var to=order.indexOf(targetPanel);
+  if(from===-1||to===-1) return false;
+  order.splice(from,1);
+  order.splice(to,0,sourcePanel);
+  _setTabOrder(order);
+  _applyTabOrder(order);
+  _renderTabVisibilityChips();
+  _scheduleAppearanceAutosave();
+  return true;
+}
+
+function _handleTabVisibilityChipDrop(e,targetPanel){
+  if(e){e.preventDefault();e.stopPropagation();}
+  document.querySelectorAll('.tab-visibility-chip.drag-over').forEach(function(el){el.classList.remove('drag-over');});
+  var sourcePanel=e&&e.dataTransfer?e.dataTransfer.getData('text/plain'):'';
+  if(_moveTabOrderPanel(sourcePanel,targetPanel)) _tabVisibilityDragSuppressUntil=Date.now()+250;
 }
 
 function _toggleTabVisibilityChip(panel){
@@ -5690,16 +5901,35 @@ function _toggleTabVisibilityChip(panel){
 }
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
+  // If the main content is not showing settings, switch back first
+  if (_currentPanel !== 'settings') {
+    _currentPanel = 'settings';
+    var mainEl = document.querySelector('main.main');
+    if (mainEl) {
+      ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(function(p) {
+        mainEl.classList.toggle('showing-' + p, p === 'settings');
+      });
+    }
+  }
+  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system'||name==='help')?name:'conversation';
+  // Deep-linking to the Plugins pane when the tab is hidden (no plugins
+  // installed, #3457) falls back to Conversation. Resolve this BEFORE toggling
+  // panes/sidebar/dropdown below so every downstream selection uses the
+  // corrected section — otherwise the plugins pane would still render active
+  // but empty. (#3457)
+  if(section==='plugins'){
+    const pluginsTabBtn=document.querySelector('[data-settings-section="plugins"]');
+    if(pluginsTabBtn && pluginsTabBtn.style.display==='none') section='conversation';
+  }
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System',help:'Help'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','system'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','plugins','system','help'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -5816,7 +6046,9 @@ function _appearancePayloadFromUi(){
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
+    activity_feed_expanded_default: !!($('settingsActivityFeedExpandedDefault')||{}).checked,
     hidden_tabs: _getHiddenTabs(),
+    tab_order: _getTabOrder(),
   };
 }
 
@@ -5869,6 +6101,9 @@ async function _autosaveAppearanceSettings(payload){
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
+    if(saved&&Object.prototype.hasOwnProperty.call(saved,'activity_feed_expanded_default')){
+      window._activityFeedExpandedDefault=!!saved.activity_feed_expanded_default;
+    }
     _setAppearanceAutosaveStatus('saved');
   }catch(e){
     console.warn('[settings] appearance autosave failed', e);
@@ -5902,10 +6137,17 @@ function _preferencesPayloadFromUi(){
   if(fadeTextCb) payload.fade_text_effect=fadeTextCb.checked;
   const simplifiedToolCb=$('settingsSimplifiedToolCalling');
   if(simplifiedToolCb) payload.simplified_tool_calling=simplifiedToolCb.checked;
+  const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
+  if(terminalAutoExpandCb) payload.terminal_auto_expand_on_output=terminalAutoExpandCb.checked;
   const apiRedactCb=$('settingsApiRedact');
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
   const showCliCb=$('settingsShowCliSessions');
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
+  const showCronCb=$('settingsShowCronSessions');
+  // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
+  // identically to the explicit saveSettings() path, so neither save route can
+  // persist show_cron_sessions=true while show_cli_sessions=false. (#3514)
+  if(showCronCb) payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked);
   const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
@@ -5975,6 +6217,9 @@ async function _autosavePreferencesSettings(payload){
       window._simplifiedToolCalling=(saved&&saved.simplified_tool_calling!==false);
       if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
       if(typeof renderMessages==='function') renderMessages();
+    }
+    if(payload&&payload.terminal_auto_expand_on_output!==undefined){
+      window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
     if(payload&&Object.prototype.hasOwnProperty.call(payload,'fade_text_effect')) window._fadeTextEffect=!!payload.fade_text_effect;
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'pinned_sessions_limit')) window._pinnedSessionsLimit=parseInt(saved.pinned_sessions_limit,10)||3;
@@ -6083,7 +6328,16 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
-    // Tab visibility chips (dynamically populated from DOM)
+    const activityExpandedCb=$('settingsActivityFeedExpandedDefault');
+    if(activityExpandedCb){
+      activityExpandedCb.checked=!!settings.activity_feed_expanded_default;
+      window._activityFeedExpandedDefault=activityExpandedCb.checked;
+      activityExpandedCb.onchange=function(){
+        window._activityFeedExpandedDefault=this.checked;
+        _scheduleAppearanceAutosave();
+      };
+    }
+    // Tab visibility/order chips (dynamically populated from DOM)
     var hiddenTabs=[];
     if(Array.isArray(settings.hidden_tabs)){
       // Server value takes priority — even an empty array means "no tabs hidden"
@@ -6092,6 +6346,14 @@ async function loadSettingsPanel(){
       // Server has no hidden_tabs key — fall back to localStorage
       hiddenTabs=_getHiddenTabs();
     }
+    var tabOrder=[];
+    if(Array.isArray(settings.tab_order)){
+      tabOrder=settings.tab_order.filter(function(s){return typeof s==='string'&&s.trim();});
+    }else{
+      tabOrder=_getTabOrder();
+    }
+    _setTabOrder(tabOrder);
+    _applyTabOrder(tabOrder);
     _setHiddenTabs(hiddenTabs);
     _applyTabVisibility(hiddenTabs);
     _renderTabVisibilityChips();
@@ -6157,7 +6419,10 @@ async function loadSettingsPanel(){
         }
       }
       langSel.value=resolvedLanguage;
-      langSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      langSel.addEventListener('change',function(){
+        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();}
+        _schedulePreferencesAutosave();
+      },{once:false});
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -6197,10 +6462,19 @@ async function loadSettingsPanel(){
     if(fadeTextCb){fadeTextCb.checked=!!settings.fade_text_effect;window._fadeTextEffect=fadeTextCb.checked;fadeTextCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const simplifiedToolCb=$('settingsSimplifiedToolCalling');
     if(simplifiedToolCb){simplifiedToolCb.checked=settings.simplified_tool_calling!==false;simplifiedToolCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
+    if(terminalAutoExpandCb){terminalAutoExpandCb.checked=!!settings.terminal_auto_expand_on_output;window._terminalAutoExpandOnOutput=terminalAutoExpandCb.checked;terminalAutoExpandCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const apiRedactCb=$('settingsApiRedact');
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb){showCliCb.checked=!!settings.show_cli_sessions;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const showCronCb=$('settingsShowCronSessions');
+    if(showCronCb){
+      showCronCb.checked=!!settings.show_cron_sessions;
+      showCronCb.disabled=showCliCb?!showCliCb.checked:true;
+      showCronCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      if(showCliCb){showCliCb.addEventListener('change',function(){showCronCb.disabled=!showCliCb.checked;},{once:false});}
+    }
     const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
@@ -6243,12 +6517,45 @@ async function loadSettingsPanel(){
         if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
       };
     }
-    // Populate voice selector from speechSynthesis
+    // TTS engine selector
+    const ttsEngineSel=$('settingsTtsEngine');
+    if(ttsEngineSel){
+      const saved=localStorage.getItem('hermes-tts-engine')||'browser';
+      ttsEngineSel.value=saved;
+      ttsEngineSel.onchange=function(){
+        localStorage.setItem('hermes-tts-engine',this.value);
+        window._populateTtsVoices();
+      };
+    }
+    // Populate voice selector based on engine
     const ttsVoiceSel=$('settingsTtsVoice');
-    if(ttsVoiceSel&&'speechSynthesis' in window){
-      const populateVoices=()=>{
+    window._populateTtsVoices=function(){
+      if(!ttsVoiceSel) return;
+      const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+      const current=localStorage.getItem('hermes-tts-voice')||'';
+      if(engine==='edge'){
+        const edgeVoices=[
+          {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
+          {value:'zh-CN-XiaoyiNeural',label:'Xiaoyi (Chinese, Female)'},
+          {value:'zh-CN-YunxiNeural',label:'Yunxi (Chinese, Male)'},
+          {value:'zh-CN-YunjianNeural',label:'Yunjian (Chinese, Male)'},
+          {value:'zh-CN-YunyangNeural',label:'Yunyang (Chinese, Male)'},
+          {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
+          {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
+        ];
+        ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
+        edgeVoices.forEach(v=>{
+          const opt=document.createElement('option');
+          opt.value=v.value;opt.textContent=v.label;
+          if(v.value===current) opt.selected=true;
+          ttsVoiceSel.appendChild(opt);
+        });
+      } else {
+        if(!('speechSynthesis' in window)){
+          ttsVoiceSel.innerHTML='<option value="">Speech synthesis not available</option>';
+          return;
+        }
         const voices=speechSynthesis.getVoices();
-        const current=localStorage.getItem('hermes-tts-voice')||'';
         ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
         voices.forEach(v=>{
           const opt=document.createElement('option');
@@ -6256,9 +6563,14 @@ async function loadSettingsPanel(){
           if(v.name===current) opt.selected=true;
           ttsVoiceSel.appendChild(opt);
         });
-      };
-      populateVoices();
-      speechSynthesis.addEventListener('voiceschanged',populateVoices,{once:true});
+      }
+    };
+    if(ttsVoiceSel&&'speechSynthesis' in window){
+      window._populateTtsVoices();
+      speechSynthesis.addEventListener('voiceschanged',function(){
+        const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+        if(engine==='browser') window._populateTtsVoices();
+      },{once:false});
       ttsVoiceSel.onchange=function(){localStorage.setItem('hermes-tts-voice',this.value);};
     }
     // TTS rate/pitch sliders
@@ -6355,6 +6667,17 @@ async function loadSettingsPanel(){
 
 // ── Plugins panel (read-only plugin/hook visibility) ───────────────────────
 
+async function handlePluginEnableToggle(pluginKey, checked){
+  try{
+    const body={dashboard_plugins:{}};
+    body.dashboard_plugins[pluginKey]=!!checked;
+    await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    loadPluginsPanel();
+  }catch(e){
+    showToast(t('settings_save_failed')+e.message);
+  }
+}
+
 async function loadPluginsPanel(){
   const list=$('pluginsList');
   const empty=$('pluginsEmpty');
@@ -6362,6 +6685,9 @@ async function loadPluginsPanel(){
   try{
     const data=await api('/api/plugins');
     const plugins=Array.isArray((data||{}).plugins)?data.plugins:[];
+    // Hide the Plugins tab when no plugins are installed (#3457)
+    const tabBtn=document.querySelector('[data-settings-section="plugins"]');
+    if(tabBtn) tabBtn.style.display=(data&&data.empty)?'none':'';
     list.innerHTML='';
     if(plugins.length===0){
       list.style.display='none';
@@ -6399,6 +6725,33 @@ function _buildPluginCard(plugin){
     : '<span class="plugin-hook-empty">'+t(isProvider?'plugins_provider_no_hooks':'plugins_no_hooks')+'</span>';
   const version=(plugin&&plugin.version)?' · v'+esc(plugin.version):'';
   const desc=(plugin&&plugin.description)?esc(plugin.description):t('plugins_no_description');
+const enabled=plugin&&plugin.enabled!==false;
+  const tab=plugin&&plugin.tab;
+  const isDashboardPlugin=!!(tab&&tab.path);
+  // No inline onclick/onchange: an inline handler interpolates tab.path/key into
+  // a JS-string-in-attribute context where HTML-escaping is insufficient (a
+  // crafted value could break out). Render inert markup + bind listeners below
+  // with the raw closure values.
+  const openBtn=enabled&&tab&&tab.path
+    ? `<a href="${esc(tab.path)}" class="plugin-open-btn">${esc(tab.label||plugin.name||'Open')} \u2197</a>`
+    : '';
+  const toggleHtml=enabled&&isDashboardPlugin
+    ? `<div class="plugin-card-footer-row">
+         <span class="plugin-toggle-label">${t('plugins_enable_toggle')||'Enabled'}</span>
+         <label class="plugin-toggle-switch">
+           <input type="checkbox" class="plugin-enable-toggle" checked>
+           <span class="plugin-toggle-slider"></span>
+         </label>
+       </div>`
+    : (isDashboardPlugin
+    ? `<div class="plugin-card-footer-row">
+         <span class="plugin-toggle-label">${t('plugins_enable_toggle')||'Enable'}</span>
+         <label class="plugin-toggle-switch">
+           <input type="checkbox" class="plugin-enable-toggle">
+           <span class="plugin-toggle-slider"></span>
+         </label>
+       </div>`
+    : '');
   let badgeText;
   let badgeClass;
   if(isProvider){
@@ -6423,12 +6776,72 @@ function _buildPluginCard(plugin){
       <div class="provider-card-hint">${desc}</div>
       <div class="provider-card-label">${t('plugins_registered_hooks')}</div>
       <div class="plugin-hook-list">${hookHtml}</div>
+      ${openBtn ? `<div class="plugin-card-footer">${openBtn}</div>` : ''}
+      ${toggleHtml}
     </div>
   `;
+  // Bind handlers with the RAW closure values (not interpolated into inline JS),
+  // so a hostile tab.path/key can't break out of a JS-string attribute context.
+  if(tab&&tab.path){
+    const _openEl=card.querySelector('.plugin-open-btn');
+    if(_openEl){
+      const _p=tab.path, _l=tab.label||plugin.name;
+      _openEl.addEventListener('click', function(ev){ switchPluginPage(ev, _p, _l); });
+    }
+  }
+  if(isDashboardPlugin){
+    const _tog=card.querySelector('.plugin-enable-toggle');
+    if(_tog){
+      const _k=plugin.key;
+      _tog.addEventListener('change', function(){ handlePluginEnableToggle(_k, this.checked); });
+    }
+  }
   return card;
 }
 
-// ── Providers panel ───────────────────────────────────────────────────────
+// ── Plugin pages ─────────────────────────────────────────────────────────────
+
+let _currentPluginPage = null;
+
+async function switchPluginPage(event, path, label) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  if (!_currentPluginPage || _currentPluginPage.path !== path) {
+    await _loadPluginPage(path, label);
+  }
+  // Update _currentPanel so clicking sidebar items won't short-circuit,
+  // but keep the sidebar panel views intact (no panelPlugin exists).
+  _currentPanel = 'plugin';
+  const mainEl = document.querySelector('main.main');
+  if (mainEl) {
+    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
+      mainEl.classList.toggle('showing-' + p, p === 'plugin');
+    });
+  }
+}
+
+async function _loadPluginPage(path, label) {
+  const container = $('pluginPageContainer');
+  const titleEl = $('pluginPageTitle');
+  if (!container) return;
+  if (titleEl) titleEl.textContent = label || path;
+  container.innerHTML = '';
+
+  // Use an iframe for full isolation (styles, scripts, modals stay sandboxed).
+  // Security note: plugins are locally-installed (~/.hermes/plugins/), similar
+  // trust model to VS Code extensions — only install plugins you trust.
+  const iframe = document.createElement('iframe');
+  iframe.src = path;
+  iframe.style.cssText = 'width:100%;height:100%;border:none;display:block;';
+  iframe.setAttribute('title', label || 'Plugin');
+  iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups');
+  container.appendChild(iframe);
+  _currentPluginPage = { path, label };
+}
+
+// ── Providers panel ─────────────────────────────────────────────────────────
 
 const _providerCardEls = new Map(); // providerId → {card, statusDot, input, saveBtn, removeBtn}
 
@@ -6446,11 +6859,14 @@ async function loadProvidersPanel(){
   try{
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
-    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom);
+    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider);
     list.innerHTML='';
     _providerCardEls.clear();
     const quotaCard=_buildProviderQuotaCard(quota);
-    if(quotaCard) list.appendChild(quotaCard);
+    if(quotaCard){
+      list.appendChild(quotaCard);
+      renderProviderCostChart(quotaCard); // async, fire-and-forget
+    }
     if(providers.length===0){
       list.style.display='none';
       if(empty) empty.style.display='';
@@ -6486,6 +6902,10 @@ async function _refreshProviderQuota(card,button){
     const fresh=_buildProviderQuotaCard(next);
     if(fresh){
       card.replaceWith(fresh);
+      // Re-render the 7-day spend chart onto the rebuilt card — the quota
+      // refresh replaces the whole card, which would otherwise drop the chart
+      // until the next full panel reload (#3600).
+      renderProviderCostChart(fresh); // async, fire-and-forget
       if(typeof showToast==='function') showToast(failed?t('provider_quota_refresh_failed'):t('provider_quota_refresh_succeeded'));
       return;
     }
@@ -6710,6 +7130,43 @@ function _buildProviderQuotaCard(status){
     });
   }
   return card;
+}
+
+async function renderProviderCostChart(card){
+  let history;
+  try{
+    history=await api('/api/provider/cost-history?provider=openrouter');
+  }catch(e){
+    return; // silently skip if endpoint unavailable
+  }
+  const body=card.querySelector('.provider-quota-body');
+  if(!body||body.querySelector('.provider-cost-chart-wrap')) return;
+  if(!history||history.ok===false) return;
+  const snaps=Array.isArray(history.snapshots)?history.snapshots:[];
+  // need at least 2 snapshots to have one non-null delta
+  const hasData=snaps.filter(s=>s.delta!=null).length>=1;
+  if(!hasData){
+    const empty=document.createElement('div');
+    empty.className='provider-cost-chart-wrap';
+    empty.innerHTML='<div class="provider-cost-chart-title">7-day spend</div><div class="provider-quota-message">Not enough data yet. Cost chart builds after 2 daily snapshots.</div>';
+    body.appendChild(empty);
+    return;
+  }
+  const maxDelta=Math.max(...snaps.map(s=>s.delta!=null?Number(s.delta):0),1e-9);
+  const nonNull=snaps.filter(s=>s.delta!=null).map(s=>Number(s.delta));
+  const avg=nonNull.length?nonNull.reduce((a,b)=>a+b,0)/nonNull.length:0;
+  const pace='$'+(avg*30).toFixed(2);
+  const bars=snaps.map(s=>{
+    const delta=s.delta!=null?Number(s.delta):null;
+    const pct=delta!=null?Math.max((delta/maxDelta)*100,delta>0?2:0).toFixed(1):'0';
+    const label=String(s.date||'').slice(5);
+    const tip=delta!=null?`${s.date} · $${delta.toFixed(4)}`:`${s.date} · no baseline`;
+    return `<div class="insights-daily-bar" title="${esc(tip)}"><div class="insights-daily-stack" aria-label="${esc(tip)}"><div class="insights-daily-bar-input" style="height:${pct}%"></div></div><span>${esc(label)}</span></div>`;
+  }).join('');
+  const wrap=document.createElement('div');
+  wrap.className='provider-cost-chart-wrap';
+  wrap.innerHTML=`<div class="provider-cost-chart-title">7-day spend <span class="provider-cost-chart-pace">Monthly pace: ${esc(pace)}</span></div><div class="provider-cost-chart-bars insights-daily-token-chart">${bars}</div>`;
+  body.appendChild(wrap);
 }
 
 function _buildProviderCard(p){
@@ -6995,11 +7452,12 @@ async function _refreshProviderModels(providerId, btn){
     const res=await api('/api/models/refresh',{method:'POST',body:JSON.stringify({provider:providerId})});
     if(res.ok){
       showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
+      _refreshModelDropdownsAfterProviderChange();
     }else{
       showToast(res.error||'Failed to refresh models');
     }
   }catch(e){
-    showToast('Error: '+e.message);
+    showToast(e.status===404?'Refresh not available for this provider.':(e.message||'Failed to refresh models'));
   }finally{
     btn.disabled=false;
     btn.innerHTML=orig;
@@ -7115,6 +7573,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._whatsNewSummaryEnabled=!!body.whats_new_summary_enabled;
   window._showThinking=body.show_thinking!==false;
   window._simplifiedToolCalling=body.simplified_tool_calling!==false;
+  window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
@@ -7156,7 +7615,7 @@ async function checkUpdatesNow(){
   if(label) label.textContent=t('settings_checking');
   if(status) status.textContent='';
   try {
-    const data=await api('/api/updates/check?force=1',{timeoutMs:60000});
+    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify({force:true}),timeoutMs:60000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
@@ -7432,6 +7891,7 @@ async function saveSettings(andClose){
   const showTps=!!($('settingsShowTps')||{}).checked;
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
+  const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
@@ -7455,8 +7915,12 @@ async function saveSettings(andClose){
   body.show_tps=showTps;
   body.fade_text_effect=fadeTextEffect;
   body.simplified_tool_calling=!!($('settingsSimplifiedToolCalling')||{}).checked;
+  body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
+  // Cron sessions are gated on CLI sessions (server short-circuits otherwise);
+  // mirror the autosave path so the explicit Save Settings button persists it too. (#3514)
+  body.show_cron_sessions=showCliSessions&&showCronSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
@@ -7859,11 +8323,17 @@ function loadGatewayStatus(){
   api('/api/gateway/status').then(r=>{
     if(!r) return;
     if(!r.configured){
-      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>Gateway not configured</div>`;
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>${esc(t('gateway_not_configured'))}</div>`;
       return;
     }
     if(!r.running){
-      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>Gateway not running</div>`;
+      const reason = _gatewayStatusReason(r);
+      const statusLabel = reason === 'gateway_stale_running_state'
+        ? t('gateway_metadata_stale')
+        : reason === 'remote_gateway_unreachable'
+          ? t('gateway_endpoint_unreachable')
+          : t('gateway_not_running');
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>${esc(statusLabel)}</div>`;
       return;
     }
     const platformIcons={telegram:'💬',discord:'🎮',slack:'📝',web:'🌐',api:'🔌'};
@@ -7874,10 +8344,10 @@ function loadGatewayStatus(){
         return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
       }).join(' ');
     }
-    const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">Last active: ${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
-    const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} session${r.session_count!==1?'s':''}</span>`:'';
-    card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">Running</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
-  }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">Failed to load gateway status</div>`});
+    const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_last_active'))}${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
+    const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_session_count',r.session_count))}</span>`:'';
+    card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running_label'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
+  }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('gateway_load_failed'))}</div>`});
 }
 // Load MCP servers when system settings tab opens
 const _origSwitchSettings=switchSettingsSection;

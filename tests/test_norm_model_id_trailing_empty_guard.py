@@ -71,10 +71,18 @@ def test_norm_model_id_simple_inputs_unchanged():
 
 def test_ui_js_mirror_has_trailing_empty_guard():
     """Frontend _normalizeConfiguredModelKey must mirror the backend guard."""
-    # The new pattern uses `const last=s.split(':').pop();s=last||s;`
-    assert "s.split(':').pop()" in UI_JS, "ui.js no longer uses split-pop pattern"
-    # Look for the `||s` fallback specifically
-    snippet = UI_JS[UI_JS.find("function _normalizeConfiguredModelKey"):UI_JS.find("function _normalizeConfiguredModelKey") + 600]
-    assert "last||s" in snippet, "ui.js missing trailing-empty guard `||s` fallback"
-    # And mirror on / branch
-    assert snippet.count("last||s") >= 2, "ui.js trailing-empty guard not mirrored on slash branch"
+    # The colon branch still uses `const last=s.split(':').pop();s=last||s;`
+    assert "s.split(':').pop()" in UI_JS, "ui.js no longer uses split-pop pattern for colon branch"
+    # Look for the `||s` fallback on the colon branch
+    snippet = UI_JS[UI_JS.find("function _normalizeConfiguredModelKey"):UI_JS.find("function _normalizeConfiguredModelKey") + 1800]
+    assert "last||s" in snippet, "ui.js missing trailing-empty guard `||s` fallback on colon branch"
+    # The slash branch now uses replace(/^[^/]+\//, '') instead of split('/').pop()
+    # to preserve multi-slash vendor hierarchy (#3360).  Verify the new pattern
+    # and its trailing-empty guard (the `||s` suffix).
+    assert "replace(/^[^/]+\\/" in snippet, (
+        "ui.js slash branch should use replace(/^[^/]+\\//) pattern (#3360)"
+    )
+    assert "'')||s" in snippet, (
+        "ui.js slash branch should have ||s trailing-empty guard (#3360)"
+    )
+

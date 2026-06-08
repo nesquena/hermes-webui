@@ -27,6 +27,10 @@ does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
   model-context reconstruction, compression, UI scene/cache, and sidebar metadata
   repairs. Start here for narrow fixes that keep the existing WebUI execution
   path.
+- [`docs/rfcs/live-to-final-assistant-replies.md`](rfcs/live-to-final-assistant-replies.md):
+  proposed product model for long-running assistant replies, live process text,
+  tool activity, recovery, terminal outcomes, and final-answer boundaries. Start
+  here for UI/UX changes to running-session assistant reply rendering.
 - [`docs/rfcs/canonical-session-resolution.md`](rfcs/canonical-session-resolution.md):
   proposed contract for resolving URL routes, query parameters, localStorage,
   sidebar rows, and compression-lineage IDs to one canonical visible session
@@ -38,6 +42,10 @@ does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
   execution behind an adapter boundary. Use this for adapter-seam, control-plane,
   runner, sidecar, or execution-ownership work; do not treat it as authorization
   to implement those slices.
+- [`docs/architecture/agent-api-contract.md`](architecture/agent-api-contract.md):
+  current audit of WebUI dependencies on the hermes-agent source checkout and
+  the replacement API/client surfaces needed before source mounts can be removed.
+  Start here for issue #2491 and Docker/source-boundary migration slices.
 - [`docs/rfcs/turn-journal.md`](rfcs/turn-journal.md): proposed crash-safe
   write-ahead journal for browser-originated chat turns.
 - [`docs/rfcs/README.md`](rfcs/README.md): RFC conventions and current RFC index.

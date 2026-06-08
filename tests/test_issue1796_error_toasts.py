@@ -34,5 +34,13 @@ def test_toast_dismissal_pauses_on_hover_and_keyboard_focus():
     assert "onmouseleave=()=>setToastDismissTimer(el,duration)" in UI_JS
     assert "onfocusin=()=>clearToastDismissTimer(el)" in UI_JS
     assert "onfocusout=()=>setToastDismissTimer(el,duration)" in UI_JS
-    assert ".toast{pointer-events:auto" in STYLE_CSS
+    # A *visible* toast must remain interactive so hover/focus can pause the
+    # dismiss timer. Interactivity lives on `.toast.show` (see #3735): the hidden
+    # base `.toast` is pointer-events:none so its invisible padding can't eat
+    # taps on controls underneath it (mobile profile buttons), and it becomes
+    # pointer-events:auto only once shown.
+    assert ".toast.show{" in STYLE_CSS
+    show_rule = STYLE_CSS[STYLE_CSS.index(".toast.show{"):STYLE_CSS.index("}", STYLE_CSS.index(".toast.show{"))]
+    assert "pointer-events:auto" in show_rule
+    assert ".toast{pointer-events:none" in STYLE_CSS  # hidden toast must not intercept clicks (#3735)
     assert ".toast-copy" in STYLE_CSS

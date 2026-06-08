@@ -201,7 +201,7 @@ def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(monkeypatch, tmp_path
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
-        lambda model, provider: (model, provider, False),
+        lambda model, provider, **_: (model, provider, False),
     )
     started = []
 
@@ -316,7 +316,7 @@ def test_goal_endpoint_adapter_keeps_full_set_text_and_legacy_payload_status(mon
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
-        lambda model, provider: (model, provider, False),
+        lambda model, provider, **_: (model, provider, False),
     )
     monkeypatch.setattr(
         routes,

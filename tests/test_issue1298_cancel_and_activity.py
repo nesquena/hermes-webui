@@ -317,8 +317,7 @@ class TestIssue1298ActivityGroupExpandPersistence:
         )
 
     def test_finalize_thinking_card_respects_user_expand(self):
-        """finalizeThinkingCard() must NOT force-collapse the live activity
-        group when the user has explicitly expanded it (#1298)."""
+        """finalizeThinkingCard() must not force-collapse the live Worklog."""
         src = (REPO_ROOT / "static" / "ui.js").read_text()
         m = re.search(
             r"function finalizeThinkingCard\(\)\{(.*?)\n\}",
@@ -326,16 +325,11 @@ class TestIssue1298ActivityGroupExpandPersistence:
         )
         assert m, "finalizeThinkingCard() must exist in ui.js"
         body = m.group(1)
-        assert "_liveActivityUserExpanded" in body, (
-            "finalizeThinkingCard() must respect the user's expand intent — "
-            "without this guard, the panel snaps shut on every tool boundary"
+        assert "tool-call-group-collapsed" not in body, (
+            "Live Worklog must remain expanded until the settled render replaces "
+            "it with the final collapsed L1 Activity summary."
         )
-        # Hard fail if force-collapse is unconditional
-        assert "_liveActivityUserExpanded !== true" in body or \
-               "_liveActivityUserExpanded!==true" in body.replace(" ", ""), (
-            "finalizeThinkingCard() must skip the force-collapse path when "
-            "_liveActivityUserExpanded === true"
-        )
+        assert "aria-expanded','false'" not in body
 
     def test_inline_onclick_records_user_intent(self):
         """The summary button's click path must call _onLiveActivityToggle

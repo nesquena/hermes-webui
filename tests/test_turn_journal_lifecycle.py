@@ -50,4 +50,6 @@ def test_append_turn_journal_event_skips_directory_fsync_without_o_directory(tmp
     )
 
     assert event["event"] == "submitted"
-    assert (tmp_path / "_turn_journal" / "sid-windows.jsonl").is_file()
+    journal_dir = tmp_path / "_turn_journal"
+    shards = list(journal_dir.glob(f"sid-windows~{os.getpid()}.jsonl"))
+    assert len(shards) == 1, f"expected one pid-scoped shard, found: {list(journal_dir.iterdir())}"

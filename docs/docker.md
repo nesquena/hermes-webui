@@ -66,11 +66,91 @@ isolated Hermes home and follow
 > for a one-off root run, use `sudo -E docker compose up -d` and verify the
 > rendered mount with `docker compose config` first.
 
+## Optional GPU runtime image
+
+The default Hermes WebUI Docker image stays CPU-only. GPU user-space packages
+are installed only when you build a custom image with the opt-in build arg:
+
+```bash
+docker build --build-arg INSTALL_GPU_LIBS=1 -t hermes-webui:gpu .
+```
+
+That build path installs VA-API basics (`libva2`, `vainfo`), AMD Mesa VA-API
+drivers (`mesa-va-drivers`), and the Intel non-free media driver when that
+package is available from the configured Debian repositories. NVIDIA host
+runtime tooling is not installed into the app image; use the NVIDIA Container
+Toolkit on the host and pass GPUs through at runtime.
+
+GPU passthrough still depends on host drivers, Docker runtime support, and
+device mappings. The commands below are configuration guidance for a suitable
+Linux Docker host; they are not a claim that native GPU passthrough was verified
+in this workspace.
+
+### Intel and AMD VA-API
+
+Expose the host render devices and add the runtime user to the common video and
+render groups:
+
+```bash
+docker run --rm \
+  --device /dev/dri:/dev/dri \
+  --group-add video \
+  --group-add render \
+  hermes-webui:gpu vainfo
+```
+
+For Compose, add the same mapping to a custom service definition:
+
+```yaml
+services:
+  hermes-webui:
+    image: hermes-webui:gpu
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+```
+
+`vainfo` should list the VA-API driver and supported profiles when the host
+driver stack and container permissions are correct. The container entrypoint
+preserves Docker-provided supplemental groups before it drops privileges to the
+`hermeswebui` runtime user, so the WebUI process keeps access to `/dev/dri`.
+
+### NVIDIA
+
+Install and configure the NVIDIA Container Toolkit on the host first, then use
+Docker's GPU runtime flag:
+
+```bash
+docker run --rm --gpus all hermes-webui:gpu nvidia-smi
+```
+
+For Compose, use a custom service with GPU access enabled:
+
+```yaml
+services:
+  hermes-webui:
+    image: hermes-webui:gpu
+    gpus: all
+```
+
+If `nvidia-smi` is unavailable or reports no devices, fix the host NVIDIA driver
+and container toolkit setup before debugging Hermes WebUI. The container image
+only supplies the WebUI plus optional user-space media libraries; it cannot
+provide host kernel drivers or the NVIDIA runtime.
+
 ## Scheduled jobs and the gateway daemon
 
-**Symptom**: Cron jobs created in the Tasks panel never fire. System Settings shows the orange "Gateway not configured" pill, and the Tasks panel shows the same banner above the job list.
+**Symptom**: Cron jobs created in the Tasks panel never fire. System Settings or Tasks shows:
+
+- Orange "Gateway not configured", or
+- Red "Gateway metadata stale" when runtime metadata is stale, or
+- Red "Gateway endpoint not reachable" when WebUI has a gateway URL configured but cannot reach its health endpoint.
 
 **Cause**: Scheduled cron ticks are not driven by the WebUI itself. The gateway daemon ticks the scheduler every 60 seconds; without one running, scheduled jobs sit idle. "Run now" / "Trigger" buttons still work because the WebUI handles those in-process.
+
+In older gateway builds, or when the daemon runs in a separate container, `gateway_state.json` can become stale and WebUI may lose confidence even if the daemon is up. This is especially visible if only base URLs are configured (e.g. `HERMES_WEBUI_GATEWAY_BASE_URL`) and local daemon state files are not being refreshed.
 
 **Fix**: Run a gateway container alongside the WebUI. The two-container compose file is the recommended path:
 
@@ -84,14 +164,31 @@ The three-container layout adds the dashboard but is otherwise the same shape. I
 **Verify**: Once the gateway is up, the System Settings pill should turn green and the Tasks banner disappear. From the host:
 
 ```bash
+export GATEWAY_BASE_URL="${HERMES_API_URL:-${HERMES_WEBUI_GATEWAY_BASE_URL:-http://hermes:8642}}"
 docker compose -f docker-compose.two-container.yml exec hermes-agent hermes gateway status
+curl -sS "${GATEWAY_BASE_URL%/}/health/detailed" | jq '.gateway_state, .state'
 ```
 
 If the service name differs in your compose file, `docker compose -f docker-compose.two-container.yml ps` lists the running services.
+For container-to-container diagnostics, set one of `HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` in the WebUI environment when using gateway chat mode (`HERMES_WEBUI_CHAT_BACKEND=gateway`), then restart WebUI.
 
 Refs #2785.
 
 ## What goes wrong (and how to fix it)
+
+### Compatibility policy and version pinning
+
+WebUI shows the version it is currently running, but that display does not in itself guarantee tested compatibility with your agent release.
+
+Until the compatibility boundary work in [#1925](https://github.com/nesquena/hermes-webui/issues/1925) and [#2491](https://github.com/nesquena/hermes-webui/issues/2491) land, the WebUI and Hermes Agent deployment should be treated as a release pair: the WebUI release is tested against its matching agent release and should be upgraded/pinned together.
+
+If you use `latest`, use it consistently on both sides and avoid mixing a fixed tag with `latest`:
+- fixed WebUI tag + `hermes-agent:latest`
+- `hermes-webui:latest` + fixed `hermes-agent` tag
+
+In multi-container setups, if you must run a pinned pair, prefer the matching tag in `docker-compose.two-container.yml`/`docker-compose.three-container.yml` and perform the agent-volume refresh workflow in [Upgrading the agent container](#upgrading-the-agent-container) whenever you upgrade the agent image.
+
+If you see behavior issues after a mixed-version upgrade, capture both WebUI and hermes-agent versions and the compose layout in the issue.
 
 ### 1. "Permission denied" at startup
 
@@ -324,6 +421,7 @@ volumes:
 - #1399 — UID alignment in compose files (fixed in v0.50.260 via PR #1428 + this guide)
 - #3012 — host `localhost` API URLs fail from Docker containers (use `host.docker.internal` / `host.containers.internal`)
 - #3006 — `sudo docker compose` can mount `/root/.hermes` instead of the user's Hermes home
+- #3243 — optional GPU runtime image/docs for containerized acceleration workloads
 - #858 — two-container `/opt/hermes` path confusion
 - #681 — tools running in WebUI container, not agent container (architectural)
 - #668 — auto-detect UID/GID from mounted volume

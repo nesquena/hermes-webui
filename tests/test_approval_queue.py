@@ -13,6 +13,10 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(REPO_ROOT))
 
 ROUTES_SRC = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+# Approval helpers moved to api.route_approvals after the #1907 extraction;
+# combine both files so static-analysis assertions still pass.
+_ROUTE_APPROVALS = REPO_ROOT / "api" / "route_approvals.py"
+ROUTES_SRC_FULL = ROUTES_SRC + (_ROUTE_APPROVALS.read_text(encoding="utf-8") if _ROUTE_APPROVALS.exists() else "")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
@@ -24,7 +28,7 @@ INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 def test_submit_pending_appends_to_list():
     """submit_pending() must append to a list, not overwrite."""
     # The new wrapper must contain a queue append (list mutation pattern)
-    assert "queue_list.append(entry)" in ROUTES_SRC or "queue.append(entry)" in ROUTES_SRC, \
+    assert "queue_list.append(entry)" in ROUTES_SRC_FULL or "queue.append(entry)" in ROUTES_SRC_FULL, \
         "submit_pending() must append entry to a list queue, not overwrite _pending[sid]"
 
 
