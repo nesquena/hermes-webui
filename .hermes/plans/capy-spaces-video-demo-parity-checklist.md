@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- Research Harness progress updates (`set_research_progress` plus `space.research.progress.set` / `update` adapters) now include the shared server-generated Memory Tree advisory/no-authority envelope beside prompt-preflight, autonomy-policy, structured progress, and output-compaction receipts. Caller-forged memory authority, raw memory context, renderer/script/API-auth fields, and secret-looking fixtures stay omitted while research/source status remains untrusted advisory context.
+
 - Source-style layout planning/read helpers (`space.spaces.buildCenteredFirstFitLayout`, `space.spaces.findFirstFitWidgetPlacement`, and `space.spaces.resolveSpaceLayout`) now include the shared server-generated Memory Tree advisory/no-authority envelope beside preflight, policy, progress, and compaction receipts; forged memory authority, raw memory context, renderer/source/html/API-auth/raw-prompt/script, and secret-looking fixtures remain omitted.
 
 - No-space widget SDK/read helpers now include the shared server-generated Memory Tree advisory/no-authority envelope beside prompt-preflight, autonomy-policy, progress, and output-compaction receipts for widget API version, size/position/rendered-size, source-style ID normalization, and current-id lookups, keeping helper context untrusted and omitting forged memory authority plus renderer/source/API-auth/raw-prompt/script/token fixtures.
