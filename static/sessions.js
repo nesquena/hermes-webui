@@ -841,7 +841,27 @@ async function loadSession(sid){
       }
     }
     _clearSameSessionForceReloadHint(sid);
+    // Capture whether this failure self-healed away the current session (a
+    // 404 on the *current* session whose sidecar was deleted server-side).
+    // In that case there is no live session left to stream for, so we must
+    // NOT restart — doing so would spin the SSE reconnect loop against a dead
+    // session_id.
+    const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
+    // The session stream was stopped unconditionally at the top of this load
+    // (mirroring stopApprovalPolling). On the happy path it's restarted ~120
+    // lines below, but this failure exit never reaches that point — leaving
+    // the session still on screen permanently silenced. bg_task_complete
+    // events (the new feature's primary delivery path) would be dropped until
+    // the user explicitly navigates to a session again. Restart the stream for
+    // the session that remains on screen. Skip when a newer load is already in
+    // flight (_loadingSessionId !== null after the reset above): that load owns
+    // the stream and starts its own. Skip the self-healed-current case (no live
+    // session to stream).
+    if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
+        && typeof startSessionStream === 'function') {
+      startSessionStream(currentSid);
+    }
     return;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case

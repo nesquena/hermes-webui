@@ -29,46 +29,13 @@ The tests below cover the wakeup-emit hot path end to end:
 from __future__ import annotations
 
 import os
-import queue
-import threading
-import types
 
-
-class _FakeProcessRegistry:
-    """Minimal stand-in for tools.process_registry.process_registry."""
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._completion_consumed: set[str] = set()
-        self.completion_queue: queue.Queue = queue.Queue()
-        self._procs: dict[str, types.SimpleNamespace] = {}
-
-    def register(self, process_id: str, session_key: str) -> None:
-        self._procs[process_id] = types.SimpleNamespace(session_key=session_key)
-
-    def get(self, process_id: str):
-        return self._procs.get(process_id)
-
-    def is_completion_consumed(self, process_id: str) -> bool:
-        with self._lock:
-            return process_id in self._completion_consumed
-
-
-def _install_fake_registry(monkeypatch, fake):
-    """Inject the fake registry under ``tools.process_registry``.
-
-    Uses ONLY monkeypatch.setitem (no sys.modules.setdefault) so both
-    ``tools`` and ``tools.process_registry`` are restored on teardown —
-    matches the rebase-isolation rule documented in
-    ``test_bg_task_complete_ab_coexistence.py``.
-    """
-    import sys
-    mod = types.ModuleType("tools.process_registry")
-    mod.process_registry = fake
-    tools_mod = types.ModuleType("tools")
-    tools_mod.process_registry = mod  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "tools", tools_mod)
-    monkeypatch.setitem(sys.modules, "tools.process_registry", mod)
+# The fake process-registry stub + its installer were duplicated verbatim in
+# three bg_task_complete suites; they now live once in tests/_wakeup_helpers.py
+# (Greptile review on PR #2979). Import under the legacy local names so the
+# rest of this module is unchanged.
+from tests._wakeup_helpers import FakeProcessRegistry as _FakeProcessRegistry
+from tests._wakeup_helpers import install_fake_registry as _install_fake_registry
 
 
 def _reset_cfg_state():

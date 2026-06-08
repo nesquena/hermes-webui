@@ -20,55 +20,17 @@ happen once.
 """
 from __future__ import annotations
 
-import queue
 import threading
-import types
 
 import pytest
 
-
-class _FakeProcessRegistry:
-    """Minimal stand-in for tools.process_registry.process_registry."""
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._completion_consumed: set[str] = set()
-        self.completion_queue: queue.Queue = queue.Queue()
-        self._procs: dict[str, types.SimpleNamespace] = {}
-
-    def register(self, process_id: str, session_key: str) -> None:
-        self._procs[process_id] = types.SimpleNamespace(session_key=session_key)
-
-    def get(self, process_id: str):
-        return self._procs.get(process_id)
-
-    def is_completion_consumed(self, process_id: str) -> bool:
-        with self._lock:
-            return process_id in self._completion_consumed
-
-
-def _install_fake_registry(monkeypatch, fake):
-    """Inject the fake registry into tools.process_registry for the test.
-
-    IMPORTANT (rebase isolation fix): use ONLY monkeypatch.setitem so both
-    sys.modules entries are restored to their real/absent state on teardown.
-    The prior implementation did sys.modules.setdefault("tools", ...) which
-    is an UNTRACKED mutation — when real `tools` was not yet imported it
-    permanently leaked a non-package fake `tools` into sys.modules, breaking
-    any later test that does `from tools.process_registry import ...` (e.g.
-    test_session_channel_option_x). With the merged upstream #2279 those
-    real-`tools`-importing tests now share the same pytest session, so the
-    leak became a hard cross-file failure.
-    """
-    import sys
-    mod = types.ModuleType("tools.process_registry")
-    mod.process_registry = fake
-    tools_mod = types.ModuleType("tools")
-    tools_mod.process_registry = mod  # type: ignore[attr-defined]
-    # Both setitem calls are monkeypatch-tracked: on teardown each key is
-    # restored to its prior value, or deleted if it was absent — no leak.
-    monkeypatch.setitem(sys.modules, "tools", tools_mod)
-    monkeypatch.setitem(sys.modules, "tools.process_registry", mod)
+# The fake process-registry stub + its installer were duplicated verbatim in
+# three bg_task_complete suites; they now live once in tests/_wakeup_helpers.py
+# (Greptile review on PR #2979). Import under the legacy local names so the
+# rest of this module is unchanged. ``threading`` is still imported above for
+# the _RenamedRegistry stub further down.
+from tests._wakeup_helpers import FakeProcessRegistry as _FakeProcessRegistry
+from tests._wakeup_helpers import install_fake_registry as _install_fake_registry
 
 
 def _reset_cfg_state():
