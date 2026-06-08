@@ -7464,12 +7464,16 @@ def _browser_surface_output_compaction_receipt(
     preflight: dict[str, Any],
     policy: dict[str, Any],
     progress_event: dict[str, Any],
+    memory_advisory: dict[str, Any],
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for receipt-only browser tools."""
     from api.capy_compaction import compact_output
 
     safe_action = _context_value(action, 120) or "browser.surface.action"
     safe_kind = _context_value(kind, 40) or "browser"
+    advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
+    context_authority = _context_value(memory_advisory.get("context_authority") or "untrusted_advisory", 80) or "untrusted_advisory"
+    can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
     surface_bits = [
         f"{key}: {value}"
         for key, value in sorted(surface.items())
@@ -7483,6 +7487,9 @@ def _browser_surface_output_compaction_receipt(
         f"prompt_preflight_status: {_context_value(preflight.get('status'), 40) or 'required'}",
         f"policy_action: {_context_value(policy.get('action'), 120) or safe_action}",
         f"model_route_hint: {_context_value(policy.get('model_route_hint'), 80) or 'hint:fast'}",
+        f"advisory_context: {advisory_context}",
+        f"context_authority: {context_authority}",
+        f"can_bypass_safety_gates: {can_bypass}",
         f"progress_run_id: {_context_value(progress_event.get('run_id'), 160) or f'browser.{safe_kind}'}",
         *surface_bits,
     ]
@@ -7526,6 +7533,7 @@ def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[
     preflight = _browser_surface_prompt_preflight_receipt(action, payload)
     policy = _browser_surface_action_policy_receipt(action, preflight)
     progress_event = _record_space_tool_progress_event(space_id, run_prefix=f"browser.{kind}")
+    memory_advisory = _memory_advisory_public_envelope()
     return {
         "ok": True,
         "action": action,
@@ -7534,6 +7542,7 @@ def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[
         "prompt_preflight": preflight,
         "autonomy_policy": policy,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": _browser_surface_output_compaction_receipt(
             action=action,
             kind=kind,
@@ -7541,6 +7550,7 @@ def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[
             preflight=preflight,
             policy=policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
         ),
     }
 
