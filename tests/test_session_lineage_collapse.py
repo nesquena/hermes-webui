@@ -583,6 +583,36 @@ console.log(JSON.stringify(rows));
     assert rows[0]["_child_sessions"][1]["_parent_segment_id"] == "fork1"
 
 
+def test_sidebar_lineage_key_uses_session_id_for_fork_rows():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sidebarLineageKeyForRow'));
+const root = {{session_id:'root', parent_session_id:null}};
+const pinnedFork = {{session_id:'fork1', session_source:'fork', parent_session_id:'root', pinned:true}};
+console.log(JSON.stringify({{
+  rootKey:_sidebarLineageKeyForRow(root),
+  forkKey:_sidebarLineageKeyForRow(pinnedFork),
+}}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["rootKey"] == "root"
+    assert result["forkKey"] == "fork1"
+
+
 def test_session_segment_count_prefers_visible_collapsed_backend_and_materialized_counts():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
