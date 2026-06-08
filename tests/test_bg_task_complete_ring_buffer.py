@@ -70,9 +70,15 @@ def _helper_source(js: str) -> str:
 
 
 def test_helper_ignores_missing_event_id():
-    """Events without an event_id are ignored — server contract guarantees one."""
+    """Events without an event_id are ignored — server contract guarantees one.
+
+    Missing key returns ``true`` (treat as seen/skip) rather than ``false``
+    (proceed): if a future call site forgets the caller-side ``if (!evt_id)``
+    guard, an un-keyable completion is dropped instead of processed without a
+    dedupe key.
+    """
     body = _helper_source(_read_messages_js())
-    assert "if (!sid || !evt_id) return false;" in body
+    assert "if (!sid || !evt_id) return true;" in body
 
 
 def test_helper_key_construction_uses_event_id_not_task_id():

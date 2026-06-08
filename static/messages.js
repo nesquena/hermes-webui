@@ -19,7 +19,12 @@ const _BG_TASK_COMPLETE_CAP = 256;
 const _bgTaskCompleteSeenIds = new Map();
 
 function _bgTaskCompleteRingBufferAdd(sid, evt_id) {
-  if (!sid || !evt_id) return false;
+  // Missing key → treat as "seen/skip" (return true). The sole caller already
+  // guards with `if (!evt_id) return;` before invoking this, so this branch is
+  // defensive: returning true (skip) rather than false (proceed) means a
+  // future call site that forgets that guard drops the un-keyable event
+  // instead of processing a completion with no dedupe key.
+  if (!sid || !evt_id) return true;
   const key = sid + '|' + evt_id;
   const now = Date.now();
   // Lazy purge: walk insertion-order; drop any entry whose expiry has passed.
