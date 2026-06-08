@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.325] — 2026-06-08 — Release KO (in-app Help tab)
+
+### Added
+- **A Help tab in Settings** with quick links to the documentation (get-hermes.ai) and the GitHub issues page, presented as icon-led resource cards. Translated across all 13 locales. (#3518, @rodboev)
+
 ## [v0.51.324] — 2026-06-07 — Release KN (i18n — translate settings + gateway-status labels)
 
 ### Added
