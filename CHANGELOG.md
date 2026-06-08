@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.333] — 2026-06-08 — Release KW (collapse old interim progress notes)
+
+### Added
+- **Long live turns no longer bury the latest progress note under a wall of older ones.** Once more than 3 interim progress notes accumulate during a streaming turn, the older ones collapse behind a "Show N earlier updates" toggle that keeps the most recent notes in view; expanding is sticky (new interim events won't re-hide what you opened). (#3574, @rodboev)
+
 ## [v0.51.332] — 2026-06-08 — Release KV (distinguish script cron jobs in Tasks)
 
 ### Fixed
