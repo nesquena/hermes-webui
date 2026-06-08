@@ -16,11 +16,12 @@ any double-counting risk.
 import logging
 import os
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-def _get_state_db(profile: str=None):
+def _get_state_db(profile: Optional[str] = None):
     """Get a SessionDB instance for a profile's state.db.
 
     When ``profile`` is provided the function resolves *that* profile's
@@ -104,7 +105,7 @@ def _get_state_db(profile: str=None):
         return None
 
 
-def sync_session_start(session_id: str, model=None, profile: str=None) -> None:
+def sync_session_start(session_id: str, model=None, profile: Optional[str] = None) -> None:
     """Register a WebUI session in state.db (idempotent).
     Called when a session's first message is sent.
 
@@ -132,8 +133,8 @@ def sync_session_start(session_id: str, model=None, profile: str=None) -> None:
 
 
 def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=0,
-                       estimated_cost=None, model=None, title: str=None,
-                       message_count: int=None, profile: str=None) -> None:
+                       estimated_cost=None, model=None, title: Optional[str] = None,
+                       message_count: Optional[int] = None, profile: Optional[str] = None) -> None:
     """Update token usage and title for a WebUI session in state.db.
     Called after each turn completes. Uses absolute=True to set totals
     (the WebUI Session already accumulates across turns).

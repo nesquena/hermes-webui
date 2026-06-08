@@ -50,6 +50,22 @@ def test_active_session_idle_reconcile_clears_stale_busy_and_inflight_state():
     assert "_sessionStreamingById.set(sid, false)" in body, "observed active streaming state must be reset"
     assert "_forgetObservedStreamingSession(sid)" in body, "persisted observed streaming marker must be cleared"
     assert "updateSendBtn()" in body, "composer controls must reflect the idle state after cleanup"
+    assert "hideApprovalCard(true)" in body, "stale approval UI must be cleared when server says the run is idle"
+    assert "hideLiveRunStatus(sid)" in body, "stale live footer must be cleared when server says the run is idle"
+    assert "clearLiveToolCards()" in body, "stale live-only tool cards must not survive idle reconciliation"
+    assert "_scheduleActiveSessionIdleReload(sid)" in body, (
+        "idle reconciliation must reload the current transcript from server truth "
+        "so missed stream_end events do not leave the active pane stale"
+    )
+
+
+def test_active_session_idle_reconcile_schedules_forced_transcript_reload():
+    helper_body = _function_body(SESSIONS_SRC, "function _scheduleActiveSessionIdleReload(")
+
+    assert "setTimeout(async () =>" in helper_body
+    assert "S.session.session_id !== sid" in helper_body
+    assert "S.busy || S.activeStreamId" in helper_body
+    assert "loadSession(sid, {force:true, externalRefreshReason:'idle-reconcile'})" in helper_body
 
 
 def test_session_list_payload_reconciles_active_idle_state_before_optimistic_merge_and_render():

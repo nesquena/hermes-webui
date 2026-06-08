@@ -130,3 +130,83 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
         "external gateway user",
         "external gateway assistant",
     ]
+
+
+def test_webui_streaming_normalizes_trailing_prefill_user_before_current_turn(monkeypatch, tmp_path):
+    import api.config as config
+    import api.models as models
+    import api.streaming as streaming
+    from api.models import new_session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    index_file = session_dir / "_index.json"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict(), raising=False)
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", index_file, raising=False)
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "state.db", raising=False)
+    config.STREAMS.clear()
+    config.CANCEL_FLAGS.clear()
+
+    captured = {}
+
+    class FakeAgent:
+        def __init__(self, prefill_messages=None, **kwargs):
+            captured["prefill_messages"] = kwargs.get("prefill_messages")
+            if prefill_messages is not None:
+                captured["prefill_messages"] = prefill_messages
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+
+        def run_conversation(self, **kwargs):
+            return {
+                "completed": True,
+                "final_response": "ok",
+                "messages": [
+                    {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                    {"role": "assistant", "content": "ok"},
+                ],
+            }
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda *args, **kwargs: ("test-model", None, None))
+    monkeypatch.setattr(streaming, "get_config", lambda: {})
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda *args, **kwargs: [])
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
+        "status": "loaded",
+        "source": "test",
+        "label": "test",
+        "message_count": 2,
+        "messages": [
+            {"role": "assistant", "content": "prefill summary"},
+            {"role": "user", "content": "webui session context"},
+        ],
+    })
+
+    s = new_session(workspace=str(tmp_path))
+    stream_id = "stream-prefill-boundary-normalization"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "new webui turn"
+    s.pending_started_at = 0.0
+    s.save(touch_updated_at=False)
+    models.SESSIONS[s.session_id] = s
+
+    config.STREAMS[stream_id] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=s.session_id,
+            msg_text="new webui turn",
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+            attachments=[],
+        )
+    finally:
+        config.STREAMS.pop(stream_id, None)
+
+    prefill = captured.get("prefill_messages") or []
+    assert prefill == [{"role": "assistant", "content": "prefill summary"}]

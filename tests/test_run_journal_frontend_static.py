@@ -11,7 +11,7 @@ def test_reattach_path_uses_replay_when_status_reports_journal():
 
     assert "st.replay_available" in block
     assert "replayOnly=true" in block
-    assert "replayOnly?_runJournalReplayParams():''" in block
+    assert "(reconnecting||replayOnly)?_runJournalReplayParams():''" in block
     assert "_clearOwnerInflightState()" in block
 
 
@@ -64,8 +64,15 @@ def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
             f"{event_name} must be handled by the shared live/replay SSE pipeline"
         )
 
-    assert "updateThinking(" in wire_block, "reasoning replay should use the live Thinking card path"
-    assert "appendLiveToolCard(tc)" in wire_block, "tool replay should use live tool-card rendering"
+    thinking_helper = MESSAGES_SRC[
+        MESSAGES_SRC.index("function _updateLiveThinkingCard") :
+        MESSAGES_SRC.index("// Split a content string", MESSAGES_SRC.index("function _updateLiveThinkingCard"))
+    ]
+    assert "_updateLiveThinkingCard(" in wire_block, "reasoning replay should use the live Thinking card path"
+    assert "updateThinking(text, opts)" in thinking_helper and "appendThinking(text, opts)" in thinking_helper, (
+        "the shared Thinking helper should still route replay/live reasoning into the Worklog Thinking card path"
+    )
+    assert "appendLiveToolCard(tc" in wire_block, "tool replay should use live tool-card rendering"
     # Compression replay must dispatch through setCompressionUi(...). The handler
     # body may build the state object inline (`setCompressionUi({...})`) or hoist
     # it into a `state` variable first (`setCompressionUi(state)`) — both forms

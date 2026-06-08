@@ -103,14 +103,21 @@ def test_timestamp_hidden_when_attention_state_is_present():
     # Timestamp now uses margin-left:auto inside the flex row instead of
     # absolute positioning. This stops the title's flex:1 bound from running
     # underneath the timestamp and lets the project dot sit beside it.
+    # Anchor on the canonical UNSCOPED `.session-time{` rule (start-of-line) —
+    # a skin-scoped variant like `:root[data-skin="graphite"] .session-item.active
+    # .session-time{` can precede it and would otherwise widen the slice into
+    # unrelated skin rules that legitimately use position:absolute.
+    import re as _re
+    _m = _re.search(r"(?m)^\s*\.session-time\{", STYLE_CSS)
+    assert _m, "canonical unscoped .session-time{ rule not found"
     session_time_block = STYLE_CSS[
-        STYLE_CSS.find(".session-time{"):
-        STYLE_CSS.find(".session-time.is-hidden")
+        _m.start():
+        STYLE_CSS.find("}", _m.start())
     ]
-    assert "position:absolute;" not in session_time_block, (
+    assert "position:absolute" not in session_time_block, (
         "Timestamp must live in flex flow (margin-left:auto), not absolute"
     )
-    assert "margin-left:auto;" in session_time_block
+    assert "margin-left:auto" in session_time_block
     assert ".session-item:hover .session-time" in STYLE_CSS
     assert ".session-item.streaming:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
     assert ".session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS

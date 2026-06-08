@@ -26,7 +26,7 @@ STREAMING = Path(__file__).resolve().parent.parent / "api" / "streaming.py"
 def _persistence_block():
     """Return the source range covering the post-merge per-turn save block."""
     src = STREAMING.read_text(encoding="utf-8")
-    start = src.find("if _reasoning_text and s.messages:")
+    start = src.find("Persist reasoning trace in the session")
     assert start != -1, "Reasoning trace marker not found in streaming.py"
     end = src.find("\n                s.save()", start)
     assert end != -1, "s.save() not found after the reasoning trace marker"

@@ -1,15 +1,17 @@
 """Regression tests for issue #2565: reasoning display bugs.
 
-Issue 1: reasoningText accumulates across turns within a single SSE stream.
-  - reasoningText must be reset at each turn boundary (tool and interim_assistant
-    events) so the done event only persists the current turn's reasoning.
+Issue 1: liveReasoningText is segment-local, while reasoningText is durable for
+the whole assistant turn.
+  - liveReasoningText must reset at tool and interim_assistant boundaries so
+    later reasoning renders in a fresh Thinking Card.
+  - reasoningText must not be reset at those boundaries; it is the fallback
+    durable payload for providers that stream reasoning without final metadata.
 
-Issue 2: ui.js display prefers m.reasoning over m.reasoning_content.
-  - The rendering path must prefer m.reasoning_content (the clean per-turn value
-    from the backend) over m.reasoning (which can be corrupted by Issue 1).
+Issue 2: provider reasoning metadata should become a Worklog Thinking Card, not
+visible Worklog process prose or final-answer text.
 
-Both fixes are needed: Issue 2 alone cannot cover providers that stream reasoning
-events without populating reasoning_content on the final API message.
+Both fixes are needed: Issue 1 keeps live cards scoped to a segment without data
+loss, while Issue 2 preserves reasoning as low-priority Worklog detail.
 """
 
 import pathlib
@@ -22,13 +24,12 @@ def read(rel):
     return (REPO / rel).read_text(encoding='utf-8')
 
 
-# ── Issue 1: reasoningText reset at turn boundaries ──────────────────────────
+# ── Issue 1: live reasoning segment reset at turn boundaries ─────────────────
 
 
-class TestReasoningTextResetOnTool:
-    """reasoningText must be reset alongside liveReasoningText in the tool
-    listener so multi-tool-turn sessions don't accumulate reasoning across
-    turns."""
+class TestLiveReasoningTextResetOnTool:
+    """liveReasoningText must reset in the tool listener so later provider
+    reasoning renders in a fresh Worklog Thinking Card."""
 
     def _tool_listener_body(self):
         """Extract the full tool listener body between the tool and
@@ -42,12 +43,11 @@ class TestReasoningTextResetOnTool:
         assert tool_complete_start >= 0, "tool_complete listener not found"
         return src[tool_start:tool_complete_start]
 
-    def test_reasoning_text_reset_in_tool_listener(self):
+    def test_durable_reasoning_text_not_reset_in_tool_listener(self):
         body = self._tool_listener_body()
-        assert "reasoningText=''" in body, (
-            "reasoningText must be reset to '' inside the tool listener "
-            "(Issue 1: accumulated reasoning from prior turns was assigned "
-            "to the last assistant message on the done event)"
+        assert "reasoningText=''" not in body and 'reasoningText = ""' not in body, (
+            "reasoningText must stay durable across tool boundaries so streamed "
+            "provider reasoning is not silently dropped"
         )
 
     def test_live_reasoning_text_also_reset_in_tool_listener(self):
@@ -57,13 +57,11 @@ class TestReasoningTextResetOnTool:
         )
 
 
-class TestReasoningTextResetOnInterimAssistant:
-    """reasoningText must be reset at the interim_assistant boundary — the
-    other turn boundary where the previous turn's reasoning closes out.
-    Without this, providers that emit reasoning before an interim_assistant
-    event will still co-mingle reasoning across turns."""
+class TestLiveReasoningTextResetOnInterimAssistant:
+    """liveReasoningText must reset at the interim_assistant boundary — the
+    other segment boundary where the previous Thinking Card closes out."""
 
-    def test_reasoning_text_reset_in_interim_assistant_listener(self):
+    def test_durable_reasoning_text_not_reset_in_interim_assistant_listener(self):
         src = read('static/messages.js')
         m = re.search(
             r"source\.addEventListener\('interim_assistant'\s*,\s*(?:e|ev)\s*=>\s*\{(.*?)\n\s*\}\);",
@@ -71,9 +69,9 @@ class TestReasoningTextResetOnInterimAssistant:
         )
         assert m, "interim_assistant listener not found in messages.js"
         body = m.group(1)
-        assert "reasoningText=''" in body, (
-            "reasoningText must be reset to '' inside the interim_assistant "
-            "listener (Issue 1: turn boundary where prior reasoning closes)"
+        assert "reasoningText=''" not in body and 'reasoningText = ""' not in body, (
+            "reasoningText must stay durable across interim assistant boundaries "
+            "so streamed provider reasoning is not silently dropped"
         )
 
     def test_live_reasoning_text_reset_in_interim_assistant_listener(self):
@@ -89,44 +87,43 @@ class TestReasoningTextResetOnInterimAssistant:
         )
 
 
-# ── Issue 2: reasoning_content preference on read ────────────────────────────
+# ── Issue 2: reasoning metadata renders as Worklog Thinking Card ─────────────
 
 
 class TestReasoningContentPreference:
-    """The rendering path in ui.js must prefer m.reasoning_content (the clean
-    per-turn value from the backend) over m.reasoning (which can be corrupted
-    by Issue 1's accumulation bug)."""
+    """Provider reasoning metadata is retained and rendered as Thinking Card
+    detail, but must not become process prose or final-answer text."""
 
-    def test_reasoning_content_checked_before_reasoning(self):
+    def test_reasoning_payload_still_in_message_signature(self):
         src = read('static/ui.js')
-        assert 'm.reasoning_content' in src, (
-            "ui.js must reference m.reasoning_content so the clean per-turn "
-            "value from the backend is used for thinking card display"
+        sig_fn = src.split("function _messageHasReasoningPayload(m)", 1)[1].split("function", 1)[0]
+        assert 'm.reasoning' in sig_fn, (
+            "ui.js should still treat persisted reasoning as message metadata "
+            "for cache/signature invalidation"
         )
 
-    def test_reasoning_content_preferred_in_thinking_text_fallback(self):
+    def test_reasoning_metadata_not_used_as_inline_content_extraction(self):
         src = read('static/ui.js')
-        lines = src.splitlines()
-        for line in lines:
-            if 'thinkingText' in line and 'm.reasoning' in line:
-                if 'm.reasoning_content' not in line and 'reasoning_content' not in line:
-                    if 'Array.isArray' not in line:
-                        raise AssertionError(
-                            f"Line references m.reasoning without checking "
-                            f"m.reasoning_content first: {line.strip()}"
-                        )
+        extraction = src.split("let thinkingText='';", 1)[1].split("const isUser=m.role==='user';", 1)[0]
+        assert 'm.reasoning_content' not in extraction
+        assert 'm.reasoning' not in extraction
 
-    def test_reasoning_content_has_priority_over_reasoning(self):
-        """The fallback expression must evaluate reasoning_content first."""
+    def test_reasoning_payload_feeds_worklog_thinking_card_helper(self):
+        src = read('static/ui.js')
+        helper = src.split("function _worklogReasoningTextFromMessage", 1)[1].split("function _thinkingCardHtml", 1)[0]
+        assert "_assistantReasoningPayloadText(m)" in helper
+        assert "_stripVisibleAssistantEchoFromThinking" in helper
+
+    def test_no_direct_reasoning_content_to_inline_thinking_assignment(self):
+        """Provider reasoning should not be promoted into inline assistant prose."""
         src = read('static/ui.js')
         m = re.search(
             r"thinkingText\s*=\s*(m\.reasoning_content\s*\|\|\s*m\.reasoning)",
             src,
         )
-        assert m, (
-            "thinkingText assignment must use m.reasoning_content || m.reasoning "
-            "so the clean backend value takes priority over the potentially "
-            "corrupted frontend-accumulated value"
+        assert not m, (
+            "thinkingText must not be assigned from reasoning_content/reasoning; "
+            "those fields are Worklog Thinking Card detail, not final-answer text"
         )
 
 

@@ -1,4 +1,4 @@
-"""Regression test for stage-364 Opus-caught SHOULD-FIX (side-channel approach):
+"""Regression test for stage-364 Opus-caught SHOULD-FIX (per-frame cursor):
 
 When the live SSE stream errors mid-stream and the frontend falls back to
 journal replay, live frames must carry an `id:` field so the frontend's
@@ -7,19 +7,17 @@ arrives with `after_seq=0` and the server replays every journaled event from
 seq 1, double-rendering tokens against the live-phase `assistantText`
 accumulator.
 
-Implementation (stage-364 — side-channel approach to avoid breaking the
-queue tuple contract used by 4 existing tests):
+Implementation:
 
   - api/config.py adds `STREAM_LAST_EVENT_ID: dict = {}` module-level dict.
   - api/streaming.py `put()` captures `journaled["event_id"]` from
     `RunJournalWriter.append_sse_event()` return and writes it to
     `STREAM_LAST_EVENT_ID[stream_id]`.
-  - api/routes.py `_handle_sse_stream` reads `STREAM_LAST_EVENT_ID[stream_id]`
-    at SSE emit time and uses `_sse_with_id` when set.
+  - StreamChannel queue items carry `(event, data, event_id)` so active
+    subscribers emit each frame with its own id instead of the latest global id.
+  - Legacy plain queues keep `(event, data)` and use `STREAM_LAST_EVENT_ID` as a
+    compatibility fallback.
   - api/streaming.py finally-block cleanup pops STREAM_LAST_EVENT_ID.
-
-The queue tuple shape is preserved as (event, data), so existing tests like
-test_cancel_puts_sentinel_in_queue still work.
 """
 
 from pathlib import Path
@@ -28,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
+GATEWAY_CHAT_PY = (REPO_ROOT / "api" / "gateway_chat.py").read_text(encoding="utf-8")
 
 
 def test_stream_last_event_id_dict_exists_in_config():
@@ -54,16 +53,27 @@ def test_put_writes_event_id_to_side_channel_dict():
     )
 
 
-def test_queue_tuple_shape_preserved_as_two_tuple():
-    """The queue still uses 2-tuples (event, data) so existing consumers
-    that unpack `event, data = q.get()` are not broken."""
+def test_stream_channel_queue_item_carries_per_event_id_with_legacy_fallback():
+    """StreamChannel queue items need per-frame ids; legacy queues stay 2-tuples."""
     put_def_idx = STREAMING_PY.find("def put(event, data):")
     put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
-    assert "q.put_nowait((event, data))" in put_body, (
-        "Queue tuple shape must remain (event, data) — changing to 3-tuple "
-        "breaks 4 existing tests in test_cancel_interrupt, test_sprint42, "
-        "test_sprint51, test_issue1857_usage_overwrite"
+    assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+        "StreamChannel events must carry their own event_id while legacy queue "
+        "consumers retain the 2-tuple shape"
     )
+    assert "q.put_nowait(queue_item)" in put_body
+
+
+def test_gateway_queue_item_carries_per_event_id_with_legacy_fallback():
+    """Gateway-backed WebUI chat must preserve the same live cursor invariant."""
+    put_def_idx = GATEWAY_CHAT_PY.find("def put_gateway_event(event, data):")
+    assert put_def_idx != -1, "put_gateway_event(event, data) not found"
+    put_body = GATEWAY_CHAT_PY[put_def_idx:put_def_idx + 1800]
+    assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+        "Gateway live events must carry their own event_id for StreamChannel "
+        "subscribers while preserving legacy queue compatibility"
+    )
+    assert "q.put_nowait(queue_item)" in put_body
 
 
 def test_sse_handler_reads_event_id_from_side_channel():

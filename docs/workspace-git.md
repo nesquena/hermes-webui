@@ -61,8 +61,11 @@ second timeout. Remote operations such as fetch, pull, and push use a 60 second 
 
 Before any Git subprocess starts, WebUI removes inherited `GIT_DIR`, `GIT_WORK_TREE`,
 `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`, and injected
-`GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*` values from the environment. Those variables can redirect
-Git to a different repository or inject config, so WebUI does not trust them from the parent process.
+`GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*` values from the environment. It also removes inherited
+`GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_SSH`, and `GIT_SSH_COMMAND` values, then sets
+`GIT_TERMINAL_PROMPT=0` so remote authentication failures fail fast instead of blocking on an
+interactive prompt. Those variables can redirect Git to a different repository, inject config, or run
+helper commands, so WebUI does not trust them from the parent process.
 
 `GIT_INDEX_FILE` is the intentional exception. Selected-file commits use a temporary index so WebUI
 can commit only the requested files, then remove the temporary index afterward.
@@ -90,3 +93,7 @@ from general Git failures.
 If a hook fails, the API returns a structured Git error instead of hiding the failure. Other classified
 failures include authentication errors, missing upstream branches, conflicts, dirty worktrees, invalid
 refs, missing Git binaries, and timeouts.
+
+Repository-local credential helpers and askpass commands are disabled for workspace Git operations.
+Private HTTPS remotes that depend on a stored credential helper may fail to fetch, pull, or push from
+WebUI; use an SSH remote or another externally authenticated transport for those workflows.

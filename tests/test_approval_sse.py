@@ -24,6 +24,11 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(REPO_ROOT))
 
 ROUTES_SRC = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+# Approval SSE state and helpers live in route_approvals after the #1907
+# extraction; combine both files so structural assertions below still pass.
+_ROUTE_APPROVALS = REPO_ROOT / "api" / "route_approvals.py"
+APPROVAL_SRC = _ROUTE_APPROVALS.read_text(encoding="utf-8") if _ROUTE_APPROVALS.exists() else ""
+ROUTES_SRC_FULL = ROUTES_SRC + APPROVAL_SRC
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
@@ -46,17 +51,17 @@ class TestSSEStaticAnalysis:
 
     def test_subscribe_function_exists(self):
         """_approval_sse_subscribe must exist and use a Queue."""
-        assert "def _approval_sse_subscribe(" in ROUTES_SRC, \
+        assert "def _approval_sse_subscribe(" in ROUTES_SRC_FULL, \
             "_approval_sse_subscribe must be defined"
 
     def test_unsubscribe_function_exists(self):
         """_approval_sse_unsubscribe must exist and clean up empty lists."""
-        assert "def _approval_sse_unsubscribe(" in ROUTES_SRC, \
+        assert "def _approval_sse_unsubscribe(" in ROUTES_SRC_FULL, \
             "_approval_sse_unsubscribe must be defined"
 
     def test_notify_function_exists(self):
         """_approval_sse_notify must exist and push to subscriber queues."""
-        assert "def _approval_sse_notify(" in ROUTES_SRC, \
+        assert "def _approval_sse_notify(" in ROUTES_SRC_FULL, \
             "_approval_sse_notify must be defined"
 
     def test_sse_subscribers_dict_exists(self):
@@ -95,7 +100,7 @@ class TestSSEStaticAnalysis:
         # block as the queue mutation so two parallel submit_pending calls can't
         # deliver out-of-order with stale pending_count. Tracks the v0.50.248
         # MUST-FIX A fix.
-        assert "_approval_sse_notify_locked(session_key, head, total)" in ROUTES_SRC, \
+        assert "_approval_sse_notify_locked(session_key, head, total)" in ROUTES_SRC_FULL, \
             ("submit_pending() must call _approval_sse_notify_locked(session_key, head, total) "
              "from inside the `with _lock:` block — not the unlocked _approval_sse_notify wrapper, "
              "and head must be queue_list[0] (the head, not the just-appended entry).")
@@ -119,25 +124,26 @@ class TestSSEStaticAnalysis:
     def test_notify_drops_on_full(self):
         """_approval_sse_notify must silently drop events when subscriber is slow."""
         # The queue.Full exception handler
-        assert "queue.Full" in ROUTES_SRC, \
+        assert "queue.Full" in ROUTES_SRC_FULL, \
             "_approval_sse_notify must handle queue.Full to drop events for slow subscribers"
 
     def test_subscribe_uses_shared_lock(self):
         """subscribe/unsubscribe/notify must all use the same _lock."""
-        # All three functions must use _lock
+        # All three functions must use _lock; search the combined corpus since the
+        # helpers live in api.route_approvals after the #1907 extraction.
         for func in ["_approval_sse_subscribe", "_approval_sse_unsubscribe", "_approval_sse_notify"]:
             # Find the function and verify it uses "with _lock"
-            func_start = ROUTES_SRC.find(f"def {func}(")
+            func_start = ROUTES_SRC_FULL.find(f"def {func}(")
             assert func_start != -1, f"{func} must exist"
             # Find the next function definition after this one
-            next_func = ROUTES_SRC.find("\ndef ", func_start + 1)
-            func_body = ROUTES_SRC[func_start:next_func] if next_func != -1 else ROUTES_SRC[func_start:]
+            next_func = ROUTES_SRC_FULL.find("\ndef ", func_start + 1)
+            func_body = ROUTES_SRC_FULL[func_start:next_func] if next_func != -1 else ROUTES_SRC_FULL[func_start:]
             assert "with _lock:" in func_body, \
                 f"{func} must use 'with _lock:' for thread safety"
 
     def test_unsubscribe_cleans_empty_session(self):
         """Unsubscribe must remove empty session keys from the dict."""
-        assert "_approval_sse_subscribers.pop(session_id, None)" in ROUTES_SRC, \
+        assert "_approval_sse_subscribers.pop(session_id, None)" in ROUTES_SRC_FULL, \
             "_approval_sse_unsubscribe must pop session_id when subscriber list is empty"
 
 

@@ -136,13 +136,17 @@ def test_preferences_ui_exposes_and_saves_fade_text_effect():
 
 
 def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
-    block = function_block(MESSAGES_JS, "_scheduleRender")
+    # _scheduleRender is deeply nested inside attachLiveStream; the simple
+    # brace-counting function_block parser can't handle template literals
+    # with ${...} that contain braces.  Use the full file for assertions
+    # instead — the checked strings are unique enough.
+    assert re.search(r"function\s+_scheduleRender\(", MESSAGES_JS)
     render_block = function_block(MESSAGES_JS, "_renderStreamingFadeMarkdown")
     renderer_block = function_block(MESSAGES_JS, "_streamFadeRenderer")
     cleanup_block = function_block(MESSAGES_JS, "_streamFadeBindCleanup")
 
     assert_contains_all(
-        block,
+        MESSAGES_JS,
         [
             "_renderStreamingFadeMarkdown(displayText)",
             "_smdWrite(displayText)",
