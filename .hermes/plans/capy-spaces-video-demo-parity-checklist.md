@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- Queued widget-event ingress now returns and persists metadata-only output-compaction evidence with event-scoped `widget-event:<event_id>` progress run ids/status, so widget-to-agent bridge receipts remain bounded and visible without leaking raw prompts, payload text, renderer/source/API-auth fields, scripts, tokens, or secret-looking fixtures.
+
 - Receipt-only development terminal/shell actions now include the shared Memory Tree advisory/no-authority envelope and safe advisory-boundary compaction evidence, making development-tool receipts explicitly metadata-only, untrusted advisory context that cannot bypass prompt-preflight, approval, sandbox preview, visual QA, or rollback/recovery gates while raw commands, prompts, renderer/source/html/script fields, API-auth fields, paths, bearer strings, and secret-looking fixtures remain omitted.
 
 - GitHub issue and pull-request comments source-refresh metadata now fail-closes malformed, missing-number, encoded/double-encoded, and lookalike-host comments-route variants before fetch and downgrades non-canonical uppercase `api.github.com` authorities to local `capy-memory://` origins before job persistence, while the exact `/repos/{owner}/{repo}/{issues|pulls}/{number}/comments` parser continues to expose only metadata-only comment counts, ids, commenters, and timestamps without raw comment bodies, query/fragment auth markers, raw prompts, renderer/source/html/script fields, or secret-like fixture values.

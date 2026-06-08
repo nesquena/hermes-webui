@@ -13419,6 +13419,7 @@ def _widget_event_output_compaction_read_summary(
     status: str,
     preflight_receipt: dict[str, Any] | None = None,
     autonomy_policy_receipt: dict[str, Any] | None = None,
+    progress_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Regenerate a metadata-only widget-event compaction receipt for read surfaces.
 
@@ -13434,6 +13435,7 @@ def _widget_event_output_compaction_read_summary(
         status=status,
         preflight_receipt=preflight_receipt,
         autonomy_policy_receipt=autonomy_policy_receipt,
+        progress_event=progress_event,
     )
 
 
@@ -13482,6 +13484,22 @@ def _widget_event_summary(
     autonomy_policy: dict[str, Any] = raw_autonomy_policy if isinstance(raw_autonomy_policy, dict) else {}
     safe_autonomy_policy = _widget_action_policy_receipt_read_summary(autonomy_policy)
     summary["autonomy_policy"] = safe_autonomy_policy
+    raw_progress_event = raw_details.get("progress_event")
+    safe_progress_event: dict[str, Any] | None = None
+    if isinstance(raw_progress_event, dict):
+        expected_run_id = f"widget-event:{event_id}"
+        if (
+            raw_progress_event.get("run_id") == expected_run_id
+            and raw_progress_event.get("event_type") == "tool.completed"
+            and raw_progress_event.get("redaction_status") == "metadata_only"
+        ):
+            safe_progress_event = {
+                "event_type": "tool.completed",
+                "family": "tool",
+                "run_id": expected_run_id,
+                "space_id": sid,
+                "redaction_status": "metadata_only",
+            }
     raw_output_compaction = raw_details.get("output_compaction")
     output_compaction: dict[str, Any] = raw_output_compaction if isinstance(raw_output_compaction, dict) else {}
     summary["output_compaction"] = _widget_event_output_compaction_read_summary(
@@ -13492,6 +13510,7 @@ def _widget_event_summary(
         status=summary["status"],
         preflight_receipt=safe_prompt_preflight,
         autonomy_policy_receipt=safe_autonomy_policy,
+        progress_event=safe_progress_event,
     )
     return summary
 
@@ -13670,6 +13689,7 @@ def _widget_event_output_compaction_receipt(
     status: str,
     preflight_receipt: dict[str, Any] | None = None,
     autonomy_policy_receipt: dict[str, Any] | None = None,
+    progress_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for queued widget events."""
     from api.capy_compaction import compact_output
@@ -13693,12 +13713,23 @@ def _widget_event_output_compaction_receipt(
     if isinstance(autonomy_policy_receipt, dict):
         lines.append(f"approval_required: {bool(autonomy_policy_receipt.get('approval_required'))}")
         lines.append(f"model_route_hint: {_safe_widget_policy_route_hint(autonomy_policy_receipt.get('model_route_hint'))}")
-    return compact_output(
+    if isinstance(progress_event, dict):
+        safe_progress_run_id = _context_value(progress_event.get("run_id"), 160)
+        safe_progress_status = _context_value(progress_event.get("event_type") or progress_event.get("status"), 80)
+        if safe_progress_run_id:
+            lines.append(f"progress_run_id: {safe_progress_run_id}")
+        if safe_progress_status:
+            lines.append(f"progress_status: {safe_progress_status}")
+    receipt = compact_output(
         "\n".join(lines),
         tool="capy-spaces-widget-event",
         command=safe_action,
         max_chars=1200,
     )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
 
 
 def _widget_events_output_compaction_receipt(
@@ -13811,6 +13842,7 @@ def queue_widget_event(
             status="local-noop",
             preflight_receipt=prompt_preflight_receipt,
             autonomy_policy_receipt=autonomy_policy_receipt,
+            progress_event=progress_event,
         )
         output_compaction["metadata_only"] = True
         if output_compaction.get("redaction_status") == "none":
@@ -13846,6 +13878,8 @@ def queue_widget_event(
             )
     prompt_preview = "[REDACTED]" if _context_value(prompt, 1) else ""
     payload_summary = _widget_event_payload_summary(payload_data)
+    event_id = uuid.uuid4().hex
+    progress_event = _record_widget_event_progress_event(sid, event_id)
     output_compaction = _widget_event_output_compaction_receipt(
         action=action,
         space_id=sid,
@@ -13854,6 +13888,7 @@ def queue_widget_event(
         status="queued",
         preflight_receipt=preflight_receipt,
         autonomy_policy_receipt=autonomy_policy_receipt,
+        progress_event=progress_event,
     )
     event_details = {
         "widget_id": wid,
@@ -13862,6 +13897,7 @@ def queue_widget_event(
         "payload_summary": payload_summary,
         "session_id": _context_value(session_id, 120),
         "status": "queued",
+        "progress_event": copy.deepcopy(progress_event),
         "output_compaction": copy.deepcopy(output_compaction),
     }
     if preflight_receipt:
@@ -13872,9 +13908,9 @@ def queue_widget_event(
         sid,
         "widget.event.queued",
         event_details,
+        event_id=event_id,
     )
     _auto_ingest_space_widget_event(event_id)
-    progress_event = _record_widget_event_progress_event(sid, event_id)
     response = {
         "queued": True,
         "status": "queued",

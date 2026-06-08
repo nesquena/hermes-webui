@@ -3760,14 +3760,20 @@ def test_space_tool_adapter_widget_event_returns_metadata_only_compaction_receip
     compaction = queued["output_compaction"]
     assert compaction["tool"] == "capy-spaces-widget-event"
     assert compaction["command"] == "space.current.widget.event"
-    assert compaction["redaction_status"] == "none"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
     assert compaction["text"]
     assert "widget_event_status: queued" in compaction["text"]
     assert "prompt_preflight_status: pass" in compaction["text"]
+    assert f"progress_run_id: widget-event:{queued['event_id']}" in compaction["text"]
+    assert "progress_status: tool.completed" in compaction["text"]
     assert events[0]["output_compaction"]["tool"] == "capy-spaces-widget-event"
+    assert events[0]["output_compaction"]["metadata_only"] is True
+    assert events[0]["output_compaction"]["text"] == compaction["text"]
     assert queued["prompt_preflight"]["status"] == "pass"
     assert queued["autonomy_policy"]["prompt_preflight_status"] == "pass"
     assert queued["progress_event"]["redaction_status"] == "metadata_only"
+    assert queued["progress_event"]["run_id"] == f"widget-event:{queued['event_id']}"
     assert "summarize safe metadata status" not in serialized
     assert "use only metadata receipts" not in serialized
     assert "secret_value_do_not_leak" not in serialized

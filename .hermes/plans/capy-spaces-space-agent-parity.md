@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): harden widget event ingress receipts`
+  - Added RED/GREEN backend coverage proving queued `space.current.widget.event` ingress receipts now mark `output_compaction` as metadata-only and thread the event-scoped `widget-event:<event_id>` progress run id/status into the compaction text.
+  - Persisted widget-event summaries regenerate only allow-listed metadata, preserving prompt-preflight/action-policy/progress evidence while keeping raw prompts, renderer/source/html/script fields, API-auth fields, bearer/token values, and secret-looking fixtures out of queued/listed event receipts.
+
 - `feat(spaces): add development advisory receipts`
   - Added RED/GREEN backend coverage proving receipt-only development terminal actions return the shared Memory Tree advisory/no-authority envelope (`untrusted_advisory`, gate bypass false, required prompt-preflight/approval/sandbox/visual-QA/rollback gates) beside existing prompt-preflight, autonomy-policy, progress, and compaction receipts.
   - Threaded safe advisory-boundary metadata into development-tool compaction evidence while continuing to omit raw commands, prompts, renderer/source/html/script fields, API-auth fields, local paths, bearer strings, and secret-looking fixture values.
