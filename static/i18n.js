@@ -16186,6 +16186,8 @@ const LOCALES = {
     session_jump_start_label: 'Przejdź do początku sesji',
     session_jump_end: 'Koniec',
     session_jump_end_label: 'Przejdź do końca sesji',
+    session_new_message: 'Nowa wiadomość',
+    session_new_message_label: 'Dostępna nowa wiadomość, przejdź do końca',
     jump_to_question: 'do pytania',
     jump_to_question_label: 'Przejdź do pytania dotyczącego tej odpowiedzi',
     queued_label: 'Zostanie wysłane po odpowiedzi',
