@@ -3504,6 +3504,171 @@ def test_space_tool_adapter_supports_source_widget_list_and_read_helpers_metadat
     assert "secret" not in serialized
 
 
+def test_space_widget_list_aliases_return_metadata_only_safety_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-list-receipt-lab", "name": "Widget List Receipt Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-widget",
+            "kind": "html",
+            "title": "Unsafe Widget",
+            "layout": {"x": 1, "y": 2, "w": 5, "h": 3},
+            "prompt": {
+                "raw": "RAW_PROMPT_WIDGET_LIST_SENTINEL_DO_NOT_LEAK",
+                "placeholder": {"instruction": "RAW_PROMPT_WIDGET_LIST_NESTED_DO_NOT_LEAK"},
+                "template": {"content": "RAW_PROMPT_WIDGET_LIST_TEMPLATE_DO_NOT_LEAK"},
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "renderer": "<script>stored()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "token": "SECRET_TOKEN"},
+        },
+    )
+
+    responses = [
+        (
+            "space.current.widgets",
+            spaces.run_space_tool(
+                "space.current.widgets",
+                {
+                    "space_id": created["space_id"],
+                    "renderer": "<script>ignore()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                },
+            ),
+            "widgets",
+            "active_space_id",
+        ),
+        (
+            "space.current.widget.list",
+            spaces.run_space_tool(
+                "space.current.widget.list",
+                {"activeSpaceId": created["space_id"], "source": "SECRET_SOURCE_DO_NOT_LEAK"},
+            ),
+            "widgets",
+            "active_space_id",
+        ),
+        (
+            "space.current.listwidgets",
+            spaces.run_space_tool(
+                "space.current.listWidgets",
+                {"activeSpaceId": created["space_id"], "token": "SECRET_TOKEN"},
+            ),
+            "widgets",
+            "active_space_id",
+        ),
+        (
+            "space.current.byid",
+            spaces.run_space_tool(
+                "space.current.byId",
+                {"activeSpaceId": created["space_id"], "html": "<script>ignore()</script>"},
+            ),
+            "widgets_by_id",
+            "active_space_id",
+        ),
+        (
+            "space.current.widgetsbyid",
+            spaces.run_space_tool(
+                "space.current.widgetsById",
+                {"activeSpaceId": created["space_id"], "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK"},
+            ),
+            "widgets_by_id",
+            "active_space_id",
+        ),
+        (
+            "space.spaces.listwidgets",
+            spaces.run_space_tool(
+                "space.spaces.listWidgets",
+                {"spaceId": created["space_id"], "renderer": "<script>ignore()</script>"},
+            ),
+            "widgets",
+            "space_id",
+        ),
+        (
+            "space.spaces.widgets",
+            spaces.run_space_tool(
+                "space.spaces.widgets",
+                {"spaceId": created["space_id"], "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            ),
+            "widgets",
+            "space_id",
+        ),
+        (
+            "space.widget.list",
+            spaces.run_space_tool(
+                "space.widget.list",
+                {"space_id": created["space_id"], "source": "SECRET_SOURCE_DO_NOT_LEAK"},
+            ),
+            "widgets",
+            "active_space_id",
+        ),
+        (
+            "space.widgets.list",
+            spaces.run_space_tool(
+                "space.widgets.list",
+                {"space_id": created["space_id"], "token": "SECRET_TOKEN"},
+            ),
+            "widgets",
+            "active_space_id",
+        ),
+        (
+            "space.current.widgets.list",
+            spaces.run_space_tool(
+                "space.current.widgets.list",
+                {"activeSpaceId": created["space_id"], "html": "<img src=x onerror=steal()>"},
+            ),
+            "widgets",
+            "active_space_id",
+        ),
+        (
+            "widget.list",
+            spaces.run_space_tool(
+                "widget.list",
+                {"space_id": created["space_id"], "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            ),
+            "widgets",
+            None,
+        ),
+    ]
+
+    for expected_action, response, collection_key, space_key in responses:
+        assert response["ok"] is True
+        assert response["action"] == expected_action
+        if space_key:
+            assert response[space_key] == created["space_id"]
+        if collection_key == "widgets_by_id":
+            assert response["widgets_by_id"]["unsafe-widget"]["id"] == "unsafe-widget"
+        else:
+            assert response["widgets"][0]["id"] == "unsafe-widget"
+        _assert_widget_read_receipts(
+            response,
+            action=expected_action,
+            run_id=f"widget.read:{created['space_id']}",
+            space_id=created["space_id"],
+            widget_count=1,
+        )
+
+    serialized = json.dumps([response for _, response, _, _ in responses], sort_keys=True).lower()
+    assert "stored()" not in serialized
+    assert "raw_prompt_widget_list_sentinel_do_not_leak" not in serialized
+    assert "raw_prompt_widget_list_nested_do_not_leak" not in serialized
+    assert "raw_prompt_widget_list_template_do_not_leak" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"data":' not in serialized
+    assert '"source":' not in serialized
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "bearer" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_tool_adapter_supports_source_current_widget_read_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-current-widget-lab", "name": "Source Current Widget Lab"})

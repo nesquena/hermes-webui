@@ -7947,6 +7947,25 @@ def _space_current_context_output_compaction(context: str) -> dict[str, Any]:
     )
 
 
+def _widget_list_safety_receipts(action: str, space_id: str, widget_count: int) -> dict[str, Any]:
+    """Return the shared metadata-only receipt envelope for widget list helpers."""
+    prompt_preflight = _widget_reload_required_prompt_preflight_receipt(action)
+    autonomy_policy = _widget_reload_action_policy_receipt(action, prompt_preflight)
+    progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.read")
+    return {
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "output_compaction": _space_tool_action_output_compaction_receipt(
+            action=action,
+            space_id=space_id,
+            widget_count=widget_count,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+        ),
+    }
+
+
 def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Dispatch a safe, Hermes-tool-shaped Capy Spaces action.
 
@@ -8129,11 +8148,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "action": name,
             "active_space_id": space_id,
             "widgets": widgets,
-            "output_compaction": _space_tool_action_output_compaction_receipt(
-                action=name,
-                space_id=space_id,
-                widget_count=len(widgets),
-            ),
+            **_widget_list_safety_receipts(name, space_id, len(widgets)),
         }
     if name in {"space.current.byid", "space.current.widgetsbyid"}:
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -8143,11 +8158,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "action": name,
             "active_space_id": space_id,
             "widgets_by_id": {widget["id"]: widget for widget in widgets},
-            "output_compaction": _space_tool_action_output_compaction_receipt(
-                action=name,
-                space_id=space_id,
-                widget_count=len(widgets),
-            ),
+            **_widget_list_safety_receipts(name, space_id, len(widgets)),
         }
     if name in {"space.current.agentinstructions", "space.current.specialinstructions"}:
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -8181,11 +8192,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "action": name,
             "space_id": space_id,
             "widgets": widgets,
-            "output_compaction": _space_tool_action_output_compaction_receipt(
-                action=name,
-                space_id=space_id,
-                widget_count=len(widgets),
-            ),
+            **_widget_list_safety_receipts(name, space_id, len(widgets)),
         }
     if name in {"space.widget.list", "space.widgets.list", "space.current.widgets.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -8195,11 +8202,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "action": name,
             "active_space_id": space_id,
             "widgets": widgets,
-            "output_compaction": _space_tool_action_output_compaction_receipt(
-                action=name,
-                space_id=space_id,
-                widget_count=len(widgets),
-            ),
+            **_widget_list_safety_receipts(name, space_id, len(widgets)),
         }
     if name in {"space.spaces.readwidget", "space.spaces.getwidget"}:
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -9711,11 +9714,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "ok": True,
             "action": name,
             "widgets": widgets,
-            "output_compaction": _space_tool_action_output_compaction_receipt(
-                action=name,
-                space_id=space_id,
-                widget_count=len(widgets),
-            ),
+            **_widget_list_safety_receipts(name, space_id, len(widgets)),
         }
     if name in {"widget.read", "widget.get"}:
         space_id = validate_space_id(data.get("space_id"))

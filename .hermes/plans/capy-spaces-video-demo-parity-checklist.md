@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- Widget collection/list adapters (`space.current.widgets`, `space.current.widget.list`, `space.current.listWidgets`, `space.current.byId`, `space.current.widgetsById`, `space.spaces.listWidgets`, `space.spaces.widgets`, `space.widget.list`, `space.widgets.list`, `space.current.widgets.list`, and legacy `widget.list`) now return the full metadata-only widget-runtime safety envelope: required prompt-preflight, generated-widget-execution autonomy policy, `widget.read:<space_id>` progress receipts, and compaction evidence, without leaking renderer/html/source/data/API-auth/raw-prompt/script/token/secret fixture fields from listed widgets or request payloads.
+
 - Queued widget-event ingress now returns and persists metadata-only output-compaction evidence with event-scoped `widget-event:<event_id>` progress run ids/status, so widget-to-agent bridge receipts remain bounded and visible without leaking raw prompts, payload text, renderer/source/API-auth fields, scripts, tokens, or secret-looking fixtures.
 
 - Receipt-only development terminal/shell actions now include the shared Memory Tree advisory/no-authority envelope and safe advisory-boundary compaction evidence, making development-tool receipts explicitly metadata-only, untrusted advisory context that cannot bypass prompt-preflight, approval, sandbox preview, visual QA, or rollback/recovery gates while raw commands, prompts, renderer/source/html/script fields, API-auth fields, paths, bearer strings, and secret-looking fixtures remain omitted.
