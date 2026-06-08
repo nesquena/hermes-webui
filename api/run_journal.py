@@ -256,6 +256,32 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
     return None
 
 
+def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> bool:
+    """Remove the entire per-session run-journal directory (``_run_journal/{sid}/``).
+
+    The run journal stores one directory per session containing a ``{rid}.jsonl``
+    file per run, so removing the session's directory clears every run's full
+    request/response payloads. Invalid/empty ids and a missing directory are a
+    no-op so callers can invoke this unconditionally on delete. Returns ``True``
+    if a directory was removed, ``False`` otherwise.
+    """
+    import shutil
+
+    sid = str(session_id or "").strip()
+    # Reject path-traversal ids: the regex below permits dots, so a bare "." or
+    # ".." would resolve `root / RUN_JOURNAL_DIR_NAME / sid` to the journal ROOT
+    # (or its parent) and rmtree the wrong directory. The route call site only
+    # passes real sids, but this is a public helper — guard it directly.
+    if sid in (".", "..") or not sid or "/" in sid or "\\" in sid or not _SAFE_ID_RE.fullmatch(sid):
+        return False
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    session_journal_dir = root / RUN_JOURNAL_DIR_NAME / sid
+    if not session_journal_dir.exists():
+        return False
+    shutil.rmtree(session_journal_dir, ignore_errors=True)
+    return not session_journal_dir.exists()
+
+
 def stale_interrupted_event(session_id: str, run_id: str, *, after_seq: int | None = None) -> dict | None:
     summary = latest_run_summary(session_id, run_id)
     if summary.get("terminal") or not summary.get("event_count"):
