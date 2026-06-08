@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Sidebar session refreshes no longer repeatedly re-parse `_index.json` for legacy lineage rows.** When stale sidecar metadata needs indexed `message_count` hints, the WebUI now reuses the `_index.json` rows already loaded by `/api/sessions` instead of reading the index once per refreshed row. This preserves the scoped sidecar refresh behavior while avoiding accidental O(n²)-style polling on large session histories. (#3814, @ai-ag2026)
+
 ## [v0.51.325] — 2026-06-08 — Release KO (in-app Help tab)
 
 ### Added
