@@ -447,11 +447,51 @@ def read_importable_agent_session_rows(
         origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
         origin_user_id_expr = _optional_col('origin_user_id', session_cols)
         platform_expr = _optional_col('platform', session_cols)
-        user_message_count_expr = (
-            "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
-            if 'role' in message_cols
-            else "COUNT(m.id)"
-        )
+        # Older/minimal state.db schemas can have NO ``messages`` table at all,
+        # or a ``messages`` table without a ``session_id`` / ``timestamp`` column.
+        # The projection SQL below joins ``messages`` and aggregates
+        # ``MAX(m.timestamp)`` unconditionally, so on those schemas the query
+        # raised ``sqlite3.OperationalError`` — which the caller
+        # (``get_cli_sessions``) swallows into an empty list, silently hiding
+        # ALL imported/CLI/agent sessions from the sidebar. Detect the columns
+        # and degrade gracefully (mirrors ``read_session_lineage_metadata``):
+        # only join/aggregate ``messages`` when it's actually usable, otherwise
+        # fall back to the per-session ``s.message_count`` / ``s.started_at``. (#3762)
+        messages_has_session_id = 'session_id' in message_cols
+        messages_has_timestamp = 'timestamp' in message_cols
+        use_messages_join = messages_has_session_id
+        count_col = 'id' if 'id' in message_cols else 'session_id'
+
+        if use_messages_join:
+            actual_count_expr = f"COUNT(m.{count_col})"
+            if 'role' in message_cols:
+                user_message_count_expr = "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
+            else:
+                user_message_count_expr = f"COUNT(m.{count_col})"
+            last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
+            join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
+            group_by_clause = "GROUP BY s.id"
+        else:
+            # No usable messages table: use the denormalized per-session counts
+            # and ``started_at`` so the rows still surface in the sidebar.
+            actual_count_expr = "s.message_count"
+            user_message_count_expr = "s.message_count"
+            last_activity_expr = "NULL"
+            join_clause = ""
+            group_by_clause = ""
+
+        if use_messages_join and messages_has_timestamp:
+            order_by_clause = "ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC"
+            candidate_order_clause = (
+                "ORDER BY COALESCE(\n"
+                "                        (SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id),\n"
+                "                        s.started_at\n"
+                "                    ) DESC,\n"
+                "                    s.started_at DESC"
+            )
+        else:
+            order_by_clause = "ORDER BY s.started_at DESC"
+            candidate_order_clause = "ORDER BY s.started_at DESC"
 
         where_clauses = ["s.source IS NOT NULL"]
         params: list[object] = []
@@ -477,9 +517,9 @@ def read_importable_agent_session_rows(
                    {parent_expr},
                    {ended_expr},
                    {end_reason_expr},
-                   COUNT(m.id) AS actual_message_count,
+                   {actual_count_expr} AS actual_message_count,
                    {user_message_count_expr} AS actual_user_message_count,
-                   MAX(m.timestamp) AS last_activity
+                   {last_activity_expr} AS last_activity
         """
         if limit is not None:
             result_limit = max(0, int(limit))
@@ -500,19 +540,15 @@ def read_importable_agent_session_rows(
                     SELECT s.id
                     FROM sessions s
                     WHERE {' AND '.join(where_clauses)}
-                    ORDER BY COALESCE(
-                        (SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id),
-                        s.started_at
-                    ) DESC,
-                    s.started_at DESC
+                    {candidate_order_clause}
                     LIMIT ?
                 )
                 {select_sql}
                 FROM sessions s
                 JOIN candidates c ON c.id = s.id
-                LEFT JOIN messages m ON m.session_id = s.id
-                GROUP BY s.id
-                ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
+                {join_clause}
+                {group_by_clause}
+                {order_by_clause}
                 """,
                 [*params, candidate_limit],
             )
@@ -521,10 +557,10 @@ def read_importable_agent_session_rows(
                 f"""
                 {select_sql}
                 FROM sessions s
-                LEFT JOIN messages m ON m.session_id = s.id
+                {join_clause}
                 WHERE {' AND '.join(where_clauses)}
-                GROUP BY s.id
-                ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
+                {group_by_clause}
+                {order_by_clause}
                 """,
                 params,
             )

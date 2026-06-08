@@ -3375,7 +3375,13 @@ from api.workspace import (
     _is_remote_terminal_backend,
     _workspace_blocked_roots,
 )
-from api.upload import handle_upload, handle_upload_extract, handle_transcribe, handle_workspace_upload
+from api.upload import (
+    handle_upload,
+    handle_upload_extract,
+    handle_transcribe,
+    handle_transcribe_capability,
+    handle_workspace_upload,
+)
 from api.streaming import (
     _sse,
     _run_agent_streaming,
@@ -5303,6 +5309,9 @@ def handle_get(handler, parsed) -> bool:
         except Exception:
             pass
         return j(handler, settings)
+
+    if parsed.path == "/api/transcribe/capability":
+        return handle_transcribe_capability(handler)
 
     if parsed.path == "/api/reasoning":
         # Current reasoning config (shared source of truth with the CLI —
@@ -7252,6 +7261,23 @@ def handle_post(handler, parsed) -> bool:
             shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
         except Exception:
             logger.debug("Failed to clean attachment dir for deleted session %s", sid)
+        # Remove the turn-journal shards and the run-journal directory so a
+        # deleted conversation is not recoverable from disk. The session JSON +
+        # state.db rows are cleared above, but these journals retain the user's
+        # messages (turn journal) and the full request/response payloads (run
+        # journal) in plaintext. (#3802)
+        try:
+            from api.turn_journal import delete_turn_journal
+
+            delete_turn_journal(sid)
+        except Exception:
+            logger.debug("Failed to delete turn journal for deleted session %s", sid)
+        try:
+            from api.run_journal import delete_run_journal
+
+            delete_run_journal(sid)
+        except Exception:
+            logger.debug("Failed to delete run journal for deleted session %s", sid)
         # Prune the per-session agent lock so deleted sessions don't leak
         # Lock entries in SESSION_AGENT_LOCKS forever.
         with SESSION_AGENT_LOCKS_LOCK:
