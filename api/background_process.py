@@ -453,9 +453,16 @@ def _emit_bg_task_complete_events_now(session_id: str, payload: dict) -> int:
     #   2. Remove this dual-emit shim (drop the legacy alias).
     # Both emits carry the SAME trimmed payload + the SAME event_id, so a
     # consumer that ever sees both can dedupe by ``event_id``.
+    #
+    # Greptile P2: hand each emit its OWN shallow copy of the payload. The
+    # same dict object would otherwise be referenced by every subscriber queue
+    # across STREAMS and SESSION_CHANNELS for BOTH event names; a downstream
+    # consumer that mutates it in place would silently corrupt all other
+    # concurrent consumers' views. Shallow copies are sufficient — the payload
+    # is a flat trimmed dict of scalars.
     return (
-        _emit_to_session_streams(session_id, "bg_task_complete", payload)
-        + _emit_to_session_streams(session_id, "process_complete", payload)
+        _emit_to_session_streams(session_id, "bg_task_complete", dict(payload))
+        + _emit_to_session_streams(session_id, "process_complete", dict(payload))
     )
 
 
