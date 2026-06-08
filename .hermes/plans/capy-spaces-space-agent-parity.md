@@ -15,6 +15,8 @@ Current latest known completed code slice: the OpenHuman-inspired Capy Memory Tr
 
 Recent receipt-safety slice: receipt-only browser-surface tool actions now include the shared Memory Tree advisory/no-authority envelope (`untrusted_advisory`, gate bypass false, required prompt-preflight/approval/sandbox/visual-QA/rollback gates) beside existing browser-surface prompt-preflight, autonomy-policy, progress, and output-compaction receipts; caller-supplied memory authority cannot forge a trusted context or bypass safety gates, and raw URL/prompt/renderer/API-auth/history/text/secret fixtures remain omitted from receipts and compaction evidence.
 
+New active-instruction safety slice: direct `/api/spaces/update` active-space instruction writes with `includeSafetyReceipts` now include the same server-generated Memory Tree advisory/no-authority envelope beside prompt-preflight, autonomy-policy, progress, and output-compaction evidence. Caller-forged `memory_advisory` authority is ignored, `can_bypass_safety_gates` remains false, and raw instruction/source/html/renderer/API-auth/secret fixtures stay out of serialized receipts and compaction text.
+
 ## OpenHuman-Inspired Expansion Track
 
 Canonical roadmap: `.hermes/plans/capy-openhuman-inspired-roadmap.md`.
