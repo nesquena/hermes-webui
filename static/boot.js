@@ -470,7 +470,13 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
 
   // Persist SR failure across reloads (e.g. Tailscale/network error)
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
-  let _forceMediaRecorder=!SpeechRecognition||localStorage.getItem(_micForceMediaRecorderKey)==='1';
+  const _micForceMediaRecorderStored=localStorage.getItem(_micForceMediaRecorderKey);
+  // Prefer Hermes server-side STT (MediaRecorder -> /api/transcribe) only
+  // after the server confirms an STT provider is available. No stored key must
+  // keep browser SpeechRecognition as the first-click default until then; that
+  // avoids dropping the first dictation on installs without server STT.
+  let _serverSttAvailable=false;
+  let _forceMediaRecorder=!SpeechRecognition||(_micForceMediaRecorderStored===null?(_serverSttAvailable&&_canRecordAudio):_micForceMediaRecorderStored==='1');
 
   // Raw audio mode preference: send audio file instead of transcribing
   let _rawAudioMode = localStorage.getItem('hermes-raw-audio-mode') === 'true';
@@ -485,7 +491,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   const statusText=status?status.querySelector('.status-text'):null;
   btn.style.display=''; // Show button — browser supports speech recognition or recording fallback
 
-  let recognition=(!_forceMediaRecorder&&SpeechRecognition)?new SpeechRecognition():null;
+  let recognition=null;
   let mediaRecorder=null;
   let mediaStream=null;
   let audioChunks=[];
@@ -556,6 +562,18 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     }
   }
 
+  function _isServerSttUnavailable(err){
+    const status=err&&err.status;
+    if(status===404||status===503||status>=500) return true;
+    if(!status) return true;
+    const msg=String((err&&err.message)||'').toLowerCase();
+    return msg.includes('unavailable')||msg.includes('not configured');
+  }
+
+  function _allowBrowserSttFallback(){
+    return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
+  }
+
   async function _transcribeBlob(blob){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
@@ -564,9 +582,21 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     try{
       const res=await fetch('api/transcribe',{method:'POST',body:form});
       const data=await res.json().catch(()=>({}));
-      if(!res.ok) throw new Error(data.error||'Transcription failed');
+      if(!res.ok){
+        const err=new Error(data.error||'Transcription failed');
+        err.status=res.status;
+        throw err;
+      }
       _commitTranscript(data.transcript||'');
     }catch(err){
+      if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
+        window._micPendingSend=false;
+        localStorage.setItem(_micForceMediaRecorderKey,'0');
+        _forceMediaRecorder=false;
+        recognition=_ensureSpeechRecognition();
+        showToast(err.message||t('mic_network'));
+        return;
+      }
       window._micPendingSend=false;
       showToast(err.message||t('mic_network'));
     }finally{
@@ -600,14 +630,16 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   }
   window._stopMic=_stopMic; // expose for send-guard above
 
-  if(recognition && !_forceMediaRecorder){
-    recognition.continuous=false;
-    recognition.interimResults=true;
-    recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
+  function _ensureSpeechRecognition(){
+    if(!SpeechRecognition) return null;
+    const sr=recognition||new SpeechRecognition();
+    sr.continuous=false;
+    sr.interimResults=true;
+    sr.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
-    recognition.onstart=()=>{ _finalText=''; };
+    sr.onstart=()=>{ _finalText=''; };
 
-    recognition.onresult=(event)=>{
+    sr.onresult=(event)=>{
       let interim='';
       let final=_finalText;
       for(let i=event.resultIndex;i<event.results.length;i++){
@@ -619,7 +651,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
       autoResize();
     };
 
-    recognition.onend=()=>{
+    sr.onend=()=>{
       const committed=_finalText
         ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
             ? _prefix+' '+_finalText.trimStart()
@@ -632,9 +664,10 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
         window._micPendingSend=false;
         send();
       }
+      _applyDeferredServerSttFlip();
     };
 
-    recognition.onerror=(event)=>{
+    sr.onerror=(event)=>{
       _setRecording(false);
       window._micPendingSend=false;
       _isRecording=false;
@@ -651,7 +684,46 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
       };
       showToast(msgs[event.error]||t('mic_error')+event.error);
     };
+
+    return sr;
   }
+
+  if(!_forceMediaRecorder){
+    recognition=_ensureSpeechRecognition();
+  }
+
+  async function _probeServerSttCapability(){
+    if(!_canRecordAudio||_micForceMediaRecorderStored!==null) return;
+    try{
+      const res=await fetch('api/transcribe/capability',{cache:'no-store'});
+      const data=await res.json().catch(()=>({}));
+      if(res.ok&&data&&data.available){
+        _serverSttAvailable=true;
+        if(!window._micActive){
+          _forceMediaRecorder=true;
+          recognition=null;
+        }
+      }
+    }catch(_err){
+      // Keep browser SpeechRecognition as the safe first-click default when the
+      // passive capability probe fails.
+    }
+  }
+
+  // If the capability probe resolved WHILE a session was active, the flip to
+  // server STT was deferred to protect that in-flight session. Apply it once the
+  // session ends so subsequent clicks use the configured server STT as intended.
+  // Reads LIVE localStorage (not the init-time const) so a fallback that just
+  // persisted '0' is respected and not re-flipped.
+  function _applyDeferredServerSttFlip(){
+    if(_serverSttAvailable&&!_forceMediaRecorder&&!window._micActive
+        &&localStorage.getItem(_micForceMediaRecorderKey)===null){
+      _forceMediaRecorder=true;
+      recognition=null;
+    }
+  }
+
+  _probeServerSttCapability();
 
   btn.onclick=async()=>{
     // Race-condition guard: ignore rapid double-clicks
@@ -707,6 +779,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
         else if(window._micPendingSend){
           window._micPendingSend=false;
         }
+        _applyDeferredServerSttFlip();
       };
       _activeCaptureMode=_rawAudioMode?'media-raw':'media-transcribe';
       mediaRecorder.start();

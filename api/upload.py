@@ -398,6 +398,125 @@ def handle_transcribe(handler):
                 pass
 
 
+def _stt_provider_capability_from_module(stt):
+    """Return (available, provider) for a loaded transcription_tools module."""
+    try:
+        load_cfg = getattr(stt, "_load_stt_config", None)
+        stt_config = load_cfg() if callable(load_cfg) else {}
+        cfg_dict = stt_config if isinstance(stt_config, dict) else {}
+        is_enabled = getattr(stt, "is_stt_enabled", None)
+        if callable(is_enabled) and not is_enabled(stt_config):
+            return False, "none"
+
+        # Some tests and future agent releases expose the provider decision as a
+        # single helper. Use it when the lower-level capability flags are not
+        # available. The current agent module exposes the flags below, so the
+        # normal path mirrors _get_provider() without triggering its lazy local
+        # STT install side effect during a passive web page probe.
+        has_internal_flags = any(
+            hasattr(stt, name)
+            for name in ("_HAS_FASTER_WHISPER", "_HAS_OPENAI", "_HAS_MISTRAL")
+        )
+        get_provider = getattr(stt, "_get_provider", None)
+        if callable(get_provider) and not has_internal_flags:
+            provider = str(get_provider(stt_config) or "none")
+            return provider not in ("", "none"), provider or "none"
+
+        def env(name):
+            getter = getattr(stt, "get_env_value", None)
+            try:
+                if callable(getter):
+                    return str(getter(name) or "").strip()
+            except Exception:
+                return ""
+            return os.getenv(name, "").strip()
+
+        def has_local_command():
+            helper = getattr(stt, "_has_local_command", None)
+            try:
+                return bool(helper()) if callable(helper) else False
+            except Exception:
+                return False
+
+        def has_browser_audio_converter():
+            helper = getattr(stt, "_find_ffmpeg_binary", None)
+            try:
+                return bool(helper()) if callable(helper) else False
+            except Exception:
+                return False
+
+        def has_openai_audio():
+            helper = getattr(stt, "_has_openai_audio_backend", None)
+            try:
+                return bool(helper()) if callable(helper) else False
+            except Exception:
+                return False
+
+        def local_command_available():
+            # The browser sends WebM/Ogg blobs; the local-command path converts
+            # non-WAV input through ffmpeg before invoking the command.
+            return has_local_command() and has_browser_audio_converter()
+
+        def resolve_provider(provider):
+            if provider == "local":
+                if bool(getattr(stt, "_HAS_FASTER_WHISPER", False)):
+                    return "local"
+                if local_command_available():
+                    return "local_command"
+                return "none"
+            if provider == "local_command":
+                if local_command_available():
+                    return "local_command"
+                if bool(getattr(stt, "_HAS_FASTER_WHISPER", False)):
+                    return "local"
+                return "none"
+            if provider == "groq":
+                return "groq" if bool(getattr(stt, "_HAS_OPENAI", False)) and bool(env("GROQ_API_KEY")) else "none"
+            if provider == "openai":
+                return "openai" if bool(getattr(stt, "_HAS_OPENAI", False)) and has_openai_audio() else "none"
+            if provider == "mistral":
+                return "mistral" if bool(getattr(stt, "_HAS_MISTRAL", False)) and bool(env("MISTRAL_API_KEY")) else "none"
+            if provider == "xai":
+                try:
+                    from tools.xai_http import resolve_xai_http_credentials
+
+                    return "xai" if resolve_xai_http_credentials().get("api_key") else "none"
+                except Exception:
+                    return "none"
+            if provider == "elevenlabs":
+                return "elevenlabs" if bool(env("ELEVENLABS_API_KEY")) else "none"
+            return "none"
+
+        explicit = "provider" in cfg_dict
+        if explicit:
+            configured = str(cfg_dict.get("provider") or "local")
+            provider = resolve_provider(configured)
+            return provider != "none", provider if provider != "none" else configured
+
+        for candidate in ("local", "local_command", "groq", "openai", "mistral", "xai", "elevenlabs"):
+            provider = resolve_provider(candidate)
+            if provider != "none":
+                return True, provider
+        return False, "none"
+    except Exception:
+        return False, "none"
+
+
+
+def _stt_provider_capability():
+    """Return (available, provider) for a cheap server-side STT capability probe."""
+    try:
+        import tools.transcription_tools as stt
+    except ImportError:
+        return False, "none"
+    return _stt_provider_capability_from_module(stt)
+
+
+def handle_transcribe_capability(handler):
+    available, provider = _stt_provider_capability()
+    return j(handler, {"ok": True, "available": bool(available), "provider": provider})
+
+
 def handle_workspace_upload(handler):
     """Upload a file into a session's workspace directory.
 
