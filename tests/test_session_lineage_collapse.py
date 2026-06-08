@@ -420,6 +420,70 @@ console.log(JSON.stringify(rows));
     assert "_child_sessions" not in rows[0]
 
 
+def test_fork_child_with_visible_parent_is_nested_once():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parent = {{session_id:'parent', title:'Parent', updated_at:10, last_message_at:10}};
+const fork = {{session_id:'fork1', title:'Fork', session_source:'fork', parent_session_id:'parent', updated_at:20, last_message_at:20}};
+const rows = _attachChildSessionsToSidebarRows([parent, fork], [parent, fork]);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert [row["session_id"] for row in rows] == ["parent"]
+    assert rows[0]["_child_session_count"] == 1
+    assert [child["session_id"] for child in rows[0]["_child_sessions"]] == ["fork1"]
+
+
+def test_fork_child_without_visible_parent_stays_top_level():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const fork = {{session_id:'fork1', title:'Fork', session_source:'fork', parent_session_id:'missing', updated_at:20, last_message_at:20}};
+const rows = _attachChildSessionsToSidebarRows([fork], [fork]);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert [row["session_id"] for row in rows] == ["fork1"]
+    assert "_child_sessions" not in rows[0]
+
+
 def test_session_segment_count_prefers_visible_collapsed_backend_and_materialized_counts():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""

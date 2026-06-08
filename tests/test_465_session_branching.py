@@ -115,6 +115,18 @@ def test_branch_fork_sessions_nest_under_parent():
     resolve_block = resolve_fn.group(0)
     assert "row.session_source==='fork'" not in resolve_block, \
         "_resolveSessionIdFromSidebarLineage must not skip fork rows; they may now be active nested children"
+    assert "!_isChildSession(s)&&!_isForkWithResolvableParent(s, sessionIdsInList)" in block, \
+        "Resolvable fork rows must be filtered out of the top-level rows array"
+
+
+def test_branch_nested_fork_rows_keep_session_actions():
+    """Nested fork rows should keep the standard session action menu path."""
+    with open('static/sessions.js') as f:
+        src = f.read()
+    assert 'session-child-session-fork' in src, \
+        "Missing fork-specific nested child row path"
+    assert '_openSessionActionMenu(child, menuBtn)' in src, \
+        "Nested fork rows should route the standard session action menu"
 
 
 def test_branch_keep_count_support():
