@@ -33,6 +33,18 @@ let _draftSaveTimer = null;
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 
+function _profileMatchesActiveProfile(profile, activeProfile){
+  const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
+  if(eventName === activeName) return true;
+  return eventName === 'default' && !!S.activeProfileIsDefault;
+}
+
+function _sessionEventProfilesMatch(eventProfile, activeProfile){
+  if(!(typeof eventProfile === 'string' && eventProfile.trim())) return true;
+  return _profileMatchesActiveProfile(eventProfile, activeProfile);
+}
+
 function _isRestorableNewChatDraftSession(session, requireDraft=false) {
   if (!session || !session.session_id) return false;
   const messageCount = Number(session.message_count || 0);
@@ -42,7 +54,7 @@ function _isRestorableNewChatDraftSession(session, requireDraft=false) {
   if (title !== 'Untitled' && title !== 'New Chat') return false;
   const activeProfile = S.activeProfile || 'default';
   const sessionProfile = session.profile || 'default';
-  if (sessionProfile !== activeProfile) return false;
+  if (!_profileMatchesActiveProfile(sessionProfile, activeProfile)) return false;
   if (!requireDraft) return true;
   const draft = session.composer_draft || {};
   const text = (typeof draft.text === 'string') ? draft.text : '';
@@ -363,8 +375,23 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   }
   _sessionStreamingById.set(sid, false);
   _forgetObservedStreamingSession(sid);
+  if (typeof hideApprovalCard==='function') hideApprovalCard(true);
+  if (typeof hideLiveRunStatus==='function') hideLiveRunStatus(sid);
+  if (typeof clearLiveToolCards==='function') clearLiveToolCards();
   if (changed&&typeof updateSendBtn==='function') updateSendBtn();
+  if (changed&&typeof _scheduleActiveSessionIdleReload==='function') _scheduleActiveSessionIdleReload(sid);
   return changed;
+}
+
+function _scheduleActiveSessionIdleReload(sid) {
+  if(!sid) return;
+  setTimeout(async () => {
+    if(!S||!S.session||S.session.session_id !== sid) return;
+    if(S.busy || S.activeStreamId) return;
+    try{
+      await loadSession(sid, {force:true, externalRefreshReason:'idle-reconcile'});
+    }catch(_){}
+  },0);
 }
 
 function _purgeStaleInflightEntries() {
@@ -406,6 +433,25 @@ function _rememberRenderedStreamingState(s, isStreaming) {
   if (!s || !s.session_id || !isStreaming) return;
   _sessionStreamingById.set(s.session_id, true);
   _rememberObservedStreamingSession(s);
+}
+
+function _inflightHasVisibleLiveState(inflight) {
+  if (!inflight || typeof inflight !== 'object') return false;
+  if (String(inflight.lastAssistantText || '').trim()) return true;
+  if (String(inflight.lastReasoningText || '').trim()) return true;
+  if (String(inflight.liveTurnHtml || '').trim()) return true;
+  if (Array.isArray(inflight.toolCalls) && inflight.toolCalls.length) return true;
+  if (Array.isArray(inflight.activityBurstAnchors) && inflight.activityBurstAnchors.length) return true;
+  if (Array.isArray(inflight.messages)) {
+    return inflight.messages.some((msg) => {
+      if (!msg || msg.role !== 'assistant') return false;
+      const content = msg.content;
+      if (typeof content === 'string') return content.trim();
+      if (Array.isArray(content)) return content.length > 0;
+      return Boolean(content);
+    });
+  }
+  return false;
 }
 
 function _rememberRenderedSessionSnapshot(s) {
@@ -604,13 +650,15 @@ async function newSession(flash, options={}){
         if(s.startsWith('openai'))return 'openai';if(s.startsWith('anthropic')||s.startsWith('claude'))return 'anthropic';
         if(s.startsWith('google')||s.startsWith('gemini'))return 'google';return s;};
       const _familyMismatch=_familyProvider&&_fallbackProvider&&_normProv(_fallbackProvider)!==_familyProvider;
+      const _fallbackIsNamedCustom=String(_fallbackProvider||'').toLowerCase().startsWith('custom:');
       reqBody.model_provider=newModelState.model_provider
-        ||((_bareModel&&!_familyMismatch)?(_fallbackProvider||null):null)
+        ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=data.session;S.messages=data.session.messages||[];
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
@@ -694,8 +742,10 @@ async function loadSession(sid){
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
   // refresh paths pass {force:true} when external state.db changes arrive.
-  // Legacy invariant kept for static regression tests: if(currentSid===sid) return
-  if(currentSid===sid && !forceReload) return;
+  // Do not no-op a same-session click while another load is in flight: the
+  // previous transcript may already have been cleared for the pending switch.
+  // Static force-reload invariant: if(currentSid===sid && !forceReload) return;
+  if(currentSid===sid && !forceReload && !_loadingSessionId) return;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
@@ -802,6 +852,7 @@ async function loadSession(sid){
   // Stale response? A newer loadSession() call has already started (#1060).
   if (_loadingSessionId !== sid) return;
   S.session=data.session;
+  if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
   // Reset scroll-direction tracker on session switch so the new chat's
@@ -853,50 +904,128 @@ async function loadSession(sid){
         messages:Array.isArray(stored.messages)&&stored.messages.length?stored.messages:[],
         uploaded:Array.isArray(stored.uploaded)?stored.uploaded:[],
         toolCalls:Array.isArray(stored.toolCalls)?stored.toolCalls:[],
+        // Phase 2: restore the live todo snapshot from persisted INFLIGHT
+        // so the panel does not flicker to empty when a mid-stream
+        // browser reload reattaches before the next `todo_state` event
+        // fires.  Both fields are optional; missing values fall back to
+        // cold-load via session.todo_state.
+        todos:Array.isArray(stored.todos)?stored.todos:null,
+        todoStateMeta:stored.todoStateMeta||null,
         reattach:true,
+        lastAssistantText:String(stored.lastAssistantText||''),
+        lastReasoningText:String(stored.lastReasoningText||''),
+        lastRunJournalSeq:Number(stored.lastRunJournalSeq||0)||0,
+        journalReplayFromStart:!!stored.journalReplayFromStart,
+        currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
+        currentLiveSegmentSeq:Number(stored.currentLiveSegmentSeq||0)||0,
+        activityBurstAnchors:Array.isArray(stored.activityBurstAnchors)?stored.activityBurstAnchors:[],
       };
     }
   }
 
+  if(INFLIGHT[sid]&&INFLIGHT[sid].journalReplayFromStart&&activeStreamId){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+
+  if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid])){
+    // A stale cursor-only INFLIGHT entry is worse than no cache: replay would
+    // resume after lastRunJournalSeq while the pane has no prose/tool DOM to
+    // preserve, making a session switch look like the live turn vanished.
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+
   if(INFLIGHT[sid]){
-    const inflightMessages=INFLIGHT[sid].messages||[];
-    S.messages=[];
+    _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
+    const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
     S.toolCalls=[];
     try {
       await _ensureMessagesLoaded(sid);
     } catch(e) {
       S.messages=inflightMessages;
     }
+    const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
+    if(liveTailPrepared){
+      S.messages=_dropCurrentTurnAssistantMessages(S.messages);
+    }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
-    if(_mergePendingSessionMessage(S.session,S.messages)){
+    if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
     }
+    // Refresh todos from cold-load or persisted INFLIGHT before painting.
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.busy=true;
     // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
+    const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
+    const replayPersistedLiveToolCards=(opts)=>{
+      const liveToolCalls=Array.isArray(S.toolCalls)
+        ? S.toolCalls
+        : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);
+      const skipUnkeyedRestoredDuplicates=!!(opts&&opts.skipUnkeyedRestoredDuplicates);
+      const restoredLiveTurn=skipUnkeyedRestoredDuplicates?document.getElementById('liveAssistantTurn'):null;
+      const hasRestoredLiveToolRows=!!(restoredLiveTurn&&restoredLiveTurn.querySelector('.tool-card-row'));
+      for(const tc of (liveToolCalls||[])){
+        if(skipUnkeyedRestoredDuplicates&&hasRestoredLiveToolRows&&!liveToolReplayId(tc)) continue;
+        if(tc&&tc.name) appendLiveToolCard(tc,{sessionId:sid,streamId:activeStreamId});
+      }
+    };
+    let didReconnect=false;
+    if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
+      INFLIGHT[sid].reattach=false;
+      if (_loadingSessionId !== sid) return;
+      didReconnect=true;
+      attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
+    }
     syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
-    const restoredLiveTurn=typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
+    if(typeof ensureRunActivityForCurrentTurn==='function') ensureRunActivityForCurrentTurn();
+    const hasStructuredLiveState=!!(INFLIGHT[sid]&&(
+      String(INFLIGHT[sid].lastAssistantText||'').trim()||
+      String(INFLIGHT[sid].lastReasoningText||'').trim()||
+      (Array.isArray(INFLIGHT[sid].activityBurstAnchors)&&INFLIGHT[sid].activityBurstAnchors.length)||
+      (Array.isArray(INFLIGHT[sid].toolCalls)&&INFLIGHT[sid].toolCalls.length)
+    ));
+    let restoredLiveTurn=false;
+    if(typeof restoreLiveTurnHtmlForSession==='function'){
+      if(!hasStructuredLiveState){
+        restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+      }else{
+        const liveTurn=document.getElementById('liveAssistantTurn');
+        const hasCurrentWorklogContent=!!(liveTurn&&liveTurn.querySelector(
+          '.live-worklog[data-live-worklog-shell="1"] .tool-card-row,'+
+          '.live-worklog[data-live-worklog-shell="1"] .wl-reason,'+
+          '.tool-call-group[data-live-tool-worklog-group="1"] .tool-card-row,'+
+          '.tool-call-group[data-live-tool-worklog-group="1"] .wl-reason,'+
+          '.tool-call-group[data-live-tool-call-group="1"] .tool-card-row,'+
+          '.tool-call-group[data-live-tool-call-group="1"] .wl-reason'
+        ));
+        if(hasCurrentWorklogContent) restoredLiveTurn=true;
+        else restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+      }
+    }
+    if(restoredLiveTurn&&didReconnect){
+      replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});
+    }
     if(!restoredLiveTurn){
-      appendThinking();
       clearLiveToolCards();
       if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
-      for(const tc of (S.toolCalls||[])){
-        if(tc&&tc.name) appendLiveToolCard(tc);
-      }
+      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+      else appendThinking();
+      replayPersistedLiveToolCards();
+    }
+    if(typeof ensureLiveWorklogShell==='function'){
+      const liveTurn=document.getElementById('liveAssistantTurn');
+      if(!liveTurn||!liveTurn.querySelector('.tool-call-group[data-tool-worklog-group="1"]')) ensureLiveWorklogShell();
     }
     loadDir('.');
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
     if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
-    if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
-      INFLIGHT[sid].reattach=false;
-      if (_loadingSessionId !== sid) return;
-      attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
-    }
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
@@ -958,16 +1087,20 @@ async function loadSession(sid){
     if(activeStreamId){
       S.busy=true;
       S.activeStreamId=activeStreamId;
+      if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
+      else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
       updateSendBtn();
       setStatus('');
       setComposerStatus('');
-      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);appendThinking();loadDir('.');
+      // syncTopbar();renderMessages();appendThinking();loadDir('.');
+      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+      else appendThinking();
+      loadDir('.');
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
       if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
-      if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
-      else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
     }else{
       S.busy=false;
       S.activeStreamId=null;
@@ -990,6 +1123,7 @@ async function loadSession(sid){
   if(_s&&typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
     const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
+    const _pickPositive=(latest,stored,dflt=0)=>Number(latest)>0?latest:(Number(stored)>0?stored:dflt);
     _syncCtxIndicator({
       input_tokens:      _pick(u.input_tokens,      _s.input_tokens),
       output_tokens:     _pick(u.output_tokens,     _s.output_tokens),
@@ -997,7 +1131,7 @@ async function loadSession(sid){
       cache_read_tokens: _pick(u.cache_read_tokens, _s.cache_read_tokens),
       cache_write_tokens:_pick(u.cache_write_tokens,_s.cache_write_tokens),
       cache_hit_percent: _pick(u.cache_hit_percent, _s.cache_hit_percent, null),
-      context_length:    _pick(_s.context_length,    u.context_length),
+      context_length:    _pickPositive(u.context_length, _s.context_length),
       last_prompt_tokens:_pick(u.last_prompt_tokens,_s.last_prompt_tokens),
       threshold_tokens:  _pick(_s.threshold_tokens,  u.threshold_tokens),
     });
@@ -1033,13 +1167,15 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
   discord: 'Discord',
   slack: 'Slack',
   email: 'Email',
+  wecom: 'WeCom',
+  wecom_callback: 'WeCom Callback',
 };
 
 function _isMessagingSession(session) {
@@ -1049,6 +1185,16 @@ function _isMessagingSession(session) {
   // Fallback: check raw_source directly
   const raw = (session.raw_source || session.source_tag || session.source || '').toLowerCase();
   return _MESSAGING_RAW_SOURCES.has(raw);
+}
+
+/**
+ * Returns true when a session originates from an external channel (CLI bridge,
+ * Discord, Telegram, Slack, etc.) and therefore needs a server-side import
+ * before the WebUI can read or send messages into it.
+ * Covers both legacy CLI sessions and messaging-source sessions.
+ */
+function _isExternalSession(session) {
+  return !!(session && (session.is_cli_session || _isMessagingSession(session)));
 }
 
 function _isReadOnlySession(session) {
@@ -1417,7 +1563,8 @@ function _resolveSessionModelForDisplaySoon(sid){
       if(!model||!S.session||S.session.session_id!==sid) return;
       S.session.model=model;
       S.session.model_provider=provider||null;
-      S.session.context_length=data.session.context_length||0;
+      const resolvedContextLength=data.session.context_length||S.session.context_length||0;
+      S.session.context_length=resolvedContextLength;
       S.session.threshold_tokens=data.session.threshold_tokens||0;
       S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
       S.session._modelResolutionDeferred=false;
@@ -1432,7 +1579,7 @@ function _resolveSessionModelForDisplaySoon(sid){
           cache_read_tokens:_pick(u.cache_read_tokens,S.session.cache_read_tokens),
           cache_write_tokens:_pick(u.cache_write_tokens,S.session.cache_write_tokens),
           cache_hit_percent:_pick(u.cache_hit_percent,S.session.cache_hit_percent,null),
-          context_length:data.session.context_length||0,
+          context_length:resolvedContextLength||u.context_length||0,
           last_prompt_tokens:_pick(u.last_prompt_tokens,S.session.last_prompt_tokens),
           threshold_tokens:data.session.threshold_tokens||0,
         });
@@ -1509,11 +1656,18 @@ function _messageReloadLimitForSession(sid){
 
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   const msgs=Array.isArray(messages)?messages:[];
+  // During active streaming, skip — clearing S.toolCalls would lose Activity
+  // and the renderMessages fallback is blocked by S.busy=true.
+  if(S.busy||S.activeStreamId) return;
   const hasMessageToolMetadata=msgs.some(m=>{
     if(!m) return false;
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+    // `_partial_tool_calls` are emitted by interrupted/partial turns and must also
+    // anchor rendering to the owning assistant message, so we can reconstruct
+    // settled tool cards from the message history when available.
+    const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    return hasTc||hasTu;
+    return hasTc||hasPartialTc||hasTu;
   });
   if(!hasMessageToolMetadata&&Array.isArray(sessionToolCalls)&&sessionToolCalls.length){
     S.toolCalls=sessionToolCalls.map(tc=>({...tc,done:true}));
@@ -1531,9 +1685,15 @@ async function _ensureMessagesLoaded(sid) {
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
   const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';
+  // expand_renderable=1 is sent ONLY here, on the initial cold load: it tells
+  // the server to expand the tail window backward until it holds ~msg_limit
+  // *renderable* rows so a tool-heavy session doesn't open showing 1-2 visible
+  // messages (#3790). The "Load earlier" path (_loadOlderMessages) deliberately
+  // omits it to keep its raw transport cap.
+  const expandParam = reloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}`);
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`);
   } finally {
     _clearSameSessionForceReloadHint(sid);
   }
@@ -1547,7 +1707,13 @@ async function _ensureMessagesLoaded(sid) {
   // toast on every mobile message (SSE/visibility events trigger this reload path
   // more aggressively on mobile).
   let msgs = (data.session.messages || []).filter(m => m && m.role);
-  _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
+  // Skip _syncToolCalls when INFLIGHT exists — the INFLIGHT restore path
+  // (loadSession line ~871) will overwrite S.toolCalls from INFLIGHT[sid].toolCalls.
+  // Clearing here and then overwriting is wasteful, and if S.busy becomes true
+  // before the next render, the fallback can't re-derive from messages.
+  if(!(typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[sid])){
+    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
+  }
   clearLiveToolCards();
   // #3018: preserve client-side ephemeral turn fields (_turnUsage, _turnDuration,
   // _turnTps, _gatewayRouting, _statusCard) across the loadSession replace.
@@ -1563,12 +1729,40 @@ async function _ensureMessagesLoaded(sid) {
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
   S.messages = msgs;
+  // Expand render window to cover all loaded messages so the next
+  // renderMessages() doesn't hide most of them behind a tiny window.
+  if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
+    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(), _messageRenderableMessageCount());
+  }
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
-    if(Object.prototype.hasOwnProperty.call(data.session,'todo_state')) S.session.todo_state=data.session.todo_state;
-    else delete S.session.todo_state;
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
+    // Phase 2: the messages=1 response carries the canonical cold-load
+    // `todo_state` snapshot, derived server-side from the FULL untruncated
+    // message list (api/routes.py + api/todo_state.py). The earlier
+    // messages=0 fetch in loadSession() does not include this field —
+    // attach_todo_state is gated on `load_messages`. Without applying it
+    // here, long sessions whose latest todo write falls outside the
+    // _INITIAL_MSG_LIMIT tail would lose the panel on refresh: the
+    // legacy reverse-scan in _legacyTodosFromMessages() can only see the
+    // tail S.messages, while the authoritative snapshot was already
+    // computed by the server and is sitting in this very response.
+    // _hydrateTodosFromSession is idempotent and picks newer of
+    // cold-load vs INFLIGHT by timestamp, so calling it again here is
+    // safe even when an INFLIGHT snapshot was already restored.
+    if(data.session.todo_state !== undefined){
+      S.session.todo_state = data.session.todo_state;
+    }else{
+      delete S.session.todo_state;
+    }
+    if(typeof _hydrateTodosFromSession === 'function'){
+      _hydrateTodosFromSession(S.session);
+    }
+    if(typeof scheduleTodosRefresh === 'function'){
+      scheduleTodosRefresh();
+    }
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
+    if(typeof syncTopbar==='function') syncTopbar();
   }
 }
 
@@ -1598,21 +1792,300 @@ function _sameTranscriptMessage(a,b){
   return false;
 }
 
+function _currentTurnAssistantText(messages){
+  const list=Array.isArray(messages)?messages:[];
+  let start=-1;
+  for(let i=list.length-1;i>=0;i--){
+    if(list[i]&&list[i].role==='user'){start=i;break;}
+  }
+  const parts=[];
+  for(let i=start+1;i<list.length;i++){
+    const msg=list[i];
+    if(!msg||msg.role!=='assistant'||msg._live) continue;
+    const text=_messageComparableText(msg);
+    if(text) parts.push(text);
+  }
+  return parts.join('\n\n').trim();
+}
+
+function _compactTranscriptText(text){
+  return String(text||'').replace(/\s+/g,' ').trim();
+}
+
+function _dropCurrentTurnAssistantMessages(messages){
+  const list=Array.isArray(messages)?messages:[];
+  let start=-1;
+  for(let i=list.length-1;i>=0;i--){
+    if(list[i]&&list[i].role==='user'){start=i;break;}
+  }
+  if(start<0) return list;
+  return list.filter((msg,idx)=>idx<=start||!(msg&&msg.role==='assistant'));
+}
+
+function _ensureInflightLiveAssistantMessage(inflight){
+  if(!inflight) return false;
+  const text=String(inflight.lastAssistantText||'').trim();
+  const reasoning=String(inflight.lastReasoningText||'').trim();
+  if(!text&&!reasoning) return false;
+  if(!Array.isArray(inflight.messages)) inflight.messages=[];
+  let live=null;
+  for(let i=inflight.messages.length-1;i>=0;i--){
+    const msg=inflight.messages[i];
+    if(msg&&msg.role==='assistant'&&msg._live){live=msg;break;}
+  }
+  if(live){
+    const liveText=_messageComparableText(live);
+    if(text&&(!liveText||text.startsWith(liveText)||text.length>liveText.length)){
+      live.content=text;
+    }
+    if(reasoning&&!live.reasoning) live.reasoning=reasoning;
+    return true;
+  }
+  inflight.messages.push({
+    role:'assistant',
+    content:text,
+    reasoning:reasoning||undefined,
+    _live:true,
+    _ts:Date.now()/1000,
+  });
+  return true;
+}
+
+function _projectInflightMessagesForActivityBursts(inflight){
+  const messages=Array.isArray(inflight&&inflight.messages)?inflight.messages:[];
+  const anchors=Array.isArray(inflight&&inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[];
+  if(!anchors.length) return messages;
+  let liveIdx=-1;
+  for(let i=messages.length-1;i>=0;i--){
+    const msg=messages[i];
+    if(msg&&msg.role==='assistant'&&msg._live){liveIdx=i;break;}
+  }
+  if(liveIdx<0) return messages;
+  let liveTailStartIdx=liveIdx;
+  while(liveTailStartIdx>0){
+    const prev=messages[liveTailStartIdx-1];
+    if(!(prev&&prev.role==='assistant'&&prev._live)) break;
+    liveTailStartIdx-=1;
+  }
+  const live=messages[liveIdx];
+  const text=_messageComparableText(live);
+  if(!text) return messages;
+  const priorLiveTexts=messages.slice(liveTailStartIdx,liveIdx)
+    .filter(m=>m&&m.role==='assistant'&&m._live)
+    .map(m=>_messageComparableText(m))
+    .filter(Boolean);
+  const liveTailIsAccumulator=priorLiveTexts.length>0&&priorLiveTexts.every(part=>
+    _compactTranscriptText(text).includes(_compactTranscriptText(part))
+  );
+  const replaceStartIdx=liveTailIsAccumulator?liveTailStartIdx:liveIdx;
+  if(priorLiveTexts.length&&!liveTailIsAccumulator) return messages;
+  const cleanAnchors=anchors
+    .map(a=>({id:Number(a&&a.id),textEnd:Number(a&&a.textEnd)}))
+    .filter(a=>Number.isFinite(a.id)&&Number.isFinite(a.textEnd)&&a.textEnd>0)
+    .sort((a,b)=>a.textEnd-b.textEnd||a.id-b.id);
+  const aliasBurstIds=new Map();
+  const fallbackBurstId = Number(inflight.currentActivityBurstId||0)||0;
+  aliasBurstIds.set(0,fallbackBurstId);
+  let lastVisibleBurstId=null;
+  let lastVisibleTextEnd=0;
+  const visibleAnchors=[];
+  for(const anchor of cleanAnchors){
+    const end=Math.min(text.length,anchor.textEnd);
+    if(end<=lastVisibleTextEnd){
+      if(lastVisibleBurstId!==null) aliasBurstIds.set(anchor.id,lastVisibleBurstId);
+      continue;
+    }
+    visibleAnchors.push(anchor);
+    lastVisibleBurstId=anchor.id;
+    lastVisibleTextEnd=end;
+  }
+
+  if(visibleAnchors.length&&Number.isFinite(visibleAnchors[0].id)) aliasBurstIds.set(0,visibleAnchors[0].id);
+  if(!visibleAnchors.length){
+    const firstVisibleBurstId=Number(cleanAnchors[0]&&cleanAnchors[0].id);
+    const fallbackAnchorId=Number.isFinite(firstVisibleBurstId)?firstVisibleBurstId:fallbackBurstId;
+    if(fallbackAnchorId!==fallbackBurstId) aliasBurstIds.set(0,fallbackAnchorId);
+    const projected=[{...live,content:text,_activityBurstId:fallbackAnchorId}];
+
+    const baselineSeq=Number(inflight.currentLiveSegmentSeq);
+    const existingSeqs=messages
+      .filter(m=>m&&m._live&&Number.isFinite(Number(m._liveSegmentSeq)))
+      .map(m=>Number(m._liveSegmentSeq));
+    const baseFromMessages=existingSeqs.length
+      ? existingSeqs.reduce((acc,n)=>Math.max(acc,n),-Infinity)
+      : 0;
+    const firstSeq=(Number.isFinite(baselineSeq)&&baselineSeq>0)
+      ? baselineSeq
+      : (Number.isFinite(baseFromMessages)&&baseFromMessages>0)
+        ? baseFromMessages
+        : 1;
+    projected.forEach((seg,i)=>{
+      seg._liveSegmentSeq=i===0?firstSeq:1+i;
+    });
+    if(Array.isArray(inflight.toolCalls)){
+      const segmentSeqByBurstId=new Map();
+      segmentSeqByBurstId.set(String(fallbackAnchorId),firstSeq);
+      projected.forEach(seg=>{
+        const bid=Number(seg&&seg._activityBurstId);
+        const seq=Number(seg&&seg._liveSegmentSeq);
+        if(!Number.isFinite(bid)||!Number.isFinite(seq)) return;
+        const key=String(bid);
+        const current=segmentSeqByBurstId.get(key);
+        if(current===undefined||seq>current) segmentSeqByBurstId.set(key,seq);
+      });
+
+      const validSeqs=new Set(segmentSeqByBurstId.values());
+      const canonicalBurstId=(value)=>{
+        const bid=Number(value);
+        if(!Number.isFinite(bid)) return null;
+        if(aliasBurstIds.has(bid)) return aliasBurstIds.get(bid);
+        return bid;
+      };
+
+      inflight.toolCalls.forEach(tc=>{
+        if(!tc) return;
+        if(tc.activityBurstId!==undefined&&tc.activityBurstId!==null){
+          const current=Number(tc.activityBurstId);
+          if(aliasBurstIds.has(current)) tc.activityBurstId=aliasBurstIds.get(current);
+        }
+        const segSeq=Number(tc.activitySegmentSeq);
+        if(Number.isFinite(segSeq)&&validSeqs.has(segSeq)) return;
+        const canonical=canonicalBurstId(tc.activityBurstId);
+        if(!Number.isFinite(canonical)){
+          if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+          return;
+        }
+        const mappedSeq=segmentSeqByBurstId.get(String(canonical));
+        if(Number.isFinite(mappedSeq)) tc.activitySegmentSeq=mappedSeq;
+        else if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+      });
+    }
+    return [...messages.slice(0,replaceStartIdx),...projected,...messages.slice(liveIdx+1)];
+  }
+  const projected=[];
+  let prev=0;
+  for(let i=0;i<visibleAnchors.length;i++){
+    const anchor=visibleAnchors[i];
+    const end=Math.max(prev,Math.min(text.length,anchor.textEnd));
+    const part=text.slice(prev,end).trim();
+    if(part) projected.push({...live,content:part,_activityBurstId:anchor.id});
+    else{
+      const fallbackAnchor = visibleAnchors[i+1] || visibleAnchors[i-1];
+      if(fallbackAnchor && Number.isFinite(anchor.id)&&Number.isFinite(fallbackAnchor.id)){
+        aliasBurstIds.set(anchor.id,fallbackAnchor.id);
+      }
+    }
+    prev=end;
+  }
+  const tail=text.slice(prev).trim();
+  if(tail) projected.push({...live,content:tail,_activityBurstId:Number(inflight.currentActivityBurstId||0)||0});
+  if(!projected.length) return messages;
+
+  const baselineSeq=Number(inflight.currentLiveSegmentSeq);
+  const existingSeqs=messages
+    .filter(m=>m&&m._live&&Number.isFinite(Number(m._liveSegmentSeq)))
+    .map(m=>Number(m._liveSegmentSeq));
+  const baseFromMessages=existingSeqs.length
+    ? existingSeqs.reduce((acc,n)=>Math.max(acc,n),-Infinity)
+    : 0;
+  const endSeq=(Number.isFinite(baselineSeq)&&baselineSeq>0)
+    ? baselineSeq
+    : (Number.isFinite(baseFromMessages)&&baseFromMessages>0)
+      ? baseFromMessages
+      : projected.length;
+  let firstSeq=endSeq-projected.length+1;
+  if(!Number.isFinite(firstSeq)||firstSeq<1) firstSeq=1;
+  projected.forEach((seg,i)=>{
+    const seq=firstSeq+i;
+    seg._liveSegmentSeq=seq;
+  });
+  if(Number.isFinite(firstSeq) && projected.length){
+    inflight.currentLiveSegmentSeq=projected[projected.length-1]._liveSegmentSeq;
+  }
+
+  const segmentSeqByBurstId=new Map();
+  projected.forEach(seg=>{
+    const bid=Number(seg&&seg._activityBurstId);
+    const seq=Number(seg&&seg._liveSegmentSeq);
+    if(!Number.isFinite(bid)||!Number.isFinite(seq)) return;
+    const key=String(bid);
+    const current=segmentSeqByBurstId.get(key);
+    if(current===undefined||seq>current) segmentSeqByBurstId.set(key,seq);
+  });
+
+  const canonicalBurstId = (value)=>{
+    const bid=Number(value);
+    if(!Number.isFinite(bid)) return null;
+    if(aliasBurstIds.has(bid)) return aliasBurstIds.get(bid);
+    return bid;
+  };
+
+  const validSeqs=new Set(segmentSeqByBurstId.values());
+
+  if(Array.isArray(inflight.toolCalls)){
+    inflight.toolCalls.forEach(tc=>{
+      if(!tc) return;
+      if(tc.activityBurstId!==undefined&&tc.activityBurstId!==null){
+        const current=Number(tc.activityBurstId);
+        if(aliasBurstIds.has(current)) tc.activityBurstId=aliasBurstIds.get(current);
+      }
+      const segSeq=Number(tc.activitySegmentSeq);
+      if(Number.isFinite(segSeq)&&validSeqs.has(segSeq)) return;
+      const canonical=canonicalBurstId(tc.activityBurstId);
+      if(!Number.isFinite(canonical)){
+        if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+        return;
+      }
+      const mappedSeq=segmentSeqByBurstId.get(String(canonical));
+      if(Number.isFinite(mappedSeq)) tc.activitySegmentSeq=mappedSeq;
+      else if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+    });
+  }
+  return [...messages.slice(0,replaceStartIdx),...projected,...messages.slice(liveIdx+1)];
+}
+
+function _prepareRunningLiveTail(baseMessages,inflightMessages){
+  const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
+  const liveMessages=inflight.filter(m=>m&&m.role==='assistant'&&m._live);
+  if(liveMessages.length>1) return liveMessages.some(m=>!!_messageComparableText(m));
+  const live=liveMessages[0]||null;
+  if(!live) return false;
+  const liveText=_messageComparableText(live);
+  const persistedText=_currentTurnAssistantText(baseMessages);
+  if(persistedText){
+    const compactPersisted=_compactTranscriptText(persistedText);
+    const compactLive=_compactTranscriptText(liveText);
+    if(!liveText || persistedText.startsWith(liveText)){
+      live.content=persistedText;
+    }else if(liveText.startsWith(persistedText)){
+      const extra=liveText.slice(persistedText.length).trim();
+      if(extra&&compactPersisted.includes(_compactTranscriptText(extra))){
+        live.content=persistedText;
+      }
+    }else if(compactPersisted===compactLive){
+      live.content=persistedText;
+    }
+  }
+  return !!_messageComparableText(live);
+}
+
 function _mergeInflightTailMessages(baseMessages, inflightMessages){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
-  let liveIdx=-1;
-  for(let i=inflight.length-1;i>=0;i--){
-    if(inflight[i]&&inflight[i]._live){liveIdx=i;break;}
+  let firstLiveIdx=-1;
+  for(let i=0;i<inflight.length;i++){
+    if(inflight[i]&&inflight[i]._live){firstLiveIdx=i;break;}
   }
-  if(liveIdx<0) return base;
-  let start=liveIdx;
-  if(liveIdx>0&&inflight[liveIdx-1]&&inflight[liveIdx-1].role==='user') start=liveIdx-1;
+  if(firstLiveIdx<0) return base;
+  let start=firstLiveIdx;
+  if(firstLiveIdx>0&&inflight[firstLiveIdx-1]&&inflight[firstLiveIdx-1].role==='user') start=firstLiveIdx-1;
   const tail=inflight.slice(start).filter(m=>m&&m.role);
   const merged=[...base];
   for(const msg of tail){
-    const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,msg));
-    if(!duplicate) merged.push(msg);
+    let candidate=msg;
+    if(!candidate) continue;
+    const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
+    if(!duplicate) merged.push(candidate);
   }
   return merged;
 }
@@ -2152,6 +2625,7 @@ function _renderBatchActionBar(){
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+        if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions');
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
@@ -2904,6 +3378,10 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   if(_activeSessionExternalRefreshInFlight) return;
   if(!S.session || !S.session.session_id) return;
   if(S.busy || S.activeStreamId) return;
+  // Cooldown: don't force-reload immediately after streaming ends — the
+  // "done" event already delivered the final messages. Reloading here would
+  // clear S.toolCalls and lose Activity.
+  if(typeof window !== 'undefined' && window._streamJustFinished) return;
   if(typeof document !== 'undefined' && document.hidden) return;
   const sid = S.session.session_id;
   const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
@@ -3003,7 +3481,18 @@ function ensureSessionEventsSSE(){
       _sessionEventsNeedsRefreshOnOpen = false;
       void refreshSessionList('reconnect');
     };
-    _sessionEventsSSE.addEventListener('sessions_changed', () => {
+    _sessionEventsSSE.addEventListener('sessions_changed', (ev) => {
+      const activeProfile = S.activeProfile || 'default';
+      try {
+        const payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};
+        const eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';
+        if (!_sessionEventProfilesMatch(eventProfile, activeProfile)) {
+          return;
+        }
+      } catch (_err) {
+        // Non-JSON payload (or transient malformed event). Keep legacy behavior:
+        // refresh once event was seen.
+      }
       _scheduleSessionEventsRefresh('event');
     });
     _sessionEventsSSE.onerror = () => {
@@ -3106,8 +3595,9 @@ function startGatewaySSE(){
           }
           // If the active session received new gateway messages, refresh the conversation view.
           // S.busy check prevents stomping on an in-progress WebUI response.
-          // is_cli_session check ensures we only poll import_cli for CLI-originated sessions.
-          if(S.session && !S.busy && S.session.is_cli_session){
+          // _isExternalSession covers CLI-originated and messaging-source sessions
+          // that need a server-side import before WebUI can read them.
+          if(S.session && !S.busy && _isExternalSession(S.session)){
             const changedIds = new Set((data.sessions||[]).map(s=>s.session_id));
             if(changedIds.has(S.session.session_id)){
               // Capture active session ID before async fetch — race guard.
@@ -4021,6 +4511,78 @@ function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtual
   });
 }
 
+// Top-level so BOTH the sidebar visibility predicate (_sidebarRowHasVisibleMessages,
+// reached via renderSessionListFromCache -> _partitionSidebarSessionRows) and the
+// per-row renderer (_renderOneSession, nested in renderSessionListFromCache) can call
+// it. It was previously declared INSIDE renderSessionListFromCache and relied on
+// function hoisting — but hoisting is scoped to the enclosing function, so the
+// top-level _sidebarRowHasVisibleMessages threw "ReferenceError: _sessionAttentionState
+// is not defined" on every cache render, crashing the sidebar (#3696, regressed in
+// #3672 when _sidebarRowHasVisibleMessages was extracted to top level). Pure function
+// (only its arg `s` plus the i18n global `t`), so hoisting it is safe.
+function _sessionAttentionState(s){
+  const attention=s&&s.attention&&typeof s.attention==='object'?s.attention:null;
+  if(!attention||!attention.kind||!Number.isFinite(Number(attention.count))||Number(attention.count)<=0)return null;
+  const kind=String(attention.kind)==='approval'?'approval':(String(attention.kind)==='clarify'?'clarify':'attention');
+  const count=Math.max(1,Number(attention.count)||1);
+  const labelKey=kind==='approval'?'session_attention_approval':(kind==='clarify'?'session_attention_clarify':'session_attention_generic');
+  const titleKey=kind==='approval'?'session_attention_approval_title':(kind==='clarify'?'session_attention_clarify_title':'session_attention_generic_title');
+  const fallback=kind==='approval'?(count===1?'Approval':`${count} approvals`):(kind==='clarify'?(count===1?'Question':`${count} questions`):(count===1?'Attention':`${count} items`));
+  const titleFallback=kind==='approval'?'Waiting for permission decision':(kind==='clarify'?'Waiting for your answer':'Waiting for user action');
+  const label=(typeof t==='function')?t(labelKey,count):fallback;
+  const title=(typeof t==='function')?t(titleKey,count):titleFallback;
+  return {kind,count,severity:String(attention.severity||''),label,title};
+}
+
+function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
+  return (s.message_count||0)>0 ||
+    _sessionAttentionState(s) ||
+    _isSessionEffectivelyStreaming(s) ||
+    !!s.active_stream_id ||
+    !!s.pending_user_message ||
+    (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
+    (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
+}
+
+function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
+  let webuiSessionCount=0;
+  let cliSessionCount=0;
+  for(const s of allMatched){
+    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
+    if(_isCliSession(s)) cliSessionCount++;
+    else webuiSessionCount++;
+  }
+  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
+    _sessionSourceFilter='webui';
+  }
+  const showCliOnly=_sessionSourceFilter==='cli';
+  const profileFiltered=[];
+  const sessionsRaw=[];
+  let archivedCount=0;
+  for(const s of allMatched){
+    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
+    const isCli=_isCliSession(s);
+    if(showCliOnly ? !isCli : isCli) continue;
+    if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
+    profileFiltered.push(s);
+    if(_activeProject===NO_PROJECT_FILTER){
+      if(s.project_id) continue;
+    } else if(_activeProject){
+      if(s.project_id!==_activeProject) continue;
+    }
+    if(s.archived) archivedCount++;
+    if(!_showArchived&&s.archived) continue;
+    sessionsRaw.push(s);
+  }
+  return {
+    webuiSessionCount,
+    cliSessionCount,
+    profileFiltered,
+    sessionsRaw,
+    archivedCount,
+  };
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -4043,49 +4605,15 @@ function renderSessionListFromCache(){
   // session id into another conversation, that content hit should still appear.
   const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
   const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
-  // Keep inactive ephemeral 0-message sessions out of the sidebar — they only
-  // become real once the first message is sent. The server already filters them.
-  // Exception: the active freshly-created chat is injected above so it remains
-  // visible/selected until the user sends the first turn or switches away.
-  const withMessages=allMatched.filter(s=>
-    (s.message_count||0)>0 ||
-    _sessionAttentionState(s) ||
-    _isSessionEffectivelyStreaming(s) ||
-    !!s.active_stream_id ||
-    !!s.pending_user_message ||
-    (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
-    (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0)
-  );
-  const webuiSessionCount = withMessages.filter(s=>!_isCliSession(s)).length;
-  const cliSessionCount = withMessages.filter(s=>_isCliSession(s)).length;
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
-    _sessionSourceFilter='webui';
-  }
-  const sourceFiltered = _sessionSourceFilter==='cli'
-    ? withMessages.filter(s=>_isCliSession(s))
-    : withMessages.filter(s=>!_isCliSession(s));
-  // The server is authoritative for profile scoping (#1611): it filters by
-  // active profile when no query param is set, and returns the aggregate when
-  // we send ?all_profiles=1. The renamed-root cross-alias (a row tagged
-  // 'default' matching active 'kinni' when kinni.is_default) lives server-side
-  // in _profiles_match, and a strict-equality client filter would reject those
-  // rows incorrectly. So we trust the wire data and skip the redundant client
-  // filter entirely.
-  const profileFiltered=sourceFiltered.filter(s=>
-    !s.default_hidden||(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)
-  );
-  // Filter by active project. NO_PROJECT_FILTER sentinel asks for sessions
-  // with no project_id; otherwise filter to the matching project_id, or
-  // pass through when no filter is active.
-  const projectFiltered=
-    _activeProject===NO_PROJECT_FILTER
-      ?profileFiltered.filter(s=>!s.project_id)
-      :(_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered);
-  // Filter archived unless toggle is on
-  const sessionsRaw=_showArchived?projectFiltered:projectFiltered.filter(s=>!s.archived);
+  const {
+    webuiSessionCount,
+    cliSessionCount,
+    profileFiltered,
+    sessionsRaw,
+    archivedCount,
+  }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
   const sessions=_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
-  const archivedCount=projectFiltered.filter(s=>s.archived).length;
   const list=$('sessionList');
   const animateRefresh=_sessionListRefreshAnimationPending;
   _sessionListRefreshAnimationPending=false;
@@ -4173,6 +4701,50 @@ function renderSessionListFromCache(){
       };
       chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
       chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
+      // Touch long-press → context menu (mobile UX: project chips can only be
+      // deleted via the right-click menu, which has no touch equivalent).
+      let _lpTimer=null;
+      let _lpHandled=false;
+      let _lpStartX=0,_lpStartY=0;
+      chip.addEventListener('touchstart',(e)=>{
+        const t=e.changedTouches&&e.changedTouches[0];
+        if(!t) return;
+        // Clear any in-flight timer before scheduling a new one, mirroring the
+        // session-item long-press path (_clearLongPressTimer). Without this a
+        // second finger / stray touchstart orphans the prior timer, which then
+        // fires unsuppressed ~500ms later and pops the menu after the gesture
+        // was cancelled.
+        if(_lpTimer){clearTimeout(_lpTimer);_lpTimer=null;}
+        _lpHandled=false;_lpStartX=t.clientX;_lpStartY=t.clientY;
+        chip.classList.add('long-pressing');
+        _lpTimer=setTimeout(()=>{
+          _lpTimer=null;
+          if(_lpHandled) return;  // already consumed by another gesture — stale fire is a no-op
+          _lpHandled=true;
+          chip.classList.remove('long-pressing');
+          clearTimeout(_pClickTimer);_pClickTimer=null;
+          const syn={clientX:t.clientX,clientY:t.clientY,preventDefault:()=>{}};
+          _showProjectContextMenu(syn,p,chip);
+        },500);
+      },{passive:true});
+      chip.addEventListener('touchmove',(e)=>{
+        if(!_lpTimer) return;
+        const t=e.changedTouches&&e.changedTouches[0];
+        if(!t) return;
+        if(Math.abs(t.clientX-_lpStartX)>10||Math.abs(t.clientY-_lpStartY)>10){
+          clearTimeout(_lpTimer);_lpTimer=null;
+          chip.classList.remove('long-pressing');
+        }
+      },{passive:true});
+      chip.addEventListener('touchend',(e)=>{
+        clearTimeout(_lpTimer);_lpTimer=null;
+        chip.classList.remove('long-pressing');
+        if(_lpHandled){e.preventDefault();e.stopPropagation();}
+      },{passive:false});
+      chip.addEventListener('touchcancel',()=>{
+        clearTimeout(_lpTimer);_lpTimer=null;_lpHandled=false;
+        chip.classList.remove('long-pressing');
+      },{passive:true});
       bar.appendChild(chip);
     }
     // Create button
@@ -4359,20 +4931,6 @@ function renderSessionListFromCache(){
   const reflowTimeout=animateRefresh?SESSION_LIST_FLIP_TIMEOUT_MS:SESSION_REFLOW_TIMEOUT_MS;
   _pendingSessionReflowPositions=null;
   _playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);
-  // Note: declared after the groups loop but available via function hoisting.
-  function _sessionAttentionState(s){
-    const attention=s&&s.attention&&typeof s.attention==='object'?s.attention:null;
-    if(!attention||!attention.kind||!Number.isFinite(Number(attention.count))||Number(attention.count)<=0)return null;
-    const kind=String(attention.kind)==='approval'?'approval':(String(attention.kind)==='clarify'?'clarify':'attention');
-    const count=Math.max(1,Number(attention.count)||1);
-    const labelKey=kind==='approval'?'session_attention_approval':(kind==='clarify'?'session_attention_clarify':'session_attention_generic');
-    const titleKey=kind==='approval'?'session_attention_approval_title':(kind==='clarify'?'session_attention_clarify_title':'session_attention_generic_title');
-    const fallback=kind==='approval'?(count===1?'Approval':`${count} approvals`):(kind==='clarify'?(count===1?'Question':`${count} questions`):(count===1?'Attention':`${count} items`));
-    const titleFallback=kind==='approval'?'Waiting for permission decision':(kind==='clarify'?'Waiting for your answer':'Waiting for user action');
-    const label=(typeof t==='function')?t(labelKey,count):fallback;
-    const title=(typeof t==='function')?t(titleKey,count):titleFallback;
-    return {kind,count,severity:String(attention.severity||''),label,title};
-  }
 
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
@@ -4398,7 +4956,7 @@ function renderSessionListFromCache(){
     if(animateRefresh&&(enterAllAnimatedRows||!(flipBefore&&flipBefore.has(s.session_id)))){
       el.classList.add('session-list-flip-enter');
     }
-    if(s.is_cli_session){
+    if(s.is_cli_session||_isMessagingSession(s)){
       el.classList.add('cli-session');
       el.dataset.source=_getChannelLabel(s)||'CLI';
       el.dataset.sourceKey=_sourceKeyForSession(s)||'cli';
@@ -4535,6 +5093,14 @@ function renderSessionListFromCache(){
       };
       titleRow.appendChild(childCountEl);
     }
+    if(s.is_cli_session||_isMessagingSession(s)){
+      const chipLabel=_getChannelLabel(s)||'CLI';
+      const chip=document.createElement('span');
+      chip.className='session-source-chip';
+      chip.textContent=chipLabel;
+      chip.dataset.sourceKey=_sourceKeyForSession(s)||'cli';
+      titleRow.appendChild(chip);
+    }
     titleRow.appendChild(ts);
     sessionText.appendChild(titleRow);
     if(density==='detailed'){
@@ -4548,7 +5114,7 @@ function renderSessionListFromCache(){
       const modelMeta=_formatSessionModelWithGateway(s);
       if(modelMeta) metaBits.push(modelMeta);
       const sourceLabel=_getChannelLabel(s);
-      if(s.is_cli_session&&sourceLabel) metaBits.push(sourceLabel);
+      if(sourceLabel&&(s.is_cli_session||_isMessagingSession(s))) metaBits.push(sourceLabel);
       if(readOnly) metaBits.push('read-only');
       if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
       const meta=document.createElement('div');
@@ -4579,7 +5145,7 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
-          if(seg.is_cli_session){
+          if(_isExternalSession(seg)){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:seg.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
@@ -4606,7 +5172,7 @@ function renderSessionListFromCache(){
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
-          if(child.is_cli_session){
+          if(_isExternalSession(child)){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:child.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
@@ -4692,8 +5258,11 @@ function renderSessionListFromCache(){
         }
         if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
       };
-      // onblur: cancel only -- no accidental saves
-      inp.onblur=()=>{ if(_renamingSid===s.session_id) finish(false); };
+      // onblur: save on blur — Escape explicitly cancels. The old cancel-on-blur
+      // behavior broke rename on mobile (iPhone "Done" dismisses the keyboard,
+      // triggering blur) and was less natural on desktop too (typing a name then
+      // clicking elsewhere should save, not discard).
+      inp.onblur=()=>{ if(_renamingSid===s.session_id) finish(true); };
       title.replaceWith(inp);
       setTimeout(()=>{inp.focus();inp.select();},10);
     };
@@ -4996,8 +5565,9 @@ function renderSessionListFromCache(){
         _tapTimer=null;
         _lastTapTime=0;
         if(_renamingSid) return;
-        // For CLI sessions, import into WebUI store first (idempotent)
-        if(s.is_cli_session){
+        // For external sessions (CLI, Discord, Telegram, Slack), import into
+        // WebUI store first so /api/chat/start finds a persisted session.
+        if(_isExternalSession(s)){
           try{
             await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:s.session_id})});
           }catch(e){ /* import failed -- fall through to read-only view */ }
@@ -5213,6 +5783,7 @@ async function deleteSession(sid, beforeDelete=null){
   }
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
     // load the most recent remaining session, or show blank if none left
     const remaining=await api('/api/sessions');
@@ -5382,10 +5953,19 @@ function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.placeholder='Project name';
+  let _finishDone=false;
   const finish=async(save)=>{
+    if(_finishDone) return;
+    _finishDone=true;
     if(save&&inp.value.trim()){
       const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
-      await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
+      try{
+        await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
+      }catch(e){
+        _finishDone=false;
+        showToast('Project create failed: '+(e.message||e));
+        return;
+      }
       await renderSessionList();
       showToast('Project created');
     }else{
@@ -5400,7 +5980,7 @@ function _startProjectCreate(bar, addBtn){
     }
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
-  inp.onblur=()=>finish(false);
+  inp.onblur=()=>finish(true);
   inp.addEventListener('input',()=>_resizeProjectInput(inp));
   addBtn.replaceWith(inp);
   _resizeProjectInput(inp);
@@ -5411,13 +5991,17 @@ function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.value=proj.name;
+  let _finishDone=false;
   const finish=async(save)=>{
+    if(_finishDone) return;
+    _finishDone=true;
     if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
       try {
         await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
         await renderSessionList();
         showToast('Project renamed');
       } catch(e) {
+        _finishDone=false;
         showToast('Rename failed: '+(e.message||e));
       }
     }else{
@@ -5432,7 +6016,7 @@ function _startProjectRename(proj, chip){
     }
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
-  inp.onblur=()=>finish(false);
+  inp.onblur=()=>finish(true);
   inp.onclick=(e)=>e.stopPropagation();
   inp.addEventListener('input',()=>_resizeProjectInput(inp));
   chip.replaceWith(inp);

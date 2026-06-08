@@ -11,19 +11,43 @@
   } catch(_) {}
 })();
 
+// cancelStream: stop the active chat stream.
+// See docs/rfcs/webui-run-state-consistency-contract.md (Invariants #2, #4)
+// for the owner-aware + terminal-settle rationale.
 async function cancelStream(){
+  const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
   if(!streamId) return;
+  let respBody=null;
   try{
-    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
-  }catch(e){/* cancel request failed - cleanup below still runs */}
-  // Clear status unconditionally after the cancel request completes.
-  // The SSE cancel event may also fire, but if the connection is already
-  // closed it won't arrive — so we handle cleanup here as the guaranteed path.
-  S.activeStreamId=null;
-  setBusy(false);
-  if(typeof setComposerStatus==='function') setComposerStatus('');
-  else setStatus('');
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    try{respBody=await r.json();}catch(_){}
+  }catch(e){
+    if(typeof console !== 'undefined' && console.warn){
+      console.warn('cancelStream: /api/chat/cancel request failed', e);
+    }
+  }
+  // Active-session cancel should not tear down the current SSE transport before
+  // the backend emits its terminal event; do that only for stale owner paths
+  // where the user moved on to a different stream before this request
+  // completed.
+  if(sid && S.activeStreamId !== streamId && typeof closeLiveStream==='function'){
+    closeLiveStream(sid, streamId);
+  }
+  // Owner guard: if the backend accepted the active-session cancel, leave
+  // the current SSE transport and owner state intact so the terminal
+  // `cancel` event can clear INFLIGHT, render "Task cancelled", and refresh
+  // the sidebar. Only clear locally when the backend says there is no active
+  // stream left to settle.
+  if(respBody && respBody.cancelled===false && S.activeStreamId===streamId){
+    S.activeStreamId=null;
+    setBusy(false);
+    if(typeof setComposerStatus==='function') setComposerStatus('');
+    else setStatus('');
+    // /api/chat/cancel only exposes `cancelled:bool`, so we cannot
+    // distinguish reasons — keep the toast generic and short.
+    if(typeof showToast==='function') showToast('Stream is no longer active',2000);
+  }
 }
 
 async function cancelSessionStream(session){
@@ -370,6 +394,9 @@ function expandSidebar(){
 // panels.js hasn't loaded yet (typeof guard).
 (function _restoreTabVisibility(){
   try{
+    if(typeof _applyTabOrder==='function'&&typeof _getTabOrder==='function'){
+      _applyTabOrder(_getTabOrder());
+    }
     if(typeof _applyTabVisibility==='function'&&typeof _getHiddenTabs==='function'){
       _applyTabVisibility(_getHiddenTabs());
     }
@@ -443,7 +470,13 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
 
   // Persist SR failure across reloads (e.g. Tailscale/network error)
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
-  let _forceMediaRecorder=!SpeechRecognition||localStorage.getItem(_micForceMediaRecorderKey)==='1';
+  const _micForceMediaRecorderStored=localStorage.getItem(_micForceMediaRecorderKey);
+  // Prefer Hermes server-side STT (MediaRecorder -> /api/transcribe) only
+  // after the server confirms an STT provider is available. No stored key must
+  // keep browser SpeechRecognition as the first-click default until then; that
+  // avoids dropping the first dictation on installs without server STT.
+  let _serverSttAvailable=false;
+  let _forceMediaRecorder=!SpeechRecognition||(_micForceMediaRecorderStored===null?(_serverSttAvailable&&_canRecordAudio):_micForceMediaRecorderStored==='1');
 
   // Raw audio mode preference: send audio file instead of transcribing
   let _rawAudioMode = localStorage.getItem('hermes-raw-audio-mode') === 'true';
@@ -458,7 +491,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   const statusText=status?status.querySelector('.status-text'):null;
   btn.style.display=''; // Show button — browser supports speech recognition or recording fallback
 
-  let recognition=(!_forceMediaRecorder&&SpeechRecognition)?new SpeechRecognition():null;
+  let recognition=null;
   let mediaRecorder=null;
   let mediaStream=null;
   let audioChunks=[];
@@ -529,6 +562,18 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     }
   }
 
+  function _isServerSttUnavailable(err){
+    const status=err&&err.status;
+    if(status===404||status===503||status>=500) return true;
+    if(!status) return true;
+    const msg=String((err&&err.message)||'').toLowerCase();
+    return msg.includes('unavailable')||msg.includes('not configured');
+  }
+
+  function _allowBrowserSttFallback(){
+    return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
+  }
+
   async function _transcribeBlob(blob){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
@@ -537,9 +582,21 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     try{
       const res=await fetch('api/transcribe',{method:'POST',body:form});
       const data=await res.json().catch(()=>({}));
-      if(!res.ok) throw new Error(data.error||'Transcription failed');
+      if(!res.ok){
+        const err=new Error(data.error||'Transcription failed');
+        err.status=res.status;
+        throw err;
+      }
       _commitTranscript(data.transcript||'');
     }catch(err){
+      if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
+        window._micPendingSend=false;
+        localStorage.setItem(_micForceMediaRecorderKey,'0');
+        _forceMediaRecorder=false;
+        recognition=_ensureSpeechRecognition();
+        showToast(err.message||t('mic_network'));
+        return;
+      }
       window._micPendingSend=false;
       showToast(err.message||t('mic_network'));
     }finally{
@@ -573,14 +630,16 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   }
   window._stopMic=_stopMic; // expose for send-guard above
 
-  if(recognition && !_forceMediaRecorder){
-    recognition.continuous=false;
-    recognition.interimResults=true;
-    recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
+  function _ensureSpeechRecognition(){
+    if(!SpeechRecognition) return null;
+    const sr=recognition||new SpeechRecognition();
+    sr.continuous=false;
+    sr.interimResults=true;
+    sr.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
-    recognition.onstart=()=>{ _finalText=''; };
+    sr.onstart=()=>{ _finalText=''; };
 
-    recognition.onresult=(event)=>{
+    sr.onresult=(event)=>{
       let interim='';
       let final=_finalText;
       for(let i=event.resultIndex;i<event.results.length;i++){
@@ -592,7 +651,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
       autoResize();
     };
 
-    recognition.onend=()=>{
+    sr.onend=()=>{
       const committed=_finalText
         ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
             ? _prefix+' '+_finalText.trimStart()
@@ -605,9 +664,10 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
         window._micPendingSend=false;
         send();
       }
+      _applyDeferredServerSttFlip();
     };
 
-    recognition.onerror=(event)=>{
+    sr.onerror=(event)=>{
       _setRecording(false);
       window._micPendingSend=false;
       _isRecording=false;
@@ -624,7 +684,46 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
       };
       showToast(msgs[event.error]||t('mic_error')+event.error);
     };
+
+    return sr;
   }
+
+  if(!_forceMediaRecorder){
+    recognition=_ensureSpeechRecognition();
+  }
+
+  async function _probeServerSttCapability(){
+    if(!_canRecordAudio||_micForceMediaRecorderStored!==null) return;
+    try{
+      const res=await fetch('api/transcribe/capability',{cache:'no-store'});
+      const data=await res.json().catch(()=>({}));
+      if(res.ok&&data&&data.available){
+        _serverSttAvailable=true;
+        if(!window._micActive){
+          _forceMediaRecorder=true;
+          recognition=null;
+        }
+      }
+    }catch(_err){
+      // Keep browser SpeechRecognition as the safe first-click default when the
+      // passive capability probe fails.
+    }
+  }
+
+  // If the capability probe resolved WHILE a session was active, the flip to
+  // server STT was deferred to protect that in-flight session. Apply it once the
+  // session ends so subsequent clicks use the configured server STT as intended.
+  // Reads LIVE localStorage (not the init-time const) so a fallback that just
+  // persisted '0' is respected and not re-flipped.
+  function _applyDeferredServerSttFlip(){
+    if(_serverSttAvailable&&!_forceMediaRecorder&&!window._micActive
+        &&localStorage.getItem(_micForceMediaRecorderKey)===null){
+      _forceMediaRecorder=true;
+      recognition=null;
+    }
+  }
+
+  _probeServerSttCapability();
 
   btn.onclick=async()=>{
     // Race-condition guard: ignore rapid double-clicks
@@ -680,6 +779,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
         else if(window._micPendingSend){
           window._micPendingSend=false;
         }
+        _applyDeferredServerSttFlip();
       };
       _activeCaptureMode=_rawAudioMode?'media-raw':'media-transcribe';
       mediaRecorder.start();
@@ -1175,12 +1275,11 @@ $('modelSelect').onchange=async()=>{
     model:modelState.model,
     model_provider:modelState.model_provider||null,
   })});
-  if(typeof _readPendingSessionModel==='function'&&typeof _clearPendingSessionModel==='function'){
-    const pending=_readPendingSessionModel(S.session.session_id);
-    if(!pending||(pending.model===modelState.model&&String(pending.model_provider||'')===String(modelState.model_provider||''))){
-      _clearPendingSessionModel(S.session.session_id);
-    }
-  }
+  // NOTE: do NOT clear the pending explicit-pick marker here. It must survive until
+  // the NEXT send() consumes it, otherwise the normal "pick → session-update → send"
+  // flow loses the explicit-pick signal before /api/chat/start runs and the server
+  // re-reverts a cross-family pick (the #3737 bug, Codex catch). send() clears it
+  // after reading a matching pending pick. (#3739/#3737)
   _applySessionContextMetadataUpdate(data);
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
@@ -1478,6 +1577,7 @@ const _SKINS=[
   {name:'Neon',     colors:['#B347FF','#C76BFF','#00DDFF']},
   {name:'Geist Contrast', value:'geist-contrast', colors:['#000000','#ffffff','#FFF175']},
   {name:'Zeus',     colors:['#FFD700','#FFBF00','#1A1A00']},
+  {name:'Verdigris', value:'verdigris', colors:['#C89A5A','#0F1714','#22342C']},
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
 const _VALID_SKINS=new Set((_SKINS||[]).map(s=>(s.value||s.name).toLowerCase()));
@@ -1815,10 +1915,10 @@ function applyBotName(){
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
   if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
-    api(_checkUrl).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
+    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false})}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
   // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
+  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';S.activeProfileIsDefault=!!p.is_default;}catch(e){S.activeProfile='default';S.activeProfileIsDefault=true;}
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

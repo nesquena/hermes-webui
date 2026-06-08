@@ -92,6 +92,39 @@ def unregister_agent(session_id: str) -> None:
         _condition.notify_all()
 
 
+def discard_session(session_id: str) -> bool:
+    """Permanently drop a session's lifecycle entry to bound memory growth.
+
+    The ``_sessions`` dict is process-global and historically only ever grew:
+    ``register_agent`` / ``mark_turn_completed`` insert keys but no runtime path
+    ever removed them, so every unique ``session_id`` the WebUI touched leaked a
+    permanent entry (issue #3506). Over days of use on a large install this is a
+    monotonic, unbounded climb.
+
+    This removes the entry, but only when it is provably safe to do so: no commit
+    is in flight and there is no uncommitted memory work that still needs the
+    retained agent handle. If the entry is busy or dirty it is left untouched so
+    failed batch-extraction memory work stays retryable -- exactly the invariant
+    ``unregister_agent`` and ``_evict_session_agent`` already preserve.
+
+    Returns True when the entry was removed (or was already absent), False when
+    it was retained because work is still pending.
+    """
+    if not session_id:
+        return False
+    with _condition:
+        entry = _sessions.get(session_id)
+        if entry is None:
+            return True
+        if entry["in_flight"]:
+            return False
+        if entry["generation"] > entry["committed_generation"]:
+            return False
+        del _sessions[session_id]
+        _condition.notify_all()
+        return True
+
+
 def mark_turn_completed(session_id: str, *, agent=None) -> int:
     if not session_id:
         return 0

@@ -1,10 +1,12 @@
 import json
+import os
 
 import api.turn_journal as turn_journal
 from api.session_recovery import audit_session_recovery
 from api.turn_journal import (
     append_turn_journal_event,
     derive_turn_journal_states,
+    iter_turn_journal_session_ids,
     read_turn_journal,
 )
 
@@ -35,9 +37,10 @@ def test_append_turn_journal_event_fsyncs_jsonl_and_preserves_payload(tmp_path):
     assert event["version"] == 1
     assert event["session_id"] == "sid-1"
     assert event["created_at"] > 0
-    journal_path = tmp_path / "_turn_journal" / "sid-1.jsonl"
-    assert journal_path.exists()
-    lines = journal_path.read_text(encoding="utf-8").splitlines()
+    journal_dir = tmp_path / "_turn_journal"
+    shards = list(journal_dir.glob(f"sid-1~{os.getpid()}.jsonl"))
+    assert len(shards) == 1, f"expected one pid-scoped shard, found: {list(journal_dir.iterdir())}"
+    lines = shards[0].read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["content"] == "hello"
 
@@ -55,7 +58,9 @@ def test_read_turn_journal_tolerates_malformed_lines(tmp_path):
     result = read_turn_journal("sid-1", session_dir=tmp_path)
 
     assert [event["event"] for event in result["events"]] == ["submitted", "completed"]
-    assert result["malformed"] == [{"line": 2, "raw": "not-json"}]
+    assert len(result["malformed"]) == 1
+    assert result["malformed"][0]["line"] == 2
+    assert result["malformed"][0]["raw"] == "not-json"
 
 
 def test_append_turn_journal_event_locks_around_write_and_fsync(tmp_path, monkeypatch):
@@ -201,3 +206,69 @@ def test_derive_turn_journal_states_no_collision_when_single_terminal():
 
     assert states['turn-normal']['event'] == 'completed'
     assert collisions == []
+
+
+def test_terminal_field_set_on_completed_event(tmp_path):
+    event = append_turn_journal_event(
+        "sid-term",
+        {"event": "completed", "turn_id": "turn-1"},
+        session_dir=tmp_path,
+    )
+    assert event.get("terminal") is True
+
+
+def test_terminal_field_set_on_interrupted_event(tmp_path):
+    event = append_turn_journal_event(
+        "sid-term-int",
+        {"event": "interrupted", "turn_id": "turn-1"},
+        session_dir=tmp_path,
+    )
+    assert event.get("terminal") is True
+
+
+def test_terminal_field_not_set_on_non_terminal_event(tmp_path):
+    event = append_turn_journal_event(
+        "sid-nterm",
+        {"event": "submitted", "turn_id": "turn-1", "content": "hi"},
+        session_dir=tmp_path,
+    )
+    assert "terminal" not in event
+
+
+def test_read_turn_journal_merges_pid_shards(tmp_path, monkeypatch):
+    journal_dir = tmp_path / "_turn_journal"
+    journal_dir.mkdir()
+
+    # Simulate two worker processes writing separate shards
+    monkeypatch.setattr(os, "getpid", lambda: 1001)
+    append_turn_journal_event(
+        "sid-merge",
+        {"event": "submitted", "turn_id": "turn-1", "created_at": 1.0},
+        session_dir=tmp_path,
+    )
+    monkeypatch.setattr(os, "getpid", lambda: 1002)
+    append_turn_journal_event(
+        "sid-merge",
+        {"event": "completed", "turn_id": "turn-1", "created_at": 2.0},
+        session_dir=tmp_path,
+    )
+
+    result = read_turn_journal("sid-merge", session_dir=tmp_path)
+
+    assert len(result["events"]) == 2
+    assert result["events"][0]["event"] == "submitted"
+    assert result["events"][1]["event"] == "completed"
+
+
+def test_iter_turn_journal_session_ids_deduplicates_pid_shards(tmp_path):
+    journal_dir = tmp_path / "_turn_journal"
+    journal_dir.mkdir()
+
+    # Create two pid-scoped shards for the same session, plus a legacy file for another session
+    (journal_dir / "sess-a~1001.jsonl").write_text("", encoding="utf-8")
+    (journal_dir / "sess-a~1002.jsonl").write_text("", encoding="utf-8")
+    (journal_dir / "sess-b.jsonl").write_text("", encoding="utf-8")
+
+    ids = iter_turn_journal_session_ids(tmp_path)
+
+    assert ids == ["sess-a", "sess-b"]

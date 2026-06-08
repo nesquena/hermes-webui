@@ -299,10 +299,11 @@ def _runtime_detail_subset(runtime_status: dict[str, Any] | None) -> dict[str, A
 # reachable remote gateway. The Tasks/Cron banner then shows a spurious amber
 # "Gateway not configured" warning.
 #
-# When ``HERMES_API_URL`` is set we treat that as an explicit declaration that
-# the gateway lives elsewhere, and probe it over HTTP before touching any local
-# filesystem / module signal. The probe result is cached briefly so a dashboard
-# rerender that fans out to multiple panels does not hammer the gateway.
+# When a gateway base URL is set in any supported env var, we treat that as an
+# explicit declaration that the gateway lives elsewhere, and probe it over HTTP
+# before touching any local filesystem / module signal. The probe result is
+# cached briefly so a dashboard rerender that fans out to multiple panels does
+# not hammer the gateway.
 
 _REMOTE_PROBE_TIMEOUT_S: float = 2.0
 _REMOTE_PROBE_CACHE_TTL_S: float = 5.0
@@ -318,7 +319,8 @@ _remote_probe_cache: dict[str, Any] = {"url": None, "expires_at": 0.0, "result":
 def _remote_gateway_base_url() -> str | None:
     """Return an explicit remote gateway base URL, or None for local-only setups.
 
-    Priority: GATEWAY_HEALTH_URL > HERMES_GATEWAY_HEALTH_URL > HERMES_API_URL.
+    Priority: GATEWAY_HEALTH_URL > HERMES_GATEWAY_HEALTH_URL > HERMES_API_URL
+    > HERMES_WEBUI_GATEWAY_BASE_URL.
     Returns ``None`` when no env var is set so the caller falls through to
     local PID/state checks.
 
@@ -328,7 +330,12 @@ def _remote_gateway_base_url() -> str | None:
     health-path suffix first so we don't build ``/health/health/detailed``
     (mirrors the normalization in api/updates.py).
     """
-    for var in ("GATEWAY_HEALTH_URL", "HERMES_GATEWAY_HEALTH_URL", "HERMES_API_URL"):
+    for var in (
+        "GATEWAY_HEALTH_URL",
+        "HERMES_GATEWAY_HEALTH_URL",
+        "HERMES_API_URL",
+        "HERMES_WEBUI_GATEWAY_BASE_URL",
+    ):
         val = os.environ.get(var, "").strip()
         if val:
             base = val.rstrip("/")

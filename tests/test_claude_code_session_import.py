@@ -238,7 +238,7 @@ def test_read_only_source_badge_ui_guards_are_present():
     assert "topbar-source-badge" in panels_js
     assert "S.session.read_only || S.session.is_read_only" in panels_js
     assert 'data-source-key="claude_code"' in style_css
-    assert ".session-item.cli-session.read-only-session:hover::after" in style_css
+    assert ".session-item.read-only-session:hover .session-source-chip" in style_css
     assert "Read-only imported sessions cannot be deleted" in routes_py
     assert "Read-only imported sessions cannot be archived" in routes_py
 
@@ -258,3 +258,41 @@ def test_messaging_source_badge_not_gated_on_is_cli_session():
     # (source_label 'WebUI' from api/session_recovery.py) don't badge the chat pane (#3338).
     assert "/^webui$/i.test(sourceLabel)" in ui_js
     assert "/^webui$/i.test(sourceLabel)" in panels_js
+
+
+def test_messaging_source_badge_in_sidebar_not_gated_on_is_cli_session():
+    sessions_js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    style_css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "function _isMessagingSession" in sessions_js
+    assert sessions_js.count("if(s.is_cli_session||_isMessagingSession(s)){") == 2
+    assert "if(s.is_cli_session&&sourceLabel) metaBits.push(sourceLabel);" not in sessions_js
+    assert (
+        "if(sourceLabel&&(s.is_cli_session||_isMessagingSession(s))) metaBits.push(sourceLabel);"
+        in sessions_js
+    )
+    assert "session-source-chip" in sessions_js
+    assert ".session-source-chip" in style_css
+    assert '.session-source-chip[data-source-key="telegram"]' in style_css
+    assert '.session-source-chip[data-source-key="discord"]' in style_css
+    assert '.session-item.cli-session[data-source-key="telegram"]' in style_css
+
+
+def test_compression_queue_discoverability_ux():
+    ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    i18n_js = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+
+    # Old misleading tooltip key must be gone from the compression branch
+    assert "composer_disabled_compression','Waiting for compression to finish'" not in ui_js
+
+    # New will-queue key must be present in ui.js (tooltip and placeholder)
+    assert "composer_compression_will_queue" in ui_js
+
+    # getComposerPrimaryAction must return 'queue' for compressionRunning+no-content
+    assert "if(compressionRunning) return 'queue';" in ui_js
+
+    # clearCompressionUi must restore the placeholder
+    assert "_compressionPlaceholderSaved" in ui_js
+
+    # New i18n key must appear in all 11 locales (count occurrences)
+    assert i18n_js.count("composer_compression_will_queue") >= 11

@@ -161,6 +161,60 @@ def test_metadata_poll_uses_sidecar_message_count_for_external_updates(monkeypat
     assert session["last_message_at"] == 1001.0
 
 
+def test_deferred_session_model_resolution_uses_profile_provider(monkeypatch, tmp_path):
+    """Deferred GET /api/session resolution must repair against profile config."""
+    import api.profiles as profiles
+    import api.routes as routes
+
+    sid = "webui_profile_resolve_model_001"
+    session = _install_test_session(monkeypatch, tmp_path, sid, [])
+    session.model = "openai/gpt-5.4-mini"
+    session.model_provider = None
+    session.profile = "anthropic"
+    session.save(touch_updated_at=False)
+
+    profile_home = tmp_path / "profiles" / "anthropic"
+    profile_home.mkdir(parents=True)
+    (profile_home / "config.yaml").write_text(
+        "model:\n"
+        "  provider: anthropic\n"
+        "  default: claude-sonnet-4.6\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: profile_home,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [],
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_context_length_for_session_model",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    session_path = tmp_path / "sessions" / f"{sid}.json"
+    before = session_path.read_text(encoding="utf-8")
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=0&resolve_model=1")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    payload = handler.response_json["session"]
+    assert payload["model"] == "claude-sonnet-4.6"
+    assert payload["model_provider"] == "anthropic"
+    assert session_path.read_text(encoding="utf-8") == before
+
+
 def test_metadata_poll_prefers_sidecar_count_when_index_is_stale(monkeypatch, tmp_path):
     """A stale sidebar index must not hide externally appended sidecar turns."""
     import api.config as config

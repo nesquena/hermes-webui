@@ -5,7 +5,7 @@ BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
-LOCALE_COUNT = 12
+LOCALE_COUNT = 13
 
 
 def test_raw_audio_active_recording_uses_dedicated_i18n_key():

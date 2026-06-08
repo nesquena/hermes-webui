@@ -207,3 +207,44 @@ def test_unsupported_model_families_and_versions():
         )
 
 
+# ── position-independent DeepSeek version detection (#3650) ───────────────────
+#
+# The DeepSeek V/R-series check keys off the token immediately AFTER "deepseek"
+# rather than requiring "deepseek" to lead the string. This keeps detection
+# working when a provider slug is prepended (e.g. a custom aggregator rewriting
+# @custom:name:DeepSeek-V4-Flash → "my-provider-deepseek-v4-flash"), while a
+# provider slug that happens to start with "v"/"r" (e.g. "vertex") must NOT by
+# itself satisfy the version guard.
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "vertex-deepseek-v4-flash",
+        "my-provider-deepseek-r1",
+        "newapi-deepseek-v5",
+    ],
+)
+def test_deepseek_version_detected_after_provider_slug(model_id):
+    efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id="custom:newapi")
+    assert set(efforts) >= {"low", "medium", "high"}, (
+        f"{model_id}: DeepSeek V/R-series marker after a provider slug should "
+        "expose reasoning efforts (position-independent detection, #3650)"
+    )
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "deepseek-chat",
+        "deepseek-coder",
+        "vertex-deepseek-chat",
+    ],
+)
+def test_deepseek_non_reasoning_variants_excluded(model_id):
+    efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id="custom:newapi")
+    assert efforts == [], (
+        f"{model_id}: non-reasoning DeepSeek variant must NOT resolve reasoning "
+        "support, and a 'v'/'r' provider slug must not falsely trigger it (#3650)"
+    )
+
+
