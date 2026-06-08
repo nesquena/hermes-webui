@@ -574,7 +574,7 @@ eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const root = {{session_id:'root', title:'Root', updated_at:10, last_message_at:10}};
 const fork1 = {{session_id:'fork1', title:'Fork 1', session_source:'fork', parent_session_id:'root', updated_at:20, last_message_at:20}};
 const fork2 = {{session_id:'fork2', title:'Fork 2', session_source:'fork', parent_session_id:'fork1', updated_at:30, last_message_at:30}};
-const rows = _attachChildSessionsToSidebarRows([root, fork1, fork2], [root, fork1, fork2]);
+const rows = _attachChildSessionsToSidebarRows([fork2, fork1, root], [fork2, fork1, root]);
 console.log(JSON.stringify(rows));
 """
     rows = json.loads(_run_node(source))

@@ -4444,6 +4444,7 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
 
 function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
   const sessionIdsInList=new Set((rawSessions||[]).map(s=>s&&s.session_id).filter(Boolean));
+  const rawSessionsById=new Map((rawSessions||[]).filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
   const rows=(collapsedRows||[])
     .filter(s=>!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList)))
     .map(s=>({...s}));
@@ -4456,6 +4457,20 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
   const visibleBySid=new Map();
   const visibleBySegmentSid=new Map();
   const visibleByLineageKey=new Map();
+  const attachDepthCache=new Map();
+  const attachDepthFor=(session, seen=new Set())=>{
+    if(!session||!session.session_id) return 0;
+    if(attachDepthCache.has(session.session_id)) return attachDepthCache.get(session.session_id);
+    if(seen.has(session.session_id)) return 0;
+    seen.add(session.session_id);
+    const parent=session.parent_session_id&&rawSessionsById.get(session.parent_session_id);
+    let depth=0;
+    if(parent&&(_isChildSession(session)||(_isForkWithResolvableParent(session, sessionIdsInList)&&!(session&&session.pinned)))){
+      depth=1+attachDepthFor(parent, seen);
+    }
+    attachDepthCache.set(session.session_id, depth);
+    return depth;
+  };
   for(const row of rows){
     if(row&&row.session_id) visibleBySid.set(row.session_id,row);
     const lineageKey=_sidebarLineageKeyForRow(row);
@@ -4465,7 +4480,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
     }
   }
   const orphans=[];
-  for(const child of rawSessions||[]){
+  const attachQueue=[...(rawSessions||[])].sort((a,b)=>attachDepthFor(a)-attachDepthFor(b));
+  for(const child of attachQueue){
     const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList)&&!(child&&child.pinned);
     if(!_isChildSession(child)&&!isForkChild) continue;
     if(!isForkChild&&child._cross_surface_child_session){
