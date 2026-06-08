@@ -2402,6 +2402,35 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
     return None
 
 
+def _get_lmstudio_reasoning_probe_api_key() -> str | None:
+    """Resolve the LM Studio key for reasoning probes with WebUI precedence."""
+    config_data = _load_yaml_config_file(_get_config_path())
+    model_cfg = config_data.get("model") or {}
+    if isinstance(model_cfg, dict):
+        active_provider = str(model_cfg.get("provider") or "").strip().lower()
+        model_key = str(model_cfg.get("api_key") or "").strip()
+        if active_provider == "lmstudio" and model_key:
+            return model_key
+
+    providers_cfg = config_data.get("providers") or {}
+    if isinstance(providers_cfg, dict):
+        lmstudio_cfg = providers_cfg.get("lmstudio") or {}
+        if isinstance(lmstudio_cfg, dict):
+            config_key = str(lmstudio_cfg.get("api_key") or "").strip()
+            if config_key:
+                return config_key
+
+    env_key = str(os.getenv("LM_API_KEY") or "").strip()
+    if env_key:
+        return env_key
+
+    legacy_env_key = str(os.getenv("LMSTUDIO_API_KEY") or "").strip()
+    if legacy_env_key:
+        return legacy_env_key
+
+    return None
+
+
 def resolve_model_reasoning_efforts(
     model_id: str | None = None,
     provider_id: str | None = None,
@@ -2442,7 +2471,11 @@ def resolve_model_reasoning_efforts(
 
         if provider == "lmstudio":
             probe_base = resolved_base_url or _get_provider_base_url(provider)
-            opts = lmstudio_model_reasoning_options(hinted_model, probe_base)
+            opts = lmstudio_model_reasoning_options(
+                hinted_model,
+                probe_base,
+                api_key=_get_lmstudio_reasoning_probe_api_key(),
+            )
             normalized = [str(opt).strip().lower() for opt in opts if str(opt).strip()]
             if not normalized or set(normalized).issubset({"off"}):
                 return []
