@@ -151,6 +151,7 @@ def _assert_widget_read_receipts(response, *, action, run_id, space_id, widget_c
     assert f"space_id: {space_id}" in response["output_compaction"]["text"]
     assert f"widget_count: {widget_count}" in response["output_compaction"]["text"]
     assert f"progress_run_id: {run_id}" in response["output_compaction"]["text"]
+    _assert_server_memory_advisory_receipt(response)
 
 
 def test_load_spaces_isolates_progress_event_log(monkeypatch, tmp_path):
