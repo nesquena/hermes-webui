@@ -8431,19 +8431,23 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         response: dict[str, Any] = {"ok": True, "action": name, "space": space}
         autonomy_policy: dict[str, Any] | None = None
         progress_event: dict[str, Any] | None = None
+        memory_advisory: dict[str, Any] | None = None
         if name in {"space.spaces.open", "space.spaces.openspace"}:
             prompt_preflight = _space_browser_navigation_required_prompt_preflight_receipt(name)
             autonomy_policy = _space_browser_navigation_action_policy_receipt(name)
             progress_event = _record_space_tool_progress_event(space_id, run_prefix="space.open")
+            memory_advisory = _memory_advisory_public_envelope()
             response["prompt_preflight"] = prompt_preflight
             response["autonomy_policy"] = autonomy_policy
             response["progress_event"] = progress_event
+            response["memory_advisory"] = memory_advisory
         response["output_compaction"] = _space_tool_action_output_compaction_receipt(
             action=name,
             space_id=space_id,
             widget_count=len(space.get("widgets") or []),
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
         )
         return response
     if name in {"space.spaces.reloadcurrentspace", "space.spaces.reloadspace"}:
@@ -8452,6 +8456,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         prompt_preflight = _space_browser_navigation_required_prompt_preflight_receipt(name)
         autonomy_policy = _space_browser_navigation_action_policy_receipt(name)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="space.reload")
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -8460,12 +8465,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=len(space.get("widgets") or []),
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
             ),
         }
     if name in {
