@@ -11471,18 +11471,39 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     window ACTIVE_RUNS is the worker-lifecycle truth; a successor chat/start for
     the same session must wait or it can reuse the cached agent while the old
     interrupt is still landing (#3808).
+
+    Bounded: the post-cancel unwind is short (dominated by the worker finally's
+    ``_ckpt_thread.join(timeout=15)``), and ``unregister_active_run`` runs in that
+    finally, so a healthy worker leaves ACTIVE_RUNS within seconds. A detached /
+    wedged worker that never reaches its finally (e.g. stuck in a provider call,
+    or leaked by SIGKILL without restart) must NOT 409 the session forever — so an
+    entry older than the unwind ceiling (180s) is treated as stale and ignored
+    here. A legitimately long-running turn keeps ``active_stream_id`` SET
+    and is handled by ``_active_stream_blocks_chat_start`` above; this guard only
+    covers the cleared-stream-id unwind window. (Codex brick-gate hardening, #3822.)
     """
     sid = str(session_id or "").strip()
     if not sid:
         return None
+    ceiling = 180.0  # generous vs the 15s checkpoint-join unwind; finite to avoid permanent-409
+    now = time.time()
     try:
         from api import config as _live_config
         with _live_config.ACTIVE_RUNS_LOCK:
             for run_stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
                 stream_id = str((raw or {}).get("stream_id") or run_stream_id or "").strip()
                 run_sid = str((raw or {}).get("session_id") or "").strip()
-                if run_sid == sid and stream_id:
-                    return stream_id
+                if run_sid != sid or not stream_id:
+                    continue
+                try:
+                    started_at = float((raw or {}).get("started_at") or 0)
+                except (TypeError, ValueError):
+                    started_at = 0.0
+                # Ignore a stale/wedged entry past the unwind ceiling so it can't
+                # block the session permanently.
+                if started_at and (now - started_at) > ceiling:
+                    continue
+                return stream_id
     except Exception:
         return None
     return None
