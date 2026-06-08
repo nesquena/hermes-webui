@@ -8558,6 +8558,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="path.helper")
         prompt_preflight = _space_path_helper_required_prompt_preflight_receipt(name)
         autonomy_policy = _space_path_helper_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -8566,12 +8567,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=0,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name in {"space.spaces.normalizespaceid", "space.spaces.normalizewidgetid"}:
