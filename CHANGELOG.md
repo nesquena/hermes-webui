@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **WebUI startup recovery no longer parses every session sidecar when no backup exists.** Startup `.bak` recovery now skips clean live sessions without a matching `.json.bak` file, while preserving orphan-backup recovery and missing-index rebuild behavior. This keeps recovery semantics intact and avoids a slow boot-time scan across large historical session directories. (#3815, @ai-ag2026)
+
 ## [v0.51.325] — 2026-06-08 — Release KO (in-app Help tab)
 
 ### Added
