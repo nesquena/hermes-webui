@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Minimal/older `state.db` schemas no longer hide every imported session from the sidebar.** `read_importable_agent_session_rows()` built its projection SQL with unconditional references to the `messages` table and `messages.timestamp` (`MAX(m.timestamp)`, the `LEFT JOIN messages`, and the `ORDER BY MAX(m.timestamp)`). On a `state.db` with no `messages` table — or a `messages` table without a `timestamp` (or `session_id`) column — the query raised `sqlite3.OperationalError`, which `get_cli_sessions()` catches and converts into an empty list, so **all** imported/CLI/agent sessions silently disappeared from the sidebar with no error shown. The projection now detects the `messages` columns up front (mirroring `read_session_lineage_metadata`) and degrades gracefully: it only joins/aggregates `messages` when it's usable, falls back to the denormalized `s.message_count` and `s.started_at` ordering otherwise, and only selects `MAX(m.timestamp)` when that column exists. (#3762)
+
+
 ## [v0.51.325] — 2026-06-08 — Release KO (in-app Help tab)
 
 ### Added
