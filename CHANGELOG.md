@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Compression continuation sessions keep their latest persisted tail.** Opening a WebUI compression child no longer lets a snapshot parent's `truncation_watermark` hide the child's saved continuation messages, and children that already replay their parent snapshot are no longer stitched back through older ancestors.
+
 ## [v0.51.326] — 2026-06-08 — Release KP (mic STT probe + journal cleanup + schema guard + help hover)
 
 ### Fixed
