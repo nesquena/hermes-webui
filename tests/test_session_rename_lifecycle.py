@@ -14,9 +14,9 @@ SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
 def _session_rename_block():
-    start = SESSIONS_JS.find("const startRename=()=>{")
-    assert start >= 0, "session inline rename startRename() block not found"
-    end = SESSIONS_JS.find("// (Project dot is appended above", start)
+    start = SESSIONS_JS.find("function _buildSessionRenameStarter(")
+    assert start >= 0, "shared session rename helper not found"
+    end = SESSIONS_JS.find("function _appendSessionCopyLinkAction(", start)
     assert end > start, "session inline rename block end marker not found"
     return SESSIONS_JS[start:end]
 
@@ -36,12 +36,12 @@ def test_session_rename_finish_is_idempotent():
 
 def test_session_rename_guard_releases_after_save_path_completes():
     block = _session_rename_block()
-    assert block.count("_renamingSid = null;") == 1, (
+    assert block.count("_renamingSid=null;") == 1, (
         "_renamingSid must be cleared from one release helper only, not at the "
         "top of finish() before the async rename save settles"
     )
     release_pos = block.find("const releaseRename=()=>{")
-    clear_pos = block.find("_renamingSid = null;")
+    clear_pos = block.find("_renamingSid=null;")
     assert release_pos >= 0 and clear_pos > release_pos, (
         "_renamingSid should be cleared inside releaseRename(), after the "
         "selected finish path has completed"
@@ -57,9 +57,10 @@ def test_session_rename_guard_releases_after_save_path_completes():
 
 def test_session_rename_success_updates_cache_and_active_session_title():
     block = _session_rename_block()
-    assert "_allSessions.find(item=>item&&item.session_id===s.session_id)" in block
-    assert "if(cached) cached.title=nextTitle;" in block
-    assert "S.session.title=nextTitle;syncTopbar();" in block, (
+    assert "_allSessions.find(item=>item&&item.session_id===session.session_id)" in block
+    assert "target.display_title=nextTitle;" in block
+    assert "target._state_db_title=nextTitle;" in block
+    assert "if(S.session&&S.session.session_id===session.session_id){applyLocalTitle(S.session, nextTitle);syncTopbar();}" in block, (
         "successful session rename must keep cached and active titles coherent"
     )
 
@@ -75,3 +76,11 @@ def test_session_rename_failure_restores_state_and_surfaces_error():
     )
     assert "setStatus(msg);" in catch_block
     assert "showToast(msg,3000,'error')" in catch_block
+
+
+def test_session_rename_blur_commits_current_title():
+    block = _session_rename_block()
+    assert "inp.onblur=()=>{ if(_renamingSid===session.session_id) finish(true); };" in block, (
+        "blur should commit the edited title so rename matches the long-standing "
+        "top-level session behavior"
+    )

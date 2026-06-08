@@ -4137,7 +4137,9 @@ main.main > #mainPlugin{display:none;}
 .session-child-session-fork{position:relative;display:flex;align-items:center;gap:4px;padding:2px 4px 2px 0;overflow:visible;white-space:normal;touch-action:pan-y;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;transform:translate3d(var(--session-swipe-offset,0),0,0);transition:background .15s,color .15s,transform .5s cubic-bezier(.22,.61,.36,1),box-shadow .15s ease;}
 .session-child-session-fork .session-child-session-main{appearance:none;border:0;background:transparent;color:inherit;font:inherit;font-size:11px;text-align:left;padding:3px 4px;border-radius:5px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:0;}
 .session-child-session-fork:hover .session-child-session-main,.session-child-session-fork.active .session-child-session-main,.session-child-session-fork .session-child-session-main.active{background:rgba(255,255,255,.06);color:var(--text);}
+.session-child-session-fork.streaming .session-child-session-main{color:var(--accent);}
 .session-child-session-fork .session-actions{position:static;transform:none;opacity:1;pointer-events:auto;flex:0 0 auto;}
+.session-child-session-fork .session-child-session-state{position:static;transform:none;flex:0 0 auto;width:14px;height:14px;margin-right:2px;color:var(--accent);}
 .session-child-session-fork .session-actions-trigger{width:22px;height:22px;}
 .session-child-session-fork .session-swipe-affordance{top:1px;bottom:1px;}
 .session-child-session-fork .session-child-session-main,.session-child-session-fork .session-actions{z-index:1;}

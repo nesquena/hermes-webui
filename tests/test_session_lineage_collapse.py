@@ -22,6 +22,7 @@ def _run_node(source: str) -> str:
         input=source,
         cwd=str(REPO_ROOT),
         capture_output=True,
+        encoding="utf-8",
         text=True,
         timeout=10,
     )
@@ -546,6 +547,56 @@ console.log(JSON.stringify(rows));
     rows = json.loads(_run_node(source))
     assert rows[0]["session_id"] == "parent"
     assert rows[0]["last_message_at"] == 20
+
+
+def test_nested_fork_bubbles_parent_attention_state():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isSessionEffectivelyStreaming(session) {{
+  return !!(session && session.active_stream_id);
+}}
+function _hasUnreadForSession(session) {{
+  return !!(session && session.has_unread);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parent = {{session_id:'parent', title:'Parent', updated_at:10, last_message_at:10}};
+const fork = {{
+  session_id:'fork1',
+  title:'Fork',
+  session_source:'fork',
+  parent_session_id:'parent',
+  updated_at:20,
+  last_message_at:20,
+  has_unread:true,
+  attention:{{kind:'approval', count:2}},
+  active_stream_id:'stream-1'
+}};
+const rows = _attachChildSessionsToSidebarRows([parent, fork], [parent, fork]);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert rows[0]["_child_session_has_unread"] is True
+    assert rows[0]["_child_session_streaming"] is True
+    assert rows[0]["_child_session_attention"]["kind"] == "approval"
 
 
 def test_fork_chain_stays_attached_under_visible_root():

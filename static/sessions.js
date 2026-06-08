@@ -2978,19 +2978,25 @@ function _buildSessionRenameStarter(session, displayEl, renderDisplay){
 
     closeSessionActionMenu();
     _renamingSid=session.session_id;
-    const oldTitle=session.title||'Untitled';
+    const oldTitle=_sessionDisplayTitle(session)||'Untitled';
     const inp=document.createElement('input');
     inp.className='session-title-input';
     inp.value=oldTitle;
     ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
       inp.addEventListener(ev, e2=>e2.stopPropagation())
     );
+    const applyLocalTitle=(target, nextTitle)=>{
+      if(!target) return;
+      target.title=nextTitle;
+      target.display_title=nextTitle;
+      target._state_db_title=nextTitle;
+    };
     const applyTitle=(nextTitle, updateDom=true)=>{
-      session.title=nextTitle;
+      applyLocalTitle(session, nextTitle);
       const cached=_allSessions.find(item=>item&&item.session_id===session.session_id);
-      if(cached) cached.title=nextTitle;
-      if(S.session&&S.session.session_id===session.session_id){S.session.title=nextTitle;syncTopbar();}
-      if(updateDom) renderDisplay(nextTitle, session);
+      applyLocalTitle(cached, nextTitle);
+      if(S.session&&S.session.session_id===session.session_id){applyLocalTitle(S.session, nextTitle);syncTopbar();}
+      if(updateDom) renderDisplay(_sessionDisplayTitle(session), session);
     };
     let finishDone=false;
     const finish=async(save)=>{
@@ -3030,7 +3036,7 @@ function _buildSessionRenameStarter(session, displayEl, renderDisplay){
       }
       if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
     };
-    inp.onblur=()=>{ if(_renamingSid===session.session_id) finish(false); };
+    inp.onblur=()=>{ if(_renamingSid===session.session_id) finish(true); };
     displayEl.replaceWith(inp);
     setTimeout(()=>{inp.focus();inp.select();},10);
   };
@@ -4455,6 +4461,27 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
     if(!Number.isFinite(childRaw)||childRaw<=parentRaw) return;
     parentRow.last_message_at=childRaw;
   };
+  const isChildStreaming=(childRow)=>typeof _isSessionEffectivelyStreaming==='function'
+    ? _isSessionEffectivelyStreaming(childRow)
+    : !!(childRow&&(childRow.active_stream_id||childRow.pending_user_message));
+  const childHasUnread=(childRow)=>typeof _hasUnreadForSession==='function'
+    ? _hasUnreadForSession(childRow)
+    : !!(childRow&&childRow.has_unread);
+  const bubbleSidebarState=(parentRow, childRow)=>{
+    if(isChildStreaming(childRow)) parentRow._child_session_streaming=true;
+    if(childHasUnread(childRow)) parentRow._child_session_has_unread=true;
+    const childAttention=childRow&&childRow.attention&&typeof childRow.attention==='object'?childRow.attention:null;
+    if(!childAttention||!childAttention.kind||!Number.isFinite(Number(childAttention.count))||Number(childAttention.count)<=0) return;
+    const priorityFor=(kind)=>kind==='approval'?3:(kind==='clarify'?2:1);
+    const current=parentRow._child_session_attention&&typeof parentRow._child_session_attention==='object'
+      ? parentRow._child_session_attention
+      : null;
+    const nextPriority=priorityFor(String(childAttention.kind));
+    const currentPriority=current?priorityFor(String(current.kind)):0;
+    if(!current||nextPriority>currentPriority||(nextPriority===currentPriority&&Number(childAttention.count||0)>Number(current.count||0))){
+      parentRow._child_session_attention={...childAttention};
+    }
+  };
   const visibleBySid=new Map();
   const visibleBySegmentSid=new Map();
   const visibleByLineageKey=new Map();
@@ -4510,6 +4537,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
       parentRow._child_sessions.push(childCopy);
       parentRow._child_session_count=parentRow._child_sessions.length;
       bubbleSidebarActivity(parentRow, childCopy);
+      bubbleSidebarState(parentRow, childCopy);
       visibleBySegmentSid.set(childCopy.session_id,{row: parentRow, seg: childCopy});
     } else {
       orphans.push({...child,_orphan_child_session:true});
@@ -5222,11 +5250,11 @@ function renderSessionListFromCache(){
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
-    const isStreaming=_isSessionEffectivelyStreaming(s);
+    const isStreaming=_isSessionEffectivelyStreaming(s)||!!s._child_session_streaming;
     _rememberRenderedStreamingState(s, isStreaming);
     _rememberRenderedSessionSnapshot(s);
-    const hasUnread=_hasUnreadForSession(s)&&!isActive;
-    const attention=_sessionAttentionState(s);
+    const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
+    const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
@@ -5443,7 +5471,7 @@ function renderSessionListFromCache(){
       }
       sessionText.appendChild(lineageList);
     }
-    if(childCount>0&&Array.isArray(s._child_sessions)&&_expandedChildSessionKeys.has(lineageKey)){
+    if(childCount>0&&Array.isArray(s._child_sessions)&&(_expandedChildSessionKeys.has(lineageKey)||!!searchQueryRaw)){
       const childList=document.createElement('div');
       childList.className='session-child-sessions';
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
@@ -5648,12 +5676,22 @@ function renderSessionListFromCache(){
       };
       for(const child of sortedChildren){
         if(child.session_source==='fork'){
+          const childIsActive=!!(activeSidForSidebar&&child.session_id===activeSidForSidebar);
+          const childStreaming=_isSessionEffectivelyStreaming(child);
+          const childHasUnread=_hasUnreadForSession(child)&&!childIsActive;
+          const childAttention=_sessionAttentionState(child);
+          const childAttentionClass=childAttention?(childAttention.kind==='approval'?' attention-approval':(childAttention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
           const row=document.createElement('div');
-          row.className='session-child-session session-child-session-fork'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+          row.className='session-child-session session-child-session-fork'
+            +(childIsActive?' active':'')
+            +(childStreaming?' streaming':'')
+            +(childHasUnread?' unread':'')
+            +(childAttention?' needs-attention':'')
+            +childAttentionClass;
           row.dataset.sid=child.session_id;
           const mainBtn=document.createElement('button');
           mainBtn.type='button';
-          mainBtn.className='session-child-session-main'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+          mainBtn.className='session-child-session-main'+(childIsActive?' active':'');
           mainBtn.textContent=childLabelFor(child);
           mainBtn.title='Open forked session';
           mainBtn.onclick=async(e)=>{
@@ -5670,6 +5708,16 @@ function renderSessionListFromCache(){
             mainBtn.textContent=childLabelFor(child);
           });
           row.appendChild(mainBtn);
+          const state=document.createElement('span');
+          state.className='session-state-indicator session-child-session-state'
+            +(childStreaming?' is-streaming':'')
+            +(childHasUnread?' is-unread':'')
+            +(childAttention?(childAttention.kind==='approval'?' is-attention-approval':(childAttention.kind==='clarify'?' is-attention-clarify':' is-attention-generic')):'');
+          state.setAttribute('aria-hidden','true');
+          const childStateTip=_sessionStateTooltip({isStreaming:childStreaming,hasUnread:childHasUnread});
+          if(childAttention&&childAttention.title) state.title=childAttention.title;
+          else if(childStateTip) state.title=childStateTip;
+          row.appendChild(state);
           const readOnlyChild=_isReadOnlySession(child);
           let actions=null;
           if(!readOnlyChild){
