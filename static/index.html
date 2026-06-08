@@ -1130,9 +1130,9 @@
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowTps" style="width:15px;height:15px;accent-color:var(--accent)">
-                <span>Show token speed (TPS)</span>
+                <span data-i18n="settings_label_token_speed">Show token speed (TPS)</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px">Displays tokens per second in assistant message headers while streaming and after a response completes. Off by default.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_token_speed">Displays tokens per second in assistant message headers while streaming and after a response completes. Off by default.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1151,9 +1151,9 @@
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsTerminalAutoExpand" style="width:15px;height:15px;accent-color:var(--accent)">
-                <span>Auto-expand terminal on output</span>
+                <span data-i18n="settings_label_terminal_auto_expand">Auto-expand terminal on output</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px">Expand the collapsed terminal panel automatically when a running command emits new output.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_terminal_auto_expand">Expand the collapsed terminal panel automatically when a running command emits new output.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1171,9 +1171,9 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sidebar_density">Controls how much metadata the session list shows in the left sidebar.</div>
             </div>
             <div class="settings-field">
-              <label for="settingsPinnedSessionsLimit">Pinned conversations limit</label>
+              <label for="settingsPinnedSessionsLimit" data-i18n="settings_label_pinned_limit">Pinned conversations limit</label>
               <input type="number" id="settingsPinnedSessionsLimit" min="1" max="99" step="1" inputmode="numeric" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              <div style="font-size:11px;color:var(--muted);margin-top:4px">Maximum number of active conversations that can be pinned in the sidebar. Default is 3.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_pinned_limit">Maximum number of active conversations that can be pinned in the sidebar. Default is 3.</div>
             </div>
             <div class="settings-field">
               <label for="settingsAutoTitleRefresh" data-i18n="settings_label_auto_title_refresh">Adaptive title refresh</label>
@@ -1313,21 +1313,21 @@
               <div id="passkeyList" style="margin-top:8px;font-size:12px;color:var(--muted)">No passkeys registered.</div>
             </div>
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
-              <label for="settingsDashboardMode">Official Hermes Dashboard</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Show a nav-rail link when the official <code>hermes dashboard</code> is reachable. Public reverse-proxy URLs are stored as browser-only links and are never server-probed.</div>
+              <label for="settingsDashboardMode" data-i18n="settings_label_dashboard_mode">Official Hermes Dashboard</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_dashboard_mode">Show a nav-rail link when the official <code>hermes dashboard</code> is reachable. Public reverse-proxy URLs are stored as browser-only links and are never server-probed.</div>
               <select id="settingsDashboardMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
-                <option value="auto">Auto-detect</option>
-                <option value="always">Always show</option>
-                <option value="never">Never show</option>
+                <option value="auto" data-i18n="settings_dashboard_mode_auto">Auto-detect</option>
+                <option value="always" data-i18n="settings_dashboard_mode_always">Always show</option>
+                <option value="never" data-i18n="settings_dashboard_mode_never">Never show</option>
               </select>
               <input type="text" id="settingsDashboardUrl" placeholder="http://127.0.0.1:9119" style="margin-top:8px;width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              <button class="sm-btn" onclick="saveDashboardSettings()" style="margin-top:8px;width:100%;padding:7px;font-weight:600">Save dashboard link settings</button>
+              <button class="sm-btn" onclick="saveDashboardSettings()" data-i18n="settings_dashboard_save" style="margin-top:8px;width:100%;padding:7px;font-weight:600">Save dashboard link settings</button>
               <div id="settingsDashboardStatus" class="settings-autosave-status" aria-live="polite"></div>
             </div>
             <!-- Gateway Status Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
-              <label>Gateway Status</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Status of the Hermes gateway (Telegram, Discord, Slack, etc.)</div>
+              <label data-i18n="settings_label_gateway_status">Gateway Status</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_gateway_status">Status of the Hermes gateway (Telegram, Discord, Slack, etc.)</div>
               <div id="gatewayStatusCard"><span style="color:var(--muted);font-size:12px">Loading…</span></div>
             </div>
             <!-- MCP Servers Section -->
