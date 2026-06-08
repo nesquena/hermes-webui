@@ -441,9 +441,16 @@ def _emit_bg_task_complete_events_now(session_id: str, payload: dict) -> int:
     #   2. Remove this dual-emit shim (drop the legacy alias).
     # Both emits carry the SAME trimmed payload + the SAME event_id, so a
     # consumer that ever sees both can dedupe by ``event_id``.
+    #
+    # Greptile P2: hand each emit its OWN shallow copy of the payload. The
+    # same dict object would otherwise be referenced by every subscriber queue
+    # across STREAMS and SESSION_CHANNELS for BOTH event names; a downstream
+    # consumer that mutates it in place would silently corrupt all other
+    # concurrent consumers' views. Shallow copies are sufficient — the payload
+    # is a flat trimmed dict of scalars.
     return (
-        _emit_to_session_streams(session_id, "bg_task_complete", payload)
-        + _emit_to_session_streams(session_id, "process_complete", payload)
+        _emit_to_session_streams(session_id, "bg_task_complete", dict(payload))
+        + _emit_to_session_streams(session_id, "process_complete", dict(payload))
     )
 
 
@@ -819,7 +826,7 @@ def _process_one(evt: dict) -> None:
                 )
             else:
                 _start_server_side_wakeup_turn(
-                    session_id, wakeup_prompt, process_id
+                    session_id, wakeup_prompt, process_id=process_id
                 )
     except Exception:
         logger.warning(
@@ -933,20 +940,34 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 "PENDING discard failed for session %s", session_id, exc_info=True
             )
         started = 0
-        for entry in entries:
-            prompt = str((entry or {}).get("wakeup_prompt") or "").strip()
-            if not prompt:
-                continue
-            entry_pid = str((entry or {}).get("process_id") or "")
-            # Same server-side wakeup path the idle branch uses. It spawns its
-            # own daemon thread, so the teardown thread never blocks. The
-            # process_id is already in BG_TASK_COMPLETE_EVENTS_SEEN +
-            # registry _completion_consumed (set in _process_one before the
-            # defer), so no other path re-delivers it. We pass process_id so a
-            # 409 race inside the wakeup turn re-queues the SAME entry (atomic
-            # claim + per-process dedupe ⇒ exactly-once, never a double-fire).
-            _start_server_side_wakeup_turn(session_id, prompt, entry_pid)
-            started += 1
+        # Greptile P1 fix: do NOT fire one daemon-threaded wakeup per entry in
+        # a tight loop. Each ``_start_server_side_wakeup_turn`` spawns a daemon
+        # thread that races for the per-session agent lock; only ONE can win,
+        # the rest 409. Since we already claimed + popped every entry (line
+        # ~938) and discarded the PENDING marker, the losers' prompts would be
+        # permanently lost. Instead: start exactly the FIRST prompt, and
+        # re-defer the remaining entries so each subsequent turn-teardown
+        # (or next-turn drain) delivers the next one — one wakeup per turn,
+        # which matches the single-prompt-per-turn design and the
+        # BG_TASK_COMPLETE_EVENTS_SEEN dedup (no double-fire).
+        leftover = [e for e in entries if str((e or {}).get("wakeup_prompt") or "").strip()]
+        if leftover:
+            first = leftover[0]
+            # Re-defer entries 2..N BEFORE starting the first turn, so they are
+            # already persisted if the first wakeup's own teardown re-runs this
+            # hook and tries to claim them.
+            for entry in leftover[1:]:
+                record_deferred_wakeup(
+                    session_id,
+                    str((entry or {}).get("process_id") or ""),
+                    str((entry or {}).get("wakeup_prompt") or "").strip(),
+                )
+            _start_server_side_wakeup_turn(
+                session_id,
+                str((first or {}).get("wakeup_prompt") or "").strip(),
+                process_id=str((first or {}).get("process_id") or ""),
+            )
+            started = 1
         if started:
             logger.info(
                 "turn-teardown idle-hook redelivered %d deferred wakeup(s) "
@@ -992,7 +1013,7 @@ def _session_has_active_turn(session_id: str) -> bool:
 
 
 def _start_server_side_wakeup_turn(
-    session_id: str, wakeup_prompt: str, process_id: str = ""
+    session_id: str, wakeup_prompt: str, *, process_id: str = ""
 ) -> None:
     """Start an agent turn server-side for a process_complete wakeup (Option Z).
 
@@ -1032,14 +1053,18 @@ def _start_server_side_wakeup_turn(
             )
             status = int((resp or {}).get("_status", 200) or 200)
             if status == 409:
-                # Lost the race to an active turn. Re-queue so a later teardown
-                # idle-hook (or the next-turn drain) redelivers; without this,
-                # a 409 in the teardown-hook caller path — which already claimed
-                # the entry and discarded the PENDING marker — drops the wakeup.
-                record_deferred_wakeup(session_id, process_id, wakeup_prompt)
+                # Raced an active turn (e.g. a human /api/chat/start, or a
+                # sibling deferred-wakeup thread). Re-defer this prompt so it
+                # is delivered by the winning turn's teardown / next-turn drain
+                # instead of being lost. The atomic claim in
+                # ``claim_deferred_wakeups`` still guarantees exactly-once
+                # delivery, and BG_TASK_COMPLETE_EVENTS_SEEN already deduped
+                # this process_id, so re-recording cannot double-fire.
+                if wakeup_prompt:
+                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
-                    "re-queued deferred wakeup for teardown/next-turn redelivery",
+                    "re-deferred for redelivery on next teardown/turn",
                     session_id,
                 )
             elif status >= 400:
