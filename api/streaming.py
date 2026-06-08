@@ -3256,17 +3256,14 @@ def _is_context_compression_marker(msg):
     return is_context_compression_marker(msg)
 
 
-def _compact_summary_text(raw_text: str | None, limit: int = 320) -> str | None:
+def _compact_summary_text(raw_text: str | None) -> str | None:
     """Normalize a text blob used in compression summary cards."""
     if not isinstance(raw_text, str):
         return None
     txt = raw_text.strip()
     if not txt:
         return None
-    txt = re.sub(r"\s+", " ", txt).strip()
-    if len(txt) > limit:
-        txt = f"{txt[: limit - 6]}…"
-    return txt
+    return re.sub(r"\s+", " ", txt).strip()
 
 
 def _compression_anchor_message_key(message):

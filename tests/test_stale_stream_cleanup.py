@@ -1,5 +1,6 @@
 import queue
 import threading
+import time
 from pathlib import Path
 
 import api.config as config
@@ -153,6 +154,200 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
         assert "new-stream" not in routes.STREAMS
     finally:
         routes.STREAMS.pop(existing_stream_id, None)
+
+
+def test_chat_start_blocks_same_session_active_run_after_cancel_clears_stream_id(monkeypatch, tmp_path):
+    """Regression for #3808: cancel clears active_stream_id before worker exit.
+
+    interrupt-and-send queues a successor message, then calls cancel_stream().
+    cancel_stream() intentionally clears session.active_stream_id so Stop remains
+    responsive, but the old worker remains in ACTIVE_RUNS until its finally block
+    unregisters it. chat/start must still block by session_id during that window.
+    """
+    config.STREAMS.clear()
+    config.ACTIVE_RUNS.clear()
+    config.SESSION_AGENT_LOCKS.clear()
+
+    class ChatStartSession:
+        session_id = "interrupt-send-session"
+
+        def __init__(self):
+            self.active_stream_id = None
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.messages = []
+            self.title = "Interrupt Send"
+            self.worktree_path = None
+            self.workspace = None
+            self.model = None
+            self.model_provider = None
+
+        def save(self, *args, **kwargs):
+            return None
+
+    session = ChatStartSession()
+    old_stream_id = "old-cancelling-stream"
+    config.register_active_run(old_stream_id, session_id=session.session_id, phase="cancelling")
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
+    monkeypatch.setattr(routes.threading, "Thread", NoopThread)
+
+    try:
+        response = routes._start_chat_stream_for_session(
+            session,
+            msg="successor prompt",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider=None,
+        )
+
+        assert response["_status"] == 409
+        assert response["active_stream_id"] == old_stream_id
+        assert session.active_stream_id is None
+        assert session.pending_user_message is None
+        assert "new-stream" not in routes.STREAMS
+    finally:
+        config.unregister_active_run(old_stream_id)
+
+
+def test_chat_start_allows_same_session_after_active_run_unregisters(monkeypatch, tmp_path):
+    """The #3808 guard must release once the old worker unregisters ACTIVE_RUNS."""
+    config.STREAMS.clear()
+    config.ACTIVE_RUNS.clear()
+    config.SESSION_AGENT_LOCKS.clear()
+
+    class ChatStartSession:
+        session_id = "interrupt-send-session-released"
+
+        def __init__(self):
+            self.active_stream_id = None
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.messages = []
+            self.title = "Interrupt Send"
+            self.worktree_path = None
+            self.workspace = None
+            self.model = None
+            self.model_provider = None
+
+        def save(self, *args, **kwargs):
+            return None
+
+    session = ChatStartSession()
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
+    monkeypatch.setattr(routes.threading, "Thread", NoopThread)
+
+    response = routes._start_chat_stream_for_session(
+        session,
+        msg="successor prompt",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider=None,
+    )
+
+    try:
+        assert "error" not in response
+        assert response["stream_id"] == "new-stream"
+        assert session.active_stream_id == "new-stream"
+        assert session.pending_user_message == "successor prompt"
+    finally:
+        routes.STREAMS.pop("new-stream", None)
+
+
+def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp_path):
+    """A wedged/detached ACTIVE_RUNS entry past the unwind ceiling must NOT 409 forever.
+
+    The #3808 successor guard waits on a same-session ACTIVE_RUNS entry during the
+    short post-cancel unwind. But unregister only runs in the worker finally, so a
+    worker stuck in a provider call (or leaked by SIGKILL without restart) would
+    block the session permanently. The guard ignores entries older than the 180s
+    ceiling so the user can recover. (Codex brick-gate hardening, #3822.)
+    """
+    config.STREAMS.clear()
+    config.ACTIVE_RUNS.clear()
+    config.SESSION_AGENT_LOCKS.clear()
+
+    class ChatStartSession:
+        session_id = "interrupt-send-session-stale"
+
+        def __init__(self):
+            self.active_stream_id = None
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.messages = []
+            self.title = "Interrupt Send"
+            self.worktree_path = None
+            self.workspace = None
+            self.model = None
+            self.model_provider = None
+
+        def save(self, *args, **kwargs):
+            return None
+
+    session = ChatStartSession()
+    stale_stream_id = "wedged-old-stream"
+    config.register_active_run(stale_stream_id, session_id=session.session_id, phase="running")
+    # Age the entry well past the 180s unwind ceiling.
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS[stale_stream_id]["started_at"] = time.time() - 600
+
+    # The bounded guard should treat it as stale and NOT report it as blocking.
+    assert routes._active_run_stream_for_session(session.session_id) is None
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
+    monkeypatch.setattr(routes.threading, "Thread", NoopThread)
+
+    try:
+        response = routes._start_chat_stream_for_session(
+            session,
+            msg="successor prompt",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider=None,
+        )
+        assert "error" not in response
+        assert response["stream_id"] == "new-stream"
+        assert session.active_stream_id == "new-stream"
+    finally:
+        config.unregister_active_run(stale_stream_id)
+        routes.STREAMS.pop("new-stream", None)
 
 
 def test_stale_stream_cleanup_does_not_clobber_concurrent_chat_start(monkeypatch):

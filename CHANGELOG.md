@@ -3,6 +3,32 @@
 
 ## [Unreleased]
 
+## [v0.51.330] — 2026-06-08 — Release KT (api docstring backfill)
+
+### Changed
+- **Internal: backfilled docstrings for 51 previously-undocumented functions** in `api/oauth.py` and `api/kanban_bridge.py` (developer-facing documentation only; no behavior change). (#3716, @camr)
+
+## [v0.51.329] — 2026-06-08 — Release KS (session-list + startup latency)
+
+### Fixed
+- **`/api/sessions` no longer does redundant `_index.json` parses per legacy sidecar row.** The stale-metadata refresh reuses the already-parsed index (O(n) instead of O(n²) for installs with many pre-`message_count` sidecars). (#3814, @ai-ag2026)
+- **Startup no longer reads every session's full JSON when there is nothing to recover.** Recovery now only reads sidecars that have a `.json.bak` backup; the reported `scanned` count is unchanged. (#3815, @ai-ag2026)
+
+## [v0.51.328] — 2026-06-08 — Release KR (preserve full compaction summaries)
+
+### Added
+- **New RFC: WebUI pending-intent controls** (`docs/rfcs/webui-pending-intent-controls.md`) — proposed Queue/Steer/Stop-and-send/Interrupt semantics during an active run. Doc-only. (#3061, @franksong2702)
+
+### Fixed
+- **Compaction summaries are no longer truncated at 320 characters.** The full compaction summary text is preserved in the summary card (the prior clip's trailing `…` also broke a long-summary reference-card match). (#3800, @rodboev)
+
+## [v0.51.327] — 2026-06-08 — Release KQ (brick wave: session-cache freshness + compression-tail + interrupt race)
+
+### Fixed
+- **`/api/session` no longer serves a stale cached conversation** that lags disk — recent assistant replies could disappear from a session until the server restarted because the in-process LRU held an older `Session` object after another object persisted new turns. `get_session()` now reloads from disk when the sidecar/index is strictly ahead of the cache. (#3829, @dso2ng)
+- **The latest assistant message no longer vanishes after compression-lineage stitching.** A compression continuation child was applying its own truncation watermark to its already-persisted sidecar tail during WebUI display merge, dropping the tail. (#3828, @dso2ng, follow-up to #3770/#3776)
+- **Interrupt-and-send no longer races a still-unwinding worker.** After Stop/interrupt clears the active stream id, a successor send could reuse the cached agent while the cancelled worker was still landing; `/api/chat/start` now blocks (409) on a same-session active run during the bounded unwind window. (#3822, @franksong2702, #3808)
+
 ## [v0.51.326] — 2026-06-08 — Release KP (mic STT probe + journal cleanup + schema guard + help hover)
 
 ### Fixed

@@ -513,24 +513,41 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
 
 def _lookup_index_message_count(session_id):
     """Return the indexed message count without loading the full session file."""
-    try:
-        entries = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
-    except Exception:
-        return None
+    return _index_message_count_map().get(str(session_id))
+
+
+def _index_message_count_map(entries=None) -> dict[str, int]:
+    """Return indexed message counts keyed by session id.
+
+    ``load_metadata_only()`` is called in loops for stale lineage/sidebar rows.
+    Reading and parsing ``_index.json`` once per row turns /api/sessions into an
+    accidental O(n²) poll for old sidecars that predate persisted
+    ``message_count``. Accepting already-loaded index rows lets callers reuse
+    the index they just parsed.
+    """
+    if entries is None:
+        try:
+            entries = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+        except Exception:
+            return {}
     if not isinstance(entries, list):
-        return None
+        return {}
+    counts: dict[str, int] = {}
     for entry in entries:
-        if entry.get('session_id') != session_id:
+        if not isinstance(entry, dict):
+            continue
+        sid = str(entry.get('session_id') or '')
+        if not sid:
             continue
         count = entry.get('message_count')
-        if isinstance(count, int) and count >= 0:
-            return count
-        try:
-            count = int(count)
-        except (TypeError, ValueError):
-            return None
-        return count if count >= 0 else None
-    return None
+        if not isinstance(count, int):
+            try:
+                count = int(count)
+            except (TypeError, ValueError):
+                continue
+        if count >= 0:
+            counts[sid] = count
+    return counts
 
 
 def _parse_nonnegative_int(value):
@@ -791,7 +808,7 @@ class Session:
         return session
 
     @classmethod
-    def load_metadata_only(cls, sid):
+    def load_metadata_only(cls, sid, *, index_message_counts=None):
         """Load only the compact metadata fields, skipping the messages array.
 
         Session JSON files have metadata fields (session_id, title, model, etc.)
@@ -820,7 +837,10 @@ class Session:
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None
             if sidecar_message_count is None:
-                index_message_count = _lookup_index_message_count(sid)
+                if index_message_counts is not None:
+                    index_message_count = index_message_counts.get(str(sid))
+                else:
+                    index_message_count = _lookup_index_message_count(sid)
             # Modern sidecars carry an accurate message_count, so it is the
             # source of truth and we skip the per-row _index.json read in the
             # common case. The sidebar index is only a cache (it can lag behind
@@ -2191,6 +2211,33 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
     return _message_content_text(cached_tail) == _message_content_text(previous_disk_user)
 
 
+def _cached_session_lags_disk(cached) -> bool:
+    """Return True when a cached full session is older than its sidecar.
+
+    Active/reconnect paths can update the persisted sidecar through another
+    Session object while the LRU cache still holds an older object for the same
+    id. Serving the cache then makes recent assistant results disappear from
+    GET /api/session even though disk and _index.json are correct. Compare only
+    cheap metadata here; full reload happens only if disk is strictly ahead.
+    """
+    if cached is None:
+        return False
+    sid = getattr(cached, 'session_id', None)
+    if not sid:
+        return False
+    try:
+        disk_meta = Session.load_metadata_only(sid)
+    except Exception:
+        return False
+    if disk_meta is None:
+        return False
+    cached_count = len(getattr(cached, 'messages', None) or [])
+    disk_count = _parse_nonnegative_int(getattr(disk_meta, '_metadata_message_count', None))
+    if disk_count is None:
+        disk_count = _lookup_index_message_count(sid)
+    return bool(disk_count is not None and disk_count > cached_count)
+
+
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping the messages array).
 
@@ -2220,6 +2267,18 @@ def get_session(sid, metadata_only=False):
                     SESSIONS.pop(sid, None)
             cached = None
     if cached is not None:
+        if not metadata_only and _cached_session_lags_disk(cached):
+            try:
+                disk_session = Session.load(sid)
+                with LOCK:
+                    SESSIONS[sid] = disk_session
+                    SESSIONS.move_to_end(sid)
+                cached = disk_session
+            except Exception:
+                logger.debug(
+                    "cached session disk-freshness check failed for session %s",
+                    sid, exc_info=True,
+                )
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             try:
                 disk_session = Session.load(sid)
@@ -2689,7 +2748,11 @@ def _stale_snapshot_metadata_refresh_ids(sessions: list[dict]) -> set[str]:
     return refresh_ids
 
 
-def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict]:
+def _refresh_index_rows_from_sidecar_metadata(
+    sessions: list[dict],
+    *,
+    index_message_counts: dict[str, int] | None = None,
+) -> list[dict]:
     """Overlay fuller sidecar metadata onto stale sidebar index rows.
 
     ``_index.json`` is a cache and can lag behind the canonical session sidecar
@@ -2710,7 +2773,10 @@ def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict
         if not sid:
             out.append(session)
             continue
-        sidecar = Session.load_metadata_only(sid)
+        sidecar = Session.load_metadata_only(
+            sid,
+            index_message_counts=index_message_counts,
+        )
         if not sidecar:
             out.append(session)
             continue
@@ -3012,7 +3078,11 @@ def all_sessions(diag=None):
                         active_stream_ids=active_stream_ids,
                     )
             _diag_stage(diag, "all_sessions.refresh_sidecar_metadata")
-            refreshed_index_rows = _refresh_index_rows_from_sidecar_metadata(list(index_map.values()))
+            index_message_counts = _index_message_count_map(index)
+            refreshed_index_rows = _refresh_index_rows_from_sidecar_metadata(
+                list(index_map.values()),
+                index_message_counts=index_message_counts,
+            )
             index_map = {
                 row['session_id']: row
                 for row in refreshed_index_rows
