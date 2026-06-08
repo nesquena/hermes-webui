@@ -10297,6 +10297,7 @@ def restore_revision(space_id: str, event_id: str, *, action: str = "space.recov
         sid,
         action=safe_action if safe_action.startswith("space.current.") else "restore",
     )
+    memory_advisory = _memory_advisory_public_envelope()
     return {
         "ok": True,
         "space": read_space_detail(sid),
@@ -10305,12 +10306,15 @@ def restore_revision(space_id: str, event_id: str, *, action: str = "space.recov
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": _space_tool_action_output_compaction_receipt(
             action=safe_action,
             space_id=sid,
             revision_event_ids=[safe_event_id, saved["revision_event_id"]],
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
             include_widget_count=False,
         ),
     }
@@ -10371,6 +10375,7 @@ def restore_widget_revision(
     prompt_preflight = _recovery_required_prompt_preflight_receipt(safe_action)
     autonomy_policy = _recovery_restore_action_policy_receipt(safe_action)
     progress_event = _record_space_recovery_progress_event(sid, action="widget.restore")
+    memory_advisory = _memory_advisory_public_envelope()
     return {
         "ok": True,
         "space_id": sid,
@@ -10380,6 +10385,7 @@ def restore_widget_revision(
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": _space_tool_action_output_compaction_receipt(
             action=safe_action,
             space_id=sid,
@@ -10387,6 +10393,8 @@ def restore_widget_revision(
             revision_event_ids=[safe_event_id, saved["revision_event_id"]],
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
             include_widget_count=False,
         ),
     }

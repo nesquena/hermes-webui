@@ -16921,6 +16921,7 @@ def test_space_tool_adapter_lists_and_restores_revisions_metadata_only(monkeypat
     assert "prompt_preflight_status: required" in compaction["text"]
     assert "model_route_hint: hint:reasoning" in compaction["text"]
     assert "progress_run_id: recovery.restore:tool-rollback" in compaction["text"]
+    _assert_server_memory_advisory_receipt(restored)
     from api.capy_progress import progress_status
 
     status = progress_status(space_id=created["space_id"])
@@ -17558,6 +17559,7 @@ def test_restore_widget_revision_restores_one_widget_without_leaking_sources(mon
     assert "prompt_preflight_status: required" in compaction["text"]
     assert "model_route_hint: hint:reasoning" in compaction["text"]
     assert f"progress_run_id: recovery.widget.restore:{created['space_id']}" in compaction["text"]
+    _assert_server_memory_advisory_receipt(restored)
     widget_handles = [handle["handle"] for handle in compaction["retained_artifact_handles"] if handle["kind"] == "widget"]
     assert widget_handles == [f"widget:{created['space_id']}:weather"]
     serialized = json.dumps({"restored": restored, "revisions": revisions}).lower()
