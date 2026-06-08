@@ -10784,6 +10784,7 @@ def _space_agent_export_output_compaction_receipt(
     widget_count: int,
     autonomy_policy_receipt: dict[str, Any] | None,
     progress_event: dict[str, Any] | None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build metadata-only compaction evidence for package exports."""
     from api.capy_compaction import compact_output
@@ -10795,6 +10796,10 @@ def _space_agent_export_output_compaction_receipt(
     model_route_hint = _context_value((autonomy_policy_receipt or {}).get("model_route_hint"), 80) or "hint:reasoning"
     prompt_preflight_status = _context_value((autonomy_policy_receipt or {}).get("prompt_preflight_status"), 40) or "required"
     progress_run_id = _context_value((progress_event or {}).get("run_id"), 160) or "package.export:[REDACTED]"
+    memory_advisory = memory_advisory if isinstance(memory_advisory, dict) else _memory_advisory_public_envelope()
+    advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
+    context_authority = _context_value(memory_advisory.get("context_authority") or "untrusted_advisory", 80) or "untrusted_advisory"
+    can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
     lines = [
         "Capy Spaces package export metadata-only receipt",
         f"format: {safe_format}",
@@ -10805,6 +10810,9 @@ def _space_agent_export_output_compaction_receipt(
         f"model_route_hint: {model_route_hint}",
         f"prompt_preflight_status: {prompt_preflight_status}",
         f"progress_run_id: {progress_run_id}",
+        f"advisory_context: {advisory_context}",
+        f"context_authority: {context_authority}",
+        f"can_bypass_safety_gates: {can_bypass}",
         "payload: sanitized package metadata only",
     ]
     receipt = compact_output(
@@ -10832,6 +10840,7 @@ def _space_agent_import_output_compaction_receipt(
     widget_count: int,
     autonomy_policy_receipt: dict[str, Any] | None,
     progress_event: dict[str, Any] | None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build metadata-only compaction evidence for package imports."""
     from api.capy_compaction import compact_output
@@ -10843,6 +10852,10 @@ def _space_agent_import_output_compaction_receipt(
     model_route_hint = _context_value((autonomy_policy_receipt or {}).get("model_route_hint"), 80) or "hint:reasoning"
     prompt_preflight_status = _context_value((autonomy_policy_receipt or {}).get("prompt_preflight_status"), 40) or "pass"
     progress_run_id = _context_value((progress_event or {}).get("run_id"), 160) or "package.import:[REDACTED]"
+    memory_advisory = memory_advisory if isinstance(memory_advisory, dict) else _memory_advisory_public_envelope()
+    advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
+    context_authority = _context_value(memory_advisory.get("context_authority") or "untrusted_advisory", 80) or "untrusted_advisory"
+    can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
     lines = [
         "Capy Spaces package import metadata-only receipt",
         f"package_format: {safe_source}",
@@ -10853,6 +10866,9 @@ def _space_agent_import_output_compaction_receipt(
         f"model_route_hint: {model_route_hint}",
         f"prompt_preflight_status: {prompt_preflight_status}",
         f"progress_run_id: {progress_run_id}",
+        f"advisory_context: {advisory_context}",
+        f"context_authority: {context_authority}",
+        f"can_bypass_safety_gates: {can_bypass}",
         "payload: sanitized package metadata only",
     ]
     receipt = compact_output(
@@ -10963,6 +10979,7 @@ def import_space_agent_package(
         {"format": source_label, "widget_count": len(imported_widgets), "status": "metadata-only"},
     )
     progress_event = _record_space_tool_progress_event(created["space_id"], run_prefix="package.import")
+    memory_advisory = _memory_advisory_public_envelope()
     response = {
         "imported": True,
         "source": source_label,
@@ -10971,12 +10988,14 @@ def import_space_agent_package(
         "warnings": warnings,
         "autonomy_policy": autonomy_policy_receipt,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": _space_agent_import_output_compaction_receipt(
             source_label=source_label,
             space_id=created["space_id"],
             widget_count=len(imported_widgets),
             autonomy_policy_receipt=autonomy_policy_receipt,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
         ),
     }
     if preflight_receipt:
@@ -11111,15 +11130,18 @@ def export_space_agent_package(space_id: str, *, format: str = "yaml") -> dict[s
     prompt_preflight_receipt = _space_agent_export_required_prompt_preflight_receipt()
     autonomy_policy_receipt = _space_agent_export_action_policy_receipt(prompt_preflight_receipt)
     progress_event = _record_space_tool_progress_event(sid, run_prefix="package.export")
+    memory_advisory = _memory_advisory_public_envelope()
     response["prompt_preflight"] = prompt_preflight_receipt
     response["autonomy_policy"] = autonomy_policy_receipt
     response["progress_event"] = progress_event
+    response["memory_advisory"] = memory_advisory
     response["output_compaction"] = _space_agent_export_output_compaction_receipt(
         export_format=response["format"],
         space_id=export_space_id,
         widget_count=len(widgets),
         autonomy_policy_receipt=autonomy_policy_receipt,
         progress_event=progress_event,
+        memory_advisory=memory_advisory,
     )
     return response
 
