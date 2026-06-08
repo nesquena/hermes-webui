@@ -3375,7 +3375,13 @@ from api.workspace import (
     _is_remote_terminal_backend,
     _workspace_blocked_roots,
 )
-from api.upload import handle_upload, handle_upload_extract, handle_transcribe, handle_workspace_upload
+from api.upload import (
+    handle_upload,
+    handle_upload_extract,
+    handle_transcribe,
+    handle_transcribe_capability,
+    handle_workspace_upload,
+)
 from api.streaming import (
     _sse,
     _run_agent_streaming,
@@ -5303,6 +5309,9 @@ def handle_get(handler, parsed) -> bool:
         except Exception:
             pass
         return j(handler, settings)
+
+    if parsed.path == "/api/transcribe/capability":
+        return handle_transcribe_capability(handler)
 
     if parsed.path == "/api/reasoning":
         # Current reasoning config (shared source of truth with the CLI —
