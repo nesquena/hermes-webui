@@ -13724,10 +13724,7 @@ def _handle_session_compress(handler, body):
         txt = raw_text.strip()
         if not txt:
             return None
-        txt = re.sub(r"\s+", " ", txt)
-        if len(txt) > 320:
-            txt = f"{txt[:314]}…"
-        return txt
+        return re.sub(r"\s+", " ", txt)
 
     try:
         require(body, "session_id")
