@@ -1566,7 +1566,13 @@
   .help-card-title{font-size:13.5px;font-weight:650;color:var(--text);margin-bottom:3px;}
   .help-card-desc{font-size:12px;color:var(--muted);line-height:1.45;margin-bottom:11px;}
   .help-card-link{display:inline-flex;align-items:center;gap:6px;text-decoration:none;padding:7px 13px;border-radius:7px;font-size:12px;font-weight:600;background:var(--input-bg);border:1px solid var(--border);color:var(--text);transition:all .15s;}
-  .help-card-link:hover{background:var(--accent);border-color:var(--accent);color:var(--accent-text,#1a1a1a);}
+  /* On hover the button fills with --accent; text must contrast against that fill.
+     --accent-text is an accent-on-background link color (often == --accent), so using
+     it here produces same-color text on the accent fill (invisible — e.g. slate/gold/
+     ares/mono dark). --bg is the page background, which --accent is designed to contrast
+     against, so background-colored text on an accent fill stays readable in every theme. */
+  .help-card-link:hover{background:var(--accent);border-color:var(--accent);color:var(--bg);}
+  .help-card-link:hover svg{opacity:1;}
   .help-card-link svg{flex:0 0 auto;opacity:.8;}
   .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;min-height:0;background:var(--main-bg);}
   .topbar{padding:12px 20px;border-bottom:1px solid var(--border);background:var(--topbar-bg);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;position:relative;z-index:10;}

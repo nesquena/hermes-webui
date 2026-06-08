@@ -338,10 +338,52 @@ def test_boot_js_media_recorder_fallback_posts_to_transcribe_api():
     assert 'fetch(' in js
 
 
+def test_boot_js_prefers_server_side_stt_by_default():
+    """Default mic capture should prefer server STT only after the server confirms support."""
+    js, _ = get_text("/static/boot.js")
+    assert "const _micForceMediaRecorderStored=localStorage.getItem(_micForceMediaRecorderKey);" in js
+    assert "let _serverSttAvailable=false" in js
+    assert "_micForceMediaRecorderStored===null?(_serverSttAvailable&&_canRecordAudio):" in js
+    assert "fetch('api/transcribe/capability'" in js
+
+
+def test_boot_js_no_server_stt_first_click_uses_browser_speech_recognition():
+    """No-server-STT installs must not lose the first mic click before fallback runs."""
+    js, _ = get_text("/static/boot.js")
+    default_idx = js.find("_micForceMediaRecorderStored===null?")
+    assert default_idx != -1
+    default_expr = js[default_idx:default_idx + 140]
+    assert "_serverSttAvailable" in default_expr
+    assert "_canRecordAudio" in default_expr
+    assert "_canRecordAudio:" not in default_expr
+
+
+def test_boot_js_falls_back_to_browser_stt_when_server_transcribe_unavailable():
+    """If server-side STT is unavailable, browser SpeechRecognition should be re-enabled."""
+    js, _ = get_text("/static/boot.js")
+    assert "function _isServerSttUnavailable(err)" in js
+    assert "function _allowBrowserSttFallback()" in js
+    assert "localStorage.setItem(_micForceMediaRecorderKey,'0')" in js
+    assert "_forceMediaRecorder=false" in js
+    assert "recognition=_ensureSpeechRecognition()" in js
+
+
+def test_boot_js_keeps_explicit_server_stt_preference_on_transcribe_failure():
+    """An explicit mic_force_mediarecorder='1' preference must not be silently overwritten."""
+    js, _ = get_text("/static/boot.js")
+    assert "localStorage.getItem(_micForceMediaRecorderKey)!=='1'" in js
+
+
 def test_routes_define_transcribe_endpoint():
     """Server routes must expose /api/transcribe for MediaRecorder fallback uploads."""
     routes = pathlib.Path(__file__).parent.parent.joinpath("api/routes.py").read_text(encoding="utf-8")
     assert '"/api/transcribe"' in routes
+
+
+def test_routes_define_transcribe_capability_endpoint():
+    """Server routes must expose a cheap STT capability probe before defaulting to MediaRecorder."""
+    routes = pathlib.Path(__file__).parent.parent.joinpath("api/routes.py").read_text(encoding="utf-8")
+    assert '"/api/transcribe/capability"' in routes
 
 
 def test_boot_js_shows_mic_button_when_any_voice_path_is_supported():
@@ -384,7 +426,9 @@ def test_boot_js_prefix_captured_on_start():
 def test_boot_js_onresult_prepends_prefix():
     """onresult must include _prefix when writing to textarea (append, not replace)."""
     js, _ = get_text("/static/boot.js")
-    onresult_idx = js.find("recognition.onresult")
+    onresult_idx = js.find("sr.onresult")
+    if onresult_idx == -1:
+        onresult_idx = js.find("recognition.onresult")
     onresult_end = js.find("};", onresult_idx)
     onresult_body = js[onresult_idx:onresult_end]
     # ta.value must be set to _prefix + something, not just the transcript alone
@@ -394,7 +438,9 @@ def test_boot_js_onresult_prepends_prefix():
 def test_boot_js_onend_commits_with_prefix():
     """onend must commit _prefix + _finalText so appended text survives after recognition ends."""
     js, _ = get_text("/static/boot.js")
-    onend_idx = js.find("recognition.onend")
+    onend_idx = js.find("sr.onend")
+    if onend_idx == -1:
+        onend_idx = js.find("recognition.onend")
     onend_end = js.find("};", onend_idx)
     onend_body = js[onend_idx:onend_end]
     assert "_prefix" in onend_body
@@ -413,7 +459,9 @@ def test_boot_js_prefix_reset_on_stop():
 def test_boot_js_auto_space_between_prefix_and_transcript():
     """onend must insert a space between existing text and new transcript when needed."""
     js, _ = get_text("/static/boot.js")
-    onend_idx = js.find("recognition.onend")
+    onend_idx = js.find("sr.onend")
+    if onend_idx == -1:
+        onend_idx = js.find("recognition.onend")
     onend_end = js.find("};", onend_idx)
     onend_body = js[onend_idx:onend_end]
     # Should handle spacing — look for trimStart or endsWith(' ') check
