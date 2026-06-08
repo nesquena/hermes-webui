@@ -196,6 +196,7 @@ def test_recovery_snapshot_exposes_metadata_only_policy_progress_and_compaction_
     assert snapshot["output_compaction"]["tool"] == "capy-spaces-tool-action"
     assert snapshot["output_compaction"]["command"] == "space.recovery.snapshot"
     assert snapshot["output_compaction"]["metadata_only"] is True
+    _assert_server_memory_advisory_receipt(snapshot)
 
     assert "secret_value_do_not_leak" not in serialized
     assert "<script" not in serialized
@@ -17730,6 +17731,8 @@ def test_recovery_snapshot_tool_returns_metadata_only_receipts_and_redacts_paylo
     assert "space_action: space.admin.recovery.snapshot" in result["output_compaction"]["text"]
     assert "prompt_preflight_status: required" in result["output_compaction"]["text"]
     assert "progress_run_id: recovery.snapshot:recovery" in result["output_compaction"]["text"]
+    _assert_server_memory_advisory_receipt(result)
+    _assert_server_memory_advisory_receipt(result["recovery"])
 
     assert "secret_value_do_not_leak" not in serialized
     assert "secret_source_do_not_leak" not in serialized

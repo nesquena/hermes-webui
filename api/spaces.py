@@ -9549,6 +9549,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     }:
         prompt_preflight = _recovery_required_prompt_preflight_receipt(name)
         autonomy_policy = _recovery_toggle_action_policy_receipt(name)
+        memory_advisory = _memory_advisory_public_envelope()
         progress_event = _record_space_tool_progress_event("recovery", run_prefix="recovery.snapshot")
         return {
             "ok": True,
@@ -9557,11 +9558,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id="recovery",
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
                 include_widget_count=False,
             ),
         }
@@ -14991,6 +14995,7 @@ def recovery_snapshot() -> dict[str, Any]:
     spaces.sort(key=lambda s: s.get("updated_at") or 0, reverse=True)
     prompt_preflight = _recovery_required_prompt_preflight_receipt("space.recovery.snapshot")
     autonomy_policy = _recovery_toggle_action_policy_receipt("space.recovery.snapshot")
+    memory_advisory = _memory_advisory_public_envelope()
     progress_event = {
         "stored": False,
         "queued": False,
@@ -15005,6 +15010,8 @@ def recovery_snapshot() -> dict[str, Any]:
         space_id="recovery",
         autonomy_policy=autonomy_policy,
         progress_event=progress_event,
+        memory_advisory=memory_advisory,
+        include_memory_required_gates=True,
         include_widget_count=False,
     )
     return {
@@ -15018,5 +15025,6 @@ def recovery_snapshot() -> dict[str, Any]:
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": output_compaction,
     }

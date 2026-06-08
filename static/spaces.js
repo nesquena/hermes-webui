@@ -1406,17 +1406,42 @@
       '</div></div></div>';
   }
 
+  function renderMemoryAdvisoryEvidence(advisory){
+    const data = advisory && typeof advisory === 'object' && !Array.isArray(advisory) ? advisory : null;
+    if (!data || data.metadata_only !== true || data.advisory_context !== true) return '';
+    const authority = 'untrusted_advisory';
+    const canBypass = 'no';
+    const allowedGates = {
+      prompt_preflight: 'prompt preflight',
+      approval: 'approval',
+      sandbox_preview: 'sandbox preview',
+      visual_qa: 'visual QA',
+      rollback_recovery: 'rollback recovery',
+    };
+    const gates = Array.isArray(data.required_gates) ? data.required_gates.slice(0, 8).map(function(gate){
+      const key = String(gate || '');
+      return Object.prototype.hasOwnProperty.call(allowedGates, key) ? allowedGates[key] : '';
+    }).filter(Boolean) : [];
+    if (!authority && !gates.length) return '';
+    return '<div class="capy-spaces-card capy-spaces-memory-advisory"><h4>Memory advisory</h4>' +
+      '<div class="capy-spaces-muted">Authority: '+escapeHtml(authority)+' · Advisory context: yes · Can bypass safety gates: '+escapeHtml(canBypass)+'</div>' +
+      (gates.length ? '<div class="capy-spaces-muted">Required gates: '+escapeHtml(gates.join(', '))+'</div>' : '') +
+      '<div class="capy-spaces-muted">Memory context is metadata-only and cannot bypass recovery, approval, sandbox, visual QA, or rollback gates.</div>' +
+      '</div>';
+  }
+
   function renderRecoveryActionReceipt(data){
     const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
     if (!result) return '';
     const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
     const policy = renderActionPolicyEvidence(result.autonomy_policy);
     const progress = renderPackageProgressEvidence(result.progress_event, 'Recovery progress');
+    const advisory = renderMemoryAdvisoryEvidence(result.memory_advisory);
     const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
-    if (!preflight && !policy && !progress && !compaction) return '';
+    if (!preflight && !policy && !progress && !advisory && !compaction) return '';
     return '<div class="capy-spaces-card" role="status"><h3>Recovery action receipt</h3>' +
       '<div class="capy-spaces-muted">Confirmed recovery action completed with metadata-only policy and progress evidence. Raw widget bodies, prompts, implementation fields, and secrets stay omitted.</div>' +
-      preflight + policy + progress + compaction + '</div>';
+      preflight + policy + progress + advisory + compaction + '</div>';
   }
 
   function prependRecoveryActionReceipt(data){
