@@ -4385,6 +4385,7 @@ function _fetchLineageReportForRow(s,lineageKey){
 
 function _sidebarLineageKeyForRow(s){
   if(!s) return null;
+  if(s.session_source==='fork') return s.session_id||s.parent_session_id||null;
   return s._lineage_key||s._lineage_root_id||s.lineage_root_id||s.parent_session_id||s.session_id||null;
 }
 
