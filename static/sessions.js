@@ -4493,6 +4493,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
       parentRow._child_sessions.push(childCopy);
       parentRow._child_session_count=parentRow._child_sessions.length;
       bubbleSidebarActivity(parentRow, childCopy);
+      visibleBySegmentSid.set(childCopy.session_id,{row: parentRow, seg: childCopy});
     } else {
       orphans.push({...child,_orphan_child_session:true});
     }
@@ -5453,8 +5454,14 @@ function renderSessionListFromCache(){
         let _swipeTracking=false;
         let _gesturePointerType='';
         let _clearDragTimer=null;
+        let _longPressTimer=null;
+        let _longPressMenuOpened=false;
         const _isForkSwipeTarget=()=>_gesturePointerType!=='mouse'&&!_sessionSelectMode;
         const _isForkActionTarget=(target)=>!!(actionsEl&&target&&actionsEl.contains(target));
+        const _clearForkLongPressTimer=()=>{
+          if(_longPressTimer){clearTimeout(_longPressTimer);_longPressTimer=null;}
+          if(!_longPressMenuOpened) rowEl.classList.remove('long-pressing');
+        };
         const _beginForkGesture=(clientX,clientY,pointerType='')=>{
           _gesturePointerType=pointerType;
           _pointerDownX=clientX;
@@ -5463,10 +5470,21 @@ function renderSessionListFromCache(){
           _pointerY=clientY;
           _gestureState='pressing';
           _swipeTracking=false;
+          _longPressMenuOpened=false;
           if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
           rowEl.classList.remove('dragging','swipe-committed','swipe-removing');
           rowEl.style.removeProperty('height');
           rowEl.style.removeProperty('min-height');
+        };
+        const _scheduleForkLongPressMenu=()=>{
+          _clearForkLongPressTimer();
+          rowEl.classList.add('long-pressing');
+          _longPressTimer=setTimeout(()=>{
+            if(_gestureState!=='pressing'||_renamingSid||_sessionSelectMode) return;
+            _longPressMenuOpened=true;
+            rowEl._skipNextChildOpen=true;
+            _openSessionActionMenu(childSession, rowEl);
+          },SESSION_LONG_PRESS_DELAY_MS);
         };
         const _paintForkSwipe=(signedDx)=>{
           const rawOffset=signedDx*.55;
@@ -5563,6 +5581,7 @@ function renderSessionListFromCache(){
           return true;
         };
         const _clearForkPointerState=()=>{
+          _clearForkLongPressTimer();
           const wasDragging=_gestureState==='dragging'||_swipeTracking;
           _gestureState='idle';
           if(wasDragging){
@@ -5573,6 +5592,7 @@ function renderSessionListFromCache(){
         rowEl.onpointerdown=(e)=>{
           if(e.pointerType==='mouse'||e.button!==0||_isForkActionTarget(e.target)) return;
           _beginForkGesture(e.clientX,e.clientY,e.pointerType||'');
+          if(e.pointerType==='touch'||e.pointerType==='pen') _scheduleForkLongPressMenu();
         };
         rowEl.onpointermove=(e)=>{
           if(e.pointerType==='mouse'||_gestureState==='idle') return;
@@ -5584,6 +5604,7 @@ function renderSessionListFromCache(){
           const dy=Math.abs(signedDy);
           if(dx>8&&dx>dy*1.1) _swipeTracking=true;
           if(_gestureState==='pressing'&&(dx>5||dy>5)){
+            _clearForkLongPressTimer();
             _gestureState='dragging';
             rowEl.classList.add('dragging');
           }
@@ -5592,6 +5613,7 @@ function renderSessionListFromCache(){
         rowEl.onpointerup=(e)=>{
           if(e.pointerType==='mouse'||e.button!==0) return;
           if(_gestureState==='idle') return;
+          if(_longPressMenuOpened){_gestureState='idle';return;}
           if(_isForkActionTarget(e.target)){_gestureState='idle';return;}
           _pointerX=e.clientX;
           _pointerY=e.clientY;
@@ -5618,6 +5640,12 @@ function renderSessionListFromCache(){
           mainBtn.textContent=childLabelFor(child);
           mainBtn.title='Open forked session';
           mainBtn.onclick=async(e)=>{
+            if(row._skipNextChildOpen){
+              row._skipNextChildOpen=false;
+              e.stopPropagation();
+              e.preventDefault();
+              return;
+            }
             e.stopPropagation();
             await openChildSession(child);
           };
