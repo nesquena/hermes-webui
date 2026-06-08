@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Tool iteration limit stops are now surfaced explicitly instead of looking like normal user turns.** WebUI filters Hermes Agent's synthetic max-iteration summary prompt out of both the visible transcript and model-facing context, marks usable final answers with `tool_limit_reached`, and shows a no-final terminal error when the limit fires before an assistant answer is available. (#3821)
+
 ## [v0.51.365] — 2026-06-11 — Release MD (lineage-segment open + reasoning chip fixes)
 
 ### Fixed

@@ -84,11 +84,17 @@ def _next_seq(path: Path) -> int:
 def _terminal_state_for_event(event_name: str, payload) -> str | None:
     name = str(event_name or "")
     if name == "done" or name == "stream_end":
+        if isinstance(payload, dict):
+            explicit_state = str(payload.get("terminal_state") or "").strip().lower()
+            if explicit_state:
+                return explicit_state
         return "completed"
     if name == "cancel":
         return "interrupted-by-user"
     if name in {"apperror", "error"}:
         err_type = str((payload or {}).get("type") or "").strip().lower() if isinstance(payload, dict) else ""
+        if err_type == "tool_limit_reached":
+            return "tool_limit_reached"
         if err_type in {"cancelled", "canceled"}:
             return "interrupted-by-user"
         if err_type == "interrupted":
