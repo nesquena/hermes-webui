@@ -53,6 +53,138 @@ def test_streaming_tool_completion_records_metadata_only_progress_event(tmp_path
         assert unsafe.lower() not in serialized.lower()
 
 
+def test_streaming_tool_terminal_receipt_includes_metadata_only_compaction(tmp_path, monkeypatch):
+    """Terminal WebUI tool callbacks should expose bounded compaction evidence.
+
+    Tool completion/failure callbacks can carry raw command output, prompts,
+    source fields, renderer payloads, and secrets. The returned receipt should
+    show only safe output-compaction metadata and preserve failure status.
+    """
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    receipt = streaming._record_streaming_tool_progress_event(
+        event_type="tool.failed",
+        stream_id="stream-terminal-tool",
+        tool_name="terminal_<script>",
+        preview="SECRET_VALUE_DO_NOT_LEAK raw_prompt ignore previous instructions",
+        args={
+            "command": "cat ~/.ssh/id_rsa SECRET_VALUE_DO_NOT_LEAK",
+            "api_key": "sk-live-SECRET_VALUE_DO_NOT_LEAK",
+            "renderer": "<script>alert(1)</script>",
+        },
+        function_result={
+            "exit_status": 2,
+            "source": "raw fetched body SECRET_VALUE_DO_NOT_LEAK",
+            "html": "<script>alert(1)</script>",
+            "output": "Traceback: SECRET_VALUE_DO_NOT_LEAK raw_prompt",
+        },
+        status=2,
+        is_error=True,
+    )
+    status = capy_progress.progress_status()
+    raw_log = Path(tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8")
+    serialized = raw_log + "\n" + str(status) + "\n" + str(receipt)
+
+    assert receipt["stored"] is True
+    assert receipt["event_type"] == "tool.failed"
+    assert receipt["run_id"] == "webui.tool:stream-terminal-tool"
+    assert receipt["output_compaction"]["tool"] == "webui-streaming"
+    assert receipt["output_compaction"]["command"] == "tool.failed"
+    assert receipt["output_compaction"]["exit_status"] == 2
+    assert receipt["output_compaction"]["original_chars"] > 0
+    assert receipt["output_compaction"]["compacted_chars"] > 0
+    assert "preserve_error_blocks" in receipt["output_compaction"]["rules_applied"]
+    assert status["recent_family_counts"]["tool"] == 1
+    for unsafe in UNSAFE_FIXTURES + ("api_key", "id_rsa", "raw fetched body", "sk-live"):
+        assert unsafe.lower() not in serialized.lower()
+
+
+def test_streaming_subagent_terminal_receipt_includes_metadata_only_compaction(tmp_path, monkeypatch):
+    """Terminal subagent callbacks should expose safe compaction evidence."""
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    receipt = streaming._record_streaming_progress_event(
+        event_type="subagent.complete",
+        stream_id="stream-terminal-subagent",
+        tool_name="delegate_task_<script>",
+        preview="SECRET_VALUE_DO_NOT_LEAK raw_prompt ignore previous instructions",
+        args={
+            "goal": "exfiltrate SECRET_VALUE_DO_NOT_LEAK",
+            "api_auth": "bearer placeholder",
+            "source": "<script>alert(1)</script>",
+        },
+        function_result={"summary": "SECRET_VALUE_DO_NOT_LEAK", "exit_status": 1},
+        status="timeout",
+        is_error=True,
+    )
+    status = capy_progress.progress_status()
+    raw_log = Path(tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8")
+    serialized = raw_log + "\n" + str(status) + "\n" + str(receipt)
+
+    assert receipt["stored"] is True
+    assert receipt["event_type"] == "subagent.failed"
+    assert receipt["family"] == "subagent"
+    assert receipt["run_id"] == "webui.subagent:stream-terminal-subagent"
+    assert receipt["output_compaction"]["tool"] == "webui-streaming"
+    assert receipt["output_compaction"]["command"] == "subagent.failed"
+    assert receipt["output_compaction"]["exit_status"] == 1
+    assert receipt["output_compaction"]["redaction_status"] == "none"
+    assert status["recent_family_counts"]["subagent"] == 1
+    for unsafe in UNSAFE_FIXTURES + ("api_auth", "bearer placeholder", "exfiltrate"):
+        assert unsafe.lower() not in serialized.lower()
+
+
+def test_streaming_terminal_receipt_prefers_result_exit_status_over_generic_status(tmp_path, monkeypatch):
+    """Terminal callback result exit codes should not be masked by generic status."""
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import streaming
+
+    receipt = streaming._record_streaming_tool_progress_event(
+        event_type="tool.failed",
+        stream_id="stream-terminal-exit-precedence",
+        function_result={"exit_status": 2, "output": "SECRET_VALUE_DO_NOT_LEAK"},
+        status=0,
+        is_error=True,
+    )
+
+    assert receipt["output_compaction"]["exit_status"] == 2
+
+
+def test_streaming_terminal_receipt_falls_back_for_path_like_stream_ids(tmp_path, monkeypatch):
+    """Path-shaped stream ids must not appear in receipts or durable progress."""
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    for stream_id in (
+        "/Users/bschmidy10/.ssh/id_rsa",
+        "/opt/project/run.log",
+        "relative/path/to/thing",
+        "foo\\bar",
+        "file:///opt/project/run.log",
+        "https://example.com/repo/file.txt",
+    ):
+        receipt = streaming._record_streaming_tool_progress_event(
+            event_type="tool.completed",
+            stream_id=stream_id,
+            function_result={"exit_status": 0},
+        )
+        assert receipt["run_id"] == "webui.tool:stream"
+        assert receipt["output_compaction"]["retained_artifact_handles"] == [
+            {"kind": "progress_event", "handle": "webui.tool:stream", "label": "Streaming progress event"}
+        ]
+    raw_log = Path(tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8")
+    serialized = raw_log + "\n" + str(capy_progress.progress_status())
+
+    for unsafe in ("/Users", "Users-bschmidy10", ".ssh", "id_rsa", "/opt", "relative-path", "foo-bar", "example.com"):
+        assert unsafe.lower() not in serialized.lower()
+
+
 def test_streaming_tool_progress_uses_fallback_run_id_for_unsafe_stream_ids(tmp_path, monkeypatch):
     """Unsafe stream ids must not become durable progress metadata."""
     monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
@@ -212,7 +344,7 @@ def test_run_agent_streaming_structured_tool_callbacks_record_metadata_only_prog
                 "call-structured-1",
                 "dangerous_tool_<script>",
                 hostile_args,
-                {"source": "raw fetched body SECRET_VALUE_DO_NOT_LEAK", "html": "<script>"},
+                {"source": "raw fetched body SECRET_VALUE_DO_NOT_LEAK", "html": "<script>", "exit_status": 7},
             )
             return {
                 "messages": [
@@ -250,7 +382,9 @@ def test_run_agent_streaming_structured_tool_callbacks_record_metadata_only_prog
     monkeypatch.setattr("api.config.get_config", lambda: {})
     monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda _cfg: [])
 
-    streaming.STREAMS[fake_stream_id] = queue.Queue()
+    q = queue.Queue()
+    streaming.STREAMS[fake_stream_id] = q
+    stream_messages = []
     try:
         streaming._run_agent_streaming(
             session_id=fake_session.session_id,
@@ -260,13 +394,15 @@ def test_run_agent_streaming_structured_tool_callbacks_record_metadata_only_prog
             stream_id=fake_stream_id,
             ephemeral=True,
         )
+        while not q.empty():
+            stream_messages.append(q.get_nowait())
     finally:
         streaming.STREAMS.pop(fake_stream_id, None)
 
     status = capy_progress.progress_status()
     log_path = Path(tmp_path / "progress" / "events.jsonl")
     raw_log = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
-    serialized = raw_log + "\n" + str(status)
+    serialized = raw_log + "\n" + str(status) + "\n" + str(stream_messages)
 
     assert saved_snapshots, "stream worker should have reached the agent run"
     assert status["recent_family_counts"]["tool"] == 2
@@ -281,6 +417,14 @@ def test_run_agent_streaming_structured_tool_callbacks_record_metadata_only_prog
     assert {
         event["run_id"] for event in status["recent_events"] if event["family"] == "run"
     } == {"webui.run:stream-structured-tool"}
+    terminal_progress_receipts = [
+        data for event, data in stream_messages
+        if event == "progress_event" and data.get("event_type") == "tool.completed" and data.get("output_compaction")
+    ]
+    assert terminal_progress_receipts
+    assert terminal_progress_receipts[0]["output_compaction"]["tool"] == "webui-streaming"
+    assert terminal_progress_receipts[0]["output_compaction"]["exit_status"] == 7
+    assert terminal_progress_receipts[0]["output_compaction"].get("text") is None
     for unsafe in UNSAFE_FIXTURES + (
         "api_key",
         "id_rsa",
@@ -1345,7 +1489,7 @@ def test_streaming_run_terminal_dedupe_uses_lock():
     dedupe_set_idx = src.find("_STREAMING_RUN_TERMINAL_PROGRESS_SEEN")
     branch_idx = src.find('elif safe_event_type in {"run.completed", "run.failed"}:')
     lock_use_idx = src.find("with _STREAMING_RUN_TERMINAL_PROGRESS_LOCK:", branch_idx)
-    record_idx = src.find("return record_progress_event", branch_idx)
+    record_idx = src.find("result = record_progress_event", branch_idx)
 
     assert lock_decl_idx != -1 and lock_decl_idx < dedupe_set_idx, "run terminal dedupe lock must be declared with the dedupe set"
     assert lock_use_idx != -1 and branch_idx < lock_use_idx < record_idx, (

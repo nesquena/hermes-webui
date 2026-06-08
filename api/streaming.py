@@ -120,7 +120,11 @@ def _safe_streaming_progress_run_id(stream_id, *, family: str = "tool") -> str:
         r"(?:^|[^A-Za-z0-9])(?:html|script|source|data|body|code)(?:$|[^A-Za-z0-9])",
         re.IGNORECASE,
     )
-    if unsafe_pattern.search(raw_stream_id):
+    unsafe_path_pattern = re.compile(
+        r"[\\/]|^[A-Za-z]:|^(?:https?|file|ssh|git):",
+        re.IGNORECASE,
+    )
+    if unsafe_pattern.search(raw_stream_id) or unsafe_path_pattern.search(raw_stream_id):
         return f"webui.{safe_family}:stream"
     safe_stream_id = re.sub(r"[^A-Za-z0-9_.:-]+", "-", raw_stream_id)[:80]
     safe_stream_id = safe_stream_id.strip(".-_:") or "stream"
@@ -169,6 +173,82 @@ def _safe_streaming_event_type(event_type, *, status=None, is_error: bool = Fals
 _STREAMING_DELTA_PROGRESS_SEEN: set[tuple[str, str]] = set()
 _STREAMING_RUN_TERMINAL_PROGRESS_LOCK = threading.Lock()
 _STREAMING_RUN_TERMINAL_PROGRESS_SEEN: set[str] = set()
+_STREAMING_TERMINAL_COMPACTION_EVENT_TYPES = {
+    "tool.completed",
+    "tool.failed",
+    "subagent.completed",
+    "subagent.failed",
+}
+
+
+def _safe_streaming_terminal_exit_status(*, status=None, function_result=None, is_error: bool = False, event_type: str = "") -> int | None:
+    """Return an allow-listed terminal status without stringifying raw output."""
+    candidate_values = []
+    if isinstance(function_result, dict):
+        for key in ("exit_status", "exitStatus", "exit_code", "exitCode", "returncode", "return_code", "status_code"):
+            if key in function_result:
+                candidate_values.append(function_result.get(key))
+    candidate_values.append(status)
+    for value in candidate_values:
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, int) and -9999 <= value <= 9999:
+            return int(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if re.fullmatch(r"-?\d{1,4}", text):
+                return int(text)
+    status_text = status.strip().lower() if isinstance(status, str) else ""
+    if is_error or event_type.endswith(".failed") or status_text in {"failed", "failure", "error", "timeout", "timed_out"}:
+        return 1
+    return None
+
+
+def _streaming_terminal_output_compaction_receipt(
+    *,
+    safe_event_type: str,
+    family: str,
+    run_id: str,
+    status=None,
+    function_result=None,
+    is_error: bool = False,
+) -> dict | None:
+    """Build metadata-only compaction evidence for terminal streaming callbacks."""
+    if safe_event_type not in _STREAMING_TERMINAL_COMPACTION_EVENT_TYPES:
+        return None
+    try:
+        from api.capy_compaction import compact_output
+
+        exit_status = _safe_streaming_terminal_exit_status(
+            status=status,
+            function_result=function_result,
+            is_error=is_error,
+            event_type=safe_event_type,
+        )
+        output = "\n".join(
+            [
+                f"streaming_event: {safe_event_type}",
+                f"event_family: {family}",
+                f"run_id: {run_id}",
+                "callback_payload: omitted",
+                "terminal_status: failed" if safe_event_type.endswith(".failed") else "terminal_status: completed",
+            ]
+        )
+        receipt = compact_output(
+            output,
+            tool="webui-streaming",
+            command=safe_event_type,
+            exit_status=exit_status,
+            max_chars=400,
+            artifact_handles=[
+                {"kind": "progress_event", "handle": run_id, "label": "Streaming progress event"},
+            ],
+        )
+        receipt.pop("text", None)
+        return receipt
+    except Exception:
+        logger.debug("Failed to build streaming terminal compaction receipt", exc_info=True)
+        return None
 
 
 def _record_streaming_delta_progress_event(*, event_type, stream_id, text=None):
@@ -288,10 +368,21 @@ def _record_streaming_progress_event(
     try:
         from api.capy_progress import record_progress_event
 
-        return record_progress_event({
+        result = record_progress_event({
             "event_type": safe_event_type,
             "run_id": run_id,
         })
+        output_compaction = _streaming_terminal_output_compaction_receipt(
+            safe_event_type=safe_event_type,
+            family=family,
+            run_id=run_id,
+            status=status,
+            function_result=function_result,
+            is_error=is_error,
+        )
+        if output_compaction:
+            result["output_compaction"] = output_compaction
+        return result
     except Exception:
         if terminal_reserved:
             with _STREAMING_RUN_TERMINAL_PROGRESS_LOCK:
@@ -2946,14 +3037,18 @@ def _run_agent_streaming(
                         tool_name=name,
                         preview=preview,
                         args=args,
+                        function_result=cb_kwargs.get('function_result', cb_kwargs.get('result')),
                         status=cb_kwargs.get('status'),
                         is_error=bool(cb_kwargs.get('is_error', False)),
                     )
-                    put('progress_event', {
+                    subagent_progress_payload = {
                         'event_type': subagent_receipt.get('event_type') or 'subagent.progress',
                         'family': 'subagent',
                         'redaction_status': 'metadata_only',
-                    })
+                    }
+                    if subagent_receipt.get('output_compaction'):
+                        subagent_progress_payload['output_compaction'] = subagent_receipt['output_compaction']
+                    put('progress_event', subagent_progress_payload)
                     return
 
                 if event_type == 'tool.args.delta':
@@ -3045,14 +3140,25 @@ def _run_agent_streaming(
                     _checkpoint_activity[0] += 1
                     _legacy_tool_completed_is_error = bool(cb_kwargs.get('is_error', False))
                     if (not _capy_prefer_structured_tool_progress[0]) or _legacy_tool_completed_is_error:
-                        _record_streaming_tool_progress_event_once(
+                        legacy_tool_receipt = _record_streaming_tool_progress_event_once(
                             event_type='tool.failed' if _legacy_tool_completed_is_error else 'tool.completed',
                             stream_id=stream_id,
                             tool_call_id=_capy_tool_progress_dedupe_id(cb_kwargs=cb_kwargs),
                             tool_name=name,
                             preview=preview,
                             args=args,
+                            function_result=cb_kwargs.get('function_result', cb_kwargs.get('result')),
+                            status=cb_kwargs.get('status'),
+                            is_error=_legacy_tool_completed_is_error,
                         )
+                        legacy_progress_payload = {
+                            'event_type': legacy_tool_receipt.get('event_type') or ('tool.failed' if _legacy_tool_completed_is_error else 'tool.completed'),
+                            'family': 'tool',
+                            'redaction_status': 'metadata_only',
+                        }
+                        if legacy_tool_receipt.get('output_compaction'):
+                            legacy_progress_payload['output_compaction'] = legacy_tool_receipt['output_compaction']
+                        put('progress_event', legacy_progress_payload)
                         if _capy_prefer_structured_tool_progress[0] and _legacy_tool_completed_is_error:
                             _capy_pending_legacy_failed_tool_completions[0] += 1
                     put('tool_complete', {
@@ -3090,7 +3196,7 @@ def _run_agent_streaming(
                 if _capy_pending_legacy_failed_tool_completions[0] > 0:
                     _capy_pending_legacy_failed_tool_completions[0] -= 1
                 else:
-                    _record_streaming_tool_progress_event_once(
+                    structured_tool_receipt = _record_streaming_tool_progress_event_once(
                         event_type='tool.completed',
                         stream_id=stream_id,
                         tool_call_id=tool_call_id,
@@ -3098,6 +3204,14 @@ def _run_agent_streaming(
                         args=args,
                         function_result=function_result,
                     )
+                    structured_progress_payload = {
+                        'event_type': structured_tool_receipt.get('event_type') or 'tool.completed',
+                        'family': 'tool',
+                        'redaction_status': 'metadata_only',
+                    }
+                    if structured_tool_receipt.get('output_compaction'):
+                        structured_progress_payload['output_compaction'] = structured_tool_receipt['output_compaction']
+                    put('progress_event', structured_progress_payload)
                 try:
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     _tool_stats = meter().get_stats()
