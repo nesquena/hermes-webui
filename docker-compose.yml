@@ -1,0 +1,57 @@
+# Hermes WebUI — single-container Docker Compose
+#
+# QUICK START (most users):
+#   1. (Optional) Copy .env.docker.example to .env and edit values
+#   2. docker compose up -d
+#   3. Open http://localhost:8787
+#
+# This is the simplest setup: one WebUI container that runs the agent in-process.
+# The WebUI auto-detects host UID/GID from the mounted .hermes volume.
+#
+# For multi-container setups (separate agent + webui or agent+webui+dashboard),
+# see docker-compose.two-container.yml or docker-compose.three-container.yml.
+
+services:
+  hermes-webui:
+    build: .
+    ports:
+    # select only one; use 127.0.0.1 version to expose to localhost only
+      - "127.0.0.1:8787:8787"
+#      - "8787:8787"
+    volumes:
+      # Mount your Hermes home directory into the container.
+      # The default (${HOME}/.hermes) works on both macOS (/Users/<you>/.hermes)
+      # and Linux (/home/<you>/.hermes) — no change needed for standard installs.
+      # Only set HERMES_HOME explicitly if your .hermes lives somewhere non-standard.
+      # macOS note: set UID and GID below to match your user ID (run `id -u` and `id -g`).
+      - ${HERMES_HOME:-${HOME}/.hermes}:/home/hermeswebui/.hermes
+      # Your workspace directory shown on first launch (adapt if yours is different, the container will use the mounted /workspace)
+      - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
+    environment:
+      # Set to your host user ID: run `id -u` and `id -g` to find them.
+      # On macOS, UIDs start at 501 (not 1000), so set UID and GID in a .env file:
+      #   echo "UID=$(id -u)" >> .env
+      #   echo "GID=$(id -g)" >> .env
+      # Without this, the container may not be able to read your mounted files.
+      - WANTED_UID=${UID:-1000}
+      - WANTED_GID=${GID:-1000}
+      # Required: bind address and port
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      # Where to store sessions, workspaces, and other state (default: ~/.hermes/webui)
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
+      # Default workspace directory shown on first launch
+#      - HERMES_WEBUI_DEFAULT_WORKSPACE=/workspace
+      # Optional: set a password for remote access
+      # - HERMES_WEBUI_PASSWORD=your-secret-password
+      #
+      # Bind-mount permission handling (fixes #1389, #1399):
+      #   When you mount an EXISTING ~/.hermes directory (the common case),
+      #   the WebUI's startup credential-permission fixer can clash with
+      #   your host file modes (e.g. 0640 group-readable .env files).
+      #   Set HERMES_SKIP_CHMOD=1 to bypass the fixer entirely, OR set
+      #   HERMES_HOME_MODE=0640 to allow group bits while still stripping
+      #   world-readable. Both are documented in api/startup.py.
+      # - HERMES_SKIP_CHMOD=1
+      # - HERMES_HOME_MODE=0640
+    restart: unless-stopped

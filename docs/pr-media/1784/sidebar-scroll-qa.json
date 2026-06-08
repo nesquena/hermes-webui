@@ -1,0 +1,25 @@
+{
+  "issue": 1784,
+  "commit_under_test": "9875967",
+  "fixture": "Synthetic 180-row session sidebar with active sid_0 streaming and long chat pane content.",
+  "pre_fix_observation": {
+    "steps": [
+      "Set _scrollPinned=true with #messages at scrollTop 0 in a long chat fixture.",
+      "Dispatch a wheel gesture on the active sidebar session row.",
+      "Call scrollIfPinned() to mimic the next streaming token render."
+    ],
+    "result": "#messages jumped from scrollTop 0 to 3073 immediately after the sidebar wheel gesture, showing the chat auto-scroll path fought non-chat scroll intent."
+  },
+  "post_fix_observation": {
+    "steps": [
+      "Repeat the same fixture and sidebar wheel gesture after the fix.",
+      "Call scrollIfPinned() immediately, then again after the 350ms non-chat intent guard expires."
+    ],
+    "result": {
+      "afterSidebarWheel": 0,
+      "afterIntentExpires": 2992,
+      "sessionListCss": "overscroll-behavior-y: contain; touch-action: pan-y"
+    },
+    "meaning": "A sidebar wheel/touch scroll intent now suppresses only the immediate chat-pane auto-scroll write, leaving the sidebar gesture free while streaming continues."
+  }
+}

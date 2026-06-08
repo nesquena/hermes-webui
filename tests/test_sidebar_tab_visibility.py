@@ -1,0 +1,208 @@
+"""Regression tests for sidebar tab visibility feature.
+
+Covers backend validation round-trip, frontend static contracts,
+i18n coverage, and the key integration points that have broken before.
+"""
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+
+
+def test_backend_round_trip_and_validation(monkeypatch, tmp_path):
+    """hidden_tabs defaults to [], saves/reloads, rejects non-list, filters empty strings."""
+    import api.config as config
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+
+    loaded = config.load_settings()
+    assert loaded["hidden_tabs"] == [], "default must be empty list"
+    assert loaded["tab_order"] == [], "tab order default must be empty list"
+
+    saved = config.save_settings({"hidden_tabs": ["kanban", "insights"]})
+    assert saved["hidden_tabs"] == ["kanban", "insights"]
+    assert config.load_settings()["hidden_tabs"] == ["kanban", "insights"]
+
+    saved = config.save_settings({"tab_order": ["logs", "tasks", "kanban"]})
+    assert saved["tab_order"] == ["logs", "tasks", "kanban"]
+    assert config.load_settings()["tab_order"] == ["logs", "tasks", "kanban"]
+
+    bad_order = config.save_settings({"tab_order": "logs,tasks"})
+    assert bad_order["tab_order"] == ["logs", "tasks", "kanban"]
+
+    # Non-list is rejected, default preserved
+    bad = config.save_settings({"hidden_tabs": "not-a-list"})
+    assert bad["hidden_tabs"] == ["kanban", "insights"]
+
+    # Empty strings filtered, empty list clears
+    saved = config.save_settings({"hidden_tabs": ["kanban", "", "  ", "logs"]})
+    assert saved["hidden_tabs"] == ["kanban", "logs"]
+    cleared = config.save_settings({"hidden_tabs": []})
+    assert cleared["hidden_tabs"] == []
+
+    # Must NOT be in bool keys (would corrupt the list)
+    assert "hidden_tabs" not in config._SETTINGS_BOOL_KEYS
+    assert "hidden_tabs" in config._SETTINGS_ALLOWED_KEYS
+
+
+def test_frontend_static_contracts():
+    """All required HTML, JS, CSS, and boot elements exist with correct wiring."""
+    # HTML: container in Appearance pane
+    assert 'id="tabVisibilityChips"' in INDEX_HTML
+    assert 'data-i18n="settings_label_tab_visibility"' in INDEX_HTML
+    assert 'data-i18n="settings_desc_tab_visibility"' in INDEX_HTML
+    appearance_start = INDEX_HTML.find('id="settingsPaneAppearance"')
+    prefs_start = INDEX_HTML.find('id="settingsPanePreferences"', appearance_start + 1)
+    chips_pos = INDEX_HTML.find('id="tabVisibilityChips"')
+    assert appearance_start < chips_pos < prefs_start, \
+        "tabVisibilityChips must be inside Appearance pane"
+
+    # JS: constants, functions, and wiring
+    assert "_ALWAYS_VISIBLE_TABS" in PANELS_JS
+    assert "'chat'" in PANELS_JS.split("_ALWAYS_VISIBLE_TABS")[1][:80]
+    assert "'settings'" in PANELS_JS.split("_ALWAYS_VISIBLE_TABS")[1][:80]
+    assert "_HIDDEN_TABS_LS_KEY" in PANELS_JS
+    assert "hermes-webui-hidden-tabs" in PANELS_JS
+    assert "_TAB_ORDER_LS_KEY" in PANELS_JS
+    assert "hermes-webui-tab-order" in PANELS_JS
+    for fn in ("_getHiddenTabs", "_setHiddenTabs", "_getTabOrder", "_setTabOrder",
+               "_applyTabOrder", "_applyTabVisibility", "_renderTabVisibilityChips",
+               "_toggleTabVisibilityChip", "_moveTabOrderPanel", "_wireTabChipDrag"):
+        assert f"function {fn}(" in PANELS_JS, f"panels.js must define {fn}()"
+
+    # Toggle must autosave and respect always-visible tabs
+    toggle_block = PANELS_JS[PANELS_JS.find("function _toggleTabVisibilityChip"):]
+    toggle_body = toggle_block[:toggle_block.find("\nfunction ", 1) or 2000]
+    assert "_scheduleAppearanceAutosave" in toggle_body
+    assert "_ALWAYS_VISIBLE_TABS" in toggle_body
+
+    # Appearance payload must include hidden_tabs and tab_order
+    payload_block = PANELS_JS[PANELS_JS.find("function _appearancePayloadFromUi"):]
+    payload_body = payload_block[:payload_block.find("\nfunction ", 1) or 2000]
+    assert "hidden_tabs" in payload_body
+    assert "_getHiddenTabs" in payload_body
+    assert "tab_order" in payload_body
+    assert "_getTabOrder" in payload_body
+
+    # CSS: hidden class and chip styles
+    assert ".nav-tab-hidden" in STYLE_CSS
+    assert "display:none" in STYLE_CSS.split(".nav-tab-hidden")[1][:80].replace(" ", "")
+    assert ".tab-visibility-chip" in STYLE_CSS
+
+    # No flash-prevention script in <head> (DOM elements don't exist at that point)
+    head_end = INDEX_HTML.find("</head>")
+    assert "hermes-webui-hidden-tabs" not in INDEX_HTML[:head_end]
+
+
+def test_boot_restores_visibility_from_localstorage():
+    """boot.js must call _applyTabVisibility at boot time so hidden tabs take effect."""
+    assert "_restoreTabVisibility" in BOOT_JS
+    block = BOOT_JS[BOOT_JS.find("_restoreTabVisibility"):][:1500]
+    assert "_applyTabVisibility" in block, \
+        "boot.js must call _applyTabVisibility so tabs are hidden before first paint"
+
+
+def test_i18n_coverage():
+    """Label and description keys must exist in all locales with matching counts."""
+    label_count = I18N_JS.count("settings_label_tab_visibility")
+    desc_count = I18N_JS.count("settings_desc_tab_visibility")
+    assert label_count >= 12, f"Expected ≥12 locales, found {label_count}"
+    assert desc_count >= 12, f"Expected ≥12 locales, found {desc_count}"
+    assert label_count == desc_count, \
+        f"Label ({label_count}) and desc ({desc_count}) counts must match"
+
+
+def test_backend_rejects_chat_and_settings_in_hidden_tabs(monkeypatch, tmp_path):
+    """Server-side belt-and-suspenders: a malicious POST that tries to hide
+    `chat` or `settings` (the always-visible nav tabs) must be filtered out
+    server-side, not just client-side. The client already applies the same
+    filter at apply time, but the server should not let a tampered payload
+    persist the forbidden values."""
+    import api.config as config
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+
+    saved = config.save_settings({"hidden_tabs": ["chat", "kanban", "settings", "logs"]})
+    assert saved["hidden_tabs"] == ["kanban", "logs"], \
+        "chat and settings must be stripped server-side"
+
+    # Even an all-forbidden payload reduces to empty (not rejected — empty is fine)
+    saved = config.save_settings({"hidden_tabs": ["chat", "settings"]})
+    assert saved["hidden_tabs"] == []
+
+
+def test_profile_switch_reconciles_hidden_tabs():
+    """When a user switches profiles, the new profile's hidden_tabs value
+    must be applied — the per-profile settings.json is the source of truth,
+    not the previous profile's localStorage value. Stage-394 added a
+    /api/settings refetch in _refreshProfileSwitchBackground; verify it stays
+    wired (the API call + the _applyTabVisibility call)."""
+    bg_start = PANELS_JS.find("function _refreshProfileSwitchBackground")
+    assert bg_start >= 0, "_refreshProfileSwitchBackground not found"
+    bg_end = PANELS_JS.find("\nfunction ", bg_start + 1)
+    if bg_end < 0:
+        bg_end = bg_start + 4000
+    bg_body = PANELS_JS[bg_start:bg_end]
+    assert "/api/settings" in bg_body, \
+        "profile-switch background refresh must re-fetch settings for the new profile"
+    assert "_applyTabVisibility" in bg_body, \
+        "profile-switch background refresh must re-apply tab visibility"
+    assert "hidden_tabs" in bg_body, \
+        "profile-switch background refresh must read hidden_tabs from server response"
+
+
+def test_chip_a11y_uses_switch_role_with_aria_checked():
+    """Chips should use role=switch + aria-checked instead of plain
+    aria-pressed. The pressed/not-pressed wording is confusing for a toggle
+    that visually represents an on/off switch; role=switch + aria-checked
+    matches user mental model."""
+    render_block = PANELS_JS[PANELS_JS.find("function _renderTabVisibilityChips"):]
+    body = render_block[:render_block.find("\nfunction ", 1) or 3000]
+    assert "role" in body and "'switch'" in body, \
+        "chip should declare role='switch' for clearer screen-reader narration"
+    assert "aria-checked" in body, "chip should use aria-checked to match role=switch"
+    # Group container also has role=group + aria-labelledby
+    assert 'role="group"' in INDEX_HTML, "chip container needs role=group"
+    assert 'aria-labelledby="tabVisibilityLabel"' in INDEX_HTML, \
+        "chip container needs aria-labelledby pointing at the label"
+    # Focus-visible and drag styles exist
+    assert ".tab-visibility-chip:focus-visible" in STYLE_CSS, \
+        "chip needs a :focus-visible style for keyboard nav"
+    assert ".tab-visibility-chip.dragging" in STYLE_CSS, \
+        "chip needs dragging style for mouse reorder feedback"
+    assert ".tab-visibility-chip.drag-over" in STYLE_CSS, \
+        "chip needs drag-over style for mouse reorder target feedback"
+
+
+def test_tab_order_excludes_always_visible_tabs(monkeypatch, tmp_path):
+    """Server-side tab_order validation mirrors hidden_tabs: chat and settings
+    remain fixed, so a tampered payload must not persist them in custom order."""
+    import api.config as config
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+
+    saved = config.save_settings({"tab_order": ["chat", "logs", "settings", "tasks", "logs"]})
+    assert saved["tab_order"] == ["logs", "tasks"], \
+        "chat/settings must be stripped and duplicate panel ids collapsed server-side"
+
+
+def test_profile_switch_reconciles_tab_order():
+    """Profile switching must also restore per-profile custom tab ordering."""
+    bg_start = PANELS_JS.find("function _refreshProfileSwitchBackground")
+    assert bg_start >= 0, "_refreshProfileSwitchBackground not found"
+    bg_end = PANELS_JS.find("\nfunction ", bg_start + 1)
+    if bg_end < 0:
+        bg_end = bg_start + 4000
+    bg_body = PANELS_JS[bg_start:bg_end]
+    assert "tab_order" in bg_body, \
+        "profile-switch background refresh must read tab_order from server response"
+    assert "_setTabOrder" in bg_body, \
+        "profile-switch background refresh must store tab_order for the new profile"
+    assert "_applyTabOrder" in bg_body, \
+        "profile-switch background refresh must apply tab ordering"

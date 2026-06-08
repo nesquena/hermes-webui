@@ -1,0 +1,580 @@
+"""Regression tests for PWA support (manifest + service worker).
+
+Covers:
+- manifest.json is valid JSON with required PWA fields
+- sw.js has the `__WEBUI_VERSION__` placeholder the server replaces at request time
+- sw.js offline-fallback uses a resolved promise (not `caches.match() || fallback`
+  which is broken — Promise objects are always truthy in `||` checks, so the
+  fallback Response would never be used)
+- /manifest.json, /manifest.webmanifest, /sw.js routes serve correct Content-Type
+"""
+import json
+import re
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+MANIFEST = ROOT / "static" / "manifest.json"
+SW = ROOT / "static" / "sw.js"
+PWA_STARTUP = ROOT / "static" / "pwa-startup.js"
+BOOT = ROOT / "static" / "boot.js"
+INDEX = ROOT / "static" / "index.html"
+ROUTES = ROOT / "api" / "routes.py"
+AUTH = ROOT / "api" / "auth.py"
+
+
+class TestManifest:
+    def test_manifest_is_valid_json(self):
+        data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        assert isinstance(data, dict)
+
+    def test_manifest_has_required_pwa_fields(self):
+        data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        for field in ("name", "start_url", "display", "icons"):
+            assert field in data, f"manifest.json missing required field: {field}"
+        assert data["display"] == "standalone", (
+            "manifest.display must be 'standalone' for installable PWA"
+        )
+        assert isinstance(data["icons"], list) and len(data["icons"]) > 0, (
+            "manifest.icons must be a non-empty list"
+        )
+
+    def test_manifest_icons_reference_existing_files(self):
+        data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        for icon in data["icons"]:
+            src = icon.get("src", "")
+            if src.startswith("http"):
+                continue  # external icon, skip
+            # Paths are relative to the app root (where manifest is served)
+            # 'static/favicon.svg' or './static/favicon.svg' both valid
+            clean = src.lstrip("./")
+            p = ROOT / clean
+            assert p.exists(), f"manifest.json references missing icon: {src}"
+
+
+class TestServiceWorker:
+    def test_sw_has_cache_version_placeholder(self):
+        src = SW.read_text(encoding="utf-8")
+        assert "__WEBUI_VERSION__" in src, (
+            "sw.js must contain __WEBUI_VERSION__ placeholder for the server "
+            "handler at /sw.js to replace with WEBUI_VERSION at request time"
+        )
+
+    def test_sw_js_has_no_merge_conflict_markers(self):
+        """Regression guard for v0.50.279 stage build: a leftover git conflict
+        marker in static/sw.js made the file fail to parse as JavaScript even
+        though the substring-based source-string tests still passed (the
+        ``__WEBUI_VERSION__`` token was present, just inside the conflict block).
+
+        A broken sw.js means the install handler throws on script load → SW
+        never reaches activated state → old SW keeps controlling the page →
+        every "old SW deletes other caches" guarantee is forfeited and frontend
+        cache-bust pathways silently break. Caught by Opus advisor pre-merge,
+        ship blocked. This test would have caught it too.
+        """
+        src = SW.read_text(encoding="utf-8")
+        for marker in ("<<<<<<<", "=======\n", ">>>>>>>"):
+            assert marker not in src, (
+                f"static/sw.js contains conflict marker {marker!r}; "
+                "the merge resolution did not actually land. Reject ship."
+            )
+
+    def test_sw_bypasses_api_and_stream(self):
+        src = SW.read_text(encoding="utf-8")
+        assert "/api/" in src, "SW must bypass /api/* (no cached auth/session responses)"
+        assert "/stream" in src, "SW must bypass streaming endpoints"
+
+    def test_sw_offline_fallback_awaits_caches_match(self):
+        """caches.match() returns a Promise (always truthy in `||`), so the pattern
+        `caches.match('./') || new Response(...)` is broken — the fallback Response
+        is dead code and the browser falls back to its default offline page.
+
+        The correct pattern chains the match through .then() or awaits it so the
+        resolved value is what gets the `||` fallback.
+        """
+        src = SW.read_text(encoding="utf-8")
+        # Must not use the broken shape
+        broken_pattern = re.compile(
+            r"caches\.match\([^)]*\)\s*\|\|\s*new\s+Response",
+            re.DOTALL,
+        )
+        assert not broken_pattern.search(src), (
+            "sw.js offline fallback uses `caches.match('./') || new Response(...)` "
+            "which is dead code — caches.match() returns a Promise that's always "
+            "truthy. Use `.then((cached) => cached || new Response(...))` instead."
+        )
+        # Positive assertion that SOME form of the working pattern is present
+        has_then = ".then(" in src and "cached" in src
+        has_await = "await caches.match" in src
+        assert has_then or has_await, (
+            "sw.js must await/then the caches.match() result before applying the fallback"
+        )
+
+    def test_sw_shell_assets_are_network_first_with_cache_fallback(self):
+        """Local hotfixes can change JS/CSS while WEBUI_VERSION stays unchanged.
+
+        If shell assets are cache-first, the browser can keep executing stale
+        sessions.js even though the server/curl already returns patched source.
+        Network-first preserves offline fallback without hiding local fixes.
+        """
+        src = SW.read_text(encoding="utf-8")
+        assert "Shell assets: network-first with cache fallback" in src
+        assert "fetch(new Request(event.request, { cache: 'no-store' })).then((response)" in src
+        assert "caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone))" in src
+        assert ".catch(() => caches.match(event.request)" in src
+        assert "if (cached) return cached;" not in src, (
+            "shell assets must not be cache-first; stale JS can survive hard refresh"
+        )
+
+    def test_sw_never_caches_api_responses(self):
+        """Defensive: the SW must not cache responses from /api/* paths.
+        Currently enforced by early-return before the shell-asset cache block."""
+        src = SW.read_text(encoding="utf-8")
+        # Look for the early-return pattern in the fetch handler
+        assert "return;" in src and "/api/" in src, (
+            "SW fetch handler must early-return for /api/* paths (no caching)"
+        )
+
+
+class TestPWARoutes:
+    def test_manifest_route_serves_correct_content_type(self):
+        src = ROUTES.read_text(encoding="utf-8")
+        # The handler block for /manifest.json
+        idx = src.find('"/manifest.json"')
+        assert idx != -1, "routes.py must handle /manifest.json"
+        block = src[idx:idx + 800]
+        # After the #2226 refactor, the root route delegates to _serve_manifest().
+        # Verify the helper exists and sets the correct Content-Type.
+        assert "_serve_manifest" in block, (
+            "manifest.json route must delegate to _serve_manifest()"
+        )
+        helper_idx = src.find("def _serve_manifest")
+        assert helper_idx != -1, "routes.py must define _serve_manifest helper"
+        helper_block = src[helper_idx:helper_idx + 800]
+        assert "application/manifest+json" in helper_block, (
+            "_serve_manifest must serve Content-Type: application/manifest+json"
+        )
+        assert "no-store" in helper_block or "Cache-Control" in helper_block, (
+            "_serve_manifest should set Cache-Control: no-store so updates are picked up"
+        )
+
+    def test_sw_route_injects_cache_version(self):
+        src = ROUTES.read_text(encoding="utf-8")
+        idx = src.find('"/sw.js"')
+        assert idx != -1, "routes.py must handle /sw.js"
+        block = src[idx:idx + 1000]
+        assert "__WEBUI_VERSION__" in block, (
+            "sw.js route must replace __WEBUI_VERSION__ with the current WEBUI_VERSION"
+        )
+        assert "WEBUI_VERSION" in block, (
+            "sw.js route must import and use WEBUI_VERSION for cache busting"
+        )
+
+    def test_sw_route_url_encodes_cache_version(self):
+        src = ROUTES.read_text(encoding="utf-8")
+        idx = src.find('"/sw.js"')
+        assert idx != -1, "routes.py must handle /sw.js"
+        block = src[idx:idx + 1200]
+        assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
+            "sw.js route must URL-encode the injected cache version so unusual git tags "
+            "cannot break the JavaScript string literal"
+        )
+
+    def test_sw_route_sets_service_worker_allowed(self):
+        src = ROUTES.read_text(encoding="utf-8")
+        idx = src.find('"/sw.js"')
+        block = src[idx:idx + 1000]
+        assert "Service-Worker-Allowed" in block, (
+            "sw.js route must set Service-Worker-Allowed header so the SW can control "
+            "the expected scope"
+        )
+
+    def test_sw_is_public_auth_path(self):
+        src = AUTH.read_text(encoding="utf-8")
+        public_idx = src.find("PUBLIC_PATHS")
+        assert public_idx != -1, "auth.py must define PUBLIC_PATHS"
+        block = src[public_idx:public_idx + 400]
+        assert "'/sw.js'" in block, (
+            "/sw.js must be public so service-worker updates never return login HTML"
+        )
+
+
+class TestIndexHtmlIntegration:
+    def test_index_links_manifest(self):
+        src = INDEX.read_text(encoding="utf-8")
+        assert 'rel="manifest"' in src, "index.html must link to manifest.json"
+
+    def test_index_registers_service_worker(self):
+        src = INDEX.read_text(encoding="utf-8")
+        assert "serviceWorker" in src and "register" in src, (
+            "index.html must register the service worker"
+        )
+
+    def test_index_uses_version_placeholders_for_static_assets(self):
+        src = INDEX.read_text(encoding="utf-8")
+        assert "sw.js?v=__WEBUI_VERSION__" in src
+        assert "static/ui.js?v=__WEBUI_VERSION__" in src
+
+    def test_index_versions_stylesheet(self):
+        """Regression for #1507: the `<link rel=stylesheet>` for style.css MUST
+        carry the same `?v=__WEBUI_VERSION__` cache-bust query as the JS files.
+
+        Without the version, a stale service worker controlling a tab across a
+        version upgrade would intercept `static/style.css`, find an exact URL
+        match in its old shell cache, and return OLD CSS — while the new JS
+        URLs (which DO carry `?v=`) miss the cache and load fresh. The mismatch
+        breaks the layout until a force-refresh bypasses the SW.
+        """
+        src = INDEX.read_text(encoding="utf-8")
+        assert "static/style.css?v=__WEBUI_VERSION__" in src, (
+            "static/style.css must carry ?v=__WEBUI_VERSION__ so an old service "
+            "worker controlling the tab across a version upgrade does not return "
+            "stale CSS — see #1507"
+        )
+        # And the unversioned form must NOT appear (defensive — catches accidental
+        # reverts that leave both lines).
+        assert 'href="static/style.css"' not in src, (
+            "unversioned static/style.css link found — must include "
+            "?v=__WEBUI_VERSION__ for cache busting"
+        )
+
+    def test_sw_shell_assets_match_versioned_asset_urls(self):
+        """The service worker's SHELL_ASSETS pre-cache list must use the same
+        `?v=__WEBUI_VERSION__` suffix on JS+CSS that index.html sends, so that
+        the pre-cached entries actually serve when the page requests them.
+
+        Without this, every `cache.match()` for a versioned asset URL (e.g.
+        `static/style.css?v=vN`) would miss against the unversioned pre-cached
+        entry (`static/style.css`), defeating the pre-cache.
+        """
+        src = SW.read_text(encoding="utf-8")
+        # Versioned shell assets must include the cache version query.
+        for asset in (
+            "style.css",
+            "boot.js",
+            "ui.js",
+            "messages.js",
+            "sessions.js",
+            "panels.js",
+            "commands.js",
+            "icons.js",
+            "i18n.js",
+            "workspace.js",
+            "terminal.js",
+            "onboarding.js",
+        ):
+            # Either inline `?v=__WEBUI_VERSION__` or via the VQ constant
+            # produces a URL string the cache lookup can match.
+            has_inline = f"{asset}?v=__WEBUI_VERSION__" in src
+            has_concat = f"{asset}' + VQ" in src or f"{asset}\" + VQ" in src
+            assert has_inline or has_concat, (
+                f"sw.js SHELL_ASSETS entry for {asset} must carry "
+                "?v=__WEBUI_VERSION__ to match the URL the page requests"
+            )
+
+    def test_sw_shell_assets_are_network_first(self):
+        """Shell JS/CSS must prefer the network, then fall back to CacheStorage.
+
+        Cache-first with an unchanged local dev version can keep stale boot.js
+        loaded after a hotfix, which is exactly how browser chrome/theme-color
+        regressions survive a patch until someone performs cache exorcism.
+        """
+        src = SW.read_text(encoding="utf-8")
+        marker = "// Shell assets: network-first with cache fallback"
+        assert marker in src
+        block = src[src.find(marker):src.find(marker) + 900]
+        assert "fetch(new Request(event.request, { cache: 'no-store' })).then" in block
+        assert "caches.match(event.request)" in block
+        assert "caches.match(event.request).then((cached)" not in block[:250]
+
+    def test_index_loads_pwa_startup_helper_early(self):
+        """The installed-app shell should classify standalone/offline mode before
+        the main UI bundle hydrates, so native chrome and safe-area affordances
+        are present on first paint.
+        """
+        src = INDEX.read_text(encoding="utf-8")
+        preload_pos = src.find('href="static/pwa-startup.js?v=__WEBUI_VERSION__"')
+        script_pos = src.find('src="static/pwa-startup.js?v=__WEBUI_VERSION__"')
+        ui_pos = src.find('static/ui.js?v=__WEBUI_VERSION__')
+        assert preload_pos != -1, "index.html must preload the PWA startup helper"
+        assert script_pos != -1, "index.html must load the PWA startup helper"
+        assert ui_pos != -1, "index.html must load the main UI bundle"
+        assert preload_pos < ui_pos and script_pos < ui_pos, (
+            "pwa-startup.js must run before ui.js so standalone/offline classes "
+            "are available before the app shell paints"
+        )
+
+    def test_sw_precaches_pwa_startup_helper(self):
+        src = SW.read_text(encoding="utf-8")
+        assert "pwa-startup.js' + VQ" in src or 'pwa-startup.js" + VQ' in src, (
+            "sw.js SHELL_ASSETS must pre-cache pwa-startup.js with the same "
+            "version query used by index.html"
+        )
+
+    def test_manifest_has_native_launch_fields(self):
+        data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        assert data.get("id") == "./"
+        assert data.get("scope") == "./"
+        assert data.get("start_url") == "./?source=pwa"
+        assert "standalone" in data.get("display_override", []), (
+            "manifest.display_override should preserve standalone as a native "
+            "launch fallback"
+        )
+        shortcuts = data.get("shortcuts") or []
+        assert any(shortcut.get("url") == "./?source=pwa&action=new-chat" for shortcut in shortcuts), (
+            "manifest should expose a native shortcut for starting a new chat"
+        )
+
+    def test_pwa_startup_detects_standalone_and_install_events(self):
+        src = PWA_STARTUP.read_text(encoding="utf-8")
+        assert "pwa-standalone" in src
+        assert "pwa-browser" in src
+        assert "beforeinstallprompt" in src
+        assert "appinstalled" in src
+        assert "HermesPWA" in src
+        assert "launchAction" in src
+        assert "promptInstall" in src
+
+    def test_pwa_new_chat_shortcut_is_handled_at_boot(self):
+        src = BOOT.read_text(encoding="utf-8")
+        assert "pwaLaunchAction" in src
+        assert "launchAction()" in src
+        assert "pwaLaunchAction==='new-chat'" in src
+        assert "await newSession(true)" in src
+
+    def test_index_route_url_encodes_asset_version(self):
+        src = ROUTES.read_text(encoding="utf-8")
+        idx = src.find('parsed.path in ("/", "/index.html")')
+        if idx == -1:
+            idx = src.find('parsed.path.startswith("/session/")')
+        assert idx != -1, "routes.py must handle /, /index.html, and /session/<id>"
+        block = src[idx:idx + 800]
+        assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
+            "index route must URL-encode the cache-busting version token before "
+            "injecting it into script src attributes and service worker registration"
+        )
+
+    def test_index_sw_registration_uses_relative_path(self):
+        """Regression: service worker registration MUST stay relative (no leading slash).
+
+        index.html sets a dynamic <base href> via script at the top of <head>.
+        All static asset paths must be relative so that installs behind a reverse
+        proxy at a subpath (e.g. /hermes/) resolve correctly.
+
+        An absolute '/sw.js' breaks subpath mounts because the browser requests
+        <origin>/sw.js — outside the proxy mount root.  A relative 'sw.js'
+        resolves to <origin><base>/sw.js, which is correct for both root and
+        subpath installs.  See issue #1481 review feedback.
+        """
+        src = INDEX.read_text(encoding="utf-8")
+        # Must contain the relative form
+        assert "'sw.js?v=" in src, (
+            "serviceWorker.register() must use relative 'sw.js' path, "
+            "not absolute '/sw.js' — subpath mounts depend on <base href> resolution"
+        )
+        # Must NOT contain the absolute form
+        assert "'/sw.js?v=" not in src, (
+            "serviceWorker.register() must NOT use absolute '/sw.js' path — "
+            "this breaks installs behind a reverse proxy at a subpath"
+        )
+
+    def test_index_has_ios_pwa_meta_tags(self):
+        src = INDEX.read_text(encoding="utf-8")
+        assert "apple-mobile-web-app-capable" in src, (
+            "index.html should include Apple PWA meta tags for iOS home-screen support"
+        )
+
+
+# ── Regression tests for #2226 ──────────────────────────────────────────────
+# Firefox Android resolves <link rel="manifest"> against the page URL before
+# the dynamic <base href> script executes when installing from /session/<id>,
+# producing requests like /session/manifest.json.  Without the route guard
+# the catch-all returns index.html and Firefox falls back to a generated
+# letter icon.  Two fixes: (1) move <base href> script above manifest/favicon
+# links so browsers resolve them correctly, and (2) add /session/manifest.*
+# route handlers that serve the real manifest JSON.
+
+
+class TestBaseHrefOrdering:
+    """Assert the dynamic <base href> script appears before manifest and
+    favicon links so browsers resolve relative URLs deterministically
+    even when the page is served from /session/<id> routes."""
+
+    def test_base_href_script_before_manifest_link(self):
+        src = INDEX.read_text(encoding="utf-8")
+        base_pos = src.find("document.write('<base href=")
+        manifest_pos = src.find('rel="manifest"')
+        assert base_pos != -1, "index.html must contain the dynamic base-href script"
+        assert manifest_pos != -1, "index.html must contain a manifest link"
+        assert base_pos < manifest_pos, (
+            "dynamic <base href> script must appear before <link rel=\"manifest\"> "
+            "so browsers resolve the manifest URL against the correct base when "
+            "served from /session/<id> — see #2226"
+        )
+
+    def test_base_href_script_before_favicon_links(self):
+        src = INDEX.read_text(encoding="utf-8")
+        base_pos = src.find("document.write('<base href=")
+        favicon_pos = src.find('rel="icon"')
+        assert base_pos != -1, "index.html must contain the dynamic base-href script"
+        assert favicon_pos != -1, "index.html must contain a favicon link"
+        assert base_pos < favicon_pos, (
+            "dynamic <base href> script must appear before <link rel=\"icon\"> "
+            "so browsers resolve favicon URLs against the correct base when "
+            "served from /session/<id> — see #2226"
+        )
+
+
+class _FakeHandler:
+    """Minimal request handler stub for exercising handle_get() in tests."""
+    def __init__(self):
+        self.status = None
+        self.sent_headers = []
+        self.body = bytearray()
+        self.wfile = self
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.sent_headers.append((name, value))
+
+    def end_headers(self):
+        pass
+
+    def write(self, data):
+        self.body.extend(data)
+
+    def header(self, name):
+        for key, value in self.sent_headers:
+            if key.lower() == name.lower():
+                return value
+        return None
+
+
+class TestSessionManifestRoute:
+    """Assert /session/manifest.json and /session/manifest.webmanifest
+    return the real manifest JSON (not index.html) so Firefox Android can
+    find the Hermes icons when installing from a /session/<id> page."""
+
+    def _get(self, path):
+        from urllib.parse import urlparse
+        from api.routes import handle_get
+        handler = _FakeHandler()
+        parsed = urlparse(f"http://example.com{path}")
+        handle_get(handler, parsed)
+        return handler
+
+    def test_session_manifest_json_returns_200(self):
+        handler = self._get("/session/manifest.json")
+        assert handler.status == 200
+
+    def test_session_manifest_json_has_manifest_content_type(self):
+        handler = self._get("/session/manifest.json")
+        ct = handler.header("Content-Type") or ""
+        assert ct.startswith("application/manifest+json"), (
+            f"expected application/manifest+json, got {ct!r}"
+        )
+
+    def test_session_manifest_json_is_parseable_json(self):
+        handler = self._get("/session/manifest.json")
+        data = json.loads(bytes(handler.body).decode("utf-8"))
+        assert isinstance(data, dict)
+
+    def test_session_manifest_json_has_hermes_name(self):
+        handler = self._get("/session/manifest.json")
+        data = json.loads(bytes(handler.body).decode("utf-8"))
+        assert data.get("name") == "Hermes"
+
+    def test_session_manifest_json_has_512_icon(self):
+        handler = self._get("/session/manifest.json")
+        data = json.loads(bytes(handler.body).decode("utf-8"))
+        icons = data.get("icons", [])
+        sizes = [icon.get("sizes", "") for icon in icons]
+        assert any("512" in s for s in sizes), (
+            f"manifest must include a 512x512 icon for PWA install, got sizes: {sizes}"
+        )
+
+    def test_session_manifest_json_is_not_html(self):
+        handler = self._get("/session/manifest.json")
+        body_start = bytes(handler.body[:200]).lower()
+        assert b"<!doctype html>" not in body_start, (
+            "/session/manifest.json must return manifest JSON, not the HTML index"
+        )
+
+    def test_session_manifest_webmanifest_returns_200(self):
+        handler = self._get("/session/manifest.webmanifest")
+        assert handler.status == 200
+
+    def test_session_manifest_webmanifest_has_manifest_content_type(self):
+        handler = self._get("/session/manifest.webmanifest")
+        ct = handler.header("Content-Type") or ""
+        assert ct.startswith("application/manifest+json"), (
+            f"expected application/manifest+json, got {ct!r}"
+        )
+
+    def test_session_manifest_webmanifest_is_parseable_json(self):
+        handler = self._get("/session/manifest.webmanifest")
+        data = json.loads(bytes(handler.body).decode("utf-8"))
+        assert data.get("name") == "Hermes"
+
+    def test_session_manifest_webmanifest_is_not_html(self):
+        handler = self._get("/session/manifest.webmanifest")
+        body_start = bytes(handler.body[:200]).lower()
+        assert b"<!doctype html>" not in body_start
+
+
+class TestRootManifestRoute:
+    """Assert root /manifest.json still works after the _serve_manifest refactor."""
+
+    def _get(self, path):
+        from urllib.parse import urlparse
+        from api.routes import handle_get
+        handler = _FakeHandler()
+        parsed = urlparse(f"http://example.com{path}")
+        handle_get(handler, parsed)
+        return handler
+
+    def test_root_manifest_json_returns_200(self):
+        handler = self._get("/manifest.json")
+        assert handler.status == 200
+
+    def test_root_manifest_json_has_manifest_content_type(self):
+        handler = self._get("/manifest.json")
+        ct = handler.header("Content-Type") or ""
+        assert ct.startswith("application/manifest+json"), (
+            f"expected application/manifest+json, got {ct!r}"
+        )
+
+    def test_root_manifest_json_has_hermes_name_and_512_icon(self):
+        handler = self._get("/manifest.json")
+        data = json.loads(bytes(handler.body).decode("utf-8"))
+        assert data.get("name") == "Hermes"
+        icons = data.get("icons", [])
+        sizes = [icon.get("sizes", "") for icon in icons]
+        assert any("512" in s for s in sizes)
+
+    def test_root_manifest_webmanifest_returns_200(self):
+        handler = self._get("/manifest.webmanifest")
+        assert handler.status == 200
+
+
+class TestSessionManifestAuthExemption:
+    """Assert /session/manifest.* paths are auth-exempt so the browser
+    can fetch the manifest during PWA install without being redirected."""
+
+    def test_session_manifest_json_is_public(self, monkeypatch):
+        monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "test-password")
+        from api.auth import check_auth, _invalidate_password_hash_cache
+        from types import SimpleNamespace
+        _invalidate_password_hash_cache()
+        handler = _FakeHandler()
+        assert check_auth(handler, SimpleNamespace(path="/session/manifest.json", query="")) is True
+
+    def test_session_manifest_webmanifest_is_public(self, monkeypatch):
+        monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "test-password")
+        from api.auth import check_auth, _invalidate_password_hash_cache
+        from types import SimpleNamespace
+        _invalidate_password_hash_cache()
+        handler = _FakeHandler()
+        assert check_auth(handler, SimpleNamespace(path="/session/manifest.webmanifest", query="")) is True
