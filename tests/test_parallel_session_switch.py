@@ -166,31 +166,56 @@ class TestGitInfoParallel:
         )
 
     def test_parallel_faster_than_serial(self, tmp_path):
-        """Wall-clock time for parallel execution should be ~1/3 of serial."""
+        """Parallel execution is provably concurrent (deterministic, not timed).
+
+        Previously this asserted wall-clock `elapsed < 0.25s` to prove the 3 git
+        calls run in parallel. That wall-clock race is fundamentally flaky on
+        shared/contended CI runners: the recurring `test (3.13, 2)` failure saw
+        the "parallel" run measure 0.27-0.33s — at or above the 0.30s serial
+        baseline — not because the code serialized, but because thread scheduling
+        itself stalls under CPU starvation, so NO timing threshold (absolute or
+        relative-to-serial) is reliable there.
+
+        Proof of concurrency belongs to a deterministic primitive, not a stopwatch:
+        a threading.Barrier(3) only releases once all three workers have ARRIVED
+        simultaneously — it is impossible to satisfy under serial execution (the
+        first worker would block forever waiting for the other two). If the calls
+        ran serially this test would time out and fail; passing proves real
+        overlap regardless of core speed. (test_git_commands_run_concurrently uses
+        the same primitive; this keeps a second pin on the parallelism invariant
+        without the flaky wall-clock assertion.)
+        """
         from api.workspace import git_info_for_workspace
         import api.workspace as ws_mod
 
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
 
-        def slow_git(args, cwd, timeout=3):
+        # Barrier(3) is releasable ONLY if all 3 workers run at once.
+        barrier = threading.Barrier(3, timeout=5)
+        arrived = {"n": 0}
+        lock = threading.Lock()
+
+        def concurrent_git(args, cwd, timeout=3):
             if args[0] == "rev-parse":
                 return "main"
-            time.sleep(0.1)
+            with lock:
+                arrived["n"] += 1
+            # Serial execution can never get 3 threads here at once → deadlock →
+            # BrokenBarrierError/timeout → test fails. Concurrent execution passes.
+            barrier.wait(timeout=3)
             if args[0] == "status":
                 return ""
             return "0"
 
-        with patch.object(ws_mod, "_run_git", side_effect=slow_git):
-            t0 = time.monotonic()
+        with patch.object(ws_mod, "_run_git", side_effect=concurrent_git):
             result = git_info_for_workspace(tmp_path)
-            elapsed = time.monotonic() - t0
 
         assert result is not None
         assert result["is_git"] is True
-        assert elapsed < 0.25, (
-            f"git_info_for_workspace took {elapsed:.3f}s — expected < 0.25s "
-            f"with parallel execution (serial baseline is ~0.3s)."
+        assert arrived["n"] == 3, (
+            f"Expected 3 concurrent git calls, got {arrived['n']} — "
+            f"suggests serial execution."
         )
 
 
@@ -333,6 +358,8 @@ class TestMessagePaginationBackend:
 
     def test_messages_offset_initial_load(self):
         """_messages_offset = index of first returned message in full array."""
+        from api.routes import _message_counts_as_renderable_for_window, _message_window_for_display
+
         session = self._make_session(100)
         msg_limit = 30
         all_msgs = session.messages
@@ -341,6 +368,28 @@ class TestMessagePaginationBackend:
         offset = len(all_msgs) - len(truncated)
         assert offset == 70
         assert truncated[0]["content"] == "Message 70"
+
+        messages = [
+            {"role": "user", "content": f"Visible {i}"}
+            for i in range(35)
+        ]
+        messages.extend(
+            {"role": "tool", "content": f"hidden tool payload {i}"}
+            for i in range(28)
+        )
+        messages.extend([
+            {"role": "user", "content": "Tail question"},
+            {"role": "assistant", "content": "Tail answer"},
+        ])
+
+        window, offset = _message_window_for_display(messages, msg_limit=30, expand_renderable=True)
+        renderable = [m for m in window if _message_counts_as_renderable_for_window(m)]
+
+        assert offset < len(messages) - 30
+        assert len(renderable) == 30
+        assert renderable[0]["content"] == "Visible 7"
+        assert renderable[-2]["content"] == "Tail question"
+        assert renderable[-1]["content"] == "Tail answer"
 
     def test_messages_offset_with_msg_before(self):
         """_messages_offset for msg_before=50, msg_limit=30."""

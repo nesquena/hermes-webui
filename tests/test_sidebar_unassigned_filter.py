@@ -58,8 +58,11 @@ def test_unassigned_chip_filter_logic():
     assert "_activeProject===NO_PROJECT_FILTER" in js, (
         "renderSessionListFromCache must branch on the NO_PROJECT_FILTER sentinel"
     )
-    assert "profileFiltered.filter(s=>!s.project_id)" in js, (
+    assert "if(_activeProject===NO_PROJECT_FILTER){" in js, (
         "The Unassigned filter must select sessions without a project_id"
+    )
+    assert "if(s.project_id) continue;" in js, (
+        "The Unassigned filter must skip sessions with a project_id"
     )
 
 

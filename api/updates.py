@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -686,6 +687,19 @@ def _ignored_agent_update_info() -> dict:
     return {'name': 'agent', 'behind': 0, 'ignored': True}
 
 
+def cached_update_status(*, include_agent=True):
+    """Return cached update status without performing network or git mutations."""
+    include_agent = bool(include_agent)
+    with _cache_lock:
+        cached = dict(_update_cache)
+    if cached.get('include_agent') != include_agent:
+        cached['include_agent'] = include_agent
+        if not include_agent:
+            cached['agent'] = _ignored_agent_update_info()
+    cached['cached'] = True
+    return cached
+
+
 def check_for_updates(force=False, *, include_agent=True):
     """Return cached update status for webui and agent repos."""
     global _check_in_progress
@@ -1012,6 +1026,34 @@ def summarize_update_payload(updates: dict, llm_callback=None, *, target: str | 
 # ── Self-update application ───────────────────────────────────────────────────
 
 
+def _purge_agent_pycache(repo_dir: Path) -> None:
+    """Delete all __pycache__ dirs under *repo_dir* so the next import
+    recompiles from source, avoiding stale-bytecode errors after git pull.
+
+    ``os.execv()`` replaces the process image but does not touch the
+    on-disk bytecode cache.  When a ``git pull`` writes new ``.py`` files
+    whose mtime lands within the same second as the pre-existing ``.pyc``
+    files, CPython may trust the stale cache and serve an old class
+    definition.  The mismatch between cached class symbols and newly-imported
+    supporting modules causes ``AttributeError`` (e.g. a method added in
+    the same update is missing from the cached ``AIAgent`` class).
+
+    This is safe to call right before ``os.execv()`` because the current
+    process is about to be replaced — losing the bytecode cache is harmless
+    and forces a clean recompilation on the next startup.
+    """
+    if repo_dir is None or not repo_dir.exists():
+        return
+    try:
+        for pycache in repo_dir.rglob("__pycache__"):
+            try:
+                shutil.rmtree(pycache, ignore_errors=True)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
 def _schedule_restart(delay: float = 2.0) -> None:
     """Re-exec this process after *delay* seconds.
 
@@ -1048,6 +1090,14 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # released atomically by the kernel.
         with _apply_lock:
             _wait_until_restart_safe()
+            # Purge bytecode caches so the new process imports from
+            # current source.  Without this, Python may serve stale .pyc
+            # files whose mtime matches the just-pulled .py files,
+            # causing AttributeError when new methods are missing from
+            # cached class definitions.
+            if _AGENT_DIR is not None:
+                _purge_agent_pycache(Path(_AGENT_DIR))
+            _purge_agent_pycache(REPO_ROOT)
             try:
                 # Re-exec into the just-pulled image.
                 #
@@ -1073,10 +1123,37 @@ def _schedule_restart(delay: float = 2.0) -> None:
                 # `[sys.executable] + sys.argv` form is the canonical CPython
                 # re-exec idiom (same shape Flask/Django reloaders use) and
                 # is the correct path.
-                if getattr(sys, "frozen", False):
-                    os.execv(sys.executable, sys.argv)
+                #
+                # IMPORTANT: On Windows, os.execv() does NOT replace the
+                # current process — it spawns a new process while the old
+                # one keeps running.  This causes "address already in use"
+                # because the old process still holds the port.  On Windows
+                # we use subprocess.Popen() + os._exit() instead.
+                if sys.platform == 'win32':
+                    import subprocess
+                    if getattr(sys, "frozen", False):
+                        args = sys.argv
+                    else:
+                        args = [sys.executable] + sys.argv
+                    # Start new process detached, redirect all stdio to
+                    # avoid broken-pipe errors when the parent exits.
+                    subprocess.Popen(
+                        args,
+                        cwd=os.getcwd(),
+                        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                        close_fds=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    # Exit immediately — the port is released as soon as
+                    # this process dies, allowing the new process to bind.
+                    os._exit(0)
                 else:
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                    if getattr(sys, "frozen", False):
+                        os.execv(sys.executable, sys.argv)
+                    else:
+                        os.execv(sys.executable, [sys.executable] + sys.argv)
             except Exception:
                 # Last-resort: if execv fails for any reason, just exit so the
                 # process supervisor (start.sh / Docker) restarts us.
@@ -1209,7 +1286,7 @@ def _apply_update_inner(target):
         }
     stashed = False
     if status_out:
-        _, ok = _run_git(['stash'], path)
+        _, ok = _run_git(['stash', 'push', '-m', 'hermes-update-autostash'], path)
         if not ok:
             return {'ok': False, 'message': 'Failed to stash local changes'}
         stashed = True
@@ -1225,57 +1302,139 @@ def _apply_update_inner(target):
         pull_args.extend(['origin', compare_ref])
     pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
     if not pull_ok:
+        pull_lower = pull_out.lower()
+        detail = pull_out.strip()[:300] if pull_out.strip() else '(no output from git)'
+        diverged_failure = (
+            'not possible to fast-forward' in pull_lower or 'diverged' in pull_lower
+        )
+        restored_stash = False
+        stash_drop_failed = False
         if stashed:
-            _run_git(['stash', 'pop'], path)
+            _, apply_ok = _run_git(['stash', 'apply'], path)
+            if apply_ok:
+                _, drop_ok = _run_git(['stash', 'drop'], path)
+                restored_stash = True
+                stash_drop_failed = not drop_ok
+            else:
+                _, reset_ok = _run_git(['reset', '--hard', 'HEAD'], path)
+                if not reset_ok:
+                    response = {
+                        'ok': False,
+                        'message': (
+                            'Pull failed, and failed to clean up a stash-apply '
+                            'conflict while restoring local changes. Manual '
+                            'intervention needed: run git -C ' + str(path) + ' '
+                            'reset --hard HEAD to remove conflict markers. Your '
+                            'changes remain in the git stash. Pull error: '
+                            + detail
+                        ),
+                        'stash_conflict': True,
+                    }
+                    if diverged_failure:
+                        response['diverged'] = True
+                    return response
+                response = {
+                    'ok': False,
+                    'message': (
+                        f'Pull failed, and your local {target} modifications '
+                        'conflicted while restoring from stash. The index and '
+                        'tracked files were restored to HEAD, and your changes '
+                        'remain in the git stash. To inspect: git -C ' + str(path) + ' stash show -p. '
+                        'To re-apply: git -C ' + str(path) + ' stash apply, then '
+                        'resolve conflicts. Pull error: ' + detail
+                    ),
+                    'stash_conflict': True,
+                }
+                if diverged_failure:
+                    response['diverged'] = True
+                return response
+
+        restored_note_parts = []
+        if restored_stash:
+            restored_note_parts.append(
+                f'Local {target} modifications were restored to the working '
+                'tree; save or stash them before running destructive recovery '
+                'commands.'
+            )
+            if stash_drop_failed:
+                restored_note_parts.append(
+                    'The temporary stash entry may still be present because '
+                    'git stash drop failed.'
+                )
+        restored_note = ' '.join(restored_note_parts)
 
         # Diagnose the most common failure modes and surface actionable messages.
-        pull_lower = pull_out.lower()
-        if 'not possible to fast-forward' in pull_lower or 'diverged' in pull_lower:
+        if diverged_failure:
+            message_parts = [
+                f'The local {target} repo has commits that are not on the remote '
+                'branch, so a fast-forward update is not possible.'
+            ]
+            if restored_note:
+                message_parts.append(restored_note)
+            message_parts.append(
+                'Run: git -C ' + str(path) + ' fetch origin && '
+                'git -C ' + str(path) + ' reset --hard ' + compare_ref
+            )
             return {
                 'ok': False,
-                'message': (
-                    f'The local {target} repo has commits that are not on the remote '
-                    'branch, so a fast-forward update is not possible. '
-                    'Run: git -C ' + str(path) + ' fetch origin && '
-                    'git -C ' + str(path) + ' reset --hard ' + compare_ref
-                ),
+                'message': ' '.join(message_parts),
                 'diverged': True,
             }
         if 'does not track' in pull_lower or 'no tracking information' in pull_lower:
+            message_parts = [
+                f'The local {target} branch has no upstream tracking branch configured.'
+            ]
+            if restored_note:
+                message_parts.append(restored_note)
+            message_parts.append(
+                'Run: git -C ' + str(path) + ' branch --set-upstream-to=' + compare_ref
+            )
             return {
                 'ok': False,
-                'message': (
-                    f'The local {target} branch has no upstream tracking branch configured. '
-                    'Run: git -C ' + str(path) + ' branch --set-upstream-to=' + compare_ref
-                ),
+                'message': ' '.join(message_parts),
             }
         # Generic fallback — include the raw git output for debugging.
-        detail = pull_out.strip()[:300] if pull_out.strip() else '(no output from git)'
-        return {'ok': False, 'message': f'Pull failed: {detail}'}
+        message_parts = [f'Pull failed: {detail}']
+        if restored_note:
+            message_parts.append(restored_note)
+        return {'ok': False, 'message': ' '.join(message_parts)}
 
-    # Pop stash if we stashed
+    # Re-apply stash if we stashed.
+    stash_drop_failed = False
     if stashed:
-        _, pop_ok = _run_git(['stash', 'pop'], path)
-        if not pop_ok:
-            _, reset_ok = _run_git(['reset', '--merge'], path)
+        _, apply_ok = _run_git(['stash', 'apply'], path)
+        if apply_ok:
+            _, drop_ok = _run_git(['stash', 'drop'], path)
+            stash_drop_failed = not drop_ok
+        else:
+            _, reset_ok = _run_git(['reset', '--hard', 'HEAD'], path)
             if not reset_ok:
                 return {
                     'ok': False,
                     'message': (
                         'Updated successfully, but failed to clean up a '
-                        'stash-pop conflict. Manual intervention needed: '
-                        'run git reset --merge in ' + str(path)
+                        'stash-apply conflict. Manual intervention needed: '
+                        'run git -C ' + str(path) + ' reset --hard HEAD to '
+                        'remove conflict markers. Your changes remain in the '
+                        'git stash.'
                     ),
                     'stash_conflict': True,
                 }
+            with _cache_lock:
+                _update_cache['checked_at'] = 0
+            _schedule_restart()
             return {
-                'ok': False,
+                'ok': True,
                 'message': (
-                    f'{target} updated to the latest version, but your local '
-                    'modifications conflict with upstream changes. Your changes '
-                    'are preserved in stash@{0}. To re-apply them: '
-                    'git -C ' + str(path) + ' stash pop, then resolve conflicts.'
+                    f'{target} updated to the latest version. Your local '
+                    'modifications conflicted with upstream changes and were '
+                    'set aside in a git stash. To inspect: '
+                    'git -C ' + str(path) + ' stash show -p. To re-apply: '
+                    'git -C ' + str(path) + ' stash apply, then resolve '
+                    'conflicts. Drop the stash after you are satisfied.'
                 ),
+                'target': target,
+                'restart_scheduled': True,
                 'stash_conflict': True,
             }
 
@@ -1295,10 +1454,16 @@ def _apply_update_inner(target):
     # setTimeout(() => location.reload(), 1500) on success, so the page reload
     # and the restart land at roughly the same time.
     _schedule_restart()
+    message = f'{target} updated successfully'
+    if stash_drop_failed:
+        message += (
+            '. Local modifications were restored, but the temporary stash '
+            'entry may still be present because git stash drop failed.'
+        )
 
     return {
         'ok': True,
-        'message': f'{target} updated successfully',
+        'message': message,
         'target': target,
         'restart_scheduled': True,
     }

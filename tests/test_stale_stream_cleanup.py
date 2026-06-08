@@ -81,6 +81,80 @@ def test_chat_start_clears_stale_pending_state_not_only_active_id():
     assert stale_comment_pos < cleanup_pos < stream_id_pos
 
 
+def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_path):
+    """A concurrent chat_start must not overwrite stream ownership.
+
+    The first request can pass the pre-lock active_stream_id check while another
+    request is waiting/running. Once this request enters the session lock, it
+    must re-read active_stream_id and reject instead of creating a ghost stream.
+    """
+    config.STREAMS.clear()
+    config.SESSION_AGENT_LOCKS.clear()
+    existing_stream_id = "already-running-stream"
+
+    class ChatStartSession:
+        session_id = "duplicate-start-session"
+
+        def __init__(self):
+            self.active_stream_id = None
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.messages = []
+            self.title = "Untitled"
+            self.worktree_path = None
+            self.workspace = None
+            self.model = None
+            self.model_provider = None
+
+        def save(self, *args, **kwargs):
+            return None
+
+    session = ChatStartSession()
+
+    class MutatingSessionLock:
+        def __enter__(self):
+            session.active_stream_id = existing_stream_id
+            session.pending_user_message = "prompt already claimed by another start"
+            session.pending_started_at = 123.0
+            routes.STREAMS[existing_stream_id] = queue.Queue()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class NoopThread:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: MutatingSessionLock())
+    monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
+    monkeypatch.setattr(routes.threading, "Thread", NoopThread)
+
+    try:
+        response = routes._start_chat_stream_for_session(
+            session,
+            msg="please start once",
+            attachments=[],
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider=None,
+        )
+
+        assert response["_status"] == 409
+        assert response["active_stream_id"] == existing_stream_id
+        assert session.active_stream_id == existing_stream_id
+        assert "new-stream" not in routes.STREAMS
+    finally:
+        routes.STREAMS.pop(existing_stream_id, None)
+
+
 def test_stale_stream_cleanup_does_not_clobber_concurrent_chat_start(monkeypatch):
     """Regression for #1533: stale cleanup must not erase a new stream id.
 

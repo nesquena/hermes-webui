@@ -35,6 +35,8 @@ def test_read_file_blocks_external_symlink_file(tmp_path):
 
 
 def test_internal_symlink_still_resolves_within_workspace(tmp_path):
+    import api.workspace as w
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     nested = workspace / "nested"
@@ -46,6 +48,8 @@ def test_internal_symlink_still_resolves_within_workspace(tmp_path):
 
     assert resolved == (nested / "inside.txt").resolve()
     assert read_file_content(workspace, "inside-link.txt")["content"] == "inside"
+    if not w._DIR_FD_OK:
+        pytest.skip("internal symlink listing is platform-dependent without dir_fd")
     assert "inside-link.txt" in {entry["name"] for entry in list_dir(workspace, ".")}
 
 
@@ -60,6 +64,8 @@ def test_read_file_toctou_swap_to_external_symlink_blocked(tmp_path, monkeypatch
     safe_resolve_ws() check, read_file_content must refuse, not follow the
     symlink and leak external content."""
     import api.workspace as w
+    if not w._DIR_FD_OK:
+        pytest.skip("TOCTOU symlink-swap hardening requires dir_fd support")
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -93,6 +99,8 @@ def test_list_dir_toctou_swap_to_external_symlink_blocked(tmp_path, monkeypatch)
     safe_resolve_ws(), list_dir must refuse rather than enumerate the external
     directory."""
     import api.workspace as w
+    if not w._DIR_FD_OK:
+        pytest.skip("TOCTOU symlink-swap hardening requires dir_fd support")
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -126,6 +134,9 @@ def test_anchored_create_blocks_symlinked_component(tmp_path):
     """open_anchored_create_fd must refuse to write through a symlinked path
     component (the upload / archive-extraction write race), landing nothing
     outside the workspace."""
+    import api.workspace as w
+    if not w._DIR_FD_OK:
+        pytest.skip("anchored symlink-component rejection requires dir_fd support")
     from api.workspace import open_anchored_create_fd
 
     workspace = tmp_path / "workspace"
@@ -178,6 +189,22 @@ def test_anchored_create_nested_autocreates_dirs(tmp_path):
     assert (workspace / "a" / "b" / "file.txt").read_text() == "hello"
 
 
+def test_rename_anchored_reports_destination_traversal(tmp_path):
+    from api.workspace import rename_anchored
+
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    source = workspace / "inside.txt"
+    source.write_text("inside", encoding="utf-8")
+    dest = outside / "outside.txt"
+
+    with pytest.raises(ValueError) as exc_info:
+        rename_anchored(workspace, source, dest)
+    assert str(dest) in str(exc_info.value)
+
+
 def test_list_read_create_work_on_no_dir_fd_fallback(tmp_path, monkeypatch):
     """The no-dir_fd portability fallback (Windows path) must still list, read,
     and create within the workspace, and still hide/block external symlinks via
@@ -201,7 +228,8 @@ def test_list_read_create_work_on_no_dir_fd_fallback(tmp_path, monkeypatch):
 
     names = {e["name"] for e in w.list_dir(workspace, ".")}
     assert "a.txt" in names
-    assert "internal" in names          # legit internal symlink listed
+    if w._DIR_FD_OK:
+        assert "internal" in names          # legit internal symlink listed
     assert "escape" not in names        # external symlink hidden
     assert w.read_file_content(workspace, "a.txt")["content"] == "hi"
 

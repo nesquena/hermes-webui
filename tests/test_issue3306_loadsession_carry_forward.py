@@ -31,7 +31,7 @@ def _load_session_clear_block() -> str:
 
 def _ensure_messages_loaded_body() -> str:
     start = SESSIONS_JS.index("async function _ensureMessagesLoaded")
-    return SESSIONS_JS[start: start + 2500]
+    return SESSIONS_JS[start: start + 3000]
 
 
 def test_pending_carry_forward_snapshot_declared_at_module_scope():

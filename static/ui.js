@@ -307,9 +307,11 @@ let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 // Cached visWithIdx array — invalidated when S.messages.length changes.
 let _visWithIdxCache=null;
 let _visWithIdxCacheLen=0;
+let _visWithIdxCacheSrc=null;  // S.messages reference — detects wholesale replacement with same length
 function clearVisibleMessageRowCache(){
   _visWithIdxCache=null;
   _visWithIdxCacheLen=0;
+  _visWithIdxCacheSrc=null;
 }
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
@@ -355,9 +357,10 @@ function _messageRenderableMessageCount(){
   for(const m of (S.messages||[])){
     if(!m||!m.role||m.role==='tool') continue;
     if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) continue;
+    if(_isRecoveryControlMessage(m)) continue;
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) count++;
+    if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) count++;
   }
   return count;
 }
@@ -416,9 +419,18 @@ async function jumpToSessionStart(){
   _messageUserUnpinned=true;
   _programmaticScroll=true;
   try{
-    if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+    // During active streaming, skip full message load — API response won't
+    // include live messages from the current turn, and replacing S.messages
+    // would lose user/assistant/tool messages.
+    if(!(S.busy||S.activeStreamId)){
+      if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+    }
     _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
-    renderMessages({ preserveScroll:true });
+    // During streaming, skip renderMessages — it rebuilds the DOM but tool card
+    // insertion is blocked by !S.busy, losing Activity until "done" fires.
+    if(!(S.busy||S.activeStreamId)){
+      renderMessages({ preserveScroll:true });
+    }
     requestAnimationFrame(()=>{
       container.scrollTop=0;
       _updateSessionStartJumpButton();
@@ -1376,13 +1388,13 @@ function _addLiveModelsToSelect(provider, models, sel){
   if(!providerGroup){
     providerGroup=document.createElement('optgroup');
     providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
+    providerGroup.dataset.provider=provider;
     sel.appendChild(providerGroup);
+  }else if(!providerGroup.dataset.provider){
+    providerGroup.dataset.provider=provider;
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
-  // Normalized dedup: strip @provider: prefix and namespace so
-  // 'minimax/minimax-m2.7' matches '@nous:minimax/minimax-m2.7' (#907).
-  // Named custom IDs (@custom:name:model) have a known two-segment prefix
-  // and must strip both to dedup against bare model IDs (#3478).
+  // Normalized dedup strips provider/custom prefixes and namespaces (#907, #3478).
   const _normId=id=>{
     let s=String(id||'');
     if(s.startsWith('@')&&s.includes(':')){
@@ -1412,6 +1424,7 @@ function _addLiveModelsToSelect(provider, models, sel){
     opt.value=mid;
     opt.textContent=m.label||m.id;
     opt.title='Live model — fetched from provider';
+    opt.dataset.provider=provider;
     providerGroup.appendChild(opt);
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
@@ -2536,16 +2549,7 @@ function _compressionLiveCardState(){
 }
 function _updateCompressionElapsedCards(state){
   if(!state)return false;
-  const preview=_autoCompressionPreviewText(state), detail=_autoCompressionDetailText(state);
-  let updated=false;
-  document.querySelectorAll('.tool-card-compress-auto.tool-card-compress-running').forEach(card=>{
-    const previewEl=card.querySelector('.tool-card-preview');
-    const detailEl=card.querySelector('.tool-card-result pre');
-    if(previewEl) previewEl.textContent=preview;
-    if(detailEl) detailEl.textContent=detail;
-    updated=true;
-  });
-  return updated;
+  return false;
 }
 function _updateCompressionElapsedTimer(){
   const state=_compressionStateForCurrentSession()||_compressionLiveCardState();
@@ -2559,6 +2563,9 @@ function _clearCompressionElapsedTimer(){if(_compressionElapsedTimer){clearInter
 let _activityElapsedTimer=null;
 let _activityElapsedTimerGroup=null;
 function _activityNowSeconds(){return Date.now()/1000;}
+function _isActivityTimerGroup(group){
+  return !!(group&&group.getAttribute('data-run-activity-group')==='1');
+}
 function _activityElapsedStartedAt(group){
   if(!group)return null;
   const raw=(group.dataset&&group.dataset.turnStartedAt!==undefined&&group.dataset.turnStartedAt!=='')
@@ -2752,6 +2759,30 @@ function _syncMobileCtxDisplay(state){
   _setCtxCompressButton(compressBtn,state.compressText||'');
 }
 
+function _mergeUsageForCtxIndicator(latest, fallback){
+  const latestObj=(latest&&typeof latest==='object')?latest:{};
+  const fallbackObj=(fallback&&typeof fallback==='object')?fallback:{};
+  const merged={...latestObj};
+  for(const field of [
+    'input_tokens','output_tokens','estimated_cost',
+    'cache_read_tokens','cache_write_tokens','cache_hit_percent',
+    'turn_cache_hit_percent','duration_seconds','tps','gateway_routing',
+  ]){
+    if(merged[field]==null&&fallbackObj[field]!=null){
+      merged[field]=fallbackObj[field];
+    }
+  }
+  if(!(Number(latestObj.context_length)>0)&&Number(fallbackObj.context_length)>0){
+    merged.context_length=fallbackObj.context_length;
+  }
+  for(const field of ['threshold_tokens','last_prompt_tokens']){
+    if(latestObj[field]==null&&fallbackObj[field]!=null){
+      merged[field]=fallbackObj[field];
+    }
+  }
+  return merged;
+}
+
 // Context usage indicator in composer footer
 function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
@@ -2923,6 +2954,13 @@ function _shouldFollowMessagesOnDomReplace(){
   // A broad near-bottom window causes long answers/mobile readers who scroll up
   // a little to read mid-stream to get snapped back to the bottom on completion.
   return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(120));
+}
+function _followMessagesAfterDomReplace(){
+  if(_shouldFollowMessagesOnDomReplace()){
+    scrollToBottom();
+    return true;
+  }
+  return false;
 }
 function _settleMessageScrollToBottom(force){
   // Markdown post-processing (Prism, tables, Mermaid/KaTeX/PDF placeholders)
@@ -3125,14 +3163,19 @@ function _sanitizeThinkingDisplayText(text){
   return stripped.trim();
 }
 
-function _stripVisibleAssistantEchoFromThinking(thinkingText, visibleText){
-  let out=String(thinkingText||'');
-  const visible=String(visibleText||'');
-  if(!out||!visible) return out.trim();
-  visible.split(/\n{2,}/).map(s=>s.trim()).filter(s=>s.length>=20).forEach(snippet=>{
-    out=out.split(snippet).join('');
-  });
-  return out.trim();
+function _normalizeThinkingEchoCompare(text){
+  return String(text||'').replace(/\s+/g,' ').trim();
+}
+
+function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
+  const clean=_sanitizeThinkingDisplayText(thinkingText);
+  const thinkingNorm=_normalizeThinkingEchoCompare(clean);
+  if(!thinkingNorm) return '';
+  for(const visibleText of visibleTexts){
+    const visibleNorm=_normalizeThinkingEchoCompare(visibleText);
+    if(visibleNorm&&visibleNorm===thinkingNorm) return '';
+  }
+  return clean;
 }
 
 function renderMd(raw){
@@ -3797,6 +3840,7 @@ function setComposerStatus(t){
 }
 
 let _composerLockState=null;
+let _compressionPlaceholderSaved=null;
 
 function lockComposerForClarify(placeholderText){
   const input=$('msg');
@@ -3868,6 +3912,7 @@ function getComposerPrimaryAction(){
   if(!isBusy) return hasContent?'send':'disabled';
   if(!hasContent){
     if(S.activeStreamId&&typeof cancelStream==='function') return 'stop';
+    if(compressionRunning) return 'queue';
     return 'disabled';
   }
   const explicitAction=_getExplicitBusyCommandAction(msg&&msg.value);
@@ -3912,10 +3957,10 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    const _dcompr=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
     if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
-    else if(_dcompr) _btnTitle=_tt('composer_disabled_compression','Waiting for compression to finish');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
+  }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
+    _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
   }else{
     const _tmap={send:'Send message',queue:'Queue message',interrupt:'Interrupt and send',steer:'Steer current response',stop:'Stop generation'};
     _btnTitle=_tt('composer_'+action,_tmap[action]||'Send message');
@@ -4816,6 +4861,13 @@ function _compactInflightState(state){
     messages,
     uploaded:Array.isArray(state.uploaded)?state.uploaded.slice(-20):[],
     toolCalls,
+    lastAssistantText:state.lastAssistantText||'',
+    lastReasoningText:state.lastReasoningText||'',
+    lastRunJournalSeq:state.lastRunJournalSeq||0,
+    journalReplayFromStart:!!state.journalReplayFromStart,
+    currentActivityBurstId:state.currentActivityBurstId||0,
+    currentLiveSegmentSeq:state.currentLiveSegmentSeq||0,
+    activityBurstAnchors:Array.isArray(state.activityBurstAnchors)?state.activityBurstAnchors.slice(-50):[],
     todos,
     todoStateMeta,
   }, limits.stringChars);
@@ -5081,6 +5133,7 @@ function restoreLiveTurnHtmlForSession(sid){
   _mergeRestoredLiveAssistantSegment(restored, existing);
   if(existing) existing.replaceWith(restored);
   else inner.appendChild(restored);
+  if(typeof normalizeLiveActivityGroupPlacement==='function') normalizeLiveActivityGroupPlacement(restored);
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
@@ -5631,6 +5684,8 @@ async function applyUpdates(){
     return;
   }
   try{
+    const stashConflictMessages=[];
+    const baselineServerIdentity = await _readHealthServerIdentity();
     for(const target of targets){
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
       if(!res.ok){
@@ -5638,11 +5693,16 @@ async function applyUpdates(){
         resetApplyButton(0);
         return;
       }
+      if(res.stash_conflict){
+        stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
+        if(errEl){errEl.textContent=stashConflictMessages.join('\n\n');errEl.style.display='block';}
+      }
     }
-    showToast('Update applied — restarting…');
+    const stashConflictMessage=stashConflictMessages.join('\n\n');
+    showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload();
+    _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
     const msg=_formatUpdateApplyExceptionMessage(e);
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -5666,6 +5726,36 @@ function _showUpdateError(target,res){
     forceBtn.style.display='inline-block';
   }
 }
+function _normalizeHealthServerIdentity(rawIdentity){
+  if(rawIdentity===undefined||rawIdentity===null) return null;
+  if(typeof rawIdentity==='string'){
+    const value=rawIdentity.trim();
+    return value ? value : null;
+  }
+  const numeric=Number(rawIdentity);
+  return Number.isFinite(numeric) ? String(numeric) : null;
+}
+
+function _healthResponseServerIdentity(data){
+  if(!data||typeof data!=='object') return null;
+  const serverStartedAt=_normalizeHealthServerIdentity(data.server_started_at);
+  const hasUptimeSeconds=data.uptime_seconds!==null&&data.uptime_seconds!==undefined;
+  const uptimeSeconds=hasUptimeSeconds?Number(data.uptime_seconds):NaN;
+  const normalizedUptime=Number.isFinite(uptimeSeconds)&&uptimeSeconds>=0 ? uptimeSeconds : null;
+  if(serverStartedAt===null&&normalizedUptime===null) return null;
+  return {serverStartedAt,uptimeSeconds:normalizedUptime};
+}
+
+async function _readHealthServerIdentity() {
+  try {
+    const r=await fetch(new URL('health', document.baseURI||location.href).href,{cache:'no-store'});
+    if(!r.ok) return null;
+    const data=await r.json();
+    return _healthResponseServerIdentity(data);
+  } catch (_) {
+    return null;
+  }
+}
 async function forceUpdate(btn){
   const target=btn&&btn.dataset.target;
   if(!target) return;
@@ -5681,6 +5771,7 @@ async function forceUpdate(btn){
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
+    const baselineServerIdentity = await _readHealthServerIdentity();
     const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
@@ -5690,7 +5781,7 @@ async function forceUpdate(btn){
     showToast('Force update applied — restarting…');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload();
+    _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
     if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
     btn.disabled=false;btn.textContent='Force update';
@@ -5705,12 +5796,36 @@ async function _waitForServerThenReload(opts){
   opts=opts||{};
   const interval=opts.interval||500;
   const maxMs=opts.maxMs||15000;
+  const baselineServerIdentity=(()=>{
+    const rawIdentity=opts.baselineServerIdentity;
+    if(!rawIdentity||typeof rawIdentity!=='object'){
+      const normalizedServerStartedAt=_normalizeHealthServerIdentity(rawIdentity);
+      return normalizedServerStartedAt===null ? null : {serverStartedAt:normalizedServerStartedAt,uptimeSeconds:null};
+    }
+    const normalizedIdentity={
+      serverStartedAt:_normalizeHealthServerIdentity(rawIdentity.serverStartedAt),
+      uptimeSeconds:Number.isFinite(Number(rawIdentity.uptimeSeconds))&&Number(rawIdentity.uptimeSeconds)>=0 ? Number(rawIdentity.uptimeSeconds) : null,
+    };
+    return normalizedIdentity.serverStartedAt===null&&normalizedIdentity.uptimeSeconds===null ? null : normalizedIdentity;
+  })();
   window._restartingForUpdate=true;
   const msgEl=$('reconnectMsg');
   const banner=$('reconnectBanner');
   if(msgEl) msgEl.textContent='⏳ Restarting… please wait';
   if(banner) banner.classList.add('visible');
   const deadline=Date.now()+maxMs;
+  // Track restart-outage evidence. An outage (failed or non-OK /health probes)
+  // followed by a healthy response is a reliable new-instance signal even when
+  // only uptime_seconds is comparable and the replacement's uptime is not strictly
+  // lower than the captured baseline (e.g. a deployment that strips
+  // server_started_at and whose baseline uptime was very low). We require at least
+  // TWO consecutive outage probes before trusting it, so a single transient network
+  // blip (with the OLD process still up and its uptime merely increasing) cannot
+  // trigger a premature reload onto the old server. Both thrown fetch errors AND
+  // non-OK responses (e.g. a reverse-proxy 502/503 during restart) count as outage
+  // evidence. (#3713 Codex catches)
+  let _consecutiveOutages=0;
+  const _restartOutageObserved=()=>_consecutiveOutages>=2;
   // Give the server a moment to actually begin its restart before the first
   // probe — otherwise the old process may still respond ok on the first poll.
   await new Promise(r=>setTimeout(r, interval));
@@ -5721,11 +5836,78 @@ async function _waitForServerThenReload(opts){
         let data={};
         try{ data=await r.json(); }catch(_){}
         if(data && data.status==='ok'){
-          location.reload();
-          return;
+          const nextServerIdentity=_healthResponseServerIdentity(data);
+          if (baselineServerIdentity===null){
+            location.reload();
+            return;
+          }
+          if(
+            nextServerIdentity===null &&
+            (
+              baselineServerIdentity.serverStartedAt!==null ||
+              baselineServerIdentity.uptimeSeconds!==null
+            )
+          ){
+            // If the replacement server comes back healthy without either
+            // identity field after the baseline exposed a comparable identity,
+            // treat that healthy response as the new server instead of timing
+            // out on an uncomparable identity shape.
+            location.reload();
+            return;
+          }
+          if(
+            nextServerIdentity!==null &&
+            baselineServerIdentity.serverStartedAt!==null &&
+            nextServerIdentity.serverStartedAt===null &&
+            nextServerIdentity.uptimeSeconds!==null
+          ){
+            // If the baseline exposed server_started_at but the replacement
+            // health response degrades to uptime-only, there is no longer a
+            // comparable started_at field. Treat the first healthy uptime-only
+            // response as the new server instead of timing out.
+            location.reload();
+            return;
+          }
+          if(
+            nextServerIdentity!==null&&(
+              (baselineServerIdentity.serverStartedAt===null&&nextServerIdentity.serverStartedAt!==null)||
+              (baselineServerIdentity.serverStartedAt!==null&&nextServerIdentity.serverStartedAt!==null&&nextServerIdentity.serverStartedAt!==baselineServerIdentity.serverStartedAt)||
+              (baselineServerIdentity.uptimeSeconds!==null&&nextServerIdentity.uptimeSeconds!==null&&nextServerIdentity.uptimeSeconds<baselineServerIdentity.uptimeSeconds)
+            )
+          ){
+            location.reload();
+            return;
+          }
+          if(
+            _restartOutageObserved() &&
+            nextServerIdentity!==null &&
+            baselineServerIdentity.serverStartedAt===null &&
+            nextServerIdentity.serverStartedAt===null &&
+            baselineServerIdentity.uptimeSeconds!==null &&
+            nextServerIdentity.uptimeSeconds!==null
+          ){
+            // Uptime-only on both sides AND we saw a sustained restart outage
+            // (>=2 consecutive failed/non-OK probes) before this healthy response:
+            // treat that outage as the restart, so reload even though the
+            // replacement uptime is not strictly lower than a very-low baseline.
+            location.reload();
+            return;
+          }
+          // Healthy response still describing the pre-restart process: this is the
+          // OLD server answering, so any earlier outage was a transient blip, not a
+          // restart — reset the outage evidence so it can't accumulate into a false
+          // positive across unrelated blips.
+          _consecutiveOutages=0;
+          // Keep polling while /health still describes the pre-restart process.
+        }else{
+          // Reachable but not status:ok (still starting up) — counts as outage.
+          _consecutiveOutages++;
         }
+      }else{
+        // Non-OK HTTP (e.g. reverse-proxy 502/503 during restart) — outage evidence.
+        _consecutiveOutages++;
       }
-    }catch(_){ /* socket closed during restart — retry */ }
+    }catch(_){ _consecutiveOutages++; /* socket closed during restart — retry */ }
     await new Promise(r=>setTimeout(r, interval));
   }
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
@@ -5966,7 +6148,17 @@ function _isRecoveryControlMessage(m){
 function _assistantMessageHasVisibleContent(m){
   if(!m||m.role!=='assistant') return false;
   if(_isRecoveryControlMessage(m)) return false;
-  return !!msgContent(m);
+  const content=m.content;
+  if(typeof content==='string') return !_isAssistantEmptyPlaceholderContent(m, content)&&!!content.trim();
+  if(!Array.isArray(content)) return false;
+  return content.some(part=>{
+    if(typeof part==='string') return !!part.trim();
+    if(!part||typeof part!=='object') return false;
+    if(part.type==='text'||part.type==='input_text'||part.type==='output_text'){
+      return !!String(part.text||part.content||'').trim();
+    }
+    return false;
+  });
 }
 
 function _fmtDateSep(d){
@@ -5983,9 +6175,14 @@ function _fmtDateSep(d){
 const _ERR_MSG_RE=/^(?:\*\*error\b|error:|connection lost|no response received)/i;
 function _messageHasReasoningPayload(m){
   if(!m||m.role!=='assistant') return false;
-  if(m.reasoning) return true;
+  if(m.reasoning||m.reasoning_content||m.thinking||m._reasoning) return true;
   if(Array.isArray(m.content)) return m.content.some(p=>p&&(p.type==='thinking'||p.type==='reasoning'));
   return /^\s*(?:<think>[\s\S]*?<\/think>|<\|channel\|?>thought\n?[\s\S]*?<channel\|>|<\|turn\|>thinking\n[\s\S]*?<turn\|>)/.test(String(m.content||''));
+}
+function _isAssistantEmptyPlaceholderContent(m, content){
+  if(!m||m.role!=='assistant') return false;
+  if(String(content||'').trim()!=='(empty)') return false;
+  return _messageHasReasoningPayload(m);
 }
 function _formatTurnTps(value){
   const n=Number(value);
@@ -6030,6 +6227,124 @@ function _createAssistantTurn(tsTitle='', tpsText=''){
 function _assistantTurnBlocks(turn){
   return turn?turn.querySelector('.assistant-turn-blocks'):null;
 }
+function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, visibleContent, opts){
+  if(!m||m.role!=='assistant') return false;
+  const isTurnFinalAssistant=!!(opts&&opts.isTurnFinalAssistant);
+  const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
+  const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
+  if(m._live) return true;
+  if(hasVisibleText&&isTurnFinalAssistant) return false;
+  if(m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined) return true;
+  const hasToolMetadata=!!(
+    (toolCallAssistantIdxs&&toolCallAssistantIdxs.has(rawIdx))||
+    (Array.isArray(m.tool_calls)&&m.tool_calls.length)||
+    (Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use'))
+  );
+  if(hasVisibleText) return false;
+  if(hasToolMetadata) return true;
+  return false;
+}
+function _assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs){
+  return !!_assistantReasoningPayloadText(m)||_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs);
+}
+function _assistantReasoningPayloadText(m){
+  if(!m||m.role!=='assistant') return '';
+  const direct=m.reasoning_content||m.reasoning||m.thinking||m._reasoning||'';
+  if(String(direct||'').trim()) return String(direct).trim();
+  if(Array.isArray(m.content)){
+    const parts=m.content
+      .filter(p=>p&&typeof p==='object'&&(p.type==='thinking'||p.type==='reasoning'))
+      .map(p=>p.text||p.content||'')
+      .filter(text=>String(text||'').trim());
+    return parts.join('\n').trim();
+  }
+  const text=String(m.content||'');
+  // Extract a LEADING thinking block even when visible answer text follows it
+  // (e.g. "<think>…</think>4"). The matching display-content stripper
+  // (_stripLeadingAssistantThinkingMarkup) is non-anchored, so the extractor must
+  // be too — a trailing `$` anchor here dropped the reasoning whenever the turn
+  // also had a visible answer, hiding the Thinking card entirely (#3401 regression
+  // vs master, which used the non-anchored form). (#3709/#3592 family)
+  const thinkMatch=text.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
+  if(thinkMatch) return thinkMatch[1].trim();
+  const thoughtMatch=text.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
+  if(thoughtMatch) return thoughtMatch[1].trim();
+  const turnMatch=text.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
+  if(turnMatch) return turnMatch[1].trim();
+  return '';
+}
+function _stripLeadingAssistantThinkingMarkup(content){
+  let out=String(content||'');
+  const thinkMatch=out.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
+  if(thinkMatch) out=out.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'').trimStart();
+  const thoughtMatch=out.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
+  if(thoughtMatch) out=out.replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'').trimStart();
+  const turnMatch=out.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
+  if(turnMatch) out=out.replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trimStart();
+  return out;
+}
+function _assistantVisibleContentForReasoningCompare(m){
+  if(!m||m.role!=='assistant') return '';
+  let content=m.content||'';
+  if(Array.isArray(content)){
+    content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
+  }
+  if(typeof content==='string') content=_stripLeadingAssistantThinkingMarkup(content);
+  if(_isMarkerOnlyAssistantCompressionMessage(m)){
+    content='**Error:** No response received after context compression. Please retry.';
+  }
+  if(_isAssistantEmptyPlaceholderContent(m, content)) return '';
+  return String(content||'');
+}
+function _assistantTurnFinalVisibleContentMap(visWithIdx){
+  const out=new Map();
+  let runIdxs=[];
+  let finalVisible='';
+  const flush=()=>{
+    for(const idx of runIdxs) out.set(idx, finalVisible);
+    runIdxs=[];
+    finalVisible='';
+  };
+  for(const entry of visWithIdx||[]){
+    const m=entry&&entry.m;
+    if(m&&m.role==='assistant'){
+      runIdxs.push(entry.rawIdx);
+      const visible=_assistantVisibleContentForReasoningCompare(m);
+      if(String(visible||'').trim()) finalVisible=visible;
+    }else{
+      flush();
+    }
+  }
+  flush();
+  return out;
+}
+function _assistantTurnVisibleContentMap(visWithIdx){
+  const out=new Map();
+  let runIdxs=[];
+  let visibleTexts=[];
+  const flush=()=>{
+    for(const idx of runIdxs) out.set(idx, visibleTexts.slice());
+    runIdxs=[];
+    visibleTexts=[];
+  };
+  for(const entry of visWithIdx||[]){
+    const m=entry&&entry.m;
+    if(m&&m.role==='assistant'){
+      runIdxs.push(entry.rawIdx);
+      const visible=_assistantVisibleContentForReasoningCompare(m);
+      if(String(visible||'').trim()) visibleTexts.push(visible);
+    }else{
+      flush();
+    }
+  }
+  flush();
+  return out;
+}
+function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visibleContent, turnFinalVisibleContent, turnVisibleContents){
+  const thinkingText=_assistantReasoningPayloadText(m);
+  const visibleTexts=Array.isArray(turnVisibleContents)?turnVisibleContents:[];
+  return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
+}
 function _thinkingCardHtml(text, open){
   const clean=_sanitizeThinkingDisplayText(text);
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
@@ -6042,7 +6357,9 @@ function isSimplifiedToolCalling(){
 function _thinkingActivityNode(text, open){
   const row=document.createElement('div');
   row.className='agent-activity-thinking';
+  row.setAttribute('data-worklog-thinking-card','1');
   row.innerHTML=_thinkingCardHtml(text, open);
+  _renderThinkingInto(row,text);
   return row;
 }
 // ── Activity-group user expand intent (#1298) ──────────────────────────────
@@ -6092,12 +6409,236 @@ function _onLiveActivityToggle(group){
   _liveActivityUserExpanded = !group.classList.contains('tool-call-group-collapsed');
 }
 function _toggleActivityGroup(summary){
-  const group=summary&&summary.closest?summary.closest('.tool-call-group'):null;
+  const group=summary&&summary.closest?summary.closest('.agent-activity-group,.tool-call-group'):null;
   if(!group) return;
   const collapsed=group.classList.toggle('tool-call-group-collapsed');
+  group.classList.toggle('open',!collapsed);
   summary.setAttribute('aria-expanded',String(!collapsed));
   _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
   if(typeof _onLiveActivityToggle==='function') _onLiveActivityToggle(group);
+}
+function _toggleToolWorklogGroup(summary){
+  const group=summary&&summary.closest?summary.closest('.tool-worklog-tool-group,.tool-group'):null;
+  if(group){
+    const collapsed=group.classList.toggle('tool-worklog-tool-group-collapsed');
+    group.classList.toggle('open',!collapsed);
+    summary.setAttribute('aria-expanded',String(!collapsed));
+    return;
+  }
+  return _toggleActivityGroup(summary);
+}
+function _worklogReasonHtmlFromAnchor(anchor, textOverride){
+  if(!anchor||!anchor.matches||!anchor.matches('.assistant-segment')) return '';
+  const body=anchor.querySelector&&anchor.querySelector('.msg-body');
+  const hasOverride=arguments.length>1;
+  const text=hasOverride?String(textOverride||''):((body?body.textContent:anchor.textContent)||'');
+  if(!String(text||'').trim()) return '';
+  if(String(text||'').trim()==='(empty)') return '';
+  if(hasOverride) return _worklogReasonHtmlFromText(text);
+  return body?body.innerHTML:esc(String(text||'').trim());
+}
+function _worklogReasonHtmlFromText(text){
+  const clean=_sanitizeThinkingDisplayText(text);
+  if(!String(clean||'').trim()) return '';
+  if(String(clean||'').trim()==='(empty)') return '';
+  return renderMd?renderMd(clean):esc(clean);
+}
+function _renderWorklogReasonInto(row, text){
+  if(!row) return;
+  const html=_worklogReasonHtmlFromText(text);
+  row.innerHTML=html;
+}
+function _worklogReasonNodeFromText(text, attrs){
+  const html=_worklogReasonHtmlFromText(text);
+  if(!html) return null;
+  const row=document.createElement('div');
+  row.className='wl-reason';
+  row.setAttribute('data-worklog-reason-source','reasoning');
+  if(attrs&&attrs.active) row.setAttribute('data-worklog-reason-active','1');
+  row.innerHTML=html;
+  return row;
+}
+let _worklogAnchorKeySeq=0;
+function _worklogReasonAnchorKey(anchor){
+  if(!anchor||!anchor.dataset) return '';
+  if(anchor.dataset.worklogAnchorKey) return anchor.dataset.worklogAnchorKey;
+  const segmentSeq=anchor.getAttribute('data-live-segment-seq')||'';
+  const burstId=anchor.getAttribute('data-activity-burst-id')||'';
+  const msgIdx=anchor.getAttribute('data-msg-idx')||'';
+  const raw=String(anchor.getAttribute('data-raw-text')||anchor.textContent||'').trim().slice(0,80);
+  const key=segmentSeq
+    ? `segment:${segmentSeq}`
+    : msgIdx
+    ? `msg:${msgIdx}`
+    : burstId&&raw
+    ? `burst:${burstId}:${raw}`
+    : burstId
+    ? `burst:${burstId}`
+    : `node:${++_worklogAnchorKeySeq}`;
+  anchor.dataset.worklogAnchorKey=key;
+  return key;
+}
+function _syncWorklogReasonFromAnchor(group, anchor, displayTextOverride){
+  const list=_toolWorklogListEl(group);
+  if(!group||!list) return;
+  const anchorKey=_worklogReasonAnchorKey(anchor);
+  const html=arguments.length>2
+    ? _worklogReasonHtmlFromAnchor(anchor, displayTextOverride)
+    : _worklogReasonHtmlFromAnchor(anchor);
+  const selector=anchorKey?`:scope > .wl-reason[data-worklog-anchor-key="${CSS.escape(anchorKey)}"]`:':scope > .wl-reason[data-worklog-anchor-reason="1"]';
+  let reason=list.querySelector(selector);
+  if(!html){
+    if(reason) reason.remove();
+    return;
+  }
+  if(!reason){
+    reason=document.createElement('div');
+    reason.className='wl-reason';
+    reason.setAttribute('data-worklog-anchor-reason','1');
+    if(anchorKey) reason.setAttribute('data-worklog-anchor-key',anchorKey);
+    list.appendChild(reason);
+  }
+  reason.innerHTML=html;
+  if(anchor){
+    anchor.classList.add('assistant-segment-worklog-source');
+    anchor.setAttribute('aria-hidden','true');
+  }
+}
+function ensureLiveWorklogContainer(blocks, opts){
+  opts=opts||{};
+  if(!blocks) return null;
+  const activityKey=opts.activityKey||_activityKeyForLiveTurn();
+  let worklog=activityKey
+    ? blocks.querySelector(`.live-worklog[data-live-worklog-shell="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`)
+    : null;
+  if(!worklog) worklog=blocks.querySelector('.live-worklog[data-live-worklog-shell="1"][data-live-activity-current="1"]');
+  if(!worklog){
+    worklog=document.createElement('div');
+    worklog.className='live-worklog worklog';
+    worklog.setAttribute('data-live-worklog-shell','1');
+    worklog.setAttribute('data-live-tool-worklog-group','1');
+    worklog.setAttribute('data-live-tool-call-group','1');
+    worklog.setAttribute('data-live-activity-current','1');
+    worklog.setAttribute('data-tool-worklog-group','1');
+    worklog.setAttribute('data-tool-worklog-key',activityKey||'');
+    worklog.innerHTML='<div class="tool-worklog-list"></div>';
+    const anchor=opts.anchor||null;
+    const footer=blocks.querySelector('#liveRunStatus');
+    if(anchor&&anchor.parentElement===blocks) anchor.insertAdjacentElement('afterend',worklog);
+    else if(footer&&footer.parentElement===blocks) blocks.insertBefore(worklog,footer);
+    else blocks.appendChild(worklog);
+  }else if(activityKey&&!worklog.getAttribute('data-tool-worklog-key')){
+    worklog.setAttribute('data-tool-worklog-key',activityKey);
+  }
+  if(opts.anchor) _syncWorklogReasonFromAnchor(worklog, opts.anchor);
+  _migrateLegacyLiveActivityGroupsToWorklog(blocks, worklog);
+  _syncToolCallGroupSummary(worklog);
+  return worklog;
+}
+function _migrateLegacyLiveActivityGroupsToWorklog(blocks, worklog){
+  if(!blocks||!worklog) return;
+  const list=_toolWorklogListEl(worklog);
+  if(!list) return;
+  const legacy=Array.from(blocks.querySelectorAll('.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"]'))
+    .filter(group=>group!==worklog && !group.classList.contains('live-worklog'));
+  for(const group of legacy){
+    const oldList=_toolWorklogListEl(group);
+    if(oldList){
+      while(oldList.firstChild) list.appendChild(oldList.firstChild);
+    }
+    group.remove();
+  }
+}
+function _appendWorklogReason(list, anchor){
+  if(!list) return null;
+  const html=_worklogReasonHtmlFromAnchor(anchor);
+  if(!html) return null;
+  const reason=document.createElement('div');
+  reason.className='wl-reason';
+  reason.setAttribute('data-worklog-anchor-reason','1');
+  const anchorKey=_worklogReasonAnchorKey(anchor);
+  if(anchorKey) reason.setAttribute('data-worklog-anchor-key',anchorKey);
+  reason.innerHTML=html;
+  list.appendChild(reason);
+  if(anchor){
+    anchor.classList.add('assistant-segment-worklog-source');
+    anchor.setAttribute('aria-hidden','true');
+  }
+  return reason;
+}
+function _toolIdentity(tc){
+  if(!tc) return '';
+  const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
+  if(tid) return `id:${tid}`;
+  const args=tc.args&&typeof tc.args==='object'?tc.args:{};
+  return [
+    tc.assistant_msg_idx!==undefined?`a:${tc.assistant_msg_idx}`:'',
+    tc.name||'tool',
+    JSON.stringify(args),
+    String(tc.snippet||tc.preview||'').slice(0,160),
+  ].join('|');
+}
+function _filterNewWorklogTools(cards, seenTools){
+  const out=[];
+  for(const tc of Array.from(cards||[]).filter(Boolean)){
+    const key=_toolIdentity(tc);
+    if(key&&seenTools&&seenTools.has(key)) continue;
+    if(key&&seenTools) seenTools.add(key);
+    out.push(tc);
+  }
+  return out;
+}
+function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
+  const list=_toolWorklogListEl(group);
+  if(!group||!list) return;
+  let wroteProse=false;
+  const seenReasons=opts&&opts.seenReasons;
+  if(!opts||opts.includeAnchorReason!==false){
+    const anchorKey=anchor&&anchor.dataset&&anchor.dataset.msgIdx?`anchor:${anchor.dataset.msgIdx}`:'';
+    if(!anchorKey||!seenReasons||!seenReasons.has(anchorKey)){
+      const reason=_appendWorklogReason(list, anchor);
+      if(reason){
+        wroteProse=true;
+        if(anchorKey&&seenReasons) seenReasons.add(anchorKey);
+      }
+    }
+  }
+  if(thinkingText){
+    const thinkingKey=(opts&&opts.thinkingKey)||`reason:${String(thinkingText).trim()}`;
+    if(!seenReasons||!seenReasons.has(thinkingKey)){
+      const thinking=_thinkingActivityNode(thinkingText, false);
+      if(thinking){
+        list.appendChild(thinking);
+        wroteProse=true;
+        if(seenReasons) seenReasons.add(thinkingKey);
+      }
+    }
+  }
+  const toolCards=_filterNewWorklogTools(cards, opts&&opts.seenTools);
+  if(toolCards.length){
+    const last=list.lastElementChild;
+    let tools=(!wroteProse&&last&&last.classList&&last.classList.contains('wl-step-tools')&&last.getAttribute('data-worklog-tools')==='1')
+      ? last
+      : null;
+    if(!tools){
+      tools=document.createElement('div');
+      tools.className='wl-step-tools tool-worklog-tools';
+      tools.setAttribute('data-worklog-tools','1');
+      list.appendChild(tools);
+    }
+    for(const tc of toolCards) tools.appendChild(buildToolCard(tc));
+    _syncToolRowsContainer(tools, !!(opts&&opts.live));
+  }
+}
+function _syncLiveWorklogReasonsForAnchor(anchor, displayTextOverride){
+  if(!anchor||!anchor.matches||!anchor.matches('[data-live-assistant="1"]')) return;
+  const blocks=anchor.parentElement;
+  if(!blocks) return;
+  const group=ensureLiveWorklogContainer(blocks,{
+    activityKey:_activityKeyForLiveTurn(),
+    anchor,
+  });
+  if(group) _syncWorklogReasonFromAnchor(group, anchor, displayTextOverride);
 }
 function _clearLiveActivityUserIntent(){
   _liveActivityUserExpanded = undefined;
@@ -6107,8 +6648,59 @@ function ensureActivityGroup(inner, opts){
   if(!inner) return null;
   const live=!!opts.live;
   const activityKey=opts.activityKey||(live?_activityKeyForLiveTurn():null);
-  const selector=live?'.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]':'.tool-call-group[data-agent-activity-group="1"]';
-  let group=inner.querySelector(selector);
+  const burstId=opts.burstId!==undefined&&opts.burstId!==null?String(opts.burstId):'';
+  const segmentSeq=opts.segmentSeq!==undefined&&opts.segmentSeq!==null?String(opts.segmentSeq):'';
+  const liveSelectors=segmentSeq
+    ? [
+      `.tool-worklog-group[data-live-tool-worklog-group="1"][data-live-segment-seq="${CSS.escape(segmentSeq)}"]`,
+      `.tool-call-group[data-live-tool-worklog-group="1"][data-live-segment-seq="${CSS.escape(segmentSeq)}"]`,
+      `.tool-call-group[data-live-tool-call-group="1"][data-live-segment-seq="${CSS.escape(segmentSeq)}"]`,
+    ]
+    : burstId
+    ? [
+      `.tool-worklog-group[data-live-tool-worklog-group="1"][data-activity-burst-id="${CSS.escape(burstId)}"]`,
+      `.tool-call-group[data-live-tool-worklog-group="1"][data-activity-burst-id="${CSS.escape(burstId)}"]`,
+      `.tool-call-group[data-live-tool-call-group="1"][data-activity-burst-id="${CSS.escape(burstId)}"]`,
+    ]
+    : [
+      '.tool-worklog-group[data-live-tool-worklog-group="1"][data-live-activity-current="1"]',
+      '.tool-call-group[data-live-tool-worklog-group="1"][data-live-activity-current="1"]',
+      '.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]',
+    ];
+  let group;
+  if(live){
+    if(activityKey){
+      group=inner.querySelector(`.tool-worklog-group[data-tool-worklog-key="${CSS.escape(activityKey)}"],.tool-call-group[data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+    }
+    if(!group){
+      for(const sel of liveSelectors){
+        group=inner.querySelector(sel);
+        if(group) break;
+      }
+    }
+  }else{
+    if(activityKey){
+      group=inner.querySelector(`.tool-worklog-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"],.tool-call-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+    }
+    if(!group&&segmentSeq){
+      group=inner.querySelector(`.tool-worklog-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-live-segment-seq="${CSS.escape(segmentSeq)}"],.tool-call-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-live-segment-seq="${CSS.escape(segmentSeq)}"]`);
+    }
+    if(!group&&burstId){
+      group=inner.querySelector(`.tool-worklog-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-activity-burst-id="${CSS.escape(burstId)}"],.tool-call-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-activity-burst-id="${CSS.escape(burstId)}"]`);
+    }
+    if(!group&&activityKey){
+      group=inner.querySelector(`.tool-worklog-group[data-tool-worklog-key="${CSS.escape(activityKey)}"],.tool-call-group[data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+    }
+    if(!group&&!activityKey){
+      group=inner.querySelector('.tool-worklog-group[data-agent-activity-group="1"][data-tool-worklog-group="1"],.tool-call-group[data-agent-activity-group="1"][data-tool-worklog-group="1"],.tool-call-group[data-agent-activity-group="1"]:not([data-run-activity-group="1"])');
+    }
+  }
+  if(!group && !activityKey && segmentSeq==="" && burstId){
+    const candidates=live
+      ? Array.from(inner.querySelectorAll('.tool-worklog-group[data-live-tool-worklog-group="1"],.tool-call-group[data-live-tool-worklog-group="1"],.tool-call-group[data-live-tool-call-group="1"]'))
+      : Array.from(inner.querySelectorAll('.tool-worklog-group[data-agent-activity-group="1"],.tool-call-group[data-agent-activity-group="1"]:not([data-run-activity-group="1"])'));
+    group=candidates.filter(el=>el.isConnected!==false).pop() || null;
+  }
   if(!group){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
@@ -6121,35 +6713,218 @@ function ensureActivityGroup(inner, opts){
     // explicitly collapsed.
     if(live && _liveActivityUserExpanded === true) collapsed=false;
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
-    if(savedState==='open') collapsed=false;
-    else if(savedState==='closed') collapsed=true;
-    group.className='tool-call-group agent-activity-group'+(collapsed?' tool-call-group-collapsed':'');
+    if(live && savedState==='open') collapsed=false;
+    else if(live && savedState==='closed') collapsed=true;
+    group.className='agent-activity-group tool-worklog-group activity'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
+    group.setAttribute('data-tool-worklog-group','1');
+    group.setAttribute('data-tool-worklog-key',activityKey||'');
     if(activityKey) group.setAttribute('data-activity-disclosure-key',activityKey);
     if(live){
+      group.setAttribute('data-live-tool-worklog-group','1');
       group.setAttribute('data-live-tool-call-group','1');
       group.setAttribute('data-live-activity-current','1');
     }
-    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="_toggleActivityGroup(this)"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-duration"></span></button><div class="tool-call-group-body"></div>`;
+    if(burstId) group.setAttribute('data-activity-burst-id',burstId);
+    if(segmentSeq) group.setAttribute('data-live-segment-seq',segmentSeq);
+    group.classList.toggle('open',!collapsed);
+    group.innerHTML=`<button type="button" class="tool-call-group-summary tool-worklog-summary activity-summary" aria-expanded="${collapsed?'false':'true'}" onclick="_toggleActivityGroup(this)"><span class="as-dot"></span><span class="tool-call-group-label tool-worklog-label as-text">Running</span><span class="tool-call-group-duration"></span><span class="tool-call-group-chevron as-caret">${li('chevron-right',12)}</span></button><div class="tool-call-group-body tool-worklog-body activity-body"><div class="worklog"><div class="tool-worklog-list"></div></div></div>`;
     const anchor=opts.anchor||null;
-    if(anchor&&anchor.parentElement===inner) anchor.insertAdjacentElement('afterend', group);
+    if(anchor&&anchor.parentElement===inner){
+      if(opts.beforeAnchor) inner.insertBefore(group, anchor);
+      else anchor.insertAdjacentElement('afterend', group);
+    }
     else inner.appendChild(group);
   }else if(activityKey&&!group.getAttribute('data-activity-disclosure-key')){
     group.setAttribute('data-activity-disclosure-key',activityKey);
   }
-  if(live){
-    _setActivityElapsedStartedAt(group);
-    _ensureLiveActivityBaseline(group);
+  if(burstId&&!group.getAttribute('data-activity-burst-id')) group.setAttribute('data-activity-burst-id',burstId);
+  if(segmentSeq&&!group.getAttribute('data-live-segment-seq')) group.setAttribute('data-live-segment-seq',segmentSeq);
+  if(!group.getAttribute('data-tool-worklog-key')&&activityKey) group.setAttribute('data-tool-worklog-key',activityKey);
+  if(opts.turnDuration!==undefined&&opts.turnDuration!==null) group.setAttribute('data-turn-duration',String(opts.turnDuration));
+  if(opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
+  const anchor=opts.anchor||null;
+  if(anchor&&anchor.parentElement===inner&&group.parentElement===inner){
+    if(opts.beforeAnchor){
+      if(group.nextElementSibling!==anchor) inner.insertBefore(group,anchor);
+    }else if(group.previousElementSibling!==anchor){
+      anchor.insertAdjacentElement('afterend',group);
+    }
   }
+  if(anchor&&opts.syncAnchorReason!==false) _syncWorklogReasonFromAnchor(group, anchor);
   _syncToolCallGroupSummary(group);
-  if(live) _startActivityElapsedTimer(group);
   return group;
+}
+function normalizeLiveActivityGroupPlacement(turn){
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return;
+  const groups=Array.from(
+    blocks.querySelectorAll('.tool-worklog-group[data-live-tool-worklog-group="1"],.tool-call-group[data-live-tool-worklog-group="1"],.tool-call-group[data-live-tool-call-group="1"]')
+  );
+  groups.sort((a,b)=>{
+    const as=Number(a.getAttribute('data-live-segment-seq'));
+    const bs=Number(b.getAttribute('data-live-segment-seq'));
+    if(Number.isFinite(as)&&Number.isFinite(bs)&&as!==bs) return as-bs;
+    const av=Number(a.getAttribute('data-activity-burst-id'));
+    const bv=Number(b.getAttribute('data-activity-burst-id'));
+    if(Number.isFinite(av)&&Number.isFinite(bv)&&av!==bv) return av-bv;
+    return 0;
+  });
+  for(const group of groups){
+    const burstId=group.getAttribute('data-activity-burst-id')||'';
+    const segmentSeq=group.getAttribute('data-live-segment-seq')||'';
+    const anchor=segmentSeq
+      ? _findLiveAssistantAnchorForSegment(blocks, segmentSeq)
+      : burstId
+      ? _findLatestVisibleLiveAssistantByBurst(blocks, burstId)
+      : _findLatestVisibleLiveAssistant(blocks);
+    if(!anchor) continue;
+    if(anchor&&group.previousElementSibling!==anchor) anchor.insertAdjacentElement('afterend',group);
+    _syncWorklogReasonFromAnchor(group, anchor);
+  }
+}
+function ensureRunActivityGroup(inner, opts){
+  opts=opts||{};
+  if(!inner) return null;
+  let group=inner.querySelector('.tool-call-group[data-run-activity-group="1"]');
+  if(!group){
+    group=document.createElement('div');
+    const collapsed=opts.collapsed!==false;
+    group.className='tool-call-group agent-activity-group run-activity-group'+(collapsed?' tool-call-group-collapsed':' open');
+    group.setAttribute('data-tool-call-group','1');
+    group.setAttribute('data-agent-activity-group','1');
+    group.setAttribute('data-run-activity-group','1');
+    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="_toggleActivityGroup(this)"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Running</span><span class="tool-call-group-duration"></span></button><div class="tool-call-group-body"></div>`;
+    if(inner.firstChild) inner.insertBefore(group, inner.firstChild);
+    else inner.appendChild(group);
+  }
+  if(opts.turnDuration!==undefined&&opts.turnDuration!==null) group.setAttribute('data-turn-duration',String(opts.turnDuration));
+  if(opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
+  _setActivityElapsedStartedAt(group);
+  _ensureLiveActivityBaseline(group);
+  _syncToolCallGroupSummary(group);
+  if(opts.live!==false) _startActivityElapsedTimer(group);
+  return group;
+}
+// ── LiveFooter timer (module-level singleton) ──────────────────────────────
+const _liveRunStatusTimers={};  // keyed by sessionId, max 1 active
+let _liveRunStatusTokens=null;
+let _liveRunStatusSessionId=null;
+function _formatRunElapsed(seconds){
+  const n=Number(seconds);
+  if(!Number.isFinite(n)||n<0)return'00:00';
+  const total=Math.max(0,Math.floor(n));
+  if(total>=3600){
+    const h=Math.floor(total/3600);
+    const m=Math.floor((total%3600)/60);
+    return h+'h '+String(m).padStart(2,'0')+'m';
+  }
+  const m=Math.floor(total/60);
+  const s=total%60;
+  return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+}
+function _moveLiveRunStatusToTurnEnd(el){
+  el=el||$('liveRunStatus');
+  if(!el) return null;
+  const turn=$('liveAssistantTurn');
+  const blocks=_assistantTurnBlocks(turn);
+  if(blocks&&el.parentElement===blocks&&blocks.lastElementChild!==el) blocks.appendChild(el);
+  return el;
+}
+function placeLiveRunStatusHost(){
+  let el=$('liveRunStatus');
+  if(!el){
+    el=document.createElement('div');
+    el.id='liveRunStatus';
+    el.hidden=true;
+  }
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    if(S.session) turn.dataset.sessionId=S.session.session_id;
+    const inner=$('msgInner');
+    if(inner) inner.appendChild(turn);
+  }
+  const blocks=_assistantTurnBlocks(turn);
+  if(blocks&&el.parentElement!==blocks) blocks.appendChild(el);
+  el.className='live-run-status live-footer';
+  return _moveLiveRunStatusToTurnEnd(el);
+}
+function showLiveRunStatus(sid,opts){
+  const el=placeLiveRunStatusHost();
+  if(!el)return;
+  _liveRunStatusSessionId=sid;
+  const startedAt=opts&&opts.startedAt||null;
+  _liveRunStatusTokens=opts&&opts.tokens||null;
+  el.hidden=false;
+  _renderLiveRunStatusContent(el,startedAt);
+  _startLiveRunStatusTimer(sid,startedAt);
+}
+function _renderLiveRunStatusContent(el,startedAt){
+  if(!el)return;
+  const now=Date.now()/1000;
+  const elapsed=startedAt?Math.max(0,now-startedAt):0;
+  const timeStr=_formatRunElapsed(elapsed);
+  const tokens=_liveRunStatusTokens;
+  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>`;
+}
+function updateLiveRunStatus(opts){
+  if(opts&&opts.tokens!==undefined)_liveRunStatusTokens=opts.tokens;
+  const el=$('liveRunStatus');
+  if(el&&!el.hidden){
+    _moveLiveRunStatusToTurnEnd(el);
+    const timer=_liveRunStatusTimers[_liveRunStatusSessionId];
+    const startedAt=timer&&timer.startedAt||null;
+    _renderLiveRunStatusContent(el,startedAt);
+  }
+}
+function _syncLiveRunStatusAfterRender(){
+  const sid=S.session&&S.session.session_id;
+  if(!sid||!S.activeStreamId||!S.busy) return;
+  const timer=_liveRunStatusTimers[sid];
+  const startedAt=(timer&&timer.startedAt)||((S.session&&S.session.pending_started_at)||Date.now()/1000);
+  const el=$('liveRunStatus');
+  if(el&&el.isConnected&&!el.hidden){
+    _moveLiveRunStatusToTurnEnd(el);
+    _renderLiveRunStatusContent(el,startedAt);
+    return;
+  }
+  showLiveRunStatus(sid,{startedAt,tokens:_liveRunStatusTokens});
+}
+function hideLiveRunStatus(sid){
+  const el=$('liveRunStatus');
+  if(el){el.hidden=true;el.innerHTML='';}
+  _clearLiveRunStatusTimer(sid||_liveRunStatusSessionId);
+  _liveRunStatusTokens=null;
+  _liveRunStatusSessionId=null;
+}
+function _startLiveRunStatusTimer(sid,startedAt){
+  if(!sid)return;
+  _clearLiveRunStatusTimer(sid);
+  _liveRunStatusTimers[sid]={startedAt,interval:setInterval(()=>{
+    const el=$('liveRunStatus');
+    if(!el||el.hidden){_clearLiveRunStatusTimer(sid);return;}
+    if(_liveRunStatusSessionId!==sid)return;
+    _renderLiveRunStatusContent(el,startedAt);
+  },1000)};
+}
+function _clearLiveRunStatusTimer(sid){
+  const t=_liveRunStatusTimers[sid];
+  if(t){clearInterval(t.interval);delete _liveRunStatusTimers[sid];}
+}
+function ensureRunActivityForCurrentTurn(){
+  // Phase C: disabled — top live run Activity card removed
+  return null;
+  const turn=$('liveAssistantTurn');
+  const blocks=_assistantTurnBlocks(turn);
+  return ensureRunActivityGroup(blocks,{live:true,collapsed:true});
 }
 function closeCurrentLiveActivityGroup(){
   const turn=$('liveAssistantTurn');
   if(!turn) return;
-  turn.querySelectorAll('.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
+  turn.querySelectorAll('.tool-worklog-group[data-live-tool-call-group="1"][data-live-activity-current="1"],.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
     group.removeAttribute('data-live-activity-current');
   });
 }
@@ -6163,10 +6938,22 @@ function isCompressionUiRunning(){
   const lock=_compressionSessionLock();
   return !!((state&&state.phase==='running') || (lock && S.session && lock===S.session.session_id));
 }
+// Restore the composer placeholder saved when auto-compaction started. Safe to
+// call whenever compression leaves the running state, from any path (clear,
+// non-running setCompressionUi, or a direct window._compressionUi=null in the
+// SSE handler) — it no-ops when nothing was saved. (#3512)
+function _restoreCompressionPlaceholder(){
+  const _input=$('msg');
+  if(_input&&typeof _compressionPlaceholderSaved==='string'){
+    _input.placeholder=_compressionPlaceholderSaved;
+  }
+  _compressionPlaceholderSaved=null;
+}
 function clearCompressionUi(){
   window._compressionUi=null;
   _clearCompressionElapsedTimer();
   _setCompressionSessionLock(null);
+  _restoreCompressionPlaceholder();
   renderCompressionUi();
 }
 function setCompressionUi(state){
@@ -6180,8 +6967,19 @@ function setCompressionUi(state){
   }
   window._compressionUi=nextState;
   if(nextState.sessionId) _setCompressionSessionLock(nextState.sessionId);
-  if(nextState.automatic&&nextState.phase==='running') _startCompressionElapsedTimer();
-  else _clearCompressionElapsedTimer();
+  if(nextState.automatic&&nextState.phase==='running'){
+    _startCompressionElapsedTimer();
+    const _input=$('msg');
+    if(_input&&_compressionPlaceholderSaved===null){
+      _compressionPlaceholderSaved=_input.placeholder;
+      _input.placeholder=typeof t==='function'?t('composer_compression_will_queue')||'Type a message — it will queue and send after compression':'Type a message — it will queue and send after compression';
+    }
+  } else {
+    _clearCompressionElapsedTimer();
+    // Leaving the running state (e.g. setCompressionUi(done)) must restore the
+    // placeholder too — not only clearCompressionUi(). (#3512 leak fix)
+    _restoreCompressionPlaceholder();
+  }
   renderCompressionUi();
 }
 function _compressionCardsHtml(state){
@@ -6248,47 +7046,47 @@ function _compressionCardsHtml(state){
     ${referenceHtml}`;
 }
 function _autoCompressionBaseDetail(state){
-  const fallback='Context auto-compressed to continue the conversation';
   const running=state&&state.phase==='running';
-  return running
-    ? (String(state.message||'Auto-compressing context...').trim()||'Auto-compressing context...')
-    : (String(state&&state.message||fallback).trim()||fallback);
+  if(running)return 'Compressing context';
+  if(state&&state.phase==='done')return 'Context auto-compressed';
+  return '';
 }
 function _autoCompressionPreviewText(state){
-  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
   const running=state&&state.phase==='running';
-  const detail=_autoCompressionBaseDetail(state);
-  if(!running) return (String(state&&state.summary?.headline||copy.preview||detail).trim()||detail);
-  const elapsedLabel=_compressionElapsedLabel(state);
-  return [detail, elapsedLabel].filter(Boolean).join(' · ');
+  if(running)return 'Compressing context';
+  if(state&&state.phase==='done')return 'Context auto-compressed';
+  return '';
 }
 function _autoCompressionDetailText(state){
   const running=state&&state.phase==='running';
-  const base=_autoCompressionBaseDetail(state);
-  const elapsedLabel=running?_compressionElapsedLabel(state):'';
-  if(running)return elapsedLabel?`Elapsed: ${elapsedLabel}`:base;
-  const continuation=String(state&&state.continuationSessionId||'').trim();
-  const handoff=continuation?`Continued in compressed session: ${continuation}`:'';
-  return [base,handoff].filter(Boolean).join('\n');
+  if(running)return '';
+  return '';
 }
 function _autoCompressionCardsHtml(state){
-  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
-  const running=state&&state.phase==='running';
   const preview=_autoCompressionPreviewText(state);
-  const cardDetail=_autoCompressionDetailText(state);
+  const done=state&&state.phase==='done';
   return `
-    <div class="tool-card-row compression-card-row" data-compression-card="1">
-      ${_compressionStatusCardHtml({
-        statusLabel: (String(state&&state.engine||'').toLowerCase()==='lcm'||String(state&&state.mode||'').toLowerCase()==='lossless_retrieval')?copy.label:t('auto_compress_label'),
-        previewText: preview,
-        detail: cardDetail,
-        icon: running ? '<span class="tool-card-running-dot"></span>' : li('check',13),
-        open: running,
-        variantClass: running
-          ? 'tool-card-compress-running tool-card-compress-auto'
-          : 'tool-card-compress-complete tool-card-compress-auto',
-      })}
+    <div class="tool-card-row compression-card-row auto-compression-divider-row" data-compression-card="1">
+      <div class="auto-compression-divider${done?' auto-compression-divider-done':''}" aria-label="${esc(preview)}">
+        <span class="auto-compression-divider-line"></span>
+        <span class="auto-compression-divider-label">${done?li('file-text',13):''}${esc(preview)}</span>
+        <span class="auto-compression-divider-line"></span>
+      </div>
     </div>`;
+}
+function _autoCompressionWorklogNode(state){
+  const row=document.createElement('div');
+  row.className='tool-card-row compression-card-row auto-compression-divider-row';
+  row.setAttribute('data-compression-card','1');
+  const label=_autoCompressionPreviewText(state);
+  const done=state&&state.phase==='done';
+  row.innerHTML=`
+    <div class="auto-compression-divider${done?' auto-compression-divider-done':''}" aria-label="${esc(label)}">
+      <span class="auto-compression-divider-line"></span>
+      <span class="auto-compression-divider-label">${done?li('file-text',13):''}${esc(label)}</span>
+      <span class="auto-compression-divider-line"></span>
+    </div>`;
+  return row;
 }
 function _compressionCardsNode(state){
   const wrap=document.createElement('div');
@@ -6309,6 +7107,37 @@ function appendLiveCompressionCard(state){
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return false;
   closeCurrentLiveActivityGroup();
+  if(state.automatic){
+    const group=ensureLiveWorklogContainer(inner,{activityKey:_activityKeyForLiveTurn()});
+    const list=_toolWorklogListEl(group);
+    if(!group||!list) return false;
+    const node=_autoCompressionWorklogNode(state);
+    node.setAttribute('data-live-compression-card','1');
+    node.setAttribute('data-compression-phase',String(state.phase||''));
+    if(state.phase==='running'){
+      const started=_compressionElapsedStartedAt(state)||Date.now()/1000;
+      node.setAttribute('data-compression-started-at',String(started));
+      node.setAttribute('data-compression-message',String(state.message||'Compressing context'));
+      _startCompressionElapsedTimer();
+    } else {
+      node.removeAttribute('data-compression-started-at');
+      node.removeAttribute('data-compression-message');
+      const _activeCompState = _compressionStateForCurrentSession();
+      if (!_activeCompState || !_activeCompState.automatic || _activeCompState.phase !== 'running') {
+        _clearCompressionElapsedTimer();
+      }
+    }
+    const existingRunning=group.querySelector('[data-live-compression-card="1"][data-compression-started-at]');
+    const existingDone=Array.from(group.querySelectorAll('[data-live-compression-card="1"][data-compression-phase="done"]')).pop();
+    const existing=state.phase==='running'?existingRunning:(existingRunning||existingDone);
+    if(existing) existing.replaceWith(node);
+    else list.appendChild(node);
+    _syncToolCallGroupSummary(group);
+    _moveLiveRunStatusToTurnEnd();
+    _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+    if(typeof scrollIfPinned==='function') scrollIfPinned();
+    return true;
+  }
   const node=_compressionCardsNode(state);
   if(!node) return false;
   node.setAttribute('data-live-compression-card','1');
@@ -6383,7 +7212,10 @@ function _collectHandoffSummaryStates(messages){
 function _isContextCompactionMessage(m){
   if(!m||!m.role||m.role==='tool') return false;
   const text=msgContent(m)||String(m.content||'');
-  return /^\s*\[context compaction/i.test(text) || /^\s*context compaction/i.test(text);
+  return _isContextCompactionText(text);
+}
+function _isContextCompactionText(text){
+  return /^\s*\[context compaction/i.test(String(text||'')) || /^\s*context compaction/i.test(String(text||''));
 }
 function _isPreservedCompressionTaskListMarkerText(text){
   return /^\s*\[your active task list was preserved across context compression\]/i.test(String(text||''));
@@ -6460,6 +7292,9 @@ function _latestCompressionReferenceMessage(messages, summaryText=''){
     if(contentNorm.includes(summaryNorm)) return {message:m, rawIdx:i};
   }
   return {message:null, rawIdx:-1};
+}
+function _shouldShowSettledCompressionReference(referenceText){
+  return !!String(referenceText||'').trim() && !_isContextCompactionText(referenceText);
 }
 function _compressionReferenceCardHtml(text, open=false){
   const copy=_engineAwareCompressionCopy();
@@ -6839,6 +7674,36 @@ function _cliToolCardHasDiffSnippet(resultSnippet, patchSnippet){
   return !!patchSnippet || _cliLooksLikePatchDiff(resultSnippet);
 }
 
+function _assistantToolAnchorIdxForMessage(messages, rawIdx){
+  const list=Array.isArray(messages)?messages:[];
+  const current=list[rawIdx];
+  if(_assistantMessageHasVisibleContent(current)) return rawIdx;
+  if(_assistantReasoningPayloadText(current)) return rawIdx;
+  for(let idx=rawIdx-1;idx>=0;idx--){
+    if(_assistantMessageHasVisibleContent(list[idx])) return idx;
+  }
+  return rawIdx;
+}
+function _toolArgsSnapshot(args, limit){
+  if(!args||typeof args!=='object'||Array.isArray(args)) return {};
+  const max=Math.max(1,Number(limit)||6);
+  const priority=[
+    'query','search_query','searchQuery','pattern','q','keyword','keywords','term',
+    'url','uri','command','cmd','path','file','file_path','filename','file_glob',
+    'glob','offset','limit',
+  ];
+  const keys=[
+    ...priority.filter(k=>Object.prototype.hasOwnProperty.call(args,k)),
+    ...Object.keys(args).filter(k=>!priority.includes(k)),
+  ].slice(0,max);
+  const out={};
+  keys.forEach(k=>{
+    const v=String(args[k]);
+    out[k]=v.slice(0,120)+(v.length>120?'...':'');
+  });
+  return out;
+}
+
 function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
@@ -6893,8 +7758,8 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // pinned users stay at bottom; users who manually scrolled up get their
   // pre-render scrollTop restored after the DOM replacement.
   if(preserveScroll){
-    if(_scrollPinned) scrollIfPinned();
-    else _restoreMessageScrollSnapshot(scrollSnapshot);
+    if(_followMessagesAfterDomReplace()) return;
+    _restoreMessageScrollSnapshot(scrollSnapshot);
     return;
   }
   if(S.activeStreamId){
@@ -6910,6 +7775,10 @@ function renderMessages(options){
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const msgCount=S.messages.length;
+  // During session switch, S.messages is intentionally cleared while the full
+  // message fetch is still in flight. Other async updates can still call
+  // renderMessages() in this window. Keep the existing loading placeholder.
+  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   const renderWindowSize=_currentMessageRenderWindowSize();
   let cachedRenderSignature=null;
@@ -6943,7 +7812,16 @@ function renderMessages(options){
     }
   }
 
-  const compressionState=_compressionStateForCurrentSession();
+  const compressionState=(()=>{
+    let compressionState=_compressionStateForCurrentSession();
+    if(!S.busy && compressionState && compressionState.automatic){
+      window._compressionUi=null;
+      _clearCompressionElapsedTimer();
+      _setCompressionSessionLock(null);
+      compressionState=null;
+    }
+    return compressionState;
+  })();
   if(window._compressionUi && !compressionState) clearCompressionUi();
   const handoffState=_handoffStateForCurrentSession();
   if(window._handoffUi && !handoffState) window._handoffUi=null;
@@ -6968,6 +7846,8 @@ function renderMessages(options){
       const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
       if(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)) return true;
       if(_assistantMessageHasVisibleContent(m)) return true;
+      const visibleText=_isAssistantEmptyPlaceholderContent(m,msgContent(m))?'':msgContent(m);
+      return m._statusCard||visibleText||m.attachments?.length;
     }
     return m._statusCard||msgContent(m)||m.attachments?.length;
   });
@@ -6981,28 +7861,31 @@ function renderMessages(options){
   const referenceText=referenceMessage
     ? msgContent(referenceMessage)||String(referenceMessage.content||'')
     : sessionCompressionSummary;
-  const referenceNode=(!compressionState && !!referenceText && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
+  const referenceNode=(!compressionState && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   let preservedCompressionTaskCardsAttached=!!referenceNode;
   // Cache visWithIdx so expanding the render window (Load earlier) doesn't
   // re-scan S.messages from scratch.  Invalidate only when the message array
   // length changes — i.e. new messages arrived or session was truncated.
-  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length){
+  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
     const rebuilt=[];
     let ri=0;
     for(const m of S.messages){
       if(!m||!m.role||m.role==='tool'){ri++;continue;}
+      if(_isContextCompactionMessage(m)){ri++;continue;}
       if(_isPreservedCompressionTaskListMessage(m)){ri++;continue;}
       if(_isRecoveryControlMessage(m)){ri++;continue;}
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
       const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) rebuilt.push({m,rawIdx:ri});
+      const visibleText=_isAssistantEmptyPlaceholderContent(m,msgContent(m))?'':msgContent(m);
+      if(visibleText||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) rebuilt.push({m,rawIdx:ri});
       ri++;
     }
     _visWithIdxCache=rebuilt;
     _visWithIdxCacheLen=S.messages.length;
+    _visWithIdxCacheSrc=S.messages;
   }
   const visWithIdx=_visWithIdxCache;
   const preservedCompressionRawIdxs=[];
@@ -7020,6 +7903,8 @@ function renderMessages(options){
   const hiddenBeforeCount=windowStart;
   const renderVisWithIdx=visWithIdx.slice(windowStart);
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
+  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(visWithIdx);
+  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(visWithIdx);
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
   const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
@@ -7079,6 +7964,39 @@ function renderMessages(options){
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
     else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
   }
+  // #3709 (defect B): build a per-turn combined visible-answer text so the
+  // thinking echo-strip can de-dupe a thinking-only message (whose own visible
+  // body is empty) against the answer prose carried by a SIBLING message in the
+  // same turn. A turn = the run of assistant messages between two user messages.
+  // Map every assistant rawIdx in a run to the run's combined visible text.
+  const _turnVisibleTextByRawIdx=new Map();
+  {
+    let _run=[]; let _runText=[];
+    const _flush=()=>{
+      if(_run.length){
+        const combined=_runText.join('\n\n');
+        for(const ri of _run) _turnVisibleTextByRawIdx.set(ri, combined);
+      }
+      _run=[]; _runText=[];
+    };
+    for(const entry of renderVisWithIdx){
+      const em=entry&&entry.m; const role=em&&em.role;
+      if(role==='assistant'){
+        _run.push(entry.rawIdx);
+        // Visible prose = content with any leading <think>…</think> /channel-thought
+        // block stripped (the same blocks the per-message extractor removes below).
+        let vis=typeof em.content==='string'?em.content:'';
+        vis=vis.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'')
+               .replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'')
+               .replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trim();
+        if(vis) _runText.push(vis);
+      }else{
+        _flush();
+      }
+    }
+    _flush();
+  }
+
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
@@ -7116,21 +8034,17 @@ function renderMessages(options){
     let content=m.content||'';
     let thinkingText='';
     if(Array.isArray(content)){
-      thinkingText=content.filter(p=>p&&(p.type==='thinking'||p.type==='reasoning')).map(p=>p.thinking||p.reasoning||p.text||'').join('\n');
       content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
     }
-    if(!thinkingText && (m.reasoning_content || m.reasoning)) thinkingText=m.reasoning_content || m.reasoning;
     if(!thinkingText && typeof content==='string'){
       const thinkMatch=content.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
       if(thinkMatch){
-        thinkingText=thinkMatch[1].trim();
         content=content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'').trimStart();
       }
       if(!thinkingText){
         // Historical name "gemmaMatch" refers to MiniMax <|channel>thought format.
         const gemmaMatch=content.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
         if(gemmaMatch){
-          thinkingText=gemmaMatch[1].trim();
           content=content.replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'').trimStart();
         }
       }
@@ -7138,7 +8052,6 @@ function renderMessages(options){
         // Gemma 4 uses asymmetric <|turn|>thinking\n...<turn|> delimiters.
         const gemmaTurnMatch=content.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
         if(gemmaTurnMatch){
-          thinkingText=gemmaTurnMatch[1].trim();
           content=content.replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trimStart();
         }
       }
@@ -7148,8 +8061,13 @@ function renderMessages(options){
       content='**Error:** No response received after context compression. Please retry.';
     }
     const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
-    if(thinkingText&&!isUser){
-      thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent);
+    if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
+      content='';
+    }
+    if(!isUser&&isSimplifiedToolCalling()&&!thinkingText){
+      const turnFinalVisibleContent=assistantTurnFinalVisibleContentByRawIdx.get(rawIdx)||'';
+      const turnVisibleContents=assistantTurnVisibleContentByRawIdx.get(rawIdx)||[];
+      thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents);
     }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     const nextRendered=renderVisWithIdx[vi+1];
@@ -7198,17 +8116,7 @@ function renderMessages(options){
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
-      if(compressionState || referenceNode){
-        continue;
-      }else{
-        currentAssistantTurn=null;
-        const row=document.createElement('div');
-        const preservedForThisCard=preservedCompressionTaskCardsAttached?[]:preservedCompressionTaskMessages;
-        row.innerHTML=_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard);
-        if(preservedForThisCard.length) preservedCompressionTaskCardsAttached=true;
-        inner.appendChild(row.firstElementChild);
-        continue;
-      }
+      continue;
     }
 
     if(isUser){
@@ -7233,6 +8141,13 @@ function renderMessages(options){
     seg.className='assistant-segment';
     seg.dataset.msgIdx=rawIdx;
     seg.dataset.rawText=String(content).trim();
+    if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
+    if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
+    const messageBelongsInWorklog=!S.busy&&isSimplifiedToolCalling()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});
+    if(messageBelongsInWorklog){
+      seg.classList.add('assistant-segment-worklog-source');
+      seg.setAttribute('aria-hidden','true');
+    }
     if(m._live){
       currentAssistantTurn.id='liveAssistantTurn';
       // Stamp the session id on the live turn so finalizeThinkingCard()
@@ -7244,7 +8159,7 @@ function renderMessages(options){
     }
     if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
     if(thinkingText&&window._showThinking!==false){
-      if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
+      if(isSimplifiedToolCalling()&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml);
@@ -7321,7 +8236,7 @@ function renderMessages(options){
     }
     inner.appendChild(node);
   }
-  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)
+  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceNode||compressionState)&&preservedCompressionTaskMessages.length)
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   const preservedOnlyAnchor=preservedCompressionRawIdxs.length
@@ -7348,7 +8263,14 @@ function renderMessages(options){
   // tracking, or runs that didn't go through the normal streaming path), build
   // a display list from per-message tool_calls (OpenAI format) stored in each
   // assistant message. This covers the reload case described in issue #140.
-  if(!S.busy && (!S.toolCalls||!S.toolCalls.length)){
+  const hasMessageToolMetadata=!S.busy&&Array.isArray(S.messages)&&S.messages.some(m=>
+    m&&m.role==='assistant'&&(
+      (Array.isArray(m.tool_calls)&&m.tool_calls.length>0)||
+      (Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0)||
+      (Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use'))
+    )
+  );
+  if(!S.busy && (hasMessageToolMetadata||!S.toolCalls||!S.toolCalls.length)){
     // Index tool outputs by tool_call_id / tool_use_id so the
     // fallback-built cards carry their result snippet (not just the command).
     // Without this step CLI-origin sessions reload with empty tool cards.
@@ -7376,13 +8298,39 @@ function renderMessages(options){
       }
       if(m.role==='assistant'){
         const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-        const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
         const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+        const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
         if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});
       }
     });
     const derived=[];
+    const liveToolMetadata=Array.isArray(S._settledLiveToolMetadata)
+      ? S._settledLiveToolMetadata
+      : (Array.isArray(S.toolCalls)?S.toolCalls:[]);
+    const liveMetadataByTid=new Map();
+    liveToolMetadata.forEach((tc,idx)=>{
+      if(!tc||typeof tc!=='object') return;
+      const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+      if(tid&&!liveMetadataByTid.has(tid)) liveMetadataByTid.set(tid,{tc,idx});
+    });
+    const usedLiveToolMetadata=new Set();
+    const copyLiveToolMetadata=(next,name,tid)=>{
+      let matchEntry=tid?liveMetadataByTid.get(tid):null;
+      if(!matchEntry){
+        const matchIdx=liveToolMetadata.findIndex((tc,i)=>tc&&!usedLiveToolMetadata.has(i)&&(!name||tc.name===name));
+        if(matchIdx>=0) matchEntry={tc:liveToolMetadata[matchIdx],idx:matchIdx};
+      }
+      if(matchEntry){
+        usedLiveToolMetadata.add(matchEntry.idx);
+        const live=matchEntry.tc||{};
+        for(const key of ['activityBurstId','duration','started_at']){
+          if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
+        }
+      }
+      return next;
+    };
     fallbackToolSources.forEach(({m,rawIdx})=>{
+      const assistantToolAnchorIdx=_assistantToolAnchorIdxForMessage(S.messages,rawIdx);
       // OpenAI format: top-level tool_calls field on the assistant message
       (m.tool_calls||[]).forEach(tc=>{
         if(!tc||typeof tc!=='object') return;
@@ -7393,17 +8341,43 @@ function renderMessages(options){
         const tid=tc.id||tc.call_id||'';
         const patchSnippet=_cliPatchSnippetFromArgs(name,args);
         const resultSnippet=resultsByTid[tid]||'';
-        let argsSnap={};
-        Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-        derived.push({
+        let argsSnap=_toolArgsSnapshot(args);
+        derived.push(copyLiveToolMetadata({
           name,
           snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
           is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
           tid,
-          assistant_msg_idx:rawIdx,
+          assistant_msg_idx:assistantToolAnchorIdx,
           args:argsSnap,
           done:true,
-        });
+        }, name, tid));
+      });
+      // WebUI partial/live format: _partial_tool_calls snapshots survive
+      // interrupted or adapter-shaped settles even when session.tool_calls is empty.
+      const partialToolCalls=Array.isArray(m._partial_tool_calls)?m._partial_tool_calls:[];
+      partialToolCalls.forEach(tc=>{
+        if(!tc||typeof tc!=='object') return;
+        const fn=tc.function||{};
+        const name=tc.name||fn.name||'tool';
+        let args=tc.args||tc.input||{};
+        if(!args||typeof args!=='object'){
+          try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){ args={}; }
+        }else if(!Object.keys(args).length&&fn.arguments){
+          try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){}
+        }
+        const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+        const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+        const resultSnippet=resultsByTid[tid]||tc.snippet||tc.preview||'';
+        const argsSnap=_toolArgsSnapshot(args);
+        derived.push(copyLiveToolMetadata({
+          name,
+          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+          tid,
+          assistant_msg_idx:assistantToolAnchorIdx,
+          args:argsSnap,
+          done:true,
+        }, name, tid));
       });
       // Anthropic format: tool_use blocks inside assistant content array
       if(Array.isArray(m.content)){
@@ -7414,19 +8388,16 @@ function renderMessages(options){
           const tid=p.id||'';
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
           const resultSnippet=resultsByTid[tid]||'';
-          const argsSnap={};
-          if(args && typeof args==='object'){
-            Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-          }
-          derived.push({
+          const argsSnap=_toolArgsSnapshot(args);
+          derived.push(copyLiveToolMetadata({
             name,
             snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
             is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
-            assistant_msg_idx:rawIdx,
+            assistant_msg_idx:assistantToolAnchorIdx,
             args:argsSnap,
             done:true,
-          });
+          }, name, tid));
         });
       }
       // WebUI-internal partial tool calls captured on cancel/stop
@@ -7439,110 +8410,169 @@ function renderMessages(options){
           const tid=tc.id||tc.call_id||tc.tool_call_id||tc.tid||'';
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
           const resultSnippet=_cliToolResultSnippet(tc.snippet||tc.result||tc.output||tc.preview||'');
-          const argsSnap={};
-          if(args && typeof args==='object'){
-            Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-          }
-          derived.push({
+          const argsSnap=_toolArgsSnapshot(args,4);
+          derived.push(copyLiveToolMetadata({
             name,
             snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
             is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
-            assistant_msg_idx:rawIdx,
+            assistant_msg_idx:assistantToolAnchorIdx,
             args:argsSnap,
             done:true,
-          });
+          }, name, tid));
         });
       }
     });
     if(derived.length) S.toolCalls=derived;
+    if(S._settledLiveToolMetadata) S._settledLiveToolMetadata=null;
   }
-  if(!S.busy){
-    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"])').forEach(el=>el.remove());
-    const byAssistant = {};
-    for(const tc of (S.toolCalls||[])){
-      const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;
-      if(!byAssistant[key]) byAssistant[key] = [];
-      byAssistant[key].push(tc);
-    }
+  if(!S.busy || (S.toolCalls&&S.toolCalls.length)){
+    // Rebuild settled tool/worklog/thinking nodes. The `|| (S.toolCalls.length)`
+    // arm is REQUIRED, not just `!S.busy`: when renderMessages re-runs during an
+    // active stream (e.g. switching back to an in-progress session, busy=true),
+    // the earlier innerHTML wipe removed every settled turn's worklog above the
+    // live turn. Gating purely on `!S.busy` skipped this rebuild while busy and
+    // left those prior turns' tool cards gone until the stream finished (#3401
+    // regression vs master; same content-loss-on-switch class as #3668). The
+    // `:not([data-live-thinking="1"])` / live-card guards below keep the active
+    // turn's own live nodes from being double-built.
+    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]),.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+    const byActivity = new Map();
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
-    const anchorInsertAfter = new Map();
-    if(isSimplifiedToolCalling()){
-      const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
-      for(const aIdx of activityIdxs){
-        const cards=byAssistant[aIdx]||[];
-        if(!cards.length&&assistantThinking.has(aIdx)){
-          const anchorRow=assistantSegments.get(aIdx);
-          if(anchorRow&&window._showThinking!==false){
-            anchorRow.insertAdjacentHTML('beforeend',_thinkingCardHtml(assistantThinking.get(aIdx)));
-          }
-          continue;
+    const _assistantAnchorForActivity=(aIdx,segmentSeq,burstId)=>{
+      if(segmentSeq){
+        for(const seg of assistantSegments.values()){
+          if(seg&&seg.getAttribute('data-live-segment-seq')===String(segmentSeq)) return seg;
         }
-        let anchorRow=assistantSegments.get(aIdx)||null;
-        if(!anchorRow&&assistantIdxs.length){
-          if(aIdx<assistantIdxs[0]) continue;
-          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
-        }
-        if(!anchorRow) continue;
-        const anchorParent=anchorRow.parentElement;
-        let insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode,activityKey:`assistant:${aIdx}`});
-        const sourceMsg=S.messages[aIdx]||{};
-        if(sourceMsg._turnDuration!==undefined) group.setAttribute('data-turn-duration', String(sourceMsg._turnDuration));
-        const body=group&&group.querySelector('.tool-call-group-body');
-        if(!body) continue;
-        const thinkingText=assistantThinking.get(aIdx);
-        if(thinkingText){
-          body.appendChild(_thinkingActivityNode(thinkingText, false));
-        }
-        for(const tc of cards){
-          body.appendChild(buildToolCard(tc));
-        }
-        _syncToolCallGroupSummary(group);
-        if(anchorRow) anchorInsertAfter.set(anchorRow, group);
       }
-    }else if(S.toolCalls && S.toolCalls.length){
-      for(const [key, cards] of Object.entries(byAssistant)){
-        const aIdx = parseInt(key);
-        let anchorRow=assistantSegments.get(aIdx)||null;
-        if(!anchorRow&&assistantIdxs.length){
-          if(aIdx<assistantIdxs[0]) continue;
-          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+      const wantedBurst=burstId!==undefined&&burstId!==null&&String(burstId)!==''&&String(burstId)!=='0'?String(burstId):'';
+      if(wantedBurst){
+        for(const seg of assistantSegments.values()){
+          if(seg&&seg.getAttribute('data-activity-burst-id')===wantedBurst) return seg;
         }
-        if(!anchorRow) continue;
-        const anchorParent=anchorRow.parentElement;
-        const frag=document.createDocumentFragment();
-        let lastInsertedNode=null;
-        for(const tc of cards){
-          const card=buildToolCard(tc);
-          frag.appendChild(card);
-          lastInsertedNode=card;
-        }
-        // Add expand/collapse toggle for groups with 2+ cards
-        if(cards.length>=2){
-          const toggle=document.createElement('div');
-          toggle.className='tool-cards-toggle';
-          // Collect card elements before they get moved to DOM
-          const cardEls=Array.from(frag.querySelectorAll('.tool-card'));
-          const expandBtn=document.createElement('button');
-          expandBtn.textContent=t('expand_all');
-          expandBtn.onclick=()=>cardEls.forEach(c=>c.classList.add('open'));
-          const collapseBtn=document.createElement('button');
-          collapseBtn.textContent=t('collapse_all');
-          collapseBtn.onclick=()=>cardEls.forEach(c=>c.classList.remove('open'));
-          toggle.appendChild(expandBtn);
-          toggle.appendChild(collapseBtn);
-          frag.insertBefore(toggle,frag.firstChild);
-        }
-        const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-        const refNode = insertAfterNode ? insertAfterNode.nextSibling : null;
-        if(refNode) anchorParent.insertBefore(frag,refNode);
-        else anchorParent.appendChild(frag);
-        if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
       }
+      let anchorRow=assistantSegments.get(aIdx)||null;
+      if(!anchorRow&&assistantIdxs.length){
+        if(aIdx<assistantIdxs[0]) return null;
+        const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+        anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+      }
+      return anchorRow;
+    };
+    const _turnDurationForAnchor=(anchorRow)=>{
+      if(!anchorRow) return undefined;
+      const turn=anchorRow.closest('.assistant-turn');
+      const blocks=_assistantTurnBlocks(turn);
+      if(!blocks) return undefined;
+      let duration;
+      for(const seg of blocks.querySelectorAll('.assistant-segment')){
+        const idx=Number(seg.dataset&&seg.dataset.msgIdx);
+        const msg=Number.isFinite(idx)?S.messages[idx]:null;
+        if(msg&&msg._turnDuration!==undefined) duration=msg._turnDuration;
+      }
+      return duration;
+    };
+    const durationAssignedTurns = new Set();
+    const activityByTurn = new Map();
+    const activityOrder = [];
+    const ensureActivityBucket=(key,aIdx,segmentSeq,burstId)=>{
+      if(!byActivity.has(key)){
+        const entry={key,aIdx,segmentSeq:segmentSeq||'',burstId:burstId||'',cards:[],thinkingIdx:null,includeAnchorReason:false};
+        byActivity.set(key,entry);
+        activityOrder.push(entry);
+      }
+      return byActivity.get(key);
+    };
+    const normalizeToken=(value)=>{
+      const hasValue=value!==undefined&&value!==null&&String(value)!==''&&String(value)!=='0';
+      return hasValue?String(value):'';
+    };
+    for(const tc of (S.toolCalls||[])){
+      if(!tc) continue;
+      const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
+      const segmentSeq=normalizeToken(tc.activitySegmentSeq);
+      const burstId=normalizeToken(tc.activityBurstId);
+      const key=segmentSeq?`segment:${segmentSeq}`:(burstId?`burst:${burstId}`:`assistant:${aIdx}`);
+      const entry=ensureActivityBucket(key,aIdx,segmentSeq,burstId);
+      entry.cards.push(tc);
+      entry.includeAnchorReason=true;
     }
+    for(const aIdx of assistantThinking.keys()){
+      const seg=assistantSegments.get(aIdx);
+      const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
+      const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
+      const key=segmentSeq?`segment:${segmentSeq}`:(burstId?`burst:${burstId}`:`assistant:${aIdx}`);
+      const entry=ensureActivityBucket(key,aIdx,segmentSeq,burstId);
+      if(entry.thinkingIdx===null) entry.thinkingIdx=aIdx;
+    }
+    for(const [aIdx,seg] of assistantSegments){
+      if(!seg||!seg.classList||!seg.classList.contains('assistant-segment-worklog-source')) continue;
+      if(!_worklogReasonHtmlFromAnchor(seg)) continue;
+      const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
+      const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
+      const key=segmentSeq?`segment:${segmentSeq}`:(burstId?`burst:${burstId}`:`assistant:${aIdx}`);
+      const entry=ensureActivityBucket(key,aIdx,segmentSeq,burstId);
+      entry.includeAnchorReason=true;
+    }
+    activityOrder.sort((a,b)=>{
+      const anchorA=_assistantAnchorForActivity(a.aIdx,a.segmentSeq,a.burstId);
+      const anchorB=_assistantAnchorForActivity(b.aIdx,b.segmentSeq,b.burstId);
+      const idxA=(anchorA&&anchorA.parentElement)?Array.prototype.indexOf.call(anchorA.parentElement.children,anchorA):Number.MAX_SAFE_INTEGER;
+      const idxB=(anchorB&&anchorB.parentElement)?Array.prototype.indexOf.call(anchorB.parentElement.children,anchorB):Number.MAX_SAFE_INTEGER;
+      if(idxA!==idxB) return idxA-idxB;
+      const seqA=a.segmentSeq!==''?Number(a.segmentSeq):Number.MAX_SAFE_INTEGER;
+      const seqB=b.segmentSeq!==''?Number(b.segmentSeq):Number.MAX_SAFE_INTEGER;
+      if(Number.isFinite(seqA)&&Number.isFinite(seqB)&&seqA!==seqB) return seqA-seqB;
+      const burstA=a.burstId!==''?Number(a.burstId):Number.MAX_SAFE_INTEGER;
+      const burstB=b.burstId!==''?Number(b.burstId):Number.MAX_SAFE_INTEGER;
+      if(Number.isFinite(burstA)&&Number.isFinite(burstB)&&burstA!==burstB) return burstA-burstB;
+      return a.aIdx-b.aIdx;
+    });
+    for(const entry of activityOrder){
+      const {aIdx,segmentSeq,burstId,cards,thinkingIdx,includeAnchorReason}=entry;
+      if(aIdx<assistantIdxs[0]) continue;
+      const anchorRow=_assistantAnchorForActivity(aIdx,segmentSeq,burstId);
+      if(!anchorRow) continue;
+      const anchorParent=anchorRow.parentElement;
+      const anchorReasonHtml=_worklogReasonHtmlFromAnchor(anchorRow);
+      const thinkingText=thinkingIdx!==null?assistantThinking.get(thinkingIdx):'';
+      if(!cards.length&&!anchorReasonHtml&&!thinkingText) continue;
+      const anchorTurn=anchorRow.closest('.assistant-turn');
+      if(!anchorTurn) continue;
+      let state=activityByTurn.get(anchorTurn);
+      if(!state){
+        const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
+        if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
+        const activityKey=`assistant:${aIdx}`;
+        const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
+        const group=ensureActivityGroup(anchorParent,{
+          collapsed:true,
+          anchor:anchorRow,
+          beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
+          syncAnchorReason:anchorIsWorklogSource,
+          activityKey,
+          burstId:burstId||'',
+          segmentSeq:segmentSeq||'',
+          turnDuration:includeTurnDuration?_turnDurationForAnchor(anchorRow):undefined,
+        });
+        const list=_toolWorklogListEl(group);
+        if(!list) continue;
+        list.innerHTML='';
+        state={group,cards:[],seenReasons:new Set(),seenTools:new Set()};
+        activityByTurn.set(anchorTurn,state);
+      }
+      state.cards.push(...cards);
+      _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
+        live:false,
+        includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml,
+        thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
+        seenReasons:state.seenReasons,
+        seenTools:state.seenTools,
+      });
+    }
+    activityByTurn.forEach(state=>{
+      _syncToolCallGroupSummary(state.group);
+    });
   }
   // Render per-turn duration and optional token usage on assistant messages.
   // Duration stays visible even when token usage is disabled, because it answers
@@ -7559,14 +8589,11 @@ function renderMessages(options){
       const failoverText=_gatewayRoutingFailoverText(routing);
       const modelWarningText=_gatewayModelWarningText(routing);
       const hasTurnUsage=!!msg._turnUsage;
-      // The activity-group summary owns the "Done in …" duration ONLY when a
-      // group is actually created. A tool-call turn always builds one. A
-      // thinking-only turn under Simplified Tool Calling now renders thinking
-      // inline (no group — see the `continue` at the activityIdxs loop, #3592),
-      // so it must keep its footer duration; suppressing it there would silently
-      // drop "Done in …" for thinking-only turns (#3592 review).
-      const compactActivityForMessage=isSimplifiedToolCalling()&&toolCallAssistantIdxs.has(mi);
-      const durationText=compactActivityForMessage?'':_formatTurnDuration(msg._turnDuration);
+      // The Worklog summary owns the "Done in …" duration whenever this
+      // assistant message contributes tool or thinking detail to a folded
+      // Worklog above the final answer.
+      const compactWorklogForMessage=isSimplifiedToolCalling()&&(toolCallAssistantIdxs.has(mi)||assistantThinking.has(mi));
+      const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;
       const seg=assistantSegments.get(mi);
       const row=seg?seg.closest('.assistant-turn'):null;
@@ -7620,6 +8647,7 @@ function renderMessages(options){
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
+  if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>postProcessRenderedMessages(inner));
@@ -7647,6 +8675,261 @@ function _toolDisplayName(tc){
   if(name==='subagent_progress') return 'Subagent';
   if(name==='delegate_task') return 'Delegate task';
   return name;
+}
+
+// Activity-summary detection for persisted memory/skill writes (#3340, #3544).
+// Action vocabularies match the real agent tool enums:
+//   memory.action      = add | replace | remove   (add/replace persist content → "saved")
+//   skill_manage.action= create | patch | edit | delete | write_file | remove_file
+//                        (create/patch/edit/write_file mutate a skill → "updated")
+// Deletions (memory 'remove', skill 'delete'/'remove_file') are intentionally
+// excluded so the "saved"/"updated" label verbs stay accurate; running/errored
+// calls are excluded so only completed writes are counted.
+const _MEMORY_SAVE_ACTIONS=new Set(['add','replace']);
+const _SKILL_UPDATE_ACTIONS=new Set(['create','patch','edit','write_file']);
+function _tcAction(tc){
+  return String((tc&&tc.args&&tc.args.action)||'').toLowerCase();
+}
+function _isMemorySave(tc){
+  if(!tc||tc.name!=='memory'||tc.done===false||tc.is_error) return false;
+  return _MEMORY_SAVE_ACTIONS.has(_tcAction(tc));
+}
+function _isSkillUpdate(tc){
+  if(!tc||tc.name!=='skill_manage'||tc.done===false||tc.is_error) return false;
+  return _SKILL_UPDATE_ACTIONS.has(_tcAction(tc));
+}
+// ── Tool action label helpers ──────────────────────────────────────────────
+function _decodeToolLabelEntities(value){
+  return String(value||'')
+    .replace(/&quot;/g,'"')
+    .replace(/&#39;|&apos;/g,"'")
+    .replace(/&lt;/g,'<')
+    .replace(/&gt;/g,'>')
+    .replace(/&amp;/g,'&');
+}
+function _redactToolTargetLabel(value){
+  return String(value||'')
+    .replace(/\bsshpass\s+-p\s+(?:"[^"]*"|'[^']*'|\S+)/gi,'sshpass -p "[redacted]"')
+    .replace(/(--password(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]')
+    .replace(/(password(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]');
+}
+function _shortToolLabel(value, limit){
+  const text=String(value||'').replace(/\s+/g,' ').trim();
+  const max=limit||112;
+  if(text.length<=max) return text;
+  const head=Math.max(24, Math.floor(max*.68));
+  const tail=Math.max(12, max-head-3);
+  return text.slice(0,head).trimEnd()+'...'+text.slice(-tail).trimStart();
+}
+function _toolActionKind(tc){
+  const n=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
+  if(!n) return 'unknown';
+  if(n==='subagent_progress'||n==='delegate_task') return 'delegate';
+  if(n.includes('terminal')||n.includes('shell')||n.includes('command')||n.includes('process')||n==='execute_code') return 'shell';
+  if(n.includes('read')||n.includes('view')||n.includes('open')||n==='vision_analyze') return 'read';
+  if(n.includes('list')||n==='todo') return 'list';
+  if(n.includes('web')||n.includes('fetch')||n.includes('curl')||n.includes('extract')||n.includes('browse')||n.includes('navigate')) return 'web';
+  if(n.includes('search')||n.includes('grep')||n.includes('find')) return 'search';
+  if(n.includes('write')||n.includes('patch')||n.includes('edit')) return 'write';
+  return 'unknown';
+}
+function _toolTargetLabel(tc){
+  const a=tc&&tc.args||{};
+  const raw=a.cmd||a.command||a.path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||tc.preview||'';
+  return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
+}
+function _toolVisibleTargetLabel(tc, opts){
+  opts=opts||{};
+  const target=_toolTargetLabel(tc);
+  if(!target) return '';
+  return _shortToolLabel(target, opts.limit||112);
+}
+function _toolCommandTitle(command){
+  const normalized=String(command||'').replace(/\s+/g,' ').trim();
+  if(!normalized) return '';
+  if(/^git\s+fetch\b/i.test(normalized)) return 'git fetch';
+  if(/^git\s+(?:status|rev-list|branch)\b/i.test(normalized)) return 'git ahead/behind';
+  if(/^git\s+log\b/i.test(normalized)) return 'git log';
+  if(/\bcurl\b/i.test(normalized)&&/\/health\b/i.test(normalized)) return 'health check';
+  if(/\b(?:ps|pgrep)\b/i.test(normalized)) return 'process check';
+  const m=normalized.match(/\blsof\b.*(?:-i|:)(\d{2,5})\b/i);
+  if(m) return `port ${m[1]} check`;
+  if(/\blaunchctl\b/i.test(normalized)) return 'launchctl';
+  return _shortToolLabel(normalized,72);
+}
+function _toolQueryTitle(query){
+  const normalized=String(query||'').replace(/\s+/g,' ').trim();
+  return _shortToolLabel(normalized,72);
+}
+function _toolActionLabelText(tc, opts){
+  opts=opts||{};
+  const kind=_toolActionKind(tc);
+  const done=tc&&tc.done!==false;
+  const isErr=tc&&tc.is_error;
+  let target=opts.generic?'':_toolVisibleTargetLabel(tc, opts);
+  if(kind==='shell'&&target) target=_toolCommandTitle(target);
+  else if((kind==='search'||kind==='web')&&target) target=_toolQueryTitle(target);
+  const verbs={
+    shell:   {ing:'Running',   ed:'Ran'},
+    read:    {ing:'Reading',   ed:'Read'},
+    list:    {ing:'Listing',   ed:'Listed'},
+    search:  {ing:'Searching for',ed:'Searched for'},
+    web:     {ing:'Checking',  ed:'Checked'},
+    write:   {ing:'Updating',  ed:'Updated'},
+    delegate:{ing:'Delegating',ed:'Delegated'},
+    unknown: {ing:'Running',   ed:'Ran'},
+  };
+  const v=verbs[kind]||verbs.unknown;
+  const display=_toolDisplayName(tc);
+  if(isErr){
+    return target?`Failed ${v.ing.toLowerCase()} ${target}`:`Failed ${v.ing.toLowerCase()} ${display}`;
+  }
+  if(done) return target?`${v.ed} ${target}`:`${v.ed} ${display}`;
+  return target?`${v.ing} ${target}`:`${v.ing} ${display}`;
+}
+function _toolActionLabel(tc){
+  return esc(_toolActionLabelText(tc,{limit:112}));
+}
+const _toolWorklogSummaries={
+  shell:{running:'Running a command',runningMany:'Running {n} commands',done:'Ran a command',doneMany:'Ran {n} commands'},
+  read:{running:'Reading a file',runningMany:'Read {n} files',done:'Read a file',doneMany:'Read {n} files'},
+  list:{running:'Listing files',runningMany:'Listed {n} items',done:'Listed files',doneMany:'Listed {n} files'},
+  search:{running:'Searching workspace',runningMany:'Searching workspace {n} times',done:'Searched workspace',doneMany:'Searched workspace {n} times'},
+  web:{running:'Checking web',runningMany:'Checked web {n} times',done:'Checked the web',doneMany:'Checked the web {n} times'},
+  write:{running:'Updating a file',runningMany:'Updated {n} files',done:'Wrote a file',doneMany:'Wrote {n} files'},
+  delegate:{running:'Delegating a task',runningMany:'Delegated {n} tasks',done:'Delegated a task',doneMany:'Delegated {n} tasks'},
+  unknown:{running:'Running a tool',runningMany:'Running {n} tools',done:'Ran a tool',doneMany:'Ran {n} tools'},
+};
+function _toolWorklogActionParts(tc){
+  if(tc&&tc.nodeType===1){
+    const row=tc.classList&&tc.classList.contains('tool-card-row')?tc:tc.closest&&tc.closest('.tool-card-row');
+    const card=tc.classList&&tc.classList.contains('tool-card')?tc:(row&&row.querySelector('.tool-card'));
+    const actionLabel=(row&&row.dataset.toolActionLabel)||(card&&card.querySelector('.tool-card-name')&&card.querySelector('.tool-card-name').textContent.trim())||'';
+    const kind=(row&&row.dataset.toolKind)||'unknown';
+    const isDone=!((row&&row.dataset.toolDone)==='false'||(card&&card.classList.contains('tool-card-running')));
+    const isErr=(row&&row.dataset.toolError)==='true'||(card&&card.classList.contains('tool-card-error'));
+    return {kind,isDone,isErr,target:'',summary:_toolWorklogSummaries[kind]||_toolWorklogSummaries.unknown,actionLabel};
+  }
+  const kind=_toolActionKind(tc);
+  return {
+    kind,
+    isDone:tc&&tc.done!==false,
+    isErr:tc&&tc.is_error,
+    target:_toolTargetLabel(tc),
+    summary:_toolWorklogSummaries[kind]||_toolWorklogSummaries.unknown,
+    actionLabel:_toolActionLabelText(tc),
+  };
+}
+function _toolWorklogSummary(toolCalls, opts){
+  const cards=Array.from(toolCalls||[]).filter(tc=>tc);
+  if(!cards.length) return (opts&&opts.live)?'Running':'Worklog';
+  if(cards.length===1){
+    const part=_toolWorklogActionParts(cards[0]);
+    const fmt=part.summary||_toolWorklogSummaries.unknown;
+    const line=part.isDone?fmt.done:fmt.running;
+    return part.isErr?`${line}, 1 failed`:line;
+  }
+  const order=['shell','read','write','search','web','list','delegate','unknown'];
+  const runningCounts={}, doneCounts={};
+  let failed=0;
+  for(const tc of cards){
+    const part=_toolWorklogActionParts(tc);
+    const counts=part.isDone?doneCounts:runningCounts;
+    counts[part.kind]=(counts[part.kind]||0)+1;
+    if(part.isErr) failed+=1;
+  }
+  const emit=(counts,state)=>{
+    const out=[];
+    for(const kind of order){
+      const n=counts[kind]||0;
+      if(!n) continue;
+      const fmt=_toolWorklogSummaries[kind]||_toolWorklogSummaries.unknown;
+      if(n===1) out.push(state==='done'?fmt.done:fmt.running);
+      else out.push((state==='done'?fmt.doneMany:fmt.runningMany).replace('{n}',String(n)));
+    }
+    return out;
+  };
+  const lines=[...emit(runningCounts,'running'),...emit(doneCounts,'done')];
+  if(failed) lines.push(`${failed} failed`);
+  return lines.length?lines.map((line,idx)=>idx===0?line:line.charAt(0).toLowerCase()+line.slice(1)).join(', '):_toolActionLabel(cards[0]);
+}
+function _toolWorklogListEl(group){
+  if(!group) return null;
+  return group.querySelector('.tool-worklog-list') || group.querySelector('.activity-body') || group.querySelector('.tool-call-group-body');
+}
+function _toolWorklogToolsEl(group){
+  const list=_toolWorklogListEl(group);
+  if(!list) return null;
+  let tools=list.querySelector(':scope > .wl-step-tools[data-worklog-tools="1"]');
+  if(!tools){
+    tools=document.createElement('div');
+    tools.className='wl-step-tools tool-worklog-tools';
+    tools.setAttribute('data-worklog-tools','1');
+    list.appendChild(tools);
+  }
+  return tools;
+}
+function _liveToolStepEl(group){
+  const list=_toolWorklogListEl(group);
+  if(!list) return null;
+  const last=list.lastElementChild;
+  if(last&&last.classList&&last.classList.contains('wl-step-tools')&&last.getAttribute('data-worklog-tools')==='1') return last;
+  const tools=document.createElement('div');
+  tools.className='wl-step-tools tool-worklog-tools';
+  tools.setAttribute('data-worklog-tools','1');
+  list.appendChild(tools);
+  return tools;
+}
+function _directWorklogToolRows(list){
+  if(!list) return [];
+  const rows=[];
+  Array.from(list.children).forEach(child=>{
+    if(child.classList&&child.classList.contains('tool-card-row')) rows.push(child);
+    else if(child.classList&&(child.classList.contains('tool-worklog-tool-group')||child.classList.contains('tool-group'))) rows.push(...Array.from(child.querySelectorAll('.tool-card-row')));
+  });
+  return rows;
+}
+function _unwrapNestedToolGroups(tools){
+  if(!tools) return;
+  tools.querySelectorAll(':scope > .tool-worklog-tool-group,:scope > .tool-group').forEach(el=>el.remove());
+}
+function _syncToolRowsContainer(tools, isLiveWorklog){
+  if(!tools) return;
+  const rows=_directWorklogToolRows(tools);
+  _unwrapNestedToolGroups(tools);
+  rows.forEach(row=>{ if(row.parentElement) row.remove(); });
+  tools.querySelectorAll(':scope > .tool-card-row').forEach(row=>row.remove());
+  const shouldGroup=tools.classList.contains('wl-step-tools') && rows.length>1;
+  if(!shouldGroup){
+    rows.forEach(row=>tools.appendChild(row));
+    return;
+  }
+  const hasRunning=rows.some(row=>row&&row.dataset&&row.dataset.toolDone==='false');
+  const shouldOpen=false;
+  const group=document.createElement('div');
+  group.className='tool-group'+(shouldOpen?' open':' tool-worklog-tool-group-collapsed');
+  group.setAttribute('data-tool-worklog-tool-group','1');
+  const summary=hasRunning?'Running':_toolWorklogSummary(rows,{live:isLiveWorklog, toolCount:rows.length});
+  group.innerHTML=`<button type="button" class="tool-group-head tool-worklog-tool-group-head" aria-expanded="${shouldOpen?'true':'false'}" onclick="_toggleToolWorklogGroup(this)"><span class="tg-sum tool-worklog-tool-group-label">${esc(summary)}</span><span class="tool-call-group-chevron tg-caret">${li('chevron-right',12)}</span></button><div class="tool-group-body tool-worklog-tool-group-body"><div class="tg-rows tool-worklog-tool-group-rows"></div></div>`;
+  const body=group.querySelector('.tg-rows');
+  rows.forEach(row=>body.appendChild(row));
+  tools.appendChild(group);
+}
+function _syncToolWorklogToolGroup(group){
+  const list=_toolWorklogListEl(group);
+  if(!list) return;
+  const isLiveWorklog=!!(group.getAttribute('data-live-tool-worklog-group')==='1' || group.getAttribute('data-live-tool-call-group')==='1');
+  const steps=Array.from(list.querySelectorAll(':scope > .wl-step-tools[data-worklog-tools="1"]'));
+  if(!steps.length){
+    const pendingRows=_directWorklogToolRows(list);
+    if(!pendingRows.length) return;
+    const tools=_toolWorklogToolsEl(group);
+    if(!tools) return;
+    pendingRows.forEach(row=>tools.appendChild(row));
+    _syncToolRowsContainer(tools,isLiveWorklog);
+    return;
+  }
+  steps.forEach(tools=>_syncToolRowsContainer(tools,isLiveWorklog));
 }
 function toolIcon(name){
   const icons={
@@ -7732,6 +9015,11 @@ function _toolCardPreviewText(tc, displaySnippet){
 function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='tool-card-row';
+  if(!row.dataset) row.dataset={};
+  row.dataset.toolKind=typeof _toolActionKind==='function'?_toolActionKind(tc):'unknown';
+  row.dataset.toolDone=String(tc&&tc.done!==false);
+  row.dataset.toolError=String(!!(tc&&tc.is_error));
+  row.dataset.toolActionLabel=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc):_toolDisplayName(tc);
   const icon=toolIcon(tc.name);
   const hasDetail=(tc.snippet&&tc.snippet!==tc.preview)||(tc.args&&Object.keys(tc.args).length>0);
   let displaySnippet='';
@@ -7774,6 +9062,15 @@ function buildToolCard(tc){
         </div>`:''}
       </div>`:''}
     </div>`;
+  row._tcData = tc;
+  // Durable classification flags: _tcData (a JS property) does NOT survive the
+  // outerHTML/innerHTML snapshot+restore the live tool-call group uses on session
+  // switch/restore, which would make _syncToolCallGroupSummary re-count restored
+  // memory/skill rows as generic tools and silently drop the suffix. Mirror the
+  // classification onto data-* attributes so it survives serialization. (#3544)
+  if(_isMemorySave(tc)){row.setAttribute('data-memory-save','1');row.removeAttribute('data-skill-update');}
+  else if(_isSkillUpdate(tc)){row.setAttribute('data-skill-update','1');row.removeAttribute('data-memory-save');}
+  else {row.removeAttribute('data-memory-save');row.removeAttribute('data-skill-update');}
   return row;
 }
 
@@ -7818,19 +9115,54 @@ function _toggleToolDiff(btn){
 
 function _syncToolCallGroupSummary(group){
   if(!group) return;
-  const cards=Array.from(group.querySelectorAll('.tool-card-row .tool-card'));
+  if(group.getAttribute('data-tool-worklog-group')==='1') _syncToolWorklogToolGroup(group);
+  const cards=Array.from((_toolWorklogListEl(group)||group).querySelectorAll('.tool-card-row .tool-card,.tool-card-row.tl'));
   const toolCount=cards.length;
-  const label=group.querySelector('.tool-call-group-label');
+  const label=group.querySelector('.tool-worklog-label') || group.querySelector('.tool-call-group-label');
+  const isWorklogGroup=!!(group.getAttribute('data-tool-worklog-group')==='1');
+  const isLiveWorklog=!!(group.getAttribute('data-live-tool-worklog-group')==='1' || group.getAttribute('data-live-tool-call-group')==='1');
+  const hasRunningTool=cards.some(card=>card.classList.contains('tool-card-running'));
+  if(isWorklogGroup){
+    if(hasRunningTool) group.setAttribute('data-tool-worklog-running','1');
+    else group.removeAttribute('data-tool-worklog-running');
+  }
   const durationEl=group.querySelector('.tool-call-group-duration');
   if(label){
-    if(group.getAttribute('data-live-tool-call-group')==='1'){
-      label.textContent=toolCount?`Activity: ${toolCount} tool${toolCount===1?'':'s'}`:'Activity · Running';
-    }else if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
-    else label.textContent='Activity';
+    if(group.getAttribute('data-run-activity-group')==='1'){
+      label.textContent=toolCount?_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount}):'Running';
+    }else if(isWorklogGroup){
+      label.textContent=_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount, labelOnly:!toolCount&&isLiveWorklog});
+      if(!label.textContent) label.textContent=isLiveWorklog?'Running':'Worklog';
+    }else{
+      const rows=Array.from(group.querySelectorAll('.tool-card-row'));
+      // Prefer the live _tcData classification; fall back to the durable data-*
+      // flags for rows restored from an HTML snapshot (which drops JS properties).
+      const isMem=r=>_isMemorySave(r._tcData)||r.getAttribute('data-memory-save')==='1';
+      const isSkill=r=>_isSkillUpdate(r._tcData)||r.getAttribute('data-skill-update')==='1';
+      const memCount=rows.filter(isMem).length;
+      const skillCount=rows.filter(r=>!isMem(r)&&isSkill(r)).length;
+      const otherCount=Math.max(0, toolCount-memCount-skillCount);
+      let suffix='';
+      if(memCount) suffix+=`, ${memCount} ${memCount===1?'memory':'memories'} saved`;
+      if(skillCount) suffix+=`, ${skillCount} ${skillCount===1?'skill':'skills'} updated`;
+      const toolsPart=otherCount?`${otherCount} tool${otherCount===1?'':'s'}`:'';
+      if(group.getAttribute('data-live-tool-call-group')==='1'){
+        if(toolsPart) label.textContent=`Activity: ${toolsPart}${suffix}`;
+        else if(suffix) label.textContent=`Activity: ${suffix.slice(2)}`;
+        else label.textContent='Running';
+      }else if(toolsPart||suffix){
+        label.textContent=toolsPart?`Activity: ${toolsPart}${suffix}`:`Activity: ${suffix.slice(2)}`;
+      }else label.textContent='Activity';
+    }
     label.setAttribute('data-sweep-label', label.textContent);
   }
   if(durationEl){
-    if(group.getAttribute('data-live-tool-call-group')==='1'){
+    if(group.getAttribute('data-run-activity-group')==='1'){
+      const durationText=_formatTurnDuration(group.dataset.turnDuration);
+      const label=durationText?'':_activityElapsedLabel(group);
+      durationEl.textContent=durationText?` Done in ${durationText}`:(label?` Working for ${label}`:'');
+      durationEl.style.display=durationEl.textContent?'':'none';
+    }else if(group.getAttribute('data-live-tool-call-group')==='1'){
       const activeText=_activityElapsedLabel(group);
       const progressText=_activityLiveProgressLabel(group);
       if(activeText) group.setAttribute('data-active-turn-elapsed',activeText);
@@ -7839,7 +9171,7 @@ function _syncToolCallGroupSummary(group){
       durationEl.style.display=durationEl.textContent?'':'none';
     }else{
       const durationText=_formatTurnDuration(group.dataset.turnDuration);
-      durationEl.textContent=durationText?`Done in ${durationText}`:'';
+      durationEl.textContent=durationText?` Done in ${durationText}`:'';
       durationEl.style.display=durationText?'':'none';
     }
   }
@@ -7899,6 +9231,9 @@ function appendLiveToolCard(tc){
   // Guard: ignore if session was switched. Prevents stale tool events from
   // a previous session's SSE stream from manipulating the new session's DOM.
   if(!S.session||!S.activeStreamId) return;
+  const opts=arguments[1]||{};
+  if(opts.sessionId&&S.session.session_id!==opts.sessionId) return;
+  if(opts.streamId&&S.activeStreamId!==opts.streamId) return;
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -7908,89 +9243,94 @@ function appendLiveToolCard(tc){
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return;
-  const tid=tc.tid||'';
-  if(!isSimplifiedToolCalling()){
-    // Update existing card in place (tool_complete after tool_start)
-    if(tid){
-      const existing=inner.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
-      if(existing){
-        const replacement=buildToolCard(tc);
-        replacement.dataset.liveTid=tid;
-        existing.replaceWith(replacement);
-        // Keep #toolRunningRow alive — dots stay until text starts streaming
-        // or the next tool fires (which replaces them). Removing here caused
-        // a gap between tool completion and the first text token arriving.
-        return;
-      }
-    }
-    const row=buildToolCard(tc);
-    if(tid) row.dataset.liveTid=tid;
-    // Insert after whichever comes last: the current live assistant segment or
-    // the last tool card. This handles both cases:
-    //   text → tool1 → tool2  (no text between tools: anchor is card1)
-    //   text1 → tool1 → text2 → tool2  (text between tools: anchor is text2)
-    const children=Array.from(inner.children);
-    // Include .thinking-card-row so tool cards land AFTER a finalized thinking
-    // card, not between the text segment and thinking.
-    const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-card-row,.thinking-card-row')).pop();
-    if(anchor) anchor.insertAdjacentElement('afterend', row);
-    else inner.appendChild(row);
-    // Add a 3-dot waiting indicator below the tool card so there's visual
-    // feedback while the tool is running. Removed when text starts streaming
-    // (ensureAssistantRow) or when tool_complete fires.
-    const oldWait=$('toolRunningRow');if(oldWait)oldWait.remove();
-    const waitRow=document.createElement('div');
-    waitRow.id='toolRunningRow';
-    waitRow.className='assistant-segment';
-    waitRow.innerHTML='<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
-    row.insertAdjacentElement('afterend', waitRow);
-    if(typeof scrollIfPinned==='function') scrollIfPinned();
-    return;
-  }
+  const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
   const children=Array.from(inner.children);
-  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')).pop();
-  const group=ensureActivityGroup(inner,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
-  const body=group.querySelector('.tool-call-group-body');
-  const toolName=_toolDisplayName(tc);
-  const toolEventId=tid?`tool-${tid}`:`tool-${String(tc.name||'tool').replace(/[^a-z0-9_-]/gi,'_')}`;
-  const toolDone=tc.done!==false;
-  _appendActivityEvent(group,{
-    id:toolEventId,
-    kind:'tool',
-    label:toolDone?`Tool finished: ${toolName}`:`Running tool: ${toolName}`,
-    detail:tc.preview||tc.snippet||'',
-    status:toolDone?(tc.is_error?'error':'done'):'waiting',
-    ts:_activityNowSeconds(),
+  const burstId=tc.activityBurstId!==undefined&&tc.activityBurstId!==null&&String(tc.activityBurstId)!=='0'?String(tc.activityBurstId):'';
+  const segmentSeq=tc.activitySegmentSeq!==undefined&&tc.activitySegmentSeq!==null&&String(tc.activitySegmentSeq)!=='0'?String(tc.activitySegmentSeq):'';
+  const segmentAnchor=segmentSeq?_findLiveAssistantAnchorForSegment(inner, segmentSeq):null;
+  const burstAnchor=burstId?_findLatestVisibleLiveAssistantByBurst(inner, burstId):null;
+  const anchor=segmentAnchor||burstAnchor||_findLatestVisibleLiveAssistant(inner)||children.filter(el=>el.matches('[data-live-assistant="1"]')).pop();
+  const effectiveSegmentSeq=anchor&&anchor.getAttribute?anchor.getAttribute('data-live-segment-seq')||segmentSeq:segmentSeq;
+  if(anchor) _removeEmptyLiveWorklogShells(inner);
+  const group=ensureLiveWorklogContainer(inner,{
+    anchor,
+    activityKey:_activityKeyForLiveTurn(),
+    segmentSeq:effectiveSegmentSeq,
+    burstId,
   });
-  const waiting=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"]');
-  if(waiting&&!toolDone){
-    const labelEl=waiting.querySelector('.agent-activity-status-label');
-    const detailEl=waiting.querySelector('.agent-activity-status-detail');
-    if(labelEl) labelEl.textContent='Waiting on tool result';
-    if(detailEl) detailEl.textContent=`${_activityProgressLabelForToolName(toolName)}: ${toolName}. Results will appear here.`;
-  }
-  // Update existing card in place (tool_complete after tool_start)
+  const list=_liveToolStepEl(group);
+  if(!list) return;
+  // toolComplete can replace the existing live card with the same tid.
   if(tid){
-    const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
+    const existing=group.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
     if(existing){
       const replacement=buildToolCard(tc);
       replacement.dataset.liveTid=tid;
       existing.replaceWith(replacement);
       _syncToolCallGroupSummary(group);
+      _moveLiveRunStatusToTurnEnd();
+      if(typeof scrollIfPinned==='function') scrollIfPinned();
       return;
     }
   }
+  const worklog=_toolWorklogListEl(group) || list;
+  const waiting=worklog.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"] .agent-activity-status-label');
+  if(waiting&&tc.done===false) waiting.textContent='Waiting on tool result';
   const row=buildToolCard(tc);
   if(tid) row.dataset.liveTid=tid;
-  body.appendChild(row);
+  list.appendChild(row);
   _syncToolCallGroupSummary(group);
+  _moveLiveRunStatusToTurnEnd();
   if(typeof scrollIfPinned==='function') scrollIfPinned();
+}
+
+function _findLatestLiveAssistantByBurst(inner, burstId){
+  if(!inner || !burstId) return null;
+  const candidates=Array.from(inner.querySelectorAll(`[data-live-assistant="1"][data-activity-burst-id="${CSS.escape(String(burstId))}"]`))
+    .filter(el=>el.isConnected!==false);
+  return candidates[candidates.length-1] || null;
+}
+function _findLatestLiveAssistantBySegment(inner, segmentSeq){
+  if(!inner || !segmentSeq) return null;
+  const candidates=Array.from(inner.querySelectorAll(`[data-live-assistant="1"][data-live-segment-seq="${CSS.escape(String(segmentSeq))}"]`)).filter(el=>el.isConnected!==false);
+  return candidates[candidates.length-1] || null;
+}
+function _liveAssistantHasVisibleText(el){
+  if(!el||!el.matches||!el.matches('[data-live-assistant="1"]')) return false;
+  const body=el.querySelector&&el.querySelector('.msg-body');
+  const text=(body?body.textContent:el.textContent)||el.dataset&&el.dataset.rawText||'';
+  return !!String(text||'').trim();
+}
+function _findPreviousVisibleLiveAssistant(inner, beforeNode){
+  if(!inner) return null;
+  let node=beforeNode&&beforeNode.previousElementSibling;
+  while(node){
+    if(_liveAssistantHasVisibleText(node)) return node;
+    node=node.previousElementSibling;
+  }
+  return null;
+}
+function _findLatestVisibleLiveAssistant(inner){
+  if(!inner) return null;
+  const candidates=Array.from(inner.querySelectorAll('[data-live-assistant="1"]')).filter(el=>el.isConnected!==false&&_liveAssistantHasVisibleText(el));
+  return candidates[candidates.length-1] || null;
+}
+function _findLatestVisibleLiveAssistantByBurst(inner, burstId){
+  if(!inner || !burstId) return null;
+  const candidates=Array.from(inner.querySelectorAll(`[data-live-assistant="1"][data-activity-burst-id="${CSS.escape(String(burstId))}"]`))
+    .filter(el=>el.isConnected!==false&&_liveAssistantHasVisibleText(el));
+  return candidates[candidates.length-1] || null;
+}
+function _findLiveAssistantAnchorForSegment(inner, segmentSeq){
+  const exact=_findLatestLiveAssistantBySegment(inner, segmentSeq);
+  if(exact&&_liveAssistantHasVisibleText(exact)) return exact;
+  return _findPreviousVisibleLiveAssistant(inner, exact) || _findLatestVisibleLiveAssistant(inner) || exact;
 }
 
 function clearLiveToolCards(){
   if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
   const inner=_assistantTurnBlocks($('liveAssistantTurn'));
-  if(inner) inner.querySelectorAll('.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]').forEach(el=>el.remove());
+  if(inner) inner.querySelectorAll('.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]').forEach(el=>el.remove());
   // Reset the per-turn user expand intent so the next turn starts at the
   // default collapsed state (#1298).
   if(typeof _clearLiveActivityUserIntent==='function') _clearLiveActivityUserIntent();
@@ -7998,6 +9338,36 @@ function clearLiveToolCards(){
   // leftover cards were inserted there before this refactor took effect.
   const container=$('liveToolCards');
   if(container){container.innerHTML='';container.style.display='none';}
+}
+function _removeEmptyLiveWorklogShells(inner){
+  if(!inner) return;
+  inner.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-worklog-shell="1"],.tool-call-group[data-live-worklog-shell="1"]').forEach(group=>{
+    if(!group.querySelector('.tool-card-row,.wl-reason,.agent-activity-thinking')) group.remove();
+  });
+}
+function ensureLiveWorklogShell(){
+  if(!S.session||!S.activeStreamId) return null;
+  $('emptyState').style.display='none';
+  if(!isSimplifiedToolCalling()){
+    appendThinking();
+    return $('thinkingRow');
+  }
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    if(S.session) turn.dataset.sessionId=S.session.session_id;
+    $('msgInner').appendChild(turn);
+  }
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return null;
+  const group=ensureLiveWorklogContainer(blocks,{
+    activityKey:_activityKeyForLiveTurn(),
+  });
+  if(!group) return null;
+  _moveLiveRunStatusToTurnEnd();
+  scrollIfPinned();
+  return group;
 }
 
 // ── Edit + Regenerate ──
@@ -8508,7 +9878,7 @@ function loadPdfInline(container){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
-          return pdfjsLib.getDocument({data:buf}).promise;
+          return pdfjsLib.getDocument({data:buf, isEvalSupported:false}).promise;
         })
         .then(pdf=>{
           if(!pdf) return;
@@ -8541,16 +9911,14 @@ function loadPdfInline(container){
       loadPdf(window._pdfjsLib);
     } else if(!_pdfjsLoading){
       _pdfjsLoading=true;
+      const _pdfSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
+      const _pdfWorker='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
+      const _pdfBlob=new Blob([`import*as p from'${_pdfSrc}';p.GlobalWorkerOptions.workerSrc='${_pdfWorker}';window._pdfjsLib=p;window._pdfjsReady=true;window.dispatchEvent(new Event('pdfjs-ready'));`],{type:'application/javascript'});
       const s=document.createElement('script');
-      s.src='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
       s.type='module';
-      s.textContent=`
-        import * as pdfjsLib from '${s.src}';
-        pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
-        window._pdfjsLib=pdfjsLib;
-        window._pdfjsReady=true;
-        window.dispatchEvent(new Event('pdfjs-ready'));
-      `;
+      const _pdfBlobUrl=URL.createObjectURL(_pdfBlob);
+      s.src=_pdfBlobUrl;
+      s.onload=()=>URL.revokeObjectURL(_pdfBlobUrl);
       document.head.appendChild(s);
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
@@ -8757,19 +10125,14 @@ function finalizeThinkingCard(){
     return;
   }
   const turn=$('liveAssistantTurn');
-  const group=turn&&turn.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
+  const group=turn&&turn.querySelector('.live-worklog[data-live-tool-call-group="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"]');
   if(group){
-    // Respect the user's explicit expand intent (#1298) — only force-collapse
-    // when the user has not manually expanded this turn's activity group, or
-    // has manually collapsed it. Otherwise the panel snaps shut whenever new
-    // activity arrives, even mid-read.
-    if(_liveActivityUserExpanded !== true && !(window._activityFeedExpandedDefault === true && _liveActivityUserExpanded !== false)){
-      group.classList.add('tool-call-group-collapsed');
-      const summary=group.querySelector('.tool-call-group-summary');
-      if(summary) summary.setAttribute('aria-expanded','false');
-    }
-    const active=turn.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
-    if(active) active.removeAttribute('data-thinking-active');
+    const activeReason=turn.querySelector('.wl-reason[data-worklog-reason-active="1"]');
+    if(activeReason) activeReason.removeAttribute('data-worklog-reason-active');
+    turn.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(active=>{
+      active.removeAttribute('data-thinking-active');
+      active.removeAttribute('data-live-thinking');
+    });
     _syncToolCallGroupSummary(group);
   }
 }
@@ -8777,109 +10140,74 @@ function appendThinking(text='', options){
   // Guard: ignore if session was switched during an async SSE stream.
   // The old stream's reasoning events can still fire after switch;
   // without this check they would pollute the new session's DOM.
+  options=options||{};
   const allowPendingPlaceholder=!!(options&&options.pending===true);
   if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
-  $('emptyState').style.display='none';
-  let turn=$('liveAssistantTurn');
-  if(!turn){
-    turn=_createAssistantTurn();
-    turn.id='liveAssistantTurn';
-    if(S.session) turn.dataset.sessionId=S.session.session_id;  // see #1366
-    $('msgInner').appendChild(turn);
-  }
-  const blocks=_assistantTurnBlocks(turn);
-  if(!blocks) return;
+  const empty=$('emptyState');
+  if(empty) empty.style.display='none';
   if(!isSimplifiedToolCalling()){
     let row=$('thinkingRow');
     if(!row){
       row=document.createElement('div');
-      row.className='assistant-segment';
       row.id='thinkingRow';
-      row.setAttribute('data-thinking-active','1');
-      // Insert after whichever comes last: a live assistant segment or a tool card.
-      // This mirrors appendLiveToolCard's anchor logic so thinking always appears
-      // in the right position in the interleaved sequence.
-      // Also skip #toolRunningRow (dots) — thinking should go before dots, not after.
-      const allChildren=Array.from(blocks.children);
-      const anchor=allChildren.filter(el=>
-        el.id!=='toolRunningRow' &&
-        el.matches('[data-live-assistant="1"],.tool-card-row')
-      ).pop();
-      if(anchor) anchor.insertAdjacentElement('afterend', row);
-      else blocks.appendChild(row);
+      row.className='thinking-card-row';
+      const inner=$('msgInner');
+      if(inner) inner.appendChild(row);
     }
-    const clean=_sanitizeThinkingDisplayText(text);
-    const hasClean=!!String(clean||'').trim();
-    row.className=hasClean?'assistant-segment thinking-card-row':'assistant-segment';
-    _renderThinkingInto(row,text);
-    scrollIfPinned();
-    // Auto-scroll the thinking card body to bottom if the user is watching
-    // (scroll pinned). If the user scrolled up to read history, leave it alone.
-    if(_scrollPinned){
-      const body=row&&row.querySelector('.thinking-card-body');
-      if(body) body.scrollTop=body.scrollHeight;
-    }
-    return;
-  }
-  const thinkingText=String(text||'').trim()||'Thinking…';
-  const cleanThinking=_sanitizeThinkingDisplayText(thinkingText);
-  const allChildren=Array.from(blocks.children);
-  const anchor=allChildren.filter(el=>
-    el.id!=='toolRunningRow' &&
-    el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row')
-  ).pop();
-  const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
-  const body=group&&group.querySelector('.tool-call-group-body');
-  if(!body) return;
-  if(!cleanThinking||cleanThinking==='Thinking…'){
-    const hasRunningTool=!!body.querySelector('.tool-card.tool-card-running');
-    const hasToolCard=!!body.querySelector('.tool-card-row');
-    let label;
-    let detail;
-    if(!S.activeStreamId && options && options.pending){
-      label='Starting agent';
-      detail='Creating the stream and sending your message…';
-    }else if(hasRunningTool){
-      label='Waiting on tool result';
-      detail=_activityWaitingDetail(group,label);
-    }else if(hasToolCard){
-      label='Waiting on model';
-      detail=_activityWaitingDetail(group,label);
-    }else{
-      label='Waiting for first model token';
-      detail='Stream connected; no model output has arrived yet.';
-    }
-    _appendActivityEvent(group,{id:'thinking-placeholder',kind:'waiting',label,detail,status:'waiting',ts:_activityNowSeconds()});
-    const active=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
-    if(active) active.removeAttribute('data-thinking-active');
-    _syncToolCallGroupSummary(group);
-    scrollIfPinned();
-    return;
-  }
-  const placeholder=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"]');
-  if(placeholder) placeholder.remove();
-  let row=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
-  if(!row){
-    const thinkingCards=Array.from(body.querySelectorAll('.agent-activity-thinking'));
-    row=thinkingCards.pop()||null;
-    if(row) row.setAttribute('data-thinking-active','1');
-  }
-  if(!row){
-    row=_thinkingActivityNode(thinkingText, false);
     row.setAttribute('data-thinking-active','1');
-    body.appendChild(row);
-  }else{
-    _renderThinkingInto(row,thinkingText);
+    _renderThinkingInto(row,text);
+    if(typeof scrollIfPinned==='function') scrollIfPinned();
+    return;
   }
-  _activityMarkObserved(group);
-  _syncToolCallGroupSummary(group);
-  scrollIfPinned();
-  if(_scrollPinned){
-    const body=row&&row.querySelector('.thinking-card-body');
-    if(body) body.scrollTop=body.scrollHeight;
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    if(S.session) turn.dataset.sessionId=S.session.session_id;
+    const inner=$('msgInner');
+    if(inner) inner.appendChild(turn);
   }
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return;
+  const clean=_sanitizeThinkingDisplayText(text);
+  if(clean&&window._showThinking!==false){
+    const segmentSeq=options.segmentSeq!==undefined&&options.segmentSeq!==null?String(options.segmentSeq):'';
+    const burstId=options.burstId!==undefined&&options.burstId!==null?String(options.burstId):'';
+    const thinkingKey=String(options.thinkingKey||(
+      segmentSeq?`segment:${segmentSeq}`:
+      burstId?`burst:${burstId}`:
+      'turn'
+    ));
+    const group=ensureLiveWorklogContainer(blocks,{
+      activityKey:options.activityKey||(S.activeStreamId?'live:'+S.activeStreamId:null),
+    });
+    const list=_toolWorklogListEl(group);
+    if(list){
+      let row=list.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
+      if(!row){
+        row=_thinkingActivityNode(clean, false);
+        row.setAttribute('data-live-thinking','1');
+        row.setAttribute('data-live-thinking-key',thinkingKey);
+        if(segmentSeq) row.setAttribute('data-live-segment-seq',segmentSeq);
+        if(burstId) row.setAttribute('data-activity-burst-id',burstId);
+        list.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(el=>{
+          if(el!==row){
+            el.removeAttribute('data-thinking-active');
+            el.removeAttribute('data-live-thinking');
+          }
+        });
+        row.setAttribute('data-thinking-active','1');
+        list.appendChild(row);
+      }else{
+        _renderThinkingInto(row, clean);
+      }
+      row.setAttribute('data-thinking-active','1');
+      _syncToolCallGroupSummary(group);
+    }
+  }
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
-function updateThinking(text=''){appendThinking(text);}
+function updateThinking(text='', options){appendThinking(text, options);}
 function removeThinking(){
   if(!isSimplifiedToolCalling()){
     const el=$('thinkingRow');

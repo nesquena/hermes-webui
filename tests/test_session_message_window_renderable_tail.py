@@ -78,3 +78,70 @@ def test_all_tool_session_keeps_tail_fallback():
 
     assert [m["content"] for m in window] == ["tool 3", "tool 4", "tool 5"]
     assert offset == 3
+
+
+def test_cold_load_flag_expands_window_to_fill_renderable_rows():
+    """With expand_renderable=True, a tail with <limit renderables expands back.
+
+    Tail window has 1 renderable (a9) + 4 tool rows. The existing blank-window
+    fallback does NOT fire (there IS a renderable), so this exercises the NEW
+    expansion path: it walks back to include 4 more renderable rows.
+    """
+    messages = [
+        ({"role": "user", "content": f"u{i}"} if i % 2 == 0 else {"role": "assistant", "content": f"a{i}"})
+        for i in range(10)
+    ] + [
+        {"role": "tool", "content": f"tool {idx}"}
+        for idx in range(10, 14)
+    ]
+
+    window, offset = _message_window_for_display(messages, msg_limit=5, expand_renderable=True)
+
+    # Expanded back to index 5 so the window holds 5 renderable rows (a5..a9).
+    assert offset == 5
+    assert [m["content"] for m in window if m["role"] != "tool"] == ["a5", "u6", "a7", "u8", "a9"]
+
+
+def test_cumulative_load_earlier_does_not_expand_without_flag():
+    """The 'Load earlier' path (larger msg_limit, no flag, no msg_before) keeps the raw cap.
+
+    Codex CORE finding: _loadOlderMessages re-requests with a larger msg_limit
+    and NO msg_before, so a msg_before-based gate would still expand and pull the
+    whole tool-heavy transcript. With the explicit expand_renderable flag OFF
+    (which is how _loadOlderMessages calls it), the raw tail cap is preserved.
+    """
+    messages = [
+        ({"role": "user", "content": f"u{i}"} if i % 2 == 0 else {"role": "assistant", "content": f"a{i}"})
+        for i in range(10)
+    ] + [
+        {"role": "tool", "content": f"tool {idx}"}
+        for idx in range(10, 14)
+    ]
+
+    # Same input as the cold-load test, but no expand flag (cumulative path).
+    window, offset = _message_window_for_display(messages, msg_limit=5, expand_renderable=False)
+
+    # Raw tail cap honored: window is the last 5 raw rows (a9 + 4 tools), NOT expanded.
+    assert offset == 9
+    assert [m["content"] for m in window] == ["a9", "tool 10", "tool 11", "tool 12", "tool 13"]
+
+
+def test_cold_load_expands_but_caps_at_total_renderable():
+    """Cold-load expansion stops at the session's total renderable count.
+
+    When the whole session has fewer renderable rows than msg_limit, the
+    backward walk must terminate at index 0 (not loop forever) and return the
+    full source.
+    """
+    messages = [
+        {"role": "user", "content": "only-user"},
+    ] + [
+        {"role": "tool", "content": f"tool {idx}"}
+        for idx in range(8)
+    ]
+
+    window, offset = _message_window_for_display(messages, msg_limit=5, expand_renderable=True)
+
+    # Only 1 renderable row in the whole session → expand back to index 0.
+    assert offset == 0
+    assert window[0]["content"] == "only-user"

@@ -178,7 +178,11 @@ class TestProfileSessionListFlip:
 
     def test_profile_refresh_drops_queued_reflow_before_playing_flip(self):
         start = self.JS.index("// Refresh FLIP and queued archive/delete reflow both drive")
-        end = self.JS.index("// Note: declared after the groups loop", start)
+        # End anchor: the next function declaration after the reflow block. (Was the
+        # "// Note: declared after the groups loop" comment on the nested
+        # _sessionAttentionState, which #3696 removed when that helper was hoisted to
+        # top-level scope — so anchor on the stable _renderOneSession decl instead.)
+        end = self.JS.index("function _renderOneSession(", start)
         block = self.JS[start:end]
 
         assert "const reflowBefore=animateRefresh?flipBefore:_pendingSessionReflowPositions;" in block
