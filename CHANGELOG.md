@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.329] — 2026-06-08 — Release KS (session-list + startup latency)
+
+### Fixed
+- **`/api/sessions` no longer does redundant `_index.json` parses per legacy sidecar row.** The stale-metadata refresh reuses the already-parsed index (O(n) instead of O(n²) for installs with many pre-`message_count` sidecars). (#3814, @ai-ag2026)
+- **Startup no longer reads every session's full JSON when there is nothing to recover.** Recovery now only reads sidecars that have a `.json.bak` backup; the reported `scanned` count is unchanged. (#3815, @ai-ag2026)
+
 ## [v0.51.328] — 2026-06-08 — Release KR (preserve full compaction summaries)
 
 ### Added
