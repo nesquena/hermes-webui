@@ -1024,8 +1024,27 @@ def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     return stripped.strip()
 
 
-def _build_agent_prompt_inputs(session, user_text: str) -> tuple[str, str]:
-    """Build versioned workspace + optional active Capy Space prompt inputs."""
+def _active_space_context_receipt(active_space_id: str) -> dict | None:
+    """Return the metadata-only active Space context receipt used for prompt injection."""
+    sid = str(active_space_id or '').strip()
+    if not sid:
+        return None
+    try:
+        from api import spaces as capy_spaces
+
+        receipt = capy_spaces.run_space_tool(
+            "space.current.context",
+            {"active_space_id": sid},
+        )
+    except (ValueError, FileNotFoundError, RuntimeError):
+        return None
+    if not isinstance(receipt, dict) or not receipt.get("ok"):
+        return None
+    return receipt
+
+
+def _build_agent_prompt_inputs_with_context_receipt(session, user_text: str) -> tuple[str, str, dict | None]:
+    """Build workspace + active Capy Space prompt inputs with safety receipt evidence."""
     workspace = getattr(session, 'workspace', '')
     workspace_ctx = _workspace_context_prefix(str(workspace))
     workspace_system_msg = (
@@ -1040,18 +1059,28 @@ def _build_agent_prompt_inputs(session, user_text: str) -> tuple[str, str]:
         "Never fall back to a hardcoded path when this tag is present."
     )
 
+    context_receipt = None
     active_space_id = str(getattr(session, 'active_space_id', '') or '').strip()
     if active_space_id:
-        try:
-            from api import spaces as capy_spaces
-            space_context = capy_spaces.build_agent_context(active_space_id)
-        except (ValueError, FileNotFoundError, RuntimeError):
-            space_context = ""
+        context_receipt = _active_space_context_receipt(active_space_id)
+        space_context = ""
+        if isinstance(context_receipt, dict):
+            space_context = str(context_receipt.get("context") or "")
+            active_space_id = str(context_receipt.get("active_space_id") or active_space_id).strip()
         if space_context:
             workspace_ctx += f"[Capy Space: {active_space_id}]\n"
             workspace_system_msg += "\n\n" + space_context
 
-    return workspace_ctx + user_text, workspace_system_msg
+    return workspace_ctx + user_text, workspace_system_msg, context_receipt
+
+
+def _build_agent_prompt_inputs(session, user_text: str) -> tuple[str, str]:
+    """Build versioned workspace + optional active Capy Space prompt inputs."""
+    agent_user_message, workspace_system_msg, _context_receipt = _build_agent_prompt_inputs_with_context_receipt(
+        session,
+        user_text,
+    )
+    return agent_user_message, workspace_system_msg
 
 
 def _first_exchange_snippets(messages):

@@ -7938,13 +7938,15 @@ def _space_current_context_output_compaction(context: str) -> dict[str, Any]:
     """Return product-visible compaction evidence for active Space context tool output."""
     from api.capy_compaction import compact_output
 
-    return compact_output(
+    receipt = compact_output(
         context,
         tool="capy-spaces-context",
         command="space.current.context",
         exit_status=0,
         max_chars=1_200,
     )
+    receipt["metadata_only"] = True
+    return receipt
 
 
 def _widget_list_safety_receipts(action: str, space_id: str, widget_count: int) -> dict[str, Any]:
@@ -8120,6 +8122,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 "ok": True,
                 "action": name,
                 "active_space_id": None,
+                "metadata_only": True,
+                "local_only": True,
                 "context": "",
                 "output_compaction": _space_current_context_output_compaction(""),
                 "context_status": context_status,
@@ -8133,6 +8137,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "ok": True,
             "action": name,
             "active_space_id": space_id,
+            "metadata_only": True,
+            "local_only": True,
             "context": context,
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": _space_current_context_action_policy_receipt(name, prompt_preflight),
