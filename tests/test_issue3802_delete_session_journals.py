@@ -93,3 +93,21 @@ def test_delete_run_journal_noop_on_missing_or_invalid(tmp_path):
     assert delete_run_journal("nope", session_dir=tmp_path) is False
     assert delete_run_journal("../escape", session_dir=tmp_path) is False
     assert delete_run_journal("", session_dir=tmp_path) is False
+
+
+def test_delete_journals_reject_dot_traversal_ids(tmp_path):
+    """A bare '.'/'..' passes the dot-permitting id regex but must NOT resolve to
+    the journal root/parent and delete the wrong directory (no '/' to catch it).
+    """
+    # Seed a real run + turn journal so we'd notice an over-broad delete.
+    writer = RunJournalWriter("keep", "run-1", session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "hello"})
+    _submit("keep", "hi", tmp_path)
+    run_dir = tmp_path / "_run_journal" / "keep"
+    assert run_dir.exists()
+    for bad in (".", ".."):
+        assert delete_run_journal(bad, session_dir=tmp_path) is False
+        assert delete_turn_journal(bad, session_dir=tmp_path) == 0
+    # The legitimate journals must still be present.
+    assert run_dir.exists()
+    assert read_turn_journal("keep", session_dir=tmp_path)

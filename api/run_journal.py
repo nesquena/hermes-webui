@@ -268,7 +268,11 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
     import shutil
 
     sid = str(session_id or "").strip()
-    if not sid or "/" in sid or "\\" in sid or not _SAFE_ID_RE.fullmatch(sid):
+    # Reject path-traversal ids: the regex below permits dots, so a bare "." or
+    # ".." would resolve `root / RUN_JOURNAL_DIR_NAME / sid` to the journal ROOT
+    # (or its parent) and rmtree the wrong directory. The route call site only
+    # passes real sids, but this is a public helper — guard it directly.
+    if sid in (".", "..") or not sid or "/" in sid or "\\" in sid or not _SAFE_ID_RE.fullmatch(sid):
         return False
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     session_journal_dir = root / RUN_JOURNAL_DIR_NAME / sid

@@ -252,7 +252,9 @@ def delete_turn_journal(session_id: str, *, session_dir: Path | None = None) -> 
     are treated as a no-op so callers can invoke this unconditionally on delete.
     """
     sid = str(session_id or "").strip()
-    if not sid or "/" in sid or "\\" in sid or not _SESSION_ID_RE.fullmatch(sid):
+    # Reject "."/".." for parity with delete_run_journal — the regex permits
+    # dots, and a traversal id has no legitimate use here.
+    if sid in (".", "..") or not sid or "/" in sid or "\\" in sid or not _SESSION_ID_RE.fullmatch(sid):
         return 0
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     journal_dir = root / TURN_JOURNAL_DIR_NAME
