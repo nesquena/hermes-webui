@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.331] — 2026-06-08 — Release KU (dismissible error toasts)
+
+### Fixed
+- **Error toasts can now be dismissed immediately.** Error toasts default to a 20-second timeout and can sit over workspace controls; they now render an explicit **Dismiss** button (alongside the existing Copy button), and non-error toasts dismiss on click. Both clear the auto-dismiss timer and hide the toast right away. (#3844, @claw-io, fixes #3842)
+
 ## [v0.51.330] — 2026-06-08 — Release KT (api docstring backfill)
 
 ### Changed

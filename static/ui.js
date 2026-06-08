@@ -4311,6 +4311,12 @@ const TOAST_DEFAULT_MS=2800;
 const TOAST_ERROR_DEFAULT_MS=20000;
 function clearToastDismissTimer(el){if(!el)return;clearTimeout(el._t);el._t=null;}
 function setToastDismissTimer(el,duration){if(!el)return;clearToastDismissTimer(el);el._t=setTimeout(()=>{el.classList.remove('show');},duration);}
+function dismissToast(btnOrEl){
+  const el=btnOrEl&&btnOrEl.closest?btnOrEl.closest('#toast'):(btnOrEl&&btnOrEl.id==='toast'?btnOrEl:null);
+  if(!el)return;
+  clearToastDismissTimer(el);
+  el.classList.remove('show');
+}
 function copyToastText(btn){
   const el=btn&&btn.closest?btn.closest('#toast'):null;
   const text=el?(el.dataset.toastMessage||el.textContent||''):'';
@@ -4324,12 +4330,13 @@ function showToast(msg,ms,type){
   const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
   el.className='toast show '+t;
   el.dataset.toastMessage=s;
-  if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button>`;
+  if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button><button class="toast-dismiss" type="button" aria-label="Dismiss error toast" data-toast-dismiss="1" onclick="dismissToast(this);event.stopPropagation()">Dismiss</button>`;
   else el.textContent=s;
   el.onmouseenter=()=>clearToastDismissTimer(el);
   el.onmouseleave=()=>setToastDismissTimer(el,duration);
   el.onfocusin=()=>clearToastDismissTimer(el);
   el.onfocusout=()=>setToastDismissTimer(el,duration);
+  el.onclick=t==='error'?null:()=>dismissToast(el);
   setToastDismissTimer(el,duration);
 }
 
