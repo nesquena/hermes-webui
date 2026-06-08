@@ -44,6 +44,7 @@ def _assert_widget_sdk_helper_receipts(response, *, action, run_id):
     assert response["output_compaction"]["metadata_only"] is True
     assert response["output_compaction"]["redaction_status"] == "metadata_only"
     assert f"progress_run_id: {run_id}" in response["output_compaction"]["text"]
+    _assert_server_memory_advisory_receipt(response)
     assert "space_id:" not in response["output_compaction"]["text"]
     assert "widget_count:" not in response["output_compaction"]["text"]
 

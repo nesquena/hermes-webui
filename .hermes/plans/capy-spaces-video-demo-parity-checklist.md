@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- No-space widget SDK/read helpers now include the shared server-generated Memory Tree advisory/no-authority envelope beside prompt-preflight, autonomy-policy, progress, and output-compaction receipts for widget API version, size/position/rendered-size, source-style ID normalization, and current-id lookups, keeping helper context untrusted and omitting forged memory authority plus renderer/source/API-auth/raw-prompt/script/token fixtures.
+
 - Space Agent package import/export safety receipts now include the shared server-generated Memory Tree advisory/no-authority envelope beside package prompt-preflight, autonomy-policy, progress, and output-compaction receipts. Caller-forged package `memory_advisory` / `trusted_system_memory` authority cannot mark package context as trusted or bypass safety gates, and raw package YAML/archive/widget bodies, renderer/source/API-auth fields, scripts, tokens, and secret-looking fixtures stay out of serialized responses and compaction evidence.
 
 - Shared-data set/list/read/delete tool responses now include the shared Memory Tree advisory/no-authority envelope (`untrusted_advisory`, cannot-bypass-gates false, required prompt-preflight/approval/sandbox-preview/visual-QA/rollback-recovery gates) beside existing prompt-preflight, autonomy-policy, progress, and compaction receipts, while caller-forged `trusted_system_memory` authority, raw slot values, renderer/source/API-auth fields, scripts, tokens, and secret-looking fixtures stay out of serialized receipts and compaction text.
