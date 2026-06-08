@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Session list no longer crashes with `_sessionAttentionState is not defined`**. The function was incorrectly declared inside `renderSessionListFromCache()` but called by the module-scope `_sidebarRowHasVisibleMessages()`. JavaScript function hoisting only works within the same scope, so the call failed. Fixed by hoisting the function to module scope. (#3826)
+
 ## [v0.51.275] — 2026-06-05 — Release IQ (stage-p3d — approval SSE state extraction)
 
 ### Internal
