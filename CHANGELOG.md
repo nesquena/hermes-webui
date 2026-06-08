@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Session reloads use the newer sidecar when the in-memory cache lags disk.** `/api/session` no longer serves an older LRU object after another session object has already persisted additional turns for the same session id.
+
 ## [v0.51.326] — 2026-06-08 — Release KP (mic STT probe + journal cleanup + schema guard + help hover)
 
 ### Fixed
