@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- Shared-data set/list/read/delete tool responses now include the shared Memory Tree advisory/no-authority envelope (`untrusted_advisory`, cannot-bypass-gates false, required prompt-preflight/approval/sandbox-preview/visual-QA/rollback-recovery gates) beside existing prompt-preflight, autonomy-policy, progress, and compaction receipts, while caller-forged `trusted_system_memory` authority, raw slot values, renderer/source/API-auth fields, scripts, tokens, and secret-looking fixtures stay out of serialized receipts and compaction text.
+
 - Source-style Space open/reload navigation helpers now include the shared Memory Tree advisory/no-authority envelope beside browser-navigation prompt-preflight, autonomy-policy, progress, and compaction receipts, keeping navigation context untrusted/advisory-only while forged memory authority, raw memory context, renderer/API-auth fields, scripts, tokens, and secret-looking fixtures remain omitted.
 
 - Direct `/api/spaces/create` and source-style `space.create` / `space.spaces.create` safety receipts now add the shared Memory Tree advisory/no-authority envelope (`untrusted_advisory`, cannot-bypass-gates false, required prompt-preflight/approval/sandbox-preview/visual-QA/rollback-recovery gates) beside existing prompt-preflight, autonomy-policy, progress, and output-compaction evidence, while caller-forged `trusted_system_memory` authority, raw create-time instructions, renderer/source/API-auth fields, scripts, tokens, and secret-looking fixtures stay out of serialized receipts, compaction text, and visual QA output.

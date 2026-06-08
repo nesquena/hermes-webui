@@ -1820,9 +1820,12 @@ def _data_slot_summary(slot: dict[str, Any]) -> dict[str, Any] | None:
         except ValueError:
             return None
     value_summary = _shared_data_preflight_summary(_payload_summary(slot.get("value_summary") if "value_summary" in slot else slot.get("value")))
-    metadata_summary = _shared_data_preflight_summary(_data_slot_metadata_summary(
-        slot.get("metadata_summary") if "metadata_summary" in slot else slot.get("metadata")
-    ))
+    raw_metadata_summary = slot.get("metadata_summary") if "metadata_summary" in slot else slot.get("metadata")
+    metadata_summary = (
+        "[REDACTED]"
+        if raw_metadata_summary == "[REDACTED]"
+        else _shared_data_preflight_summary(_data_slot_metadata_summary(raw_metadata_summary))
+    )
     return {
         "key": key,
         "value_summary": value_summary,
@@ -1855,10 +1858,39 @@ def _data_slot_summaries(space: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
+def _shared_data_compact_marker(value: Any, limit: int = 500) -> str:
+    text = _context_value(value, limit)
+    return re.sub(r"[^a-z0-9]+", "", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text).lower())
+
+
+def _shared_data_unsafe_authority_marker(value: Any) -> bool:
+    text = _context_value(value, 500)
+    compact = _shared_data_compact_marker(text, 500)
+    return bool(
+        text
+        and (
+            compact == "canbypass"
+            or "canbypass" in compact
+            or "systemmemory" in compact
+            or "memoryadvisory" in compact
+            or "contextauthority" in compact
+            or "canbypasssafetygates" in compact
+            or "requiredgates" in compact
+            or "forgedmemoryauthority" in compact
+            or ("trusted" in compact and "memory" in compact)
+        )
+    )
+
+
+def _shared_data_unsafe_key_marker(value: Any) -> bool:
+    text = _context_value(value, 120)
+    compact = _shared_data_compact_marker(text)
+    return bool(not text or "prompt" in compact or "instruction" in compact or _shared_data_unsafe_authority_marker(text))
+
+
 def _shared_data_slot_key_summary(key: str) -> str:
     candidate = _active_context_value(validate_data_key(key), 80)
-    compact = re.sub(r"[^a-z0-9]+", "", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", candidate).lower())
-    if candidate and candidate != "[REDACTED]" and ("prompt" in compact or "instruction" in compact):
+    if candidate and candidate != "[REDACTED]" and _shared_data_unsafe_key_marker(candidate):
         return "[REDACTED]"
     return candidate or "[REDACTED]"
 
@@ -1880,8 +1912,7 @@ _SHARED_DATA_PREFLIGHT_HTML_RE = re.compile(r"<\s*/?\s*[a-z][^>]*>", re.IGNORECA
 
 def _shared_data_summary_key(key: Any) -> str:
     text = _context_value(key, 80)
-    compact = re.sub(r"[^a-z0-9]+", "", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text).lower())
-    if not text or "prompt" in compact or "instruction" in compact:
+    if _shared_data_unsafe_key_marker(text):
         return "[REDACTED]"
     return text
 
@@ -1899,7 +1930,11 @@ def _shared_data_preflight_summary(value: Any) -> Any:
         return [_shared_data_preflight_summary(item) for item in value]
     if isinstance(value, str):
         text = _payload_text_summary(value)
-        if text != "[REDACTED]" and (_SHARED_DATA_PREFLIGHT_HTML_RE.search(text) or _SHARED_DATA_PREFLIGHT_SECRET_SHAPE_RE.search(text)):
+        if text != "[REDACTED]" and (
+            _shared_data_unsafe_authority_marker(text)
+            or _SHARED_DATA_PREFLIGHT_HTML_RE.search(text)
+            or _SHARED_DATA_PREFLIGHT_SECRET_SHAPE_RE.search(text)
+        ):
             return "[REDACTED]"
         return text
     return value
@@ -2071,9 +2106,18 @@ def _space_create_output_compaction_receipt(
             or "untrusted_advisory"
         )
         can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
+        raw_required_gates = memory_advisory.get("required_gates")
+        required_gates = raw_required_gates if isinstance(raw_required_gates, list) else []
+        safe_required_gates = []
+        for gate in required_gates[:8]:
+            safe_gate = _payload_text_summary(gate, 40)
+            if safe_gate:
+                safe_required_gates.append(safe_gate)
         lines.append(f"advisory_context: {advisory_context}")
         lines.append(f"context_authority: {context_authority}")
         lines.append(f"can_bypass_safety_gates: {can_bypass}")
+        if safe_required_gates and safe_action.startswith(("space.data.", "space.current.data.")):
+            lines.append(f"required_gates: {', '.join(safe_required_gates)}")
     receipt = compact_output(
         "\n".join(lines),
         tool="capy-spaces-tool-action",
@@ -2185,9 +2229,18 @@ def _space_tool_action_output_compaction_receipt(
             or "untrusted_advisory"
         )
         can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
+        raw_required_gates = memory_advisory.get("required_gates")
+        required_gates = raw_required_gates if isinstance(raw_required_gates, list) else []
+        safe_required_gates = []
+        for gate in required_gates[:8]:
+            safe_gate = _payload_text_summary(gate, 40)
+            if safe_gate:
+                safe_required_gates.append(safe_gate)
         lines.append(f"advisory_context: {advisory_context}")
         lines.append(f"context_authority: {context_authority}")
         lines.append(f"can_bypass_safety_gates: {can_bypass}")
+        if safe_required_gates and safe_action.startswith(("space.data.", "space.current.data.")):
+            lines.append(f"required_gates: {', '.join(safe_required_gates)}")
 
     retained_space_id = safe_target_space_id or safe_space_id or safe_source_space_id
     artifact_handles: list[dict[str, str]] = []
@@ -4002,6 +4055,9 @@ def set_shared_data_slot(space_id: str, key: str, value: Any, metadata: Any | No
         "value_summary": _shared_data_preflight_summary(_payload_summary(value)),
         "metadata_summary": _shared_data_preflight_summary(_data_slot_metadata_summary(metadata if isinstance(metadata, dict) else {})),
     }
+    if _shared_data_unsafe_authority_marker(data_key):
+        item["value_summary"] = "[REDACTED]"
+        item["metadata_summary"] = "[REDACTED]"
     prompt_preflight = _shared_data_slot_prompt_preflight_receipt(data_key, item)
     if prompt_preflight.get("status") != "pass":
         raise ValueError("Shared data slot prompt preflight blocked")
@@ -9240,7 +9296,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         result = set_shared_data_slot(space_id, data.get("key"), data.get("value"), data.get("metadata"))
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="shared-slot.set")
-        response = {"ok": True, "action": name, **result, "progress_event": progress_event}
+        memory_advisory = _memory_advisory_public_envelope()
+        response = {"ok": True, "action": name, **result, "progress_event": progress_event, "memory_advisory": memory_advisory}
         autonomy_policy = _shared_data_slot_action_policy_receipt(name, result.get("prompt_preflight"))
         response["autonomy_policy"] = autonomy_policy
         response["output_compaction"] = _space_tool_action_output_compaction_receipt(
@@ -9249,6 +9306,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             widget_count=0,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
         )
         return response
     if name in {"space.data.list", "space.current.data.list"}:
@@ -9257,6 +9315,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="shared-slot.list")
         prompt_preflight = _shared_data_slot_required_prompt_preflight_receipt(name)
         autonomy_policy = _shared_data_slot_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -9264,6 +9323,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "items": items,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
@@ -9271,6 +9331,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 widget_count=0,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
             ),
         }
     if name in {"space.data.get", "space.current.data.get"}:
@@ -9280,6 +9341,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="shared-slot.get")
         prompt_preflight = _shared_data_slot_required_prompt_preflight_receipt(name)
         autonomy_policy = _shared_data_slot_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -9287,6 +9349,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "item": item,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
@@ -9294,6 +9357,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 widget_count=0,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
             ),
         }
     if name in {"space.data.delete", "space.current.data.delete"}:
@@ -9301,12 +9365,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         prompt_preflight = _shared_data_slot_required_prompt_preflight_receipt(name)
         result = delete_shared_data_slot(space_id, data.get("key"))
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="shared-slot.delete")
+        memory_advisory = _memory_advisory_public_envelope()
         response = {
             "ok": True,
             "action": name,
             **result,
             "prompt_preflight": prompt_preflight,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
         }
         autonomy_policy = _shared_data_slot_action_policy_receipt(name, prompt_preflight)
         response["autonomy_policy"] = autonomy_policy
@@ -9317,6 +9383,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             revision_event_id=result.get("revision_event_id"),
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
         )
         return response
     if name in {"space.research.artifact.set", "space.current.research.artifact.set", "space.research.report.set", "space.current.research.report.set"}:
