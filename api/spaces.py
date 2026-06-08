@@ -2021,6 +2021,7 @@ def _space_create_output_compaction_receipt(
     space: dict[str, Any],
     autonomy_policy: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for source-style Space create.
 
@@ -2063,6 +2064,16 @@ def _space_create_output_compaction_receipt(
         "metadata_only: true",
         "raw_prompt_stored: false",
     ]
+    if isinstance(memory_advisory, dict):
+        advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
+        context_authority = (
+            _payload_text_summary(memory_advisory.get("context_authority") or "untrusted_advisory", 80)
+            or "untrusted_advisory"
+        )
+        can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
+        lines.append(f"advisory_context: {advisory_context}")
+        lines.append(f"context_authority: {context_authority}")
+        lines.append(f"can_bypass_safety_gates: {can_bypass}")
     receipt = compact_output(
         "\n".join(lines),
         tool="capy-spaces-tool-action",
@@ -3806,16 +3817,19 @@ def create_space(
         receipt_space["agent_instructions"] = "[metadata-only instructions stored after prompt preflight]"
     progress_event = _record_space_tool_progress_event(detail["space_id"], run_prefix="space.create")
     autonomy_policy = _space_create_action_policy_receipt(action, prompt_preflight)
+    memory_advisory = _memory_advisory_public_envelope()
     response: dict[str, Any] = {
         "space": receipt_space,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": _space_create_output_compaction_receipt(
             action=action,
             raw_payload=payload,
             space=receipt_space,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
         ),
     }
     if prompt_preflight is not None:
@@ -8368,12 +8382,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             space["agent_instructions"] = "[metadata-only instructions stored after prompt preflight]"
         progress_event = _record_space_tool_progress_event(created["space_id"], run_prefix="space.create")
         autonomy_policy = _space_create_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         output_compaction = _space_create_output_compaction_receipt(
             action=name,
             raw_payload=data,
             space=space,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
         )
         response = {
             "ok": True,
@@ -8381,6 +8397,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "space": space,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": output_compaction,
         }
         if prompt_preflight is not None:

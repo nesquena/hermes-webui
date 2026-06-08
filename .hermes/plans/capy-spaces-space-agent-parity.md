@@ -17,6 +17,8 @@ Recent receipt-safety slice: receipt-only browser-surface tool actions now inclu
 
 New active-instruction safety slice: direct `/api/spaces/update` active-space instruction writes with `includeSafetyReceipts` now include the same server-generated Memory Tree advisory/no-authority envelope beside prompt-preflight, autonomy-policy, progress, and output-compaction evidence. Caller-forged `memory_advisory` authority is ignored, `can_bypass_safety_gates` remains false, and raw instruction/source/html/renderer/API-auth/secret fixtures stay out of serialized receipts and compaction text.
 
+New create-space advisory slice: direct `/api/spaces/create` with `includeSafetyReceipts` and source-style create helpers (`space.create`, `space.spaces.create`, `space.spaces.createSpace`) now return the same server-generated Memory Tree advisory/no-authority envelope beside create-time prompt-preflight, autonomy-policy, progress, and output-compaction evidence, while caller-forged trusted memory authority, raw instructions, renderer/source/API-auth fields, scripts, and secret-looking fixtures remain omitted from receipts, compaction, and visual QA output.
+
 ## OpenHuman-Inspired Expansion Track
 
 Canonical roadmap: `.hermes/plans/capy-openhuman-inspired-roadmap.md`.
