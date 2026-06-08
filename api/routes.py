@@ -2307,9 +2307,14 @@ def _resolve_compatible_session_model_state(
     # Default (human chat/start) path calls get_available_models() with NO
     # kwargs so it stays signature-compatible with the many tests that stub
     # get_available_models as a zero-arg callable. Only the server-side wakeup
-    # path (prefer_cached_catalog=True) opts into the cache-only mode.
+    # path (prefer_cached_catalog=True) opts into the cache-only mode. Some
+    # tests monkeypatch get_available_models as a zero-arg callable, so keep
+    # the cache-preference call signature-compatible on TypeError.
     if prefer_cached_catalog:
-        catalog = get_available_models(prefer_cache=True)
+        try:
+            catalog = get_available_models(prefer_cache=True)
+        except TypeError:
+            catalog = get_available_models()
     else:
         catalog = get_available_models()
     default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
