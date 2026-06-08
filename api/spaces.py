@@ -8684,6 +8684,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         resolved_url = _space_tool_resolve_app_url(data)
         progress_event = _record_resolve_app_url_progress_event(name)
         autonomy_policy = _space_resolve_app_url_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -8692,11 +8693,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 widget_count=0,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name == "space.spaces.sizetotoken":
