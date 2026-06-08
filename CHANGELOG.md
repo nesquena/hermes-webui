@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.328] — 2026-06-08 — Release KR (LM Studio probe auth + full compaction summaries)
+
+### Fixed
+- **Reasoning-effort detection no longer 401s against a keyed LM Studio server.** The reasoning probe now resolves the LM Studio API key (active-model config → `providers.lmstudio` → `LM_API_KEY`/`LMSTUDIO_API_KEY`) instead of probing keyless. (#3750, @rodboev)
+- **Compaction summaries are no longer truncated at 320 characters.** The full compaction summary text is preserved in the summary card (the prior clip also broke a long-summary reference-card match). (#3800, @rodboev)
+
 ## [v0.51.327] — 2026-06-08 — Release KQ (brick wave: session-cache freshness + compression-tail + interrupt race)
 
 ### Fixed
