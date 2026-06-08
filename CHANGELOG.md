@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Error toasts can now be dismissed immediately.** Error toasts already stayed visible longer and exposed a Copy button, but they could still block nearby workspace controls until the timeout expired. They now include an explicit Dismiss button, and non-error toasts can also be cleared with a click on the toast body. Adds regression coverage for the dismiss helper, dismiss-button markup hook, and shared toast-button styling. (#3842)
+
 ## [v0.51.330] — 2026-06-08 — Release KT (api docstring backfill)
 
 ### Changed
