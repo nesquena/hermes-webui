@@ -1506,6 +1506,22 @@ def _inline_thinking_fence_marker_at(text, index):
     return ''
 
 
+def _inline_thinking_indented_code_at(text, index):
+    """True when `index` falls on a markdown indented code block line (the line
+    containing `index` starts with >=4 spaces or a tab, and is not blank). Such
+    lines are literal code, so thinking tags inside them must stay visible.
+    Evaluated for any column on the line, not just the first — the thinking tag
+    sits after the indentation."""
+    line_start = text.rfind('\n', 0, index) + 1  # 0 if no preceding newline
+    line_end = text.find('\n', index)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    if not line.strip():
+        return False
+    return line.startswith('    ') or line.startswith('\t')
+
+
 def _merge_inline_thinking_reasoning(existing_reasoning, extracted_parts):
     out = str(existing_reasoning or '').strip()
     for part in extracted_parts or ():
@@ -1521,7 +1537,21 @@ def _merge_inline_thinking_reasoning(existing_reasoning, extracted_parts):
     return out
 
 
-def _extract_inline_thinking_from_content(raw_content, existing_reasoning=''):
+def _extract_inline_thinking_from_content(raw_content, existing_reasoning='', *, streaming=False):
+    """Split inline thinking blocks out of assistant content.
+
+    Code-aware: thinking tags inside a triple-fence (``` / ~~~), an inline
+    single-backtick code span, or an indented (>=4-space / tab) code block are
+    LEFT VISIBLE — they are literal text a user typed/pasted, not a real thinking
+    trace. (#3633 deep-review / Codex catch: the earlier full-scan version only
+    protected triple fences, so a literal `<think>` in an inline code span got
+    silently extracted.)
+
+    ``streaming`` gates partial/unclosed-block handling: during live streaming an
+    unmatched open tag means "still thinking" and its tail is shown as reasoning;
+    on the persist/reload path (streaming=False) an unclosed tag is LEFT VISIBLE
+    so prose after a literal ``<think>`` is never silently truncated on save.
+    """
     text = '' if raw_content is None else str(raw_content)
     if not text:
         return text, str(existing_reasoning or '').strip()
@@ -1530,12 +1560,18 @@ def _extract_inline_thinking_from_content(raw_content, existing_reasoning=''):
     cursor = 0
     index = 0
     fence = ''
+    in_backtick = False
     length = len(text)
     while index < length:
         marker = _inline_thinking_fence_marker_at(text, index)
         if marker:
             fence = '' if fence == marker else (fence or marker)
-        if not fence:
+        # Inline single-backtick code span toggles on each lone backtick that is
+        # not part of a triple fence. Only tracked outside a triple fence.
+        if not fence and not marker and text[index] == '`':
+            in_backtick = not in_backtick
+        in_code = bool(fence) or in_backtick or _inline_thinking_indented_code_at(text, index)
+        if not in_code:
             pair = None
             for open_tag, close_tag in _INLINE_THINKING_TAG_PAIRS:
                 if text.startswith(open_tag, index):
@@ -1543,28 +1579,44 @@ def _extract_inline_thinking_from_content(raw_content, existing_reasoning=''):
                     break
             if pair:
                 open_tag, close_tag = pair
-                visible.append(text[cursor:index])
                 close_index = text.find(close_tag, index + len(open_tag))
                 if close_index == -1:
+                    # Unclosed open tag. A LEADING unclosed block (nothing
+                    # visible before it) is a genuine thinking trace that got
+                    # cut off / persisted mid-thought → reasoning (master #3455
+                    # leading-only intent, and the live-stream "still thinking"
+                    # case). An unclosed tag AFTER visible content on the persist
+                    # path is almost always a literal typed tag — leave it (and
+                    # the prose after it) visible so nothing is silently
+                    # truncated (#3633 Codex catch). During live streaming any
+                    # unmatched open tag is treated as in-progress thinking.
+                    leading = (text[:index].strip() == '')
+                    if not streaming and not leading:
+                        break
+                    visible.append(text[cursor:index])
                     partial = text[index + len(open_tag):]
                     if partial:
                         extracted.append(partial)
                     cursor = length
                     index = length
                     break
+                visible.append(text[cursor:index])
                 extracted.append(text[index + len(open_tag):close_index])
                 index = close_index + len(close_tag)
                 cursor = index
                 continue
-            for open_tag, _close_tag in _INLINE_THINKING_TAG_PAIRS:
-                rest = text[index:]
-                if len(rest) < len(open_tag) and open_tag.startswith(rest):
-                    visible.append(text[cursor:index])
-                    cursor = length
-                    index = length
+            if streaming:
+                matched_partial = False
+                for open_tag, _close_tag in _INLINE_THINKING_TAG_PAIRS:
+                    rest = text[index:]
+                    if len(rest) < len(open_tag) and open_tag.startswith(rest):
+                        visible.append(text[cursor:index])
+                        cursor = length
+                        index = length
+                        matched_partial = True
+                        break
+                if matched_partial or index >= length:
                     break
-            if index >= length:
-                break
         index += 1
     if cursor < length:
         visible.append(text[cursor:])
@@ -1574,10 +1626,15 @@ def _extract_inline_thinking_from_content(raw_content, existing_reasoning=''):
 
 
 def _split_thinking_from_content(raw_content, existing_reasoning=''):
-    """Split inline thinking blocks out of assistant content for persistence."""
+    """Split inline thinking blocks out of assistant content for persistence.
+
+    Persistence path: streaming=False, so an unclosed tag stays visible content
+    (a partial block only means "still thinking" during a live stream).
+    """
     return _extract_inline_thinking_from_content(
         raw_content,
         existing_reasoning=existing_reasoning,
+        streaming=False,
     )
 
 

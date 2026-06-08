@@ -119,6 +119,18 @@ function _thinkingFenceMarkerAt(text, index){
   return '';
 }
 
+function _thinkingIndentedCodeAt(text, index){
+  // True when index falls on a markdown indented code block line (the line
+  // containing index starts with >=4 spaces or a tab, and is not blank).
+  // Literal code — thinking tags inside it must stay visible.
+  const lineStart=text.lastIndexOf('\n',index-1)+1;
+  let lineEnd=text.indexOf('\n',index);
+  if(lineEnd===-1) lineEnd=text.length;
+  const line=text.slice(lineStart,lineEnd);
+  if(!line.trim()) return false;
+  return line.startsWith('    ')||line.startsWith('\t');
+}
+
 function _mergeInlineThinkingReasoning(existingReasoning, extractedParts){
   let out=String(existingReasoning||'').trim();
   (Array.isArray(extractedParts)?extractedParts:[]).forEach(function(part){
@@ -132,6 +144,13 @@ function _mergeInlineThinkingReasoning(existingReasoning, extractedParts){
 }
 
 function _extractInlineThinkingFromContent(rawContent, existingReasoning, options){
+  // Code-aware extraction (must mirror api/streaming.py
+  // _extract_inline_thinking_from_content): thinking tags inside a triple-fence,
+  // an inline single-backtick code span, or an indented code block are LEFT
+  // VISIBLE. options.streaming gates partial/unclosed handling — only during a
+  // live stream does an unmatched open tag mean "still thinking"; on the
+  // reload/render path an unclosed tag stays visible content (#3633 Codex catch).
+  const streaming=!!(options&&options.streaming);
   const text=String(rawContent||'');
   if(!text){
     const reasoning=String(existingReasoning||'').trim();
@@ -142,19 +161,30 @@ function _extractInlineThinkingFromContent(rawContent, existingReasoning, option
   let cursor=0;
   let index=0;
   let fence='';
+  let inBacktick=false;
   let inThinking=false;
   while(index<text.length){
     const marker=_thinkingFenceMarkerAt(text,index);
     if(marker) fence=(fence===marker)?'':(fence||marker);
-    if(!fence){
+    if(!fence&&!marker&&text[index]==='`') inBacktick=!inBacktick;
+    const inCode=!!fence||inBacktick||_thinkingIndentedCodeAt(text,index);
+    if(!inCode){
       let pair=null;
       for(const candidate of _thinkPairs){
         if(text.startsWith(candidate.open,index)){pair=candidate;break;}
       }
       if(pair){
-        visible.push(text.slice(cursor,index));
         const closeIndex=text.indexOf(pair.close,index+pair.open.length);
         if(closeIndex===-1){
+          // Unclosed open tag. A LEADING unclosed block (nothing visible before
+          // it) is a genuine thinking trace cut off mid-thought → reasoning
+          // (master #3455 leading-only intent + live "still thinking"). An
+          // unclosed tag AFTER visible content on the reload/render path is
+          // almost always a literal typed tag — leave it (and following prose)
+          // visible so nothing is silently truncated (#3633 Codex catch).
+          const leading=(text.slice(0,index).trim()==='');
+          if(!streaming&&!leading) break;
+          visible.push(text.slice(cursor,index));
           const partial=text.slice(index+pair.open.length);
           if(partial) extracted.push(partial);
           inThinking=true;
@@ -162,22 +192,27 @@ function _extractInlineThinkingFromContent(rawContent, existingReasoning, option
           index=text.length;
           break;
         }
+        visible.push(text.slice(cursor,index));
         extracted.push(text.slice(index+pair.open.length,closeIndex));
         index=closeIndex+pair.close.length;
         cursor=index;
         continue;
       }
-      for(const candidate of _thinkPairs){
-        const rest=text.slice(index);
-        if(rest.length<candidate.open.length&&candidate.open.startsWith(rest)){
-          visible.push(text.slice(cursor,index));
-          inThinking=true;
-          cursor=text.length;
-          index=text.length;
-          break;
+      if(streaming){
+        let matchedPartial=false;
+        for(const candidate of _thinkPairs){
+          const rest=text.slice(index);
+          if(rest.length<candidate.open.length&&candidate.open.startsWith(rest)){
+            visible.push(text.slice(cursor,index));
+            inThinking=true;
+            cursor=text.length;
+            index=text.length;
+            matchedPartial=true;
+            break;
+          }
         }
+        if(matchedPartial||index>=text.length) break;
       }
-      if(index>=text.length) break;
     }
     index++;
   }

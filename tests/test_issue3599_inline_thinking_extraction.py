@@ -75,11 +75,20 @@ def test_reasoning_only_content_survives_reload_source_fields():
     assert reasoning == "only reasoning"
 
 
-def test_unclosed_inline_thinking_is_removed_from_visible_content():
+def test_unclosed_inline_thinking_after_content_stays_visible_on_persist():
+    """#3633 deep-review (Codex catch): on the PERSIST path an unclosed think tag
+    that appears AFTER visible content is almost always a literal typed tag, so
+    the prose after it must NOT be silently truncated into reasoning. A LEADING
+    unclosed block (cut off mid-thought) is still treated as reasoning."""
+    # Mid-body unclosed → stays fully visible, nothing moved to reasoning.
     content, reasoning = _split_thinking_from_content("answer<think>still thinking")
+    assert content == "answer<think>still thinking"
+    assert reasoning == ""
 
-    assert content == "answer"
-    assert reasoning == "still thinking"
+    # Leading unclosed → genuine cut-off thinking trace, moves to reasoning.
+    lead_content, lead_reasoning = _split_thinking_from_content("<think>still thinking")
+    assert lead_content == ""
+    assert lead_reasoning == "still thinking"
 
 
 def test_messages_js_live_and_persist_paths_share_extractor():

@@ -52,6 +52,7 @@ _DRIVER = """
 %s
 %s
 %s
+%s
 const args = JSON.parse(process.argv[2]);
 process.stdout.write(JSON.stringify(_splitThinkFromContent(args.raw, args.existing || '')));
 """
@@ -63,11 +64,12 @@ def driver(tmp_path_factory):
         pytest.skip("node not available")
     pairs = _extract_block(MESSAGES_JS, "const _thinkPairs=")
     fence = _extract_block(MESSAGES_JS, "function _thinkingFenceMarkerAt(")
+    indented = _extract_block(MESSAGES_JS, "function _thinkingIndentedCodeAt(")
     merge = _extract_block(MESSAGES_JS, "function _mergeInlineThinkingReasoning(")
     extract = _extract_block(MESSAGES_JS, "function _extractInlineThinkingFromContent(")
     fn = _extract_block(MESSAGES_JS, "function _splitThinkFromContent(")
     p = tmp_path_factory.mktemp("think3455") / "driver.js"
-    p.write_text(_DRIVER % (pairs, fence, merge, extract, fn), encoding="utf-8")
+    p.write_text(_DRIVER % (pairs, fence, indented, merge, extract, fn), encoding="utf-8")
     return str(p)
 
 
@@ -142,10 +144,14 @@ def test_block_after_content_extracted(driver):
     assert r["reasoning"] == "lead\n\ntrailing"
 
 
-def test_lookalike_tag_without_close_is_hidden(driver):
+def test_lookalike_tag_without_close_after_content_stays_visible(driver):
+    """#3633 deep-review (Codex catch): a literal <think> token used mid-sentence
+    and never closed is NOT a thinking trace — it must stay visible, not get the
+    rest of the line swallowed into reasoning. (A LEADING unclosed block is still
+    treated as reasoning; see test_unclosed_think_hidden_into_reasoning.)"""
     r = _split(driver, "use <think> as a literal token, never closed")
-    assert r["content"] == "use "
-    assert r["reasoning"] == "as a literal token, never closed"
+    assert r["content"] == "use <think> as a literal token, never closed"
+    assert r["reasoning"] == ""
 
 
 def test_empty_content(driver):
@@ -205,3 +211,29 @@ class TestBackendThinkSplitParity:
         content, reasoning = self._sp(None)
         assert content in (None, "")
         assert reasoning == ""
+
+    # ── #3633 deep-review (Codex catch): code-awareness + unclosed-position ──
+    def test_inline_backtick_code_span_preserved(self):
+        """A <think> literal inside an inline single-backtick code span is code,
+        not a thinking trace — it must stay visible (the earlier full-scan only
+        protected triple fences)."""
+        raw = "Use the `<think>foo</think>` tag in your prompt."
+        assert self._sp(raw) == (raw, "")
+
+    def test_indented_code_block_preserved(self):
+        """A <think> literal inside a >=4-space indented code block must stay
+        visible."""
+        raw = "Example:\n\n    <think>foo</think>\n\ndone"
+        assert self._sp(raw) == (raw, "")
+
+    def test_mid_body_unclosed_stays_visible(self):
+        """An unclosed <think> AFTER visible content (a literal typed tag) must
+        NOT truncate the following prose on the persist path."""
+        assert self._sp("answer<think>still thinking") == (
+            "answer<think>still thinking",
+            "",
+        )
+
+    def test_leading_unclosed_still_extracted(self):
+        """A LEADING unclosed block (cut off mid-thought) is still reasoning."""
+        assert self._sp("<think>still thinking") == ("", "still thinking")
