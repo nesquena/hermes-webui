@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.328] — 2026-06-08 — Release KR (preserve full compaction summaries)
+
+### Fixed
+- **Compaction summaries are no longer truncated at 320 characters.** The full compaction summary text is preserved in the summary card (the prior clip's trailing `…` also broke a long-summary reference-card match). (#3800, @rodboev)
+
 ## [v0.51.327] — 2026-06-08 — Release KQ (brick wave: session-cache freshness + compression-tail + interrupt race)
 
 ### Fixed
