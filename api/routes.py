@@ -3332,6 +3332,7 @@ from api.models import (
     _write_session_index,
     SESSION_INDEX_FILE,
     _active_state_db_path,
+    _resolve_state_db_path,
     load_projects,
     save_projects,
     import_cli_session,
@@ -5728,7 +5729,16 @@ def handle_get(handler, parsed) -> bool:
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "session_id required", 400)
-        report = read_session_lineage_report(_active_state_db_path(), sid)
+        # Resolve state.db by the session's owning profile, not the active
+        # profile — CLI/Telegram sessions live in a profile-scoped state.db
+        # and the WebUI's own profile DB is the wrong one. Falls back to
+        # the active profile when the sidecar is missing or unknown.
+        try:
+            sidecar_session = Session.load(sid) if is_safe_session_id(sid) else None
+        except Exception:
+            sidecar_session = None
+        db_path = _resolve_state_db_path(session=sidecar_session)
+        report = read_session_lineage_report(db_path, sid)
         if not report.get("found"):
             return bad(handler, "Session not found", 404)
         return j(handler, report)

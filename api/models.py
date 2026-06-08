@@ -2741,7 +2741,7 @@ def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict
 
 
 def state_db_has_session(sid: str) -> bool:
-    """Return True when ``sid`` exists in the active state.db sessions table.
+    """Return True when ``sid`` exists in the agent state.db sessions table.
 
     Used by file-manager handlers to fall back to a state.db lookup when
     ``get_session`` raises ``KeyError`` because the session was created by
@@ -2749,6 +2749,11 @@ def state_db_has_session(sid: str) -> bool:
     schema stores only metadata (id/title/model/source/...), not a workspace
     path — the workspace is shared across session storage backends and is
     resolved separately via ``get_last_workspace()``.
+
+    The lookup targets the *session's* profile-scoped state.db first, so a
+    CLI session created under the ``reverse-engineer`` profile is found
+    even when the WebUI itself runs as ``default`` (the active profile).
+    Falls back to the active profile's DB when the session is unknown.
     """
     if not sid:
         return False
@@ -2756,7 +2761,11 @@ def state_db_has_session(sid: str) -> bool:
         import sqlite3
     except ImportError:
         return False
-    db_path = _active_state_db_path()
+    try:
+        sidecar_session = Session.load(sid) if is_safe_session_id(sid) else None
+    except Exception:
+        sidecar_session = None
+    db_path = _resolve_state_db_path(session=sidecar_session)
     if not db_path.exists():
         return False
     try:
@@ -2810,6 +2819,61 @@ def _active_state_db_path() -> Path:
     except Exception:
         hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
     return hermes_home / 'state.db'
+
+
+def _resolve_state_db_path(
+    *,
+    profile: str | None = None,
+    session=None,
+) -> Path:
+    """Return the agent ``state.db`` for the session's owning profile.
+
+    Resolution order (most specific wins):
+      1. ``session.profile`` — when a session object is supplied and declares
+         a non-empty profile, look in that profile's home first. This is the
+         common case for CLI/Telegram sessions displayed in the WebUI:
+         their messages live in a profile-scoped ``state.db`` and the active
+         profile's DB is the wrong one.
+      2. ``profile=`` — explicit caller override. Takes precedence over
+         ``session.profile`` so handlers that already know the target
+         profile can avoid the session attribute round-trip.
+      3. Active profile (legacy ``_active_state_db_path()``) — the WebUI's
+         own profile. This preserves the pre-fix default for any caller
+         that has not been updated.
+
+    Why the order matters
+    ---------------------
+    Before this helper existed, callers used ``_active_state_db_path()``
+    unconditionally. When a session was created by a CLI profile other
+    than the active one (e.g. ``reverse-engineer`` while the WebUI ran as
+    ``default``), the WebUI found the session in its JSON sidecar but
+    looked for messages in the wrong ``state.db``, so the transcript
+    appeared empty. Pinning ``session.profile`` here fixes the regression
+    for every existing call site that passes a session, with no breaking
+    change to callers that don't.
+    """
+    candidate_profiles: list[str] = []
+    if session is not None:
+        session_profile = getattr(session, "profile", None)
+        if isinstance(session_profile, str) and session_profile:
+            candidate_profiles.append(session_profile)
+    if isinstance(profile, str) and profile:
+        # Explicit override wins over the session hint, but only if it's
+        # not already at the head of the candidate list.
+        if not candidate_profiles or candidate_profiles[0] != profile:
+            candidate_profiles.insert(0, profile)
+    if not candidate_profiles:
+        return _active_state_db_path()
+    for name in candidate_profiles:
+        try:
+            from api.profiles import get_hermes_home_for_profile
+            home = Path(get_hermes_home_for_profile(name)).expanduser()
+        except Exception:
+            continue
+        db_path = home / "state.db"
+        if db_path.exists():
+            return db_path
+    return _active_state_db_path()
 
 
 def _agent_state_db_path(*, profile=None) -> Path | None:

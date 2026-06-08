@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Profile-scoped `state.db` lookups for CLI/Telegram sessions.** When a session is owned by a profile other than the WebUI's active profile (e.g. a session created by the `reverse-engineer` CLI profile while the WebUI runs as `default`), `state_db_has_session()` and `/api/session/lineage/report` now resolve the agent `state.db` from the session's own profile, not the active profile's. Previously the session would show up in the sidebar (because the JSON sidecar was found) but its messages came from the wrong database, so the transcript appeared empty. Adds `api.models._resolve_state_db_path(*, profile, session)` with explicit-priority resolution and a four-test regression suite under `tests/test_profile_aware_state_db.py`. The legacy `_active_state_db_path()` helper is preserved for callers without a PR handle.
+
 ## [v0.51.326] — 2026-06-08 — Release KP (mic STT probe + journal cleanup + schema guard + help hover)
 
 ### Fixed
