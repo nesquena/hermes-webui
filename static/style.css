@@ -1557,6 +1557,17 @@
   .sm-btn{flex:1;padding:8px 0;border-radius:8px;font-size:11px;font-weight:500;background:var(--input-bg);border:1px solid var(--border);color:var(--muted);cursor:pointer;transition:all .15s;text-align:center;letter-spacing:.02em;}
   .sm-btn:hover{background:rgba(255,255,255,0.09);color:var(--text);border-color:rgba(255,255,255,.15);}
   .sm-btn:disabled{opacity:.45;cursor:not-allowed;}
+  /* Help tab (Settings → Help): icon-led resource cards (#3518) */
+  .help-cards{display:flex;flex-direction:column;gap:12px;margin-top:14px;}
+  .help-card{display:flex;gap:14px;align-items:flex-start;padding:16px;border:1px solid var(--border2);border-radius:10px;background:var(--input-bg);transition:border-color .15s,background .15s;}
+  .help-card:hover{border-color:var(--accent);}
+  .help-card-icon{flex:0 0 38px;width:38px;height:38px;display:flex;align-items:center;justify-content:center;border-radius:9px;background:var(--accent-soft,rgba(255,255,255,.06));color:var(--accent);}
+  .help-card-body{min-width:0;flex:1;}
+  .help-card-title{font-size:13.5px;font-weight:650;color:var(--text);margin-bottom:3px;}
+  .help-card-desc{font-size:12px;color:var(--muted);line-height:1.45;margin-bottom:11px;}
+  .help-card-link{display:inline-flex;align-items:center;gap:6px;text-decoration:none;padding:7px 13px;border-radius:7px;font-size:12px;font-weight:600;background:var(--input-bg);border:1px solid var(--border);color:var(--text);transition:all .15s;}
+  .help-card-link:hover{background:var(--accent);border-color:var(--accent);color:var(--accent-text,#1a1a1a);}
+  .help-card-link svg{flex:0 0 auto;opacity:.8;}
   .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;min-height:0;background:var(--main-bg);}
   .topbar{padding:12px 20px;border-bottom:1px solid var(--border);background:var(--topbar-bg);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;position:relative;z-index:10;}
   .topbar-title{font-size:15px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}

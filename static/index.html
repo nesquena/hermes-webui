@@ -366,6 +366,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
           <span data-i18n="settings_tab_system">System</span>
         </button>
+        <button type="button" class="side-menu-item" data-settings-section="help" onclick="switchSettingsSection('help')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span data-i18n="settings_tab_help">Help</span>
+        </button>
       </div>
     </div>
   <div class="resize-handle" id="sidebarResize"></div>
@@ -1348,6 +1352,42 @@
               <div class="mcp-restart-hint" data-i18n="mcp_tools_runtime_note">Tool inventory only uses already-known active MCP runtime data; the WebUI does not start or probe servers.</div>
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
+          </div>
+          <div class="settings-pane" id="settingsPaneHelp">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title" data-i18n="settings_tab_help">Help</div>
+                <div class="settings-section-meta" data-i18n="settings_help_meta">Resources and support for Hermes WebUI.</div>
+              </div>
+            </div>
+            <div class="help-cards">
+              <div class="help-card">
+                <div class="help-card-icon" aria-hidden="true">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                </div>
+                <div class="help-card-body">
+                  <div class="help-card-title" data-i18n="settings_help_docs_label">Documentation</div>
+                  <div class="help-card-desc" data-i18n="settings_help_docs_desc">Guides, configuration reference, and the full Hermes WebUI README.</div>
+                  <a href="https://get-hermes.ai/" target="_blank" rel="noopener noreferrer" class="help-card-link">
+                    <span data-i18n="settings_help_docs_link">Open Documentation</span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
+                  </a>
+                </div>
+              </div>
+              <div class="help-card">
+                <div class="help-card-icon" aria-hidden="true">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>
+                </div>
+                <div class="help-card-body">
+                  <div class="help-card-title" data-i18n="settings_help_issue_label">Having an issue?</div>
+                  <div class="help-card-desc" data-i18n="settings_help_issue_desc">Search existing reports or open a new one on GitHub.</div>
+                  <a href="https://github.com/nesquena/hermes-webui/issues" target="_blank" rel="noopener noreferrer" class="help-card-link">
+                    <span data-i18n="settings_help_issue_link">Open GitHub Issues</span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
+                  </a>
+                </div>
+              </div>
+            </div>
           </div>
       </div>
     </div>
