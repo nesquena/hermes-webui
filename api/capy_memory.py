@@ -1660,31 +1660,91 @@ def _github_community_profile_refresh_summary(origin_uri: str, payload: dict[str
     return _bounded_refresh_summary("; ".join(parts))
 
 
-def _json_payload_is_github_release_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
+def _github_release_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "releases"
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", int(path[5])
+
+
+def _github_release_path_matches(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
     except ValueError:
         return False
     if (parts.hostname or "").strip().lower() != "api.github.com":
         return False
-    path = parts.path.split("/")
-    lowered = [segment.lower() for segment in path]
-    if (
-        len(path) != 6
-        or path[0] != ""
-        or lowered[1] != "repos"
-        or not path[2]
-        or not path[3]
-        or lowered[4] != "releases"
-        or not re.fullmatch(r"[1-9][0-9]*", path[5])
-    ):
+
+    def _release_route_shape_matches(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        if (
+            len(path) < 6
+            or path[0] != ""
+            or lowered[1] != "repos"
+            or len(path[2]) == 0
+            or len(path[3]) == 0
+        ):
+            return False
+        release_segment = lowered[4]
+        if not (release_segment == "releases" or release_segment.startswith(("releases%", "releases\x00"))):
+            return False
+        tail = lowered[5]
+        if len(path) == 6 and tail == "latest":
+            return False
+        if len(path) == 7 and re.fullmatch(r"[1-9][0-9]*", path[5]) and lowered[6] == "assets":
+            return False
+        return True
+
+    return _release_route_shape_matches(parts.path) or _release_route_shape_matches(unquote(parts.path))
+
+
+def _json_payload_is_github_release_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
+    path_info = _github_release_path_info(origin_uri)
+    if path_info is None:
         return False
-    release_id = _safe_nonnegative_int(payload.get("id"))
-    if release_id != int(path[5]):
+    _repo, expected_release_id = path_info
+    release_id = _safe_optional_nonnegative_int(payload.get("id"))
+    if release_id != expected_release_id:
         return False
     for field in ("name", "tag_name", "published_at"):
         raw_value = payload.get(field)
-        if isinstance(raw_value, _PUBLIC_SCALAR_TYPES) and _REFRESH_BLOCKED_VALUE_RE.search(str(raw_value)):
+        if _is_present_public_value(raw_value) and _refresh_value_is_blocked(raw_value):
+            return False
+    for field in ("name", "tag_name"):
+        raw_value = payload.get(field)
+        if not _is_present_public_value(raw_value):
+            continue
+        safe_value = _safe_public_text(raw_value, limit=200 if field == "name" else 120)
+        raw_text = str(raw_value)
+        if (
+            not safe_value
+            or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(raw_text)
+            or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(safe_value)
+            or _github_issue_list_value_has_query_fragment_marker(raw_text)
+            or _github_issue_list_value_has_query_fragment_marker(safe_value)
+        ):
+            return False
+    raw_published = payload.get("published_at")
+    if not _is_present_public_value(raw_published) or not _safe_iso_timestamp(raw_published):
+        return False
+    for field in ("draft", "prerelease"):
+        raw_value = payload.get(field)
+        if not isinstance(raw_value, bool):
             return False
     return bool(_safe_public_text(payload.get("name") or payload.get("tag_name"), limit=200))
 
@@ -11635,6 +11695,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_release_assets_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or _github_release_assets_path_info(raw_origin_uri) is None:
             raise RuntimeError("refresh fetcher disabled")
+    if _github_release_path_matches(raw_origin_uri):
+        if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or _github_release_path_info(raw_origin_uri) is None:
+            raise RuntimeError("refresh fetcher disabled")
     if _github_code_frequency_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_code_frequency_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -11806,6 +11869,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_release_assets_path_matches(safe_origin_uri):
         if _github_release_assets_path_info(safe_origin_uri) is None or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_release_path_matches(safe_origin_uri):
+        if _github_release_path_info(safe_origin_uri) is None or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_code_frequency_path_matches(safe_origin_uri):
@@ -12271,6 +12338,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_latest_release_path_matches(safe_origin_uri) and (
             not _github_latest_release_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_release_path_matches(safe_origin_uri) and (
+            _github_release_path_info(safe_origin_uri) is None
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")

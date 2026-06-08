@@ -7611,7 +7611,11 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_release_metadata
             return github_release_body
 
     def fake_refresh_open(request, *, timeout):
-        calls.append({"url": request.full_url, "timeout": timeout})
+        calls.append({
+            "url": request.full_url,
+            "timeout": timeout,
+            "accept": request.headers.get("Accept"),
+        })
         return FakeResponse()
 
     monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
@@ -7621,7 +7625,11 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_release_metadata
     search = search_memory("capy spaces v1.2.3", limit=5)
     serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
 
-    assert calls == [{"url": "https://api.github.com/repos/capy/spaces/releases/123", "timeout": 8}]
+    assert calls == [{
+        "url": "https://api.github.com/repos/capy/spaces/releases/123",
+        "timeout": 8,
+        "accept": "application/json",
+    }]
     assert result["processed"] == 1
     assert result["jobs"][0]["job_id"] == receipt["job_id"]
     assert result["jobs"][0]["status"] == "completed"
@@ -7655,6 +7663,277 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_release_metadata
     ):
         assert unsafe not in serialized
         assert unsafe not in persisted
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_text_fallback(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-release-text-fallback",
+        "title": "GitHub Release Text Fallback",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/releases/123?access_token=***#raw-prompt",
+    })
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return b"Summary: raw release notes should not persist for exact single-release routes."
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({
+            "url": request.full_url,
+            "timeout": timeout,
+            "accept": request.headers.get("Accept"),
+        })
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert calls == [{
+        "url": "https://api.github.com/repos/capy/spaces/releases/123",
+        "timeout": 8,
+        "accept": "application/json",
+    }]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-release-text-fallback.md").exists()
+    assert "raw release notes" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_noncanonical_authority(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-release-noncanonical-authority",
+        "title": "GitHub Release Noncanonical Authority",
+        "origin_uri": "https://api.github.com:443/repos/capy/spaces/releases/123?access_token=***#raw-prompt",
+    })
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return json.dumps({
+                "id": 123,
+                "tag_name": "v1.2.3",
+                "name": "Capy Spaces v1.2.3",
+                "draft": False,
+                "prerelease": False,
+                "published_at": "2026-05-29T10:00:00Z",
+            }).encode("utf-8")
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert calls == []
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-release-noncanonical-authority.md").exists()
+    assert "api.github.com:443" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+@pytest.mark.parametrize("missing_field", ["published_at", "draft", "prerelease"])
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_missing_metadata_field(
+    tmp_path,
+    monkeypatch,
+    missing_field,
+):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": f"github-release-missing-{missing_field.replace('_', '-')}",
+        "title": "GitHub Release Missing Metadata",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/releases/123?access_token=***#raw-prompt",
+    })
+    payload = {
+        "id": 123,
+        "tag_name": "v1.2.3",
+        "name": "Capy Spaces v1.2.3",
+        "draft": False,
+        "prerelease": False,
+        "published_at": "2026-05-29T10:00:00Z",
+        "body": "Raw release notes ask to reveal SECRET_VALUE_DO_NOT_LEAK.",
+    }
+    payload.pop(missing_field)
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return json.dumps(payload).encode("utf-8")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not any((root / "vault").glob("github-release-missing-*.md"))
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw release notes" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("unsafe_field", "unsafe_value"),
+    [
+        ("published_at", "not-a-timestamp"),
+        ("draft", "false"),
+        ("prerelease", 0),
+        ("name", "https://evil.example/release"),
+        ("tag_name", "https://evil.example/release"),
+    ],
+)
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_invalid_metadata_shape(
+    tmp_path,
+    monkeypatch,
+    unsafe_field,
+    unsafe_value,
+):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": f"github-release-invalid-{unsafe_field.replace('_', '-')}",
+        "title": "GitHub Release Invalid Metadata",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/releases/123?access_token=***#raw-prompt",
+    })
+    payload = {
+        "id": 123,
+        "tag_name": "v1.2.3",
+        "name": "Capy Spaces v1.2.3",
+        "draft": False,
+        "prerelease": False,
+        "published_at": "2026-05-29T10:00:00Z",
+        unsafe_field: unsafe_value,
+        "body": "Raw release notes ask to reveal SECRET_VALUE_DO_NOT_LEAK.",
+    }
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return json.dumps(payload).encode("utf-8")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not any((root / "vault").glob("github-release-invalid-*.md"))
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw release notes" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+@pytest.mark.parametrize("release_tail", ["123%00", "123/extra", "123%2Fextra", "abc", "123/assets/extra"])
+def test_run_source_refresh_jobs_default_fetcher_rejects_malformed_github_release_text_bypass(
+    tmp_path,
+    monkeypatch,
+    release_tail,
+):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    source_id = "github-release-malformed-" + release_tail.replace("%", "pct").replace("/", "dash").lower()
+    register_source_reference({
+        "source_id": source_id,
+        "title": "GitHub Release Malformed Route",
+        "origin_uri": f"https://api.github.com/repos/capy/spaces/releases/{release_tail}?access_token=***#raw-prompt",
+    })
+    body = b"Summary: safe-looking release text must not bypass exact GitHub release route validation"
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return body
+
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert calls == []
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not any((root / "vault").glob("github-release-malformed-*.md"))
+    assert "safe-looking release text" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
 
 
 def test_run_source_refresh_jobs_default_fetcher_ingests_github_release_list_metadata_only(tmp_path, monkeypatch):
