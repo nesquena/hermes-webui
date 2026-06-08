@@ -2191,6 +2191,33 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
     return _message_content_text(cached_tail) == _message_content_text(previous_disk_user)
 
 
+def _cached_session_lags_disk(cached) -> bool:
+    """Return True when a cached full session is older than its sidecar.
+
+    Active/reconnect paths can update the persisted sidecar through another
+    Session object while the LRU cache still holds an older object for the same
+    id. Serving the cache then makes recent assistant results disappear from
+    GET /api/session even though disk and _index.json are correct. Compare only
+    cheap metadata here; full reload happens only if disk is strictly ahead.
+    """
+    if cached is None:
+        return False
+    sid = getattr(cached, 'session_id', None)
+    if not sid:
+        return False
+    try:
+        disk_meta = Session.load_metadata_only(sid)
+    except Exception:
+        return False
+    if disk_meta is None:
+        return False
+    cached_count = len(getattr(cached, 'messages', None) or [])
+    disk_count = _parse_nonnegative_int(getattr(disk_meta, '_metadata_message_count', None))
+    if disk_count is None:
+        disk_count = _lookup_index_message_count(sid)
+    return bool(disk_count is not None and disk_count > cached_count)
+
+
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping the messages array).
 
@@ -2220,6 +2247,18 @@ def get_session(sid, metadata_only=False):
                     SESSIONS.pop(sid, None)
             cached = None
     if cached is not None:
+        if not metadata_only and _cached_session_lags_disk(cached):
+            try:
+                disk_session = Session.load(sid)
+                with LOCK:
+                    SESSIONS[sid] = disk_session
+                    SESSIONS.move_to_end(sid)
+                cached = disk_session
+            except Exception:
+                logger.debug(
+                    "cached session disk-freshness check failed for session %s",
+                    sid, exc_info=True,
+                )
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             try:
                 disk_session = Session.load(sid)

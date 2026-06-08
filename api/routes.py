@@ -2893,6 +2893,23 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
     return window, start_idx
 
 
+def _messages_start_with_visible_prefix(messages, prefix) -> bool:
+    """Return True when ``messages`` already replays ``prefix`` in display order."""
+    messages = list(messages or [])
+    prefix = list(prefix or [])
+    if not prefix:
+        return True
+    if len(messages) < len(prefix):
+        return False
+    try:
+        return all(
+            _session_message_visible_key(messages[idx]) == _session_message_visible_key(prefix_msg)
+            for idx, prefix_msg in enumerate(prefix)
+        )
+    except Exception:
+        return False
+
+
 def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) -> list:
     """Return WebUI sidecar messages stitched across compression snapshots.
 
@@ -2904,6 +2921,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     """
     segments = []
     current = session
+    session_messages = list(getattr(session, "messages", []) or [])
     seen = {str(getattr(session, "session_id", "") or "")}
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
@@ -2912,6 +2930,11 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         parent = Session.load(parent_id)
         if not parent or not getattr(parent, "pre_compression_snapshot", False):
             break
+        if not segments and _messages_start_with_visible_prefix(
+            session_messages,
+            getattr(parent, "messages", []) or [],
+        ):
+            return session_messages
         segments.append(parent)
         seen.add(parent_id)
         current = parent
@@ -2929,7 +2952,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     return merge_session_messages_append_only(
         merged,
         getattr(session, "messages", []) or [],
-        truncation_watermark=getattr(session, "truncation_watermark", None),
+        truncation_watermark=None,
     )
 
 
@@ -3342,6 +3365,7 @@ from api.models import (
     merge_session_messages_append_only,
     _active_stream_ids,
     _session_message_merge_key,
+    _session_message_visible_key,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
@@ -11439,6 +11463,31 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     return False
 
 
+def _active_run_stream_for_session(session_id: str | None) -> str | None:
+    """Return a live worker stream for this session even if sidecar stream id is clear.
+
+    cancel_stream() intentionally clears ``session.active_stream_id`` before the
+    worker thread fully exits so Stop remains responsive. During that unwind
+    window ACTIVE_RUNS is the worker-lifecycle truth; a successor chat/start for
+    the same session must wait or it can reuse the cached agent while the old
+    interrupt is still landing (#3808).
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    try:
+        from api import config as _live_config
+        with _live_config.ACTIVE_RUNS_LOCK:
+            for run_stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
+                stream_id = str((raw or {}).get("stream_id") or run_stream_id or "").strip()
+                run_sid = str((raw or {}).get("session_id") or "").strip()
+                if run_sid == sid and stream_id:
+                    return stream_id
+    except Exception:
+        return None
+    return None
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -11492,6 +11541,14 @@ def _start_chat_stream_for_session(
                     }
                 needs_stale_cleanup = True
             else:
+                blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
+                if blocking_run_stream_id:
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": blocking_run_stream_id,
+                        "_status": 409,
+                    }
                 needs_stale_cleanup = False
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
