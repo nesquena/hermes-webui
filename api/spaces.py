@@ -711,6 +711,7 @@ def _recovery_toggle_output_compaction_receipt(
     prompt_preflight: dict[str, Any] | None = None,
     autonomy_policy: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return bounded metadata-only compaction evidence for recovery toggles.
 
@@ -733,10 +734,31 @@ def _recovery_toggle_output_compaction_receipt(
         "recovery_toggle: recorded",
         "metadata_only: true",
         "raw_prompt_stored: false",
+    ]
+    if isinstance(memory_advisory, dict):
+        advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
+        context_authority = (
+            _payload_text_summary(memory_advisory.get("context_authority") or "untrusted_advisory", 80)
+            or "untrusted_advisory"
+        )
+        can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
+        raw_required_gates = memory_advisory.get("required_gates")
+        required_gates = raw_required_gates if isinstance(raw_required_gates, list) else []
+        safe_required_gates = [
+            _payload_text_summary(gate, 40)
+            for gate in required_gates
+            if _payload_text_summary(gate, 40)
+        ][:6]
+        lines.append(f"advisory_context: {advisory_context}")
+        lines.append(f"context_authority: {context_authority}")
+        lines.append(f"can_bypass_safety_gates: {can_bypass}")
+        if safe_required_gates:
+            lines.append(f"required_gates: {', '.join(safe_required_gates)}")
+    lines.extend([
         f"action: {safe_action}",
         f"space_id: {safe_space_id}",
         f"target_kind: {safe_target_kind}",
-    ]
+    ])
     if safe_target_id:
         lines.append(f"target_id: {safe_target_id}")
     if disabled is not None:
@@ -773,7 +795,7 @@ def _recovery_toggle_output_compaction_receipt(
         tool="capy-spaces-recovery-toggle",
         command=safe_action,
         exit_status=0,
-        max_chars=700,
+        max_chars=900,
         artifact_handles=artifact_handles,
     )
     receipt["metadata_only"] = True
@@ -12773,6 +12795,7 @@ def disable_space_for_recovery(
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="disable")
     prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(safe_action)
     autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action, preflight_receipt)
+    memory_advisory = _memory_advisory_public_envelope()
     output_compaction = _recovery_toggle_output_compaction_receipt(
         action=safe_action,
         space_id=saved["space_id"],
@@ -12782,6 +12805,7 @@ def disable_space_for_recovery(
         prompt_preflight=prompt_preflight,
         autonomy_policy=autonomy_policy,
         progress_event=progress_event,
+        memory_advisory=memory_advisory,
     )
     return {
         "disabled": True,
@@ -12790,6 +12814,7 @@ def disable_space_for_recovery(
         "prompt_preflight": prompt_preflight,
         "progress_event": progress_event,
         "autonomy_policy": autonomy_policy,
+        "memory_advisory": memory_advisory,
         "output_compaction": output_compaction,
     }
 
@@ -12821,6 +12846,7 @@ def enable_space_for_recovery(
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="enable")
     prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(safe_action)
     autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action, preflight_receipt)
+    memory_advisory = _memory_advisory_public_envelope()
     output_compaction = _recovery_toggle_output_compaction_receipt(
         action=safe_action,
         space_id=saved["space_id"],
@@ -12830,6 +12856,7 @@ def enable_space_for_recovery(
         prompt_preflight=prompt_preflight,
         autonomy_policy=autonomy_policy,
         progress_event=progress_event,
+        memory_advisory=memory_advisory,
     )
     return {
         "disabled": False,
@@ -12838,6 +12865,7 @@ def enable_space_for_recovery(
         "prompt_preflight": prompt_preflight,
         "progress_event": progress_event,
         "autonomy_policy": autonomy_policy,
+        "memory_advisory": memory_advisory,
         "output_compaction": output_compaction,
     }
 
@@ -12881,6 +12909,7 @@ def disable_widget_for_recovery(
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.disable")
     prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(safe_action)
     autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action, preflight_receipt)
+    memory_advisory = _memory_advisory_public_envelope()
     output_compaction = _recovery_toggle_output_compaction_receipt(
         action=safe_action,
         space_id=saved["space_id"],
@@ -12891,6 +12920,7 @@ def disable_widget_for_recovery(
         prompt_preflight=prompt_preflight,
         autonomy_policy=autonomy_policy,
         progress_event=progress_event,
+        memory_advisory=memory_advisory,
     )
     return {
         "disabled": True,
@@ -12900,6 +12930,7 @@ def disable_widget_for_recovery(
         "prompt_preflight": prompt_preflight,
         "progress_event": progress_event,
         "autonomy_policy": autonomy_policy,
+        "memory_advisory": memory_advisory,
         "output_compaction": output_compaction,
     }
 
@@ -12937,6 +12968,7 @@ def enable_widget_for_recovery(
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.enable")
     prompt_preflight = preflight_receipt or _recovery_required_prompt_preflight_receipt(safe_action)
     autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action, preflight_receipt)
+    memory_advisory = _memory_advisory_public_envelope()
     output_compaction = _recovery_toggle_output_compaction_receipt(
         action=safe_action,
         space_id=saved["space_id"],
@@ -12947,6 +12979,7 @@ def enable_widget_for_recovery(
         prompt_preflight=prompt_preflight,
         autonomy_policy=autonomy_policy,
         progress_event=progress_event,
+        memory_advisory=memory_advisory,
     )
     return {
         "disabled": False,
@@ -12956,6 +12989,7 @@ def enable_widget_for_recovery(
         "prompt_preflight": prompt_preflight,
         "progress_event": progress_event,
         "autonomy_policy": autonomy_policy,
+        "memory_advisory": memory_advisory,
         "output_compaction": output_compaction,
     }
 
@@ -13045,9 +13079,11 @@ def upsert_recovery_module(module: dict[str, Any]) -> dict[str, Any]:
         action="module.quarantine",
     )
     autonomy_policy = _recovery_toggle_action_policy_receipt(action)
+    memory_advisory = _memory_advisory_public_envelope()
     summary["prompt_preflight"] = prompt_preflight
     summary["progress_event"] = progress_event
     summary["autonomy_policy"] = autonomy_policy
+    summary["memory_advisory"] = memory_advisory
     summary["output_compaction"] = _recovery_toggle_output_compaction_receipt(
         action=action,
         space_id=_RECOVERY_MODULE_PROGRESS_SPACE_ID,
@@ -13058,6 +13094,7 @@ def upsert_recovery_module(module: dict[str, Any]) -> dict[str, Any]:
         prompt_preflight=prompt_preflight,
         autonomy_policy=autonomy_policy,
         progress_event=progress_event,
+        memory_advisory=memory_advisory,
     )
     return summary
 
@@ -13141,9 +13178,11 @@ def disable_module_for_recovery(
         action="module.disable",
     )
     autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action, preflight_receipt)
+    memory_advisory = _memory_advisory_public_envelope()
     summary["prompt_preflight"] = prompt_preflight
     summary["progress_event"] = progress_event
     summary["autonomy_policy"] = autonomy_policy
+    summary["memory_advisory"] = memory_advisory
     summary["output_compaction"] = _recovery_toggle_output_compaction_receipt(
         action=safe_action,
         space_id=_RECOVERY_MODULE_PROGRESS_SPACE_ID,
@@ -13154,6 +13193,7 @@ def disable_module_for_recovery(
         prompt_preflight=prompt_preflight,
         autonomy_policy=autonomy_policy,
         progress_event=progress_event,
+        memory_advisory=memory_advisory,
     )
     return summary
 
@@ -13190,9 +13230,11 @@ def enable_module_for_recovery(
         action="module.enable",
     )
     autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action, preflight_receipt)
+    memory_advisory = _memory_advisory_public_envelope()
     summary["prompt_preflight"] = prompt_preflight
     summary["progress_event"] = progress_event
     summary["autonomy_policy"] = autonomy_policy
+    summary["memory_advisory"] = memory_advisory
     summary["output_compaction"] = _recovery_toggle_output_compaction_receipt(
         action=safe_action,
         space_id=_RECOVERY_MODULE_PROGRESS_SPACE_ID,
@@ -13203,6 +13245,7 @@ def enable_module_for_recovery(
         prompt_preflight=prompt_preflight,
         autonomy_policy=autonomy_policy,
         progress_event=progress_event,
+        memory_advisory=memory_advisory,
     )
     return summary
 

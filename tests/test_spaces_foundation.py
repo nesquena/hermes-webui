@@ -6728,12 +6728,13 @@ def test_recovery_module_toggle_outputs_include_compaction_receipts_metadata_onl
         (disabled, "space.module.recovery.disable"),
         (enabled, "space.module.recovery.enable"),
     ]:
+        _assert_server_memory_advisory_receipt(result)
         compaction = result["output_compaction"]
         assert compaction["tool"] == "capy-spaces-recovery-toggle"
         assert compaction["command"] == action
         assert compaction["metadata_only"] is True
         assert compaction["original_chars"] > 0
-        assert compaction["compacted_chars"] <= 700
+        assert compaction["compacted_chars"] <= 900
         assert compaction["redaction_status"] == "metadata_only"
         assert compaction["rules_applied"]
         text = compaction["text"].lower()
@@ -6742,6 +6743,10 @@ def test_recovery_module_toggle_outputs_include_compaction_receipts_metadata_onl
         assert "target_kind: module" in text
         assert "target_id: module-compaction-lab" in text
         assert "raw_prompt_stored: false" in text
+        assert "advisory_context: true" in text
+        assert "context_authority: untrusted_advisory" in text
+        assert "can_bypass_safety_gates: false" in text
+        assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in text
         assert "broken renderer" not in text
         assert "safe after" not in text
         handles = compaction["retained_artifact_handles"]
@@ -6753,9 +6758,37 @@ def test_recovery_module_toggle_outputs_include_compaction_receipts_metadata_onl
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "bearer" not in serialized
+    assert "trusted_system_memory" not in serialized
+    assert '"can_bypass_safety_gates": true' not in serialized
     assert '"source":' not in serialized
     assert '"html":' not in serialized
     assert '"credentials":' not in serialized
+
+
+def test_recovery_toggle_compaction_preserves_memory_advisory_with_long_safe_ids(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    memory_advisory = spaces._memory_advisory_public_envelope()
+    compaction = spaces._recovery_toggle_output_compaction_receipt(
+        action="space.module.recovery.disable:" + "a" * 300,
+        space_id="recovery-modules-" + "b" * 300,
+        target_kind="widget",
+        target_id="widget-" + "c" * 300,
+        disabled=True,
+        revision_event_id="evt_" + "d" * 300,
+        prompt_preflight=spaces._recovery_required_prompt_preflight_receipt("space.module.recovery.disable"),
+        autonomy_policy=spaces._recovery_toggle_action_policy_receipt("space.module.recovery.disable"),
+        progress_event={"run_id": "recovery.module.disable:" + "e" * 300, "status": "completed"},
+        memory_advisory=memory_advisory,
+    )
+
+    text = compaction["text"].lower()
+    assert compaction["metadata_only"] is True
+    assert compaction["compacted_chars"] <= 900
+    assert "advisory_context: true" in text
+    assert "context_authority: untrusted_advisory" in text
+    assert "can_bypass_safety_gates: false" in text
+    assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in text
+    assert "trusted_system_memory" not in text
 
 
 def test_recovery_module_enable_disable_tools_record_metadata_only_progress_events(monkeypatch, tmp_path):
@@ -7280,6 +7313,7 @@ def test_recovery_enable_disable_primitives_return_metadata_only_action_policy_r
         assert policy["model_route_hint"] == "hint:reasoning"
         assert policy["metadata_only"] is True
         assert policy["local_only"] is True
+        _assert_server_memory_advisory_receipt(result)
     assert "secret_value_do_not_leak" not in serialized
     assert "renderer" not in serialized
     assert "<script" not in serialized

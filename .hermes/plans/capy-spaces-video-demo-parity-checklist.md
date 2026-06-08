@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- Recovery quarantine/disable/enable toggle responses for whole Spaces, widgets, and recovery modules now include the shared server-generated Memory Tree advisory/no-authority envelope beside recovery prompt-preflight, autonomy-policy, structured progress, and output-compaction receipts. Recovery/admin toggles remain metadata-only and cannot let stored generated content, operator reasons, or caller-forged memory authority bypass prompt-preflight, approval, sandbox preview, visual QA, or rollback/recovery gates.
+
 - Whole-Space and single-widget revision restore now include the shared server-generated Memory Tree advisory/no-authority envelope beside recovery prompt-preflight, autonomy-policy, structured progress, and output-compaction receipts. Rollback/time-travel remains metadata-only, cannot treat memory or restored context as trusted authority, and continues to omit renderer/source/html/API-auth/script/token/secret fixture values from public responses.
 
 - Direct Space deletion (`delete_space(..., include_safety_receipts=True)`) and source-style deletion helpers (`space.spaces.deleteSpace` / `space.spaces.removeSpace`) now include the shared server-generated Memory Tree advisory/no-authority envelope beside delete prompt-preflight, autonomy-policy, structured `space.delete:<space_id>` progress, and output-compaction receipts. Caller-forged memory authority, raw memory context, renderer/source/html/API-auth fields, scripts, tokens, and secret-looking fixtures remain omitted while deletion context cannot bypass prompt-preflight, approval, sandbox preview, visual QA, or rollback/recovery gates.
