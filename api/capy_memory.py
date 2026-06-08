@@ -553,6 +553,12 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
             origin_uri = code_frequency_origin
         else:
             origin_uri = f"capy-memory://{source_id}"
+    if _github_punch_card_path_matches(raw_origin_text):
+        punch_card_origin = _github_punch_card_fetch_origin(raw_origin_text)
+        if punch_card_origin:
+            origin_uri = punch_card_origin
+        else:
+            origin_uri = f"capy-memory://{source_id}"
     if _github_participation_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_participation_path_repo(origin_uri)
@@ -4415,6 +4421,39 @@ def _github_code_frequency_path_matches(origin_uri: str) -> bool:
     )
 
 
+def _github_punch_card_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 6
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "stats"
+            and lowered[5] == "punch_card"
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    double_decoded_path = unquote(unquote(parts.path)).split("/")
+    if _segments_match(double_decoded_path):
+        return True
+    return any(
+        segment.lower().startswith(("stats%", "punch_card%", "punch%5fcard"))
+        for segment in raw_path
+    )
+
+
 def _github_code_frequency_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -4457,6 +4496,48 @@ def _github_code_frequency_fetch_origin(origin_uri: str) -> str:
     return f"https://api.github.com/repos/{path[2]}/{path[3]}/stats/code_frequency"
 
 
+def _github_punch_card_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "stats"
+        or path[5] != "punch_card"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_punch_card_fetch_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_hostname_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "stats"
+        or path[5] != "punch_card"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"https://api.github.com/repos/{path[2]}/{path[3]}/stats/punch_card"
+
+
 def _github_code_frequency_row_is_safe(row: Any) -> bool:
     if not isinstance(row, list) or len(row) != 3:
         return False
@@ -4493,6 +4574,49 @@ def _github_code_frequency_refresh_summary(origin_uri: str, payload: list[Any]) 
             f"active weeks: {active_weeks}",
         ])
     )
+
+
+def _github_punch_card_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, list) or len(row) != 3:
+        return False
+    day, hour, commits = row
+    day_count = _safe_optional_nonnegative_int(day)
+    hour_count = _safe_optional_nonnegative_int(hour)
+    commit_count = _safe_optional_nonnegative_int(commits)
+    return (
+        day_count is not None
+        and 0 <= day_count <= 6
+        and hour_count is not None
+        and 0 <= hour_count <= 23
+        and commit_count is not None
+    )
+
+
+def _json_payload_is_github_punch_card_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_punch_card_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list) or not payload or len(payload) > 168:
+        return False
+    return all(_github_punch_card_row_is_safe(row) for row in payload)
+
+
+def _github_punch_card_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_punch_card_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_punch_card_row_is_safe(row)]
+    total_commits = sum(int(row[2]) for row in safe_rows)
+    active_slots = sum(1 for row in safe_rows if int(row[2]) > 0)
+    busiest = max(safe_rows, key=lambda row: int(row[2]), default=None)
+    summary_parts = [
+        f"GitHub punch card for {repo}",
+        f"slots: {len(safe_rows)}",
+        f"total commits: {total_commits}",
+        f"active slots: {active_slots}",
+    ]
+    if busiest is not None:
+        summary_parts.append(
+            f"busiest slot: day {int(busiest[0])} hour {int(busiest[1])} commits {int(busiest[2])}"
+        )
+    return _bounded_refresh_summary("; ".join(summary_parts))
 
 
 def _json_payload_is_github_participation_metadata(origin_uri: str, payload: Any) -> bool:
@@ -10536,6 +10660,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_participation_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    punch_card_repo = _github_punch_card_path_repo(origin_uri)
+    if punch_card_repo:
+        if not _json_payload_is_github_punch_card_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub punch card {punch_card_repo}",
+            "summary": _github_punch_card_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_punch_card_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     repository_events_repo = _github_repository_events_path_repo(origin_uri)
     if repository_events_repo:
         if not _json_payload_is_github_repository_events_metadata(origin_uri, payload):
@@ -11502,6 +11638,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_code_frequency_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_code_frequency_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_punch_card_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_punch_card_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_participation_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_participation_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -11623,6 +11762,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     code_frequency_fetch_origin = _github_code_frequency_fetch_origin(raw_origin_uri)
     if code_frequency_fetch_origin:
         safe_origin_uri = code_frequency_fetch_origin
+    punch_card_fetch_origin = _github_punch_card_fetch_origin(raw_origin_uri)
+    if punch_card_fetch_origin:
+        safe_origin_uri = punch_card_fetch_origin
     if not _source_refresh_allowed(safe_origin_uri):
         raise RuntimeError("refresh fetcher disabled")
     request_accept = "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8"
@@ -11668,6 +11810,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_code_frequency_path_matches(safe_origin_uri):
         if not _github_code_frequency_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_punch_card_path_matches(safe_origin_uri):
+        if not _github_punch_card_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_participation_path_matches(safe_origin_uri):
@@ -11897,6 +12043,24 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_traffic_popular_referrers_path_repo(final_url) != _github_traffic_popular_referrers_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_code_frequency_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_code_frequency_path_repo(final_url)
+            or _github_code_frequency_path_repo(final_url) != _github_code_frequency_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_punch_card_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_punch_card_path_repo(final_url)
+            or _github_punch_card_path_repo(final_url) != _github_punch_card_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_participation_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_participation_path_repo(final_url)
+            or _github_participation_path_repo(final_url) != _github_participation_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
         if _github_workflow_run_timing_path_run_id(safe_origin_uri) is not None and (
             _github_workflow_run_timing_path_info(final_url) is None
             or _github_workflow_run_timing_path_info(final_url) != _github_workflow_run_timing_path_info(safe_origin_uri)
@@ -12117,6 +12281,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_code_frequency_path_matches(safe_origin_uri) and (
             not _github_code_frequency_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_punch_card_path_matches(safe_origin_uri) and (
+            not _github_punch_card_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
