@@ -11439,6 +11439,31 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     return False
 
 
+def _active_run_stream_for_session(session_id: str | None) -> str | None:
+    """Return a live worker stream for this session even if sidecar stream id is clear.
+
+    cancel_stream() intentionally clears ``session.active_stream_id`` before the
+    worker thread fully exits so Stop remains responsive. During that unwind
+    window ACTIVE_RUNS is the worker-lifecycle truth; a successor chat/start for
+    the same session must wait or it can reuse the cached agent while the old
+    interrupt is still landing (#3808).
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    try:
+        from api import config as _live_config
+        with _live_config.ACTIVE_RUNS_LOCK:
+            for run_stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
+                stream_id = str((raw or {}).get("stream_id") or run_stream_id or "").strip()
+                run_sid = str((raw or {}).get("session_id") or "").strip()
+                if run_sid == sid and stream_id:
+                    return stream_id
+    except Exception:
+        return None
+    return None
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -11492,6 +11517,14 @@ def _start_chat_stream_for_session(
                     }
                 needs_stale_cleanup = True
             else:
+                blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
+                if blocking_run_stream_id:
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": blocking_run_stream_id,
+                        "_status": 409,
+                    }
                 needs_stale_cleanup = False
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None

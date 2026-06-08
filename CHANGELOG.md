@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Interrupt-and-send no longer starts a successor run while the cancelled run is still unwinding.** `cancel_stream()` still clears `active_stream_id` eagerly so Stop remains responsive, but `/api/chat/start` now also checks `ACTIVE_RUNS` by `session_id` before creating a new stream. This closes the window where busy-composer `interrupt` could show a queued user turn in WebUI while a still-active predecessor worker shared the session agent and prevented the successor turn from reaching the durable Agent message chain. (#3808)
+
 ## [v0.51.326] — 2026-06-08 — Release KP (mic STT probe + journal cleanup + schema guard + help hover)
 
 ### Fixed
