@@ -11676,9 +11676,11 @@ def upsert_system_widget(
         prompt_preflight = _system_widget_required_prompt_preflight_receipt()
         autonomy_policy = _space_widget_mutation_action_policy_receipt("space.system_widget.upsert", prompt_preflight)
         progress_event = _record_space_tool_progress_event(sid, run_prefix="system-widget.upsert")
+        memory_advisory = _memory_advisory_public_envelope()
         response["prompt_preflight"] = prompt_preflight
         response["autonomy_policy"] = autonomy_policy
         response["progress_event"] = progress_event
+        response["memory_advisory"] = memory_advisory
         response["output_compaction"] = _space_tool_action_output_compaction_receipt(
             action="space.system_widget.upsert",
             space_id=sid,
@@ -11687,6 +11689,8 @@ def upsert_system_widget(
             revision_event_id=response.get("revision_event_id"),
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
         )
     return response
 

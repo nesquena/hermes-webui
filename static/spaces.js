@@ -1524,12 +1524,13 @@
     if (!result) return '';
     const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
     const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const advisory = renderMemoryAdvisoryEvidence(result.memory_advisory);
     const progress = renderPackageProgressEvidence(result.progress_event, 'System widget progress');
     const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
-    if (!preflight && !policy && !progress && !compaction) return '';
+    if (!preflight && !policy && !advisory && !progress && !compaction) return '';
     return '<div class="capy-spaces-card" role="status"><h3>System widget added</h3>' +
-      '<div class="capy-spaces-muted">Trusted WebUI system widget attached with metadata-only preflight, policy, progress, and compaction evidence. Raw widget bodies, prompts, implementation fields, and secrets stay omitted.</div>' +
-      preflight + policy + progress + compaction + '</div>';
+      '<div class="capy-spaces-muted">Trusted WebUI system widget attached with metadata-only preflight, policy, memory advisory, progress, and compaction evidence. Raw widget bodies, prompts, implementation fields, and secrets stay omitted.</div>' +
+      preflight + policy + advisory + progress + compaction + '</div>';
   }
 
   function prependSystemWidgetUpsertReceipt(data){
