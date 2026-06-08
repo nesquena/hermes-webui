@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.334] — 2026-06-08 — Release KX (new-message cue when scrolled up)
+
+### Added
+- **A "New message" cue on the jump-to-bottom button when you've scrolled up.** If you scroll up to read while a turn is still arriving, a new message no longer silently lands off-screen nor yanks you to the bottom — the jump-to-bottom button shows a "New message" cue you can click to catch up. Pinned/at-bottom readers still auto-follow to the latest response as before. (#3545, #3631, @rodboev)
+
 ## [v0.51.333] — 2026-06-08 — Release KW (collapse old interim progress notes)
 
 ### Added
