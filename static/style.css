@@ -4077,6 +4077,14 @@ main.main > #mainPlugin{display:none;}
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}
 .cron-new-dot{width:7px;height:7px;border-radius:50%;background:var(--success,#22c55e);flex-shrink:0;animation:cron-dot-pulse 2s ease-in-out infinite;}
 .cron-agent-badge{flex-shrink:0;font-size:12px;line-height:1;}
+.cron-script-badge{flex-shrink:0;font-size:12px;line-height:1;opacity:.92;}
+.cron-script-job-banner{margin-bottom:12px;}
+.cron-script-job-banner .detail-alert-title{font-weight:600;}
+.detail-script{background:var(--sidebar);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;white-space:pre-wrap;line-height:1.55;color:var(--text);font-family:'SF Mono',ui-monospace,monospace;word-break:break-word;}
+.detail-hint{font-size:11px;color:var(--muted);line-height:1.5;}
+.cron-script-card .detail-hint,.cron-script-card-hint{margin-top:8px;}
+.detail-badge.cron-mode-badge.script{background:rgba(148,163,184,.14);color:var(--text-secondary);}
+.detail-badge.cron-mode-badge.agent{background:rgba(99,179,237,.14);color:#90cdf4;}
 @keyframes cron-dot-pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
 .has-new-run{border-color:var(--success,#22c55e)!important;box-shadow:0 0 0 1px var(--success,#22c55e);}
 

@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.332] — 2026-06-08 — Release KV (distinguish script cron jobs in Tasks)
+
+### Fixed
+- **Script cron jobs (`no_agent`) in the Tasks panel no longer show an empty Prompt card that looked like missing configuration.** Script jobs now display a 📜 script badge (next to the agent 🤖 badge), a "Script" banner, the script path + working directory, and "Script output" run-history labels distinct from agent jobs. (#3589, @pamnard)
+
 ## [v0.51.331] — 2026-06-08 — Release KU (dismissible error toasts)
 
 ### Fixed
