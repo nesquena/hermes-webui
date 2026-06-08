@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): add development advisory receipts`
+  - Added RED/GREEN backend coverage proving receipt-only development terminal actions return the shared Memory Tree advisory/no-authority envelope (`untrusted_advisory`, gate bypass false, required prompt-preflight/approval/sandbox/visual-QA/rollback gates) beside existing prompt-preflight, autonomy-policy, progress, and compaction receipts.
+  - Threaded safe advisory-boundary metadata into development-tool compaction evidence while continuing to omit raw commands, prompts, renderer/source/html/script fields, API-auth fields, local paths, bearer strings, and secret-looking fixture values.
+
 - `feat(streaming): add terminal compaction receipts`
   - Added RED/GREEN streaming progress coverage proving terminal tool and subagent callbacks return metadata-only `output_compaction` evidence with safe stream-scoped run ids, path/URL-shaped hostile stream-id fallback, and preserved numeric exit status; structured tool callback coverage also proves SSE progress-event surfacing of the metadata-only receipt.
   - The receipt builder never stringifies callback payloads, so hostile tool names, args, outputs, subagent summaries, raw prompts, renderer/source/html/script fields, API-auth fields, bearer strings, local paths, and secret-looking fixtures stay out of durable progress logs, status, and returned receipts.

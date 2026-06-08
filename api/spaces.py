@@ -14049,6 +14049,7 @@ def _development_tool_output_compaction_receipt(
     prompt_preflight: dict[str, Any],
     autonomy_policy: dict[str, Any],
     progress_event: dict[str, Any],
+    memory_advisory: dict[str, Any],
 ) -> dict[str, Any]:
     """Build metadata-only compaction evidence for receipt-only development tools.
 
@@ -14064,12 +14065,18 @@ def _development_tool_output_compaction_receipt(
     preflight_status = _payload_text_summary(prompt_preflight.get("status") or "required", 40) or "required"
     model_route_hint = _payload_text_summary(autonomy_policy.get("model_route_hint") or "hint:code", 80) or "hint:code"
     progress_run_id = _payload_text_summary(progress_event.get("run_id") or f"development.{safe_requested}:{safe_space_id}", 160) or f"development.{safe_requested}:{safe_space_id}"
+    advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
+    context_authority = _payload_text_summary(memory_advisory.get("context_authority") or "untrusted_advisory", 80) or "untrusted_advisory"
+    can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
     lines = [
         "Capy Spaces development tool metadata-only receipt",
         f"development_action: {safe_action}",
         f"space_id: {safe_space_id}",
         f"requested_action: {safe_requested}",
         "metadata_only: true",
+        f"advisory_context: {advisory_context}",
+        f"context_authority: {context_authority}",
+        f"can_bypass_safety_gates: {can_bypass}",
         "executed: false",
         "approval_required: true",
         "command_stored: false",
@@ -14108,6 +14115,7 @@ def _development_tool_receipt(action: str, payload: dict[str, Any]) -> dict[str,
         prompt_preflight_status=str(prompt_preflight.get("status") or "required"),
     )
     progress_event = _record_space_tool_progress_event(space_id, run_prefix=f"development.{requested_action}")
+    memory_advisory = _memory_advisory_public_envelope()
     development_surface = {
         "mode": "metadata-only",
         "requested_action": requested_action,
@@ -14125,6 +14133,7 @@ def _development_tool_receipt(action: str, payload: dict[str, Any]) -> dict[str,
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": _development_tool_output_compaction_receipt(
             action=action,
             space_id=space_id,
@@ -14132,6 +14141,7 @@ def _development_tool_receipt(action: str, payload: dict[str, Any]) -> dict[str,
             prompt_preflight=prompt_preflight,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
         ),
     }
 
