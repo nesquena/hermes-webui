@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.324] — 2026-06-07 — Release KN (i18n — translate settings + gateway-status labels)
+
+### Added
+- **Settings labels/descriptions and gateway-status strings are now translated across all 13 locales.** Previously-untranslated settings fields (token speed, terminal auto-expand, pinned-conversations limit, and others) and gateway session-count strings now follow the selected UI language. English copy is unchanged (it's the fallback), so there's no visible change for English users. (#3801, @leszek3737)
+
 ## [v0.51.323] — 2026-06-07 — Release KM (7-day provider spend chart)
 
 ### Added
