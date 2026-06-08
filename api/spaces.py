@@ -928,6 +928,7 @@ def _template_install_output_compaction_receipt(
     prompt_preflight: dict[str, Any] | None = None,
     autonomy_policy: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for high-risk template installs."""
     from api.capy_compaction import compact_output
@@ -951,6 +952,24 @@ def _template_install_output_compaction_receipt(
     if isinstance(progress_event, dict):
         lines.append(f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or f'template.install:{safe_space_id}', 160) or f'template.install:{safe_space_id}'}")
         lines.append(f"progress_status: {_payload_text_summary(progress_event.get('status') or 'completed', 40) or 'completed'}")
+    if isinstance(memory_advisory, dict):
+        advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
+        context_authority = _payload_text_summary(
+            memory_advisory.get("context_authority") or "untrusted_advisory", 80
+        ) or "untrusted_advisory"
+        can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
+        raw_required_gates = memory_advisory.get("required_gates")
+        required_gates = raw_required_gates if isinstance(raw_required_gates, list) else []
+        safe_required_gates = []
+        for gate in required_gates[:8]:
+            safe_gate = _payload_text_summary(gate, 40)
+            if safe_gate:
+                safe_required_gates.append(safe_gate)
+        lines.append(f"advisory_context: {advisory_context}")
+        lines.append(f"context_authority: {context_authority}")
+        lines.append(f"can_bypass_safety_gates: {can_bypass}")
+        if safe_required_gates:
+            lines.append(f"required_gates: {', '.join(safe_required_gates)}")
 
     receipt = compact_output(
         "\n".join(lines),
@@ -981,6 +1000,7 @@ def _template_reset_output_compaction_receipt(
     prompt_preflight: dict[str, Any] | None = None,
     autonomy_policy: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for template reset results."""
     from api.capy_compaction import compact_output
@@ -1006,6 +1026,24 @@ def _template_reset_output_compaction_receipt(
     if isinstance(progress_event, dict):
         lines.append(f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or f'template.reset:{safe_space_id}', 160) or f'template.reset:{safe_space_id}'}")
         lines.append(f"progress_status: {_payload_text_summary(progress_event.get('status') or 'completed', 40) or 'completed'}")
+    if isinstance(memory_advisory, dict):
+        advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
+        context_authority = _payload_text_summary(
+            memory_advisory.get("context_authority") or "untrusted_advisory", 80
+        ) or "untrusted_advisory"
+        can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
+        raw_required_gates = memory_advisory.get("required_gates")
+        required_gates = raw_required_gates if isinstance(raw_required_gates, list) else []
+        safe_required_gates = []
+        for gate in required_gates[:8]:
+            safe_gate = _payload_text_summary(gate, 40)
+            if safe_gate:
+                safe_required_gates.append(safe_gate)
+        lines.append(f"advisory_context: {advisory_context}")
+        lines.append(f"context_authority: {context_authority}")
+        lines.append(f"can_bypass_safety_gates: {can_bypass}")
+        if safe_required_gates:
+            lines.append(f"required_gates: {', '.join(safe_required_gates)}")
 
     receipt = compact_output(
         "\n".join(lines),
@@ -12689,6 +12727,8 @@ def install_template(template: str, *, space_id: str | None = None, record_progr
         result["prompt_preflight"] = preflight_receipt
         result["autonomy_policy"] = _interactive_template_action_policy_receipt(response_template, preflight_receipt)
     if isinstance(result.get("prompt_preflight"), dict) and isinstance(result.get("autonomy_policy"), dict):
+        memory_advisory = _memory_advisory_public_envelope()
+        result["memory_advisory"] = memory_advisory
         result["output_compaction"] = _template_install_output_compaction_receipt(
             template=response_template,
             space_id=space["space_id"],
@@ -12696,6 +12736,7 @@ def install_template(template: str, *, space_id: str | None = None, record_progr
             prompt_preflight=result.get("prompt_preflight"),
             autonomy_policy=result.get("autonomy_policy"),
             progress_event=result.get("progress_event"),
+            memory_advisory=memory_advisory,
         )
     return result
 
@@ -12757,6 +12798,8 @@ def reset_template(template: str, *, space_id: str | None = None, record_progres
     preflight_receipt = _template_reset_prompt_preflight_receipt()
     result["prompt_preflight"] = preflight_receipt
     result["autonomy_policy"] = _template_reset_action_policy_receipt(preflight_receipt)
+    memory_advisory = _memory_advisory_public_envelope()
+    result["memory_advisory"] = memory_advisory
     result["output_compaction"] = _template_reset_output_compaction_receipt(
         space_id=sid,
         installed_widget_count=len(installed_widgets),
@@ -12764,6 +12807,7 @@ def reset_template(template: str, *, space_id: str | None = None, record_progres
         prompt_preflight=preflight_receipt,
         autonomy_policy=result["autonomy_policy"],
         progress_event=result.get("progress_event"),
+        memory_advisory=memory_advisory,
     )
     return result
 

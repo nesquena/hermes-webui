@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- High-risk template installs and Big Bang template resets now include the shared server-generated Memory Tree advisory/no-authority envelope beside template prompt-preflight, autonomy-policy, structured progress when present, and metadata-only output-compaction receipts. Template setup/reset remains advisory-only and cannot let caller-forged trusted memory authority, raw memory context, renderer/source/API-auth/script/token/secret fixture values, or generated widget bodies bypass prompt-preflight, approval, sandbox preview, visual QA, or rollback/recovery gates.
+
 - Recovery quarantine/disable/enable toggle responses for whole Spaces, widgets, and recovery modules now include the shared server-generated Memory Tree advisory/no-authority envelope beside recovery prompt-preflight, autonomy-policy, structured progress, and output-compaction receipts. Recovery/admin toggles remain metadata-only and cannot let stored generated content, operator reasons, or caller-forged memory authority bypass prompt-preflight, approval, sandbox preview, visual QA, or rollback/recovery gates.
 
 - Whole-Space and single-widget revision restore now include the shared server-generated Memory Tree advisory/no-authority envelope beside recovery prompt-preflight, autonomy-policy, structured progress, and output-compaction receipts. Rollback/time-travel remains metadata-only, cannot treat memory or restored context as trusted authority, and continues to omit renderer/source/html/API-auth/script/token/secret fixture values from public responses.
