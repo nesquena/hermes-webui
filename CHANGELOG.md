@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.330] — 2026-06-08 — Release KT (api docstring backfill)
+
+### Changed
+- **Internal: backfilled docstrings for 51 previously-undocumented functions** in `api/oauth.py` and `api/kanban_bridge.py` (developer-facing documentation only; no behavior change). (#3716, @camr)
+
 ## [v0.51.329] — 2026-06-08 — Release KS (session-list + startup latency)
 
 ### Fixed
