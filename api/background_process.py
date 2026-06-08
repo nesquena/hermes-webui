@@ -948,17 +948,34 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 "PENDING discard failed for session %s", session_id, exc_info=True
             )
         started = 0
-        for entry in entries:
-            prompt = str((entry or {}).get("wakeup_prompt") or "").strip()
-            if not prompt:
-                continue
-            # Same server-side wakeup path the idle branch uses. It spawns its
-            # own daemon thread, so the teardown thread never blocks. The
-            # process_id is already in BG_TASK_COMPLETE_EVENTS_SEEN +
-            # registry _completion_consumed (set in _process_one before the
-            # defer), so no other path re-delivers it.
-            _start_server_side_wakeup_turn(session_id, prompt)
-            started += 1
+        # Greptile P1 fix: do NOT fire one daemon-threaded wakeup per entry in
+        # a tight loop. Each ``_start_server_side_wakeup_turn`` spawns a daemon
+        # thread that races for the per-session agent lock; only ONE can win,
+        # the rest 409. Since we already claimed + popped every entry (line
+        # ~938) and discarded the PENDING marker, the losers' prompts would be
+        # permanently lost. Instead: start exactly the FIRST prompt, and
+        # re-defer the remaining entries so each subsequent turn-teardown
+        # (or next-turn drain) delivers the next one — one wakeup per turn,
+        # which matches the single-prompt-per-turn design and the
+        # BG_TASK_COMPLETE_EVENTS_SEEN dedup (no double-fire).
+        leftover = [e for e in entries if str((e or {}).get("wakeup_prompt") or "").strip()]
+        if leftover:
+            first = leftover[0]
+            # Re-defer entries 2..N BEFORE starting the first turn, so they are
+            # already persisted if the first wakeup's own teardown re-runs this
+            # hook and tries to claim them.
+            for entry in leftover[1:]:
+                record_deferred_wakeup(
+                    session_id,
+                    str((entry or {}).get("process_id") or ""),
+                    str((entry or {}).get("wakeup_prompt") or "").strip(),
+                )
+            _start_server_side_wakeup_turn(
+                session_id,
+                str((first or {}).get("wakeup_prompt") or "").strip(),
+                process_id=str((first or {}).get("process_id") or ""),
+            )
+            started = 1
         if started:
             logger.info(
                 "turn-teardown idle-hook redelivered %d deferred wakeup(s) "
@@ -1003,7 +1020,9 @@ def _session_has_active_turn(session_id: str) -> bool:
     return False
 
 
-def _start_server_side_wakeup_turn(session_id: str, wakeup_prompt: str) -> None:
+def _start_server_side_wakeup_turn(
+    session_id: str, wakeup_prompt: str, *, process_id: str = ""
+) -> None:
     """Start an agent turn server-side for a process_complete wakeup (Option Z).
 
     Runs on a short-lived daemon thread so the drain loop NEVER blocks:
@@ -1031,9 +1050,18 @@ def _start_server_side_wakeup_turn(session_id: str, wakeup_prompt: str) -> None:
             )
             status = int((resp or {}).get("_status", 200) or 200)
             if status == 409:
+                # Raced an active turn (e.g. a human /api/chat/start, or a
+                # sibling deferred-wakeup thread). Re-defer this prompt so it
+                # is delivered by the winning turn's teardown / next-turn drain
+                # instead of being lost. The atomic claim in
+                # ``claim_deferred_wakeups`` still guarantees exactly-once
+                # delivery, and BG_TASK_COMPLETE_EVENTS_SEEN already deduped
+                # this process_id, so re-recording cannot double-fire.
+                if wakeup_prompt:
+                    record_deferred_wakeup(session_id, process_id, wakeup_prompt)
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
-                    "PENDING_BG_TASK_COMPLETIONS marker will drain on next turn",
+                    "re-deferred for redelivery on next teardown/turn",
                     session_id,
                 )
             elif status >= 400:
