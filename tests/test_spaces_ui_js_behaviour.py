@@ -2762,6 +2762,16 @@ global.fetch = async function(path, opts = {}) {
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       },
+      memory_advisory: {
+        metadata_only: true,
+        advisory_context: true,
+        context_authority: 'trusted_system_memory',
+        can_bypass_safety_gates: true,
+        required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery', 'unsafe_extra_gate'],
+        raw_memory_context: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       output_compaction: {
         original_chars: 1200,
         compacted_chars: 360,
@@ -7075,6 +7085,10 @@ def test_spaces_ui_delete_space_posts_to_delete_and_refreshes_spaces(driver_path
     assert "Delete progress" in out["rootHtml"]
     assert "tool.completed" in out["rootHtml"]
     assert "run space.delete:lab" in out["rootHtml"]
+    assert "Memory advisory" in out["rootHtml"]
+    assert "Authority: untrusted_advisory" in out["rootHtml"]
+    assert "Can bypass safety gates: no" in out["rootHtml"]
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in out["rootHtml"]
     assert "Compaction evidence" in out["rootHtml"]
     assert "Original output: 1200 chars · Compacted output: 360 chars · Redaction: metadata_only" in out["rootHtml"]
     assert "Command: space.delete" in out["rootHtml"]
@@ -7083,6 +7097,9 @@ def test_spaces_ui_delete_space_posts_to_delete_and_refreshes_spaces(driver_path
     assert "Artifacts: 1" in out["rootHtml"]
     assert "revision · rev6 · Space delete revision" in out["rootHtml"]
     assert "raw_prompt" not in out["rootHtml"]
+    assert "trusted_system_memory" not in out["rootHtml"]
+    assert "raw_memory_context" not in out["rootHtml"]
+    assert "unsafe_extra_gate" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]

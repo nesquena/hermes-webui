@@ -10481,11 +10481,13 @@ def delete_space(space_id: str, *, include_safety_receipts: bool = False, action
         if include_safety_receipts:
             progress_event = _record_space_tool_progress_event(sid, run_prefix="space.delete")
             autonomy_policy = _space_layout_action_policy_receipt(action, prompt_preflight)
+            memory_advisory = _memory_advisory_public_envelope()
             result.update(
                 {
                     "prompt_preflight": prompt_preflight,
                     "autonomy_policy": autonomy_policy,
                     "progress_event": progress_event,
+                    "memory_advisory": memory_advisory,
                     "output_compaction": _space_tool_action_output_compaction_receipt(
                         action=action,
                         space_id=sid,
@@ -10493,6 +10495,8 @@ def delete_space(space_id: str, *, include_safety_receipts: bool = False, action
                         revision_event_id=event_id,
                         autonomy_policy=autonomy_policy,
                         progress_event=progress_event,
+                        memory_advisory=memory_advisory,
+                        include_memory_required_gates=True,
                     ),
                 }
             )
