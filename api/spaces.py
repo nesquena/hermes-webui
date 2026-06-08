@@ -2153,6 +2153,7 @@ def _space_tool_action_output_compaction_receipt(
     autonomy_policy: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
     memory_advisory: dict[str, Any] | None = None,
+    include_memory_required_gates: bool = False,
     include_widget_count: bool = True,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for source-style Space actions.
@@ -2239,7 +2240,7 @@ def _space_tool_action_output_compaction_receipt(
         lines.append(f"advisory_context: {advisory_context}")
         lines.append(f"context_authority: {context_authority}")
         lines.append(f"can_bypass_safety_gates: {can_bypass}")
-        if safe_required_gates and safe_action.startswith(("space.data.", "space.current.data.")):
+        if safe_required_gates and include_memory_required_gates:
             lines.append(f"required_gates: {', '.join(safe_required_gates)}")
 
     retained_space_id = safe_target_space_id or safe_space_id or safe_source_space_id
@@ -7964,10 +7965,12 @@ def _space_collection_read_receipt_envelope(
     progress_event = _record_space_collection_read_progress_event(
         action, space_id=space_id, current_read=current_read
     )
+    memory_advisory = _memory_advisory_public_envelope()
     return {
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": _space_tool_action_output_compaction_receipt(
             action=action,
             space_id=space_id,
@@ -7975,6 +7978,8 @@ def _space_collection_read_receipt_envelope(
             space_count=space_count,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
             include_widget_count=widget_count is not None,
         ),
     }
@@ -9307,6 +9312,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
             memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
         )
         return response
     if name in {"space.data.list", "space.current.data.list"}:
@@ -9332,6 +9338,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
                 memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name in {"space.data.get", "space.current.data.get"}:
@@ -9358,6 +9365,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
                 memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name in {"space.data.delete", "space.current.data.delete"}:
@@ -9384,6 +9392,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
             memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
         )
         return response
     if name in {"space.research.artifact.set", "space.current.research.artifact.set", "space.research.report.set", "space.current.research.report.set"}:
