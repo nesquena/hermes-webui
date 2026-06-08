@@ -103,8 +103,8 @@ def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
         "renderMessages({preserveScroll:true}) must capture #messages.scrollTop before "
         "replacing transcript DOM, then pass that snapshot to the post-render scroll helper"
     )
-    assert "if(_scrollPinned) scrollIfPinned()" in after_render
-    assert "else {\n      _restoreMessageScrollSnapshot(scrollSnapshot);\n      _maybeShowNewMessageScrollCue(scrollSnapshot);\n    }" in after_render
+    assert "if(_followMessagesAfterDomReplace()) return;" in after_render
+    assert "_restoreMessageScrollSnapshot(scrollSnapshot);\n    _maybeShowNewMessageScrollCue(scrollSnapshot);" in after_render
     assert "_shouldFollowMessagesOnDomReplace()" in follow
     assert "scrollToBottom();" in follow
     assert "el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop))" in restore

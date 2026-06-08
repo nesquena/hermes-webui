@@ -29,9 +29,18 @@ def _scroll_listener_block() -> str:
 def test_preserve_scroll_unpinned_branch_shows_new_message_cue_after_restore():
     helper = _function_body(UI_JS, "function _scrollAfterMessageRender")
 
-    assert "if(_scrollPinned) scrollIfPinned();" in helper
-    assert "else {\n      _restoreMessageScrollSnapshot(scrollSnapshot);\n      _maybeShowNewMessageScrollCue(scrollSnapshot);\n    }" in helper
+    # The preserve-scroll branch keeps master's forced follow path for pinned /
+    # near-bottom users (no regression on settled-response bottom-pinning), and
+    # only the genuinely-scrolled-up cohort restores their viewport + gets the
+    # new-message cue. (Codex CORE catch: scrollIfPinned() in the pinned branch
+    # could leave a pinned reader short of the settled response.)
+    assert "if(_followMessagesAfterDomReplace()) return;" in helper
+    assert "_restoreMessageScrollSnapshot(scrollSnapshot);" in helper
     assert helper.index("_restoreMessageScrollSnapshot(scrollSnapshot)") < helper.index(
+        "_maybeShowNewMessageScrollCue(scrollSnapshot)"
+    )
+    # The cue is only shown on the non-follow (restore) path, after the restore.
+    assert helper.index("_followMessagesAfterDomReplace()") < helper.index(
         "_maybeShowNewMessageScrollCue(scrollSnapshot)"
     )
     assert helper.count("_maybeShowNewMessageScrollCue(scrollSnapshot)") == 1

@@ -7785,11 +7785,17 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // pinned users stay at bottom; users who manually scrolled up get their
   // pre-render scrollTop restored after the DOM replacement.
   if(preserveScroll){
-    if(_scrollPinned) scrollIfPinned();
-    else {
-      _restoreMessageScrollSnapshot(scrollSnapshot);
-      _maybeShowNewMessageScrollCue(scrollSnapshot);
-    }
+    // Keep master's follow heuristic for pinned / still-near-bottom users:
+    // _followMessagesAfterDomReplace() does a FORCED scrollToBottom() (synchronous
+    // bottom write + forced settle), so the final settled response can't leave a
+    // pinned reader a few lines short. Only genuinely-scrolled-up (unpinned, not
+    // near bottom) users fall through to keep their position and get the
+    // new-message cue. (Using scrollIfPinned() here instead would skip the forced
+    // write unless distance>500 and let the DOM-rebuild scroll event cancel the
+    // delayed settles — Codex CORE catch on #3631.)
+    if(_followMessagesAfterDomReplace()) return;
+    _restoreMessageScrollSnapshot(scrollSnapshot);
+    _maybeShowNewMessageScrollCue(scrollSnapshot);
     return;
   }
   if(S.activeStreamId){
