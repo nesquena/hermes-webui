@@ -7872,16 +7872,20 @@ def _space_api_health_receipt_envelope(action: str, *, space_count: int) -> dict
     prompt_preflight = _space_api_health_required_prompt_preflight_receipt(action)
     autonomy_policy = _space_api_health_action_policy_receipt(action, prompt_preflight)
     progress_event = _record_space_api_health_progress_event(action)
+    memory_advisory = _memory_advisory_public_envelope()
     return {
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": _space_tool_action_output_compaction_receipt(
             action=action,
             widget_count=0,
             space_count=space_count,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
             include_widget_count=False,
         ),
     }
