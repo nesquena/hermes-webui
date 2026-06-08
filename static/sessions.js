@@ -4447,6 +4447,12 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
   const rows=(collapsedRows||[])
     .filter(s=>!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList)))
     .map(s=>({...s}));
+  const bubbleSidebarActivity=(parentRow, childRow)=>{
+    const parentRaw=Number(parentRow&&(parentRow.last_message_at||parentRow.updated_at||parentRow.created_at||0));
+    const childRaw=Number(childRow&&(childRow.last_message_at||childRow.updated_at||childRow.created_at||0));
+    if(!Number.isFinite(childRaw)||childRaw<=parentRaw) return;
+    parentRow.last_message_at=childRaw;
+  };
   const visibleBySid=new Map();
   const visibleBySegmentSid=new Map();
   const visibleByLineageKey=new Map();
@@ -4486,6 +4492,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
       }
       parentRow._child_sessions.push(childCopy);
       parentRow._child_session_count=parentRow._child_sessions.length;
+      bubbleSidebarActivity(parentRow, childCopy);
     } else {
       orphans.push({...child,_orphan_child_session:true});
     }
