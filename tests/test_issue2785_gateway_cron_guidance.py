@@ -24,6 +24,9 @@ def test_cron_panel_loads_gateway_status_for_scheduling_guidance():
     assert "api('/api/gateway/status')" in panels
     assert "Gateway not configured" in panels
     assert "Gateway not running" in panels
+    assert "Gateway endpoint not reachable" in panels
+    assert "configured gateway URL env var" in panels
+    assert "GATEWAY_HEALTH_URL" in panels
     assert "scheduled jobs require the Hermes gateway daemon" in panels
     assert "loadCronGatewayNotice()" in panels
 
@@ -34,4 +37,8 @@ def test_docker_docs_explain_single_container_cron_gateway_boundary():
     assert "single-container setup runs the WebUI only" in docs
     assert "scheduled jobs require the Hermes gateway daemon" in docs
     assert "Gateway not configured" in docs
+    assert "Gateway metadata stale" in docs
+    assert "Gateway endpoint not reachable" in docs
+    assert "`gateway_state.json` can become stale" in docs
+    assert "HERMES_WEBUI_GATEWAY_BASE_URL" in docs
     assert "docker-compose.two-container.yml" in docs

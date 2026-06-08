@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 from api.session_events import publish_session_list_changed
 
 logger = logging.getLogger(__name__)
@@ -425,7 +427,13 @@ def install_cron_scheduler_profile_isolation() -> None:
             with cron_profile_context_for_home(_home_for_scheduled_cron_job(job)):
                 return original(job, *args, **kwargs)
         finally:
-            publish_session_list_changed("cron_complete")
+            event_profile = str((job or {}).get("profile") or "").strip() or None
+            try:
+                publish_session_list_changed("cron_complete", profile=event_profile)
+            except TypeError:
+                # Focused tests and older integrations may patch the publisher
+                # with the historical one-argument shape.
+                publish_session_list_changed("cron_complete")
 
     _webui_profile_isolated_run_job._webui_profile_isolated = True
     _webui_profile_isolated_run_job._webui_original_run_job = original
@@ -891,6 +899,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
             raise ValueError(f"Profile '{name}' does not exist.")
 
     with _profile_lock:
+        _SKILLS_STATS_CACHE.clear()
         if process_wide:
             global _active_profile
             _active_profile = name
@@ -983,40 +992,257 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     return {
         'profiles': list_profiles_api(),
         'active': name,
+        'is_default': _is_root_profile(name),
         'default_model': default_model,
         'default_model_provider': default_model_provider,
         'default_workspace': default_workspace,
     }
 
 
-def list_profiles_api() -> list:
-    """List all profiles with metadata, serialized for JSON response."""
+_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, float]] = {}
+_SKILLS_STATS_CACHE_TTL = 8.0  # seconds
+
+
+def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
+    """Calculate (enabled_count, compatible_count) for a profile directory."""
+    import time
+    profile_dir = Path(profile_dir).resolve()
+    now = time.time()
+    # Read via .get() (not membership-check + index) so a concurrent
+    # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
+    # between the `in` test and the lookup.
+    cached = _SKILLS_STATS_CACHE.get(profile_dir)
+    if cached is not None:
+        enabled, compat, expiry = cached
+        if now < expiry:
+            return enabled, compat
+
+    skills_dir = profile_dir / "skills"
+    if not skills_dir.is_dir():
+        res = (0, 0)
+        _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
+        return res
+
+    disabled = set()
+    config_path = profile_dir / "config.yaml"
+    if config_path.exists():
+        try:
+            import yaml as _yaml
+            cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if isinstance(cfg, dict):
+                skills_cfg = cfg.get("skills")
+                if isinstance(skills_cfg, dict):
+                    # Align with get_disabled_skill_names(platform="webui") behavior:
+                    platform_disabled = (skills_cfg.get("platform_disabled") or {}).get("webui")
+                    if platform_disabled is not None:
+                        disabled_val = platform_disabled
+                    else:
+                        disabled_val = skills_cfg.get("disabled")
+                    
+                    if disabled_val is not None:
+                        if isinstance(disabled_val, str):
+                            disabled_val = [disabled_val]
+                        disabled = {str(v).strip() for v in disabled_val if str(v).strip()}
+        except Exception:
+            pass
+
+    from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
+    
+    seen_names = set()
+    enabled_count = 0
+    compatible_count = 0
+    
+    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+        try:
+            content = skill_md.read_text(encoding="utf-8")[:4000]
+            frontmatter, _ = parse_frontmatter(content)
+            if not skill_matches_platform(frontmatter):
+                continue
+            name = frontmatter.get("name", skill_md.parent.name)[:64]
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            
+            compatible_count += 1
+            if name not in disabled:
+                enabled_count += 1
+        except Exception:
+            pass
+            
+    res = (enabled_count, compatible_count)
+    _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
+    return res
+
+
+_LIST_PROFILES_CACHE: tuple[list, float] | None = None
+_LIST_PROFILES_CACHE_TTL = 4.0  # seconds — short enough that gateway dots / new
+                                # profiles stay near-live, long enough that rapid
+                                # re-opens of the dropdown are free.
+_LIST_PROFILES_CACHE_LOCK = threading.Lock()
+
+
+def _invalidate_list_profiles_cache() -> None:
+    """Drop the cached profile list (call after create/delete/switch)."""
+    global _LIST_PROFILES_CACHE
+    with _LIST_PROFILES_CACHE_LOCK:
+        _LIST_PROFILES_CACHE = None
+
+
+def _build_profile_rows_fast() -> list | None:
+    """Build the profile list WITHOUT the upstream alias scan.
+
+    ``hermes_cli.profiles.list_profiles()`` calls ``find_alias_for_profile()``
+    once per profile, which iterates every file in the wrapper dir
+    (``~/.local/bin``) and ``read_text()``s each one — including large binaries
+    (claude, node, uv, …). On a machine with big binaries on PATH that is
+    hundreds of MB of reads PER PROFILE, which makes the compose-footer profile
+    dropdown hang for many seconds.
+
+    The WebUI never uses the alias data (``list_profiles_api`` does not return
+    ``alias_name``/``alias_path``), so we replicate the cheap part of upstream's
+    ``list_profiles()`` — the same per-profile metadata, the same hardcoded
+    ``"default"`` name for the base home — and simply skip the alias scan.
+
+    Returns ``None`` if the upstream cheap helpers can't be imported, so the
+    caller can fall back to the original (slow but correct) path. Forward-
+    compatible: if upstream fixes ``find_alias_for_profile`` this stays fast and
+    correct with nothing to revert.
+    """
     try:
-        from hermes_cli.profiles import list_profiles
-        infos = list_profiles()
-    except ImportError:
-        # hermes_cli not available -- return just the default
-        return [_default_profile_dict()]
+        from hermes_cli.profiles import (
+            _get_default_hermes_home,
+            _get_profiles_root,
+            _read_config_model,
+            _check_gateway_running,
+            _PROFILE_ID_RE as _UPSTREAM_PROFILE_ID_RE,
+        )
+    except Exception:
+        return None
+
+    def _row(home: Path, name: str, is_default: bool) -> dict:
+        try:
+            model, provider = _read_config_model(home)
+        except Exception:
+            model, provider = None, None
+        try:
+            gateway_running = _check_gateway_running(home)
+        except Exception:
+            gateway_running = False
+        enabled_count, total_count = _get_profile_skills_stats(home)
+        return {
+            'name': name,
+            'path': str(home),
+            'is_default': is_default,
+            'is_active': False,  # filled in by caller (cheap, varies per request)
+            'gateway_running': gateway_running,
+            'model': model,
+            'provider': provider,
+            'has_env': (home / '.env').exists(),
+            'visible': _profile_visible_from_meta(home),
+            'skill_count': enabled_count,
+            'enabled_skills': enabled_count,
+            'total_skills': total_count,
+        }
+
+    rows: list = []
+    default_home = _get_default_hermes_home()
+    if default_home.is_dir():
+        # Upstream hardcodes the base home's display name to "default" even when
+        # the directory is literally ".hermes" — match that exactly.
+        rows.append(_row(default_home, 'default', True))
+
+    profiles_root = _get_profiles_root()
+    if profiles_root.is_dir():
+        for entry in sorted(profiles_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
+                continue
+            rows.append(_row(entry, entry.name, False))
+
+    return rows
+
+
+def list_profiles_api() -> list:
+    """List all profiles with metadata, serialized for JSON response.
+
+    Fast path: build the rows from upstream's cheap per-profile helpers and skip
+    ``find_alias_for_profile`` (whose result the WebUI discards) — see
+    ``_build_profile_rows_fast``. Results are cached for a short TTL so rapid
+    re-opens of the compose-footer dropdown are free; the cache is busted on
+    profile create/delete. Falls back to upstream ``list_profiles()`` if the
+    cheap helpers are unavailable.
+    """
+    import time
+    global _LIST_PROFILES_CACHE
+    now = time.time()
+
+    with _LIST_PROFILES_CACHE_LOCK:
+        cached = _LIST_PROFILES_CACHE
+    if cached is not None and now - cached[1] < _LIST_PROFILES_CACHE_TTL:
+        active = get_active_profile_name()
+        # Return a fresh copy with is_active recomputed (cheap, per-request).
+        return [{**p, 'is_active': p['name'] == active} for p in cached[0]]
+
+    rows = _build_profile_rows_fast()
+    if rows is None:
+        # Fallback: cheap helpers unavailable — use the original (slow) path,
+        # or the default-only dict if hermes_cli isn't importable at all.
+        logger.debug(
+            "list_profiles_api: fast path unavailable, falling back to "
+            "upstream list_profiles() (slower)"
+        )
+        try:
+            from hermes_cli.profiles import list_profiles
+            infos = list_profiles()
+        except ImportError:
+            return [_default_profile_dict()]
+
+        active = get_active_profile_name()
+        result = []
+        for p in infos:
+            enabled_count, total_count = _get_profile_skills_stats(p.path)
+            result.append({
+                'name': p.name,
+                'path': str(p.path),
+                'is_default': p.is_default,
+                'is_active': p.name == active,
+                'gateway_running': p.gateway_running,
+                'model': p.model,
+                'provider': p.provider,
+                'has_env': p.has_env,
+                'visible': _profile_visible_from_meta(p.path),
+                'skill_count': enabled_count,
+                'enabled_skills': enabled_count,
+                'total_skills': total_count,
+            })
+        return result
+
+    with _LIST_PROFILES_CACHE_LOCK:
+        _LIST_PROFILES_CACHE = (rows, now)
 
     active = get_active_profile_name()
-    result = []
-    for p in infos:
-        result.append({
-            'name': p.name,
-            'path': str(p.path),
-            'is_default': p.is_default,
-            'is_active': p.name == active,
-            'gateway_running': p.gateway_running,
-            'model': p.model,
-            'provider': p.provider,
-            'has_env': p.has_env,
-            'skill_count': p.skill_count,
-        })
-    return result
+    return [{**p, 'is_active': p['name'] == active} for p in rows]
+
+
+def _profile_visible_from_meta(profile_path: Path) -> bool:
+    """Return False only for an explicit boolean ``visible: false`` in profile.yaml."""
+    try:
+        meta_path = Path(profile_path) / 'profile.yaml'
+        if not meta_path.exists():
+            return True
+        data = yaml.safe_load(meta_path.read_text(encoding='utf-8'))
+    except Exception:
+        return True
+    if not isinstance(data, dict):
+        return True
+    visible = data.get('visible')
+    return visible is not False
 
 
 def _default_profile_dict() -> dict:
     """Fallback profile dict when hermes_cli is not importable."""
+    enabled_count, compatible_count = _get_profile_skills_stats(_DEFAULT_HERMES_HOME)
     return {
         'name': 'default',
         'path': str(_DEFAULT_HERMES_HOME),
@@ -1026,7 +1252,10 @@ def _default_profile_dict() -> dict:
         'model': None,
         'provider': None,
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
-        'skill_count': 0,
+        'visible': True,
+        'skill_count': enabled_count,
+        'enabled_skills': enabled_count,
+        'total_skills': compatible_count,
     }
 
 
@@ -1437,6 +1666,8 @@ def create_profile_api(name: str, clone_from: str = None,
 
     # Invalidate cached root-profile-name lookup; create_profile may have added
     # a new profile that flips is_default semantics on the agent side (#1612).
+    _SKILLS_STATS_CACHE.clear()
+    _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
 
     # Find and return the newly created profile info.
@@ -1456,6 +1687,8 @@ def create_profile_api(name: str, clone_from: str = None,
         'provider': None,
         'has_env': (profile_path / '.env').exists(),
         'skill_count': 0,
+        'enabled_skills': 0,
+        'total_skills': 0,
     }
 
 
@@ -1488,5 +1721,7 @@ def delete_profile_api(name: str) -> dict:
             raise ValueError(f"Profile '{name}' does not exist.")
 
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
+    _SKILLS_STATS_CACHE.clear()
+    _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
     return {'ok': True, 'name': name}

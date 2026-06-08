@@ -328,7 +328,12 @@ def test_lru_eviction_commits_outside_cache_lock():
 
     assert "commit_session_memory" not in locked_section
     assert "_lifecycle_commit" not in locked_section
-    assert "SESSION_AGENT_CACHE.popitem" in locked_section
+    # Eviction now selects the oldest INACTIVE entry (active-run-aware) and pops
+    # it by id under the lock, rather than a liveness-blind popitem(last=False).
+    # The commit/close still happens outside the lock (asserted below).
+    assert "SESSION_AGENT_CACHE.pop(_evictable_sid)" in locked_section
+    assert "_sid not in _active_sids" in locked_section
+    assert "SESSION_AGENT_CACHE.popitem(last=False)" not in locked_section
     assert "_close_evicted_agent_at_session_boundary" in outside_section
     helper_start = src.index("def _close_evicted_agent_at_session_boundary")
     helper_end = src.index("\ndef _refresh_cached_agent_runtime", helper_start)

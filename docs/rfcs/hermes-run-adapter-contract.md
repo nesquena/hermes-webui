@@ -956,28 +956,34 @@ Non-goals for Slice 4e:
 
 #### Slice 4f: Supervised local runner client backend gate
 
-Status as of 2026-05-28: client transport proposed in #3073 behind
-`HERMES_WEBUI_RUNNER_BASE_URL`; it should be described as under review until a
-release PR actually ships it.
-`runner-local` still remains default-off and returns the bounded not-configured
-path unless that endpoint is explicitly configured. When configured, WebUI uses a
-JSON HTTP client boundary for start / observe / status / controls and bridges
-observed runner events through the existing SSE stream route rather than adding
-main-process runner-owned maps.
+Status as of 2026-05-31: shipped in v0.51.188 via #3073 / #3274. The client
+transport is now implemented behind `HERMES_WEBUI_RUNNER_BASE_URL` and remains
+default-off. With no endpoint configured, `runner-local` still returns the
+bounded not-configured path and the live in-process `_run_agent_streaming` path
+is unchanged. When configured, WebUI uses a JSON HTTP client boundary for start /
+observe / status / controls and bridges observed runner events through the
+existing SSE stream route rather than adding main-process runner-owned maps.
+
+The release added two security hardening checks while absorbing #3073:
+`HttpRunnerClient` rejects non-`http(s)` base URL schemes and uses an opener that
+does not follow redirects, so a misconfigured or compromised runner cannot leak a
+Bearer token to a redirected host. The release gate reported full pytest passing
+and independent default-off/inert-path review.
+
 This bridge is intentionally a WebUI consumer transport seam: the configured
 runner must emit events that are already compatible with the browser SSE event
 names/payloads, or a later runner-owned normalization layer must translate
 Hermes runtime families such as `token.delta`, `tool.started`, and `done` before
 they reach this route.
 
-After the route-selection harness ships, the next reviewable step is not to make
-`runner-local` the default. It is to define the first concrete supervised/local
-runner client backend that can replace the bounded 501 path under the existing
-feature flag and prove execution ownership has moved out of the main WebUI
-request process.
+After the configured runner-client boundary ships, the next reviewable step is
+not to make `runner-local` the default. It is to define the first supervised
+runner process harness that can actually own `AIAgent` execution behind that
+client boundary and prove restart/reattach with a real local runner, not just a
+configured external endpoint or fake-runner fixture.
 
-This slice is a contract gate before backend code lands. The goal is to pin the
-minimum runner client behavior so the implementation cannot become a renamed
+This slice was the client-boundary implementation gate. The goal was to pin the
+minimum runner client behavior so the implementation could not become a renamed
 `STREAMS` / `CANCEL_FLAGS` / cached `AIAgent` surrogate inside `api/routes.py`.
 
 Scope:
@@ -1026,6 +1032,59 @@ Non-goals for Slice 4f:
 - no server-side queue scheduler just for adapter symmetry;
 - no permanent WebUI-owned active-run discovery cache that duplicates runner or
   future Hermes Runtime API responsibility.
+
+#### Slice 4g: Supervised local runner process harness gate
+
+After #3073 / #3274, WebUI has an explicit configured-runner HTTP client and SSE
+consumer bridge, but it still does not ship the supervised runner process itself.
+The next gate should define the smallest local runner harness that can own
+`AIAgent` execution outside the main WebUI request process while being consumed
+through the already-shipped `runner-local` client boundary.
+
+Scope:
+
+- define the local runner process lifecycle: spawn/start, health check, run
+  ownership, graceful shutdown, crash classification, and cleanup;
+- keep WebUI as a client of `HERMES_WEBUI_RUNNER_BASE_URL`, not the owner of
+  process-local runner execution state;
+- persist run/session lookup, ordered events, terminal state, and active controls
+  in runner-owned or journal-backed state that a restarted WebUI can discover;
+- carry explicit profile, workspace, attachments, provider/model, toolset,
+  source, and metadata payloads into the runner without WebUI process-global
+  environment mutation;
+- prove cancel as the first live control for active runner-owned runs, with
+  approval, clarify, goal, and queue either mapped to explicit runner
+  capabilities or returned as bounded unsupported/conflict `ControlResult`
+  values.
+
+Acceptance tests for Slice 4g:
+
+1. **Process ownership moved.** A local runner process, not `hermes-webui`, owns
+   `AIAgent` construction/reuse and active run execution for `runner-local` runs.
+2. **Restart/reattach with a real runner.** Start a non-trivial `runner-local`
+   run, restart only `hermes-webui`, reload the session, rediscover the active or
+   terminal runner-owned run, replay/catch up from cursor without duplicate
+   transcript/tool/reasoning state, and preserve cancel if still active.
+3. **No runtime-surrogate globals in WebUI.** The main WebUI server still does not
+   gain new module-level maps for runner-owned streams, cancel flags,
+   approval/clarify callbacks, cached agents, child process run registries, goal
+   state, or queue schedulers.
+4. **Default-off and reversible.** Unset `HERMES_WEBUI_RUNNER_BASE_URL` or switch
+   the adapter mode back to legacy and the existing in-process path remains
+   available without session or journal migration.
+5. **Runner health and failure are observable.** A missing, unhealthy, or crashed
+   runner returns bounded diagnostics and terminal/interrupted state rather than
+   silently falling back to WebUI-owned execution for a runner-selected run.
+
+Non-goals for Slice 4g:
+
+- no default-on runner mode;
+- no removal of `legacy-direct` or `legacy-journal`;
+- no server-side queue scheduler just for adapter symmetry;
+- no broad WebUI product-surface migration;
+- no claim that this is the canonical Hermes Agent Runtime API; if Hermes Agent
+  later ships `/v1/runs`, this local runner remains a replaceable backend behind
+  the same adapter/client boundary.
 
 ## First Meaningful Success Criteria
 

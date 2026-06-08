@@ -360,7 +360,9 @@ class TestIssue765FollowupHardening:
             "with _agent_lock:\n"
             "                if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
         )
-        silent_failure_idx = src.find("if not _assistant_added and not _token_sent:")
+        silent_failure_idx = src.find(
+            "if _terminal_failure or (not _assistant_added and not _token_sent):"
+        )
         inner_lock_idx = src.find("with _agent_lock:", outer_lock_idx + 1)
         compression_idx = src.find("# ── Handle context compression side effects ──")
 

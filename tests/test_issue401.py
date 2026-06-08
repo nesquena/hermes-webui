@@ -16,6 +16,41 @@ import textwrap
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+_SYNC_TOOL_CALLS_FN_NAME = (
+    "function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){"
+)
+_SYNC_TOOL_CALLS_FN_END_MARKER = "async function _ensureMessagesLoaded"
+_SYNC_TOOL_CALLS_FN_START = SESSIONS_JS.find(_SYNC_TOOL_CALLS_FN_NAME)
+_SYNC_TOOL_CALLS_FN_END = SESSIONS_JS.find(
+    _SYNC_TOOL_CALLS_FN_END_MARKER,
+    _SYNC_TOOL_CALLS_FN_START,
+)
+assert _SYNC_TOOL_CALLS_FN_START >= 0
+assert _SYNC_TOOL_CALLS_FN_END > _SYNC_TOOL_CALLS_FN_START
+_SYNC_TOOL_CALLS_FN = SESSIONS_JS[_SYNC_TOOL_CALLS_FN_START:_SYNC_TOOL_CALLS_FN_END]
+
+
+def _run_sync_tool_calls(messages: list, session_tool_calls: list) -> list:
+    assert _SYNC_TOOL_CALLS_FN_NAME in SESSIONS_JS
+    assert _SYNC_TOOL_CALLS_FN.strip()
+    script = textwrap.dedent(
+        f"""
+        const S = {{}};
+        S.toolCalls = [];
+        {_SYNC_TOOL_CALLS_FN}
+        const messages = {json.dumps(messages)};
+        const sessionToolCalls = {json.dumps(session_tool_calls)};
+        _syncToolCallsForLoadedMessages(messages, sessionToolCalls);
+        process.stdout.write(JSON.stringify(S.toolCalls));
+        """
+    )
+    proc = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(proc.stdout)
 
 
 def test_loadsession_preserves_tool_rows():
@@ -38,103 +73,96 @@ def test_loadsession_uses_session_toolcalls_only_as_fallback():
 def test_rendermessages_treats_openai_toolcall_assistants_as_visible():
     """OpenAI assistant rows with empty content but tool_calls must stay anchorable."""
     assert "const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;" in UI_JS
-    assert "if(hasTc||hasTu||_messageHasReasoningPayload(m)) return true;" in UI_JS
+    assert "if(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)) return true;" in UI_JS
 
 
-def _run_js(script_body: str) -> dict:
-    script = textwrap.dedent(f"""
-        function loadSessionShape(messages, sessionToolCalls) {{
-            const filtered = (messages || []).filter(m => m && m.role);
-            const hasMessageToolMetadata = filtered.some(m => {{
-                if (!m || m.role !== 'assistant') return false;
-                const hasTc = Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
-                const hasTu = Array.isArray(m.content) && m.content.some(p => p && p.type === 'tool_use');
-                return hasTc || hasTu;
-            }});
-            const toolCalls = (!hasMessageToolMetadata && sessionToolCalls && sessionToolCalls.length)
-                ? sessionToolCalls.map(tc => ({{ ...tc, done: true }}))
-                : [];
-            return {{ filtered, hasMessageToolMetadata, toolCalls }};
-        }}
+def test_rendermessages_treats_partial_toolcall_assistants_as_visible():
+    """Assistant rows carrying `_partial_tool_calls` must stay anchorable."""
+    assert "const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;" in UI_JS
+    assert "if(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)) return true;" in UI_JS
 
-        {script_body}
-    """)
-    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
-    return json.loads(proc.stdout)
+
+def test_rendermessages_rebuilds_tool_cards_from_partial_tool_calls():
+    """Fallback reconstruction should include private `_partial_tool_calls` rows."""
+    assert "const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;" in UI_JS
+    assert "if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});" in UI_JS
+    assert "if(Array.isArray(m._partial_tool_calls)){" in UI_JS
+    assert "tc.snippet||tc.result||tc.output||tc.preview" in UI_JS
+    assert "done:true" in UI_JS
 
 
 def test_reload_keeps_empty_assistant_toolcall_anchor():
     """OpenAI-style assistant {content:'', tool_calls:[...]} must survive reload."""
-    result = _run_js("""
-        const messages = [
-            { role: 'user', content: 'list files' },
-            {
-                role: 'assistant',
-                content: '',
-                tool_calls: [{ id: 'call-1', function: { name: 'terminal', arguments: '{}' } }]
-            },
-            { role: 'tool', tool_call_id: 'call-1', content: '{"output":"ok"}' },
-            { role: 'assistant', content: 'Done.' }
-        ];
-        const loaded = loadSessionShape(messages, [{ name: 'terminal', assistant_msg_idx: 1 }]);
-        process.stdout.write(JSON.stringify({
-            filtered_len: loaded.filtered.length,
-            has_metadata: loaded.hasMessageToolMetadata,
-            fallback_len: loaded.toolCalls.length,
-            assistant_tool_idx: loaded.filtered.findIndex(m => m.role === 'assistant' && m.tool_calls),
-            tool_idx: loaded.filtered.findIndex(m => m.role === 'tool')
-        }));
-    """)
-    assert result["filtered_len"] == 4
-    assert result["has_metadata"] is True
-    assert result["fallback_len"] == 0
-    assert result["assistant_tool_idx"] == 1
-    assert result["tool_idx"] == 2
+    messages = [
+        {"role": "user", "content": "list files"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call-1", "function": {"name": "terminal", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": '{"output":"ok"}'},
+        {"role": "assistant", "content": "Done."},
+    ]
+    filtered = [m for m in messages if m and m.get("role")]
+    tool_calls = _run_sync_tool_calls(
+        messages,
+        [{"name": "terminal", "assistant_msg_idx": 1}],
+    )
+    assert len(filtered) == 4
+    assert tool_calls == []
+    assert filtered[1]["role"] == "assistant" and filtered[1].get("tool_calls")
+    assert filtered[2]["role"] == "tool"
+
+
+def test_reload_keeps_empty_assistant_partial_toolcall_anchor():
+    """Partial tool-call rows with empty content must survive reload."""
+    messages = [
+        {"role": "user", "content": "open log"},
+        {
+            "role": "assistant",
+            "content": "",
+            "_partial_tool_calls": [{"name": "read_file", "args": {"path": "README.md"}}],
+        },
+        {"role": "assistant", "content": "Done."},
+    ]
+    filtered = [m for m in messages if m and m.get("role")]
+    tool_calls = _run_sync_tool_calls(
+        messages,
+        [{"name": "write_file", "assistant_msg_idx": 1}],
+    )
+    assert len(filtered) == 3
+    assert tool_calls == []
+    assert filtered[1]["role"] == "assistant"
+    assert isinstance(filtered[1].get("_partial_tool_calls"), list)
+    assert filtered[1]["_partial_tool_calls"][0]["name"] == "read_file"
 
 
 def test_reload_uses_session_summary_when_messages_have_no_tool_metadata():
     """Older sessions should still render from session.tool_calls on reload."""
-    result = _run_js("""
-        const messages = [
-            { role: 'user', content: 'build site' },
-            { role: 'assistant', content: 'Starting.' },
-            { role: 'tool', content: '{"bytes_written": 4955}' },
-            { role: 'assistant', content: '' }
-        ];
-        const sessionToolCalls = [
-            { name: 'write_file', assistant_msg_idx: 1, snippet: 'bytes_written', tid: '' }
-        ];
-        const loaded = loadSessionShape(messages, sessionToolCalls);
-        process.stdout.write(JSON.stringify({
-            has_metadata: loaded.hasMessageToolMetadata,
-            fallback_len: loaded.toolCalls.length,
-            done_flag: loaded.toolCalls[0] && loaded.toolCalls[0].done === true
-        }));
-    """)
-    assert result["has_metadata"] is False
-    assert result["fallback_len"] == 1
-    assert result["done_flag"] is True
+    messages = [
+        {"role": "user", "content": "build site"},
+        {"role": "assistant", "content": "Starting."},
+        {"role": "tool", "content": '{"bytes_written": 4955}'},
+        {"role": "assistant", "content": ""},
+    ]
+    tool_calls = _run_sync_tool_calls(
+        messages,
+        [{"name": "write_file", "assistant_msg_idx": 1, "snippet": "bytes_written", "tid": ""}],
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["done"] is True
 
 
 def test_rebased_legacy_toolcalls_stay_distinct_in_paged_window():
     """Backend-rebased legacy tool calls must not be rebased a second time."""
-    result = _run_js("""
-        const messages = [
-            { role: 'assistant', content: 'first legacy page row' },
-            { role: 'assistant', content: 'second legacy page row' }
-        ];
-        const sessionToolCalls = [
-            { name: 'first_tool', assistant_msg_idx: 0, snippet: 'first' },
-            { name: 'second_tool', assistant_msg_idx: 1, snippet: 'second' }
-        ];
-        const loaded = loadSessionShape(messages, sessionToolCalls);
-        const renderedRawIdxs = messages.map((_, idx) => idx);
-        process.stdout.write(JSON.stringify({
-            indices: loaded.toolCalls.map(tc => tc.assistant_msg_idx),
-            distinct_indices: new Set(loaded.toolCalls.map(tc => tc.assistant_msg_idx)).size,
-            anchors_visible: loaded.toolCalls.every(tc => renderedRawIdxs.includes(tc.assistant_msg_idx))
-        }));
-    """)
-    assert result["indices"] == [0, 1]
-    assert result["distinct_indices"] == 2
-    assert result["anchors_visible"] is True
+    messages = [
+        {"role": "assistant", "content": "first legacy page row"},
+        {"role": "assistant", "content": "second legacy page row"},
+    ]
+    session_tool_calls = [
+        {"name": "first_tool", "assistant_msg_idx": 0, "snippet": "first"},
+        {"name": "second_tool", "assistant_msg_idx": 1, "snippet": "second"},
+    ]
+    tool_calls = _run_sync_tool_calls(messages, session_tool_calls)
+    assert [tc["assistant_msg_idx"] for tc in tool_calls] == [0, 1]
+    assert len({tc["assistant_msg_idx"] for tc in tool_calls}) == 2

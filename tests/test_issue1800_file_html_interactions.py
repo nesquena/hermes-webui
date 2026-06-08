@@ -20,6 +20,15 @@ def _slice_after(source: str, needle: str, chars: int = 900) -> str:
     return source[idx : idx + chars]
 
 
+def _function_body(source: str, name: str) -> str:
+    start = source.index(f"def {name}")
+    try:
+        end = source.index("\n\ndef ", start + 1)
+    except ValueError:
+        end = len(source)
+    return source[start:end]
+
+
 def test_attach_button_is_non_submit_button():
     """Attach must not act like a submit button in browser/container shells."""
     m = re.search(r"<button[^>]*id=\"btnAttach\"[^>]*>", INDEX_HTML)
@@ -83,7 +92,7 @@ def test_media_html_inline_keeps_csp_sandbox():
 
 def test_sandboxed_file_responses_do_not_send_x_frame_options():
     """X-Frame-Options: DENY would block the sandbox iframe preview."""
-    body = _slice_after(ROUTES_PY, "def _serve_file_bytes", 1800)
+    body = _function_body(ROUTES_PY, "_serve_file_bytes")
     csp_branch = body[body.find("if csp:") : body.find("else:", body.find("if csp:"))]
     assert "Content-Security-Policy" in csp_branch
     assert 'send_header("X-Frame-Options"' not in csp_branch

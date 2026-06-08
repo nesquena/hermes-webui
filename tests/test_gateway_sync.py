@@ -12,6 +12,7 @@ Tests are ordered TDD-style:
 import json
 import os
 import pathlib
+import subprocess
 import sqlite3
 import time
 import urllib.error
@@ -245,15 +246,15 @@ def test_gateway_sessions_appear_when_enabled():
 
 
 def test_webui_state_db_session_without_sidecar_appears_when_agent_sessions_enabled():
-    """Regression: WebUI-origin rows in state.db can recover missing JSON sidecars."""
+    """Regression: state.db rows without JSON sidecars can be recovered via agent bridge."""
     conn = _ensure_state_db()
-    sid = 'webui_state_only_001'
+    sid = 'cli_state_only_001'
     try:
         _insert_agent_session_row(
             conn,
             session_id=sid,
-            source='webui',
-            title='Recovered WebUI Session',
+            source='cli',
+            title='Recovered CLI Session',
             model='openai/gpt-5',
             messages=2,
         )
@@ -265,10 +266,10 @@ def test_webui_state_db_session_without_sidecar_appears_when_agent_sessions_enab
         sessions = data.get('sessions', [])
         recovered = [s for s in sessions if s.get('session_id') == sid]
         assert len(recovered) == 1, (
-            "WebUI-origin sessions that exist in state.db but have no JSON sidecar "
+            "State.db sessions without a JSON sidecar "
             "should be surfaced through the agent-session bridge for recovery."
         )
-        assert recovered[0].get('source_tag') == 'webui'
+        assert recovered[0].get('source_tag') == 'cli'
         assert recovered[0].get('is_cli_session') is True
     finally:
         try:
@@ -424,6 +425,144 @@ def test_compression_chain_collapses_to_latest_tip_in_sidebar():
         except Exception:
             pass
         post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_compression_lineage_prefers_freshest_descendant_over_newer_direct_sibling():
+    """A later-started stale sibling must not hide a deeper active branch."""
+    conn = _ensure_state_db()
+    ids_to_remove = (
+        'branch_root_001',
+        'branch_old_mid_001',
+        'branch_fresh_tip_001',
+        'branch_empty_stale_tip_001',
+        'branch_newer_direct_sibling_001',
+    )
+    t0 = time.time() - 800
+    try:
+        _insert_agent_session_row(
+            conn,
+            'branch_root_001',
+            title='Qwen Routing Audit',
+            started_at=t0,
+            ended_at=t0 + 100,
+            end_reason='compression',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            'branch_old_mid_001',
+            title='Qwen Routing Audit #2',
+            started_at=t0 + 101,
+            parent_session_id='branch_root_001',
+            ended_at=t0 + 200,
+            end_reason='compression',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            'branch_newer_direct_sibling_001',
+            title='Qwen Routing Audit #3 stale sibling',
+            started_at=t0 + 150,
+            parent_session_id='branch_root_001',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            'branch_fresh_tip_001',
+            title='Qwen Routing Audit #4 freshest tip',
+            started_at=t0 + 500,
+            parent_session_id='branch_old_mid_001',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            'branch_empty_stale_tip_001',
+            title='Qwen Routing Audit #5 empty stale tip',
+            started_at=t0 + 700,
+            parent_session_id='branch_old_mid_001',
+            messages=0,
+        )
+        conn.execute(
+            "UPDATE sessions SET message_count = 3 WHERE id = ?",
+            ('branch_empty_stale_tip_001',),
+        )
+        conn.commit()
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {s.get('session_id') for s in data.get('sessions', [])}
+        tip = next((s for s in data.get('sessions', []) if s.get('session_id') == 'branch_fresh_tip_001'), None)
+
+        assert 'branch_fresh_tip_001' in ids
+        assert 'branch_newer_direct_sibling_001' not in ids
+        assert 'branch_empty_stale_tip_001' not in ids
+        assert tip is not None
+        assert tip.get('title') == 'Qwen Routing Audit'
+        assert abs(tip.get('updated_at') - (t0 + 501)) < 0.01
+        assert tip.get('_lineage_root_id') == 'branch_root_001'
+        assert tip.get('_lineage_tip_id') == 'branch_fresh_tip_001'
+        assert tip.get('_compression_segment_count') == 5
+
+        from api.agent_sessions import read_importable_agent_session_rows
+
+        rows = read_importable_agent_session_rows(_get_state_db_path(), limit=None)
+        projected_tip = next((row for row in rows if row.get('id') == 'branch_fresh_tip_001'), None)
+        assert projected_tip is not None
+        assert projected_tip.get('_lineage_root_id') == 'branch_root_001'
+        assert projected_tip.get('_lineage_tip_id') == 'branch_fresh_tip_001'
+        assert projected_tip.get('_compression_segment_count') == 5
+
+        from api.agent_sessions import read_session_lineage_metadata
+
+        metadata = read_session_lineage_metadata(
+            _get_state_db_path(),
+            {'branch_old_mid_001', 'branch_fresh_tip_001', 'branch_empty_stale_tip_001', 'branch_newer_direct_sibling_001'},
+        )
+        assert metadata['branch_old_mid_001'].get('_lineage_tip_id') == 'branch_fresh_tip_001'
+        assert metadata['branch_empty_stale_tip_001'].get('_lineage_tip_id') == 'branch_fresh_tip_001'
+        assert metadata['branch_newer_direct_sibling_001'].get('_lineage_tip_id') == 'branch_fresh_tip_001'
+        assert metadata['branch_newer_direct_sibling_001'].get('_compression_segment_count') == 5
+    finally:
+        try:
+            _remove_test_sessions(conn, *ids_to_remove)
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_compression_projection_handles_deep_lineage_iteratively():
+    """Very deep compression chains should not depend on Python recursion depth."""
+    from api.agent_sessions import _project_agent_session_rows
+
+    rows = []
+    previous = None
+    for idx in range(1100):
+        sid = f'deep_chain_{idx:04d}'
+        started_at = float(idx * 2)
+        rows.append({
+            'id': sid,
+            'title': 'Deep Chain' if idx == 0 else f'Deep Chain #{idx + 1}',
+            'source': 'cli',
+            'started_at': started_at,
+            'parent_session_id': previous,
+            'ended_at': started_at + 1 if idx < 1099 else None,
+            'end_reason': 'compression' if idx < 1099 else None,
+            'actual_message_count': 1,
+            'actual_user_message_count': 1,
+            'message_count': 1,
+            'last_activity': started_at + 0.5,
+        })
+        previous = sid
+
+    projected = _project_agent_session_rows(rows)
+
+    assert len(projected) == 1
+    assert projected[0]['id'] == 'deep_chain_1099'
+    assert projected[0]['_lineage_root_id'] == 'deep_chain_0000'
+    assert projected[0]['_lineage_tip_id'] == 'deep_chain_1099'
+    assert projected[0]['_compression_segment_count'] == 1100
 
 
 def test_compression_chain_with_empty_latest_tip_falls_back_to_latest_importable_segment():
@@ -780,7 +919,7 @@ def test_gateway_session_has_correct_metadata():
         assert gw.get('raw_source') == 'telegram'
         assert gw.get('session_source') == 'messaging'
         assert gw.get('source_label') == 'Telegram'
-        assert gw.get('is_cli_session') is True, "is_cli_session should be True for agent sessions"
+        assert gw.get('is_cli_session') is False, "is_cli_session should be False for messaging (telegram) sessions"
         assert gw.get('title') == 'Meta Test'
     finally:
         try:
@@ -798,6 +937,8 @@ def test_agent_session_source_normalization_contract():
     cases = {
         'cli': ('cli', 'CLI'),
         'email': ('messaging', 'Email'),
+        'wecom': ('messaging', 'WeCom'),
+        'wecom_callback': ('messaging', 'WeCom Callback'),
         'weixin': ('messaging', 'Weixin'),
         'telegram': ('messaging', 'Telegram'),
         'discord': ('messaging', 'Discord'),
@@ -823,8 +964,39 @@ def test_sessions_js_treats_email_as_messaging_source():
     """Email gateway sessions should receive the same sidebar metadata as other messaging channels."""
     src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
-    assert "'email'" in src[src.find("_MESSAGING_RAW_SOURCES"):src.find("function _isMessagingSession")]
-    assert "email: 'Email'" in src[src.find("_MESSAGING_SOURCE_LABELS"):src.find("function _isMessagingSession")]
+    raw_section = src[src.find("_MESSAGING_RAW_SOURCES"):src.find("function _isMessagingSession")]
+    label_section = src[src.find("_MESSAGING_SOURCE_LABELS"):src.find("function _isMessagingSession")]
+
+    for raw_source in ("email", "wecom", "wecom_callback"):
+        assert f"'{raw_source}'" in raw_section, f"Missing raw source {raw_source!r} in _MESSAGING_RAW_SOURCES"
+
+    assert "email: 'Email'" in label_section
+    assert "wecom: 'WeCom'" in label_section
+    assert "wecom_callback: 'WeCom Callback'" in label_section
+
+
+def test_sessions_js_treats_wecom_sidecars_as_messaging_behaviorally():
+    """Stale WeCom sidecars with session_source=other should still route as messaging."""
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = src.index("const _MESSAGING_RAW_SOURCES")
+    end = src.index("/**", start)
+    block = src[start:end]
+    script = f"""
+{block}
+const cases = [
+  {{ session_source: 'other', source: 'wecom' }},
+  {{ session_source: 'other', raw_source: 'wecom_callback' }},
+  {{ session_source: 'other', source_tag: 'wecom' }},
+  {{ session_source: 'messaging', source: 'anything' }},
+];
+for (const c of cases) {{
+  if (!_isMessagingSession(c)) throw new Error('expected messaging for '+JSON.stringify(c));
+}}
+if (_isMessagingSession({{ session_source: 'other', source: 'cli' }})) {{
+  throw new Error('cli should not be treated as messaging');
+}}
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
 
 def test_empty_active_gateway_session_does_not_hide_messaging_history(monkeypatch):

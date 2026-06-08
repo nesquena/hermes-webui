@@ -68,6 +68,10 @@ def test_tool_callback_events_keep_existing_frontend_event_contract():
 
     assert "source.addEventListener('tool',e=>{" in messages
     assert "source.addEventListener('tool_complete',e=>{" in messages
-    assert "tid:d.tid" in messages
+    assert "String(d&&d.tid" in messages or "explicitTid=String(d&&d.tid" in messages, (
+        "frontend tool handlers must still consume explicit server tid when present"
+    )
+    assert "upsertLiveToolCall(d,'start')" in messages
+    assert "upsertLiveToolCall(d,'complete')" in messages
     assert "data-live-tid" in ui
     assert "existing.replaceWith(replacement)" in ui
