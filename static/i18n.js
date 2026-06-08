@@ -1162,6 +1162,9 @@ const LOCALES = {
     cron_job_paused: 'Job paused',
     cron_job_resumed: 'Job resumed',
     cron_job_updated: 'Job updated',
+    cron_model_label: 'Model Override',
+    cron_model_hint: 'Override the default model for this job.',
+    cron_model_use_default: 'Default (use profile/system default)',
     cron_delete_confirm_title: 'Delete cron job',
     cron_delete_confirm_message: 'This cannot be undone.',
     cron_job_deleted: 'Job deleted',
@@ -2527,6 +2530,9 @@ const LOCALES = {
     cron_job_paused: 'Job in pausa',
     cron_job_resumed: 'Job ripreso',
     cron_job_updated: 'Job aggiornato',
+    cron_model_label: 'Model Override', // TODO: translate
+    cron_model_hint: 'Override the default model for this job.', // TODO: translate
+    cron_model_use_default: 'Default (use profile/system default)', // TODO: translate
     cron_delete_confirm_title: 'Elimina job pianificato',
     cron_delete_confirm_message: 'Questa azione non può essere annullata.',
     cron_job_deleted: 'Job eliminato',
@@ -3897,6 +3903,9 @@ const LOCALES = {
     cron_job_paused: 'ジョブを一時停止しました',
     cron_job_resumed: 'ジョブを再開しました',
     cron_job_updated: 'ジョブを更新しました',
+    cron_model_label: 'Model Override', // TODO: translate
+    cron_model_hint: 'Override the default model for this job.', // TODO: translate
+    cron_model_use_default: 'Default (use profile/system default)', // TODO: translate
     cron_delete_confirm_title: 'Cronジョブを削除',
     cron_delete_confirm_message: 'この操作は取り消せません。',
     cron_job_deleted: 'ジョブを削除しました',
@@ -4981,6 +4990,9 @@ const LOCALES = {
     cron_job_paused: 'Задание поставлено на паузу',
     cron_job_resumed: 'Задание возобновлено',
     cron_job_updated: 'Задание обновлено',
+    cron_model_label: 'Model Override', // TODO: translate
+    cron_model_hint: 'Override the default model for this job.', // TODO: translate
+    cron_model_use_default: 'Default (use profile/system default)', // TODO: translate
     cron_delete_confirm_title: 'Удалить cron-задание',
     cron_delete_confirm_message: 'Это действие нельзя отменить.',
     cron_job_deleted: 'Задание удалено',
@@ -6288,6 +6300,9 @@ const LOCALES = {
     cron_job_paused: 'Job paused',
     cron_job_resumed: 'Job resumed',
     cron_job_updated: 'Job updated',
+    cron_model_label: 'Model Override',
+    cron_model_hint: 'Override the default model for this job.',
+    cron_model_use_default: 'Default (use profile/system default)',
     cron_delete_confirm_title: 'Delete cron job',
     cron_delete_confirm_message: 'This cannot be undone.',
     cron_job_deleted: 'Job deleted',
@@ -7796,6 +7811,9 @@ const LOCALES = {
     cron_job_paused: 'Aufgabe pausiert.',
     cron_job_resumed: 'Aufgabe fortgesetzt.',
     cron_job_updated: 'Aufgabe aktualisiert.',
+    cron_model_label: 'Model Override', // TODO: translate
+    cron_model_hint: 'Override the default model for this job.', // TODO: translate
+    cron_model_use_default: 'Default (use profile/system default)', // TODO: translate
     cron_delete_confirm_title: 'Aufgabe löschen',
     cron_delete_confirm_message: 'Sind Sie sicher?',
     cron_job_deleted: 'Aufgabe gelöscht.',
@@ -8902,6 +8920,9 @@ const LOCALES = {
     cron_job_paused: '任务已暂停',
     cron_job_resumed: '任务已恢复',
     cron_job_updated: '任务已更新',
+    cron_model_label: 'Model Override', // TODO: translate
+    cron_model_hint: 'Override the default model for this job.', // TODO: translate
+    cron_model_use_default: 'Default (use profile/system default)', // TODO: translate
     cron_delete_confirm_title: '删除定时任务',
     cron_delete_confirm_message: '此操作无法撤销。',
     cron_job_deleted: '任务已删除',
@@ -10474,6 +10495,9 @@ const LOCALES = {
     cron_job_paused: '排程任務已暫停',
     cron_job_resumed: '排程任務已恢復',
     cron_job_updated: '排程任務已更新',
+    cron_model_label: 'Model Override', // TODO: translate
+    cron_model_hint: 'Override the default model for this job.', // TODO: translate
+    cron_model_use_default: 'Default (use profile/system default)', // TODO: translate
     cron_delete_confirm_title: '刪除排程任務',
     cron_delete_confirm_message: '此操作無法復原。',
     cron_job_deleted: '排程任務已刪除',
@@ -11659,6 +11683,9 @@ const LOCALES = {
     cron_job_paused: 'Tarefa pausada',
     cron_job_resumed: 'Tarefa retomada',
     cron_job_updated: 'Tarefa atualizada',
+    cron_model_label: 'Model Override', // TODO: translate
+    cron_model_hint: 'Override the default model for this job.', // TODO: translate
+    cron_model_use_default: 'Default (use profile/system default)', // TODO: translate
     cron_delete_confirm_title: 'Excluir tarefa cron',
     cron_delete_confirm_message: 'Isso não pode ser desfeito.',
     cron_job_deleted: 'Tarefa excluída',
@@ -12926,6 +12953,9 @@ const LOCALES = {
     cron_job_paused: 'Job paused',
     cron_job_resumed: 'Job resumed',
     cron_job_updated: 'Job updated',
+    cron_model_label: 'Model Override',
+    cron_model_hint: 'Override the default model for this job.',
+    cron_model_use_default: 'Default (use profile/system default)',
     cron_delete_confirm_title: 'Delete cron job',
     cron_delete_confirm_message: 'This cannot be undone.',
     cron_job_deleted: 'Job deleted',
@@ -14232,6 +14262,9 @@ const LOCALES = {
     cron_job_paused: 'Tâche suspendue',
     cron_job_resumed: 'Travail repris',
     cron_job_updated: 'Emploi mis à jour',
+    cron_model_label: 'Model Override', // TODO: translate
+    cron_model_hint: 'Override the default model for this job.', // TODO: translate
+    cron_model_use_default: 'Default (use profile/system default)', // TODO: translate
     cron_delete_confirm_title: 'Supprimer la tâche cron',
     cron_delete_confirm_message: 'Cela ne peut pas être annulé.',
     cron_job_deleted: 'Travail supprimé',
@@ -15591,6 +15624,9 @@ const LOCALES = {
     cron_job_paused: 'İş duraklatıldı',
     cron_job_resumed: 'İş devam ettirildi',
     cron_job_updated: 'İş güncellendi',
+    cron_model_label: 'Model Override', // TODO: translate
+    cron_model_hint: 'Override the default model for this job.', // TODO: translate
+    cron_model_use_default: 'Default (use profile/system default)', // TODO: translate
     cron_delete_confirm_title: 'Cron işini sil',
     cron_delete_confirm_message: 'Bu geri alınamaz.',
     cron_job_deleted: 'İş silindi',
@@ -17027,6 +17063,9 @@ const LOCALES = {
     cron_job_paused: 'Zadanie wstrzymane',
     cron_job_resumed: 'Zadanie wznowione',
     cron_job_updated: 'Zadanie zaktualizowane',
+    cron_model_label: 'Model Override', // TODO: translate
+    cron_model_hint: 'Override the default model for this job.', // TODO: translate
+    cron_model_use_default: 'Default (use profile/system default)', // TODO: translate
     cron_delete_confirm_title: 'Usuń zadanie cron',
     cron_delete_confirm_message: 'Tej operacji nie można cofnąć.',
     cron_job_deleted: 'Zadanie usunięte',

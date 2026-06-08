@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Added
+- **Scheduled jobs in the Tasks panel now support per-job model/provider overrides.** A new "Model Override" select field is populated from the configured model catalog with provider-grouped `<optgroup>` sections. The override is persisted on create, restorable on edit and duplicate, and clearable back to the profile/system default. This closes a UI/API gap where the underlying scheduler already supported per-job model choices but the WebUI silently relied on defaults. (#3809, @b3nw)
+
+### Fixed
+- **Edit-path race condition that could silently clear a saved model override.** The model picker is populated asynchronously from `/api/models`. If a user saved an edited job before the catalog finished loading, the form would read an empty select value and submit `model: null` / `provider: null`, wiping the saved override. The clear branch is now gated on a `loaded` dataset flag so a premature save preserves the existing value instead. (#3809, @b3nw)
+
 ## [v0.51.326] — 2026-06-08 — Release KP (mic STT probe + journal cleanup + schema guard + help hover)
 
 ### Fixed
