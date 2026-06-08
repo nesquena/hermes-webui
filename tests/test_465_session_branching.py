@@ -115,8 +115,8 @@ def test_branch_fork_sessions_nest_under_parent():
     resolve_block = resolve_fn.group(0)
     assert "row.session_source==='fork'" not in resolve_block, \
         "_resolveSessionIdFromSidebarLineage must not skip fork rows; they may now be active nested children"
-    assert "!_isChildSession(s)&&!_isForkWithResolvableParent(s, sessionIdsInList)" in block, \
-        "Resolvable fork rows must be filtered out of the top-level rows array"
+    assert "!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList))" in block, \
+        "Only unpinned resolvable fork rows should be filtered out of the top-level rows array"
 
 
 def test_branch_nested_fork_rows_keep_session_actions():
@@ -127,6 +127,8 @@ def test_branch_nested_fork_rows_keep_session_actions():
         "Missing fork-specific nested child row path"
     assert '_openSessionActionMenu(child, menuBtn)' in src, \
         "Nested fork rows should route the standard session action menu"
+    assert 'row._startRename=_buildSessionRenameStarter(child, mainBtn' in src, \
+        "Nested fork rows should expose the same rename entry point as top-level rows"
 
 
 def test_branch_keep_count_support():

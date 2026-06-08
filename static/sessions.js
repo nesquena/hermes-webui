@@ -2996,6 +2996,77 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   _playSessionActionMenuEntrance(menu);
 }
 
+function _findSessionRenameRow(sessionId){
+  const sid=String(sessionId||'');
+  if(!sid) return null;
+  return document.querySelector('.session-item[data-sid="'+sid+'"], .session-child-session[data-sid="'+sid+'"]');
+}
+
+function _buildSessionRenameStarter(session, displayEl, renderDisplay){
+  return ()=>{
+    if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be renamed.',3000); return; }
+    if(_loadingSessionId&&_loadingSessionId!==session.session_id) return;
+
+    closeSessionActionMenu();
+    _renamingSid=session.session_id;
+    const oldTitle=session.title||'Untitled';
+    const inp=document.createElement('input');
+    inp.className='session-title-input';
+    inp.value=oldTitle;
+    ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
+      inp.addEventListener(ev, e2=>e2.stopPropagation())
+    );
+    const applyTitle=(nextTitle, updateDom=true)=>{
+      session.title=nextTitle;
+      const cached=_allSessions.find(item=>item&&item.session_id===session.session_id);
+      if(cached) cached.title=nextTitle;
+      if(S.session&&S.session.session_id===session.session_id){S.session.title=nextTitle;syncTopbar();}
+      if(updateDom) renderDisplay(nextTitle, session);
+    };
+    let finishDone=false;
+    const finish=async(save)=>{
+      if(finishDone) return;
+      finishDone=true;
+      const releaseRename=()=>{
+        _renamingSid=null;
+        if(inp.isConnected) inp.replaceWith(displayEl);
+        setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
+      };
+      if(!save){
+        applyTitle(oldTitle,false);
+        releaseRename();
+        return;
+      }
+      const newTitle=inp.value.trim()||'Untitled';
+      try{
+        if(newTitle!==oldTitle){
+          await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:session.session_id,title:newTitle})});
+        }
+        applyTitle(newTitle);
+      }catch(err){
+        applyTitle(oldTitle,false);
+        const msg='Rename failed: '+(err&&err.message?err.message:String(err));
+        setStatus(msg);
+        if(typeof showToast==='function') showToast(msg,3000,'error');
+      }finally{
+        releaseRename();
+      }
+    };
+    inp.onkeydown=e2=>{
+      if(e2.key==='Enter'){
+        if(window._isImeEnter&&window._isImeEnter(e2)){return;}
+        e2.preventDefault();
+        e2.stopPropagation();
+        finish(true);
+      }
+      if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
+    };
+    inp.onblur=()=>{ if(_renamingSid===session.session_id) finish(false); };
+    displayEl.replaceWith(inp);
+    setTimeout(()=>{inp.focus();inp.select();},10);
+  };
+}
+
 function _appendSessionCopyLinkAction(menu, session){
   menu.appendChild(_buildSessionAction(
     t('session_copy_link'),
@@ -3102,7 +3173,7 @@ function _openSessionActionMenu(session, anchorEl){
         // Falls back to a no-op toast if the row isn't currently rendered
         // (e.g. archived-and-hidden) — extremely rare since the menu only
         // opens from a visible row's three-dot button.
-        const row=document.querySelector('.session-item[data-sid="'+session.session_id+'"]');
+        const row=_findSessionRenameRow(session.session_id);
         if(row && typeof row._startRename === 'function'){
           row._startRename();
         } else if(typeof showToast==='function'){
@@ -4497,7 +4568,7 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
 function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
   const sessionIdsInList=new Set((rawSessions||[]).map(s=>s&&s.session_id).filter(Boolean));
   const rows=(collapsedRows||[])
-    .filter(s=>!_isChildSession(s)&&!_isForkWithResolvableParent(s, sessionIdsInList))
+    .filter(s=>!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList)))
     .map(s=>({...s}));
   const visibleBySid=new Map();
   const visibleBySegmentSid=new Map();
@@ -4512,7 +4583,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
   }
   const orphans=[];
   for(const child of rawSessions||[]){
-    const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList);
+    const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList)&&!(child&&child.pinned);
     if(!_isChildSession(child)&&!isForkChild) continue;
     if(!isForkChild&&child._cross_surface_child_session){
       orphans.push({...child,_orphan_child_session:true});
@@ -5688,6 +5759,9 @@ function renderSessionListFromCache(){
             e.stopPropagation();
             await openChildSession(child);
           };
+          row._startRename=_buildSessionRenameStarter(child, mainBtn, ()=>{
+            mainBtn.textContent=childLabelFor(child);
+          });
           row.appendChild(mainBtn);
           const readOnlyChild=_isReadOnlySession(child);
           let actions=null;
@@ -5755,74 +5829,14 @@ function renderSessionListFromCache(){
     }
 
     // Rename: called directly when we confirm it's a double-click
-    const startRename=()=>{
-      if(_isReadOnlySession(s)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be renamed.',3000); return; }
-      // Guard: prevent renaming if session is currently being loaded
-      if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
-
-      closeSessionActionMenu();
-      _renamingSid = s.session_id;
-      const oldTitle=s.title||'Untitled';
-      const inp=document.createElement('input');
-      inp.className='session-title-input';
-      inp.value=oldTitle;
-      ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
-        inp.addEventListener(ev, e2=>e2.stopPropagation())
-      );
-      const applyTitle=(nextTitle, updateDom=true)=>{
-        if(updateDom) title.textContent=nextTitle;
-        s.title=nextTitle;
-        const cached=_allSessions.find(item=>item&&item.session_id===s.session_id);
-        if(cached) cached.title=nextTitle;
-        if(S.session&&S.session.session_id===s.session_id){S.session.title=nextTitle;syncTopbar();}
-      };
-      let finishDone=false;
-      const finish=async(save)=>{
-        if(finishDone) return;
-        finishDone=true;
-        const releaseRename=()=>{
-          _renamingSid = null;
-          if(inp.isConnected) inp.replaceWith(title);
-          // Allow list re-renders again after DOM cleanup has completed.
-          setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
-        };
-        if(!save){
-          applyTitle(oldTitle,false);
-          releaseRename();
-          return;
-        }
-        const newTitle=inp.value.trim()||'Untitled';
-        try{
-          if(newTitle!==oldTitle){
-            await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});
-          }
-          applyTitle(newTitle);
-        }catch(err){
-          applyTitle(oldTitle,false);
-          const msg='Rename failed: '+(err&&err.message?err.message:String(err));
-          setStatus(msg);
-          if(typeof showToast==='function') showToast(msg,3000,'error');
-        }finally{
-          releaseRename();
-        }
-      };
-      inp.onkeydown=e2=>{
-        if(e2.key==='Enter'){
-          if(window._isImeEnter&&window._isImeEnter(e2)){return;}
-          e2.preventDefault();
-          e2.stopPropagation();
-          finish(true);
-        }
-        if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
-      };
-      // onblur: save on blur — Escape explicitly cancels. The old cancel-on-blur
-      // behavior broke rename on mobile (iPhone "Done" dismisses the keyboard,
-      // triggering blur) and was less natural on desktop too (typing a name then
-      // clicking elsewhere should save, not discard).
-      inp.onblur=()=>{ if(_renamingSid===s.session_id) finish(true); };
-      title.replaceWith(inp);
-      setTimeout(()=>{inp.focus();inp.select();},10);
-    };
+    const startRename=_buildSessionRenameStarter(
+      s,
+      title,
+      (nextTitle)=>{
+        title.textContent=nextTitle;
+        title.title=_sessionFullTitleTooltip(nextTitle,nextTitle,s);
+      }
+    );
     // Expose the rename closure on the row so the three-dot action menu
     // (`_openSessionActionMenu`, defined elsewhere) can trigger it without
     // needing a separate DOM hunt or a duplicate copy of all this state
