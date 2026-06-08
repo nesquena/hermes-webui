@@ -2840,7 +2840,7 @@ function closeSessionActionMenu(){
     if(_sessionActionAnchor.classList&&_sessionActionAnchor.classList.contains('session-actions-trigger')){
       _sessionActionAnchor.classList.remove('active');
     }
-    const row=_sessionActionAnchor.closest('.session-item');
+    const row=_sessionActionAnchor.closest('.session-item,.session-child-session');
     if(row) row.classList.remove('menu-open','long-pressing');
     _sessionActionAnchor = null;
   }
@@ -2959,7 +2959,7 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   _sessionActionAnchor = anchorEl;
   _sessionActionSessionId = session.session_id;
   if(anchorEl.classList&&anchorEl.classList.contains('session-actions-trigger')) anchorEl.classList.add('active');
-  const row=anchorEl.closest('.session-item');
+  const row=anchorEl.closest('.session-item,.session-child-session');
   if(row) row.classList.add('menu-open');
   _positionSessionActionMenu(anchorEl);
   _playSessionActionMenuEntrance(menu);
@@ -4372,7 +4372,10 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
 }
 
 function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
-  const rows=(collapsedRows||[]).filter(s=>!_isChildSession(s)).map(s=>({...s}));
+  const sessionIdsInList=new Set((rawSessions||[]).map(s=>s&&s.session_id).filter(Boolean));
+  const rows=(collapsedRows||[])
+    .filter(s=>!_isChildSession(s)&&!_isForkWithResolvableParent(s, sessionIdsInList))
+    .map(s=>({...s}));
   const visibleBySid=new Map();
   const visibleBySegmentSid=new Map();
   const visibleByLineageKey=new Map();
@@ -4384,7 +4387,6 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
       if(seg&&seg.session_id) visibleBySegmentSid.set(seg.session_id,{row,seg});
     }
   }
-  const sessionIdsInList=new Set((rawSessions||[]).map(s=>s&&s.session_id).filter(Boolean));
   const orphans=[];
   for(const child of rawSessions||[]){
     const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList);
@@ -5350,23 +5352,244 @@ function renderSessionListFromCache(){
       childList.className='session-child-sessions';
       ['pointerdown','pointerup','click'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
-      for(const child of sortedChildren){
-        const row=document.createElement('button');
-        row.type='button';
-        row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+      const openChildSession=async(childSession)=>{
+        if(_isExternalSession(childSession)){
+          try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:childSession.session_id})});}
+          catch(_e){ /* read-only fallback */ }
+        }
+        await loadSession(childSession.session_id, {skipLineageResolve:true});
+        renderSessionListFromCache();
+      };
+      const childLabelFor=(child)=>{
         const childTitle=_sessionDisplayTitle(child)||'Untitled child session';
         const childTime=_formatRelativeSessionTime(_sessionTimestampMs(child));
         const parentNote=child._parent_segment_title?` via ${child._parent_segment_title}`:'';
-        row.textContent=`-> ${childTitle}${parentNote} - ${childTime}`;
+        return `-> ${childTitle}${parentNote} - ${childTime}`;
+      };
+      const installForkChildSwipe=(rowEl, childSession, actionsEl)=>{
+        let _pointerDownX=0;
+        let _pointerDownY=0;
+        let _pointerX=0;
+        let _pointerY=0;
+        let _gestureState='idle';
+        let _swipeTracking=false;
+        let _gesturePointerType='';
+        let _clearDragTimer=null;
+        const _isForkSwipeTarget=()=>_gesturePointerType!=='mouse'&&!_sessionSelectMode;
+        const _isForkActionTarget=(target)=>!!(actionsEl&&target&&actionsEl.contains(target));
+        const _beginForkGesture=(clientX,clientY,pointerType='')=>{
+          _gesturePointerType=pointerType;
+          _pointerDownX=clientX;
+          _pointerDownY=clientY;
+          _pointerX=clientX;
+          _pointerY=clientY;
+          _gestureState='pressing';
+          _swipeTracking=false;
+          if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+          rowEl.classList.remove('dragging','swipe-committed','swipe-removing');
+          rowEl.style.removeProperty('height');
+          rowEl.style.removeProperty('min-height');
+        };
+        const _paintForkSwipe=(signedDx)=>{
+          const rawOffset=signedDx*.55;
+          const revealedOffset=Math.max(-72,Math.min(72,rawOffset));
+          const overshoot=Math.max(0,Math.abs(rawOffset)-72);
+          const offset=Math.sign(rawOffset)*(Math.abs(revealedOffset)+Math.sqrt(overshoot)*5);
+          const progress=Math.min(1,Math.abs(revealedOffset)/72);
+          const reveal=Math.abs(offset);
+          const actionRevealScale=1.15;
+          const iconScale=Math.min(1,Math.max(.01,progress*actionRevealScale));
+          const badgeSize=34*iconScale;
+          const iconSize=18*iconScale;
+          const labelScale=Math.min(1,Math.max(.01,progress*actionRevealScale));
+          const actionOpacity=Math.min(1,Math.max(.01,progress*actionRevealScale));
+          const actionInset=6;
+          const tileGap=6;
+          const stretchStart=72/actionRevealScale;
+          const stretchProgress=Math.max(0,reveal-stretchStart);
+          const badgeStretch=Math.min(Math.max(0,reveal-34),stretchProgress*1.15,Math.max(0,reveal-badgeSize-actionInset-tileGap));
+          rowEl.style.setProperty('--session-swipe-offset',offset+'px');
+          rowEl.style.setProperty('--session-swipe-reveal',reveal+'px');
+          rowEl.style.setProperty('--session-swipe-badge-size',badgeSize+'px');
+          rowEl.style.setProperty('--session-swipe-icon-size',iconSize+'px');
+          rowEl.style.setProperty('--session-swipe-label-scale',labelScale);
+          rowEl.style.setProperty('--session-swipe-badge-stretch',badgeStretch+'px');
+          rowEl.style.setProperty('--session-swipe-progress',actionOpacity);
+          rowEl.classList.toggle('swiping-right',offset>0);
+          rowEl.classList.toggle('swiping-left',offset<0);
+        };
+        const _clearForkSwipePaint=()=>{
+          rowEl.style.removeProperty('--session-swipe-offset');
+          rowEl.style.removeProperty('--session-swipe-reveal');
+          rowEl.style.removeProperty('--session-swipe-badge-size');
+          rowEl.style.removeProperty('--session-swipe-icon-size');
+          rowEl.style.removeProperty('--session-swipe-label-scale');
+          rowEl.style.removeProperty('--session-swipe-badge-stretch');
+          rowEl.style.removeProperty('--session-swipe-progress');
+          rowEl.style.removeProperty('height');
+          rowEl.style.removeProperty('min-height');
+          rowEl.classList.remove('swiping-right','swiping-left','swipe-committed','swipe-removing');
+        };
+        const _settleForkSwipePaint=()=>{
+          rowEl.classList.remove('dragging');
+          requestAnimationFrame(()=>requestAnimationFrame(_clearForkSwipePaint));
+        };
+        const _completeForkSwipePaint=(signedDx)=>{
+          rowEl.classList.remove('dragging');
+          rowEl.classList.add('swipe-committed');
+          rowEl.style.setProperty('--session-swipe-progress','0');
+          rowEl.style.setProperty('--session-swipe-offset',(signedDx>0?1:-1)*window.innerWidth+'px');
+          const rect=rowEl.getBoundingClientRect();
+          rowEl.style.height=rect.height+'px';
+          rowEl.style.minHeight=rect.height+'px';
+          requestAnimationFrame(()=>rowEl.classList.add('swipe-removing'));
+        };
+        const _canSwipeDeleteFork=()=>_isForkSwipeTarget()&&!_isMessagingSession(childSession)&&!_isCliSession(childSession);
+        const _handleForkSwipe=(signedDx,signedDy)=>{
+          if(_gestureState==='committed'||!_isForkSwipeTarget()) return false;
+          const actionThreshold=signedDx>0?SESSION_ARCHIVE_SWIPE_THRESHOLD_PX:SESSION_DELETE_SWIPE_THRESHOLD_PX;
+          if(Math.abs(signedDx)<actionThreshold) return false;
+          if(Math.abs(signedDy)>Math.abs(signedDx)*SESSION_SWIPE_CANCEL_RATIO) return false;
+          _gestureState='committed';
+          closeSessionActionMenu();
+          if(signedDx>0){
+            if(childSession.archived){
+              _settleForkSwipePaint();
+              _archiveSession(childSession,false,()=>_waitForSessionMotion(committedSwipeDuration)).then((restored)=>{
+                if(!restored) _settleForkSwipePaint();
+              });
+            }else if(_showArchived){
+              _settleForkSwipePaint();
+              _archiveSession(childSession,true,()=>_waitForSessionMotion(committedSwipeDuration)).then((archived)=>{
+                if(!archived) _settleForkSwipePaint();
+              });
+            }else{
+              _completeForkSwipePaint(signedDx);
+              _archiveSession(childSession,true,()=>_waitForSessionMotion(committedSwipeReflowDelay)).then((archived)=>{
+                if(!archived) _settleForkSwipePaint();
+              });
+            }
+          }else if(_canSwipeDeleteFork()){
+            rowEl.classList.remove('dragging');
+            deleteSession(childSession.session_id,async()=>{
+              _completeForkSwipePaint(signedDx);
+              await _waitForSessionMotion(committedSwipeReflowDelay);
+            }).then((deleted)=>{
+              if(!deleted) _settleForkSwipePaint();
+            });
+          }else if(typeof showToast==='function'){
+            showToast('Imported sessions cannot be deleted here.',3000);
+            _gestureState='dragging';
+            _settleForkSwipePaint();
+          }
+          return true;
+        };
+        const _clearForkPointerState=()=>{
+          const wasDragging=_gestureState==='dragging'||_swipeTracking;
+          _gestureState='idle';
+          if(wasDragging){
+            if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+            _clearDragTimer=setTimeout(()=>{_settleForkSwipePaint();_clearDragTimer=null;},50);
+          }
+        };
+        rowEl.onpointerdown=(e)=>{
+          if(e.pointerType==='mouse'||e.button!==0||_isForkActionTarget(e.target)) return;
+          _beginForkGesture(e.clientX,e.clientY,e.pointerType||'');
+        };
+        rowEl.onpointermove=(e)=>{
+          if(e.pointerType==='mouse'||_gestureState==='idle') return;
+          _pointerX=e.clientX;
+          _pointerY=e.clientY;
+          const signedDx=e.clientX-_pointerDownX;
+          const signedDy=e.clientY-_pointerDownY;
+          const dx=Math.abs(signedDx);
+          const dy=Math.abs(signedDy);
+          if(dx>8&&dx>dy*1.1) _swipeTracking=true;
+          if(_gestureState==='pressing'&&(dx>5||dy>5)){
+            _gestureState='dragging';
+            rowEl.classList.add('dragging');
+          }
+          if(_isForkSwipeTarget()&&(_swipeTracking||dx>dy)) _paintForkSwipe(signedDx);
+        };
+        rowEl.onpointerup=(e)=>{
+          if(e.pointerType==='mouse'||e.button!==0) return;
+          if(_gestureState==='idle') return;
+          if(_isForkActionTarget(e.target)){_gestureState='idle';return;}
+          _pointerX=e.clientX;
+          _pointerY=e.clientY;
+          if(_handleForkSwipe(_pointerX-_pointerDownX,_pointerY-_pointerDownY)){
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+          _clearForkPointerState();
+        };
+        rowEl.onpointercancel=()=>_clearForkPointerState();
+        rowEl.onpointerleave=()=>{
+          if(_gesturePointerType!=='mouse'&&_gestureState!=='idle') _clearForkPointerState();
+        };
+      };
+      for(const child of sortedChildren){
+        if(child.session_source==='fork'){
+          const row=document.createElement('div');
+          row.className='session-child-session session-child-session-fork'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+          row.dataset.sid=child.session_id;
+          const mainBtn=document.createElement('button');
+          mainBtn.type='button';
+          mainBtn.className='session-child-session-main'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+          mainBtn.textContent=childLabelFor(child);
+          mainBtn.title='Open forked session';
+          mainBtn.onclick=async(e)=>{
+            e.stopPropagation();
+            await openChildSession(child);
+          };
+          row.appendChild(mainBtn);
+          const readOnlyChild=_isReadOnlySession(child);
+          let actions=null;
+          if(!readOnlyChild){
+            actions=document.createElement('div');
+            actions.className='session-actions';
+            const menuBtn=document.createElement('button');
+            menuBtn.type='button';
+            menuBtn.className='session-actions-trigger';
+            menuBtn.title='Conversation actions';
+            menuBtn.setAttribute('aria-haspopup','menu');
+            menuBtn.setAttribute('aria-label','Conversation actions');
+            menuBtn.innerHTML=ICONS.more;
+            const stopMenuPointer=(e)=>e.stopPropagation();
+            menuBtn.onpointerdown=stopMenuPointer;
+            menuBtn.onpointerup=stopMenuPointer;
+            menuBtn.onclick=(e)=>{
+              e.stopPropagation();
+              e.preventDefault();
+              _openSessionActionMenu(child, menuBtn);
+            };
+            actions.appendChild(menuBtn);
+            row.appendChild(actions);
+            row.append(
+              _makeSessionSwipeAffordance('right',child.archived?'undo':'archive',child.archived?'Restore':t('session_batch_archive')),
+              _makeSessionSwipeAffordance('left','trash-2',t('session_batch_delete')),
+            );
+            installForkChildSwipe(row, child, actions);
+          }
+          row.oncontextmenu=(e)=>{
+            if(readOnlyChild) return;
+            e.preventDefault();
+            if(e.pointerType==='touch'||e.pointerType==='pen') return;
+            e.stopPropagation();
+            _openSessionActionMenu(child, actions||row);
+          };
+          childList.appendChild(row);
+          continue;
+        }
+        const row=document.createElement('button');
+        row.type='button';
+        row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+        row.textContent=childLabelFor(child);
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
-          if(_isExternalSession(child)){
-            try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:child.session_id})});}
-            catch(_e){ /* read-only fallback */ }
-          }
-          await loadSession(child.session_id, {skipLineageResolve:true});
-          renderSessionListFromCache();
+          await openChildSession(child);
         };
         childList.appendChild(row);
       }
