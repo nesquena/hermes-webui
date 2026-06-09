@@ -8985,7 +8985,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             _space_tool_reject_ambient_current_selectors(data)
         result = save_space_meta_from_tool(data)
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="save-meta")
-        response = {"ok": True, "action": name, **result, "progress_event": progress_event}
+        memory_advisory = _memory_advisory_public_envelope()
+        response = {
+            "ok": True,
+            "action": name,
+            **result,
+            "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
+        }
         preflight_receipt = result.get("prompt_preflight") if isinstance(result.get("prompt_preflight"), dict) else None
         autonomy_policy = _space_current_instruction_action_policy_receipt(
             name,
@@ -8999,6 +9006,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             revision_event_id=result.get("revision_event_id"),
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
         )
         if name.startswith("space.current."):
             response["active_space_id"] = result["space_id"]
@@ -9009,12 +9018,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = save_space_layout_from_tool(data)
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="save-layout")
         autonomy_policy = _space_layout_action_policy_receipt(name)
+        memory_advisory = _memory_advisory_public_envelope()
         response = {
             "ok": True,
             "action": name,
             **result,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=result.get("space_id"),
@@ -9022,6 +9033,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_id=result.get("revision_event_id"),
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
         if name.startswith("space.current."):
