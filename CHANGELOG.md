@@ -3,6 +3,17 @@
 
 ## [Unreleased]
 
+## [v0.51.343] — 2026-06-09 — Release LG (Phase-1 batch: sidebar stale-row refresh, workspace refresh cache, ja locale)
+
+### Fixed
+
+- **Sidebar no longer hides a messageful session that carries a stale `message_count: 0` index row.** When a stream was interrupted before the final index write, a titled session could keep a stale zero count and get filtered out of the sidebar even though `state.db` still had its messages. The read-side refresh now also fires for a row whose indexed `message_count` is 0 while `user_message_count > 0` (and whose sidecar mtime is newer than the index), self-healing the count from the sidecar — generalizing the earlier compression-lineage-only refresh to the ordinary interrupted-stream case without reintroducing the per-poll hydration cost (the `user_message_count` gate keeps empty Untitled drafts cheap). (#3740, #3883)
+- **Workspace file tree now shows files created in expanded subdirectories after a manual refresh.** The refresh button only reloaded the current directory level and left cached expanded child directories untouched, so background writes (cron jobs, CLI agents, external tools) into those descendants stayed invisible until a full reload. A manual refresh now clears the directory cache and re-fetches expanded descendants without losing tree state. (#3833, #3878)
+
+### Changed
+
+- **Japanese locale:** translated the 11 remaining English strings in the `ja` locale (Settings → Help panel labels/links, the cron-sessions setting, and the compression-queue composer placeholder). (#3880)
+
 ## [v0.51.342] — 2026-06-09 — Release LF (transcript + sidebar reliability: blank-transcript, missing-index stall, stale watermark)
 
 ### Fixed
