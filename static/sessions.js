@@ -666,6 +666,7 @@ async function newSession(flash, options={}){
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
+    if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
     _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
     // Sync chat-header dropdown to the session's model/provider so the UI reflects
     // the default route the server actually used (#872). Compare provider state too:
@@ -731,6 +732,25 @@ async function newSession(flash, options={}){
   }
 }
 
+// #2971 (Greptile P1 r3377162160): loadSession() tears down the live
+// per-session SSE at the top via stopSessionStream() (line ~754), but only the
+// success path re-arms it via startSessionStream() (line ~875). Every
+// early-return exit (fetch error, auth-redirect undefined) — and the
+// same-session no-op guard, which returns BEFORE the teardown — could leave
+// the session the user actually remains on with a permanently null
+// EventSource, silently dropping bg_task_complete delivery until a full page
+// reload or a forced loadSession. This helper re-arms the stream for whatever
+// session is currently on screen (S.session). startSessionStream() is
+// idempotent — it no-ops when already live for that sid (top guard
+// `_sessionStreamSessionId === sid && _sessionEventSource`) — so this never
+// double-arms the success path, which arms the *newly assigned* S.session
+// only after this point.
+function _rearmActiveSessionStream(){
+  if(typeof startSessionStream!=='function') return;
+  const activeSid = S.session ? S.session.session_id : null;
+  if(activeSid) startSessionStream(activeSid);
+}
+
 async function loadSession(sid){
   const opts = arguments[1] || {};
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
@@ -747,11 +767,15 @@ async function loadSession(sid){
   // Do not no-op a same-session click while another load is in flight: the
   // previous transcript may already have been cleared for the pending switch.
   // Static force-reload invariant: if(currentSid===sid && !forceReload) return;
+  // #2971: idempotent re-arm before the no-op guard revives a stream a prior
+  // failed loadSession killed; no-ops on real switches.
+  _rearmActiveSessionStream();
   if(currentSid===sid && !forceReload && !_loadingSessionId) return;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
   stopApprovalPolling();hideApprovalCard(forceReload);
+  if(typeof stopSessionStream==='function') stopSessionStream();
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
@@ -841,7 +865,32 @@ async function loadSession(sid){
       }
     }
     _clearSameSessionForceReloadHint(sid);
+    // Capture whether this failure self-healed away the current session (a
+    // 404 on the *current* session whose sidecar was deleted server-side).
+    // In that case there is no live session left to stream for, so we must
+    // NOT restart — doing so would spin the SSE reconnect loop against a dead
+    // session_id.
+    const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
+    // The session stream was stopped unconditionally at the top of this load
+    // (mirroring stopApprovalPolling). On the happy path it's restarted ~120
+    // lines below, but this failure exit never reaches that point — leaving
+    // the session still on screen permanently silenced. bg_task_complete
+    // events (the new feature's primary delivery path) would be dropped until
+    // the user explicitly navigates to a session again. Restart the stream for
+    // the session that remains on screen. Skip when a newer load is already in
+    // flight (_loadingSessionId !== null after the reset above): that load owns
+    // the stream and starts its own. Skip the self-healed-current case (no live
+    // session to stream).
+    // #2971: this fetch-error path keeps its bespoke guarded restart (rather
+    // than the shared _rearmActiveSessionStream helper used on the other
+    // early-returns) because only here can the current session have just
+    // self-healed away — re-arming a 404'd/deleted session_id would spin the
+    // SSE reconnect loop against a dead session.
+    if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
+        && typeof startSessionStream === 'function') {
+      startSessionStream(currentSid);
+    }
     return;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
@@ -849,10 +898,21 @@ async function loadSession(sid){
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
+    // #2971: re-arm the still-displayed session's stream (defensive — harmless
+    // if the 401 redirect is already tearing the page down). Idempotent.
+    _rearmActiveSessionStream();
     return;
   }
   // Stale response? A newer loadSession() call has already started (#1060).
-  if (_loadingSessionId !== sid) return;
+  if (_loadingSessionId !== sid) {
+    // #2971: a newer in-flight load owns the final stream arming, but until it
+    // assigns S.session and reaches startSessionStream() the currently-shown
+    // session must not be left stream-dead by our top-of-function teardown.
+    // Re-arm the genuinely-displayed S.session (idempotent — no-ops once the
+    // newer load arms its own sid).
+    _rearmActiveSessionStream();
+    return;
+  }
   S.session=data.session;
   if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
   S.session._modelResolutionDeferred=true;
@@ -872,6 +932,7 @@ async function loadSession(sid){
   _clearSessionCompletionUnread(S.session.session_id);
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
+  if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;
   // If the server says the session is idle, discard any browser-side inflight
