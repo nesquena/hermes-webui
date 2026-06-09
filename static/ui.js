@@ -10189,7 +10189,7 @@ function finalizeThinkingCard(){
     if(!row) return;
     // If the row is still just a spinner (no thinking content rendered),
     // remove it entirely — it's the initial waiting dots.
-    const hasContent=row.querySelector('.thinking-card') || row.classList.contains('thinking-card-row');
+    const hasContent=!!row.querySelector('.thinking-card');
     if(!hasContent && row.getAttribute('data-thinking-active')==='1'){
       row.remove();
       return;
