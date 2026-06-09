@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Settings now treats Worklog details as folded by default.** The Appearance toggle is now worded as an opt-in to open Worklog details automatically, while the default remains folded; changing the control now immediately opens or folds Thinking cards, Tool cards, and multi-tool Worklog groups. The deprecated **Compact tool activity** renderer switch is no longer shown in Preferences, and existing installs stay on the Worklog renderer even if they previously saved the legacy setting as disabled.
+
 ## [v0.51.340] — 2026-06-09 — Release LD (background-task agent wakeup in WebUI) — ⛔ HELD pending independent review
 
 ### Added
@@ -38,7 +41,6 @@
 ### Added
 - **Keyboard navigation in the model picker.** With the model dropdown open, ↑/↓ move a highlight through the filtered models (wrapping at the ends) and Enter selects the highlighted one; Escape closes. The highlight reuses the existing hover styling and is invisible until you use the keyboard. (#2952, #2791, @Sanjays2402)
 - **A "New chat" button in the mobile titlebar.** On narrow screens the app titlebar now shows a `+` button to start a new conversation without opening the sidebar; it shares the existing reload-button styling and mirrors the new-chat in-flight/disabled state. (#3531, @franksong2702)
-
 ## [v0.51.336] — 2026-06-08 — Release KZ (fix inline-thinking streaming perf regression)
 
 ### Fixed

@@ -6410,10 +6410,30 @@ function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visi
   const visibleTexts=Array.isArray(turnVisibleContents)?turnVisibleContents:[];
   return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
 }
+function _worklogDetailsExpandedDefault(){
+  return window._worklogDetailsExpandedByDefault===true;
+}
+function _applyWorklogDetailsExpandedDefault(root){
+  const scope=root&&root.querySelectorAll?root:document;
+  const open=_worklogDetailsExpandedDefault();
+  scope.querySelectorAll('.thinking-card').forEach(card=>{
+    card.classList.toggle('open', open);
+  });
+  scope.querySelectorAll('.tool-card').forEach(card=>{
+    if(card.querySelector('.tool-card-detail')) card.classList.toggle('open', open);
+  });
+  scope.querySelectorAll('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group').forEach(group=>{
+    group.classList.toggle('open', open);
+    group.classList.toggle('tool-worklog-tool-group-collapsed', !open);
+    const summary=group.querySelector('.tool-group-head,.tool-worklog-tool-group-head');
+    if(summary) summary.setAttribute('aria-expanded', String(open));
+  });
+}
 function _thinkingCardHtml(text, open){
   const clean=_sanitizeThinkingDisplayText(text);
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
-  const classes=`thinking-card${open?' open':''}`;
+  const shouldOpen=!!open||_worklogDetailsExpandedDefault();
+  const classes=`thinking-card${shouldOpen?' open':''}`;
   return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function isSimplifiedToolCalling(){
@@ -6769,7 +6789,7 @@ function ensureActivityGroup(inner, opts){
   if(!group){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
-    if(window._activityFeedExpandedDefault===true) collapsed=false;
+    if(window._worklogDetailsExpandedByDefault===true) collapsed=false;
     const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
@@ -8987,7 +9007,7 @@ function _syncToolRowsContainer(tools, isLiveWorklog){
     return;
   }
   const hasRunning=rows.some(row=>row&&row.dataset&&row.dataset.toolDone==='false');
-  const shouldOpen=false;
+  const shouldOpen=_worklogDetailsExpandedDefault();
   const group=document.createElement('div');
   group.className='tool-group'+(shouldOpen?' open':' tool-worklog-tool-group-collapsed');
   group.setAttribute('data-tool-worklog-tool-group','1');
@@ -9120,7 +9140,8 @@ function buildToolCard(tc){
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
-  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
+  const openClass=hasDetail&&_worklogDetailsExpandedDefault()?' open':'';
+  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'')+openClass;
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
   let displayName=_toolDisplayName(tc);
   let previewText=_toolCardPreviewText(tc, displaySnippet);
@@ -10158,7 +10179,7 @@ function renderKatexBlocks(container,options){
 
 function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
-  const openClass=isSimplifiedToolCalling()?'':' open';
+  const openClass=_worklogDetailsExpandedDefault()||!isSimplifiedToolCalling()?' open':'';
   return (clean&&String(clean).trim())
     ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
