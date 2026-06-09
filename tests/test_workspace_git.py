@@ -1357,6 +1357,70 @@ def test_git_discard_skips_repo_local_filters_when_destructive_mode_enabled(tmp_
     assert not marker.exists()
 
 
+def test_destructive_filter_overrides_include_worktree_scope(tmp_path):
+    import os
+
+    from api.workspace_git import _destructive_filter_overrides
+
+    repo = _init_repo(tmp_path / "repo")
+    _git(repo, "config", "extensions.worktreeConfig", "true")
+    _git(repo, "config", "--worktree", "filter.demo.clean", "cat")
+    _git(repo, "config", "--worktree", "filter.demo.required", "true")
+
+    overrides = dict(_destructive_filter_overrides(repo, os.environ.copy()))
+
+    assert overrides["filter.demo.clean"] == "cat"
+    assert overrides["filter.demo.smudge"] == "cat"
+    assert overrides["filter.demo.process"] == ""
+    assert overrides["filter.demo.required"] == "false"
+
+
+def test_git_checkout_skips_worktree_scope_filters_when_destructive_mode_enabled(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("scripted filter helper setup is POSIX-only")
+
+    from api.workspace_git import (
+        WORKSPACE_GIT_DESTRUCTIVE_ENV,
+        git_checkout,
+    )
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitattributes").write_text("*.txt filter=demo\n", encoding="utf-8")
+    marker = tmp_path / "filter-worktree-smudge-ran"
+    helper = tmp_path / "filter_worktree_checkout_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('filter ran', encoding='utf-8')\n"
+        "print(sys.stdin.read(), end='')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    _git(repo, "config", "extensions.worktreeConfig", "true")
+    _git(repo, "config", "--worktree", "filter.demo.clean", f"\"{sys.executable}\" \"{helper}\" \"{marker}\"")
+    _git(repo, "config", "--worktree", "filter.demo.smudge", f"\"{sys.executable}\" \"{helper}\" \"{marker}\"")
+    _git(repo, "branch", "-M", "main")
+    _git(repo, "add", ".gitattributes")
+    _git(repo, "commit", "-m", "Initial")
+    _git(repo, "branch", "feature")
+    _git(repo, "checkout", "feature")
+    (repo / "tracked.txt").write_text("from feature\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "Feature update")
+    _git(repo, "checkout", "main")
+    marker.unlink(missing_ok=True)
+
+    monkeypatch.setenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
+    result = git_checkout(repo, "feature", "local")
+
+    assert result["ok"] is True
+    assert result["current_branch"] == "feature"
+    assert not marker.exists()
+
+
 def test_git_commit_skips_repo_local_gpg_program_when_destructive_mode_enabled(tmp_path, monkeypatch):
     import os
     import sys
