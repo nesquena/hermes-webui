@@ -14520,6 +14520,7 @@ def _development_tool_output_compaction_receipt(
     autonomy_policy: dict[str, Any],
     progress_event: dict[str, Any],
     memory_advisory: dict[str, Any],
+    progress_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build metadata-only compaction evidence for receipt-only development tools.
 
@@ -14535,6 +14536,11 @@ def _development_tool_output_compaction_receipt(
     preflight_status = _payload_text_summary(prompt_preflight.get("status") or "required", 40) or "required"
     model_route_hint = _payload_text_summary(autonomy_policy.get("model_route_hint") or "hint:code", 80) or "hint:code"
     progress_run_id = _payload_text_summary(progress_event.get("run_id") or f"development.{safe_requested}:{safe_space_id}", 160) or f"development.{safe_requested}:{safe_space_id}"
+    progress_event_types = ", ".join(
+        _payload_text_summary(event.get("event_type"), 40) or "tool.completed"
+        for event in (progress_events or [progress_event])
+        if isinstance(event, dict)
+    ) or "tool.completed"
     advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
     context_authority = _payload_text_summary(memory_advisory.get("context_authority") or "untrusted_advisory", 80) or "untrusted_advisory"
     can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
@@ -14555,6 +14561,7 @@ def _development_tool_output_compaction_receipt(
         f"prompt_preflight_status: {preflight_status}",
         f"model_route_hint: {model_route_hint}",
         f"progress_run_id: {progress_run_id}",
+        f"progress_event_types: {progress_event_types}",
     ]
     receipt = compact_output(
         "\n".join(lines),
@@ -14584,7 +14591,17 @@ def _development_tool_receipt(action: str, payload: dict[str, Any]) -> dict[str,
         action,
         prompt_preflight_status=str(prompt_preflight.get("status") or "required"),
     )
-    progress_event = _record_space_tool_progress_event(space_id, run_prefix=f"development.{requested_action}")
+    progress_started = _record_space_tool_progress_event(
+        space_id,
+        run_prefix=f"development.{requested_action}",
+        event_type="tool.started",
+    )
+    progress_event = _record_space_tool_progress_event(
+        space_id,
+        run_prefix=f"development.{requested_action}",
+        event_type="tool.completed",
+    )
+    progress_events = [progress_started, progress_event]
     memory_advisory = _memory_advisory_public_envelope()
     development_surface = {
         "mode": "metadata-only",
@@ -14603,6 +14620,7 @@ def _development_tool_receipt(action: str, payload: dict[str, Any]) -> dict[str,
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "progress_events": progress_events,
         "memory_advisory": memory_advisory,
         "output_compaction": _development_tool_output_compaction_receipt(
             action=action,
@@ -14612,6 +14630,7 @@ def _development_tool_receipt(action: str, payload: dict[str, Any]) -> dict[str,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
             memory_advisory=memory_advisory,
+            progress_events=progress_events,
         ),
     }
 
@@ -14633,8 +14652,16 @@ def _space_tool_progress_fallback_space_id(space_id: str) -> str:
 
 
 
-def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict[str, Any]:
+def _record_space_tool_progress_event(
+    space_id: str,
+    *,
+    run_prefix: str,
+    event_type: str = "tool.completed",
+) -> dict[str, Any]:
     """Best-effort metadata-only progress producer for Space tool receipts."""
+    safe_event_type = str(event_type or "tool.completed").strip().lower()
+    if safe_event_type not in {"tool.started", "tool.completed"}:
+        safe_event_type = "tool.completed"
     sid = validate_space_id(space_id)
     safe_prefix = str(run_prefix or "tool").strip().lower()
     if safe_prefix not in {
@@ -14713,7 +14740,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
 
         return record_progress_event(
             {
-                "event_type": "tool.completed",
+                "event_type": safe_event_type,
                 "run_id": run_id,
                 "space_id": sid,
             }
@@ -14723,7 +14750,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         return {
             "stored": False,
             "queued": False,
-            "event_type": "tool.completed",
+            "event_type": safe_event_type,
             "family": "tool",
             "run_id": f"{safe_prefix}:{fallback_sid}",
             "space_id": fallback_sid,

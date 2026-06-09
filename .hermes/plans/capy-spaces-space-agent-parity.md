@@ -80,6 +80,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): add development tool lifecycle progress receipts`
+  - Added RED/GREEN backend coverage proving receipt-only `space.development.terminal` / `development.shell` actions emit a metadata-only `tool.started` → `tool.completed` progress lifecycle with a stable `development.terminal:<space_id>` run id.
+  - Preserved backward-compatible `progress_event` completion receipts while adding a `progress_events` list and safe `progress_event_types` compaction evidence, without leaking raw commands, prompts, renderer/source/html/API-auth fields, bearer strings, local paths, or secret-looking fixtures to public receipts or progress logs.
+
 - `feat(spaces): add instruction memory advisory receipts`
   - Added RED/GREEN backend coverage proving `space.current.agentInstructions` and `space.current.specialInstructions` return the server-generated Memory Tree advisory/no-authority envelope beside active-space instruction prompt-preflight, `instructions:<space_id>` progress, autonomy-policy, and output-compaction receipts.
   - Threaded advisory boundary metadata and required gates into current-instruction compaction evidence while ignoring caller-forged memory authority and omitting raw active instructions, renderer/source/html/API-auth fields, scripts, tokens, and secret-looking fixture values.
