@@ -1125,7 +1125,12 @@
                 <input type="checkbox" id="settingsNotificationsEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_notifications">Browser notifications</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_notifications">Show a system notification when a response completes while the tab is in the background.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_notifications">Show a system notification when a response completes while the app is in the background.</div>
+              <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+                <button type="button" class="sm-btn" onclick="requestNotificationPermission()" style="padding:5px 10px;font-size:12px" data-i18n="notifications_enable_btn">Enable notifications</button>
+                <button type="button" class="sm-btn" onclick="sendBrowserNotification('Hermes test','Notifications are ready.',{force:true});" style="padding:5px 10px;font-size:12px" data-i18n="notifications_test_btn">Send test</button>
+                <span id="notificationPermissionStatus" style="font-size:11px;color:var(--muted)"></span>
+              </div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
