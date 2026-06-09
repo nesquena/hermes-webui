@@ -1462,14 +1462,26 @@ def _csrf_exempt_path(path: str) -> bool:
     return False
 
 
-def _is_plugin_null_origin(handler, path: str) -> bool:
-    """A sandboxed plugin iframe sends Origin: null — accept it."""
-    return path.startswith("/api/plugins/") and handler.headers.get("Origin") == "null"
-
-
 def _is_plugin_request(handler, path: str) -> bool:
-    """Plugin iframe fetch sets X-Plugin-Request header; CSRF can't forge it."""
-    return path.startswith("/api/plugins/") and handler.headers.get("X-Plugin-Request") == "1"
+    """Let a sandboxed plugin iframe skip the session CSRF token check.
+
+    A sandboxed iframe (no allow-same-origin) sends an opaque ``Origin: null``,
+    which ``_check_csrf`` rejects as an origin mismatch — so plugin fetches need
+    a narrow exemption. It is scoped to exactly that case: ``/api/plugins/``
+    paths carrying the ``X-Plugin-Request`` marker AND ``Origin: null``.
+
+    A cross-origin attacker page carries a concrete Origin (e.g.
+    ``https://evil.example``), so it never matches here and still falls through
+    to ``_check_csrf``, which rejects it. Same-origin and Origin-less requests
+    already pass ``_check_csrf`` on their own and do not rely on this path.
+    (Cross-origin cookie riding is independently impossible: the server never
+    sends ``Access-Control-Allow-Credentials``.)
+    """
+    return (
+        path.startswith("/api/plugins/")
+        and handler.headers.get("X-Plugin-Request") == "1"
+        and handler.headers.get("Origin") == "null"
+    )
 
 
 def _dispatch_plugin_subprocess(handler, plugin_name: str, sub_route: str, method: str, parsed) -> bool:
@@ -1522,17 +1534,44 @@ def _dispatch_plugin_subprocess(handler, plugin_name: str, sub_route: str, metho
     if body_bytes:
         req["body_b64"] = base64.b64encode(body_bytes).decode("ascii")
 
+    def _read_response_line(stream) -> bytes:
+        """Read one newline-terminated response line under an overall deadline.
+
+        select() only signals that *some* bytes are ready; a plugin that writes
+        a partial line and then stalls would hang a bare readline() forever
+        while holding the pipe lock. Loop on select with a shrinking deadline so
+        a stuck plugin trips PIPE_TIMEOUT instead. One line per response is part
+        of the protocol, so trailing bytes after the newline are not expected.
+        """
+        import os as _os
+        fd = stream.fileno()
+        deadline = _time.monotonic() + PIPE_TIMEOUT
+        buf = bytearray()
+        while True:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("plugin read deadline exceeded")
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                raise TimeoutError("plugin read deadline exceeded")
+            chunk = _os.read(fd, 65536)
+            if not chunk:
+                raise OSError("plugin closed pipe before responding")
+            buf.extend(chunk)
+            nl = buf.find(b"\n")
+            if nl != -1:
+                return bytes(buf[:nl])
+
     lock = get_plugin_pipe_lock(plugin_name)
     with lock:
         try:
             proc.stdin.write((_json.dumps(req) + "\n").encode("utf-8"))
             proc.stdin.flush()
-            ready, _, _ = select.select([proc.stdout], [], [], PIPE_TIMEOUT)
-            if not ready:
-                kill_plugin(plugin_name)
-                return j(handler, {"error": "plugin timeout"}, status=504)
-            resp_line = proc.stdout.readline().decode("utf-8").strip()
+            resp_line = _read_response_line(proc.stdout).decode("utf-8").strip()
             resp = _json.loads(resp_line)
+        except TimeoutError:
+            kill_plugin(plugin_name)
+            return j(handler, {"error": "plugin timeout"}, status=504)
         except (BrokenPipeError, OSError, _json.JSONDecodeError, ValueError) as exc:
             logger.warning("Plugin subprocess %s failed: %s", plugin_name, exc)
             kill_plugin(plugin_name)
