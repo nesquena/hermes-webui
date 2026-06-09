@@ -1547,9 +1547,14 @@ def _dispatch_plugin_subprocess(handler, plugin_name: str, sub_route: str, metho
 
     _allowed_resp = {"cache-control", "content-type", "etag", "last-modified"}
     handler.send_response(resp_status)
+    if handler.headers.get("Origin") == "null":
+        handler.send_header("Access-Control-Allow-Origin", "null")
     for k, v in resp_headers.items():
         kl = k.lower()
         if kl in _allowed_resp or kl.startswith("x-"):
+            # Strip CRLF to prevent header injection from plugin-controlled values.
+            k = k.replace("\r", "").replace("\n", "")
+            v = str(v).replace("\r", "").replace("\n", "")
             handler.send_header(k, v)
     handler.send_header("Content-Length", str(len(resp_body)))
     handler.end_headers()
@@ -6227,7 +6232,7 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Plugin pages (HTML shell) ──
     from api.plugins import PLUGIN_MANIFESTS, _PLUGIN_STATIC_ROOTS
-    _FETCH_WRAPPER = b'<script>(function(){var _f=fetch;window.fetch=function(u,o){o=o||{};o.headers=o.headers||new Headers();if(!o.headers.has("X-Plugin-Request")&&u.indexOf("/api/plugins/")===0)o.headers.set("X-Plugin-Request","1");return _f(u,o)}})()</script>'
+    _FETCH_WRAPPER = b'<script>(function(){var _f=fetch;window.fetch=function(u,o){if(!u||u.indexOf("/api/plugins/")!==0)return _f(u,o);o=o||{};o.headers=new Headers(o.headers||{});if(!o.headers.has("X-Plugin-Request"))o.headers.set("X-Plugin-Request","1");return _f(u,o)}})()</script>'
     for name, manifest in PLUGIN_MANIFESTS.items():
         tab = manifest.get("tab", {})
         tab_path = tab.get("path", f"/{name}")
@@ -6277,7 +6282,7 @@ def handle_get(handler, parsed) -> bool:
                         '  <meta charset="utf-8">\n'
                         f'  <title>{label}</title>\n'
                         f'  {css_tag}\n'
-                        '  <script>(function(){{var _f=fetch;window.fetch=function(u,o){{o=o||{{}};o.headers=o.headers||new Headers();if(!o.headers.has("X-Plugin-Request")&&u.indexOf("/api/plugins/")===0)o.headers.set("X-Plugin-Request","1");return _f(u,o)}}}})()</script>\n'
+                        '  <script>(function(){{var _f=fetch;window.fetch=function(u,o){{if(!u||u.indexOf("/api/plugins/")!==0)return _f(u,o);o=o||{{}};o.headers=new Headers(o.headers||{{}});if(!o.headers.has("X-Plugin-Request"))o.headers.set("X-Plugin-Request","1");return _f(u,o)}}}})()</script>\n'
                         '</head>\n'
                         '<body>\n'
                         '  <div id="pluginPageContainer"></div>\n'
