@@ -4306,6 +4306,7 @@ def _research_artifact_output_compaction_receipt(
     prompt_preflight: dict[str, Any] | None,
     autonomy_policy: dict[str, Any] | None,
     progress_event: dict[str, Any] | None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for Research Harness artifacts.
 
@@ -4334,12 +4335,32 @@ def _research_artifact_output_compaction_receipt(
         lines.append(f"model_route_hint: {_payload_text_summary(autonomy_policy.get('model_route_hint') or 'hint:summarize', 80) or 'hint:summarize'}")
     if isinstance(progress_event, dict):
         lines.append(f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or f'research-artifact:{space_id}', 120) or f'research-artifact:{space_id}'}")
-    return compact_output(
+    if isinstance(memory_advisory, dict):
+        advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
+        context_authority = (
+            _payload_text_summary(memory_advisory.get("context_authority") or "untrusted_advisory", 80)
+            or "untrusted_advisory"
+        )
+        can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
+        raw_required_gates = memory_advisory.get("required_gates")
+        safe_required_gates: list[str] = []
+        if isinstance(raw_required_gates, list):
+            safe_required_gates = [
+                _payload_text_summary(gate, 60)
+                for gate in raw_required_gates[:8]
+            ]
+            safe_required_gates = [gate for gate in safe_required_gates if gate]
+        lines.append(f"advisory_context: {advisory_context}")
+        lines.append(f"context_authority: {context_authority}")
+        lines.append(f"can_bypass_safety_gates: {can_bypass}")
+        if safe_required_gates:
+            lines.append(f"required_gates: {', '.join(safe_required_gates)}")
+    receipt = compact_output(
         "\n".join(lines),
         tool="capy-spaces-research",
         command="space.research.artifact",
         exit_status=0,
-        max_chars=700,
+        max_chars=900,
         artifact_handles=[
             {
                 "kind": "artifact",
@@ -4348,6 +4369,10 @@ def _research_artifact_output_compaction_receipt(
             }
         ],
     )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
 
 
 def _research_progress_output_compaction_receipt(
@@ -4598,6 +4623,7 @@ def set_research_artifact(space_id: str, title: Any, markdown: Any) -> dict[str,
     if prompt_preflight.get("status") != "pass":
         raise ValueError("Research artifact prompt preflight blocked")
     autonomy_policy = _research_artifact_action_policy_receipt(prompt_preflight)
+    memory_advisory = _memory_advisory_public_envelope()
     artifact = set_shared_data_slot(
         sid,
         "research-summary",
@@ -4624,6 +4650,7 @@ def set_research_artifact(space_id: str, title: Any, markdown: Any) -> dict[str,
         prompt_preflight=prompt_preflight,
         autonomy_policy=autonomy_policy,
         progress_event=progress_event,
+        memory_advisory=memory_advisory,
     )
     return {
         "space_id": sid,
@@ -4633,6 +4660,7 @@ def set_research_artifact(space_id: str, title: Any, markdown: Any) -> dict[str,
         "progress_event": progress_event,
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
+        "memory_advisory": memory_advisory,
         "output_compaction": output_compaction,
     }
 
