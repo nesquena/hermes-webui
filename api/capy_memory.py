@@ -578,6 +578,14 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
             fetch_origin_uri = commit_activity_origin
         else:
             origin_uri = f"capy-memory://{source_id}"
+    if _github_contributor_stats_path_matches(raw_origin_text):
+        contributor_stats_origin = _github_contributor_stats_fetch_origin(raw_origin_text)
+        contributor_stats_public_origin = _github_contributor_stats_public_origin(contributor_stats_origin)
+        if contributor_stats_origin:
+            origin_uri = contributor_stats_public_origin or f"capy-memory://{source_id}"
+            fetch_origin_uri = contributor_stats_origin
+        else:
+            origin_uri = f"capy-memory://{source_id}"
     if _github_participation_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_participation_path_repo(origin_uri)
@@ -4725,6 +4733,43 @@ def _github_commit_activity_path_matches(origin_uri: str) -> bool:
     )
 
 
+def _github_contributor_stats_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not _github_raw_hostname_looks_like(origin_uri, "api.github.com"):
+        return False
+
+    def _segment_looks_like(segment: str, expected: str) -> bool:
+        lowered = segment.lower()
+        return lowered == expected or lowered.startswith((f"{expected}%", f"{expected};", f"{expected}?", f"{expected}\x00"))
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 6
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and _segment_looks_like(path_segments[4], "stats")
+            and _segment_looks_like(path_segments[5], "contributors")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    double_decoded_path = unquote(unquote(parts.path)).split("/")
+    if _segments_match(double_decoded_path):
+        return True
+    return any(
+        segment.lower().startswith(("stats%", "contributors%"))
+        for segment in raw_path
+    )
+
+
 def _github_code_frequency_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -4858,6 +4903,55 @@ def _github_commit_activity_public_origin(origin_uri: str) -> str:
     return f"github commit activity {repo}"
 
 
+def _github_contributor_stats_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "stats"
+        or path[5] != "contributors"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_contributor_stats_fetch_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if not _github_https_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "stats"
+        or path[5] != "contributors"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"https://api.github.com/repos/{path[2]}/{path[3]}/stats/contributors"
+
+
+def _github_contributor_stats_public_origin(origin_uri: str) -> str:
+    repo = _github_contributor_stats_path_repo(origin_uri)
+    if not repo:
+        return ""
+    return f"github contributor stats {repo}"
+
+
 def _github_code_frequency_row_is_safe(row: Any) -> bool:
     if not isinstance(row, list) or len(row) != 3:
         return False
@@ -4935,6 +5029,84 @@ def _github_commit_activity_refresh_summary(origin_uri: str, payload: list[Any])
             f"active weeks: {active_weeks}",
         ])
     )
+
+
+def _github_contributor_stats_login_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    login = _safe_public_text(value, limit=80)
+    if not login or login != value.strip():
+        return False
+    if _refresh_value_is_blocked(login) or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(login):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", login))
+
+
+def _github_contributor_stats_week_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if set(row.keys()) != {"w", "a", "d", "c"}:
+        return False
+    return all(_safe_optional_nonnegative_int(row.get(key)) is not None for key in ("w", "a", "d", "c"))
+
+
+def _github_contributor_stats_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if set(row.keys()) != {"total", "weeks", "author"}:
+        return False
+    total = _safe_optional_nonnegative_int(row.get("total"))
+    if total is None:
+        return False
+    author = row.get("author")
+    if not isinstance(author, dict) or not _github_contributor_stats_login_is_safe(author.get("login")):
+        return False
+    weeks = row.get("weeks")
+    if not isinstance(weeks, list) or len(weeks) > 52:
+        return False
+    if not all(_github_contributor_stats_week_row_is_safe(week) for week in weeks):
+        return False
+    return sum(int(week.get("c") or 0) for week in weeks) == total
+
+
+def _json_payload_is_github_contributor_stats_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_contributor_stats_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list) or len(payload) > 100:
+        return False
+    return all(_github_contributor_stats_row_is_safe(row) for row in payload)
+
+
+def _github_contributor_stats_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_contributor_stats_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_contributor_stats_row_is_safe(row)]
+    total_commits = sum(int(row.get("total") or 0) for row in safe_rows)
+    active_contributors = sum(1 for row in safe_rows if int(row.get("total") or 0) > 0)
+    week_ids: set[int] = set()
+    active_week_ids: set[int] = set()
+    for row in safe_rows:
+        weeks = row.get("weeks") if isinstance(row.get("weeks"), list) else []
+        for week in weeks:
+            if not isinstance(week, dict) or not _github_contributor_stats_week_row_is_safe(week):
+                continue
+            week_id = int(week.get("w") or 0)
+            week_ids.add(week_id)
+            if int(week.get("c") or 0) > 0:
+                active_week_ids.add(week_id)
+    parts = [
+        f"GitHub contributor stats for {repo}",
+        f"contributors: {len(safe_rows)}",
+        f"total commits: {total_commits}",
+        f"active contributors: {active_contributors}",
+        f"weeks: {len(week_ids)}",
+        f"active weeks: {len(active_week_ids)}",
+    ]
+    for row in safe_rows[:5]:
+        author = row.get("author") if isinstance(row.get("author"), dict) else {}
+        login = _safe_public_text(author.get("login"), limit=80)
+        total = int(row.get("total") or 0)
+        parts.append(f"{login} commits: {total}")
+    return _bounded_refresh_summary("; ".join(parts))
 
 
 def _github_punch_card_row_is_safe(row: Any) -> bool:
@@ -11425,6 +11597,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_commit_activity_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    contributor_stats_repo = _github_contributor_stats_path_repo(origin_uri)
+    if contributor_stats_repo:
+        if not _json_payload_is_github_contributor_stats_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub contributor stats {contributor_stats_repo}",
+            "summary": _github_contributor_stats_refresh_summary(origin_uri, payload),
+            "origin_uri": _github_contributor_stats_public_origin(origin_uri) or _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_contributor_stats_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     participation_repo = _github_participation_path_repo(origin_uri)
     if participation_repo:
         if not _json_payload_is_github_participation_metadata(origin_uri, payload):
@@ -12488,6 +12672,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_punch_card_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_punch_card_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_contributor_stats_path_matches(raw_origin_uri):
+        if not _github_https_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_contributor_stats_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_participation_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_participation_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -12621,6 +12808,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     commit_activity_fetch_origin = _github_commit_activity_fetch_origin(raw_origin_uri)
     if commit_activity_fetch_origin:
         safe_origin_uri = commit_activity_fetch_origin
+    contributor_stats_fetch_origin = _github_contributor_stats_fetch_origin(raw_origin_uri)
+    if contributor_stats_fetch_origin:
+        safe_origin_uri = contributor_stats_fetch_origin
     if not _source_refresh_allowed(safe_origin_uri):
         raise RuntimeError("refresh fetcher disabled")
     request_accept = "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8"
@@ -12696,6 +12886,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_commit_activity_path_matches(safe_origin_uri):
         if not _github_commit_activity_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_contributor_stats_path_matches(safe_origin_uri):
+        if not _github_contributor_stats_path_repo(safe_origin_uri) or not _github_https_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_participation_path_matches(safe_origin_uri):
@@ -12949,6 +13143,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_commit_activity_path_repo(final_url)
             or _github_commit_activity_path_repo(final_url) != _github_commit_activity_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_contributor_stats_path_matches(safe_origin_uri) and (
+            not _github_https_authority_is_exact(final_url, "api.github.com")
+            or not _github_contributor_stats_path_repo(final_url)
+            or _github_contributor_stats_path_repo(final_url) != _github_contributor_stats_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_participation_path_matches(safe_origin_uri) and (
@@ -13232,6 +13432,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_commit_activity_path_matches(safe_origin_uri) and (
             not _github_commit_activity_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_contributor_stats_path_matches(safe_origin_uri) and (
+            not _github_contributor_stats_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -13949,6 +14154,11 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
                 or _github_commit_activity_fetch_origin(str(payload.get("origin_uri") or ""))
                 or _github_commit_activity_fetch_origin(raw_source_origin_uri)
             )
+            contributor_stats_fetch_origin = (
+                _github_contributor_stats_fetch_origin(str(payload.get("fetch_origin_uri") or ""))
+                or _github_contributor_stats_fetch_origin(str(payload.get("origin_uri") or ""))
+                or _github_contributor_stats_fetch_origin(raw_source_origin_uri)
+            )
             if actions_runners_origin_text:
                 origin_uri = actions_runners_origin_text
             elif _github_actions_runners_route_path_matches(raw_source_origin_uri):
@@ -13963,6 +14173,8 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
                 origin_uri = interaction_limits_origin_text
             elif commit_activity_fetch_origin:
                 origin_uri = _github_commit_activity_public_origin(commit_activity_fetch_origin) or f"capy-memory://{source_id}"
+            elif contributor_stats_fetch_origin:
+                origin_uri = _github_contributor_stats_public_origin(contributor_stats_fetch_origin) or f"capy-memory://{source_id}"
             elif workflow_timing_fetch_origin:
                 origin_uri = _github_workflow_timing_public_origin(workflow_timing_fetch_origin)
             elif _github_repository_custom_properties_route_path_matches(raw_source_origin_uri):
@@ -14014,6 +14226,8 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
                 updated_payload["fetch_origin_uri"] = interaction_limits_fetch_origin
             if commit_activity_fetch_origin and _github_commit_activity_path_repo(commit_activity_fetch_origin):
                 updated_payload["fetch_origin_uri"] = commit_activity_fetch_origin
+            if contributor_stats_fetch_origin and _github_contributor_stats_path_repo(contributor_stats_fetch_origin):
+                updated_payload["fetch_origin_uri"] = contributor_stats_fetch_origin
             if workflow_timing_fetch_origin and _github_workflow_timing_path_info(workflow_timing_fetch_origin) is not None:
                 updated_payload["fetch_origin_uri"] = workflow_timing_fetch_origin
             cursor = conn.execute(
@@ -14213,6 +14427,12 @@ def run_source_refresh_jobs(
             commit_activity_origin = _github_commit_activity_fetch_origin(raw_origin_uri)
             if commit_activity_origin:
                 origin_uri = commit_activity_origin
+            else:
+                origin_uri = f"capy-memory://{source_id}"
+        elif _github_contributor_stats_path_matches(raw_origin_uri):
+            contributor_stats_origin = _github_contributor_stats_fetch_origin(raw_origin_uri)
+            if contributor_stats_origin:
+                origin_uri = contributor_stats_origin
             else:
                 origin_uri = f"capy-memory://{source_id}"
         elif _github_workflow_run_timing_route_path_matches(raw_origin_uri):
