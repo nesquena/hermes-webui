@@ -125,8 +125,11 @@ def load_plugin_api_routes() -> None:
 
         from api.plugin_manager import spawn_plugin
         plugin_root = base.parent
-        spawn_plugin(plugin_name, plugin_root)
-        logger.info("Plugin %s: spawned subprocess (dir=%s)", plugin_name, plugin_root)
+        proc = spawn_plugin(plugin_name, plugin_root)
+        if proc is None:
+            logger.warning("Plugin %s: subprocess failed to spawn (dir=%s)", plugin_name, plugin_root)
+        else:
+            logger.info("Plugin %s: spawned subprocess (dir=%s)", plugin_name, plugin_root)
 
 
 def serve_plugin_static(plugin_name: str, rel_path: str) -> tuple[bytes, str] | None:

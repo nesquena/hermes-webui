@@ -6233,6 +6233,22 @@ def handle_get(handler, parsed) -> bool:
     # ── Plugin pages (HTML shell) ──
     from api.plugins import PLUGIN_MANIFESTS, _PLUGIN_STATIC_ROOTS
     _FETCH_WRAPPER = b'<script>(function(){var _f=fetch;window.fetch=function(u,o){if(!u||u.indexOf("/api/plugins/")!==0)return _f(u,o);o=o||{};o.headers=new Headers(o.headers||{});if(!o.headers.has("X-Plugin-Request"))o.headers.set("X-Plugin-Request","1");return _f(u,o)}})()</script>'
+
+    def _inject_fetch_wrapper(html_bytes: bytes) -> bytes:
+        """Insert the X-Plugin-Request fetch shim so plugin POSTs pass CSRF.
+
+        Falls back through </head>, <head>, <body> and finally prepends —
+        plugin HTML that omits a </head> tag still gets the shim, instead
+        of silently losing it (which would break POST from those plugins).
+        """
+        import re
+        for pat, after in ((rb"</head\s*>", False), (rb"<head[^>]*>", True), (rb"<body[^>]*>", False)):
+            m = re.search(pat, html_bytes, re.IGNORECASE)
+            if m:
+                idx = m.end() if after else m.start()
+                return html_bytes[:idx] + _FETCH_WRAPPER + html_bytes[idx:]
+        return _FETCH_WRAPPER + html_bytes
+
     for name, manifest in PLUGIN_MANIFESTS.items():
         tab = manifest.get("tab", {})
         tab_path = tab.get("path", f"/{name}")
@@ -6246,7 +6262,7 @@ def handle_get(handler, parsed) -> bool:
                 index_html = dashboard_dir / "dist" / "index.html"
                 if index_html.is_file():
                     data = index_html.read_bytes()
-                    data = data.replace(b"</head>", _FETCH_WRAPPER + b"</head>")
+                    data = _inject_fetch_wrapper(data)
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
                     handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
@@ -6259,7 +6275,7 @@ def handle_get(handler, parsed) -> bool:
                 static_html = plugin_root / "static" / "index.html"
                 if static_html.is_file():
                     data = static_html.read_bytes()
-                    data = data.replace(b"</head>", _FETCH_WRAPPER + b"</head>")
+                    data = _inject_fetch_wrapper(data)
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
                     handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
