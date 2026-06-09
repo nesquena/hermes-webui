@@ -517,8 +517,14 @@ function _markMessageVirtualMeasurementsSettled(windowMetrics){
 function _messageVirtualHeightEntryMatches(previousEntry, nextEntry){
   return !!(
     previousEntry&&nextEntry&&
-    previousEntry.rawIdx===nextEntry.rawIdx&&
     previousEntry.m===nextEntry.m
+  );
+}
+function _messageVirtualHeightPrefixEntryMatches(previousEntry, nextEntry){
+  return !!(
+    previousEntry&&nextEntry&&
+    previousEntry.rawIdx===nextEntry.rawIdx&&
+    _messageVirtualHeightEntryMatches(previousEntry, nextEntry)
   );
 }
 function _syncMessageVirtualHeightCache(visWithIdx){
@@ -544,7 +550,7 @@ function _syncMessageVirtualHeightCache(visWithIdx){
     const sharedPrefix=Math.min(previousEntries.length,nextEntries.length);
     let prefixMatches=true;
     for(let i=0;i<sharedPrefix;i++){
-      if(!_messageVirtualHeightEntryMatches(previousEntries[i], nextEntries[i])){
+      if(!_messageVirtualHeightPrefixEntryMatches(previousEntries[i], nextEntries[i])){
         prefixMatches=false;
         break;
       }
