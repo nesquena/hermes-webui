@@ -3541,7 +3541,6 @@ function renderMd(raw){
         continue;
       }
       if(!item) continue;
-      if(!line.trim()) continue;
       item.parts.push(line.replace(/^ {2,}/,'').trim());
     }
     flush();
@@ -3585,8 +3584,10 @@ function renderMd(raw){
   // Preserve continuation lines, nested indentation, and LaTeX placeholder lines
   // inside list items without changing the wider markdown pipeline.
   s=_renderLists(s,false);
-  // Ordered lists: keep continuation lines attached to their item and preserve
-  // explicit numbering via value= even when blank lines split the markdown.
+  // Ordered-list parsing intentionally runs on the post-unordered string; the
+  // unordered pass emits <ul> HTML that cannot satisfy the ordered-item regex.
+  // Keep continuation lines attached to their item and preserve explicit
+  // numbering via value= even when blank lines split the markdown.
   s=_renderLists(s,true);
   // Tables: | col | col | header row followed by | --- | --- | separator then data rows
   // NOTE: table pass runs BEFORE outer link pass so [label](url) in table cells
