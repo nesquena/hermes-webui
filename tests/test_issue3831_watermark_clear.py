@@ -124,3 +124,49 @@ def test_zero_watermark_still_blocks_all_replay_empty_sidecar():
         [], state, truncation_watermark=0.0
     )
     assert merged == []
+
+
+# --- Inline commit-path coverage (greptile): the two sites that inline the -----
+# --- falsy-gated clear instead of calling the helper must behave identically. --
+
+def test_error_path_materialize_clears_positive_watermark():
+    """The error/cancel materialization path (_materialize_pending_user_turn_before_error)
+    inlines the watermark clear. #3831 was triggered on recovery/reconcile after a
+    crash, so the error path is precisely the failure mode — lock it down: a pending
+    user turn committed on the error path retires a stale positive watermark."""
+    s = _FakeSession(100.0)  # stale, from a prior retry/undo/edit
+    s.pending_user_message = "new turn after edit"
+    appended = streaming._materialize_pending_user_turn_before_error(s)
+    assert appended is True
+    assert s.truncation_watermark is None
+    assert any(m.get("content") == "new turn after edit" for m in s.messages)
+
+
+def test_error_path_materialize_preserves_zero_sentinel():
+    """The error-path inline must use the same falsy guard as the helper: the 0.0
+    truncate-to-empty sentinel (#2914) is preserved, not cleared."""
+    s = _FakeSession(0.0)
+    s.pending_user_message = "new turn"
+    streaming._materialize_pending_user_turn_before_error(s)
+    assert s.truncation_watermark == 0.0
+
+
+def test_eager_checkpoint_clears_positive_watermark():
+    """The eager first-turn checkpoint path (_checkpoint_user_message_for_eager_session_save
+    in routes.py) inlines the same clear. A committed user turn retires a stale
+    positive watermark; the 0.0 sentinel is preserved."""
+    import api.routes as routes
+
+    s = _FakeSession(100.0)
+    routes._checkpoint_user_message_for_eager_session_save(
+        s, "eager new turn", None, started_at=200.0
+    )
+    assert s.truncation_watermark is None
+    assert any(m.get("content") == "eager new turn" for m in s.messages)
+
+    s0 = _FakeSession(0.0)
+    routes._checkpoint_user_message_for_eager_session_save(
+        s0, "eager new turn", None, started_at=200.0
+    )
+    assert s0.truncation_watermark == 0.0
+
