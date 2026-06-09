@@ -6545,7 +6545,7 @@ def handle_get(handler, parsed) -> bool:
                 "raw_source": synth.raw_source,
                 "session_source": synth.session_source,
                 "source_label": synth.source_label,
-                "read_only": False,  # the synthesized stub is no longer marked read-only
+                "read_only": bool((cli_meta or {}).get("read_only")),
                 "messages": msgs,
                 "tool_calls": [],
             }

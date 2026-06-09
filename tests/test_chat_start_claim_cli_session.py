@@ -148,6 +148,33 @@ def test_get_session_route_uses_shared_synthesiser():
     )
 
 
+def test_get_session_preserves_cli_read_only_flag():
+    """Regression for nesquena-hermes review 2026-06-09: the GET stub
+    must report ``read_only`` from cli_meta (matching master) rather
+    than hardcoding False, so a Telegram/external-agent session that
+    the foreign store flagged read-only is still gated as read-only on
+    the WebUI side until the user explicitly POSTs to claim it."""
+    block = re.search(
+        r'if parsed\.path == "/api/session":.*?return j\(handler, \{"session": redact_session_data\(sess\)\}\)',
+        ROUTES_PY.read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    assert block, "could not locate /api/session GET block"
+    text = block.group(0)
+    # Master did: bool((cli_meta or {}).get("read_only"))
+    assert 'bool((cli_meta or {}).get("read_only"))' in text, (
+        "GET /api/session must derive read_only from cli_meta (not hardcode "
+        "False) so the foreign store's read-only flag survives to the wire. "
+        "The POST path claims the session writeable when it materialises the "
+        "sidecar; the GET path stays read-only-faithful until then."
+    )
+    assert '"read_only": False' not in text, (
+        "GET /api/session must not hardcode read_only: False — that was a "
+        "side effect of the initial refactor and is a UX shift from master "
+        "for sessions where the foreign store explicitly sets read_only"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Functional tests: the helper resolves each reason branch correctly
 # ---------------------------------------------------------------------------
