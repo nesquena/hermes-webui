@@ -3568,14 +3568,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource(source);
         return;
       }
-      // A stream_end recovery is already in flight (it polls the server's settled
-      // state and finalizes or settles on its own). Don't let the SSE error path
-      // start a COMPETING reconnect: stream_end now defers `_terminalStateReached`
-      // until recovery resolves, so without this guard a server that closes the
-      // SSE right after stream_end would trigger a reconnect here, and then
-      // recovery-exhaustion could set `_streamFinalized` and mute the freshly
-      // reconnected stream (UI frozen at the partial). Let recovery own the
-      // terminal decision. (Opus stage-LK review, #3885.)
+      // #3885: if a stream_end recovery is in flight, don't start a competing
+      // reconnect — recovery polls server state and owns the terminal decision
+      // (else its exhaustion could mute a freshly reconnected stream). Opus stage-LK.
       if(_pendingStreamEndRecovery){
         _closeSource(source);
         return;
