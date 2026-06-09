@@ -162,7 +162,10 @@ _pid_from_file() {
 
 _is_alive() {
   local pid="$1"
-  kill -0 "${pid}" >/dev/null 2>&1
+  kill -0 "${pid}" >/dev/null 2>&1 || return 1
+  local state
+  state="$(ps -p "${pid}" -o stat= 2>/dev/null || true)"
+  [[ "${state}" != *Z* ]]
 }
 
 _is_windows_bash() {
