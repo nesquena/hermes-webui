@@ -2751,7 +2751,7 @@ def _session_index_marks_was_webui(sid: str) -> bool:
     return False
 
 
-def _claim_or_synthesize_cli_session(sid: str):
+def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
     """Resolve a session_id that has no WebUI sidecar.
 
     Returns ``(session_or_None, reason)``. Reasons:
@@ -2777,58 +2777,70 @@ def _claim_or_synthesize_cli_session(sid: str):
       ``'invalid_sid'``
         ``sid`` failed :func:`is_safe_session_id`.  Callers MUST return 404.
 
+    ``cli_meta`` is an optional pass-through.  Callers that already
+    computed ``_lookup_cli_session_metadata(sid)`` (e.g. the GET path
+    building a sidebar dict) can pass it in to avoid the redundant
+    lookup; callers without it (POST path, tests) pass nothing and the
+    helper does the lookup itself.
+
     Closing the GET-vs-POST asymmetry for foreign-origin sessions: GET
     ``/api/session`` and POST ``/api/chat/start`` both call this helper
     on a missing-sidecar KeyError, so a TUI/Desktop/CLI session can be
     loaded read-only AND continued writeable from the WebUI.
     """
+    def build_workspace(sid, cli_meta):
+        """Coalesce workspace with sane fallbacks so _start_run doesn't
+        trip on a missing field. state.db's cwd is the canonical workspace for
+        agent sessions; CLI metadata is the fallback (handles Telegram/etc).
+        """
+        workspace = (cli_meta or {}).get("workspace") or (cli_meta or {}).get("cwd")
+        if not workspace:
+            try:
+                from api.workspace import get_last_workspace
+                workspace = get_last_workspace()
+            except Exception:
+                workspace = None
+        if not workspace:
+            try:
+                from api.models import DEFAULT_WORKSPACE
+                workspace = DEFAULT_WORKSPACE
+            except Exception:
+                workspace = "/"
+        return workspace
+
+    def build_session(sid, cli_meta, msgs):
+        return Session(
+            session_id=sid,
+            title=(cli_meta or {}).get("title") or "CLI Session",
+            workspace=build_workspace(sid, cli_meta),
+            model=(cli_meta or {}).get("model") or "unknown",
+            model_provider=(cli_meta or {}).get("model_provider"),
+            messages=msgs,
+            created_at=(cli_meta or {}).get("created_at") or 0,
+            updated_at=(cli_meta or {}).get("updated_at") or 0,
+            profile=(cli_meta or {}).get("profile"),
+            is_cli_session=True,
+            source_tag=(cli_meta or {}).get("source_tag"),
+            raw_source=(cli_meta or {}).get("raw_source"),
+            session_source=(cli_meta or {}).get("session_source"),
+            source_label=(cli_meta or {}).get("source_label"),
+            # The user is now taking ownership of this session in WebUI; clear
+            # the read-only flag the foreign store set so _start_run can persist
+            # the new turn.  source_tag/source_label stay so the original badge
+            # is still rendered in the sidebar.
+            read_only=False,
+        )
+
     if not is_safe_session_id(sid):
         return None, "invalid_sid"
     if _session_index_marks_was_webui(sid):
         return None, "was_webui"
-    cli_meta = _lookup_cli_session_metadata(sid) or {}
+    if cli_meta is None:
+        cli_meta = _lookup_cli_session_metadata(sid) or {}
     msgs = get_cli_session_messages(sid)
     if not msgs:
         return None, "no_foreign_state"
-    # Coalesce workspace/model with sane fallbacks so _start_run doesn't
-    # trip on a missing field. state.db's cwd is the canonical workspace for
-    # agent sessions; CLI metadata is the fallback (handles Telegram/etc).
-    workspace = cli_meta.get("workspace") or cli_meta.get("cwd")
-    if not workspace:
-        try:
-            from api.workspace import get_last_workspace
-            workspace = get_last_workspace()
-        except Exception:
-            workspace = None
-    if not workspace:
-        try:
-            from api.models import DEFAULT_WORKSPACE
-            workspace = DEFAULT_WORKSPACE
-        except Exception:
-            workspace = "/"
-    model = cli_meta.get("model") or "unknown"
-    session = Session(
-        session_id=sid,
-        title=cli_meta.get("title") or "CLI Session",
-        workspace=workspace,
-        model=model,
-        model_provider=cli_meta.get("model_provider"),
-        messages=msgs,
-        created_at=cli_meta.get("created_at") or 0,
-        updated_at=cli_meta.get("updated_at") or 0,
-        profile=cli_meta.get("profile"),
-        is_cli_session=True,
-        source_tag=cli_meta.get("source_tag"),
-        raw_source=cli_meta.get("raw_source"),
-        session_source=cli_meta.get("session_source"),
-        source_label=cli_meta.get("source_label"),
-        # The user is now taking ownership of this session in WebUI; clear
-        # the read-only flag the foreign store set so _start_run can persist
-        # the new turn.  source_tag/source_label stay so the original badge
-        # is still rendered in the sidebar.
-        read_only=False,
-    )
-    return session, "materialized"
+    return build_session(sid, cli_meta, msgs), "materialized"
 
 
 def _messaging_session_identity(session: dict, raw_source: str) -> str:
@@ -5882,7 +5894,8 @@ def handle_get(handler, parsed) -> bool:
             # No WebUI sidecar. Delegate to the shared foreign-session
             # synthesizer so GET and POST have symmetric writeable/read-only
             # behaviour for CLI/TUI/Desktop sessions.
-            synth, reason = _claim_or_synthesize_cli_session(sid)
+            cli_meta = _lookup_cli_session_metadata(sid)
+            synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta or {})
             if reason == "was_webui":
                 # Deleted WebUI session: 404 so the client self-heals
                 # (clears stale /session/<id> URL and localStorage).
@@ -5892,7 +5905,6 @@ def handle_get(handler, parsed) -> bool:
             # Build the legacy dict response from the synthesized Session so
             # the wire shape stays byte-equivalent to the previous inline
             # synthesis (the frontend has been reading these exact keys).
-            cli_meta = _lookup_cli_session_metadata(sid)
             msgs = list(synth.messages or [])
             sess = {
                 "session_id": synth.session_id,
@@ -12515,14 +12527,21 @@ def _handle_chat_start(handler, body, diag=None):
             try:
                 synth.save()
             except Exception as _save_err:
-                # Persisting the sidecar failed: surface as 500 so the
-                # client retries instead of silently losing the typed
-                # message to the empty-state fallback.
+                # Persisting the sidecar failed: surface a generic 500 to
+                # the client (paths sanitised, see _sanitize_error) and log
+                # the full exception server-side. Returning the raw str(exc)
+                # would leak /root/.hermes/webui/sessions/<sid>.json or any
+                # other absolute filesystem path the OSError happened to
+                # carry — #4911 review feedback (Greptile, 2026-06-09).
                 logger.exception(
                     "failed to persist materialised sidecar for foreign session %s",
                     body["session_id"],
                 )
-                return bad(handler, f"failed to claim session: {_save_err}", 500)
+                return bad(
+                    handler,
+                    f"failed to claim session: {_sanitize_error(_save_err)}",
+                    500,
+                )
             s = synth
             try:
                 with LOCK:
