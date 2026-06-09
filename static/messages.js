@@ -3915,6 +3915,20 @@ function startSessionStream(sid) {
       // good (readyState === 2) — schedule a one-shot re-open after 5s.
       if (es.readyState === 2 && _sessionStreamSessionId === sid) {
         if (_sessionStreamReconnectTimer) clearTimeout(_sessionStreamReconnectTimer);
+        // The CLOSED EventSource (readyState === 2) will never reconnect on
+        // its own, and startSessionStream's top guard
+        // (`_sessionStreamSessionId === sid && _sessionEventSource`) would
+        // short-circuit the re-open while this dead object is still pinned.
+        // Drop our reference (and close it for good measure) so the timer's
+        // startSessionStream() reaches stopSessionStream() and builds a FRESH
+        // EventSource instead of reusing the closed one. Only clear if `es`
+        // is still the active source — a newer connection may have replaced
+        // it in the interim (stale onerror from a superseded stream), in
+        // which case we must not stomp the live one.
+        if (_sessionEventSource === es) {
+          try { es.close(); } catch (_) {}
+          _sessionEventSource = null;
+        }
         _sessionStreamReconnectTimer = setTimeout(() => {
           _sessionStreamReconnectTimer = null;
           if (_sessionStreamSessionId === sid) startSessionStream(sid);

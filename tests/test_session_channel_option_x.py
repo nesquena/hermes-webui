@@ -32,6 +32,7 @@ def test_background_process_exports_session_channel_api():
         "SESSION_CHANNELS",
         "SESSION_CHANNELS_LOCK",
         "get_or_create_session_channel",
+        "subscribe_to_session_channel",
         "get_session_channel",
         "start_session_channel_reaper",
         "stop_session_channel_reaper",
@@ -277,9 +278,13 @@ def test_routes_registers_session_stream_endpoint():
 
 def test_routes_session_sse_uses_session_channel_subscribe():
     src = (REPO_ROOT / "api" / "routes.py").read_text()
-    # The handler must use the channel's subscribe/unsubscribe lifecycle
-    assert "get_or_create_session_channel" in src
+    # The handler must use the atomic get-or-create+subscribe helper (closes
+    # the PR #2971 reaper TOCTOU race) and release the slot on every exit path.
+    assert "subscribe_to_session_channel" in src
     assert "ch.unsubscribe(q)" in src
+    # The split get-then-subscribe call pair must NOT come back — it reopens
+    # the race the atomic helper exists to close.
+    assert "ch = get_or_create_session_channel(sid)" not in src
 
 
 def test_server_starts_session_channel_reaper():
@@ -657,4 +662,50 @@ def test_backend_emitter_stamps_event_id_on_every_bg_task_complete():
     )
     assert "uuid.uuid4().hex" in fn_src, (
         "event_id should be a per-emit uuid hex (R2 §Q1)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Regression (Greptile P1 r3371970195): a CLOSED (readyState===2) session
+# EventSource must trigger a FRESH reconnect, not silently die.
+# ---------------------------------------------------------------------------
+#
+# Bug: startSessionStream's top guard is
+#   `if (_sessionStreamSessionId === sid && _sessionEventSource) return;`
+# When onerror fired with readyState === 2 (permanent close: server 4xx/204,
+# browser retry-exhaustion), the old code scheduled the reconnect timer WITHOUT
+# clearing _sessionEventSource. The still-non-null (but CLOSED) object made the
+# guard short-circuit, so stopSessionStream() was never reached and no new
+# EventSource was ever created — the session stream stayed dead until the user
+# navigated away and back, dropping all bg_task_complete notifications meanwhile.
+#
+# Fix: in onerror, when es.readyState === 2 and es is still the active source,
+# close it and null _sessionEventSource BEFORE arming the reconnect timer, so
+# the deferred startSessionStream() passes its guard, runs stopSessionStream(),
+# and builds a fresh EventSource. The `_sessionEventSource === es` identity
+# check prevents a stale onerror from a superseded stream stomping a newer live
+# connection.
+
+def test_session_stream_onerror_clears_closed_source_so_reconnect_proceeds():
+    js = (REPO_ROOT / "static" / "messages.js").read_text()
+    # Isolate the onerror handler body within startSessionStream.
+    fn_ix = js.index("function startSessionStream")
+    err_ix = js.index("es.onerror", fn_ix)
+    onerror_src = js[err_ix:err_ix + 1600]
+
+    # Must only act on the permanently-CLOSED state.
+    assert "es.readyState === 2" in onerror_src
+    # Identity-guard so a stale onerror can't stomp a newer live connection.
+    assert "_sessionEventSource === es" in onerror_src
+    # Must drop the dead reference (and close it) BEFORE arming the timer so
+    # startSessionStream's "already connected" guard no longer short-circuits.
+    assert "_sessionEventSource = null;" in onerror_src
+    assert "es.close()" in onerror_src
+
+    # Ordering: the null-out must precede the setTimeout that re-opens.
+    null_pos = onerror_src.index("_sessionEventSource = null;")
+    timer_pos = onerror_src.index("setTimeout(")
+    assert null_pos < timer_pos, (
+        "must null the closed EventSource BEFORE arming the reconnect timer, "
+        "else startSessionStream's guard short-circuits and the stream stays dead"
     )
