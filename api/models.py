@@ -323,8 +323,16 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
             _fallback = True
 
     if _fallback:
-        # Corrupt or missing index — fall back to full rebuild (called outside LOCK to avoid deadlock)
-        _write_session_index(updates=None)
+        # Corrupt or missing index — fall back to full rebuild (called outside LOCK to avoid deadlock).
+        # Propagate the resolved target so a rebuild scoped to a specific session dir
+        # (the background rebuild thread) falls back to rebuilding THAT dir's index,
+        # not the global SESSION_DIR (Opus advisor, stage-344 — defensive; today the
+        # only kwargs-caller passes updates=None and never reaches the fast path).
+        _write_session_index(
+            updates=None,
+            session_dir=session_dir,
+            session_index_file=session_index_file,
+        )
 
 
 def prune_session_from_index(session_id: str) -> None:
