@@ -49,6 +49,49 @@ def test_helper_is_defined():
     )
 
 
+def test_helper_accepts_pass_through_cli_meta():
+    """GET path pre-computes _lookup_cli_session_metadata(sid) once; the
+    helper must accept it via the cli_meta kwarg to avoid a redundant
+    lookup.  Regression for Greptile review note 2026-06-09."""
+    import inspect
+    import api.routes as _routes
+    sig = inspect.signature(_routes._claim_or_synthesize_cli_session)
+    assert "cli_meta" in sig.parameters, (
+        "_claim_or_synthesize_cli_session must accept a pass-through "
+        "cli_meta kwarg so the GET path can avoid a second "
+        "_lookup_cli_session_metadata call"
+    )
+    assert sig.parameters["cli_meta"].default is None, (
+        "cli_meta must default to None so existing callers (POST path, "
+        "tests) keep working without a keyword argument"
+    )
+
+
+def test_chat_start_sanitises_500_error():
+    """Regression for Greptile review note 2026-06-09: the 500 returned
+    when synth.save() fails must NOT leak the sidecar filesystem path to
+    the client.  _sanitize_error replaces absolute paths with ``<path>``."""
+    body = _route_handler_block(
+        ROUTES_PY.read_text(encoding="utf-8"), "_handle_chat_start"
+    )
+    # Locate the save-failure arm and assert the response uses the
+    # sanitiser, not the raw exception.
+    m = re.search(
+        r"except Exception as _save_err:(.*?)(?=\n\s*s = synth)",
+        body, re.DOTALL,
+    )
+    assert m, "could not find the save-failure arm of _handle_chat_start"
+    arm = m.group(1)
+    assert "_sanitize_error(_save_err)" in arm, (
+        "save-failure 500 must pipe the exception through _sanitize_error "
+        "so filesystem paths from OSError don't leak to the client"
+    )
+    assert "logger.exception(" in arm, (
+        "save-failure 500 must also log the full exception server-side "
+        "so the operator can debug — sanitisation is only for the response"
+    )
+
+
 def test_classifier_helper_is_defined():
     src = ROUTES_PY.read_text(encoding="utf-8")
     assert "def _session_index_marks_was_webui(" in src, (
