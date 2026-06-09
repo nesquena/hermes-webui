@@ -56,12 +56,29 @@ _GIT_HARDENED_CONFIG = (
     # command reachable on `git fetch` against a git:// remote.
     ("core.gitProxy", ""),
 )
+_GIT_DESTRUCTIVE_HARDENED_CONFIG = (
+    # Disable repository-local hooks and signing helper command resolution while
+    # performing destructive Git operations.
+    ("core.hooksPath", ""),
+    ("commit.gpgSign", "false"),
+    ("gpg.program", ""),
+)
 
 
-def _hardened_git_argv(args: list[str]) -> list[str]:
+def _hardened_git_argv(
+    args: list[str],
+    *,
+    destructive: bool = False,
+    attributes_file: str | None = None,
+) -> list[str]:
     argv = ["git"]
     for key, value in _GIT_HARDENED_CONFIG:
         argv.extend(["-c", f"{key}={value}"])
+    if destructive:
+        for key, value in _GIT_DESTRUCTIVE_HARDENED_CONFIG:
+            argv.extend(["-c", f"{key}={value}"])
+    if attributes_file:
+        argv.extend(["-c", f"core.attributesFile={attributes_file}"])
     argv.extend(args)
     return argv
 
@@ -164,12 +181,26 @@ def _run_git(
     timeout: int = GIT_TIMEOUT,
     check: bool = False,
     env: dict[str, str] | None = None,
+    destructive: bool = False,
+    disable_filter_attributes: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     cwd = ctx_or_cwd.repo_root if isinstance(ctx_or_cwd, GitContext) else ctx_or_cwd
     run_env = _clean_git_env(env)
+    effective_destructive = destructive and workspace_git_destructive_enabled()
+    attributes_file = None
+    temporary_attributes: list[str] = []
+    if effective_destructive and disable_filter_attributes:
+        fd, attributes_path = tempfile.mkstemp(prefix="hermes-webui-git-attrs-")
+        os.close(fd)
+        attributes_file = attributes_path
+        temporary_attributes = [attributes_path]
     try:
         result = subprocess.run(
-            _hardened_git_argv(args),
+            _hardened_git_argv(
+                args,
+                destructive=effective_destructive,
+                attributes_file=attributes_file,
+            ),
             cwd=str(cwd),
             shell=False,
             capture_output=True,
@@ -183,6 +214,9 @@ def _run_git(
         raise GitWorkspaceError("Git is not installed or not available on PATH", "missing_git") from exc
     except OSError as exc:
         raise GitWorkspaceError(str(exc), _classify_git_error(str(exc), args)) from exc
+    finally:
+        for path in temporary_attributes:
+            Path(path).unlink(missing_ok=True)
     if check and result.returncode != 0:
         message = (result.stderr or result.stdout or "Git command failed").strip()
         raise GitWorkspaceError(message, _classify_git_error(message, args))
@@ -708,7 +742,13 @@ def _restore_branch_switch_stash_locked(ctx: GitContext, branch: str) -> dict:
     for item in _hermes_branch_switch_stashes(ctx):
         if item.get("branch") != branch:
             continue
-        result = _run_git(ctx, ["stash", "pop", "--index", item["ref"]], check=False)
+        result = _run_git(
+            ctx,
+            ["stash", "pop", "--index", item["ref"]],
+            check=False,
+            destructive=True,
+            disable_filter_attributes=True,
+        )
         if result.returncode == 0:
             return {"restored_stash": item}
         return {
@@ -755,17 +795,35 @@ def _perform_checkout_locked(
 ) -> subprocess.CompletedProcess[str]:
     if mode == "local":
         target = _validate_local_branch(ctx, ref)
-        return _run_git(ctx, ["switch", target], check=True)
+        return _run_git(
+            ctx,
+            ["switch", target],
+            check=True,
+            destructive=True,
+            disable_filter_attributes=True,
+        )
     if mode in {"new", "create"}:
         branch = _validate_new_branch_name(ctx, new_branch or ref)
         start_ref = _validate_checkout_start(ctx, ref if (new_branch and ref and ref != new_branch) else "HEAD")
-        return _run_git(ctx, ["switch", "-c", branch, start_ref], check=True)
+        return _run_git(
+            ctx,
+            ["switch", "-c", branch, start_ref],
+            check=True,
+            destructive=True,
+            disable_filter_attributes=True,
+        )
     if mode == "remote":
         remote_ref = _validate_remote_branch(ctx, ref)
         branch_name = str(new_branch or remote_ref.split("/", 1)[-1]).strip()
         exists = _run_git(ctx, ["show-ref", "--verify", f"refs/heads/{branch_name}"], check=False)
         if exists.returncode == 0:
-            result = _run_git(ctx, ["switch", branch_name], check=True)
+            result = _run_git(
+                ctx,
+                ["switch", branch_name],
+                check=True,
+                destructive=True,
+                disable_filter_attributes=True,
+            )
             if track:
                 _run_git(ctx, ["branch", "--set-upstream-to", remote_ref, branch_name], check=False)
             return result
@@ -774,10 +832,22 @@ def _perform_checkout_locked(
         if track:
             args.append("--track")
         args.append(remote_ref)
-        return _run_git(ctx, args, check=True)
+        return _run_git(
+            ctx,
+            args,
+            check=True,
+            destructive=True,
+            disable_filter_attributes=True,
+        )
     if mode in {"detached", "detach"}:
         target = _validate_checkout_start(ctx, ref)
-        return _run_git(ctx, ["switch", "--detach", target], check=True)
+        return _run_git(
+            ctx,
+            ["switch", "--detach", target],
+            check=True,
+            destructive=True,
+            disable_filter_attributes=True,
+        )
     raise GitWorkspaceError("Unsupported checkout mode", "invalid_ref")
 
 
@@ -833,14 +903,26 @@ def git_stash_and_checkout(
         _validate_checkout_request_locked(ctx, ref, mode, new_branch)
         stashed = False
         if _dirty_worktree(ctx):
-            stash_result = _run_git(ctx, ["stash", "push", "-u", "-m", stash_name], check=True)
+            stash_result = _run_git(
+                ctx,
+                ["stash", "push", "-u", "-m", stash_name],
+                check=True,
+                destructive=True,
+                disable_filter_attributes=True,
+            )
             stash_text = _remote_message(stash_result)
             stashed = "No local changes to save" not in stash_text
         try:
             result = _perform_checkout_locked(ctx, workspace, ref, mode, new_branch, track)
         except Exception:
             if stashed:
-                _run_git(ctx, ["stash", "pop", "--index", "stash@{0}"], check=False)
+                _run_git(
+                    ctx,
+                    ["stash", "pop", "--index", "stash@{0}"],
+                    check=False,
+                    destructive=True,
+                    disable_filter_attributes=True,
+                )
             raise
         current_branch = _current_checkout_label(ctx)
         restored = _restore_branch_switch_stash_locked(ctx, current_branch)
@@ -972,7 +1054,13 @@ def git_stage(workspace: str | Path, paths: Iterable[str]) -> dict:
     if ctx is None:
         raise GitWorkspaceError("Workspace is not a Git repository", "not_a_repo")
     with _git_mutation_lock(ctx):
-        _run_git(ctx, ["add", "--", *_pathspecs(ctx, paths)], check=True)
+        _run_git(
+            ctx,
+            ["add", "--", *_pathspecs(ctx, paths)],
+            check=True,
+            destructive=True,
+            disable_filter_attributes=True,
+        )
     return git_status(workspace)
 
 
@@ -982,9 +1070,14 @@ def git_unstage(workspace: str | Path, paths: Iterable[str]) -> dict:
         raise GitWorkspaceError("Workspace is not a Git repository", "not_a_repo")
     specs = _pathspecs(ctx, paths)
     with _git_mutation_lock(ctx):
-        result = _run_git(ctx, ["restore", "--staged", "--", *specs], check=False)
+        result = _run_git(
+            ctx,
+            ["restore", "--staged", "--", *specs],
+            check=False,
+            destructive=True,
+        )
         if result.returncode != 0:
-            _run_git(ctx, ["reset", "HEAD", "--", *specs], check=True)
+            _run_git(ctx, ["reset", "HEAD", "--", *specs], check=True, destructive=True)
     return git_status(workspace)
 
 
@@ -1017,7 +1110,12 @@ def git_discard(workspace: str | Path, paths: Iterable[str], *, delete_untracked
                         # reported it but before this discard reaches unlink.
                         pass
                 continue
-            _run_git(ctx, ["restore", "--worktree", "--", repo_rel], check=True)
+            _run_git(
+                ctx,
+                ["restore", "--worktree", "--", repo_rel],
+                check=True,
+                destructive=True,
+            )
     return git_status(workspace)
 
 
@@ -1061,12 +1159,25 @@ def _selected_temp_index_env(ctx: GitContext, specs: list[str]) -> tuple[dict[st
     Path(index_path).unlink(missing_ok=True)
     env = {"GIT_INDEX_FILE": index_path}
     try:
-        head = _run_git(ctx, ["rev-parse", "--verify", "HEAD"], check=False, env=env)
+        head = _run_git(
+            ctx,
+            ["rev-parse", "--verify", "HEAD"],
+            check=False,
+            env=env,
+            destructive=True,
+        )
         if head.returncode == 0:
-            _run_git(ctx, ["read-tree", "HEAD"], check=True, env=env)
+            _run_git(ctx, ["read-tree", "HEAD"], check=True, env=env, destructive=True)
         else:
-            _run_git(ctx, ["read-tree", "--empty"], check=True, env=env)
-        _run_git(ctx, ["add", "-A", "--", *specs], check=True, env=env)
+            _run_git(ctx, ["read-tree", "--empty"], check=True, env=env, destructive=True)
+        _run_git(
+            ctx,
+            ["add", "-A", "--", *specs],
+            check=True,
+            env=env,
+            destructive=True,
+            disable_filter_attributes=True,
+        )
         return env, index_path
     except Exception:
         Path(index_path).unlink(missing_ok=True)
@@ -1105,6 +1216,8 @@ def _selected_diff_text(ctx: GitContext, specs: list[str]) -> tuple[str, bool]:
             ["diff", "--cached", "--no-ext-diff", "--unified=3", "--", *specs],
             check=True,
             env=env,
+            destructive=True,
+            disable_filter_attributes=True,
         )
         diff = result.stdout or ""
         encoded = diff.encode("utf-8", errors="replace")
@@ -1223,7 +1336,14 @@ def git_commit(workspace: str | Path, message: str) -> dict:
     if ctx is None:
         raise GitWorkspaceError("Workspace is not a Git repository", "not_a_repo")
     with _git_mutation_lock(ctx):
-        _run_git(ctx, ["commit", "-m", msg], timeout=10, check=True)
+        _run_git(
+            ctx,
+            ["commit", "-m", msg],
+            timeout=10,
+            check=True,
+            destructive=True,
+            disable_filter_attributes=True,
+        )
     sha = _run_git(ctx, ["rev-parse", "--short", "HEAD"], check=True).stdout.strip()
     return {"ok": True, "commit": sha, "status": git_status(workspace)}
 
@@ -1239,11 +1359,31 @@ def git_commit_selected(workspace: str | Path, message: str, paths: Iterable[str
         specs, workspace_paths, _selected_files_list = _selected_files(ctx, paths)
         env, index_path = _selected_temp_index_env(ctx, specs)
         try:
-            quiet = _run_git(ctx, ["diff", "--cached", "--quiet", "--", *specs], check=False, env=env)
+            quiet = _run_git(
+                ctx,
+                ["diff", "--cached", "--quiet", "--", *specs],
+                check=False,
+                env=env,
+                destructive=True,
+                disable_filter_attributes=True,
+            )
             if quiet.returncode == 0:
                 raise GitWorkspaceError("Selected paths have no committable changes")
-            _run_git(ctx, ["commit", "-m", msg], timeout=10, check=True, env=env)
-            _run_git(ctx, ["reset", "-q", "HEAD", "--", *specs], check=True)
+            _run_git(
+                ctx,
+                ["commit", "-m", msg],
+                timeout=10,
+                check=True,
+                env=env,
+                destructive=True,
+                disable_filter_attributes=True,
+            )
+            _run_git(
+                ctx,
+                ["reset", "-q", "HEAD", "--", *specs],
+                check=True,
+                destructive=True,
+            )
         finally:
             Path(index_path).unlink(missing_ok=True)
     sha = _run_git(ctx, ["rev-parse", "--short", "HEAD"], check=True).stdout.strip()
@@ -1266,7 +1406,14 @@ def git_fetch(workspace: str | Path) -> dict:
     if ctx is None:
         raise GitWorkspaceError("Workspace is not a Git repository", "not_a_repo")
     with _git_mutation_lock(ctx):
-        result = _run_git(ctx, ["fetch", "--prune"], timeout=GIT_REMOTE_TIMEOUT, check=True)
+        result = _run_git(
+            ctx,
+            ["fetch", "--prune"],
+            timeout=GIT_REMOTE_TIMEOUT,
+            check=True,
+            destructive=True,
+            disable_filter_attributes=True,
+        )
     return {"ok": True, "message": _remote_message(result), "status": git_status(workspace)}
 
 
@@ -1275,7 +1422,14 @@ def git_pull(workspace: str | Path) -> dict:
     if ctx is None:
         raise GitWorkspaceError("Workspace is not a Git repository", "not_a_repo")
     with _git_mutation_lock(ctx):
-        result = _run_git(ctx, ["pull", "--ff-only"], timeout=GIT_REMOTE_TIMEOUT, check=True)
+        result = _run_git(
+            ctx,
+            ["pull", "--ff-only"],
+            timeout=GIT_REMOTE_TIMEOUT,
+            check=True,
+            destructive=True,
+            disable_filter_attributes=True,
+        )
     return {"ok": True, "message": _remote_message(result), "status": git_status(workspace)}
 
 
@@ -1292,5 +1446,12 @@ def git_push(workspace: str | Path) -> dict:
             if "origin" not in remotes:
                 raise GitWorkspaceError("No upstream branch or origin remote is configured", "no_upstream")
             args.extend(["-u", "origin", branch])
-        result = _run_git(ctx, args, timeout=GIT_REMOTE_TIMEOUT, check=True)
+        result = _run_git(
+            ctx,
+            args,
+            timeout=GIT_REMOTE_TIMEOUT,
+            check=True,
+            destructive=True,
+            disable_filter_attributes=True,
+        )
     return {"ok": True, "message": _remote_message(result), "status": git_status(workspace)}

@@ -1063,6 +1063,258 @@ def test_git_fetch_blocks_repo_local_askpass_execution(tmp_path):
     assert not marker.exists()
 
 
+def test_git_commit_skips_repo_local_hooks_when_destructive_mode_enabled(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("hook script setup is POSIX-only")
+
+    from api.workspace_git import WORKSPACE_GIT_DESTRUCTIVE_ENV, git_commit, git_stage
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    marker = tmp_path / "pre-commit-ran"
+    helper = tmp_path / "pre_commit_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('pre-commit executed', encoding='utf-8')\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    pre_commit = hooks / "pre-commit"
+    pre_commit.write_text(
+        "#!/bin/sh\n"
+        f"\"{sys.executable}\" \"{helper}\" \"{marker}\"\n",
+        encoding="utf-8",
+    )
+    pre_commit.chmod(0o755)
+    _git(repo, "config", "core.hooksPath", str(hooks))
+
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    git_stage(repo, ["tracked.txt"])
+
+    monkeypatch.setenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
+    git_commit(repo, "Commit with hooks disabled")
+
+    assert not marker.exists()
+
+
+def test_git_checkout_skips_repo_local_hooks_when_destructive_mode_enabled(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("hook script setup is POSIX-only")
+
+    from api.workspace_git import WORKSPACE_GIT_DESTRUCTIVE_ENV, git_checkout
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    _git(repo, "branch", "-M", "main")
+    _git(repo, "checkout", "-b", "feature")
+    _git(repo, "checkout", "main")
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    marker = tmp_path / "post-checkout-ran"
+    helper = tmp_path / "post_checkout_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('post-checkout executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    post_checkout = hooks / "post-checkout"
+    post_checkout.write_text(
+        "#!/bin/sh\n"
+        f"\"{sys.executable}\" \"{helper}\" \"{marker}\"\n",
+        encoding="utf-8",
+    )
+    post_checkout.chmod(0o755)
+    _git(repo, "config", "core.hooksPath", str(hooks))
+
+    monkeypatch.setenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
+    result = git_checkout(repo, "feature", "local")
+
+    assert result["ok"] is True
+    assert result["current_branch"] == "feature"
+    assert not marker.exists()
+
+
+def test_git_pull_skips_repo_local_hooks_when_destructive_mode_enabled(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("hook script setup is POSIX-only")
+
+    from api.workspace_git import WORKSPACE_GIT_DESTRUCTIVE_ENV, git_pull
+
+    remote = _init_bare_repo(tmp_path / "remote.git")
+    origin = _init_repo(tmp_path / "origin")
+    (origin / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(origin)
+    _git(origin, "branch", "-M", "main")
+    _git(origin, "remote", "add", "origin", str(remote))
+    _git(origin, "push", "-u", "origin", "main")
+    _git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", str(remote), str(clone))
+    _git(clone, "config", "user.email", "hermes-tests@example.invalid")
+    _git(clone, "config", "user.name", "Hermes Tests")
+
+    (origin / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    _commit_all(origin, "Remote update")
+    _git(origin, "push")
+
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    marker = tmp_path / "post-merge-ran"
+    helper = tmp_path / "post_merge_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('post-merge executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    post_merge = hooks / "post-merge"
+    post_merge.write_text(
+        "#!/bin/sh\n"
+        f"\"{sys.executable}\" \"{helper}\" \"{marker}\"\n",
+        encoding="utf-8",
+    )
+    post_merge.chmod(0o755)
+    _git(clone, "config", "core.hooksPath", str(hooks))
+
+    monkeypatch.setenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
+    git_pull(clone)
+
+    assert not marker.exists()
+
+
+def test_git_stage_skips_repo_local_filters_when_destructive_mode_enabled(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("scripted filter helper setup is POSIX-only")
+
+    from api.workspace_git import WORKSPACE_GIT_DESTRUCTIVE_ENV, git_stage
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitattributes").write_text("*.txt filter=demo\n", encoding="utf-8")
+    marker = tmp_path / "filter-ran"
+    helper = tmp_path / "filter_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('filter ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    _git(repo, "config", "filter.demo.clean", f"\"{sys.executable}\" \"{helper}\" \"{marker}\"")
+    _git(repo, "config", "filter.demo.smudge", f"\"{sys.executable}\" \"{helper}\" \"{marker}\"")
+
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+
+    monkeypatch.setenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
+    staged = git_stage(repo, ["tracked.txt"])
+
+    assert staged["totals"]["staged"] == 1
+    assert not marker.exists()
+
+
+def test_git_checkout_skips_repo_local_filters_when_destructive_mode_enabled(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("scripted filter helper setup is POSIX-only")
+
+    from api.workspace_git import (
+        WORKSPACE_GIT_DESTRUCTIVE_ENV,
+        git_checkout,
+    )
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitattributes").write_text("*.txt filter=demo\n", encoding="utf-8")
+    marker = tmp_path / "filter-smudge-ran"
+    helper = tmp_path / "filter_checkout_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('filter ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    _git(repo, "config", "filter.demo.clean", f"\"{sys.executable}\" \"{helper}\" \"{marker}\"")
+    _git(repo, "config", "filter.demo.smudge", f"\"{sys.executable}\" \"{helper}\" \"{marker}\"")
+    _git(repo, "branch", "-M", "main")
+    _git(repo, "commit", "-m", "Initial", "--allow-empty")
+    _git(repo, "branch", "feature")
+    _git(repo, "checkout", "feature")
+    (repo / "tracked.txt").write_text("from feature\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "Feature update")
+    _git(repo, "checkout", "main")
+
+    monkeypatch.setenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
+    result = git_checkout(repo, "feature", "local")
+
+    assert result["ok"] is True
+    assert result["current_branch"] == "feature"
+    assert not marker.exists()
+
+
+def test_git_commit_skips_repo_local_gpg_program_when_destructive_mode_enabled(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("non-interactive gpg helper test is POSIX-only")
+
+    from api.workspace_git import (
+        WORKSPACE_GIT_DESTRUCTIVE_ENV,
+        git_commit,
+        git_stage,
+    )
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    marker = tmp_path / "gpg-ran"
+    helper = tmp_path / "gpg_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('gpg executed', encoding='utf-8')\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    _git(repo, "config", "commit.gpgsign", "true")
+    _git(repo, "config", "gpg.program", f"\"{sys.executable}\" \"{helper}\" \"{marker}\"")
+
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    git_stage(repo, ["tracked.txt"])
+    monkeypatch.setenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
+    result = git_commit(repo, "Signed commit path blocked")
+
+    assert result["ok"] is True
+    assert not marker.exists()
+
+
 def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeypatch):
     from api.workspace_git import _clean_git_env
 
