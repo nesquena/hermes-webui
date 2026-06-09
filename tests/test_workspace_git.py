@@ -1277,6 +1277,41 @@ def test_git_checkout_skips_repo_local_filters_when_destructive_mode_enabled(tmp
     assert not marker.exists()
 
 
+def test_git_discard_skips_repo_local_filters_when_destructive_mode_enabled(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("scripted filter helper setup is POSIX-only")
+
+    from api.workspace_git import WORKSPACE_GIT_DESTRUCTIVE_ENV, git_discard
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitattributes").write_text("*.txt filter=demo\n", encoding="utf-8")
+    marker = tmp_path / "filter-discard-ran"
+    helper = tmp_path / "filter_discard_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('filter ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    _git(repo, "config", "filter.demo.clean", f"\"{sys.executable}\" \"{helper}\" \"{marker}\"")
+    _git(repo, "config", "filter.demo.smudge", f"\"{sys.executable}\" \"{helper}\" \"{marker}\"")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    marker.unlink(missing_ok=True)
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+
+    monkeypatch.setenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
+    discarded = git_discard(repo, ["tracked.txt"])
+
+    assert discarded["totals"]["changed"] == 0
+    assert (repo / "tracked.txt").read_text(encoding="utf-8") == "one\n"
+    assert not marker.exists()
+
+
 def test_git_commit_skips_repo_local_gpg_program_when_destructive_mode_enabled(tmp_path, monkeypatch):
     import os
     import sys

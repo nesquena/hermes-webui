@@ -1115,6 +1115,7 @@ def git_discard(workspace: str | Path, paths: Iterable[str], *, delete_untracked
                 ["restore", "--worktree", "--", repo_rel],
                 check=True,
                 destructive=True,
+                disable_filter_attributes=True,
             )
     return git_status(workspace)
 
