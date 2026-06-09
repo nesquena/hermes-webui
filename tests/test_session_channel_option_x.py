@@ -886,3 +886,36 @@ def test_load_session_rearms_stream_on_every_early_return():
         "fetch-error path must restart the on-screen stream, guarded against "
         "the self-healed-current (deleted/404) session"
     )
+
+
+def test_session_sse_stream_unsubscribes_on_header_write_failure():
+    """Deep-review fix (Codex): in _handle_session_sse_stream the subscriber
+    slot is acquired by subscribe_to_session_channel BEFORE the SSE headers are
+    written. The header writes (send_response/send_header/end_headers) touch the
+    socket and can raise a client-disconnect error. If that happened OUTSIDE the
+    try/finally, ch.unsubscribe(q) would be skipped and — because
+    reaper_should_collect refuses to collect a channel with sub_count>0 — the
+    channel would zombie forever. Pin that the subscribe and the header setup
+    both sit inside the single try whose finally unsubscribes.
+    """
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
+    i = src.find("def _handle_session_sse_stream(")
+    assert i != -1, "handler not found"
+    j = src.find("\ndef ", i + 1)
+    body = src[i:j]
+
+    sub_ix = body.find("subscribe_to_session_channel(")
+    assert sub_ix != -1, "subscribe call not found"
+    try_ix = body.find("try:", sub_ix)
+    end_headers_ix = body.find("end_headers()", sub_ix)
+    finally_ix = body.find("finally:", sub_ix)
+    unsub_ix = body.find("ch.unsubscribe(q)", finally_ix if finally_ix != -1 else sub_ix)
+
+    # Order must be: subscribe → try → end_headers (inside try) → finally → unsubscribe.
+    assert try_ix != -1 and finally_ix != -1 and unsub_ix != -1
+    assert sub_ix < try_ix < end_headers_ix < finally_ix < unsub_ix, (
+        "header setup must run INSIDE the try/finally that unsubscribes — "
+        "a header-write disconnect must not leak a SessionChannel subscriber"
+    )

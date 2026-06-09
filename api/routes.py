@@ -10731,29 +10731,31 @@ def _handle_session_sse_stream(handler, parsed):
     # subscribe_to_session_channel for the full rationale (PR #2971 Greptile P1).
     ch, q = subscribe_to_session_channel(sid, maxsize=64)
 
-    handler.send_response(200)
-    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
-    handler.send_header('Cache-Control', 'no-cache')
-    handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
-    handler.end_headers()
-    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
-
-    from api.streaming import _sse
-
-    # NOTE: ``q = ch.subscribe(...)`` above acquires a subscriber slot that
-    # MUST be released on every exit path. The initial-frame write and the
-    # on-subscribe recovery replay below both call ``_sse``, which can raise
-    # a member of ``_CLIENT_DISCONNECT_ERRORS`` (BrokenPipeError /
-    # ConnectionResetError) if the client drops immediately after the SSE
-    # headers are sent. If that happened outside a try/finally the
-    # ``ch.unsubscribe(q)`` cleanup would be skipped, permanently leaking a
-    # subscriber. Because ``SessionChannel.reaper_should_collect()`` refuses
-    # to collect any channel with ``sub_count > 0``, a single ghost
-    # subscriber blocks the reaper forever and the channel zombies in
-    # SESSION_CHANNELS. So everything from the initial frame onward runs
-    # inside one try/finally that unconditionally unsubscribes.
+    # NOTE: ``subscribe_to_session_channel`` above acquires a subscriber slot
+    # that MUST be released on every exit path. Header setup
+    # (``send_response`` / ``send_header`` / ``end_headers`` /
+    # ``_sse_set_write_deadline``) and the initial-frame + on-subscribe
+    # recovery writes below all touch the socket and can raise a member of
+    # ``_CLIENT_DISCONNECT_ERRORS`` (BrokenPipeError / ConnectionResetError) if
+    # the client drops immediately after subscribing. If that happened outside
+    # this try/finally the ``ch.unsubscribe(q)`` cleanup would be skipped,
+    # permanently leaking a subscriber. Because
+    # ``SessionChannel.reaper_should_collect()`` refuses to collect any channel
+    # with ``sub_count > 0``, a single ghost subscriber blocks the reaper
+    # forever and the channel zombies in SESSION_CHANNELS. So EVERYTHING from
+    # the subscribe onward — header setup included — runs inside one
+    # try/finally that unconditionally unsubscribes.
     try:
+        handler.send_response(200)
+        handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        handler.send_header('Cache-Control', 'no-cache')
+        handler.send_header('X-Accel-Buffering', 'no')
+        handler.send_header('Connection', 'keep-alive')
+        handler.end_headers()
+        _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
+
+        from api.streaming import _sse
+
         # Push an initial frame so the client has confirmation the channel is
         # live (mirrors approval/clarify which send an 'initial' frame). No
         # snapshot data is needed — this channel only carries forward-looking
