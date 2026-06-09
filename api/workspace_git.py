@@ -245,9 +245,15 @@ def _run_git(
 _FILTER_CONFIG_RE = re.compile(r"^filter\.(.+)\.(clean|smudge|process|required)$")
 
 
-def _destructive_filter_overrides(cwd: Path, env: dict[str, str]) -> list[tuple[str, str]]:
+def _filter_names_for_scope(
+    scope: str,
+    cwd: Path,
+    env: dict[str, str],
+    *,
+    ignore_unsupported: bool = False,
+) -> set[str]:
     result = subprocess.run(
-        ["git", "config", "--local", "--name-only", "--get-regexp", r"^filter\..*\.(clean|smudge|process|required)$"],
+        ["git", "config", scope, "--name-only", "--get-regexp", r"^filter\..*\.(clean|smudge|process|required)$"],
         cwd=str(cwd),
         shell=False,
         text=True,
@@ -256,6 +262,8 @@ def _destructive_filter_overrides(cwd: Path, env: dict[str, str]) -> list[tuple[
         env=env,
     )
     if result.returncode not in {0, 1}:
+        if ignore_unsupported:
+            return set()
         message = (result.stderr or result.stdout or "Git command failed").strip()
         raise GitWorkspaceError(message, _classify_git_error(message, ["config"]))
     names: set[str] = set()
@@ -263,6 +271,17 @@ def _destructive_filter_overrides(cwd: Path, env: dict[str, str]) -> list[tuple[
         match = _FILTER_CONFIG_RE.match(line.strip())
         if match:
             names.add(match.group(1))
+    return names
+
+
+def _destructive_filter_overrides(cwd: Path, env: dict[str, str]) -> list[tuple[str, str]]:
+    names = _filter_names_for_scope("--local", cwd, env)
+    names |= _filter_names_for_scope(
+        "--worktree",
+        cwd,
+        env,
+        ignore_unsupported=True,
+    )
     overrides: list[tuple[str, str]] = []
     for name in sorted(names):
         overrides.extend(
