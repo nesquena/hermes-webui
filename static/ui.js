@@ -429,7 +429,7 @@ function _messageIsRenderable(m){
   const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
   const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
   const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-  return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m))));
+  return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)||hasPartialTc||_assistantMessageHasVisibleContent(m))));
 }
 function _getVisibleMessagesWithIdx(){
   if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
@@ -9309,28 +9309,6 @@ function renderMessages(options){
   );
   const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
 
-  const compressionState=(()=>{
-    let compressionState=_compressionStateForCurrentSession();
-    if(!S.busy && compressionState && compressionState.automatic){
-      window._compressionUi=null;
-      _clearCompressionElapsedTimer();
-      _setCompressionSessionLock(null);
-      compressionState=null;
-    }
-    return compressionState;
-  })();
-  if(window._compressionUi && !compressionState) clearCompressionUi();
-  const handoffState=_handoffStateForCurrentSession();
-  if(window._handoffUi && !handoffState) window._handoffUi=null;
-  const sessionCompressionAnchor=(
-    S.session && typeof S.session.compression_anchor_visible_idx==='number'
-  ) ? S.session.compression_anchor_visible_idx : null;
-  const sessionCompressionAnchorKey=(
-    S.session && S.session.compression_anchor_message_key && typeof S.session.compression_anchor_message_key==='object'
-  ) ? S.session.compression_anchor_message_key : null;
-  const sessionCompressionSummary=(
-    S.session && typeof S.session.compression_anchor_summary==='string'
-  ) ? S.session.compression_anchor_summary.trim() : '';
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
   $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
@@ -9375,9 +9353,7 @@ function renderMessages(options){
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
-    return m._statusCard||msgContent(m)||m.attachments?.length;
-  });
-  $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
+  }
   // Mid-stream flicker fix (#3877): when a renderMessages() rebuild is reached
   // while THIS session is actively streaming (e.g. the clarify-response echo at
   // messages.js, or a CLI-import refresh), the `inner.innerHTML=''` below detaches
@@ -9395,6 +9371,28 @@ function renderMessages(options){
       _preservedLiveTurn=_lt;
     }
   }
+  const compressionState=(()=>{
+    let compressionState=_compressionStateForCurrentSession();
+    if(!S.busy && compressionState && compressionState.automatic){
+      window._compressionUi=null;
+      _clearCompressionElapsedTimer();
+      _setCompressionSessionLock(null);
+      compressionState=null;
+    }
+    return compressionState;
+  })();
+  if(window._compressionUi && !compressionState) clearCompressionUi();
+  const handoffState=_handoffStateForCurrentSession();
+  if(window._handoffUi && !handoffState) window._handoffUi=null;
+  const sessionCompressionAnchor=(
+    S.session && typeof S.session.compression_anchor_visible_idx==='number'
+  ) ? S.session.compression_anchor_visible_idx : null;
+  const sessionCompressionAnchorKey=(
+    S.session && S.session.compression_anchor_message_key && typeof S.session.compression_anchor_message_key==='object'
+  ) ? S.session.compression_anchor_message_key : null;
+  const sessionCompressionSummary=(
+    S.session && typeof S.session.compression_anchor_summary==='string'
+  ) ? S.session.compression_anchor_summary.trim() : '';
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
