@@ -1,0 +1,109 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  # Forward-looking Python lint gate (ruff). The Python twin of the ESLint runtime
+  # guard. Runs the curated [tool.ruff] ruleset (E9 + F + B) but only on lines this
+  # PR adds/modifies vs the merge-base — so it keeps NEW code clean without demanding
+  # a reformat of the existing tree's cosmetic backlog (#3273). Fast, fails early.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need history so the gate can diff against the merge-base with master.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ensure origin/master ref is available for the diff gate
+        run: git fetch --no-tags --depth=1 origin master || true
+
+      - name: Ruff forward gate (new/changed lines only)
+        run: python3 scripts/ruff_lint.py --diff origin/master
+
+      - name: Ruff whole-tree report (informational — never blocks)
+        if: always()
+        run: python3 scripts/ruff_lint.py --all
+
+      # Static-JS runtime-error guards. These catch brick-class bugs that throw only
+      # when the browser executes the code — node --check, source-presence tests, and
+      # the mocked pytest suite all miss them. Two complementary ESLint passes:
+      #   * runtime-guard config: no-const-assign / no-import-assign (#3162 class)
+      #   * scope_undef_gate.py: no-undef across the shared classic-<script> global
+      #     scope, catching a function defined nested but called from a sibling
+      #     scope (#3696 — ReferenceError: _sessionAttentionState is not defined).
+      - name: Set up Node for ESLint runtime guards
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install ESLint
+        run: npm install --no-save eslint@^10
+
+      - name: ESLint runtime-error gate (no-const-assign / no-import-assign, #3162)
+        run: npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
+
+      - name: Scope / undefined-reference gate (#3696)
+        run: python3 scripts/scope_undef_gate.py
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't cancel the other shards/versions when one fails — we want the full
+      # failure picture across the matrix in a single run.
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+        # Split the suite across 3 parallel shards per Python version. pytest-shard
+        # partitions tests deterministically by test-id hash; the suite was made
+        # shard-safe (no cross-test state leakage) so every shard passes
+        # independently. See docs/agent-memory note on test-suite shard-safety.
+        # NOTE: pytest-shard is 0-indexed — shard ids must be 0..num_shards-1.
+        # Using 1-based ids would crash the out-of-range job AND silently skip
+        # shard 0's tests.
+        shard: [0, 1, 2]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: |
+            **/setup.cfg
+            **/requirements*.txt
+            **/pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio pytest-shard
+          # ruff is installed so tests/test_ruff_forward_lint.py runs its E9/F821
+          # tree-clean assertions in-suite (mirrors how eslint is available for
+          # tests/test_static_js_runtime_lint.py). If install fails the test
+          # skips cleanly — it never blocks the matrix.
+          pip install ruff || echo "ruff install failed — test_ruff_forward_lint.py will skip"
+          # Install the `mcp` package so tests/test_mcp_server.py runs in CI.
+          # The package is an optional runtime dep of mcp_server.py — users
+          # who run the MCP integration install it themselves; CI installs
+          # it so test coverage exists. If mcp install fails (Python 3.13
+          # wheel not yet available, etc.), tests/test_mcp_server.py uses
+          # importorskip and the matrix stays green.
+          pip install mcp || echo "mcp install failed — test_mcp_server.py will importorskip"
+
+      - name: Run tests (shard ${{ matrix.shard }} of 3)
+        run: pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=3
