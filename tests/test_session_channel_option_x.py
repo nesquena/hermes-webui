@@ -800,12 +800,13 @@ def test_load_session_rearms_stream_on_every_early_return():
     # dead-stream window the re-arm closes).
     assert "stopSessionStream()" in body
 
-    # Every post-teardown early-return path must re-arm. We assert the helper
-    # is called at least as many times as there are early-return exits we know
-    # about (same-session guard, stale-await, fetch-error, undefined-data,
-    # stale-response) — 5 sites + the helper definition reference = 6 mentions
-    # in the file is the floor.
-    assert js.count("_rearmActiveSessionStream()") >= 5, (
+    # Post-teardown early-return paths must re-arm the on-screen session. The
+    # helper is called on at least the same-session no-op guard, the
+    # undefined-data (401) exit, and the stale-response exit. (On the #2979
+    # tail branch the fetch-error path instead uses its own _selfHealedCurrent-
+    # guarded restart, so the helper count there is the same floor.) 3 call
+    # sites is the floor.
+    assert js.count("_rearmActiveSessionStream()") >= 3, (
         "each failed/early-return loadSession exit after stopSessionStream() "
         "must re-arm the on-screen session's stream, else bg_task_complete "
         "delivery dies until a page reload (Greptile P1 r3377162160)"
@@ -818,4 +819,17 @@ def test_load_session_rearms_stream_on_every_early_return():
         "the same-session no-op guard must re-arm before returning so a "
         "previously-killed stream is revived on re-selecting the session"
     )
+
+    # The fetch-error catch must restart the on-screen session's stream — via
+    # either the shared helper or the _selfHealedCurrent-guarded direct restart
+    # (the #2979 tail branch uses the latter so it never spins the reconnect
+    # loop against a just-self-healed 404'd session).
+    catch_ix = body.index("} catch(e) {")
+    catch_src = body[catch_ix:catch_ix + 2600]
+    assert ("_rearmActiveSessionStream()" in catch_src
+            or ("!_selfHealedCurrent" in catch_src
+                and "startSessionStream(currentSid)" in catch_src)), (
+        "fetch-error path must restart the on-screen session's stream"
+    )
+
 
