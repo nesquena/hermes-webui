@@ -6262,7 +6262,7 @@ def handle_get(handler, parsed) -> bool:
                 # .html/.svg can't run privileged same-origin script if navigated
                 # to directly (the in-panel iframe sandbox doesn't cover direct
                 # navigation). nosniff prevents content-type confusion.
-                handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
+                handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox")
                 handler.send_header("X-Content-Type-Options", "nosniff")
                 handler.send_header("Content-Length", str(len(data)))
                 handler.end_headers()
@@ -6304,7 +6304,7 @@ def handle_get(handler, parsed) -> bool:
                     data = _inject_fetch_wrapper(data)
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
-                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals")
                     handler.send_header("Content-Length", str(len(data)))
                     handler.end_headers()
                     handler.wfile.write(data)
@@ -6317,7 +6317,7 @@ def handle_get(handler, parsed) -> bool:
                     data = _inject_fetch_wrapper(data)
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
-                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals")
                     handler.send_header("Content-Length", str(len(data)))
                     handler.end_headers()
                     handler.wfile.write(data)
@@ -6347,7 +6347,7 @@ def handle_get(handler, parsed) -> bool:
                     ).encode("utf-8")
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
-                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals")
                     handler.send_header("Content-Length", str(len(html_content)))
                     handler.end_headers()
                     handler.wfile.write(html_content)
