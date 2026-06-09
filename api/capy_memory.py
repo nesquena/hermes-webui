@@ -498,6 +498,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or _github_issue_comments_path_info(origin_uri) is None
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_commit_comment_reactions_path_matches(raw_origin_text) and (
+        not _github_https_authority_is_exact(raw_origin_text, "api.github.com")
+        or _github_commit_comment_reactions_path_info(origin_uri) is None
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_issue_labels_path_matches(raw_origin_text) and not _github_raw_authority_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
     if _github_latest_release_path_matches(raw_origin_text) and (
@@ -8459,6 +8464,113 @@ def _github_issue_reactions_refresh_summary(origin_uri: str, payload: list[Any])
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_commit_comment_reactions_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or lowered[4] != "comments"
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+        or lowered[6] != "reactions"
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", int(path[5])
+
+
+def _github_commit_comment_reactions_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _candidate_paths(raw_path: str) -> list[str]:
+        paths = [raw_path]
+        current = raw_path
+        for _ in range(6):
+            decoded = unquote(current)
+            if decoded == current:
+                break
+            paths.append(decoded)
+            current = decoded
+        return paths
+
+    def _segment_looks_like_reactions(raw_segment: str) -> bool:
+        segment = raw_segment.lower()
+        return segment == "reactions" or segment.startswith(("reactions%", "reactions?", "reactions\x00", "reactions;", "reactions."))
+
+    def _matches_commit_comment_reactions_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        compacted_lowered = [segment.lower() for segment in path if segment]
+
+        def _has_reactions_after_comment(candidate: list[str]) -> bool:
+            if len(candidate) < 5:
+                return False
+            if candidate[0] != "repos" or candidate[3] != "comments":
+                return False
+            later_segments = candidate[4:]
+            return any(_segment_looks_like_reactions(segment) for segment in later_segments) or any(
+                "%2freactions" in segment.lower() for segment in later_segments
+            )
+
+        exact_layout_candidate = lowered[1:] if len(lowered) > 1 and path[0] == "" else lowered
+        return _has_reactions_after_comment(exact_layout_candidate) or _has_reactions_after_comment(compacted_lowered)
+
+    return any(_matches_commit_comment_reactions_shape(path) for path in _candidate_paths(parts.path))
+
+
+def _json_payload_is_github_commit_comment_reactions_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_commit_comment_reactions_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_reaction_row_is_safe(row) for row in payload)
+
+
+def _github_commit_comment_reactions_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    _repo, comment_id = _github_commit_comment_reactions_path_info(origin_uri) or ("repository", 0)
+    safe_rows = [row for row in payload if _github_reaction_row_is_safe(row)]
+    reaction_counts: dict[str, int] = {}
+    reactors: list[str] = []
+    row_summaries: list[str] = []
+    for row in safe_rows:
+        content = _safe_public_text(row.get("content"), limit=20)
+        reaction_counts[content] = reaction_counts.get(content, 0) + 1
+        user = row.get("user") if isinstance(row.get("user"), dict) else {}
+        login = _safe_public_text(user.get("login") if isinstance(user, dict) else "", limit=80)
+        reaction_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        created = _safe_public_text(row.get("created_at"), limit=80)
+        if login and login not in reactors:
+            reactors.append(login)
+        row_parts = [f"reaction {reaction_id}"]
+        if login:
+            row_parts[-1] = f"reaction {reaction_id} by {login}"
+        row_parts.append(f"content: {content}")
+        if created:
+            row_parts.append(f"created: {created}")
+        if len(row_summaries) < 5:
+            row_summaries.append("; ".join(row_parts))
+    parts = [f"GitHub commit comment {comment_id} reactions", f"reaction count: {len(payload)}"]
+    for content in sorted(reaction_counts):
+        parts.append(f"reaction {content}: {reaction_counts[content]}")
+    if reactors:
+        parts.append(f"reactors: {', '.join(reactors[:5])}")
+    parts.extend(row_summaries)
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_commit_comments_path_info(origin_uri: str) -> tuple[str, str] | None:
     try:
         parts = urlsplit(origin_uri)
@@ -11413,6 +11525,19 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    commit_comment_reactions_path_info = _github_commit_comment_reactions_path_info(origin_uri)
+    if commit_comment_reactions_path_info is not None:
+        if not _json_payload_is_github_commit_comment_reactions_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        repo, comment_id = commit_comment_reactions_path_info
+        return {
+            "metadata_only": True,
+            "title": f"GitHub commit comment {comment_id} reactions {repo}",
+            "summary": _github_commit_comment_reactions_refresh_summary(origin_uri, payload),
+            "origin_uri": f"github commit comment reactions {repo} {comment_id}",
+        }
+    if _github_commit_comment_reactions_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     commit_comments_path_info = _github_commit_comments_path_info(origin_uri)
     if commit_comments_path_info is not None:
         if not _json_payload_is_github_commit_comments_metadata(origin_uri, payload):
@@ -12278,6 +12403,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_issue_reactions_path_info(issue_reactions_origin) is None
         ):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_commit_comment_reactions_path_matches(raw_origin_uri):
+        commit_comment_reactions_origin = _safe_origin_uri(raw_origin_uri, source_id=_safe_public_id(source_id, fallback="source"))
+        if (
+            not _github_https_authority_is_exact(raw_origin_uri, "api.github.com")
+            or _github_commit_comment_reactions_path_info(commit_comment_reactions_origin) is None
+        ):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_forks_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
         raise RuntimeError("refresh fetcher disabled")
     if _github_subscribers_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
@@ -12515,6 +12647,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_issue_reactions_path_matches(safe_origin_uri):
         if (
             _github_issue_reactions_path_info(safe_origin_uri) is None
+            or not _github_https_authority_is_exact(safe_origin_uri, "api.github.com")
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_commit_comment_reactions_path_matches(safe_origin_uri):
+        if (
+            _github_commit_comment_reactions_path_info(safe_origin_uri) is None
             or not _github_https_authority_is_exact(safe_origin_uri, "api.github.com")
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -12958,6 +13097,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_issue_reactions_path_info(final_url) != _github_issue_reactions_path_info(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_commit_comment_reactions_path_matches(safe_origin_uri) and (
+            not _github_https_authority_is_exact(final_url, "api.github.com")
+            or _github_commit_comment_reactions_path_info(final_url) is None
+            or _github_commit_comment_reactions_path_info(final_url) != _github_commit_comment_reactions_path_info(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
         if _github_commit_comments_path_matches(safe_origin_uri) and (
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or _github_commit_comments_path_info(final_url) is None
@@ -13005,6 +13150,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_issue_reactions_path_matches(safe_origin_uri) and (
             _github_issue_reactions_path_info(safe_origin_uri) is None
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_commit_comment_reactions_path_matches(safe_origin_uri) and (
+            _github_commit_comment_reactions_path_info(safe_origin_uri) is None
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -14080,6 +14230,15 @@ def run_source_refresh_jobs(
             issue_timeline_origin = _github_issue_timeline_safe_origin(raw_origin_uri)
             if issue_timeline_origin:
                 origin_uri = issue_timeline_origin
+            else:
+                origin_uri = f"capy-memory://{source_id}"
+        elif _github_commit_comment_reactions_path_matches(raw_origin_uri):
+            commit_comment_reactions_origin = _safe_origin_uri(raw_origin_uri, source_id=source_id)
+            if (
+                _github_https_authority_is_exact(raw_origin_uri, "api.github.com")
+                and _github_commit_comment_reactions_path_info(commit_comment_reactions_origin) is not None
+            ):
+                origin_uri = commit_comment_reactions_origin
             else:
                 origin_uri = f"capy-memory://{source_id}"
         elif _github_branch_protection_route_path_matches(raw_origin_uri) and (
