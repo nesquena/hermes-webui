@@ -63,6 +63,9 @@ _PROTECTED_BOUNDARIES = [
     "model_provider_template",
     "template_reset",
     "recovery_action",
+    "space_demo_run",
+    "space_demo_list",
+    "space_demo_run_all",
 ]
 
 _MODEL_HINT_ORDER = [
