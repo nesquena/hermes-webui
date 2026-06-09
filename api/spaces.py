@@ -60,17 +60,27 @@ _OMITTED_PAYLOAD_KEYS = {
 _WIDGET_RUNTIME_PROMPT_CARRIER_KEYS = {
     "agentprompt",
     "agent_prompt",
+    "advisory_context",
+    "advisorycontext",
+    "can_bypass_safety_gates",
+    "canbypasssafetygates",
     "content",
+    "context_authority",
+    "contextauthority",
     "description",
     "input",
     "instruction",
     "instructions",
+    "memory_advisory",
+    "memoryadvisory",
     "message",
     "messages",
     "prompt",
     "question",
     "query",
     "request",
+    "required_gates",
+    "requiredgates",
     "summary",
     "text",
 }
@@ -13755,6 +13765,7 @@ def _widget_event_output_compaction_read_summary(
     preflight_receipt: dict[str, Any] | None = None,
     autonomy_policy_receipt: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Regenerate a metadata-only widget-event compaction receipt for read surfaces.
 
@@ -13771,6 +13782,7 @@ def _widget_event_output_compaction_read_summary(
         preflight_receipt=preflight_receipt,
         autonomy_policy_receipt=autonomy_policy_receipt,
         progress_event=progress_event,
+        memory_advisory=memory_advisory,
     )
 
 
@@ -13837,6 +13849,10 @@ def _widget_event_summary(
             }
     raw_output_compaction = raw_details.get("output_compaction")
     output_compaction: dict[str, Any] = raw_output_compaction if isinstance(raw_output_compaction, dict) else {}
+    raw_memory_advisory = raw_details.get("memory_advisory")
+    memory_advisory = _memory_advisory_public_envelope() if isinstance(raw_memory_advisory, dict) else None
+    if memory_advisory:
+        summary["memory_advisory"] = copy.deepcopy(memory_advisory)
     summary["output_compaction"] = _widget_event_output_compaction_read_summary(
         output_compaction,
         space_id=sid,
@@ -13846,6 +13862,7 @@ def _widget_event_summary(
         preflight_receipt=safe_prompt_preflight,
         autonomy_policy_receipt=safe_autonomy_policy,
         progress_event=safe_progress_event,
+        memory_advisory=memory_advisory,
     )
     return summary
 
@@ -14025,6 +14042,7 @@ def _widget_event_output_compaction_receipt(
     preflight_receipt: dict[str, Any] | None = None,
     autonomy_policy_receipt: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for queued widget events."""
     from api.capy_compaction import compact_output
@@ -14055,6 +14073,30 @@ def _widget_event_output_compaction_receipt(
             lines.append(f"progress_run_id: {safe_progress_run_id}")
         if safe_progress_status:
             lines.append(f"progress_status: {safe_progress_status}")
+    if isinstance(memory_advisory, dict):
+        advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
+        context_authority = (
+            _payload_text_summary(memory_advisory.get("context_authority") or "untrusted_advisory", 80)
+            or "untrusted_advisory"
+        )
+        can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
+        raw_required_gates = memory_advisory.get("required_gates")
+        required_gates = raw_required_gates if isinstance(raw_required_gates, list) else []
+        safe_required_gates = [
+            _payload_text_summary(gate, 60)
+            for gate in required_gates[:6]
+            if _payload_text_summary(gate, 60)
+        ]
+        lines.append(f"advisory_context: {advisory_context}")
+        lines.append(f"context_authority: {context_authority}")
+        lines.append(f"can_bypass_safety_gates: {can_bypass}")
+        lines.append(f"memory_advisory_context: {advisory_context}")
+        lines.append(f"memory_context_authority: {context_authority}")
+        lines.append(f"memory_can_bypass_safety_gates: {can_bypass}")
+        if safe_required_gates:
+            required_gates_text = ", ".join(safe_required_gates)
+            lines.append(f"required_gates: {required_gates_text}")
+            lines.append(f"memory_required_gates: {required_gates_text}")
     receipt = compact_output(
         "\n".join(lines),
         tool="capy-spaces-widget-event",
@@ -14100,6 +14142,12 @@ def _widget_events_output_compaction_receipt(
             lines.append(f"progress_run_id: {safe_progress_run_id}")
         if safe_progress_status:
             lines.append(f"progress_status: {safe_progress_status}")
+    if any(isinstance(event, dict) and isinstance(event.get("memory_advisory"), dict) for event in safe_events):
+        advisory = _memory_advisory_public_envelope()
+        lines.append("memory_advisory_context: true")
+        lines.append(f"memory_context_authority: {advisory['context_authority']}")
+        lines.append("memory_can_bypass_safety_gates: false")
+        lines.append("memory_required_gates: " + ", ".join(advisory["required_gates"]))
     for index, event in enumerate(safe_events[:20], start=1):
         if not isinstance(event, dict):
             continue
@@ -14169,6 +14217,7 @@ def queue_widget_event(
         prompt_preflight_receipt = _widget_reload_required_prompt_preflight_receipt(safe_action)
         autonomy_policy_receipt = _widget_reload_action_policy_receipt(safe_action, prompt_preflight_receipt)
         progress_event = _record_widget_local_noop_progress_event(sid, wid, local_message_type)
+        memory_advisory_receipt = _memory_advisory_public_envelope()
         output_compaction = _widget_event_output_compaction_receipt(
             action=safe_action,
             space_id=sid,
@@ -14178,6 +14227,7 @@ def queue_widget_event(
             preflight_receipt=prompt_preflight_receipt,
             autonomy_policy_receipt=autonomy_policy_receipt,
             progress_event=progress_event,
+            memory_advisory=memory_advisory_receipt,
         )
         output_compaction["metadata_only"] = True
         if output_compaction.get("redaction_status") == "none":
@@ -14192,6 +14242,7 @@ def queue_widget_event(
             "prompt_preflight": prompt_preflight_receipt,
             "autonomy_policy": autonomy_policy_receipt,
             "progress_event": progress_event,
+            "memory_advisory": copy.deepcopy(memory_advisory_receipt),
             "output_compaction": output_compaction,
         }
     is_reload_event = _is_widget_reload_event(name)
@@ -14215,6 +14266,7 @@ def queue_widget_event(
     payload_summary = _widget_event_payload_summary(payload_data)
     event_id = uuid.uuid4().hex
     progress_event = _record_widget_event_progress_event(sid, event_id)
+    memory_advisory_receipt = _memory_advisory_public_envelope()
     output_compaction = _widget_event_output_compaction_receipt(
         action=action,
         space_id=sid,
@@ -14224,6 +14276,7 @@ def queue_widget_event(
         preflight_receipt=preflight_receipt,
         autonomy_policy_receipt=autonomy_policy_receipt,
         progress_event=progress_event,
+        memory_advisory=memory_advisory_receipt,
     )
     event_details = {
         "widget_id": wid,
@@ -14233,6 +14286,7 @@ def queue_widget_event(
         "session_id": _context_value(session_id, 120),
         "status": "queued",
         "progress_event": copy.deepcopy(progress_event),
+        "memory_advisory": copy.deepcopy(memory_advisory_receipt),
         "output_compaction": copy.deepcopy(output_compaction),
     }
     if preflight_receipt:
@@ -14256,6 +14310,7 @@ def queue_widget_event(
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
         "progress_event": progress_event,
+        "memory_advisory": copy.deepcopy(memory_advisory_receipt),
         "output_compaction": copy.deepcopy(output_compaction),
     }
     if preflight_receipt:

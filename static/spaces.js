@@ -141,6 +141,7 @@
       renderPromptPreflightEvidence(result && result.prompt_preflight) +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
       renderPackageProgressEvidence(result && result.progress_event, 'Widget event progress') +
+      renderMemoryAdvisoryEvidence(result && result.memory_advisory) +
       renderCompactionEvidence(result && (result.output_compaction || result.compaction)) + '</div>';
   }
 
@@ -2106,7 +2107,7 @@
 
   function widgetEventPayloadSummaryForDisplay(payloadSummary){
     if (!payloadSummary || typeof payloadSummary !== 'object' || Array.isArray(payloadSummary)) return {};
-    const promptCarrierKeys = ['agentprompt', 'agent_prompt', 'content', 'description', 'input', 'instruction', 'instructions', 'message', 'messages', 'prompt', 'question', 'query', 'request', 'summary', 'text'];
+    const promptCarrierKeys = ['agentprompt', 'agent_prompt', 'advisory_context', 'advisorycontext', 'can_bypass_safety_gates', 'canbypasssafetygates', 'content', 'context_authority', 'contextauthority', 'description', 'input', 'instruction', 'instructions', 'memory_advisory', 'memoryadvisory', 'message', 'messages', 'prompt', 'question', 'query', 'request', 'required_gates', 'requiredgates', 'summary', 'text'];
     const bodyMarkers = ['body', 'generated', 'generatedbody', 'generatedcode', 'rawbody', 'rawcode', 'widgetbody'];
     const safe = {};
     Object.keys(payloadSummary).slice(0, 50).forEach(function(key){
@@ -2142,6 +2143,7 @@
       };
       const promptPreflightEvidence = eventReceiptHtml(renderPromptPreflightEvidence(event && event.prompt_preflight));
       const policyEvidence = renderActionPolicyEvidence(event && event.autonomy_policy);
+      const advisoryEvidence = renderMemoryAdvisoryEvidence(event && event.memory_advisory);
       const compactionEvidence = eventReceiptHtml(renderCompactionEvidence(event && event.output_compaction));
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventName)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(widgetId)+' · '+escapeHtml(status)+'</div>' +
@@ -2149,6 +2151,7 @@
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
         promptPreflightEvidence +
         policyEvidence +
+        advisoryEvidence +
         compactionEvidence +
         '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No queued widget events.</div>';

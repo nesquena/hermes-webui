@@ -667,6 +667,7 @@ Recent completed slices:
 - `feat(spaces): require widget reload policy receipts`
   - Added RED/GREEN backend coverage proving widget reload/refresh aliases without a free-form prompt or reason still return metadata-only `required` prompt-preflight and action-policy receipts beside structured progress events.
   - Persisted the same required-preflight/action-policy evidence on queued widget refresh events while keeping hostile renderer/script/API-key/token fixture markers out of responses, event summaries, and progress telemetry.
+  - Follow-up: queued widget reload/refresh events now return and list the server-generated Memory Tree advisory/no-authority envelope, thread that advisory boundary into compaction evidence, and ignore caller-forged memory authority so reload context cannot bypass prompt-preflight, approval, sandbox preview, visual QA, or rollback/recovery gates.
 
 - `feat(spaces): add local service template policy receipts`
   - Added RED/GREEN backend coverage proving the Local Service Dashboard template install boundary returns metadata-only prompt-preflight and `space.template.install.local_service` autonomy-policy receipts for direct, route, and tool-adapter installs while preserving redaction of renderer/html/source/API-key/token/password/secret fields.

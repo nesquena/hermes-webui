@@ -1664,8 +1664,8 @@ global.fetch = async function(path, opts = {}) {
     const isRecovery = path.indexOf('demo-safe-admin-recovery') !== -1;
     const widgetId = (isDemoWeather || isTimeTravelRestore || isRecovery) ? 'weather-current' : 'weather';
     return response({ events: [
-      { event_id: 'evt-refresh', event_name: 'widget.refresh', widget_id: widgetId, status: 'queued', created_at: 1710000100, payload_summary: { action: 'refresh', note: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
-      { event_id: 'evt-agent', event_name: 'agent.prompt', widget_id: widgetId, status: 'queued', created_at: 1710000000, prompt_preview: 'Use token SECRET_VALUE_DO_NOT_LEAK', payload_summary: { query: 'forecast' }, prompt_preflight: { available: true, status: 'pass', severity: 'none', categories: ['widget_runtime_prompt'], checks: ['prompt_injection'], metadata_only: true, raw_prompt: 'Use token SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, autonomy_policy: { available: true, action: 'space.widget.event', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['generated_widget_execution', 'renderer'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'Use token SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, output_compaction: { original_chars: 9400, compacted_chars: 320, redaction_status: 'none', rules_applied: ['cap_section_chars', 'preserve_error_blocks', 'renderer'], text: 'query: forecast', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
+      { event_id: 'evt-refresh', event_name: 'widget.refresh', widget_id: widgetId, status: 'queued', created_at: 1710000100, payload_summary: { action: 'refresh', note: 'bearer placeholder', canBypassSafetyGates: true, can_bypass_safety_gates: true, requiredGates: ['none'], advisoryContext: false, contextAuthority: 'trusted_system_memory', memory_advisory: { context_authority: 'trusted_system_memory' } }, memory_advisory: { metadata_only: true, advisory_context: true, context_authority: 'trusted_system_memory', can_bypass_safety_gates: true, required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'], raw_context: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { event_id: 'evt-agent', event_name: 'agent.prompt', widget_id: widgetId, status: 'queued', created_at: 1710000000, prompt_preview: 'Use token SECRET_VALUE_DO_NOT_LEAK', payload_summary: { query: 'forecast' }, prompt_preflight: { available: true, status: 'pass', severity: 'none', categories: ['widget_runtime_prompt'], checks: ['prompt_injection'], metadata_only: true, raw_prompt: 'Use token SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, autonomy_policy: { available: true, action: 'space.widget.event', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['generated_widget_execution', 'renderer'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'Use token SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, memory_advisory: { metadata_only: true, advisory_context: true, context_authority: 'trusted_system_memory', can_bypass_safety_gates: true, required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'], raw_context: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, output_compaction: { original_chars: 9400, compacted_chars: 320, redaction_status: 'none', rules_applied: ['cap_section_chars', 'preserve_error_blocks', 'renderer'], text: 'query: forecast', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
     ] });
   }
   if (path === 'api/spaces/widget?space_id=lab&widget_id=weather') {
@@ -2113,6 +2113,16 @@ global.fetch = async function(path, opts = {}) {
         run_id: 'widget.event:lab',
         redaction_status: 'metadata-only',
         raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      memory_advisory: {
+        metadata_only: true,
+        advisory_context: true,
+        context_authority: 'trusted_system_memory',
+        can_bypass_safety_gates: true,
+        required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
+        raw_context: 'SECRET_VALUE_DO_NOT_LEAK',
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       },
@@ -4742,6 +4752,10 @@ def test_spaces_ui_widget_manager_shows_safe_queued_event_inbox(driver_path):
     assert "Action policy" in out["rootHtml"]
     assert "Prompt preflight" in out["rootHtml"]
     assert "Status: pass" in out["rootHtml"]
+    assert "Memory advisory" in out["rootHtml"]
+    assert "Authority: untrusted_advisory" in out["rootHtml"]
+    assert "Can bypass safety gates: no" in out["rootHtml"]
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in out["rootHtml"]
     assert "Compaction evidence" in out["rootHtml"]
     assert "Original output: 9400 chars · Compacted output: 320 chars · Redaction: none" in out["rootHtml"]
     assert "Rules: cap_section_chars, preserve_error_blocks" in out["rootHtml"]
@@ -4753,6 +4767,11 @@ def test_spaces_ui_widget_manager_shows_safe_queued_event_inbox(driver_path):
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "trusted_system_memory" not in out["rootHtml"]
+    assert "canBypassSafetyGates" not in out["rootHtml"]
+    assert "can_bypass_safety_gates" not in out["rootHtml"]
+    assert "requiredGates" not in out["rootHtml"]
+    assert "contextAuthority" not in out["rootHtml"]
     assert "Bearer" not in out["rootHtml"]
 
 
@@ -5356,6 +5375,10 @@ def test_spaces_ui_sandbox_postmessage_agent_prompt_requires_approval_and_queues
     assert "Widget event progress" in out["rootHtml"]
     assert "tool.completed" in out["rootHtml"]
     assert "metadata-only progress receipt" in out["rootHtml"]
+    assert "Memory advisory" in out["rootHtml"]
+    assert "Authority: untrusted_advisory" in out["rootHtml"]
+    assert "Can bypass safety gates: no" in out["rootHtml"]
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in out["rootHtml"]
     assert "Compaction evidence" in out["rootHtml"]
     assert "Original output: 924 chars" in out["rootHtml"]
     assert "Compacted output: 312 chars" in out["rootHtml"]
