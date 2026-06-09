@@ -200,16 +200,16 @@ def _run_git(
     extra_configs: list[tuple[str, str]] = []
     temporary_attributes: list[str] = []
     temporary_dirs: list[str] = []
-    if effective_destructive and disable_filter_attributes:
-        fd, attributes_path = tempfile.mkstemp(prefix="hermes-webui-git-attrs-")
-        os.close(fd)
-        attributes_file = attributes_path
-        temporary_attributes = [attributes_path]
-        extra_configs = _destructive_filter_overrides(cwd, run_env)
-    if effective_destructive:
-        hooks_path = tempfile.mkdtemp(prefix="hermes-webui-git-hooks-")
-        temporary_dirs = [hooks_path]
     try:
+        if effective_destructive and disable_filter_attributes:
+            fd, attributes_path = tempfile.mkstemp(prefix="hermes-webui-git-attrs-")
+            os.close(fd)
+            attributes_file = attributes_path
+            temporary_attributes = [attributes_path]
+            extra_configs = _destructive_filter_overrides(cwd, run_env)
+        if effective_destructive:
+            hooks_path = tempfile.mkdtemp(prefix="hermes-webui-git-hooks-")
+            temporary_dirs = [hooks_path]
         result = subprocess.run(
             _hardened_git_argv(
                 args,
