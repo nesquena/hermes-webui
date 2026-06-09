@@ -126,6 +126,29 @@ function _thinkingFenceMarkerAt(text, index){
   return '';
 }
 
+function _nextThinkingOpener(text, start){
+  // Index of the earliest complete thinking opener at/after `start`, or -1.
+  // Cheap indexOf per opener — lets the scanner bulk-skip plain trailing content
+  // instead of walking it char-by-char (#3633 Codex per-token perf catch).
+  let best=-1;
+  for(const p of _thinkPairs){
+    const i=text.indexOf(p.open,start);
+    if(i!==-1&&(best===-1||i<best)) best=i;
+  }
+  return best;
+}
+
+function _textTailIsPartialOpener(text){
+  // True when the END of text is a non-empty proper prefix of some opener
+  // (e.g. "<thi" for "<think>"). Decides whether a streaming tail might be a
+  // forming block worth code-aware handling.
+  for(const p of _thinkPairs){
+    const m=Math.min(p.open.length-1,text.length);
+    for(let n=m;n>0;n--){ if(p.open.startsWith(text.slice(text.length-n))) return true; }
+  }
+  return false;
+}
+
 function _lineIsIndentedCode(text, lineStart){
   // True when the line beginning at lineStart is a markdown indented code block
   // line (>=4 leading spaces or a leading tab, and not blank). lineStart must be
@@ -166,6 +189,27 @@ function _extractInlineThinkingFromContent(rawContent, existingReasoning, option
     const reasoning=String(existingReasoning||'').trim();
     return {reasoning,content:text,thinkingText:reasoning,displayText:text,inThinking:false};
   }
+  // Fast path (#3633 Codex perf catch — _parseStreamState / syncInflightAssistantMessage
+  // call this on the FULL accumulator on every streamed token, so the common no-tag
+  // case must not do the O(length) char walk per call). If no complete opener is
+  // present AND — when streaming — the tail is not a prefix of an opener, there is
+  // nothing to extract: return the text unchanged (two cheap substring scans).
+  if(!_thinkPairs.some(p=>text.indexOf(p.open)!==-1)){
+    let tailIsPartialOpener=false;
+    if(streaming){
+      for(const p of _thinkPairs){
+        const maxPrefix=Math.min(p.open.length-1,text.length);
+        for(let n=maxPrefix;n>0;n--){
+          if(p.open.startsWith(text.slice(text.length-n))){tailIsPartialOpener=true;break;}
+        }
+        if(tailIsPartialOpener) break;
+      }
+    }
+    if(!tailIsPartialOpener){
+      const reasoning=String(existingReasoning||'').trim();
+      return {reasoning,content:text,thinkingText:reasoning,displayText:text,inThinking:false};
+    }
+  }
   const visible=[];
   const extracted=[];
   let cursor=0;
@@ -183,7 +227,26 @@ function _extractInlineThinkingFromContent(rawContent, existingReasoning, option
   // and has no leading thinking wrapper keeps its leading whitespace (#3633
   // Codex catch).
   let leadingRemoved=false;
+  // Index of the next complete opener at/after `index` — lets the scanner bulk-skip
+  // plain trailing content instead of walking it char-by-char every streamed token
+  // (#3633 Codex per-token perf catch).
+  let nextOpener=_nextThinkingOpener(text,0);
   while(index<text.length){
+    if(nextOpener===-1||index>nextOpener) nextOpener=_nextThinkingOpener(text,index);
+    if(nextOpener===-1){
+      // No further COMPLETE opener ahead — remaining tail is plain and is
+      // appended in one slice, EXCEPT during streaming when the tail is a prefix
+      // of an opener ("...<thi"): it may be a forming block and must be
+      // suppressed, but ONLY if outside code context (a partial opener inside
+      // inline-backtick / fenced / indented code stays visible — master parity).
+      // Code state needs the char walk, so fall through in that case (bounded —
+      // a partial tail is a transient single token) instead of bulk-skipping.
+      if(streaming&&_textTailIsPartialOpener(text)){
+        // fall through to the code-aware char walk for the tail
+      } else {
+        break;
+      }
+    }
     const ch=text[index];
     if(index>0&&text[index-1]==='\n') lineIsIndentedCode=_lineIsIndentedCode(text,index);
     const marker=_thinkingFenceMarkerAt(text,index);
