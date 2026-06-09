@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.345] — 2026-06-09 — Release LI (model override picker for scheduled jobs)
+
+### Added
+
+- **Scheduled jobs can now set a per-job model override from the WebUI.** The Tasks → scheduled-jobs create/edit form has a new **Model Override** dropdown, populated from the configured `/api/models` catalog and grouped by provider (with provider context preserved so duplicate model IDs across providers stay distinguishable). The default option keeps the existing profile/system-default behavior; selections persist across edit and duplicate, can be cleared back to default, and the picker is disabled in no-agent mode. This surfaces the per-job model/provider override that hermes-agent's scheduler already supported, bringing the WebUI Tasks panel to parity with the CLI. (#3809)
+
 ## [v0.51.344] — 2026-06-09 — Release LH (sidebar fork-lineage grouping)
 
 ### Fixed

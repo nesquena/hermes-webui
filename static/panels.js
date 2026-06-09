@@ -897,6 +897,10 @@ function duplicateCurrentCron(){
     deliver: job.deliver || 'local',
     profile: job.profile || '',
     toast_notifications: job.toast_notifications !== false,
+    no_agent: !!job.no_agent,
+    script: job.script || '',
+    model: job.model || '',
+    provider: job.provider || '',
     isEdit: false,
   });
   if (!_cronSkillsCache) {
@@ -931,7 +935,7 @@ function openCronCreate(){
   _cronMode = 'create';
   _cronIsDuplicate = false;
   _cronSelectedSkills = [];
-  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', toast_notifications:true, isEdit:false });
+  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', toast_notifications:true, model:'', provider:'', isEdit:false });
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
   loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
@@ -952,6 +956,8 @@ function openCronEdit(job){
     toast_notifications: job.toast_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
+    model: job.model || '',
+    provider: job.provider || '',
     isEdit: true,
   });
   if (!_cronSkillsCache) {
@@ -962,7 +968,7 @@ function openCronEdit(job){
   loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', isEdit }){
+function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', model='', provider='', isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
@@ -1021,6 +1027,13 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           <div class="detail-form-hint">${esc(t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time')}</div>
         </div>
         <div class="detail-form-row">
+          <label for="cronFormModel">${esc(t('cron_model_label') || 'Model Override')}</label>
+          <select id="cronFormModel"${isNoAgent ? ' disabled' : ''}>
+            <option value="">loading...</option>
+          </select>
+          <div class="detail-form-hint">${esc(t('cron_model_hint') || 'Override the default model for this job.')}</div>
+        </div>
+        <div class="detail-form-row">
           <label for="cronFormToastNotifications">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</label>
           <label class="detail-form-check" for="cronFormToastNotifications">
             <input type="checkbox" id="cronFormToastNotifications" ${toastNotifications ? 'checked' : ''}>
@@ -1035,6 +1048,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
   if (empty) empty.style.display = 'none';
   _setCronHeaderButtons(isEdit ? 'edit' : 'create');
   _populateCronDeliverOptions(deliver, isEdit);
+  _populateCronFormModelSelect(model, provider, isNoAgent);
   if (!isNoAgent) _renderCronSkillTags();
   const scheduleEl = $('cronFormSchedule');
   if (scheduleEl) {
@@ -1075,6 +1089,72 @@ async function _populateCronDeliverOptions(selectedValue, isEdit) {
     sel.innerHTML = '<option value="local">Local (save output only)</option>';
   }
   sel.disabled = false;
+}
+
+async function _populateCronFormModelSelect(selectedModel, selectedProvider, disabled){
+  const sel = $('cronFormModel');
+  if (!sel) return;
+  delete sel.dataset.loaded;
+  sel.disabled = true;
+  sel.innerHTML = `<option value="">${esc(t('cron_model_use_default') || 'Default (use profile/system default)')}</option>`;
+  try {
+    const data = await api('/api/models');
+    const groups = (Array.isArray(data && data.groups) && data.groups.length) ? data.groups : [];
+    for (const g of groups) {
+      const og = document.createElement('optgroup');
+      og.label = g.provider || g.provider_id || 'Configured';
+      if (g.provider_id) og.dataset.provider = g.provider_id;
+      for (const m of (Array.isArray(g.models) ? g.models : [])) {
+        if (!m || !m.id) continue;
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.label || m.id;
+        if (g.provider_id) opt.dataset.provider = g.provider_id;
+        og.appendChild(opt);
+      }
+      if (og.children.length) sel.appendChild(og);
+    }
+
+    let found = false;
+    if (selectedModel) {
+      if (typeof _applyModelToDropdown === 'function') {
+        found = !!_applyModelToDropdown(selectedModel, sel, selectedProvider || null);
+      }
+      if (!found) {
+        for (const opt of sel.options) {
+          if (opt.value !== selectedModel) continue;
+          const prov = opt.dataset.provider || (opt.parentElement && opt.parentElement.dataset.provider) || '';
+          if (!selectedProvider || prov === selectedProvider) {
+            opt.selected = true;
+            found = true;
+            break;
+          }
+        }
+      }
+    } else {
+      found = true;
+    }
+
+    if (selectedModel && !found) {
+      const opt = document.createElement('option');
+      opt.value = selectedModel;
+      opt.textContent = `${selectedModel} (${t('not_available') || 'not available'})`;
+      if (selectedProvider) opt.dataset.provider = selectedProvider;
+      opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.dataset.loaded = '1';
+  } catch (e) {
+    console.warn('Failed to load cron model picker:', e.message);
+    // Load failed: dataset.loaded stays unset so saveCronForm omits model/provider
+    // and preserves any existing override. Keep the select DISABLED rather than
+    // re-enabling it showing only "Default" — an enabled "Default"-only select
+    // would let the user think they cleared the override when a save actually
+    // preserves it (Opus advisor, stage-345). A reopen retries the load.
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = !!disabled;
 }
 
 function _renderCronSkillTags(){
@@ -1157,11 +1237,27 @@ async function saveCronForm(){
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
   try{
+    const modelEl = $('cronFormModel');
+    const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
+    const selectedModel = modelEl ? (modelEl.value || '').trim() : '';
     if (_editingCronId) {
       const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications};
       if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       if (deliver) updates.deliver = deliver;
+      if (modelEl) {
+        if (selectedModel && modelLoaded) {
+          const modelState = (typeof _modelStateForSelect === 'function')
+            ? _modelStateForSelect(modelEl, selectedModel)
+            : { model: selectedModel, model_provider: null };
+          updates.model = modelState.model || null;
+          updates.provider = modelState.model_provider || null;
+        } else if (modelLoaded) {
+          updates.model = null;
+          updates.provider = null;
+        }
+        // else: select not yet populated — omit model/provider to preserve saved value
+      }
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
       _editingCronId = null;
@@ -1176,6 +1272,18 @@ async function saveCronForm(){
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
+    if (modelEl && modelLoaded) {
+      if (selectedModel) {
+        const modelState = (typeof _modelStateForSelect === 'function')
+          ? _modelStateForSelect(modelEl, selectedModel)
+          : { model: selectedModel, model_provider: null };
+        body.model = modelState.model || null;
+        body.provider = modelState.model_provider || null;
+      }
+    } else if (_cronIsDuplicate && _cronPreFormDetail && _cronPreFormDetail.model) {
+      body.model = _cronPreFormDetail.model;
+      body.provider = _cronPreFormDetail.provider || null;
+    }
     const res = await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
     _cronPreFormDetail = null;
     _cronIsDuplicate = false;
