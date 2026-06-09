@@ -113,7 +113,7 @@ def test_render_messages_uses_virtual_window_and_spacer_measurement_path():
     assert "_messageVirtualSpacer(virtualWindow.bottomPad,'after')" in render_body
     assert "_updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);" in render_body
     assert "const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));" in render_body
-    assert "if(virtualWindow.virtualized&&renderableRawIdxs.has(key)&&!renderedRawIdxs.has(key)) continue;" in render_body
+    assert "if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;" in render_body
     assert "if(hasServerOlder){" in render_body
     assert "_showEarlierRenderedMessages();" not in render_body
     top_spacer_idx = render_body.index("_messageVirtualSpacer(virtualWindow.topPad,'before')")
