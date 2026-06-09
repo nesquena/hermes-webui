@@ -122,8 +122,14 @@ def test_wakeup_resolve_passes_prefer_cached_catalog(monkeypatch):
 
     real = routes._resolve_compatible_session_model_state
 
-    def _spy(model_id, model_provider=None, *, prefer_cached_catalog=False):
+    def _spy(model_id, model_provider=None, *, profile_provider=None,
+             profile_default_model=None, prefer_cached_catalog=False):
         seen["prefer_cached_catalog"] = prefer_cached_catalog
+        # The wakeup path now also threads the session's profile model defaults
+        # through (greptile fix) so a brand-new session with an empty model
+        # falls back to the profile default, not the global DEFAULT_MODEL.
+        seen["profile_provider"] = profile_provider
+        seen["profile_default_model"] = profile_default_model
         return ("m", None, False)
 
     monkeypatch.setattr(

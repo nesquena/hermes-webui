@@ -300,6 +300,17 @@ def _reaper_loop() -> None:
                         SESSION_CHANNELS.pop(sid, None)
                         collected.append(sid)
             if collected:
+                # Prune the per-session coalesce timestamp map for any collected
+                # session so _LAST_EMIT_TS does not grow one permanent entry per
+                # session that ever fired a bg task (greptile flag). The pending
+                # payload/timer maps self-clean when their timers fire, but
+                # _LAST_EMIT_TS is only ever written, never deleted — sweep it
+                # here alongside the channel it belongs to. A session that fires
+                # again after collection simply re-seeds its entry (first emit in
+                # the new window fires immediately, which is correct).
+                with _EMIT_COALESCE_LOCK:
+                    for sid in collected:
+                        _LAST_EMIT_TS.pop(sid, None)
                 logger.debug("SessionChannel reaper collected: %s", collected)
         except Exception:
             logger.warning("SessionChannel reaper iteration failed", exc_info=True)

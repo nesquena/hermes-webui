@@ -10750,7 +10750,10 @@ def _handle_session_sse_stream(handler, parsed):
         handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
         handler.send_header('Cache-Control', 'no-cache')
         handler.send_header('X-Accel-Buffering', 'no')
-        handler.send_header('Connection', 'keep-alive')
+        # #3103: omit the Connection header — rely on the HTTP/1.1 keep-alive
+        # default, matching the other long-lived SSE handlers (gateway/session
+        # events) that fixed the reconnect-storm. An explicit value here is a
+        # third, inconsistent approach (greptile flag).
         handler.end_headers()
         _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
@@ -12120,10 +12123,17 @@ def start_session_turn(
     requested_provider = getattr(s, "model_provider", None)
     # Server-initiated wakeup (Option Z): resolve persisted model via the
     # standard helper in cache-only mode so wakeups never trigger a cold
-    # catalog rebuild.
+    # catalog rebuild. Thread the session's PROFILE model defaults through too
+    # (mirrors _handle_chat_start) — a brand-new session that spawned a
+    # background task before its first human turn has an empty s.model, and
+    # without the profile defaults the resolver would fall back to the global
+    # DEFAULT_MODEL instead of the profile's configured default (greptile flag).
+    _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
     model, model_provider, normalized_model = _resolve_compatible_session_model_state(
         requested_model,
         requested_provider,
+        profile_provider=_pp_provider,
+        profile_default_model=_pp_default,
         prefer_cached_catalog=True,
     )
     resp = _start_run(
