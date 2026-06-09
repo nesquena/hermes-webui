@@ -766,12 +766,7 @@ async function loadSession(sid){
   // previous transcript may already have been cleared for the pending switch.
   // Static force-reload invariant: if(currentSid===sid && !forceReload) return;
   if(currentSid===sid && !forceReload && !_loadingSessionId){
-    // #2971: a prior failed/early-returned loadSession may have torn down this
-    // session's stream (stopSessionStream at the top) without ever reaching
-    // the success-path startSessionStream(). Re-selecting the same session
-    // would otherwise no-op here and leave it with a dead EventSource. Re-arm
-    // before returning (idempotent: no-ops if already live for this sid).
-    _rearmActiveSessionStream();
+    _rearmActiveSessionStream(); // #2971: revive stream on same-session re-select
     return;
   }
   // Mark this session as the in-flight load. Subsequent loadSession() calls
@@ -796,15 +791,7 @@ async function loadSession(sid){
     // continuation can't wipe S.messages / write the loading placeholder /
     // close streams for the session the user actually landed on (#1060 guard,
     // extended to cover the new pre-switch await).
-    if (_loadingSessionId !== sid) {
-      // #2971: stale continuation after the draft-save await — a newer load
-      // (rapid B→C) took over and owns final arming. Re-arm the genuinely
-      // displayed S.session so our top-of-function teardown doesn't leave it
-      // stream-dead in the handoff window (idempotent; the newer load's own
-      // stop+start reconciles its target).
-      _rearmActiveSessionStream();
-      return;
-    }
+    if (_loadingSessionId !== sid) return;
   }
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external

@@ -816,8 +816,7 @@ def test_session_stream_onerror_clears_closed_source_so_reconnect_proceeds():
 # viewing with _sessionEventSource === null and no path back to a live stream:
 #   - fetch error (network / non-404)          → returns after stopSessionStream
 #   - api() returned undefined (401 redirect)  → returns
-#   - stale-load race (_loadingSessionId !== sid) → returns
-#   - post-draft-save stale continuation       → returns
+#   - stale-load race (_loadingSessionId !== sid after data) → returns
 #   - same-session no-op guard (currentSid===sid && !forceReload) → returns
 #     BEFORE the teardown, but a *prior* failed load already nulled the source,
 #     and re-selecting the same session would otherwise no-op forever.
@@ -856,11 +855,11 @@ def test_load_session_rearms_stream_on_every_early_return():
     assert "stopSessionStream()" in body
 
     # Post-teardown early-return paths must re-arm. The helper covers the
-    # same-session guard, the post-draft stale continuation, the undefined-data
-    # (401) exit, and the stale-response exit — 4 helper call sites is the
-    # floor. (The fetch-error path uses its own `_selfHealedCurrent`-guarded
-    # restart, asserted separately below.)
-    assert js.count("_rearmActiveSessionStream()") >= 4, (
+    # same-session guard, the undefined-data (401) exit, and the stale-response
+    # exit — 3 helper call sites is the floor. (The fetch-error path uses its
+    # own `_selfHealedCurrent`-guarded restart, asserted separately below; the
+    # rapid-switch post-draft handoff is owned by the newer load's own arming.)
+    assert js.count("_rearmActiveSessionStream()") >= 3, (
         "each failed/early-return loadSession exit after stopSessionStream() "
         "must re-arm the on-screen session's stream, else bg_task_complete "
         "delivery dies until a page reload (Greptile P1 r3377162160)"
