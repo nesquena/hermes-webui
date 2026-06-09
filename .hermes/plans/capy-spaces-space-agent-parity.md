@@ -96,6 +96,11 @@ Recent completed slices:
   - Added RED/GREEN backend coverage by strengthening `_assert_widget_sdk_helper_receipts` so no-space widget SDK helpers must return the server-generated Memory Tree advisory/no-authority envelope beside existing prompt-preflight, autonomy-policy, progress, and compaction receipts.
   - Threaded advisory boundary metadata into helper compaction evidence for widget API version, size/position/rendered-size helpers, ID normalizers, and current-id lookups while preserving no-space progress run ids and omitting forged memory authority, renderer/source/html/API-auth/raw-prompt/script/token/secret fixture values.
 
+- `feat(capy-memory): ingest GitHub interaction-limits metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub interaction-limits API payloads (`/repos/{owner}/{repo}/interaction-limits`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from safe repository path, allow-listed limit/origin values, and safe expiry timestamp while omitting raw URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
+  - Query/fragment origins sanitize to a durable public label plus exact safe fetch route, requeued jobs preserve that fetch route, while text fallback payloads, lookalike-host route bypasses, userinfo authorities, malformed route tails, and encoded route tricks fail closed before unsafe fetch or persistence.
+
 - `fix(capy-memory): harden GitHub single-release refresh routes`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub single-release API payloads (`/repos/{owner}/{repo}/releases/{release_id}`) request `application/json` and persist only metadata-only release id, tag/name, draft/prerelease, and published timestamp evidence.
   - Malformed single-release route tails such as encoded/null-suffixed ids, extra segments, and nonnumeric ids now fail closed before text fallback can create unsafe vault/search records, keeping raw release notes, URLs, API-auth fields, prompts, scripts, renderer/source fields, and secret-like fixture values out of receipts/search/vault output.

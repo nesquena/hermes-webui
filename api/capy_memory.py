@@ -564,6 +564,15 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_participation_path_repo(origin_uri)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_interaction_limits_route_path_matches(raw_origin_text):
+        interaction_limits_origin = _github_interaction_limits_safe_origin(raw_origin_text)
+        interaction_limits_repo = _github_interaction_limits_path_repo(interaction_limits_origin or "")
+        if not interaction_limits_origin or not interaction_limits_repo:
+            origin_uri = f"capy-memory://{source_id}"
+            fetch_origin_uri = ""
+        else:
+            origin_uri = f"github interaction limits {interaction_limits_repo}"
+            fetch_origin_uri = interaction_limits_origin
     if _github_traffic_views_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_traffic_views_path_repo(origin_uri)
@@ -4449,6 +4458,135 @@ def _github_participation_counts_are_safe(value: Any) -> bool:
     if not isinstance(value, list) or not value or len(value) > 52:
         return False
     return all(_safe_optional_nonnegative_int(item) is not None for item in value)
+
+
+def _github_interaction_limits_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    host = (parts.hostname or "").strip().lower().rstrip(".")
+    if host != "api.github.com" and not host.startswith("api.github.com."):
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 5
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4].startswith("interaction-limits")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return any(segment.lower().startswith("interaction-limits%") for segment in raw_path)
+
+
+def _github_interaction_limits_path_matches(origin_uri: str) -> bool:
+    return _github_interaction_limits_route_path_matches(origin_uri)
+
+
+def _github_interaction_limits_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "interaction-limits"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_interaction_limits_safe_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "interaction-limits"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"https://api.github.com/repos/{path[2]}/{path[3]}/interaction-limits"
+
+
+def _safe_github_interaction_limits_origin_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    match = re.fullmatch(r"github interaction limits ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", text)
+    if not match:
+        return ""
+    owner, repo = match.group(1).split("/", 1)
+    if not _github_repo_path_segment_is_safe(owner) or not _github_repo_path_segment_is_safe(repo):
+        return ""
+    return text
+
+
+def _github_interaction_limits_fetch_origin_from_origin_text(value: Any) -> str:
+    text = _safe_github_interaction_limits_origin_text(value)
+    if not text:
+        return ""
+    repo = text.rsplit(" ", 1)[-1]
+    owner, name = repo.split("/", 1)
+    return f"https://api.github.com/repos/{owner}/{name}/interaction-limits"
+
+
+_GITHUB_INTERACTION_LIMIT_VALUES = {"existing_users", "contributors_only", "collaborators_only"}
+_GITHUB_INTERACTION_LIMIT_ORIGINS = {"repository", "organization", "user"}
+
+
+def _json_payload_is_github_interaction_limits_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_interaction_limits_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("limit") not in _GITHUB_INTERACTION_LIMIT_VALUES:
+        return False
+    if payload.get("origin") not in _GITHUB_INTERACTION_LIMIT_ORIGINS:
+        return False
+    expires_at = payload.get("expires_at")
+    if expires_at is not None and not _safe_iso_timestamp(expires_at):
+        return False
+    return True
+
+
+def _github_interaction_limits_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_interaction_limits_path_repo(origin_uri) or "repository"
+    parts = [
+        f"GitHub interaction limits for {repo}",
+        f"limit: {payload.get('limit')}",
+        f"origin: {payload.get('origin')}",
+    ]
+    expires_at = payload.get("expires_at")
+    if isinstance(expires_at, str) and expires_at.endswith("Z") and _safe_iso_timestamp(expires_at):
+        parts.append(f"expires at: {expires_at}")
+    else:
+        expires_at = _safe_iso_timestamp(expires_at)
+        if expires_at:
+            parts.append(f"expires at: {expires_at}")
+    return _bounded_refresh_summary("; ".join(parts))
 
 
 def _github_code_frequency_path_matches(origin_uri: str) -> bool:
@@ -10720,6 +10858,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_participation_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    interaction_limits_repo = _github_interaction_limits_path_repo(origin_uri)
+    if interaction_limits_repo:
+        if not _json_payload_is_github_interaction_limits_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub interaction limits {interaction_limits_repo}",
+            "summary": _github_interaction_limits_refresh_summary(origin_uri, payload),
+            "origin_uri": f"github interaction limits {interaction_limits_repo}",
+        }
+    if _github_interaction_limits_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     punch_card_repo = _github_punch_card_path_repo(origin_uri)
     if punch_card_repo:
         if not _json_payload_is_github_punch_card_metadata(origin_uri, payload):
@@ -11707,6 +11857,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_participation_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_participation_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_interaction_limits_path_matches(raw_origin_uri):
+        if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_interaction_limits_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_traffic_views_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_traffic_views_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -11885,6 +12038,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_participation_path_matches(safe_origin_uri):
         if not _github_participation_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_interaction_limits_path_matches(safe_origin_uri):
+        if not _github_interaction_limits_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_traffic_views_path_matches(safe_origin_uri):
@@ -12128,6 +12285,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_participation_path_repo(final_url) != _github_participation_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_interaction_limits_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or not _github_interaction_limits_path_repo(final_url)
+            or _github_interaction_limits_path_repo(final_url) != _github_interaction_limits_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
         if _github_workflow_run_timing_path_run_id(safe_origin_uri) is not None and (
             _github_workflow_run_timing_path_info(final_url) is None
             or _github_workflow_run_timing_path_info(final_url) != _github_workflow_run_timing_path_info(safe_origin_uri)
@@ -12363,6 +12526,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_participation_path_matches(safe_origin_uri) and (
             not _github_participation_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_interaction_limits_path_matches(safe_origin_uri) and (
+            not _github_interaction_limits_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -13055,6 +13223,7 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
             actions_runners_origin_text = _safe_github_actions_runners_origin_text(raw_source_origin_uri)
             actions_caches_origin_text = _safe_github_actions_caches_origin_text(raw_source_origin_uri)
             custom_properties_origin_text = _safe_github_repository_custom_properties_origin_text(raw_source_origin_uri)
+            interaction_limits_origin_text = _safe_github_interaction_limits_origin_text(raw_source_origin_uri)
             workflow_timing_fetch_origin = _github_workflow_timing_fetch_origin(
                 str(payload.get("fetch_origin_uri") or "")
             ) or _github_workflow_timing_fetch_origin(str(payload.get("origin_uri") or ""))
@@ -13068,6 +13237,8 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
                 origin_uri = _source_catalog_public_origin_uri(raw_source_origin_uri, source_id=source_id)
             elif custom_properties_origin_text:
                 origin_uri = custom_properties_origin_text
+            elif interaction_limits_origin_text:
+                origin_uri = interaction_limits_origin_text
             elif workflow_timing_fetch_origin:
                 origin_uri = _github_workflow_timing_public_origin(workflow_timing_fetch_origin)
             elif _github_repository_custom_properties_route_path_matches(raw_source_origin_uri):
@@ -13109,6 +13280,11 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
             deploy_keys_fetch_origin = _github_deploy_keys_safe_origin(str(payload.get("fetch_origin_uri") or ""))
             if deploy_keys_fetch_origin and _github_deploy_keys_path_repo(deploy_keys_fetch_origin):
                 updated_payload["fetch_origin_uri"] = deploy_keys_fetch_origin
+            interaction_limits_fetch_origin = _github_interaction_limits_safe_origin(
+                str(payload.get("fetch_origin_uri") or "")
+            ) or _github_interaction_limits_fetch_origin_from_origin_text(origin_uri)
+            if interaction_limits_fetch_origin and _github_interaction_limits_path_repo(interaction_limits_fetch_origin):
+                updated_payload["fetch_origin_uri"] = interaction_limits_fetch_origin
             if workflow_timing_fetch_origin and _github_workflow_timing_path_info(workflow_timing_fetch_origin) is not None:
                 updated_payload["fetch_origin_uri"] = workflow_timing_fetch_origin
             cursor = conn.execute(
@@ -13289,6 +13465,9 @@ def run_source_refresh_jobs(
         custom_properties_fetch_origin = _github_repository_custom_properties_fetch_origin_from_origin_text(raw_origin_uri)
         if custom_properties_fetch_origin:
             raw_origin_uri = custom_properties_fetch_origin
+        interaction_limits_fetch_origin = _github_interaction_limits_fetch_origin_from_origin_text(raw_origin_uri)
+        if interaction_limits_fetch_origin:
+            raw_origin_uri = interaction_limits_fetch_origin
         if _github_repository_custom_properties_route_path_matches(raw_origin_uri):
             custom_properties_origin = _github_repository_custom_properties_safe_origin(raw_origin_uri)
             if custom_properties_origin:
@@ -13392,6 +13571,12 @@ def run_source_refresh_jobs(
             or not _github_teams_path_repo(raw_origin_uri)
         ):
             origin_uri = f"capy-memory://{source_id}"
+        elif _github_interaction_limits_route_path_matches(raw_origin_uri):
+            interaction_limits_origin = _github_interaction_limits_safe_origin(raw_origin_uri)
+            if not interaction_limits_origin:
+                origin_uri = f"capy-memory://{source_id}"
+            else:
+                origin_uri = interaction_limits_origin
         elif _github_dependabot_alerts_path_matches(raw_origin_uri) and (
             not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
             or not _github_dependabot_alerts_path_repo(raw_origin_uri)
