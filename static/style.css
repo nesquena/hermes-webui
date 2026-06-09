@@ -2289,6 +2289,9 @@
     .composer-left > .composer-model-wrap,
     .composer-left > .composer-reasoning-wrap,
     .composer-left > .composer-toolsets-wrap{display:none!important;}
+    /* Saved prompts is a desktop-only composer affordance — too much for the
+       narrow mobile composer (Nathan 2026-06-09). Hide the button + popup. */
+    #btnSavedPrompts,.saved-prompts-popup{display:none!important;}
     .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
     .composer-mobile-config-panel.open{display:flex;}
     .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
@@ -2384,6 +2387,9 @@
     .composer-left > .composer-model-wrap,
     .composer-left > .composer-reasoning-wrap,
     .composer-left > .composer-toolsets-wrap{display:none!important;}
+    /* Saved prompts is a desktop-only composer affordance — too much for the
+       narrow mobile composer (Nathan 2026-06-09). Hide the button + popup. */
+    #btnSavedPrompts,.saved-prompts-popup{display:none!important;}
     .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
     .composer-mobile-config-panel.open{display:flex;}
     .composer-mobile-config-action{box-sizing:border-box;flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}

@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.338] — 2026-06-09 — Release LB (saved prompts library)
+
+### Added
+- **A saved prompts library in the composer.** A bookmark button in the composer toolbar opens a popup of your saved prompts; click one to drop it into the composer, or save the current input as a new prompt, and delete prompts you no longer want. Prompts persist per Hermes home (`webui/saved_prompts.json`) with server-side caps (8000 chars/prompt, 200 prompts). The affordance is desktop-only — it's hidden on mobile to keep the narrow composer uncluttered. (#3571, @rodboev)
+
 ## [v0.51.337] — 2026-06-09 — Release LA (model-picker keyboard nav + mobile new-chat)
 
 ### Added

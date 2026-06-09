@@ -16129,6 +16129,11 @@ const LOCALES = {
     selected_text_reply: 'Odpowiedz z zaznaczeniem',
     selected_text_reply_title: 'Dodaj zaznaczony tekst czatu jako cytowany kontekst',
     selected_text_reply_appended: 'Dodano zaznaczony tekst do pola wprowadzania',
+    saved_prompts_empty: 'Brak zapisanych promptów.',
+    saved_prompts_save_current: 'Zapisz bieżący tekst jako prompt',
+    saved_prompts_saved: 'Prompt zapisany',
+    saved_prompts_delete: 'Usuń prompt',
+    saved_prompts_empty_input: 'Najpierw wpisz prompt do zapisania',
 
     diff_loading: 'Ładowanie zmian (diff)',
     diff_error: 'Nie można załadować pliku poprawki',
