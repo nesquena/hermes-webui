@@ -8513,6 +8513,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         prompt_preflight = _widget_reload_required_prompt_preflight_receipt(name)
         autonomy_policy = _widget_reload_action_policy_receipt(name, prompt_preflight)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.see")
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -8523,12 +8524,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=1,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name in {"space.widget.runtime_contract", "space.current.widget.runtime_contract", "widget.runtime_contract"}:
@@ -8538,6 +8542,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         prompt_preflight = _widget_reload_required_prompt_preflight_receipt(name)
         autonomy_policy = _widget_reload_action_policy_receipt(name, prompt_preflight)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="runtime-contract")
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -8546,12 +8551,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=1,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name in {"space.template.install", "space.templates.install", "template.install", "space.spaces.installexamplespace", "space.spaces.installtemplate"}:
