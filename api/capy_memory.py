@@ -735,6 +735,12 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
             origin_uri = f"capy-memory://{source_id}"
         else:
             origin_uri = f"github actions caches {actions_caches_repo}"
+    if _github_actions_cache_usage_route_path_matches(raw_origin_text):
+        actions_cache_usage_repo = _github_actions_cache_usage_path_repo(origin_uri)
+        if not _github_raw_authority_is_exact(raw_origin_text, "api.github.com") or not actions_cache_usage_repo:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = f"github actions cache usage {actions_cache_usage_repo}"
     if _github_repository_custom_properties_route_path_matches(raw_origin_text):
         custom_properties_origin = _github_repository_custom_properties_safe_origin(raw_origin_text)
         custom_properties_repo = _github_repository_custom_properties_path_repo(custom_properties_origin or "")
@@ -6687,6 +6693,107 @@ def _github_actions_caches_refresh_summary(origin_uri: str, payload: dict[str, A
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_actions_cache_usage_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "actions"
+        or path[5] != "cache"
+        or path[6] != "usage"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_actions_cache_usage_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _matches_cache_usage_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 7
+            and path[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "actions"
+            and lowered[5] == "cache"
+            and lowered[6].startswith("usage")
+        )
+
+    return _matches_cache_usage_shape(parts.path) or _matches_cache_usage_shape(unquote(parts.path))
+
+
+def _github_actions_cache_usage_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_actions_cache_usage_route_path_matches(origin_uri)
+
+
+def _safe_github_actions_cache_usage_origin_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    match = re.fullmatch(r"github actions cache usage ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", text)
+    if not match:
+        return ""
+    owner, repo = match.group(1).split("/", 1)
+    if not _github_repo_path_segment_is_safe(owner) or not _github_repo_path_segment_is_safe(repo):
+        return ""
+    return text
+
+
+def _github_actions_cache_usage_fetch_origin_from_origin_text(value: Any) -> str:
+    text = _safe_github_actions_cache_usage_origin_text(value)
+    if not text:
+        return ""
+    repo = text.removeprefix("github actions cache usage ")
+    return f"https://api.github.com/repos/{repo}/actions/cache/usage"
+
+
+def _json_payload_is_github_actions_cache_usage_metadata(origin_uri: str, payload: Any) -> bool:
+    repo = _github_actions_cache_usage_path_repo(origin_uri)
+    if not repo:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if _json_payload_is_feed(payload) or any(key in payload for key in ("version", "items")):
+        return False
+    size = _safe_optional_nonnegative_int(payload.get("active_caches_size_in_bytes"))
+    count = _safe_optional_nonnegative_int(payload.get("active_caches_count"))
+    if size is None or count is None:
+        return False
+    full_name = payload.get("full_name")
+    if full_name != repo:
+        return False
+    return True
+
+
+def _github_actions_cache_usage_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_actions_cache_usage_path_repo(origin_uri) or "repository"
+    size = _safe_optional_nonnegative_int(payload.get("active_caches_size_in_bytes")) or 0
+    count = _safe_optional_nonnegative_int(payload.get("active_caches_count")) or 0
+    return _bounded_refresh_summary(
+        f"GitHub Actions cache usage for {repo}; active cache count: {count}; active cache size bytes: {size}"
+    )
+
+
 def _github_repository_custom_properties_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -6783,6 +6890,9 @@ def _source_catalog_public_origin_uri(value: Any, *, source_id: str) -> str:
     actions_caches_text = _safe_github_actions_caches_origin_text(value)
     if actions_caches_text:
         return actions_caches_text
+    actions_cache_usage_text = _safe_github_actions_cache_usage_origin_text(value)
+    if actions_cache_usage_text:
+        return actions_cache_usage_text
     custom_properties_text = _safe_github_repository_custom_properties_origin_text(value)
     if custom_properties_text:
         return custom_properties_text
@@ -6818,6 +6928,19 @@ def _source_catalog_public_origin_uri(value: Any, *, source_id: str) -> str:
             actions_caches_repo = _github_actions_caches_path_repo(actions_caches_origin)
             if actions_caches_repo:
                 return f"github actions caches {actions_caches_repo}"
+        return f"capy-memory://{source_id}"
+    if _github_actions_cache_usage_route_path_matches(raw_text):
+        try:
+            parts = urlsplit(raw_text)
+            raw_authority = parts.netloc or ""
+        except ValueError:
+            raw_authority = ""
+            parts = None
+        if parts is not None and parts.scheme == "https" and raw_authority == "api.github.com":
+            actions_cache_usage_origin = urlunsplit(("https", "api.github.com", parts.path, "", ""))
+            actions_cache_usage_repo = _github_actions_cache_usage_path_repo(actions_cache_usage_origin)
+            if actions_cache_usage_repo:
+                return f"github actions cache usage {actions_cache_usage_repo}"
         return f"capy-memory://{source_id}"
     if _github_repository_custom_properties_route_path_matches(raw_text):
         custom_properties_origin = _github_repository_custom_properties_safe_origin(raw_text)
@@ -12785,6 +12908,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_actions_caches_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    actions_cache_usage_repo = _github_actions_cache_usage_path_repo(origin_uri)
+    if actions_cache_usage_repo:
+        if not _json_payload_is_github_actions_cache_usage_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub Actions cache usage {actions_cache_usage_repo}",
+            "summary": _github_actions_cache_usage_refresh_summary(origin_uri, payload),
+            "origin_uri": f"github actions cache usage {actions_cache_usage_repo}",
+        }
+    if _github_actions_cache_usage_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     repository_custom_properties_repo = _github_repository_custom_properties_path_repo(origin_uri)
     if repository_custom_properties_repo:
         if not _json_payload_is_github_repository_custom_properties_metadata(origin_uri, payload):
@@ -13115,6 +13250,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     actions_runners_fetch_origin = _github_actions_runners_fetch_origin_from_origin_text(raw_origin_uri)
     if actions_runners_fetch_origin:
         raw_origin_uri = actions_runners_fetch_origin
+    actions_cache_usage_fetch_origin = _github_actions_cache_usage_fetch_origin_from_origin_text(raw_origin_uri)
+    if actions_cache_usage_fetch_origin:
+        raw_origin_uri = actions_cache_usage_fetch_origin
     custom_properties_fetch_origin = _github_repository_custom_properties_fetch_origin_from_origin_text(raw_origin_uri)
     if custom_properties_fetch_origin:
         raw_origin_uri = custom_properties_fetch_origin
@@ -13298,6 +13436,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_actions_caches_route_path_matches(raw_origin_uri):
         if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_caches_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_actions_cache_usage_route_path_matches(raw_origin_uri):
+        if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_cache_usage_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_repository_custom_properties_route_path_matches(raw_origin_uri):
         if not _github_repository_custom_properties_safe_origin(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -13367,6 +13508,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     repository_webhooks_safe_origin = _github_repository_webhooks_safe_origin(raw_origin_uri)
     if repository_webhooks_safe_origin:
         safe_origin_uri = repository_webhooks_safe_origin
+    actions_cache_usage_repo = _github_actions_cache_usage_path_repo(raw_origin_uri)
+    if actions_cache_usage_repo:
+        actions_cache_usage_parts = urlsplit(raw_origin_uri)
+        safe_origin_uri = urlunsplit(("https", "api.github.com", actions_cache_usage_parts.path, "", ""))
     repository_custom_properties_safe_origin = _github_repository_custom_properties_safe_origin(raw_origin_uri)
     if repository_custom_properties_safe_origin:
         safe_origin_uri = repository_custom_properties_safe_origin
@@ -13551,6 +13696,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_actions_caches_path_matches(safe_origin_uri):
         if not _github_actions_caches_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_actions_cache_usage_path_matches(safe_origin_uri):
+        if not _github_actions_cache_usage_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_actions_secrets_public_key_path_matches(safe_origin_uri):
@@ -13821,6 +13970,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_authority_is_exact(final_url, "api.github.com")
             or not _github_actions_caches_path_repo(final_url)
             or _github_actions_caches_path_repo(final_url) != _github_actions_caches_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_cache_usage_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or not _github_actions_cache_usage_path_repo(final_url)
+            or _github_actions_cache_usage_path_repo(final_url) != _github_actions_cache_usage_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_secrets_public_key_path_matches(safe_origin_uri) and (
@@ -14160,6 +14315,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_caches_path_matches(safe_origin_uri) and (
             not _github_actions_caches_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_cache_usage_path_matches(safe_origin_uri) and (
+            not _github_actions_cache_usage_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -15043,6 +15203,9 @@ def run_source_refresh_jobs(
         actions_caches_fetch_origin = _github_actions_caches_fetch_origin_from_origin_text(raw_origin_uri)
         if actions_caches_fetch_origin:
             raw_origin_uri = actions_caches_fetch_origin
+        actions_cache_usage_fetch_origin = _github_actions_cache_usage_fetch_origin_from_origin_text(raw_origin_uri)
+        if actions_cache_usage_fetch_origin:
+            raw_origin_uri = actions_cache_usage_fetch_origin
         custom_properties_fetch_origin = _github_repository_custom_properties_fetch_origin_from_origin_text(raw_origin_uri)
         if custom_properties_fetch_origin:
             raw_origin_uri = custom_properties_fetch_origin
@@ -15124,6 +15287,11 @@ def run_source_refresh_jobs(
         elif _github_actions_caches_route_path_matches(raw_origin_uri) and (
             not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com")
             or not _github_actions_caches_path_repo(raw_origin_uri)
+        ):
+            origin_uri = f"capy-memory://{source_id}"
+        elif _github_actions_cache_usage_route_path_matches(raw_origin_uri) and (
+            not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com")
+            or not _github_actions_cache_usage_path_repo(raw_origin_uri)
         ):
             origin_uri = f"capy-memory://{source_id}"
         elif _github_actions_secrets_public_key_path_matches(raw_origin_uri):
