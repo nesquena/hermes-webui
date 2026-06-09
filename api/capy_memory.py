@@ -4290,7 +4290,13 @@ def _github_traffic_popular_value_has_urlish_marker(value: str) -> bool:
         return True
     if re.search(r"[A-Za-z0-9._%+-]+:[^@\s/]+@", text):
         return True
-    if re.search(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:[/:.]|$)", text):
+    version_path_text = re.sub(
+        r"/(?:releases?|tags?|versions?)/v?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?=$|[-_/])",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if re.search(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:[/:.]|$)", version_path_text):
         return True
     if re.search(r"(?<![\w.])localhost(?::\d+)?(?:[/:.]|$)", text, flags=re.IGNORECASE):
         return True

@@ -14803,6 +14803,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_traffic_popular_
     github_popular_paths_body = json.dumps([
         {"path": "/docs/capy-spaces", "title": "Capy Spaces docs", "count": 120, "uniques": 75},
         {"path": "/docs/memory-tree", "title": "Memory Tree", "count": 41, "uniques": 26},
+        {"path": "/releases/1.2.3.4", "title": "Release 1.2.3.4 notes", "count": 7, "uniques": 3},
     ]).encode("utf-8")
     calls = []
 
@@ -14846,9 +14847,11 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_traffic_popular_
     assert result["jobs"][0]["prompt_preflight"]["raw_prompt_stored"] is False
     assert search["results"][0]["source_id"] == "github-traffic-popular-paths-source-refresh"
     assert "github traffic popular paths for capy/spaces" in persisted
-    assert "path count: 2" in persisted
+    assert "path count: 3" in persisted
     assert "path: /docs/capy-spaces" in persisted
     assert "title: capy spaces docs" in persisted
+    assert "path: /releases/1.2.3.4" in persisted
+    assert "title: release 1.2.3.4 notes" in persisted
     assert "count: 120" in persisted
     assert "uniques: 75" in persisted
     for unsafe in (
@@ -14955,6 +14958,98 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_traffic_popular_
     assert "secret_value_do_not_leak" not in serialized
     assert "raw fetched body" not in serialized
     assert "<script" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_traffic_popular_paths_ip_path(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-traffic-popular-paths-ip-path",
+        "title": "GitHub Traffic Popular Paths IP Path",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/traffic/popular/paths?access_token=***#raw-prompt",
+    })
+    github_popular_paths_body = json.dumps([
+        {
+            "path": "/127.0.0.1/path",
+            "title": "Capy Spaces docs",
+            "count": 120,
+            "uniques": 75,
+        },
+    ]).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_popular_paths_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"result": result, "jobs": list_source_refresh_jobs(limit=5)}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-traffic-popular-paths-ip-path.md").exists()
+    assert "127.0.0.1" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_traffic_popular_paths_mixed_version_and_ip_path(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-traffic-popular-paths-mixed-version-ip",
+        "title": "GitHub Traffic Popular Paths Mixed Version IP",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/traffic/popular/paths?access_token=***#raw-prompt",
+    })
+    github_popular_paths_body = json.dumps([
+        {
+            "path": "/releases/1.2.3.4/127.0.0.1/path",
+            "title": "Release 1.2.3.4 notes",
+            "count": 120,
+            "uniques": 75,
+        },
+    ]).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_popular_paths_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"result": result, "jobs": list_source_refresh_jobs(limit=5)}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-traffic-popular-paths-mixed-version-ip.md").exists()
+    assert "127.0.0.1" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
 
 
 def test_run_source_refresh_jobs_default_fetcher_rejects_github_traffic_popular_paths_url_title(tmp_path, monkeypatch):
