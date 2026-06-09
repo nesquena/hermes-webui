@@ -13,12 +13,16 @@ def test_workspace_heading_is_interactive_root_control():
     assert "loadDir('.')" in UI_JS
 
 
-def test_workspace_heading_context_menu_exposes_root_reveal_and_copy_path():
-    """Right-clicking the heading should expose root-scoped Reveal and Copy path actions."""
+def test_workspace_heading_context_menu_exposes_root_actions():
+    """Right-clicking the heading should expose root-scoped create and utility actions."""
     assert "_showWorkspaceRootContextMenu" in UI_JS
+    assert "promptNewFile('.')" in UI_JS
+    assert "promptNewFolder('.')" in UI_JS
     assert "'/api/file/reveal'" in UI_JS
     assert "'/api/file/path'" in UI_JS
     assert "path:'.'" in UI_JS.replace(" ", "")
+    assert "new_file_prompt" in UI_JS
+    assert "new_folder_prompt" in UI_JS
     assert "copy_file_path" in UI_JS
     assert "reveal_in_finder" in UI_JS
 
