@@ -408,7 +408,9 @@ function _messageIsRenderable(m){
   const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
   const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
   const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-  return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)||hasPartialTc||_assistantMessageHasVisibleContent(m))));
+  const hasReasoningAnchor=hasTc||hasTu||_messageHasReasoningPayload(m);
+  const hasAssistantVisibleAnchor=hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m);
+  return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasReasoningAnchor||hasAssistantVisibleAnchor)));
 }
 function _getVisibleMessagesWithIdx(){
   if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
