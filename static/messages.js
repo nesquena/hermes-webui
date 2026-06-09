@@ -178,6 +178,11 @@ function _extractInlineThinkingFromContent(rawContent, existingReasoning, option
   // no-newline content — #3633 Codex perf catch).
   let lineIsIndentedCode=_lineIsIndentedCode(text,0);
   let seenNonspace=false;
+  // Only lstrip the final content when a LEADING thinking block/prefix was
+  // removed — a reply that legitimately starts with indented code / whitespace
+  // and has no leading thinking wrapper keeps its leading whitespace (#3633
+  // Codex catch).
+  let leadingRemoved=false;
   while(index<text.length){
     const ch=text[index];
     if(index>0&&text[index-1]==='\n') lineIsIndentedCode=_lineIsIndentedCode(text,index);
@@ -201,6 +206,7 @@ function _extractInlineThinkingFromContent(rawContent, existingReasoning, option
           // visible so nothing is silently truncated (#3633 Codex catch).
           const leading=!seenNonspace;
           if(!streaming&&!leading) break;
+          if(leading) leadingRemoved=true;
           visible.push(text.slice(cursor,index));
           const partial=text.slice(index+pair.open.length);
           if(partial) extracted.push(partial);
@@ -211,6 +217,7 @@ function _extractInlineThinkingFromContent(rawContent, existingReasoning, option
         }
         visible.push(text.slice(cursor,index));
         extracted.push(text.slice(index+pair.open.length,closeIndex));
+        if(!seenNonspace) leadingRemoved=true;
         seenNonspace=true;
         index=closeIndex+pair.close.length;
         cursor=index;
@@ -221,6 +228,7 @@ function _extractInlineThinkingFromContent(rawContent, existingReasoning, option
         for(const candidate of _thinkPairs){
           const rest=text.slice(index);
           if(rest.length<candidate.open.length&&candidate.open.startsWith(rest)){
+            if(!seenNonspace) leadingRemoved=true;
             visible.push(text.slice(cursor,index));
             inThinking=true;
             cursor=text.length;
@@ -236,7 +244,7 @@ function _extractInlineThinkingFromContent(rawContent, existingReasoning, option
     index++;
   }
   if(cursor<text.length) visible.push(text.slice(cursor));
-  const content=visible.join('').replace(/^\s+/,'');
+  const content=leadingRemoved?visible.join('').replace(/^\s+/,''):visible.join('');
   const reasoning=_mergeInlineThinkingReasoning(existingReasoning,extracted);
   return {reasoning,content,thinkingText:reasoning,displayText:content,inThinking};
 }

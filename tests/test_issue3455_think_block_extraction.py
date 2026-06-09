@@ -245,3 +245,13 @@ class TestBackendThinkSplitParity:
         assert self._sp(backtick) == (backtick, "")
         tilde = "text\n   ~~~html\n   <think>lit</think>\n   ~~~\nend"
         assert self._sp(tilde) == (tilde, "")
+
+    def test_leading_whitespace_preserved_when_no_thinking_removed(self):
+        """#3633 Codex catch: content is only lstripped when a LEADING thinking
+        block/prefix was actually removed. A reply that legitimately starts with
+        an indented code block or blank lines (and has no leading thinking
+        wrapper) keeps its leading whitespace."""
+        assert self._sp("    indented code\nmore") == ("    indented code\nmore", "")
+        assert self._sp("\n\n  hi") == ("\n\n  hi", "")
+        # ...but a leading thinking block still strips the whitespace after it.
+        assert self._sp("<think>r</think>   answer") == ("answer", "r")

@@ -1584,6 +1584,11 @@ def _extract_inline_thinking_from_content(raw_content, existing_reasoning='', *,
     # Whether any non-whitespace char appeared in text[:index] — the cheap
     # equivalent of the old `text[:index].strip() != ''` leading check.
     seen_nonspace = False
+    # Whether a LEADING thinking block/prefix was removed — only then do we
+    # lstrip the final content (so a reply that legitimately starts with
+    # indented code / whitespace and has NO leading thinking wrapper keeps its
+    # leading whitespace — #3633 Codex catch).
+    leading_removed = False
     while index < length:
         ch = text[index]
         if index > 0 and text[index - 1] == '\n':
@@ -1618,6 +1623,8 @@ def _extract_inline_thinking_from_content(raw_content, existing_reasoning='', *,
                     leading = not seen_nonspace
                     if not streaming and not leading:
                         break
+                    if leading:
+                        leading_removed = True
                     visible.append(text[cursor:index])
                     partial = text[index + len(open_tag):]
                     if partial:
@@ -1627,6 +1634,8 @@ def _extract_inline_thinking_from_content(raw_content, existing_reasoning='', *,
                     break
                 visible.append(text[cursor:index])
                 extracted.append(text[index + len(open_tag):close_index])
+                if not seen_nonspace:
+                    leading_removed = True
                 seen_nonspace = True  # the extracted tag span is non-whitespace
                 index = close_index + len(close_tag)
                 cursor = index
@@ -1636,6 +1645,8 @@ def _extract_inline_thinking_from_content(raw_content, existing_reasoning='', *,
                 for open_tag, _close_tag in _INLINE_THINKING_TAG_PAIRS:
                     rest = text[index:]
                     if len(rest) < len(open_tag) and open_tag.startswith(rest):
+                        if not seen_nonspace:
+                            leading_removed = True
                         visible.append(text[cursor:index])
                         cursor = length
                         index = length
@@ -1648,7 +1659,9 @@ def _extract_inline_thinking_from_content(raw_content, existing_reasoning='', *,
         index += 1
     if cursor < length:
         visible.append(text[cursor:])
-    content = ''.join(visible).lstrip()
+    content = ''.join(visible)
+    if leading_removed:
+        content = content.lstrip()
     reasoning = _merge_inline_thinking_reasoning(existing_reasoning, extracted)
     return content, reasoning
 
