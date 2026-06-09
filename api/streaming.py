@@ -1591,47 +1591,194 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
     return parts if image_count else workspace_ctx + msg_text
 
 
-def _split_thinking_from_content(raw_content, existing_reasoning=''):
-    """Split a single LEADING <think> block out of assistant content.
+_INLINE_THINKING_TAG_PAIRS = (
+    ('<think>', '</think>'),
+    ('<|channel>thought\n', '<channel|>'),
+    ('<|turn|>thinking\n', '<turn|>'),
+)
 
-    Server-side twin of the JS ``_splitThinkFromContent`` (static/messages.js).
-    Inline-thinking providers (e.g. MiniMax-M3, OpenAI-compat) leave the thinking
-    trace inside the saved ``m['content']``, bloating session files 30-50% and
-    bypassing the ``m['reasoning']`` field the thinking card reads on reload
-    (#3455). This extracts exactly ONE leading block (after lstrip) — matching the
-    live renderer's _streamDisplay/_parseStreamState semantics — so a closed
-    ``<think>...</think>`` that appears MID-BODY (e.g. a literal tag in a fenced
-    code block) stays visible content and is never moved into reasoning, and a
-    partial/unclosed block is left intact.
 
-    Returns ``(content, reasoning)``. ``reasoning`` merges ``existing_reasoning``
-    (e.g. from a separate on_reasoning stream) with the extracted block.
+def _inline_thinking_fence_marker_at(text, index):
+    # A fenced code block opener may be indented up to 3 spaces in Markdown
+    # (4+ spaces is an indented code block, handled separately). The marker is
+    # only a fence when it sits at the start of a line (after optional 1-3
+    # spaces of indentation).
+    if index > 0 and text[index - 1] != '\n':
+        # Allow up to 3 leading spaces: walk back over spaces to a line start.
+        back = index - 1
+        spaces = 0
+        while back >= 0 and text[back] == ' ' and spaces < 3:
+            back -= 1
+            spaces += 1
+        if not (back < 0 or text[back] == '\n'):
+            return ''
+    if text.startswith('```', index):
+        return '```'
+    if text.startswith('~~~', index):
+        return '~~~'
+    return ''
+
+
+def _line_is_indented_code(text, line_start):
+    """True when the line beginning at `line_start` is a markdown indented code
+    block line (>=4 leading spaces or a leading tab, and not blank). `line_start`
+    must be the index of the first character of the line. O(1)-ish: only inspects
+    the line's leading characters, not the whole document (the per-character
+    variant was O(n^2) on long no-newline content — #3633 Codex perf catch)."""
+    if line_start >= len(text):
+        return False
+    if text[line_start] == '\t':
+        # A leading tab is indented code only if the line isn't otherwise blank.
+        nl = text.find('\n', line_start)
+        seg = text[line_start:(nl if nl != -1 else len(text))]
+        return bool(seg.strip())
+    if text.startswith('    ', line_start):
+        nl = text.find('\n', line_start)
+        seg = text[line_start:(nl if nl != -1 else len(text))]
+        return bool(seg.strip())
+    return False
+
+
+def _merge_inline_thinking_reasoning(existing_reasoning, extracted_parts):
+    out = str(existing_reasoning or '').strip()
+    for part in extracted_parts or ():
+        item = str(part or '').strip()
+        if not item:
+            continue
+        if not out:
+            out = item
+            continue
+        if out == item or any(existing.strip() == item for existing in out.split('\n\n')):
+            continue
+        out = out + '\n\n' + item
+    return out
+
+
+def _extract_inline_thinking_from_content(raw_content, existing_reasoning='', *, streaming=False):
+    """Split inline thinking blocks out of assistant content.
+
+    Code-aware: thinking tags inside a triple-fence (``` / ~~~), an inline
+    single-backtick code span, or an indented (>=4-space / tab) code block are
+    LEFT VISIBLE — they are literal text a user typed/pasted, not a real thinking
+    trace. (#3633 deep-review / Codex catch: the earlier full-scan version only
+    protected triple fences, so a literal `<think>` in an inline code span got
+    silently extracted.)
+
+    ``streaming`` gates partial/unclosed-block handling: during live streaming an
+    unmatched open tag means "still thinking" and its tail is shown as reasoning;
+    on the persist/reload path (streaming=False) an unclosed tag is LEFT VISIBLE
+    so prose after a literal ``<think>`` is never silently truncated on save.
     """
     text = '' if raw_content is None else str(raw_content)
     if not text:
-        return text, (existing_reasoning or '')
-    # Leading-only, single block — same three tag pairs as the JS helper.
-    _pairs = (
-        ('<think>', '</think>'),
-        ('<|channel>thought\n', '<channel|>'),
-        ('<|turn|>thinking\n', '<turn|>'),
+        return text, str(existing_reasoning or '').strip()
+    visible = []
+    extracted = []
+    cursor = 0
+    index = 0
+    fence = ''
+    in_backtick = False
+    length = len(text)
+    # Incremental, O(1)-per-iteration line state (the previous per-character line
+    # scan made the whole pass O(n^2) on long no-newline content — #3633 Codex
+    # perf catch). `line_is_indented_code` is recomputed only at a line start.
+    line_is_indented_code = _line_is_indented_code(text, 0)
+    # Whether any non-whitespace char appeared in text[:index] — the cheap
+    # equivalent of the old `text[:index].strip() != ''` leading check.
+    seen_nonspace = False
+    # Whether a LEADING thinking block/prefix was removed — only then do we
+    # lstrip the final content (so a reply that legitimately starts with
+    # indented code / whitespace and has NO leading thinking wrapper keeps its
+    # leading whitespace — #3633 Codex catch).
+    leading_removed = False
+    while index < length:
+        ch = text[index]
+        if index > 0 and text[index - 1] == '\n':
+            line_is_indented_code = _line_is_indented_code(text, index)
+        marker = _inline_thinking_fence_marker_at(text, index)
+        if marker:
+            fence = '' if fence == marker else (fence or marker)
+        # Inline single-backtick code span toggles on each lone backtick that is
+        # not part of a triple fence. Only tracked outside a triple fence.
+        if not fence and not marker and ch == '`':
+            in_backtick = not in_backtick
+        in_code = bool(fence) or in_backtick or line_is_indented_code
+        if not in_code:
+            pair = None
+            for open_tag, close_tag in _INLINE_THINKING_TAG_PAIRS:
+                if text.startswith(open_tag, index):
+                    pair = (open_tag, close_tag)
+                    break
+            if pair:
+                open_tag, close_tag = pair
+                close_index = text.find(close_tag, index + len(open_tag))
+                if close_index == -1:
+                    # Unclosed open tag. A LEADING unclosed block (nothing
+                    # visible before it) is a genuine thinking trace that got
+                    # cut off / persisted mid-thought → reasoning (master #3455
+                    # leading-only intent, and the live-stream "still thinking"
+                    # case). An unclosed tag AFTER visible content on the persist
+                    # path is almost always a literal typed tag — leave it (and
+                    # the prose after it) visible so nothing is silently
+                    # truncated (#3633 Codex catch). During live streaming any
+                    # unmatched open tag is treated as in-progress thinking.
+                    leading = not seen_nonspace
+                    if not streaming and not leading:
+                        break
+                    if leading:
+                        leading_removed = True
+                    visible.append(text[cursor:index])
+                    partial = text[index + len(open_tag):]
+                    if partial:
+                        extracted.append(partial)
+                    cursor = length
+                    index = length
+                    break
+                visible.append(text[cursor:index])
+                extracted.append(text[index + len(open_tag):close_index])
+                if not seen_nonspace:
+                    leading_removed = True
+                seen_nonspace = True  # the extracted tag span is non-whitespace
+                index = close_index + len(close_tag)
+                cursor = index
+                continue
+            if streaming:
+                matched_partial = False
+                for open_tag, _close_tag in _INLINE_THINKING_TAG_PAIRS:
+                    rest = text[index:]
+                    if len(rest) < len(open_tag) and open_tag.startswith(rest):
+                        if not seen_nonspace:
+                            leading_removed = True
+                        visible.append(text[cursor:index])
+                        cursor = length
+                        index = length
+                        matched_partial = True
+                        break
+                if matched_partial or index >= length:
+                    break
+        if not ch.isspace():
+            seen_nonspace = True
+        index += 1
+    if cursor < length:
+        visible.append(text[cursor:])
+    content = ''.join(visible)
+    if leading_removed:
+        content = content.lstrip()
+    reasoning = _merge_inline_thinking_reasoning(existing_reasoning, extracted)
+    return content, reasoning
+
+
+def _split_thinking_from_content(raw_content, existing_reasoning=''):
+    """Split inline thinking blocks out of assistant content for persistence.
+
+    Persistence path: streaming=False, so an unclosed tag stays visible content
+    (a partial block only means "still thinking" during a live stream).
+    """
+    return _extract_inline_thinking_from_content(
+        raw_content,
+        existing_reasoning=existing_reasoning,
+        streaming=False,
     )
-    trimmed = text.lstrip()
-    extracted = ''
-    remaining = text
-    for open_tag, close_tag in _pairs:
-        if not trimmed.startswith(open_tag):
-            continue
-        ci = trimmed.find(close_tag, len(open_tag))
-        if ci == -1:
-            break  # partial open — leave intact
-        extracted = trimmed[len(open_tag):ci]
-        remaining = trimmed[ci + len(close_tag):].lstrip()
-        break
-    if not extracted:
-        return raw_content, (existing_reasoning or '')
-    final_reasoning = (existing_reasoning + '\n\n' + extracted) if existing_reasoning else extracted
-    return remaining, final_reasoning
 
 
 def _strip_thinking_markup(text: str) -> str:
@@ -3358,17 +3505,14 @@ def _is_context_compression_marker(msg):
     return is_context_compression_marker(msg)
 
 
-def _compact_summary_text(raw_text: str | None, limit: int = 320) -> str | None:
+def _compact_summary_text(raw_text: str | None) -> str | None:
     """Normalize a text blob used in compression summary cards."""
     if not isinstance(raw_text, str):
         return None
     txt = raw_text.strip()
     if not txt:
         return None
-    txt = re.sub(r"\s+", " ", txt).strip()
-    if len(txt) > limit:
-        txt = f"{txt[: limit - 6]}…"
-    return txt
+    return re.sub(r"\s+", " ", txt).strip()
 
 
 def _compression_anchor_message_key(message):
@@ -6742,14 +6886,11 @@ def _run_agent_streaming(
                 # memory until the next turn's save, and the last-turn thinking card
                 # is lost when the user reloads immediately after a response.
                 #
-                # #3455: also split any inline leading <think> block out of the saved
+                # #3455/#3599: split inline thinking blocks out of the saved
                 # assistant content into m['reasoning'] (server-side twin of the JS
                 # _splitThinkFromContent). Inline-thinking providers (e.g. MiniMax-M3)
                 # otherwise leave the thinking trace in m['content'], bloating the
                 # persisted session file 30-50% and bypassing the thinking card. The
-                # split is leading-only/single-block so mid-body literal tags (e.g. in
-                # a fenced code block) stay visible content.
-                #
                 # #3587: use per-message segments so intermediate assistant turns
                 # (before tool calls) each receive their own reasoning trace rather
                 # than all reasoning being written only to the last assistant message.

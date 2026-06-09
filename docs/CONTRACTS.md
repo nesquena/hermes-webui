@@ -48,6 +48,12 @@ does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
   Start here for issue #2491 and Docker/source-boundary migration slices.
 - [`docs/rfcs/turn-journal.md`](rfcs/turn-journal.md): proposed crash-safe
   write-ahead journal for browser-originated chat turns.
+- [`docs/rfcs/webui-pending-intent-controls.md`](rfcs/webui-pending-intent-controls.md):
+  proposed control-surface companion to the long-running-session reply model for
+  Queue, Steer, Stop-and-send, Interrupt, and leftover-steer inputs submitted
+  while an agent run is active. Start here for busy-composer behavior, pending
+  queued messages, interrupt replacement, steer visibility, or leftover-steer
+  recovery changes.
 - [`docs/rfcs/README.md`](rfcs/README.md): RFC conventions and current RFC index.
 
 When a change touches streaming, recovery, replay, compression, context
