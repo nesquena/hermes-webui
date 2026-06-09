@@ -48,10 +48,20 @@ _OMITTED_PAYLOAD_KEYS = {
     "cookie",
     "credential",
     "credentials",
+    "can_bypass_safety_gates",
+    "canbypasssafetygates",
     "data",
     "html",
+    "memory_advisory",
+    "memoryadvisory",
+    "memory_context",
+    "memorycontext",
     "password",
+    "raw_context",
+    "rawcontext",
     "renderer",
+    "required_gates",
+    "requiredgates",
     "script",
     "secret",
     "source",
@@ -3061,9 +3071,10 @@ def _payload_key_is_safe(key: str) -> bool:
     lowered = str(key or "").strip().lower()
     if not lowered:
         return False
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
     if _payload_key_is_prompt_bearing(lowered):
         return False
-    return not any(part in lowered for part in _OMITTED_PAYLOAD_KEYS)
+    return not any(part in lowered or part in compact for part in _OMITTED_PAYLOAD_KEYS)
 
 
 def _payload_text_summary(value: Any, limit: int = 500) -> str:
@@ -8908,6 +8919,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         widget_count = len(widgets) if isinstance(widgets, list) else None
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.reposition")
         autonomy_policy = _space_layout_action_policy_receipt(name)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -8917,12 +8929,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=widget_count,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name in {"space.spaces.duplicatespace", "space.spaces.clonespace"}:
