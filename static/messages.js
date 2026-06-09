@@ -725,6 +725,14 @@ function _removeNamedContextBlock(id){
   _renderSelectionChips();
 }
 
+function _clearPendingSelections(){
+  if(!_pendingSelections.length)return false;
+  _pendingSelections=[];
+  _renderSelectionChips();
+  return true;
+}
+if(typeof window!=='undefined') window._clearPendingSelections=_clearPendingSelections;
+
 function _renderSelectionChips(){
   const wrap=document.getElementById('composerSelectionChips');
   if(!wrap)return;
@@ -763,8 +771,7 @@ function _flushSelectionBlocksToComposer(){
   const blocks=_pendingSelections.map(s=>`**${s.name}:**\n${_formatSelectedTextReplyQuote(s.text)}`).join('\n\n');
   const current=String(composer.value||'');
   composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${blocks}\n\n`:`${blocks}\n\n`;
-  _pendingSelections=[];
-  _renderSelectionChips();
+  _clearPendingSelections();
   composer.focus();
   try{ composer.setSelectionRange(composer.value.length, composer.value.length); }catch(_e){}
   composer.dispatchEvent(new Event('input',{bubbles:true}));
