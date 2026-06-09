@@ -3248,6 +3248,139 @@ def _lookup_cli_session_metadata(session_id: str) -> dict:
     return {}
 
 
+def _session_index_marks_was_webui(sid: str) -> bool:
+    """Return True iff ``sid`` is in the WebUI session index as a WebUI- or
+    fork-origin row whose sidecar is now gone.
+
+    The WebUI session index (``SESSION_INDEX_FILE``) is the canonical registry
+    of sessions the WebUI ever owned. A row there tagged with ``webui`` or
+    ``fork`` means the session once had a sidecar that has since been deleted
+    (or never materialised on this profile). Returning 404 to the client on
+    these ids is what lets the browser self-heal: strip the stale
+    ``/session/<id>`` URL and clear localStorage instead of silently
+    re-attaching to a now-empty session (#2782).
+
+    Foreign-origin rows (CLI, TUI, Desktop, claude_code, gateway, telegram,
+    etc.) — those with explicit non-webui source tags, OR blank sources with
+    ``is_cli_session``/``read_only`` markers — are NOT treated as deleted
+    WebUI sessions, even when the sidecar is absent.
+    """
+    if not SESSION_INDEX_FILE.exists():
+        return False
+    try:
+        entries = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    for entry in entries if isinstance(entries, list) else []:
+        if entry.get("session_id") != sid:
+            continue
+        # Classify per source field, not on a collapsed `a or b or c` — a
+        # legacy CLI/imported row can carry is_cli_session:true with BLANK
+        # source fields, and collapsing-then-defaulting-to-WebUI would wrongly
+        # 404 it (it should keep its read-only CLI stub).
+        srcs = [
+            str(entry.get("source_tag") or "").strip().lower(),
+            str(entry.get("raw_source") or "").strip().lower(),
+            str(entry.get("session_source") or "").strip().lower(),
+        ]
+        explicit = [s for s in srcs if s]
+        if any(s in ("webui", "fork") for s in explicit):
+            # Explicit WebUI-origin (incl. forks, which /api/session/branch
+            # stamps session_source="fork") — a deleted sidecar bricks
+            # identically. 404.
+            return True
+        if explicit:
+            # Explicit non-WebUI source (cli, telegram, claude_code, ...) —
+            # genuine foreign session, keep the existing CLI/read-only stub.
+            return False
+        # All source fields blank: WebUI-origin UNLESS the row is a legacy
+        # CLI/imported session marked only by is_cli_session / read_only.
+        is_cli = entry.get("is_cli_session") is True
+        is_read_only = bool(entry.get("read_only") or entry.get("is_read_only"))
+        return not (is_cli or is_read_only)
+    return False
+
+
+def _claim_or_synthesize_cli_session(sid: str):
+    """Resolve a session_id that has no WebUI sidecar.
+
+    Returns ``(session_or_None, reason)``. Reasons:
+
+      ``'materialized'``
+        A state.db row with messages exists. ``session`` is a fully populated
+        :class:`api.models.Session` ready for writeable use; the caller MUST
+        call ``session.save()`` to persist a WebUI-owned sidecar before the
+        first write.  The Session carries the source-tag metadata from the
+        CLI/state.db lookup (``is_cli_session=True``, ``read_only=False``)
+        so the sidebar still renders the original source badge.
+
+      ``'was_webui'``
+        The sid is in the WebUI session index as a webui/fork origin row but
+        its sidecar is gone.  Callers MUST return 404 so the browser clears
+        its stale ``/session/<id>`` URL and localStorage instead of silently
+        re-attaching to a now-empty session (#2782).
+
+      ``'no_foreign_state'``
+        The sid has no WebUI sidecar AND no recoverable messages in
+        state.db.  Callers MUST return 404.
+
+      ``'invalid_sid'``
+        ``sid`` failed :func:`is_safe_session_id`.  Callers MUST return 404.
+
+    Closing the GET-vs-POST asymmetry for foreign-origin sessions: GET
+    ``/api/session`` and POST ``/api/chat/start`` both call this helper
+    on a missing-sidecar KeyError, so a TUI/Desktop/CLI session can be
+    loaded read-only AND continued writeable from the WebUI.
+    """
+    if not is_safe_session_id(sid):
+        return None, "invalid_sid"
+    if _session_index_marks_was_webui(sid):
+        return None, "was_webui"
+    cli_meta = _lookup_cli_session_metadata(sid) or {}
+    msgs = get_cli_session_messages(sid)
+    if not msgs:
+        return None, "no_foreign_state"
+    # Coalesce workspace/model with sane fallbacks so _start_run doesn't
+    # trip on a missing field. state.db's cwd is the canonical workspace for
+    # agent sessions; CLI metadata is the fallback (handles Telegram/etc).
+    workspace = cli_meta.get("workspace") or cli_meta.get("cwd")
+    if not workspace:
+        try:
+            from api.workspace import get_last_workspace
+            workspace = get_last_workspace()
+        except Exception:
+            workspace = None
+    if not workspace:
+        try:
+            from api.models import DEFAULT_WORKSPACE
+            workspace = DEFAULT_WORKSPACE
+        except Exception:
+            workspace = "/"
+    model = cli_meta.get("model") or "unknown"
+    session = Session(
+        session_id=sid,
+        title=cli_meta.get("title") or "CLI Session",
+        workspace=workspace,
+        model=model,
+        model_provider=cli_meta.get("model_provider"),
+        messages=msgs,
+        created_at=cli_meta.get("created_at") or 0,
+        updated_at=cli_meta.get("updated_at") or 0,
+        profile=cli_meta.get("profile"),
+        is_cli_session=True,
+        source_tag=cli_meta.get("source_tag"),
+        raw_source=cli_meta.get("raw_source"),
+        session_source=cli_meta.get("session_source"),
+        source_label=cli_meta.get("source_label"),
+        # The user is now taking ownership of this session in WebUI; clear
+        # the read-only flag the foreign store set so _start_run can persist
+        # the new turn.  source_tag/source_label stay so the original badge
+        # is still rendered in the sidebar.
+        read_only=False,
+    )
+    return session, "materialized"
+
+
 def _messaging_session_identity(session: dict, raw_source: str) -> str:
     metadata = _lookup_gateway_session_identity(session.get("session_id"))
     session_key = _safe_first(
@@ -6363,86 +6496,50 @@ def handle_get(handler, parsed) -> bool:
                 )
             return resp
         except KeyError:
-            # Not a WebUI session -- try CLI store.
-            # Before synthesising a read-only CLI stub, verify the id was not a
-            # deleted WebUI session. _index.json is the canonical WebUI session
-            # registry; an entry there with a webui, fork, or empty source means the
-            # session once had a sidecar that is now gone. Returning 404 lets the
-            # client self-heal: strip the stale /session/<id> URL and clear
-            # localStorage. Otherwise GET would keep returning 200 from the CLI
-            # stub while POST /api/session/draft and /api/chat/start 404, leaving
-            # the UI bricked (#2782). Genuine CLI-origin sessions (absent from the
-            # index, or tagged with a non-webui source) keep the existing 200 path.
-            _was_webui_session = False
-            if SESSION_INDEX_FILE.exists():
-                try:
-                    _index_entries = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
-                    for _ie in _index_entries if isinstance(_index_entries, list) else []:
-                        if _ie.get("session_id") == sid:
-                            # Classify PER source field, not on a collapsed
-                            # `a or b or c` — a legacy CLI/imported row can carry
-                            # is_cli_session:true with BLANK source fields, and
-                            # collapsing-then-defaulting-to-WebUI would wrongly
-                            # 404 it (it should keep its read-only CLI stub).
-                            _srcs = [
-                                str(_ie.get("source_tag") or "").strip().lower(),
-                                str(_ie.get("raw_source") or "").strip().lower(),
-                                str(_ie.get("session_source") or "").strip().lower(),
-                            ]
-                            _explicit = [s for s in _srcs if s]
-                            if any(s in ("webui", "fork") for s in _explicit):
-                                # Explicit WebUI-origin (incl. forks, which
-                                # /api/session/branch stamps session_source="fork")
-                                # — a deleted sidecar bricks identically. 404.
-                                _was_webui_session = True
-                            elif _explicit:
-                                # Explicit non-WebUI source (cli, telegram,
-                                # claude_code, ...) — a genuine foreign session.
-                                # Keep the existing 200 CLI/read-only stub path.
-                                _was_webui_session = False
-                            else:
-                                # All source fields blank: WebUI-origin UNLESS the
-                                # row is a legacy CLI/imported session marked only
-                                # by is_cli_session / read_only.
-                                _is_cli = _ie.get("is_cli_session") is True
-                                _ro = bool(_ie.get("read_only") or _ie.get("is_read_only"))
-                                _was_webui_session = not (_is_cli or _ro)
-                            break
-                except Exception:
-                    pass
-            if _was_webui_session:
+            # No WebUI sidecar. Delegate to the shared foreign-session
+            # synthesizer so GET and POST have symmetric writeable/read-only
+            # behaviour for CLI/TUI/Desktop sessions.
+            synth, reason = _claim_or_synthesize_cli_session(sid)
+            if reason == "was_webui":
+                # Deleted WebUI session: 404 so the client self-heals
+                # (clears stale /session/<id> URL and localStorage).
                 return bad(handler, "Session not found", 404)
+            if synth is None:
+                return bad(handler, "Session not found", 404)
+            # Build the legacy dict response from the synthesized Session so
+            # the wire shape stays byte-equivalent to the previous inline
+            # synthesis (the frontend has been reading these exact keys).
             cli_meta = _lookup_cli_session_metadata(sid)
-            msgs = get_cli_session_messages(sid)
-            if msgs:
-                sess = {
-                    "session_id": sid,
-                    "title": (cli_meta or {}).get("title", "CLI Session"),
-                    "workspace": (cli_meta or {}).get("workspace", ""),
-                    "model": (cli_meta or {}).get("model", "unknown"),
-                    "message_count": len(msgs),
-                    "created_at": (cli_meta or {}).get("created_at", 0),
-                    "updated_at": (cli_meta or {}).get("updated_at", 0),
-                    "last_message_at": (cli_meta or {}).get("last_message_at")
+            msgs = list(synth.messages or [])
+            sess = {
+                "session_id": synth.session_id,
+                "title": synth.title,
+                "workspace": synth.workspace,
+                "model": synth.model,
+                "message_count": len(msgs),
+                "created_at": synth.created_at,
+                "updated_at": synth.updated_at,
+                "last_message_at": (
+                    (cli_meta or {}).get("last_message_at")
                     or (cli_meta or {}).get("updated_at", 0)
-                    or (msgs[-1] if msgs else {"timestamp": 0}).get("timestamp", 0),
-                    "pinned": False,
-                    "archived": False,
-                    "project_id": None,
-                    "profile": (cli_meta or {}).get("profile"),
-                    "is_cli_session": True,
-                    "source_tag": (cli_meta or {}).get("source_tag"),
-                    "raw_source": (cli_meta or {}).get("raw_source"),
-                    "session_source": (cli_meta or {}).get("session_source"),
-                    "source_label": (cli_meta or {}).get("source_label"),
-                    "read_only": bool((cli_meta or {}).get("read_only")),
-                    "messages": msgs,
-                    "tool_calls": [],
-                }
-                attach_todo_state(sess, msgs)
-                sess = _merge_cli_sidebar_metadata(sess, cli_meta)
-                return j(handler, {"session": redact_session_data(sess)})
-            return bad(handler, "Session not found", 404)
+                    or ((msgs or [{}])[-1].get("timestamp", 0))
+                ),
+                "pinned": bool(getattr(synth, "pinned", False)),
+                "archived": bool(getattr(synth, "archived", False)),
+                "project_id": getattr(synth, "project_id", None),
+                "profile": synth.profile,
+                "is_cli_session": True,
+                "source_tag": synth.source_tag,
+                "raw_source": synth.raw_source,
+                "session_source": synth.session_source,
+                "source_label": synth.source_label,
+                "read_only": False,  # the synthesized stub is no longer marked read-only
+                "messages": msgs,
+                "tool_calls": [],
+            }
+            attach_todo_state(sess, msgs)
+            sess = _merge_cli_sidebar_metadata(sess, cli_meta)
+            return j(handler, {"session": redact_session_data(sess)})
 
     if parsed.path == "/api/session/lineage/report":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
@@ -13096,7 +13193,42 @@ def _handle_chat_start(handler, body, diag=None):
         try:
             s = get_session(body["session_id"])
         except KeyError:
-            return bad(handler, "Session not found", 404)
+            # No WebUI sidecar. If this is a foreign-origin session (CLI,
+            # TUI, Desktop, claude_code, gateway) with recoverable state.db
+            # messages, claim it by materialising a WebUI-owned Session and
+            # persisting it as a sidecar. This closes the GET-vs-POST
+            # asymmetry where a TUI/Desktop session loads read-only via
+            # GET /api/session but 404s on the first POST /api/chat/start,
+            # making the typed message disappear into the empty state.
+            synth, reason = _claim_or_synthesize_cli_session(body["session_id"])
+            if synth is None:
+                # 'was_webui' (deleted WebUI session, client should self-heal
+                # via the existing 404 path), 'no_foreign_state' (sid has
+                # no recoverable state anywhere), or 'invalid_sid' (path
+                # safety violation). All collapse to 404 — the client only
+                # knows the right thing to do for "this session is gone".
+                return bad(handler, "Session not found", 404)
+            try:
+                synth.save()
+            except Exception as _save_err:
+                # Persisting the sidecar failed: surface as 500 so the
+                # client retries instead of silently losing the typed
+                # message to the empty-state fallback.
+                logger.exception(
+                    "failed to persist materialised sidecar for foreign session %s",
+                    body["session_id"],
+                )
+                return bad(handler, f"failed to claim session: {_save_err}", 500)
+            s = synth
+            try:
+                with LOCK:
+                    SESSIONS[s.session_id] = s
+                    SESSIONS.move_to_end(s.session_id)
+            except Exception:
+                # If the in-memory LRU refuses the new session, fall through
+                # with the just-persisted sidecar; _start_run will load it
+                # from disk if needed.
+                pass
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         if requested_profile:
