@@ -1421,6 +1421,30 @@ def _append_journaled_partial_output(
         # A stream can start with tools before any text. Keep those tools
         # visible after restart with an empty recovered assistant anchor instead
         # of inventing synthetic progress prose.
+        #
+        # Dedup guard (#3875): reuse an existing empty recovered anchor for THIS
+        # stream instead of appending a fresh one. The lazy read-side retry path
+        # (_retry_journal_recovery_in_place) re-runs this recovery on repeated
+        # get_session() calls, and a tool-first stream that never emitted text
+        # has no content to dedup on (flush_assistant() returns early on empty),
+        # so without this guard each retry — and each distinct interrupted stream
+        # over the session's life — appends another empty anchor. A session that
+        # was interrupted-and-recovered many times then accumulates thousands of
+        # empty content-less assistant rows, bloating the file and (combined with
+        # the render path) painting the transcript blank. One anchor per stream
+        # is all that's needed to host its recovered tool cards.
+        for _existing_idx in range(len(session.messages) - 1, -1, -1):
+            _m = session.messages[_existing_idx]
+            if not isinstance(_m, dict):
+                continue
+            if (
+                _m.get('_recovered_from_run_journal')
+                and _m.get('_recovered_stream_id') == stream_id
+                and _m.get('role') == 'assistant'
+                and not str(_m.get('content') or '').strip()
+            ):
+                current_assistant_idx = _existing_idx
+                return _existing_idx
         session.messages.append({
             'role': 'assistant',
             'content': '',

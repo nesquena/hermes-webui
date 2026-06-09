@@ -48,9 +48,13 @@ def test_missing_index_starts_background_rebuild_while_preserving_first_scan(mon
     assert {row["session_id"] for row in rows} == {"issue28630", "issue28631", "issue28632"}
 
     thread = models._SESSION_INDEX_REBUILD_THREAD
-    assert thread is not None
-    thread.join(timeout=5)
-    assert not thread.is_alive()
+    # Fast runners can complete the background rebuild and clear the global
+    # thread slot before this assertion observes it. The invariant is that the
+    # first scan remains correct and the index is rebuilt, not that the transient
+    # thread object is still visible.
+    if thread is not None:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
 
     index = json.loads(models.SESSION_INDEX_FILE.read_text(encoding="utf-8"))
     assert {row["session_id"] for row in index} == {"issue28630", "issue28631", "issue28632"}

@@ -5488,7 +5488,7 @@ _SETTINGS_DEFAULTS = {
     "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
-    "activity_feed_expanded_default": False,  # expand Activity disclosures by default for new turns
+    "worklog_details_expanded_default": False,  # opt-in: expand Worklog details by default; default remains folded
     "pinned_sessions_limit": 3,  # maximum active pinned sessions shown in the sidebar
     "inflight_state_max_sessions": 8,  # max active-stream recovery snapshots kept in browser localStorage
     "inflight_state_max_messages": 24,  # max recent messages kept per recovery snapshot
@@ -5505,7 +5505,7 @@ _SETTINGS_DEFAULTS = {
     "rtl": False,  # right-to-left chat layout (chat messages + composer only)
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
-    "simplified_tool_calling": True,  # render tools/thinking as compact inline timeline activity
+    "simplified_tool_calling": True,  # legacy compatibility; Worklog renderer remains enabled
     "terminal_auto_expand_on_output": False,  # auto-expand terminal panel when output arrives while collapsed
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
     "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
@@ -5514,7 +5514,13 @@ _SETTINGS_DEFAULTS = {
     "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
-_SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
+_SETTINGS_LEGACY_DROP_KEYS = {
+    "assistant_language",
+    "bubble_layout",
+    "default_model",
+    "activity_feed_expanded_default",
+    "simplified_tool_calling",
+}
 _SETTINGS_THEME_VALUES = {"light", "dark", "system"}
 _SETTINGS_SKIN_VALUES = {
     "default",
@@ -5595,6 +5601,13 @@ def load_settings() -> dict:
         try:
             stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             if isinstance(stored, dict):
+                if (
+                    "worklog_details_expanded_default" not in stored
+                    and "activity_feed_expanded_default" in stored
+                ):
+                    settings["worklog_details_expanded_default"] = bool(
+                        stored.get("activity_feed_expanded_default")
+                    )
                 settings.update(
                     {
                         k: v
@@ -5621,6 +5634,7 @@ def load_settings() -> dict:
 _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     "password_hash",
     "default_model",
+    "simplified_tool_calling",
 }
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter"},
@@ -5655,12 +5669,11 @@ _SETTINGS_BOOL_KEYS = {
     "rtl",
     "notifications_enabled",
     "show_thinking",
-    "simplified_tool_calling",
     "terminal_auto_expand_on_output",
     "api_redact_enabled",
     "session_jump_buttons",
     "session_endless_scroll",
-    "activity_feed_expanded_default",
+    "worklog_details_expanded_default",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
@@ -5669,6 +5682,15 @@ _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8}
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
     current = load_settings()
+    if (
+        "worklog_details_expanded_default" not in settings
+        and "activity_feed_expanded_default" in settings
+    ):
+        settings["worklog_details_expanded_default"] = settings.get(
+            "activity_feed_expanded_default"
+        )
+    settings.pop("activity_feed_expanded_default", None)
+    settings.pop("simplified_tool_calling", None)
     pending_theme = current.get("theme")
     pending_skin = current.get("skin")
     theme_was_explicit = False

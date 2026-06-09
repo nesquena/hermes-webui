@@ -1589,6 +1589,72 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _closeSource(source){
     closeLiveStream(activeSid, streamId, source);
   }
+  function _clearStreamEndRecovery(){
+    if(_streamEndRecoveryTimer){
+      clearTimeout(_streamEndRecoveryTimer);
+      _streamEndRecoveryTimer=null;
+    }
+    _pendingStreamEndRecovery=false;
+    _streamEndRecoveryAttempts=0;
+  }
+  function _liveStreamEndScenePresent(){
+    if(assistantText||assistantRow) return true;
+    if(String(liveReasoningText||reasoningText||'').trim()) return true;
+    const inflight=INFLIGHT[activeSid];
+    if(inflight&&Array.isArray(inflight.toolCalls)&&inflight.toolCalls.length) return true;
+    if(!_isActiveSession()||typeof document==='undefined') return false;
+    const turn=$('liveAssistantTurn');
+    return !!(turn&&turn.querySelector(
+      '[data-live-assistant="1"],'+
+      '.live-worklog[data-live-worklog-shell="1"],'+
+      '.tool-card-row[data-live-tid],'+
+      '.agent-activity-thinking[data-thinking-active="1"]'
+    ));
+  }
+  function _scheduleStreamEndRecovery(source, delay=180){
+    if(_streamEndRecoveryTimer) clearTimeout(_streamEndRecoveryTimer);
+    _pendingStreamEndRecovery=true;
+    _streamEndRecoveryTimer=setTimeout(()=>{void _runStreamEndRecovery(source);},delay);
+  }
+  function _finalizeStreamEndFallback(source){
+    _clearStreamEndRecovery();
+    if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+    _terminalStateReached=true;
+    _streamFinalized=true;
+    _cancelAnimationFramePendingStreamRender();
+    _streamFadeCleanupReduceMotionListener();
+    _smdEndParser();
+    if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+    _clearOwnerInflightState();
+    _clearApprovalForOwner();
+    _clearClarifyForOwner('terminal');
+    if(_isActiveSession()){
+      S.activeStreamId=null;
+      clearLiveToolCards();if(!assistantText)removeThinking();
+      renderMessages({preserveScroll:true});
+    }
+    renderSessionList();
+    _setActivePaneIdleIfOwner();
+    _closeSource(source);
+  }
+  async function _runStreamEndRecovery(source){
+    if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery){
+      _clearStreamEndRecovery();
+      return;
+    }
+    _streamEndRecoveryTimer=null;
+    const status=await _restoreSettledSession(source,{status:true});
+    if(status==='restored'){
+      _clearStreamEndRecovery();
+      return;
+    }
+    if(status==='active'&&_streamEndRecoveryAttempts<10){
+      _streamEndRecoveryAttempts+=1;
+      _scheduleStreamEndRecovery(source,200);
+      return;
+    }
+    _finalizeStreamEndFallback(source);
+  }
   function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
     (Array.isArray(snippets)?snippets:[]).forEach(snippet=>{
@@ -1739,6 +1805,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _reconnectAttempted=false;
   let _terminalStateReached=false;
   let _deferredStreamRecoveryBound=false;
+  let _pendingStreamEndRecovery=false;
+  let _streamEndRecoveryTimer=null;
+  let _streamEndRecoveryAttempts=0;
 
   function _pageHiddenForStreamError(){
     return (typeof document!=='undefined'&&document.visibilityState==='hidden')||
@@ -3042,6 +3111,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
+      _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
@@ -3266,27 +3336,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource(source);
         return;
       }
+      _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
-      _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
       }catch(_){}
+      if(S.activeStreamId===streamId && _liveStreamEndScenePresent()){
+        _scheduleStreamEndRecovery(source);
+        return;
+      }
       // Some replay/journal paths can deliver stream_end without a preceding
       // done event. In that case closing the EventSource is not enough: the
       // live DOM/inflight state remains projected and can duplicate Thinking or
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
-      if(await _restoreSettledSession(source)){
+      const status=await _restoreSettledSession(source,{status:true});
+      if(status==='restored'){
         return;
       }
-      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
-      _streamFinalized=true;
-      _cancelAnimationFramePendingStreamRender();
-      _streamFadeCleanupReduceMotionListener();
-      _smdEndParser();
-      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      _closeSource(source);
+      if(status==='active'&&S.activeStreamId===streamId){
+        _scheduleStreamEndRecovery(source,200);
+        return;
+      }
+      _finalizeStreamEndFallback(source);
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
@@ -3398,6 +3471,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('apperror',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      _clearStreamEndRecovery();
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -3494,6 +3568,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource(source);
         return;
       }
+      // A stream_end recovery is already in flight (it polls the server's settled
+      // state and finalizes or settles on its own). Don't let the SSE error path
+      // start a COMPETING reconnect: stream_end now defers `_terminalStateReached`
+      // until recovery resolves, so without this guard a server that closes the
+      // SSE right after stream_end would trigger a reconnect here, and then
+      // recovery-exhaustion could set `_streamFinalized` and mute the freshly
+      // reconnected stream (UI frozen at the partial). Let recovery own the
+      // terminal decision. (Opus stage-LK review, #3885.)
+      if(_pendingStreamEndRecovery){
+        _closeSource(source);
+        return;
+      }
       if(typeof recordClientSSEError==='function') recordClientSSEError('chat-response',{ready_state:source?source.readyState:null,session_id:activeSid,stream_id:streamId,reason:'chat EventSource.onerror'});
       source.close();
       if(_deferStreamErrorIfOffline()) return;
@@ -3541,6 +3627,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('cancel',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      _clearStreamEndRecovery();
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -3631,19 +3718,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     window._carryForwardEphemeralTurnFields=_carryForwardEphemeralTurnFields;
   }
 
-  async function _restoreSettledSession(source){
+  async function _restoreSettledSession(source, options=null){
+    const returnStatus=!!(options&&options.status);
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
-      return false;
+      return returnStatus?'stale':false;
     }
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
-      if(_streamFinalized) return true;
+      if(_streamFinalized) return returnStatus?'restored':true;
       const session=data&&data.session;
-      if(!session) return false;
-      if(session.active_stream_id||session.pending_user_message) return false;
+      if(!session) return returnStatus?'missing':false;
+      if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
       _cancelAnimationFramePendingStreamRender();
@@ -3701,9 +3789,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
       _setActivePaneIdleIfOwner();
-      return true;
+      return returnStatus?'restored':true;
     }catch(_){
-      return false;
+      return returnStatus?'error':false;
     }
   }
 
@@ -3712,6 +3800,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _closeSource(source);
       return;
     }
+    _clearStreamEndRecovery();
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}

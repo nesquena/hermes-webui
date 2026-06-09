@@ -153,29 +153,24 @@ def _run_thinking_echo_helper(*args: str) -> str:
 
 
 class TestToolCallGroupingStatic:
-    def test_simplified_tool_calling_setting_is_wired_through_frontend(self):
-        assert "settingsSimplifiedToolCalling" in (REPO / "static" / "index.html").read_text(encoding="utf-8"), (
-            "Settings should expose a Compact tool activity checkbox."
-        )
-        assert "window._simplifiedToolCalling" in (REPO / "static" / "boot.js").read_text(encoding="utf-8"), (
-            "Boot should hydrate simplified_tool_calling into a runtime flag."
+    def test_simplified_tool_calling_setting_is_hidden_from_frontend(self):
+        assert "settingsSimplifiedToolCalling" not in (REPO / "static" / "index.html").read_text(encoding="utf-8"), (
+            "Settings should no longer expose the deprecated Compact tool activity checkbox."
         )
         panels = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-        assert "settingsSimplifiedToolCalling" in panels and "simplified_tool_calling" in panels, (
-            "Settings panel should load and save the simplified_tool_calling setting."
+        assert "settingsSimplifiedToolCalling" not in panels, (
+            "Settings panel should not load or save the deprecated simplified_tool_calling setting."
         )
 
-    def test_simplified_tool_calling_autosave_hot_applies_renderer_mode(self):
+    def test_simplified_tool_calling_renderer_is_forced_to_worklog_mode(self):
+        boot = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+        assert "window._simplifiedToolCalling=true" in boot, (
+            "Boot should keep the Compact Worklog renderer enabled regardless of legacy saved values."
+        )
         panels = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
         fn = _function_body(panels, "_autosavePreferencesSettings")
-        assert "window._simplifiedToolCalling" in fn, (
-            "Autosaving Compact tool activity should update the live renderer flag immediately."
-        )
-        assert "clearMessageRenderCache()" in fn, (
-            "Autosaving Compact tool activity should invalidate cached transcript HTML."
-        )
-        assert "renderMessages()" in fn, (
-            "Autosaving Compact tool activity should rebuild the visible transcript without a refresh."
+        assert "simplified_tool_calling" not in fn and "window._simplifiedToolCalling" not in fn, (
+            "Preferences autosave should no longer hot-apply the deprecated renderer switch."
         )
 
     def test_render_messages_gates_settled_activity_grouping(self):

@@ -3509,38 +3509,86 @@ function renderMd(raw){
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
   // fence_stash. The per-line passes below never see > prefixes.)
-  // B8: improved list handling supporting up to 2 levels of indentation
-  s=s.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,block=>{
-    const lines=block.trimEnd().split('\n');
-    let html='<ul>';
-    for(const l of lines){
-      const indent=/^ {2,}/.test(l);
-      const text=l.replace(/^ {0,4}[-*+] /,'');
-      let _ih;
-      if(/^\[x\] /i.test(text)) _ih='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
-      else if(/^\[ \] /.test(text)) _ih='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
-      else _ih=inlineMd(text);
-      if(indent) html+=`<li style="margin-left:16px">${_ih}</li>`;
-      else html+=`<li>${_ih}</li>`;
+  function _renderListBlock(lines, ordered){
+    const marker=ordered?'\\d+\\. ':'[-*+] ';
+    let html=ordered?'<ol>':'<ul>';
+    let item=null;
+    const flush=()=>{
+      if(!item) return;
+      const body=item.parts.join('\n').trim();
+      const text=body;
+      let inner;
+      if(!ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
+      else if(!ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
+      else inner=inlineMd(text);
+      const valueAttr=item.value!==null?` value="${item.value}"`:'';
+      const styleAttr=item.indent?` style="margin-left:16px"`:'';
+      html+=`<li${valueAttr}${styleAttr}>${inner}</li>`;
+      item=null;
+    };
+    for(const raw of lines){
+      const line=String(raw||'');
+      const nested=line.match(new RegExp(`^ {2,}(${marker})(.*)$`));
+      if(nested){
+        flush();
+        item={indent:true,value:ordered?parseInt(nested[1],10):null,parts:[nested[2]]};
+        continue;
+      }
+      const top=line.match(new RegExp(`^(?:  )?(${marker})(.*)$`));
+      if(top){
+        flush();
+        item={indent:false,value:ordered?parseInt(top[1],10):null,parts:[top[2]]};
+        continue;
+      }
+      if(!item) continue;
+      item.parts.push(line.replace(/^ {2,}/,'').trim());
     }
-    return html+'</ul>';
-  });
-  // Ordered lists: use value= on each <li> so the correct number is preserved
-  // even when blank lines between items cause the paragraph splitter to place
-  // each item in its own <ol> container — without value= every <ol> restarts
-  // at 1, producing "1. 1. 1." instead of "1. 2. 3." (#886).
-  s=s.replace(/((?:^(?:  )?\d+\. .+\n?)+)/gm,block=>{
-    const lines=block.trimEnd().split('\n');
-    let html='<ol>';
-    for(const l of lines){
-      const numMatch=l.match(/^\s*(\d+)\. /);
-      const num=numMatch?parseInt(numMatch[1],10):null;
-      const text=l.replace(/^ {0,4}\d+\. /,'');
-      const valAttr=num!==null?` value="${num}"`:'';
-      html+=`<li${valAttr}>${inlineMd(text)}</li>`;
+    flush();
+    return html+(ordered?'</ol>':'</ul>');
+  }
+  function _renderLists(src, ordered){
+    const lines=src.split('\n');
+    const out=[];
+    const topRe=ordered?/^(?:  )?\d+\. /:/^(?:  )?[-*+] /;
+    const nestedRe=ordered?/^ {2,}\d+\. /:/^ {2,}[-*+] /;
+    const contRe=/^ {2,}\S/;
+    let i=0;
+    while(i<lines.length){
+      if(!topRe.test(lines[i])){
+        out.push(lines[i]);
+        i++;
+        continue;
+      }
+      const block=[lines[i]];
+      i++;
+      while(i<lines.length){
+        const line=lines[i];
+        if(topRe.test(line)||nestedRe.test(line)||contRe.test(line)){
+          block.push(line);
+          i++;
+          continue;
+        }
+        if(!line.trim()){
+          const next=lines[i+1]||'';
+          if(topRe.test(next)||nestedRe.test(next)||contRe.test(next)){
+            i++;
+            continue;
+          }
+        }
+        break;
+      }
+      out.push(_renderListBlock(block,ordered));
     }
-    return html+'</ol>';
-  });
+    return out.join('\n');
+  }
+  // Preserve continuation lines, nested indentation, and LaTeX placeholder lines
+  // inside list items without changing the wider markdown pipeline.
+  s=_renderLists(s,false);
+  // Ordered-list parsing intentionally runs on the post-unordered string; the
+  // unordered pass emits <ul> HTML that cannot satisfy the ordered-item regex.
+  // Keep continuation lines attached to their item and preserve explicit
+  // numbering via value= even when blank lines split the markdown.
+  s=_renderLists(s,true);
   // Tables: | col | col | header row followed by | --- | --- | separator then data rows
   // NOTE: table pass runs BEFORE outer link pass so [label](url) in table cells
   // is handled by inlineMd() only — prevents double-linking.
@@ -6410,10 +6458,30 @@ function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visi
   const visibleTexts=Array.isArray(turnVisibleContents)?turnVisibleContents:[];
   return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
 }
+function _worklogDetailsExpandedDefault(){
+  return window._worklogDetailsExpandedByDefault===true;
+}
+function _applyWorklogDetailsExpandedDefault(root){
+  const scope=root&&root.querySelectorAll?root:document;
+  const open=_worklogDetailsExpandedDefault();
+  scope.querySelectorAll('.thinking-card').forEach(card=>{
+    card.classList.toggle('open', open);
+  });
+  scope.querySelectorAll('.tool-card').forEach(card=>{
+    if(card.querySelector('.tool-card-detail')) card.classList.toggle('open', open);
+  });
+  scope.querySelectorAll('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group').forEach(group=>{
+    group.classList.toggle('open', open);
+    group.classList.toggle('tool-worklog-tool-group-collapsed', !open);
+    const summary=group.querySelector('.tool-group-head,.tool-worklog-tool-group-head');
+    if(summary) summary.setAttribute('aria-expanded', String(open));
+  });
+}
 function _thinkingCardHtml(text, open){
   const clean=_sanitizeThinkingDisplayText(text);
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
-  const classes=`thinking-card${open?' open':''}`;
+  const shouldOpen=!!open||_worklogDetailsExpandedDefault();
+  const classes=`thinking-card${shouldOpen?' open':''}`;
   return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function isSimplifiedToolCalling(){
@@ -6769,7 +6837,7 @@ function ensureActivityGroup(inner, opts){
   if(!group){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
-    if(window._activityFeedExpandedDefault===true) collapsed=false;
+    if(window._worklogDetailsExpandedByDefault===true) collapsed=false;
     const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
@@ -7927,6 +7995,23 @@ function renderMessages(options){
     return m._statusCard||msgContent(m)||m.attachments?.length;
   });
   $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
+  // Mid-stream flicker fix (#3877): when a renderMessages() rebuild is reached
+  // while THIS session is actively streaming (e.g. the clarify-response echo at
+  // messages.js, or a CLI-import refresh), the `inner.innerHTML=''` below detaches
+  // the live `#liveAssistantTurn` node — and the smd parser keeps writing into
+  // that now-orphaned node, so the streamed text vanishes until the next stream
+  // event rebuilds the turn ("disappears, then reappears"). Capture the live
+  // turn's actual DOM node (not its HTML — the parser holds a live reference into
+  // it) so it can be re-attached after the rebuild, keeping the parser target
+  // connected and the streamed text visible. Only for the streaming session's own
+  // live turn; never affects settled transcripts.
+  let _preservedLiveTurn=null;
+  if(sid&&INFLIGHT[sid]){
+    const _lt=document.getElementById('liveAssistantTurn');
+    if(_lt&&(!_lt.dataset||!_lt.dataset.sessionId||_lt.dataset.sessionId===sid)){
+      _preservedLiveTurn=_lt;
+    }
+  }
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
@@ -8240,6 +8325,29 @@ function renderMessages(options){
       seg.setAttribute('data-live-assistant','1');
     }
     if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
+    // A turn whose visible content is empty but which carries a separate
+    // `reasoning` field (e.g. a run-journal-recovered anchor: empty content +
+    // reasoning + `_recovered_from_run_journal`) extracts NO inline thinkingText
+    // and would render no Thinking Card at all — collapsing to an empty hidden
+    // anchor. A session made entirely of such rows then paints blank (only date
+    // separators) — the #3875 reporter's exact case (Compact tool activity OFF,
+    // i.e. legacy mode). Surface the message's reasoning payload as the Thinking
+    // Card source for these empty-content turns so the turn is never blank.
+    //
+    // LEGACY-MODE ONLY (!isSimplifiedToolCalling()): the simplified/Worklog path
+    // already derives reasoning above (line ~8149 via
+    // _worklogReasoningTextFromMessage, which strips an exact visible-answer echo
+    // so reasoning duplicating a sibling answer is not re-shown). Repopulating the
+    // raw reasoning here would bypass that echo-strip and re-render the duplicate
+    // as a Worklog Thinking card (Codex gate catch). In legacy mode there is no
+    // Worklog folding, so the raw payload is the correct Thinking-card source.
+    // Stays OUT of the inline-content `thinkingText` extraction block (#2565) and
+    // only fires for empty-content/no-inline-thinking turns, so answer-bearing
+    // messages are unchanged.
+    if(!isUser&&!m._live&&!isSimplifiedToolCalling()&&!thinkingText&&!String(content||'').trim()&&!filesHtml&&!statusHtml){
+      const _reasoningPayload=_assistantReasoningPayloadText(m);
+      if(_reasoningPayload) thinkingText=_reasoningPayload;
+    }
     if(thinkingText&&window._showThinking!==false){
       if(isSimplifiedToolCalling()&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
@@ -8789,6 +8897,37 @@ function renderMessages(options){
       }
     }
   }
+  // Re-attach the preserved live turn (#3877). The rebuild above recreated a
+  // live turn from S.messages, but the live assistant message's content is empty
+  // until the stream settles — so the fresh node shows no streamed text while the
+  // ORIGINAL node (still referenced by the smd parser) holds the real in-progress
+  // reply. If the rebuilt live turn has less streamed text than the preserved one,
+  // swap the preserved node back in so the parser target stays connected and the
+  // visible text never blanks. The length guard below already establishes that the
+  // preserved (parser) node carries strictly MORE streamed text than the rebuilt
+  // one, so a plain replaceWith is sufficient — no segment merge is needed (during
+  // a live stream the rebuilt node's live content is empty/shorter, never longer,
+  // and the guard skips the swap entirely when the rebuild has equal/more content).
+  // No-op for a settled turn or when nothing was streaming.
+  if(_preservedLiveTurn){
+    const _rebuilt=document.getElementById('liveAssistantTurn');
+    const _preservedLen=_liveAssistantSegmentTextLength(
+      _preservedLiveTurn.querySelector('[data-live-assistant="1"]')||_preservedLiveTurn
+    );
+    if(_preservedLen>0){
+      const _rebuiltLen=_rebuilt?_liveAssistantSegmentTextLength(
+        _rebuilt.querySelector('[data-live-assistant="1"]')||_rebuilt
+      ):-1;
+      if(_rebuiltLen<_preservedLen){
+        if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
+        if(_rebuilt){
+          _rebuilt.replaceWith(_preservedLiveTurn);
+        }else{
+          inner.appendChild(_preservedLiveTurn);
+        }
+      }
+    }
+  }
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
@@ -9050,7 +9189,7 @@ function _syncToolRowsContainer(tools, isLiveWorklog){
     return;
   }
   const hasRunning=rows.some(row=>row&&row.dataset&&row.dataset.toolDone==='false');
-  const shouldOpen=false;
+  const shouldOpen=_worklogDetailsExpandedDefault();
   const group=document.createElement('div');
   group.className='tool-group'+(shouldOpen?' open':' tool-worklog-tool-group-collapsed');
   group.setAttribute('data-tool-worklog-tool-group','1');
@@ -9183,7 +9322,8 @@ function buildToolCard(tc){
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
-  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
+  const openClass=hasDetail&&_worklogDetailsExpandedDefault()?' open':'';
+  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'')+openClass;
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
   let displayName=_toolDisplayName(tc);
   let previewText=_toolCardPreviewText(tc, displaySnippet);
@@ -10221,7 +10361,7 @@ function renderKatexBlocks(container,options){
 
 function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
-  const openClass=isSimplifiedToolCalling()?'':' open';
+  const openClass=_worklogDetailsExpandedDefault()?' open':'';
   return (clean&&String(clean).trim())
     ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
