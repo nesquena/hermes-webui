@@ -9,6 +9,22 @@ def test_missing_index_starts_background_rebuild_while_preserving_first_scan(mon
     import api.models as models
     from api.models import all_sessions
 
+    # Hermetic isolation: a prior test in the same worker may have left the
+    # background rebuild thread bookkeeping populated. Since #3884 the start
+    # helper short-circuits when a rebuild thread for the same target is still
+    # alive, so stale globals from another test could suppress the fresh thread
+    # this test asserts on. Join any leftover thread and clear both globals so
+    # this test only observes the thread IT triggers, regardless of run order.
+    _stale = getattr(models, "_SESSION_INDEX_REBUILD_THREAD", None)
+    if _stale is not None:
+        try:
+            _stale.join(timeout=5)
+        except Exception:
+            pass
+    models._SESSION_INDEX_REBUILD_THREAD = None
+    if hasattr(models, "_SESSION_INDEX_REBUILD_THREAD_TARGET"):
+        models._SESSION_INDEX_REBUILD_THREAD_TARGET = None
+
     session_dir = tmp_path / "sessions"
     session_dir.mkdir(parents=True)
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)

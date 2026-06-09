@@ -11727,6 +11727,15 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     if attachments:
         user_msg["attachments"] = list(attachments)
     s.messages.append(user_msg)
+    # The new user turn is now committed to messages (#3831): a positive
+    # truncation watermark from a prior retry/undo/edit has been superseded and
+    # must retire, else it freezes at the old edit boundary and later drops these
+    # post-edit turns on an empty-sidecar reconcile. Safe here (not at chat-start)
+    # because the row is durably in messages, so the merge's max-sidecar guard now
+    # suppresses the replaced tail without the watermark. Cleared to None — never
+    # 0.0, which is the truncate-to-empty sentinel (#2914).
+    if getattr(s, "truncation_watermark", None):
+        s.truncation_watermark = None
 
 
 def _is_default_or_empty_session_title(title) -> bool:
@@ -12860,6 +12869,7 @@ def _handle_cron_create(handler, body):
             deliver=body.get("deliver") or "local",
             skills=body.get("skills") or [],
             model=body.get("model") or None,
+            provider=body.get("provider") or None,
         )
         post_create_updates = {}
         if profile is not None:
@@ -12902,6 +12912,8 @@ def _handle_cron_update(handler, body):
                 continue
             if k == "profile":
                 updates[k] = _normalize_cron_profile_value(v)
+            elif k in ("model", "provider"):
+                updates[k] = v if v else None
             elif v is not None:
                 updates[k] = v
     except ValueError as e:

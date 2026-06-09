@@ -8726,6 +8726,69 @@ function renderMessages(options){
       }
     }
   }
+  // Fail-safe invariant (#3875): a settled assistant turn must never render with
+  // ZERO visible content. The Worklog redesign (#3401) folds intermediate
+  // assistant segments into a collapsed Worklog card and hides the source segment
+  // (`assistant-segment-worklog-source` → display:none). That is correct WHEN the
+  // turn also has a visible final answer. But when a turn's ONLY content is folded
+  // into a collapsed Worklog (e.g. an autonomous/interrupted run whose final
+  // assistant message is empty, or a reload where S.toolCalls didn't hydrate so the
+  // worklog card built with no expandable tool steps), every segment is hidden and
+  // the turn paints as nothing — leaving the transcript a bare stack of date
+  // separators (#3875 brick). Reveal such turns so their content is never silently
+  // swallowed: expand the turn's Worklog group(s) when the turn has no other
+  // visible content. This NEVER touches a turn that has any visible segment, so the
+  // intended collapsed-Worklog UX is preserved whenever a visible answer exists.
+  // The live turn is excluded by its `liveAssistantTurn` id (it drives its own
+  // state during a stream), so this sweep is safe to run even while busy — a
+  // historical blank turn must not re-paint blank during a follow-up stream
+  // (Opus advisor, stage-342).
+  {
+    const _turnHasVisibleContent=(turn)=>{
+      const segs=turn.querySelectorAll('.assistant-segment');
+      for(const seg of segs){
+        // A segment shows real content only when it is NOT worklog-folded AND its
+        // body/files/status actually painted (the anchor-only placeholder class
+        // carries no visible body).
+        if(seg.classList.contains('assistant-segment-worklog-source')) continue;
+        if(seg.classList.contains('assistant-segment-anchor')) continue;
+        if((seg.textContent||'').trim()) return true;
+      }
+      return false;
+    };
+    for(const turn of inner.querySelectorAll('.assistant-turn')){
+      if(turn.id==='liveAssistantTurn') continue; // live turn drives its own state
+      if(_turnHasVisibleContent(turn)) continue;
+      // No visible content — surface the folded Worklog so the turn isn't blank.
+      const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
+      let revealed=false;
+      for(const group of groups){
+        if(!(group.textContent||'').trim()) continue; // empty group can't help
+        if(group.classList.contains('tool-call-group-collapsed')){
+          group.classList.remove('tool-call-group-collapsed');
+          group.classList.add('open');
+          const summary=group.querySelector('.tool-call-group-summary,.activity-summary');
+          if(summary) summary.setAttribute('aria-expanded','true');
+        }
+        // `revealed` means "this turn has a non-empty Worklog group that the user
+        // can see" — NOT "we just expanded something". An already-open non-empty
+        // group is itself visible (it slips past _turnHasVisibleContent only
+        // because that check inspects .assistant-segment nodes, not group bodies),
+        // so the turn isn't truly blank and the last-resort un-hide below is
+        // unnecessary. Keep this assignment OUTSIDE the if(collapsed) branch.
+        revealed=true;
+      }
+      // Last resort: no usable worklog group either, but hidden worklog-source
+      // segments carry the real text — un-hide them so nothing is lost.
+      if(!revealed){
+        for(const seg of turn.querySelectorAll('.assistant-segment-worklog-source')){
+          if(!(seg.textContent||'').trim()) continue;
+          seg.classList.remove('assistant-segment-worklog-source');
+          seg.removeAttribute('aria-hidden');
+        }
+      }
+    }
+  }
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.

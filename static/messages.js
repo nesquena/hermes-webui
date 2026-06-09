@@ -2911,14 +2911,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       showApprovalForSession(activeSid, d, 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed');
+      sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
     });
 
     source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed');
+      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
     });
 
     source.addEventListener('state_saved',e=>{
@@ -3251,7 +3251,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         renderSessionList();
         _setActivePaneIdleIfOwner();
         playNotificationSound();
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
+        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{sid:activeSid});
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -4946,16 +4946,59 @@ function playAttentionSound(key){
   }catch(e){console.warn('Attention sound failed:',e);}
 }
 
-function sendBrowserNotification(title,body){
-  if(!window._notificationsEnabled||!document.hidden) return;
-  if(!('Notification' in window)) return;
+function _notificationOptions(body,options={}){
+  const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
+  const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
+  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:false,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+}
+function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
+  const opts=_notificationOptions(body,options);
+  const direct=()=>new Notification(title||botName,opts);
+  // Prefer the service worker (the only path that works in a standalone PWA,
+  // notably iOS). Use getRegistration() + a short timeout race rather than
+  // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
+  // registration ever activates for the scope (e.g. a reverse proxy serving
+  // sw.js with the wrong MIME type, or SW disabled in the browser) — which
+  // would silently drop every notification instead of falling back.
+  if(navigator.serviceWorker&&navigator.serviceWorker.getRegistration){
+    const reg$=Promise.race([
+      navigator.serviceWorker.getRegistration().catch(()=>null),
+      new Promise(res=>setTimeout(()=>res(null),2000))
+    ]);
+    return reg$.then(reg=>(reg&&reg.active&&reg.showNotification)
+      ? reg.showNotification(title||botName,opts)
+      : direct());
+  }
+  return Promise.resolve(direct());
+}
+function requestNotificationPermission(){
+  if(!('Notification' in window)){
+    if(typeof showToast==='function') showToast(t('notifications_unsupported'),3000,'error');
+    return Promise.resolve('unsupported');
+  }
+  if(Notification.permission==='granted') return Promise.resolve('granted');
+  if(Notification.permission==='denied'){
+    if(typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+    return Promise.resolve('denied');
+  }
+  return Notification.requestPermission().then(p=>{
+    if(typeof showToast==='function') showToast(p==='granted'?t('notifications_enabled_toast'):t('notifications_denied'),3000,p==='granted'?undefined:'error');
+    if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
+    return p;
+  });
+}
+function sendBrowserNotification(title,body,options={}){
+  const force=!!(options&&options.force);
+  if(!force&&(!window._notificationsEnabled||!document.hidden)) return;
+  if(!('Notification' in window)) return;
   if(Notification.permission==='granted'){
-    new Notification(title||botName,{body:body});
-  }else if(Notification.permission!=='denied'){
-    Notification.requestPermission().then(p=>{
-      if(p==='granted') new Notification(title||botName,{body:body});
-    });
+    _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+  }else if(Notification.permission==='denied'){
+    // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
+    if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+  }else{
+    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});});
   }
 }
 
