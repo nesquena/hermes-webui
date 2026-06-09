@@ -10585,6 +10585,16 @@ function _copyTextWithFallback(text, successMsg, failurePrefix){
   return Promise.resolve();
 }
 
+function _workspaceCreateTargetLabel(targetDir){
+  return targetDir && targetDir !== '.' ? targetDir : t('workspace_root');
+}
+
+function _workspaceJoinTargetPath(targetDir, name){
+  const cleanName=String(name||'').trim();
+  if(!cleanName) return '';
+  return (!targetDir||targetDir==='.') ? cleanName : `${targetDir}/${cleanName}`;
+}
+
 function _showWorkspaceRootContextMenu(e){
   document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
   const menu=document.createElement('div');
@@ -10593,6 +10603,20 @@ function _showWorkspaceRootContextMenu(e){
   const vw=window.innerWidth,vh=window.innerHeight;
   menu.style.left=(e.clientX+160>vw?e.clientX-170:e.clientX)+'px';
   menu.style.top=(e.clientY+80>vh?e.clientY-80:e.clientY)+'px';
+
+  menu.appendChild(_workspaceContextMenuItem(t('new_file'),async()=>{
+    menu.remove();
+    await promptNewFile('.');
+  }));
+
+  menu.appendChild(_workspaceContextMenuItem(t('new_folder'),async()=>{
+    menu.remove();
+    await promptNewFolder('.');
+  }));
+
+  const createSep=document.createElement('hr');
+  createSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(createSep);
 
   menu.appendChild(_workspaceContextMenuItem(t('reveal_in_finder'),async()=>{
     menu.remove();
@@ -10930,6 +10954,21 @@ function _showFileContextMenu(e, item){
   const vw=window.innerWidth,vh=window.innerHeight;
   menu.style.left=(e.clientX+140>vw?e.clientX-150:e.clientX)+'px';
   menu.style.top=(e.clientY+100>vh?e.clientY-100:e.clientY)+'px';
+  const targetDir=item.type==='dir' ? item.path : _workspaceParentDir(item.path);
+
+  menu.appendChild(_workspaceContextMenuItem(t('new_file'),async()=>{
+    menu.remove();
+    await promptNewFile(targetDir);
+  }));
+
+  menu.appendChild(_workspaceContextMenuItem(t('new_folder'),async()=>{
+    menu.remove();
+    await promptNewFolder(targetDir);
+  }));
+
+  const createSep=document.createElement('hr');
+  createSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(createSep);
 
   // Rename
   const renameItem=document.createElement('div');
@@ -10977,10 +11016,6 @@ function _showFileContextMenu(e, item){
         await navigator.clipboard.writeText(abs);
         showToast(t('path_copied'));
       }catch(clipErr){
-        // Fallback for browsers where Clipboard API is gated (older Safari,
-        // non-secure contexts). Use the legacy execCommand path against a
-        // hidden textarea — this is the same pattern boot.js uses for the
-        // "Copy" buttons on code blocks.
         const ta=document.createElement('textarea');
         ta.value=abs;
         ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
@@ -10998,8 +11033,6 @@ function _showFileContextMenu(e, item){
   };
   menu.appendChild(copyPathItem);
 
-  // Download as zip — only for directories. Streams the folder contents
-  // through /api/folder/download which builds the zip on the fly.
   if(item.type==='dir'){
     const dlItem=document.createElement('div');
     dlItem.textContent=t('download_folder');
@@ -11015,7 +11048,6 @@ function _showFileContextMenu(e, item){
     menu.appendChild(dlItem);
   }
 
-  // Divider + Delete
   const sep=document.createElement('hr');
   sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
   menu.appendChild(sep);
@@ -11077,9 +11109,7 @@ async function deleteWorkspaceFile(relPath, name){
   }catch(e){setStatus(t('delete_failed')+e.message);}
 }
 
-async function promptNewFile(){
-  // If no active session but a default workspace is configured, auto-create
-  // a session bound to it so workspace actions work on the blank new-chat page.
+async function promptNewFile(targetDir = S.currentDir || '.'){
   if(!S.session){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws) return;
@@ -11089,19 +11119,24 @@ async function promptNewFile(){
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
-  const name=await showPromptDialog({title:t('new_file_prompt'),placeholder:'filename.txt',confirmLabel:t('create')});
-  if(!name||!name.trim())return;
-  const relPath=S.currentDir==='.'?name.trim():(S.currentDir+'/'+name.trim());
+  const targetLabel=_workspaceCreateTargetLabel(targetDir);
+  const name=await showPromptDialog({
+    title:t('new_file_prompt_title', targetLabel),
+    placeholder:'filename.txt',
+    confirmLabel:t('create')
+  });
+  if(!name||!name.trim()) return;
+  const relPath=_workspaceJoinTargetPath(targetDir,name);
   try{
     await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,content:''})});
     showToast(t('created')+name.trim());
+    delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);
     openFile(relPath);
   }catch(e){setStatus(t('create_failed')+e.message);}
 }
 
-async function promptNewFolder(){
-  // Same auto-create-session logic as promptNewFile for the blank page.
+async function promptNewFolder(targetDir = S.currentDir || '.'){
   if(!S.session){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws) return;
@@ -11111,20 +11146,26 @@ async function promptNewFolder(){
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;
-  const name=await showPromptDialog({title:t('new_folder_prompt'),placeholder:'folder-name',confirmLabel:t('create')});
-  if(!name||!name.trim())return;
-  const relPath=S.currentDir==='.'?name.trim():(S.currentDir+'/'+name.trim());
+  const targetLabel=_workspaceCreateTargetLabel(targetDir);
+  const name=await showPromptDialog({
+    title:t('new_folder_prompt_title', targetLabel),
+    placeholder:'folder-name',
+    confirmLabel:t('create')
+  });
+  if(!name||!name.trim()) return;
+  const relPath=_workspaceJoinTargetPath(targetDir,name);
   try{
     await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
     showToast(t('folder_created')+name.trim());
+    delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);
-    // Offer to add the new folder as a space (#782)
-    const absPath=S.session.workspace?((S.currentDir==='.'?S.session.workspace:S.session.workspace+'/'+S.currentDir)+'/'+name.trim()):null;
+    const absPath=S.session.workspace?(targetDir==='.'?`${S.session.workspace}/${name.trim()}`:`${S.session.workspace}/${targetDir}/${name.trim()}`):null;
     if(absPath){
       const addAsSpace=await showConfirmDialog({
         title:t('folder_add_as_space_title'),
         message:t('folder_add_as_space_msg'),
         confirmLabel:t('folder_add_as_space_btn'),
+        cancelLabel:t('status_no'),
         focusCancel:true
       });
       if(addAsSpace){

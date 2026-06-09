@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+## [v0.51.339] — 2026-06-09 — Release LC (targeted workspace create actions)
+
+### Added
+- **Create files and folders where you right-click in the workspace.** The workspace context menus (root heading, directory rows, file rows) now offer **New File** / **New Folder** that target the thing you clicked — a directory row creates inside that directory, a file row creates alongside it — instead of always targeting the current directory. The create prompt names the target (e.g. "New file name in `src`:"). (#3855, #3843, @b3nw)
+
+### Fixed
+- **The "Add as space?" prompt after creating a folder now has a clear "No" option** instead of an unlabeled cancel. (#3858, #3856, @b3nw)
+
 ## [v0.51.338] — 2026-06-09 — Release LB (saved prompts library)
 
 ### Added
