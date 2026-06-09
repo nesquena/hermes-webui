@@ -8443,6 +8443,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         safe_instructions = _space_current_instruction_after_preflight(space_id, instructions, preflight)
         autonomy_policy = _space_current_instruction_action_policy_receipt(name, preflight)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="instructions")
+        memory_advisory = _memory_advisory_public_envelope()
         key = "agent_instructions" if name.endswith("agentinstructions") else "special_instructions"
         return {
             "ok": True,
@@ -8452,11 +8453,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
                 include_widget_count=False,
             ),
         }
