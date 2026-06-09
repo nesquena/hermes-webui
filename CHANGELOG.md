@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+## [v0.51.340] — 2026-06-09 — Release LD (background-task agent wakeup in WebUI) — ⛔ HELD pending independent review
+
 ### Added
 
 - Background tasks started with `terminal(notify_on_complete=true)` now wake the WebUI agent turn server-side, so the wakeup fires even when no browser tab is open. Closed-tab parity with CLI / Telegram / gateway hosts. (#2968)
