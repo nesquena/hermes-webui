@@ -4954,13 +4954,23 @@ function _notificationOptions(body,options={}){
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
   const opts=_notificationOptions(body,options);
-  if(navigator.serviceWorker&&navigator.serviceWorker.ready){
-    return navigator.serviceWorker.ready.then(reg=>{
-      if(reg&&reg.showNotification) return reg.showNotification(title||botName,opts);
-      return new Notification(title||botName,opts);
-    });
+  const direct=()=>new Notification(title||botName,opts);
+  // Prefer the service worker (the only path that works in a standalone PWA,
+  // notably iOS). Use getRegistration() + a short timeout race rather than
+  // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
+  // registration ever activates for the scope (e.g. a reverse proxy serving
+  // sw.js with the wrong MIME type, or SW disabled in the browser) — which
+  // would silently drop every notification instead of falling back.
+  if(navigator.serviceWorker&&navigator.serviceWorker.getRegistration){
+    const reg$=Promise.race([
+      navigator.serviceWorker.getRegistration().catch(()=>null),
+      new Promise(res=>setTimeout(()=>res(null),2000))
+    ]);
+    return reg$.then(reg=>(reg&&reg.active&&reg.showNotification)
+      ? reg.showNotification(title||botName,opts)
+      : direct());
   }
-  return Promise.resolve(new Notification(title||botName,opts));
+  return Promise.resolve(direct());
 }
 function requestNotificationPermission(){
   if(!('Notification' in window)){
@@ -4974,6 +4984,7 @@ function requestNotificationPermission(){
   }
   return Notification.requestPermission().then(p=>{
     if(typeof showToast==='function') showToast(p==='granted'?t('notifications_enabled_toast'):t('notifications_denied'),3000,p==='granted'?undefined:'error');
+    if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
     return p;
   });
 }
@@ -4983,8 +4994,11 @@ function sendBrowserNotification(title,body,options={}){
   if(!('Notification' in window)) return;
   if(Notification.permission==='granted'){
     _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
-  }else if(Notification.permission!=='denied'){
-    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options);});
+  }else if(Notification.permission==='denied'){
+    // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
+    if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+  }else{
+    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});});
   }
 }
 

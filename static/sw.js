@@ -177,9 +177,17 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const rawUrl = (event.notification.data && event.notification.data.url) || './';
   const targetUrl = new URL(rawUrl, self.registration.scope || './').href;
+  const targetPath = new URL(targetUrl).pathname;
+  const samePath = (clientUrl) => {
+    try { return new URL(clientUrl).pathname === targetPath; } catch (_e) { return false; }
+  };
   event.waitUntil(
     self.clients.matchAll({type: 'window', includeUncontrolled: true}).then((clientList) => {
-      const targetClient = clientList.find((client) => client.url === targetUrl && 'focus' in client);
+      // Match on pathname, not the full href: _sessionUrlForSid copies the
+      // current page's query string + hash into the deep link, so an open tab
+      // already on /session/<sid> would fail an exact-href match and spawn a
+      // duplicate window.
+      const targetClient = clientList.find((client) => samePath(client.url) && 'focus' in client);
       if (targetClient) return targetClient.focus();
       if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
       const focusableClient = clientList.find((client) => 'focus' in client);

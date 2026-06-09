@@ -35,7 +35,9 @@ def test_service_worker_handles_notification_clicks_without_hijacking_other_sess
     assert "event.notification.close()" in SW_JS
     assert "clients.matchAll" in SW_JS
     assert "clients.openWindow" in SW_JS
-    assert "client.url === targetUrl" in SW_JS
+    # Match the open tab on pathname, not the full href (query/hash differ).
+    assert "samePath(client.url)" in SW_JS
+    assert "new URL(clientUrl).pathname === targetPath" in SW_JS
     assert "targetClient.focus()" in SW_JS
     exact_idx = SW_JS.index("targetClient.focus()")
     open_idx = SW_JS.index("self.clients.openWindow(targetUrl)")
