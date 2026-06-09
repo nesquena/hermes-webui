@@ -106,19 +106,17 @@ def test_messages_js_live_and_persist_paths_share_extractor():
 def test_render_messages_uses_shared_extractor_on_reload():
     render = _function_body(UI_JS, "function renderMessages")
 
-    # The reload path seeds the shared extractor with the message's separate
-    # reasoning payload so inline <think> blocks MERGE with (not suppress) a
-    # distinct m.reasoning payload (#3633 Codex catch).
-    assert "m.reasoning_content||m.reasoning||m.thinking||m._reasoning" in render
-    assert "window._extractInlineThinkingFromContentForRender(content, directReasoning||thinkingText)" in render
+    assert "window._extractInlineThinkingFromContentForRender(content, thinkingText)" in render
     assert "thinkingText=split.reasoning||thinkingText" in render
     assert "content=split.content" in render
 
 
 def test_inline_and_separate_reasoning_merge_not_drop():
-    """#3633 Codex catch: when content has an inline <think> block AND a separate
-    reasoning payload, the extractor must MERGE both (deduped), not drop either."""
-    # existing_reasoning is the separate payload; inline block merges after it.
+    """#3633: the extractor MERGES inline + an explicitly-passed separate reasoning
+    payload (deduped) rather than dropping either. (The reload render path itself
+    deliberately does NOT seed m.reasoning into this extractor — that separation
+    is pinned by test_issue2565; the merge capability is exercised by the live
+    streaming path which passes liveReasoningText.)"""
     content, reasoning = _split_thinking_from_content("<think>inline</think>answer", "separate")
     assert content == "answer"
     assert reasoning == "separate\n\ninline"

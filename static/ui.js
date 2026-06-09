@@ -8089,15 +8089,7 @@ function renderMessages(options){
     }
     if(typeof content==='string'){
       if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
-        // Seed with the message's separate reasoning payload so an inline
-        // <think> block in content MERGES with (rather than suppresses) a
-        // distinct m.reasoning/m.reasoning_content payload on reload. The
-        // extractor's _mergeInlineThinkingReasoning dedupes identical parts, so
-        // passing both is safe. (#3633 Codex catch: seeding '' here dropped a
-        // separate reasoning payload whenever content also had inline tags,
-        // because the !thinkingText worklog resolution below was then skipped.)
-        const directReasoning=String(m.reasoning_content||m.reasoning||m.thinking||m._reasoning||'').trim();
-        const split=window._extractInlineThinkingFromContentForRender(content, directReasoning||thinkingText);
+        const split=window._extractInlineThinkingFromContentForRender(content, thinkingText);
         thinkingText=split.reasoning||thinkingText;
         content=split.content;
       }else if(!thinkingText){
