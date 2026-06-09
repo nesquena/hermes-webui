@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.346] — 2026-06-09 — Release LJ (PWA notification controls)
+
+### Added
+
+- **PWA notifications now use the service worker for reliable delivery, with explicit controls in Settings.** Browser notifications prefer `ServiceWorkerRegistration.showNotification()` (falling back to a direct `Notification` when no service worker is registered), which is the only notification path that works in an installed standalone PWA — notably iOS, where `new Notification()` is unavailable. Notification payloads now carry the originating session's deep link, icon, badge, and a stable per-session tag, and clicking a notification focuses an already-open tab for that session (or opens a new window) instead of yanking an unrelated tab away from what you were reading. Settings → Preferences gains **Enable notifications**, **Send test**, and a live permission-status readout. (#3196, #3229)
+
 ## [v0.51.345] — 2026-06-09 — Release LI (model override picker for scheduled jobs)
 
 ### Added

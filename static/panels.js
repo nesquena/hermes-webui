@@ -8518,6 +8518,7 @@ function loadGatewayStatus(){
 const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name){
   _origSwitchSettings(name);
+  if(name==='preferences') updateNotificationPermissionStatus();
   if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
 };
 
@@ -8627,4 +8628,13 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
   }catch(e){
     showToast(t('checkpoint_restore')+': '+e.message,'error');
   }
+}
+
+
+function updateNotificationPermissionStatus(){
+  const el=$('notificationPermissionStatus');
+  if(!el) return;
+  if(!('Notification' in window)){el.textContent=t('notifications_unsupported');return;}
+  const perm=Notification.permission||'default';
+  el.textContent=t('notifications_permission_status', perm);
 }
