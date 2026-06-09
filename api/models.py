@@ -59,6 +59,7 @@ _STALE_TMP_AGE_SECONDS = 3600  # 1 hour
 _INDEX_WRITE_LOCK = threading.RLock()
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
+_SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
 
 # Path-safety contract for session IDs.  Accept alphanumerics, underscore, and
 # hyphen so API/gateway-issued ids (``api-*``, ``reachy-voice-*``) round-trip
@@ -146,26 +147,41 @@ def _session_dir_has_persisted_session_files() -> bool:
         return False
 
 
-def _rebuild_session_index_background() -> None:
+def _rebuild_session_index_background(expected_session_dir: Path, expected_index_file: Path) -> None:
+    global _SESSION_INDEX_REBUILD_THREAD, _SESSION_INDEX_REBUILD_THREAD_TARGET
     try:
+        if SESSION_DIR != expected_session_dir or SESSION_INDEX_FILE != expected_index_file:
+            return
         _write_session_index(updates=None)
     except Exception:
         logger.debug("Background session-index rebuild failed", exc_info=True)
+    finally:
+        with _SESSION_INDEX_REBUILD_LOCK:
+            if _SESSION_INDEX_REBUILD_THREAD_TARGET == (
+                expected_session_dir,
+                expected_index_file,
+            ):
+                _SESSION_INDEX_REBUILD_THREAD = None
+                _SESSION_INDEX_REBUILD_THREAD_TARGET = None
 
 
 def _start_session_index_rebuild_thread() -> None:
     """Start one background full-index rebuild if the index is missing."""
-    global _SESSION_INDEX_REBUILD_THREAD
+    global _SESSION_INDEX_REBUILD_THREAD, _SESSION_INDEX_REBUILD_THREAD_TARGET
+    target = (SESSION_DIR, SESSION_INDEX_FILE)
     with _SESSION_INDEX_REBUILD_LOCK:
         if SESSION_INDEX_FILE.exists():
             return
         if (
             _SESSION_INDEX_REBUILD_THREAD is not None
             and _SESSION_INDEX_REBUILD_THREAD.is_alive()
+            and _SESSION_INDEX_REBUILD_THREAD_TARGET == target
         ):
             return
+        _SESSION_INDEX_REBUILD_THREAD_TARGET = target
         _SESSION_INDEX_REBUILD_THREAD = threading.Thread(
             target=_rebuild_session_index_background,
+            args=target,
             name="session-index-rebuild",
             daemon=True,
         )
@@ -2452,9 +2468,18 @@ def _sidebar_message_count(session: dict) -> int:
 
 def _sidebar_lineage_root_id(session: dict, sessions_by_id: dict[str, dict]) -> str:
     sid = str(session.get('session_id') or '')
+    explicit = str(session.get('_lineage_root_id') or '').strip()
+    if explicit:
+        return explicit
+    relationship_type = str(session.get('relationship_type') or '').strip().lower()
+    if relationship_type == 'child_session':
+        return sid
     root = sid
     parent = session.get('parent_session_id')
+    source = str(session.get('session_source') or '').strip().lower()
     seen = {sid}
+    if source == 'fork':
+        return root
     while parent and parent not in seen and parent in sessions_by_id:
         root = str(parent)
         seen.add(root)
@@ -3108,6 +3133,8 @@ def all_sessions(diag=None):
                 and not s.get('has_pending_user_message')
                 and not s.get('worktree_path')
             )]
+            _diag_stage(diag, "all_sessions.lineage_metadata")
+            _enrich_sidebar_lineage_metadata(result)
             result = _prefer_fuller_snapshots_for_sidebar(result)
             sidebar_candidates = result
             visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
@@ -3119,8 +3146,6 @@ def all_sessions(diag=None):
             for s in result:
                 if not s.get('profile'):
                     s['profile'] = 'default'
-            _diag_stage(diag, "all_sessions.lineage_metadata")
-            _enrich_sidebar_lineage_metadata(result)
             return result
         except Exception:
             logger.debug("Failed to load session index, falling back to full scan")
@@ -3149,6 +3174,8 @@ def all_sessions(diag=None):
         and not s.pending_user_message
         and not getattr(s, 'worktree_path', None)
     )]
+    _diag_stage(diag, "all_sessions.lineage_metadata")
+    _enrich_sidebar_lineage_metadata(result)
     result = _prefer_fuller_snapshots_for_sidebar(result)
     sidebar_candidates = result
     visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
@@ -3158,8 +3185,6 @@ def all_sessions(diag=None):
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
-    _diag_stage(diag, "all_sessions.lineage_metadata")
-    _enrich_sidebar_lineage_metadata(result)
     return result
 
 

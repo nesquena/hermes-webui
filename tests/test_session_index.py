@@ -437,6 +437,50 @@ def test_pre_compression_snapshot_hidden_from_active_sidebar_but_file_remains(mo
     assert [row["session_id"] for row in rows] == ["new_sid"]
 
 
+def test_forked_child_of_snapshot_stays_visible_when_snapshot_is_fuller(monkeypatch):
+    """A manual fork should not be grouped into a snapshot's hidden continuation lineage.
+
+    Even when the parent snapshot has a fuller transcript and a newer
+    timestamp, a `/branch` fork is independently discoverable and should stay in
+    the active sidebar rows as its own root.
+    """
+    snapshot = Session(
+        session_id="snapshot_parent",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "root"},
+            {"role": "assistant", "content": "compressed context"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ],
+        pre_compression_snapshot=True,
+        parent_session_id="snapshot_origin",
+        updated_at=300.0,
+        last_message_at=300.0,
+    )
+    fork = Session(
+        session_id="manual_fork_child",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "new branch"},
+            {"role": "assistant", "content": "reply"},
+        ],
+        parent_session_id="snapshot_parent",
+        session_source="fork",
+        updated_at=200.0,
+        last_message_at=200.0,
+    )
+    snapshot.save(touch_updated_at=False)
+    fork.save(touch_updated_at=False)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert snapshot.path.exists(), "snapshot JSON must stay available for lineage traversal"
+    assert rows[0]["session_id"] == "manual_fork_child"
+    assert rows[0]["session_source"] == "fork"
+
+
 def test_fuller_pre_compression_snapshot_replaces_shorter_visible_segment(monkeypatch):
     """If the hidden snapshot has the fuller transcript, keep it reachable.
 
@@ -1300,3 +1344,27 @@ def test_all_sessions_ignores_stale_index_entries():
     ids = {e["session_id"] for e in rows}
     assert "sess_a" in ids
     assert "ghost_sid" not in ids
+
+
+def test_background_index_rebuild_skips_after_session_dir_switch(tmp_path, monkeypatch):
+    """A delayed rebuild thread must not write into a newer isolated session dir."""
+    original_session_dir = models.SESSION_DIR
+    original_index_file = models.SESSION_INDEX_FILE
+    new_session_dir = tmp_path / "other-sessions"
+    new_session_dir.mkdir()
+    new_index_file = new_session_dir / "_index.json"
+
+    monkeypatch.setattr(models, "_SESSION_INDEX_REBUILD_THREAD", object())
+    monkeypatch.setattr(models, "_SESSION_INDEX_REBUILD_THREAD_TARGET", (
+        original_session_dir,
+        original_index_file,
+    ))
+    monkeypatch.setattr(models, "SESSION_DIR", new_session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", new_index_file)
+
+    models._rebuild_session_index_background(
+        original_session_dir,
+        original_index_file,
+    )
+
+    assert not new_index_file.exists()
