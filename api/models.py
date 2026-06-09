@@ -2654,6 +2654,14 @@ def _strip_sidebar_internal_flags(sessions: list[dict]) -> None:
         session.pop('_show_pre_compression_snapshot', None)
 
 
+def _looks_like_stale_zero_message_row(session: dict) -> bool:
+    """Return True for indexed rows that likely need sidecar metadata repair."""
+    return bool(
+        int(session.get('message_count') or 0) == 0
+        and int(session.get('user_message_count') or 0) > 0
+    )
+
+
 def _row_may_need_sidecar_metadata_refresh(
     session: dict,
     *,
@@ -2693,7 +2701,19 @@ def _row_may_need_sidecar_metadata_refresh(
             or session.get('_lineage_root_id')
             or session.get('_compression_segment_count')
         )
-        return bool(lineage_shaped and sid and _sidecar_mtime_after_index_timestamp(session))
+        needs_mtime_check = lineage_shaped or (
+            sid and _looks_like_stale_zero_message_row(session)
+        )
+        if needs_mtime_check and _sidecar_mtime_after_index_timestamp(session):
+            return True
+        return False
+    if (
+        sid
+        and _looks_like_stale_zero_message_row(session)
+        and str(session.get('session_source') or '').strip().lower() != 'fork'
+        and _sidecar_mtime_after_index_timestamp(session)
+    ):
+        return True
     if session.get('message_count') is None or session.get('last_message_at') is None:
         return True
     return bool(sid and stale_snapshot_ids and sid in stale_snapshot_ids)

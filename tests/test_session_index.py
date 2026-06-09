@@ -869,6 +869,118 @@ def test_all_sessions_refreshes_stale_visible_continuation_metadata(monkeypatch)
     assert rows[0]["last_message_at"] == 103.0
 
 
+def test_all_sessions_refreshes_stale_zero_count_row_from_sidecar(monkeypatch):
+    """A zero-message indexed row can still have real transcript content on disk."""
+    session = Session(
+        session_id="stale_zero_count",
+        title="Recovered Session",
+        messages=[
+            {"role": "user", "content": "first", "timestamp": 100.0},
+            {"role": "assistant", "content": "second", "timestamp": 101.0},
+        ],
+        updated_at=101.0,
+        last_message_at=101.0,
+    )
+    session.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "stale_zero_count",
+                "title": "Recovered Session",
+                "message_count": 0,
+                "user_message_count": 1,
+                "created_at": 100.0,
+                "updated_at": 1.0,
+                "last_message_at": 1.0,
+                "pinned": False,
+                "archived": False,
+            },
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["stale_zero_count"]
+    assert rows[0]["message_count"] == 2
+    assert rows[0]["last_message_at"] == 101.0
+
+
+def test_all_sessions_refreshes_stale_zero_count_snapshot_row_from_sidecar(monkeypatch):
+    """Snapshot rows follow the same stale-zero sidecar refresh path."""
+    session = Session(
+        session_id="stale_zero_snapshot_count",
+        title="Recovered Snapshot Session",
+        messages=[
+            {"role": "user", "content": "first", "timestamp": 100.0},
+            {"role": "assistant", "content": "second", "timestamp": 101.0},
+        ],
+        updated_at=101.0,
+        last_message_at=101.0,
+        pre_compression_snapshot=True,
+    )
+    session.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "stale_zero_snapshot_count",
+                "title": "Recovered Snapshot Session",
+                "message_count": 0,
+                "user_message_count": 1,
+                "created_at": 100.0,
+                "updated_at": 1.0,
+                "last_message_at": 1.0,
+                "pinned": False,
+                "archived": False,
+                "pre_compression_snapshot": True,
+            },
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["stale_zero_snapshot_count"]
+    assert rows[0]["message_count"] == 2
+    assert rows[0]["last_message_at"] == 101.0
+
+
+def test_all_sessions_skips_refresh_for_real_empty_untitled_drafts(monkeypatch):
+    """Keep genuine empty drafts on the cheap path when they have no user turns."""
+    draft = Session(
+        session_id="untitled_empty_draft",
+        title="Untitled",
+        messages=[],
+        updated_at=100.0,
+        last_message_at=100.0,
+    )
+    draft.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "untitled_empty_draft",
+                "title": "Untitled",
+                "message_count": 0,
+                "user_message_count": 0,
+                "created_at": 100.0,
+                "updated_at": 100.0,
+                "last_message_at": 100.0,
+                "pinned": False,
+                "archived": False,
+            },
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    with patch.object(Session, "load_metadata_only", side_effect=AssertionError("empty draft should not refresh sidecar")):
+        rows = models.all_sessions()
+
+    assert rows == []
+
+
 def test_all_sessions_does_not_refresh_plain_branch_fork_from_sidecar(monkeypatch):
     """A plain /branch fork (session_source='fork') must NOT trigger a sidecar refresh.
 
