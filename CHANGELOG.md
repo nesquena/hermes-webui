@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Tiling chat interface** — Multiple chat sessions open in parallel via a CSS Grid tiling layout. Toggle with titlebar 4-square icon or `Cmd/Ctrl+Shift+T`. In tiling mode, clicking sidebar sessions opens them in new tiles (minimize to tab bar, focus, close). Each tile has its own composer, scroll position, and stream state. Max 6 tiles with oldest-idle eviction. Sidebar shows tile count badges. Fully opt-in — zero behavior change when off. Vanilla JS + CSS Grid, no new dependencies.
+
 ## [v0.51.335] — 2026-06-08 — Release KY (normalize inline thinking extraction)
 
 ### Fixed

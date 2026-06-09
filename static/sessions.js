@@ -735,6 +735,14 @@ async function loadSession(sid){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
   }
+  // Tiling mode: open session in a new tile instead of replacing
+  if(typeof isTilingMode==='function' && isTilingMode()){
+    if(typeof openTileForSession==='function'){
+      const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+      openTileForSession(sid, data && data.session);
+      return;
+    }
+  }
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   const sameSessionForceReload = forceReload && currentSid===sid;

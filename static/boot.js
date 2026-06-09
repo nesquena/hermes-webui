@@ -1465,6 +1465,16 @@ document.addEventListener('keydown',async e=>{
       if(bar){const cancel=bar.querySelector('.msg-edit-cancel');if(cancel)cancel.click();}
     }
   }
+  // Cmd/Ctrl+Shift+T toggles tiling mode
+  if((e.metaKey||e.ctrlKey)&&e.shiftKey&&(e.key==='t'||e.key==='T')){
+    const t=e.target;
+    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    if(!isText){
+      e.preventDefault();
+      if(typeof toggleTilingMode==='function') toggleTilingMode();
+      return;
+    }
+  }
 });
 $('msg').addEventListener('paste',e=>{
   const items=Array.from(e.clipboardData?.items||[]);
