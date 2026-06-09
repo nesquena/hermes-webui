@@ -558,6 +558,113 @@ function _appendSelectedTextReplyToComposer(text){
   return true;
 }
 
+function insertSavedPromptIntoComposer(text){
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  if(!composer||!text)return;
+  const current=String(composer.value||'');
+  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}\n\n`:`${text}\n\n`;
+  composer.focus();
+  try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
+  composer.dispatchEvent(new Event('input',{bubbles:true}));
+  if(typeof autoResize==='function') autoResize();
+}
+
+let _savedPromptsCache=null;
+
+async function _loadSavedPrompts(){
+  try{
+    const data=await api('/api/prompts');
+    _savedPromptsCache=Array.isArray(data&&data.prompts)?data.prompts:[];
+  }catch(_e){_savedPromptsCache=[];}
+  return _savedPromptsCache;
+}
+
+async function toggleSavedPromptsPopup(){
+  const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
+  const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
+  if(!popup)return;
+  if(popup.style.display!=='none'){
+    popup.style.display='none';
+    if(btn)btn.setAttribute('aria-expanded','false');
+    return;
+  }
+  popup.innerHTML='<div class="saved-prompts-loading">Loading…</div>';
+  popup.style.display='flex';
+  if(btn)btn.setAttribute('aria-expanded','true');
+  const prompts=await _loadSavedPrompts();
+  popup.innerHTML='';
+  if(!prompts.length){
+    const empty=document.createElement('div');
+    empty.className='saved-prompts-empty';
+    empty.textContent=(typeof t==='function'&&t('saved_prompts_empty'))||'No saved prompts yet.';
+    popup.appendChild(empty);
+  }else{
+    for(const p of prompts){
+      const row=document.createElement('div');
+      row.className='saved-prompt-row';
+      row.setAttribute('role','menuitem');
+      const label=document.createElement('span');
+      label.className='saved-prompt-label';
+      label.textContent=p.label||p.text;
+      label.title=p.text;
+      row.onclick=()=>{
+        insertSavedPromptIntoComposer(p.text);
+        popup.style.display='none';
+        if(btn)btn.setAttribute('aria-expanded','false');
+      };
+      const del=document.createElement('button');
+      del.className='saved-prompt-delete';
+      del.type='button';
+      del.title=(typeof t==='function'&&t('saved_prompts_delete'))||'Delete';
+      del.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      del.onclick=async(e)=>{
+        e.stopPropagation();
+        try{await api('/api/prompts',{method:'DELETE',body:JSON.stringify({id:p.id})});}catch(_e){}
+        _savedPromptsCache=null;
+        await toggleSavedPromptsPopup();
+        await toggleSavedPromptsPopup();
+      };
+      row.appendChild(label);
+      row.appendChild(del);
+      popup.appendChild(row);
+    }
+  }
+  const addRow=document.createElement('div');
+  addRow.className='saved-prompt-add-row';
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='saved-prompt-save-btn';
+  saveBtn.textContent=(typeof t==='function'&&t('saved_prompts_save_current'))||'Save current input';
+  saveBtn.onclick=async()=>{
+    const msgEl=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+    const text=(msgEl&&msgEl.value||'').trim();
+    if(!text){
+      if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_empty_input'))||'Type a prompt first',2000,'error');
+      return;
+    }
+    try{await api('/api/prompts',{method:'POST',body:JSON.stringify({text})});}catch(_e){
+      if(typeof showToast==='function') showToast(_e&&_e.message||'Failed to save prompt',2000,'error');
+      return;
+    }
+    _savedPromptsCache=null;
+    popup.style.display='none';
+    if(btn)btn.setAttribute('aria-expanded','false');
+    if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_saved'))||'Prompt saved',1600);
+  };
+  addRow.appendChild(saveBtn);
+  popup.appendChild(addRow);
+}
+
+document.addEventListener('click',(e)=>{
+  const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
+  const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
+  if(!popup||popup.style.display==='none')return;
+  if(!popup.contains(e.target)&&e.target!==btn&&!(btn&&btn.contains(e.target))){
+    popup.style.display='none';
+    if(btn)btn.setAttribute('aria-expanded','false');
+  }
+},{capture:false});
+
 function _selectedTextReplyButton(){
   if(_selectedTextReplyBtn)return _selectedTextReplyBtn;
   const btn=document.createElement('button');

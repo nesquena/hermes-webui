@@ -562,8 +562,10 @@ function _markPollingCompletionUnreadTransitions(sessions) {
 let _newSessionInFlight=null;
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
 function _setNewSessionPending(pending){
-  const btn=$('btnNewChat');
-  if(btn){
+  const ids=['btnNewChat','btnTitlebarNewChat'];
+  for (let i=0;i<ids.length;i++){
+    const btn=$(ids[i]);
+    if(!btn) continue;
     btn.disabled=!!pending;
     btn.setAttribute('aria-busy',pending?'true':'false');
   }
