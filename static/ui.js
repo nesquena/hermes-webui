@@ -8770,6 +8770,12 @@ function renderMessages(options){
           const summary=group.querySelector('.tool-call-group-summary,.activity-summary');
           if(summary) summary.setAttribute('aria-expanded','true');
         }
+        // `revealed` means "this turn has a non-empty Worklog group that the user
+        // can see" — NOT "we just expanded something". An already-open non-empty
+        // group is itself visible (it slips past _turnHasVisibleContent only
+        // because that check inspects .assistant-segment nodes, not group bodies),
+        // so the turn isn't truly blank and the last-resort un-hide below is
+        // unnecessary. Keep this assignment OUTSIDE the if(collapsed) branch.
         revealed=true;
       }
       // Last resort: no usable worklog group either, but hidden worklog-source
