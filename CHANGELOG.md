@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Session falsely streams after sidebar switch:** `loadSession` now clears `S.busy` and `S.activeStreamId` as soon as session metadata confirms there is no `active_stream_id`, before the async message-load gap. Prevents the previous session's busy flag from making an idle chat show Stop/spinner/thinking.
+- **Activity timer resets when switching back to a streaming chat:** `loadSession` snapshots the live turn DOM before replacing `msgInner`, ensures an `INFLIGHT` bucket exists for the snapshot, and restores that HTML on the `active_stream_id` return path instead of always rebuilding the worklog shell from scratch.
+
 ## [v0.51.346] — 2026-06-09 — Release LJ (PWA notification controls)
 
 ### Added
