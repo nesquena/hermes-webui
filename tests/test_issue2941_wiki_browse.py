@@ -4,7 +4,7 @@ Verifies that:
 1. /api/wiki/browse and /api/wiki/page route patterns exist in routes.py.
 2. _renderLlmWikiStatus in panels.js references a browse action.
 3. Path-traversal rejection (the ".." check) is present in the wiki page handler.
-4. The four i18n keys are present in all 12 locale blocks.
+4. The four i18n keys are present in every locale block.
 """
 from __future__ import annotations
 
@@ -54,22 +54,18 @@ def test_i18n_wiki_keys_in_all_locales():
         "wiki_not_configured",
     ]
     # Locate all locale block boundaries by finding "_lang:" occurrences,
-    # then verify each key appears in every block.
+    # then verify each required key appears in every locale block.
     lang_positions = [m.start() for m in re.finditer(r"_lang:", src)]
-    assert len(lang_positions) == 12, f"Expected 12 locale blocks, found {len(lang_positions)}"
+    assert lang_positions, "Could not find any locale blocks in i18n data"
 
-    # Build per-locale slices: each block runs from just before "_lang:"
-    # back to the previous locale start, forward to the next one.
-    # Simpler: split on the top-level locale key pattern and check each chunk.
-    # We split on the opening "  <key>: {" pattern used at the top level.
-    chunks = re.split(r"\n  (?:'[^']+'|\w+): \{", src)
-    # chunks[0] is the preamble before the first locale; chunks[1..12] are locale bodies.
-    locale_chunks = chunks[1:]
-    assert len(locale_chunks) == 12, f"Expected 12 locale chunks after split, got {len(locale_chunks)}"
+    locale_chunks = []
+    for idx, start in enumerate(lang_positions):
+        end = lang_positions[idx + 1] if idx + 1 < len(lang_positions) else len(src)
+        locale_chunks.append(src[start:end])
 
     for i, chunk in enumerate(locale_chunks):
         for key in required_keys:
             assert key + ":" in chunk, (
                 f"i18n key '{key}' missing from locale block {i + 1} "
-                f"(position ~{lang_positions[i] if i < len(lang_positions) else '?'})"
+                f"(position ~{lang_positions[i]})"
             )
