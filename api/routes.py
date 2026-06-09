@@ -12737,6 +12737,7 @@ def _handle_cron_create(handler, body):
             deliver=body.get("deliver") or "local",
             skills=body.get("skills") or [],
             model=body.get("model") or None,
+            provider=body.get("provider") or None,
         )
         post_create_updates = {}
         if profile is not None:
@@ -12779,6 +12780,8 @@ def _handle_cron_update(handler, body):
                 continue
             if k == "profile":
                 updates[k] = _normalize_cron_profile_value(v)
+            elif k in ("model", "provider"):
+                updates[k] = v if v else None
             elif v is not None:
                 updates[k] = v
     except ValueError as e:
