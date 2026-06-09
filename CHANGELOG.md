@@ -3,6 +3,19 @@
 
 ## [Unreleased]
 
+## [v0.51.347] — 2026-06-09 — Release LK (streaming & render reliability cluster)
+
+### Fixed
+
+- **Mid-stream content no longer flickers (disappears and reappears) during a live turn.** When `renderMessages()` rebuilt the transcript while a session was actively streaming (e.g. a clarify-response echo or a CLI-import refresh), the `inner.innerHTML=''` wipe detached the live assistant turn node that the streaming markdown parser keeps writing into, so the streamed text vanished until the next stream event. The live turn's DOM node is now preserved across the rebuild and re-attached so the parser target stays connected and the text never blanks. (#3877)
+- **Recovered turns with empty visible content no longer render a blank transcript.** A run-journal-recovered assistant anchor (empty content + a `reasoning` payload + recovery marker) extracted no inline thinking text and rendered nothing, so a session made of such rows painted as only date separators. Two fixes: the backend now reuses one empty recovered anchor per stream instead of appending a fresh empty row on every lazy recovery retry (which previously bloated sessions with thousands of content-less rows), and the renderer surfaces the message's reasoning payload as a Thinking card for empty-content turns so the turn is never blank. (#3875)
+- **`stream_end` no longer finalizes a turn prematurely when the server is still active.** When a `stream_end` event arrived while the session was still streaming server-side, the client could settle to a partial state. It now polls the persisted session and retries settlement (bounded) until the server reports the stream complete, and the SSE error path defers to an in-flight recovery instead of starting a competing reconnect. (#3885)
+- **Markdown list markers and indentation are preserved around LaTeX blocks.** Continuation lines, nested indentation, and KaTeX-placeholder lines inside list items no longer break the list into fragments or lose their markers. (#3830)
+
+### Changed
+
+- **Worklog details settings now align with the live-to-final model.** The old "Activity expanded by default" setting is renamed to **Worklog details** (default folded), the legacy "Compact tool activity" preference is deprecated, and the Worklog renderer stays enabled for older installs that had saved `simplified_tool_calling=false`. (#3400, #3820)
+
 ## [v0.51.346] — 2026-06-09 — Release LJ (PWA notification controls)
 
 ### Added
