@@ -372,11 +372,12 @@ def test_session_sse_handler_wires_on_subscribe_recovery():
     assert "active_stream_id_for_session" in handler_src
     assert '"recovered": True' in handler_src
     assert "server_turn_started" in handler_src
-    # Recovery CALL must come AFTER ch.subscribe() so a frame emitted between
-    # subscribe and recovery is still caught by the queue (no lost-frame gap).
-    # (The symbol also appears in the import line above subscribe — assert on
-    # the call site `= active_stream_id_for_session(` specifically.)
-    assert handler_src.index("ch.subscribe(") < handler_src.index(
+    # Recovery CALL must come AFTER the channel subscription so a frame emitted
+    # between subscribe and recovery is still caught by the queue (no lost-frame
+    # gap). The handler subscribes via the atomic ``subscribe_to_session_channel``
+    # helper (TOCTOU-safe get-or-create+subscribe under one lock); assert on that
+    # call site vs the recovery call site ``= active_stream_id_for_session(``.
+    assert handler_src.index("subscribe_to_session_channel(") < handler_src.index(
         "= active_stream_id_for_session("
     )
 
