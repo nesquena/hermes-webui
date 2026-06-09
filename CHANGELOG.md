@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.336] — 2026-06-08 — Release KZ (fix inline-thinking streaming perf regression)
+
+### Fixed
+- **Long streaming responses no longer slow down as they grow.** A follow-up to v0.51.335: the inline-thinking extractor runs on the full in-progress message on every streamed token, and the v0.51.335 rewrite made that scan re-walk the whole buffer each time (quadratic over a long response — most noticeable on reasoning-model replies with a `<think>` block). It now fast-paths content with no thinking tags and skips already-settled trailing text, keeping per-token work flat. No behavior change — verified identical to the prior release across streaming, reload, persistence, and code-block cases. (#3633 follow-up)
+
 ## [v0.51.335] — 2026-06-08 — Release KY (normalize inline thinking extraction)
 
 ### Fixed
