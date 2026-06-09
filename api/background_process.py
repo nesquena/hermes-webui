@@ -209,6 +209,47 @@ def get_session_channel(session_id: str) -> Optional[SessionChannel]:
         return SESSION_CHANNELS.get(session_id)
 
 
+def subscribe_to_session_channel(
+    session_id: str, maxsize: int = 16
+) -> tuple["SessionChannel", "queue.Queue"]:
+    """Atomically get-or-create the channel for ``session_id`` AND register a
+    subscriber on it, both under ``SESSION_CHANNELS_LOCK``.
+
+    Closes a TOCTOU race flagged on PR #2971: callers that did
+    ``ch = get_or_create_session_channel(sid); q = ch.subscribe()`` released
+    ``SESSION_CHANNELS_LOCK`` between the two steps. The reaper acquires that
+    same lock and evaluates+collects channels entirely within it
+    (``_reaper_loop``), so a previously-idle channel with 0 subscribers past
+    the grace/TTL window could be collected in the gap — leaving the SSE
+    handler subscribed to a channel no longer in ``SESSION_CHANNELS``. Future
+    ``bg_task_complete`` emits resolve the session via ``get_session_channel``
+    and reach a different (or absent) channel, so the orphaned subscriber's
+    queue never fills: keepalives keep flowing, ``onerror`` never fires, no
+    auto-reconnect, and only a manual refresh recovers.
+
+    Holding ``SESSION_CHANNELS_LOCK`` across both the get-or-create and the
+    ``subscribe`` makes the two steps indivisible w.r.t. the reaper: the reaper
+    cannot run its critical section concurrently, and the next time it does the
+    channel already has ``sub_count >= 1`` so ``reaper_should_collect`` refuses
+    to collect it.
+
+    Lock order is ``SESSION_CHANNELS_LOCK`` → ``SessionChannel._lock`` (taken
+    inside ``subscribe``), identical to the order the reaper uses
+    (``SESSION_CHANNELS_LOCK`` → ``reaper_should_collect`` → ``_lock``), so no
+    new lock-ordering hazard is introduced. ``emit`` only takes ``_lock``.
+
+    Returns ``(channel, queue)``. The caller still owns the subscriber slot and
+    MUST ``channel.unsubscribe(queue)`` on every exit path.
+    """
+    with SESSION_CHANNELS_LOCK:
+        ch = SESSION_CHANNELS.get(session_id)
+        if ch is None:
+            ch = SessionChannel(session_id)
+            SESSION_CHANNELS[session_id] = ch
+        q = ch.subscribe(maxsize=maxsize)
+        return ch, q
+
+
 def active_stream_id_for_session(session_id: str) -> Optional[str]:
     """Return the stream_id of the live run for *session_id*, or None.
 
@@ -850,6 +891,14 @@ def _process_one(evt: dict) -> None:
                     session_id,
                 )
             else:
+                # Idle-path sibling of the F1 (409/teardown) fix: pass
+                # ``process_id`` so that if this idle wakeup's daemon thread
+                # loses the per-session lock race and 409s, the re-defer in
+                # ``_start_server_side_wakeup_turn`` records the entry WITH its
+                # process_id — keeping the ``record_deferred_wakeup`` dedup
+                # guard (``if process_id and any(...)``) live on that re-defer
+                # path so a second 409 race cannot accumulate a duplicate
+                # deferred entry (which would deliver the same wakeup twice).
                 _start_server_side_wakeup_turn(
                     session_id, wakeup_prompt, process_id=process_id
                 )

@@ -112,6 +112,37 @@ function _deferStreamErrorIfOffline(){
 
 document.addEventListener('visibilitychange', _markActiveSessionViewedOnReturn);
 window.addEventListener('focus', _markActiveSessionViewedOnReturn);
+
+// Delegated click handler for the interim-progress-note collapse toggle (#2403).
+// Delegation (not a per-element listener) is required because the live turn's
+// DOM is snapshotted/restored via outerHTML/innerHTML on session switch
+// (snapshotLiveTurnHtmlForSession / restoreLiveTurnHtmlForSession in ui.js),
+// which strips element listeners. A document-level handler survives the
+// restore so a restored toggle stays interactive and collapsed notes never
+// become permanently unreachable. State lives in the DOM (presence of
+// .interim-collapsed + data-threshold on the toggle), so the handler is
+// stateless and works on freshly-created and restored toggles alike.
+function _interimCollapseDelegatedClick(e){
+  const toggle=e.target&&e.target.closest?e.target.closest('.interim-collapse-toggle'):null;
+  if(!toggle) return;
+  const blocks=toggle.parentElement;
+  if(!blocks) return;
+  const threshold=parseInt(toggle.dataset.threshold,10)||3;
+  const hidden=blocks.querySelectorAll('.interim-collapsed');
+  if(hidden.length){
+    hidden.forEach(el=>el.classList.remove('interim-collapsed'));
+    toggle.dataset.expanded='1';
+    toggle.textContent='Collapse';
+  } else {
+    const all=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
+    const rehide=all.slice(0,all.length-threshold);
+    rehide.forEach(el=>el.classList.add('interim-collapsed'));
+    toggle.dataset.expanded='';
+    toggle.textContent='Show '+rehide.length+' earlier update'+(rehide.length===1?'':'s');
+  }
+}
+document.addEventListener('click', _interimCollapseDelegatedClick);
+
 // TTS: pause speech synthesis when user focuses the composer (#499)
 const _msgEl=document.getElementById('msg');
 if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
@@ -121,6 +152,154 @@ let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';
 let _selectedTextReplyRaf=0;
 const _persistentStateToastSeen=new Set();
+const _thinkPairs=[
+  {open:'<think>',close:'</think>'},
+  {open:'<|channel>thought\n',close:'<channel|>'},
+  {open:'<|turn|>thinking\n',close:'<turn|>'}
+];
+
+function _thinkingFenceMarkerAt(text, index){
+  // A fenced code block opener may be indented up to 3 spaces in Markdown
+  // (4+ spaces is an indented code block, handled separately). Only treat the
+  // marker as a fence when it sits at a line start after optional 1-3 spaces.
+  if(index>0&&text[index-1]!=='\n'){
+    let back=index-1, spaces=0;
+    while(back>=0&&text[back]===' '&&spaces<3){back--;spaces++;}
+    if(!(back<0||text[back]==='\n')) return '';
+  }
+  if(text.startsWith('```',index)) return '```';
+  if(text.startsWith('~~~',index)) return '~~~';
+  return '';
+}
+
+function _lineIsIndentedCode(text, lineStart){
+  // True when the line beginning at lineStart is a markdown indented code block
+  // line (>=4 leading spaces or a leading tab, and not blank). lineStart must be
+  // the first char of the line. Only inspects the line's leading chars, not the
+  // whole document (the per-character variant was O(n^2) on long no-newline
+  // content — #3633 Codex perf catch).
+  if(lineStart>=text.length) return false;
+  if(text[lineStart]==='\t'||text.startsWith('    ',lineStart)){
+    let nl=text.indexOf('\n',lineStart);
+    if(nl===-1) nl=text.length;
+    return text.slice(lineStart,nl).trim()!=='';
+  }
+  return false;
+}
+
+function _mergeInlineThinkingReasoning(existingReasoning, extractedParts){
+  let out=String(existingReasoning||'').trim();
+  (Array.isArray(extractedParts)?extractedParts:[]).forEach(function(part){
+    const item=String(part||'').trim();
+    if(!item) return;
+    if(!out){out=item;return;}
+    if(out===item||out.split('\n\n').some(function(existing){return existing.trim()===item;})) return;
+    out += '\n\n' + item;
+  });
+  return out;
+}
+
+function _extractInlineThinkingFromContent(rawContent, existingReasoning, options){
+  // Code-aware extraction (must mirror api/streaming.py
+  // _extract_inline_thinking_from_content): thinking tags inside a triple-fence,
+  // an inline single-backtick code span, or an indented code block are LEFT
+  // VISIBLE. options.streaming gates partial/unclosed handling — only during a
+  // live stream does an unmatched open tag mean "still thinking"; on the
+  // reload/render path an unclosed tag stays visible content (#3633 Codex catch).
+  const streaming=!!(options&&options.streaming);
+  const text=String(rawContent||'');
+  if(!text){
+    const reasoning=String(existingReasoning||'').trim();
+    return {reasoning,content:text,thinkingText:reasoning,displayText:text,inThinking:false};
+  }
+  const visible=[];
+  const extracted=[];
+  let cursor=0;
+  let index=0;
+  let fence='';
+  let inBacktick=false;
+  let inThinking=false;
+  // Incremental O(1)-per-iteration line state + seen-nonspace flag (the previous
+  // per-character line scan + slice(0,index).trim() were O(n^2) on long
+  // no-newline content — #3633 Codex perf catch).
+  let lineIsIndentedCode=_lineIsIndentedCode(text,0);
+  let seenNonspace=false;
+  // Only lstrip the final content when a LEADING thinking block/prefix was
+  // removed — a reply that legitimately starts with indented code / whitespace
+  // and has no leading thinking wrapper keeps its leading whitespace (#3633
+  // Codex catch).
+  let leadingRemoved=false;
+  while(index<text.length){
+    const ch=text[index];
+    if(index>0&&text[index-1]==='\n') lineIsIndentedCode=_lineIsIndentedCode(text,index);
+    const marker=_thinkingFenceMarkerAt(text,index);
+    if(marker) fence=(fence===marker)?'':(fence||marker);
+    if(!fence&&!marker&&ch==='`') inBacktick=!inBacktick;
+    const inCode=!!fence||inBacktick||lineIsIndentedCode;
+    if(!inCode){
+      let pair=null;
+      for(const candidate of _thinkPairs){
+        if(text.startsWith(candidate.open,index)){pair=candidate;break;}
+      }
+      if(pair){
+        const closeIndex=text.indexOf(pair.close,index+pair.open.length);
+        if(closeIndex===-1){
+          // Unclosed open tag. A LEADING unclosed block (nothing visible before
+          // it) is a genuine thinking trace cut off mid-thought → reasoning
+          // (master #3455 leading-only intent + live "still thinking"). An
+          // unclosed tag AFTER visible content on the reload/render path is
+          // almost always a literal typed tag — leave it (and following prose)
+          // visible so nothing is silently truncated (#3633 Codex catch).
+          const leading=!seenNonspace;
+          if(!streaming&&!leading) break;
+          if(leading) leadingRemoved=true;
+          visible.push(text.slice(cursor,index));
+          const partial=text.slice(index+pair.open.length);
+          if(partial) extracted.push(partial);
+          inThinking=true;
+          cursor=text.length;
+          index=text.length;
+          break;
+        }
+        visible.push(text.slice(cursor,index));
+        extracted.push(text.slice(index+pair.open.length,closeIndex));
+        if(!seenNonspace) leadingRemoved=true;
+        seenNonspace=true;
+        index=closeIndex+pair.close.length;
+        cursor=index;
+        continue;
+      }
+      if(streaming){
+        let matchedPartial=false;
+        for(const candidate of _thinkPairs){
+          const rest=text.slice(index);
+          if(rest.length<candidate.open.length&&candidate.open.startsWith(rest)){
+            if(!seenNonspace) leadingRemoved=true;
+            visible.push(text.slice(cursor,index));
+            inThinking=true;
+            cursor=text.length;
+            index=text.length;
+            matchedPartial=true;
+            break;
+          }
+        }
+        if(matchedPartial||index>=text.length) break;
+      }
+    }
+    if(ch.trim()!=='') seenNonspace=true;
+    index++;
+  }
+  if(cursor<text.length) visible.push(text.slice(cursor));
+  const content=leadingRemoved?visible.join('').replace(/^\s+/,''):visible.join('');
+  const reasoning=_mergeInlineThinkingReasoning(existingReasoning,extracted);
+  return {reasoning,content,thinkingText:reasoning,displayText:content,inThinking};
+}
+
+if(typeof window!=='undefined'){
+  window._extractInlineThinkingFromContentForRender=function(rawContent, existingReasoning){
+    return _extractInlineThinkingFromContent(rawContent, existingReasoning, {streaming:false});
+  };
+}
 
 function enhanceMarkdownTables(root){
   if(!root||!root.querySelectorAll) return;
@@ -1074,7 +1253,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     ? (_liveInflightAssistantMessages.length>1
       ? (_fullInflightAssistant || _joinedInflightSegments)
       : (_liveInflightAssistant
-        ? (_liveInflightAssistant.content || '')
+        ? (_fullInflightAssistant || _liveInflightAssistant.content || '')
         : _fullInflightAssistant))
     : '';
   const _lastLiveReasoning = reconnecting
@@ -1119,13 +1298,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // On reconnect, the assistantBody already has partial smd-rendered content.
   // We clear it on first new token and restart the parser from the reconnect point.
   let _smdReconnect=reconnecting;
-  // Thinking tag patterns for streaming display
-  const _thinkPairs=[
-    {open:'<think>',close:'</think>'},
-    {open:'<|channel>thought\n',close:'<channel|>'},
-    {open:'<|turn|>thinking\n',close:'<turn|>'}  // Gemma 4
-  ];
-
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
@@ -1283,30 +1455,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // reasoning channel, which would otherwise bloat the persisted session
   // message by 30-50% and miss the m.reasoning field used by the thinking card.
   function _splitThinkFromContent(rawContent, existingReasoning){
-    const text=String(rawContent||'');
-    if(!text) return {reasoning:existingReasoning||'', content:text};
-    // Extract exactly ONE leading think block (after lstrip), matching the
-    // streaming renderer's _streamDisplay/_parseStreamState semantics EXACTLY —
-    // both strip only the first leading block. A closed <think>...</think> that
-    // appears MID-BODY is, by the renderer's definition, visible content (e.g. a
-    // literal tag inside a fenced code block); a whole-body scan would silently
-    // move it into m.reasoning. And looping multiple leading blocks here (when the
-    // renderer strips only one) would make persisted/reload content diverge from
-    // the live stream. So: leading, single, partial-open left intact (#3455 review, Codex).
-    let extracted='';
-    let remaining=text;
-    const trimmed=text.trimStart();
-    for(const {open,close} of _thinkPairs){
-      if(!trimmed.startsWith(open)) continue;
-      const ci=trimmed.indexOf(close,open.length);
-      if(ci===-1) break; // partial open — leave intact for the live renderer
-      extracted=trimmed.slice(open.length,ci);
-      remaining=trimmed.slice(ci+close.length).replace(/^\s+/,'');
-      break;
-    }
-    if(!extracted) return {reasoning:existingReasoning||'', content:rawContent};
-    const finalReasoning=existingReasoning?existingReasoning+'\n\n'+extracted:extracted;
-    return {reasoning:finalReasoning, content:remaining};
+    return _extractInlineThinkingFromContent(rawContent, existingReasoning, {streaming:false});
   }
   function syncInflightAssistantMessage(){
     const inflight=INFLIGHT[activeSid];
@@ -1556,57 +1705,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return s.trim();
   }
   function _streamDisplay(){
-    const raw=_stripXmlToolCalls(assistantText);
-    // Always run think-block stripping even when reasoningText is populated.
-    // Some providers emit reasoning content via on_reasoning AND wrap it in
-    // <think> tags in the token stream — the early-return caused the thinking
-    // card and main response to show identical content (closes #852).
-    for(const {open,close} of _thinkPairs){
-      // Trim leading whitespace before checking for the open tag — some models
-      // (e.g. MiniMax) emit newlines before <think>.
-      const trimmed=raw.trimStart();
-      if(trimmed.startsWith(open)){
-        const ci=trimmed.indexOf(close,open.length);
-        if(ci!==-1){
-          // Thinking block complete — strip it, show the rest
-          return trimmed.slice(ci+close.length).replace(/^\s+/,'');
-        }
-        // Still inside thinking block — show placeholder
-        return '';
-      }
-      // Hide partial tag prefixes while streaming so users don't see
-      // `<thi`, `<think`, etc. before the model finishes the token.
-      if(open.startsWith(trimmed)) return '';
-    }
-    return raw;
+    return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true}).content;
   }
   function _parseStreamState(){
-    const raw=_stripXmlToolCalls(assistantText);
-    if(reasoningText){
-      return {thinkingText:liveReasoningText, displayText:_streamDisplay(), inThinking:false};
-    }
-    for(const {open,close} of _thinkPairs){
-      const trimmed=raw.trimStart();
-      if(trimmed.startsWith(open)){
-        const ci=trimmed.indexOf(close,open.length);
-        if(ci!==-1){
-          return {
-            thinkingText: trimmed.slice(open.length, ci).trim(),
-            displayText: trimmed.slice(ci+close.length).replace(/^\s+/,''),
-            inThinking:false,
-          };
-        }
-        return {
-          thinkingText: trimmed.slice(open.length).trim(),
-          displayText:'',
-          inThinking:true,
-        };
-      }
-      if(open.startsWith(trimmed)){
-        return {thinkingText:'', displayText:'', inThinking:true};
-      }
-    }
-    return {thinkingText:'', displayText:raw, inThinking:false};
+    return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true});
   }
   function _renderLiveThinking(parsed){
     if(window._showThinking===false){removeThinking();return;}
@@ -1878,8 +1980,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _streamFadePauseAfter(text, paragraphBreakIndex){
     if(paragraphBreakIndex>=0) return 90;
     const trimmed=String(text||'').trimEnd();
-    if(/[.!?]["')\]]*$/.test(trimmed)) return 45;
-    if(/[:;]["')\]]*$/.test(trimmed)) return 30;
+    if(/[.!?]["\x27)\]]*$/.test(trimmed)) return 45;
+    if(/[:;]["\x27)\]]*$/.test(trimmed)) return 30;
     return 0;
   }
   function _streamFadeNextText(targetText){
@@ -2338,7 +2440,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Throttling to 66ms intervals prevents this pileup without noticeable
     // visual degradation — streaming text updates still feel immediate.
     // performance.now() is monotonic so tab suspend/resume and NTP adjustments
-    // can't produce negative or enormous deltas.
+    // cannot produce negative or enormous deltas.
     const sinceLastMs=performance.now()-_lastRenderMs;
     const _doRender=()=>{
       _pendingRafHandle=null;
@@ -2479,9 +2581,39 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _completeAutomaticCompressionOnLiveProgress(activeSid);
       ensureAssistantRow(true);
+      if(assistantRow) assistantRow.setAttribute('data-interim','1');
       _flushPendingSegmentRender({force:true});
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
+      // Collapse old interim notes once more than INTERIM_COLLAPSE_THRESHOLD accumulate.
+      const INTERIM_COLLAPSE_THRESHOLD=3;
+      if(visibleInterimSnippets.length>INTERIM_COLLAPSE_THRESHOLD&&assistantRow){
+        const blocks=assistantRow.parentElement;
+        if(blocks){
+          const allInterim=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
+          const toHide=allInterim.slice(0,allInterim.length-INTERIM_COLLAPSE_THRESHOLD);
+          let toggle=blocks.querySelector('.interim-collapse-toggle');
+          if(!toggle){
+            toggle=document.createElement('span');
+            toggle.className='interim-collapse-toggle';
+            // No per-element listener: clicks are handled by a delegated
+            // document-level handler (see _interimCollapseDelegatedClick) so
+            // the toggle keeps working after a live-turn DOM restore
+            // (snapshotLiveTurnHtmlForSession/restoreLiveTurnHtmlForSession
+            // rebuild via innerHTML, which would drop a direct listener and
+            // leave the collapsed notes permanently unreachable). The
+            // threshold rides on the markup so the handler stays stateless.
+            toggle.dataset.threshold=String(INTERIM_COLLAPSE_THRESHOLD);
+            if(toHide.length) toHide[0].before(toggle);
+          }
+          // Skip re-collapse when the user expanded manually; always update the stored count.
+          if(!toggle.dataset.expanded){
+            toHide.forEach(el=>el.classList.add('interim-collapsed'));
+          }
+          const stillHidden=blocks.querySelectorAll('[data-interim="1"].interim-collapsed').length;
+          if(stillHidden) toggle.textContent='Show '+stillHidden+' earlier update'+(stillHidden===1?'':'s');
+        }
+      }
       recordActivityBoundary();
       _resetAssistantSegment();
       _scheduleRender();

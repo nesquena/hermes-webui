@@ -566,6 +566,49 @@ def test_api_session_reload_drops_stale_cached_user_tail_after_saved_assistant(m
     assert handler.response_json["session"]["message_count"] == 2
 
 
+def test_get_session_reloads_when_cached_session_lags_disk(monkeypatch, tmp_path):
+    import api.models as models
+
+    sid = "webui_reconcile_cache_lags_disk"
+    old_messages = [
+        {"role": "user", "content": "old user", "timestamp": 1000.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, old_messages)
+
+    cached = models.Session.load(sid)
+    assert cached is not None
+    cached.active_stream_id = "stream-cache-lags-disk"
+    cached.pending_user_message = "next prompt"
+    models.SESSIONS[sid] = cached
+
+    newer = models.Session(
+        session_id=sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=old_messages + [
+            {"role": "user", "content": "new user", "timestamp": 1002.0},
+            {"role": "assistant", "content": "new final answer", "timestamp": 1003.0},
+        ],
+        created_at=1000.0,
+        updated_at=1003.0,
+        active_stream_id="stream-cache-lags-disk",
+        pending_user_message="next prompt",
+    )
+    newer.save(touch_updated_at=False)
+
+    loaded = models.get_session(sid)
+
+    assert [m["content"] for m in loaded.messages] == [
+        "old user",
+        "old assistant",
+        "new user",
+        "new final answer",
+    ]
+    assert models.SESSIONS[sid] is loaded
+
+
 def test_metadata_fast_path_uses_summary_without_full_merge_for_restamped_replays(monkeypatch, tmp_path):
     """Metadata-only /api/session must not full-read and merge transcripts.
 

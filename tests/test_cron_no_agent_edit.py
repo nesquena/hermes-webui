@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,13 +45,16 @@ def test_open_cron_edit_plumbs_no_agent_and_script_to_form():
     assert "script: job.script || ''" in body
 
 
-def test_no_agent_form_drops_prompt_required_attribute_and_shows_script_context():
+def test_no_agent_form_hides_prompt_and_shows_readonly_script_path():
     body = _function_body("_renderCronForm")
     assert "no_agent" in body and "script" in body
     assert "const isNoAgent = !!no_agent;" in body
-    assert "cron-no-agent-hint" in body
-    assert "No-agent script" in body
-    assert "${isNoAgent ? ' disabled' : ' required'}" in body
+    assert "const promptBlock = isNoAgent ? '' :" in body
+    assert 'id="cronFormScript"' in body
+    assert "readonly autocomplete=\"off\"" in body
+    assert "cron_script_path_hint" in body
+    assert "const skillsBlock = isNoAgent ? '' :" in body
+    assert "if (!isNoAgent) _renderCronSkillTags();" in body
 
 
 def test_save_cron_form_keeps_agent_prompt_required_but_skips_no_agent_edits():
@@ -65,7 +67,8 @@ def test_save_cron_form_keeps_agent_prompt_required_but_skips_no_agent_edits():
 
 def test_no_agent_detail_displays_mode_and_script():
     body = _function_body("_renderCronDetail")
-    assert "const isNoAgent = !!job.no_agent;" in body
-    assert "No-agent script" in body
+    assert "const isNoAgent = _isCronScriptJob(job);" in body
+    assert "isNoAgent ? _cronScriptCardHtml(job) : _cronAgentPromptCardHtml(job)" in body
+    assert "isNoAgent ? _cronScriptJobBannerHtml() : ''" in body
     assert "cronJobMode" in body
-    assert "job.script" in body
+    assert "cron-mode-badge ${isNoAgent ? 'script' : 'agent'}" in body

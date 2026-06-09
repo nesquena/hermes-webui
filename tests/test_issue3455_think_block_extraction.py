@@ -49,6 +49,10 @@ def _extract_block(src: str, marker: str) -> str:
 _DRIVER = """
 %s
 %s
+%s
+%s
+%s
+%s
 const args = JSON.parse(process.argv[2]);
 process.stdout.write(JSON.stringify(_splitThinkFromContent(args.raw, args.existing || '')));
 """
@@ -59,9 +63,13 @@ def driver(tmp_path_factory):
     if shutil.which("node") is None:
         pytest.skip("node not available")
     pairs = _extract_block(MESSAGES_JS, "const _thinkPairs=")
+    fence = _extract_block(MESSAGES_JS, "function _thinkingFenceMarkerAt(")
+    indented = _extract_block(MESSAGES_JS, "function _lineIsIndentedCode(")
+    merge = _extract_block(MESSAGES_JS, "function _mergeInlineThinkingReasoning(")
+    extract = _extract_block(MESSAGES_JS, "function _extractInlineThinkingFromContent(")
     fn = _extract_block(MESSAGES_JS, "function _splitThinkFromContent(")
     p = tmp_path_factory.mktemp("think3455") / "driver.js"
-    p.write_text(_DRIVER % (pairs, fn), encoding="utf-8")
+    p.write_text(_DRIVER % (pairs, fence, indented, merge, extract, fn), encoding="utf-8")
     return str(p)
 
 
@@ -85,14 +93,11 @@ def test_think_at_start_extracted(driver):
     assert r["reasoning"] == "my reasoning"
 
 
-def test_content_before_think_is_not_extracted(driver):
-    """Renderer-matching: a think block is only extracted at the LEADING position.
-    A <think> that appears after real prose is, by the renderer's definition,
-    visible content and must be left in m.content (not moved to reasoning)."""
+def test_content_before_think_is_extracted(driver):
+    """#3599: inline providers can emit visible prose before a complete think block."""
     r = _split(driver, "Real prefix <think>mid</think> tail")
-    # Not leading -> nothing extracted, content fully preserved.
-    assert r["content"] == "Real prefix <think>mid</think> tail"
-    assert r["reasoning"] == ""
+    assert r["content"] == "Real prefix  tail"
+    assert r["reasoning"] == "mid"
 
 
 def test_closed_literal_think_in_code_block_preserved(driver):
@@ -106,12 +111,11 @@ def test_closed_literal_think_in_code_block_preserved(driver):
     assert "visible literal" in r["content"]
 
 
-def test_unclosed_think_left_intact(driver):
-    """Streaming-safe: a partial/unclosed block is not extracted (the live
-    renderer hides it); content must not be dropped."""
+def test_unclosed_think_hidden_into_reasoning(driver):
+    """Streaming-safe: a partial/unclosed block is hidden from visible content."""
     r = _split(driver, "<think>still thinking...")
-    assert r["content"] == "<think>still thinking..."
-    assert r["reasoning"] == ""
+    assert r["content"] == ""
+    assert r["reasoning"] == "still thinking..."
 
 
 def test_existing_reasoning_is_merged_not_overwritten(driver):
@@ -120,26 +124,34 @@ def test_existing_reasoning_is_merged_not_overwritten(driver):
     assert r["reasoning"] == "from on_reasoning stream\n\nextra"
 
 
-def test_single_leading_block_extracted_matches_renderer(driver):
-    """Only ONE leading think block is extracted — matching _streamDisplay/
-    _parseStreamState which strip a single leading block. A second consecutive
-    block stays in content so persisted state never diverges from the live stream."""
+def test_existing_reasoning_substring_does_not_drop_block(driver):
+    r = _split(driver, "<think>plan</think>answer", existing="planning the approach carefully")
+    assert r["content"] == "answer"
+    assert r["reasoning"] == "planning the approach carefully\n\nplan"
+
+
+def test_multiple_blocks_extracted(driver):
+    """#3599: multiple complete inline blocks move to reasoning together."""
     r = _split(driver, "<think>a</think><think>b</think>the answer")
-    assert r["content"] == "<think>b</think>the answer"
-    assert r["reasoning"] == "a"
+    assert r["content"] == "the answer"
+    assert r["reasoning"] == "a\n\nb"
 
 
-def test_block_after_content_not_extracted(driver):
-    """A think block that follows visible content stays in content (renderer only
-    strips leading blocks)."""
+def test_block_after_content_extracted(driver):
+    """#3599: complete inline blocks after visible content are reasoning too."""
     r = _split(driver, "<think>lead</think>answer <think>trailing</think> more")
-    assert r["content"] == "answer <think>trailing</think> more"
-    assert r["reasoning"] == "lead"
+    assert r["content"] == "answer  more"
+    assert r["reasoning"] == "lead\n\ntrailing"
 
 
-def test_lookalike_tag_in_code_not_extracted(driver):
+def test_lookalike_tag_without_close_after_content_stays_visible(driver):
+    """#3633 deep-review (Codex catch): a literal <think> token used mid-sentence
+    and never closed is NOT a thinking trace — it must stay visible, not get the
+    rest of the line swallowed into reasoning. (A LEADING unclosed block is still
+    treated as reasoning; see test_unclosed_think_hidden_into_reasoning.)"""
     r = _split(driver, "use <think> as a literal token, never closed")
     assert r["content"] == "use <think> as a literal token, never closed"
+    assert r["reasoning"] == ""
 
 
 def test_empty_content(driver):
@@ -176,14 +188,20 @@ class TestBackendThinkSplitParity:
         assert content == raw
         assert reasoning == ""
 
-    def test_unclosed_left_intact(self):
-        assert self._sp("<think>still...") == ("<think>still...", "")
+    def test_unclosed_hidden_into_reasoning(self):
+        assert self._sp("<think>still...") == ("", "still...")
 
     def test_existing_reasoning_merged(self):
         assert self._sp("<think>new</think>ans", "prior") == ("ans", "prior\n\nnew")
 
-    def test_single_leading_block_only(self):
-        assert self._sp("<think>a</think><think>b</think>end") == ("<think>b</think>end", "a")
+    def test_multiple_blocks_extracted(self):
+        assert self._sp("<think>a</think><think>b</think>end") == ("end", "a\n\nb")
+
+    def test_substring_reasoning_is_not_dropped(self):
+        assert self._sp("<think>plan</think>answer", "planning the approach carefully") == (
+            "answer",
+            "planning the approach carefully\n\nplan",
+        )
 
     def test_empty(self):
         assert self._sp("") == ("", "")
@@ -193,3 +211,47 @@ class TestBackendThinkSplitParity:
         content, reasoning = self._sp(None)
         assert content in (None, "")
         assert reasoning == ""
+
+    # ── #3633 deep-review (Codex catch): code-awareness + unclosed-position ──
+    def test_inline_backtick_code_span_preserved(self):
+        """A <think> literal inside an inline single-backtick code span is code,
+        not a thinking trace — it must stay visible (the earlier full-scan only
+        protected triple fences)."""
+        raw = "Use the `<think>foo</think>` tag in your prompt."
+        assert self._sp(raw) == (raw, "")
+
+    def test_indented_code_block_preserved(self):
+        """A <think> literal inside a >=4-space indented code block must stay
+        visible."""
+        raw = "Example:\n\n    <think>foo</think>\n\ndone"
+        assert self._sp(raw) == (raw, "")
+
+    def test_mid_body_unclosed_stays_visible(self):
+        """An unclosed <think> AFTER visible content (a literal typed tag) must
+        NOT truncate the following prose on the persist path."""
+        assert self._sp("answer<think>still thinking") == (
+            "answer<think>still thinking",
+            "",
+        )
+
+    def test_leading_unclosed_still_extracted(self):
+        """A LEADING unclosed block (cut off mid-thought) is still reasoning."""
+        assert self._sp("<think>still thinking") == ("", "still thinking")
+
+    def test_indented_fence_1_3_spaces_preserved(self):
+        """A fenced code block indented 1-3 spaces is still a fence (valid
+        Markdown), so a literal think tag inside it stays visible."""
+        backtick = "text\n  ```\n  <think>lit</think>\n  ```\nend"
+        assert self._sp(backtick) == (backtick, "")
+        tilde = "text\n   ~~~html\n   <think>lit</think>\n   ~~~\nend"
+        assert self._sp(tilde) == (tilde, "")
+
+    def test_leading_whitespace_preserved_when_no_thinking_removed(self):
+        """#3633 Codex catch: content is only lstripped when a LEADING thinking
+        block/prefix was actually removed. A reply that legitimately starts with
+        an indented code block or blank lines (and has no leading thinking
+        wrapper) keeps its leading whitespace."""
+        assert self._sp("    indented code\nmore") == ("    indented code\nmore", "")
+        assert self._sp("\n\n  hi") == ("\n\n  hi", "")
+        # ...but a leading thinking block still strips the whitespace after it.
+        assert self._sp("<think>r</think>   answer") == ("answer", "r")

@@ -97,6 +97,23 @@ def _wait_for_wakeup(holder, timeout=3.0):
     return _impl(holder, timeout=timeout)
 
 
+def _wait_for(predicate, timeout=3.0, interval=0.02):
+    """Poll *predicate* until it returns truthy or *timeout* elapses.
+
+    Used when the assertion targets state mutated by the wakeup daemon thread
+    AFTER it calls start_session_turn (e.g. the 409 re-defer), which races the
+    ``holder['event']`` set inside the fake start_session_turn.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
 def _reset_cfg_state():
     from api import config as _cfg
 
@@ -529,5 +546,76 @@ def test_multiple_deferred_wakeups_each_survive_across_teardowns(monkeypatch):
     finally:
         with cfg.ACTIVE_RUNS_LOCK:
             cfg.ACTIVE_RUNS.pop(stream_id, None)
+        bp.unregister_process_session(sid)
+        _reset_cfg_state()
+
+
+# --------------------------------------------------------------------------
+# Test 7 — Greptile P1 (idle-branch sibling of the 409/teardown F1 fix):
+# the IDLE-path wakeup must pass process_id, so when its daemon thread loses
+# the per-session lock race (409) the re-defer carries the real process_id and
+# the record_deferred_wakeup dedup guard stays live — a second 409 race cannot
+# accumulate a duplicate deferred entry that would deliver the wakeup twice.
+# --------------------------------------------------------------------------
+
+
+def test_idle_path_409_redefer_carries_process_id_and_dedups(monkeypatch):
+    """Idle completion → _process_one idle branch starts the server-side
+    wakeup. The fake start_session_turn returns 409 (raced an active turn /
+    sibling wakeup), so the daemon re-defers via record_deferred_wakeup.
+
+    BEFORE the fix the idle branch called _start_server_side_wakeup_turn
+    WITHOUT process_id, so the re-defer recorded process_id="" — falsy, so the
+    `if process_id and any(...)` dedup guard was skipped and a second 409 race
+    appended a duplicate identical entry, ultimately double-delivering the
+    wakeup. AFTER the fix the re-defer carries the real process_id and the
+    guard dedups the second race to a single entry.
+    """
+    from api import background_process as bp, config as cfg
+
+    fake = _FakeProcessRegistry()
+    fake.register("proc-idle-409", "sess-idle-409")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+    # 409 == lost the per-session agent lock race; triggers the re-defer path.
+    holder = _install_fake_start_session_turn(monkeypatch, status=409)
+
+    sid = "sess-idle-409"
+    bp.register_process_session(sid, sid)
+    try:
+        # Session is idle → _process_one takes the idle branch (the line-838
+        # call site this card fixes), which now plumbs process_id through.
+        assert bp._session_has_active_turn(sid) is False
+        bp._process_one(_completion_evt("proc-idle-409", sid))
+
+        # The wakeup daemon ran, hit 409, and re-deferred. Poll for the
+        # re-defer (it races the holder event set inside the fake).
+        assert _wait_for_wakeup(holder), "idle-branch wakeup never attempted"
+        assert _wait_for(
+            lambda: bool(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid))
+        ), "409 on the idle path did not re-defer the wakeup — it was lost"
+
+        entries = cfg.DEFERRED_PROCESS_WAKEUPS[sid]
+        assert len(entries) == 1
+        # THE regression assertion: the re-defer carries the real process_id,
+        # not "" (which is what the missing-process_id idle call produced).
+        assert entries[0]["process_id"] == "proc-idle-409", (
+            "idle-path re-defer dropped process_id — the dedup guard in "
+            "record_deferred_wakeup is now bypassed and duplicates can "
+            "accumulate (the exact Greptile P1)"
+        )
+
+        # Now prove the dedup guard is actually live on this path: a second
+        # 409 race for the SAME process_id (e.g. the next teardown drain) must
+        # NOT append a duplicate. With process_id="" (pre-fix) this would grow
+        # to 2 entries and double-deliver.
+        bp.record_deferred_wakeup(
+            sid, "proc-idle-409", entries[0]["wakeup_prompt"]
+        )
+        assert len(cfg.DEFERRED_PROCESS_WAKEUPS[sid]) == 1, (
+            "duplicate deferred entry accumulated — dedup guard did not fire "
+            "because the idle-path re-defer lost its process_id"
+        )
+    finally:
         bp.unregister_process_session(sid)
         _reset_cfg_state()
