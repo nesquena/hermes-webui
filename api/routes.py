@@ -1081,7 +1081,7 @@ _SESSIONS_CACHE_TTL_SECONDS = 2.5
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
-_SESSIONS_CACHE: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
+_SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple, dict]] = OrderedDict()
 _SESSIONS_CACHE_LOCK = threading.RLock()
 _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
 _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION = 0
@@ -1117,11 +1117,15 @@ def _session_list_cache_get(
     allow_stale: bool = False,
 ) -> tuple[dict | None, bool]:
     now = time.monotonic()
+    current_stamp = _session_list_cache_source_stamp()
     with _SESSIONS_CACHE_LOCK:
         entry = _SESSIONS_CACHE.get(key)
         if not entry:
             return None, False
-        ts, payload = entry
+        ts, stamp, payload = entry
+        if stamp != current_stamp:
+            _SESSIONS_CACHE.pop(key, None)
+            return None, False
         fresh = (now - ts) < _SESSIONS_CACHE_TTL_SECONDS
         if fresh:
             _SESSIONS_CACHE.move_to_end(key)
@@ -1136,8 +1140,9 @@ def _session_list_cache_get(
 def _session_list_cache_set(key: tuple, payload: dict) -> None:
     if not isinstance(payload, dict):
         return
+    stamp = _session_list_cache_source_stamp()
     with _SESSIONS_CACHE_LOCK:
-        _SESSIONS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
+        _SESSIONS_CACHE[key] = (time.monotonic(), stamp, copy.deepcopy(payload))
         _SESSIONS_CACHE.move_to_end(key)
         while len(_SESSIONS_CACHE) > _SESSIONS_CACHE_MAX_ENTRIES:
             _SESSIONS_CACHE.popitem(last=False)
@@ -1184,6 +1189,36 @@ def _session_list_cache_invalidation_stamp(key: tuple) -> tuple[int, int]:
             global_version,
             _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION.get(cache_profile, 0),
         )
+
+
+def _session_list_cache_path_stamp(path: Path | None) -> tuple[int, int]:
+    try:
+        if path is None:
+            return (0, 0)
+        st = Path(path).stat()
+        return (int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))), int(st.st_size))
+    except Exception:
+        return (0, 0)
+
+
+def _session_list_cache_source_stamp() -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
+    try:
+        state_db_path = Path(_active_state_db_path())
+    except Exception:
+        state_db_path = None
+    try:
+        gateway_metadata_path = _gateway_session_metadata_path()
+    except Exception:
+        gateway_metadata_path = None
+    try:
+        session_index_path = SESSION_DIR / "_index.json"
+    except Exception:
+        session_index_path = None
+    return (
+        _session_list_cache_path_stamp(state_db_path),
+        _session_list_cache_path_stamp(gateway_metadata_path),
+        _session_list_cache_path_stamp(session_index_path),
+    )
 
 
 def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
