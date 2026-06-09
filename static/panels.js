@@ -6893,7 +6893,7 @@ async function _loadPluginPage(path, label) {
   iframe.src = path;
   iframe.style.cssText = 'width:100%;height:100%;border:none;display:block;';
   iframe.setAttribute('title', label || 'Plugin');
-  iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups');
+  iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-modals');
   container.appendChild(iframe);
   _currentPluginPage = { path, label };
 }

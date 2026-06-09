@@ -1454,12 +1454,114 @@ def _is_browser_unsafe_request(handler) -> bool:
 
 def _csrf_exempt_path(path: str) -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
-    return path in {
+    if path in {
         "/api/auth/login",
         "/api/auth/passkey/options",
         "/api/auth/passkey/login",
         "/api/csp-report",
+    }:
+        return True
+    return False
+
+
+def _is_plugin_null_origin(handler, path: str) -> bool:
+    """A sandboxed plugin iframe sends Origin: null — accept it."""
+    return path.startswith("/api/plugins/") and handler.headers.get("Origin") == "null"
+
+
+def _is_plugin_request(handler, path: str) -> bool:
+    """Plugin iframe fetch sets X-Plugin-Request header; CSRF can't forge it."""
+    return path.startswith("/api/plugins/") and handler.headers.get("X-Plugin-Request") == "1"
+
+
+def _dispatch_plugin_subprocess(handler, plugin_name: str, sub_route: str, method: str, parsed) -> bool:
+    """Proxy a plugin API request to a subprocess via stdin/stdout JSON.
+
+    Each plugin is a single subprocess with a per-plugin pipe lock, so
+    requests are serial: one slow handler blocks all others for up to
+    PIPE_TIMEOUT (30s). Future versions may add concurrency per plugin.
+    """
+    import base64
+    import binascii
+    import json as _json
+    import select
+    import time as _time
+
+    from api.plugin_manager import get_plugin_process, spawn_plugin, kill_plugin, get_plugin_pipe_lock
+    from api.plugins import get_plugin_root
+
+    MAX_PLUGIN_BODY_BYTES = 1 * 1024 * 1024
+    PIPE_TIMEOUT = 30
+
+    proc = get_plugin_process(plugin_name)
+    if proc is None:
+        root = get_plugin_root(plugin_name)
+        if root:
+            proc = spawn_plugin(plugin_name, root)
+    if proc is None or proc.poll() is not None:
+        return j(handler, {"error": "plugin unavailable"}, status=503)
+
+    body_bytes = b""
+    try:
+        length = int(handler.headers.get("Content-Length", 0))
+        if length > MAX_PLUGIN_BODY_BYTES:
+            return bad(handler, "request body too large", status=413)
+        if length > 0:
+            body_bytes = handler.rfile.read(length)
+    except (ValueError, OSError):
+        pass
+
+    req = {
+        "id": int(_time.time() * 1000) % 1000000,
+        "method": method,
+        "path": sub_route,
+        "query": parsed.query,
+        "headers": {
+            k: v for k, v in handler.headers.items()
+            if k.lower() not in ("cookie", "authorization")
+        },
     }
+    if body_bytes:
+        req["body_b64"] = base64.b64encode(body_bytes).decode("ascii")
+
+    lock = get_plugin_pipe_lock(plugin_name)
+    with lock:
+        try:
+            proc.stdin.write((_json.dumps(req) + "\n").encode("utf-8"))
+            proc.stdin.flush()
+            ready, _, _ = select.select([proc.stdout], [], [], PIPE_TIMEOUT)
+            if not ready:
+                kill_plugin(plugin_name)
+                return j(handler, {"error": "plugin timeout"}, status=504)
+            resp_line = proc.stdout.readline().decode("utf-8").strip()
+            resp = _json.loads(resp_line)
+        except (BrokenPipeError, OSError, _json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Plugin subprocess %s failed: %s", plugin_name, exc)
+            kill_plugin(plugin_name)
+            return j(handler, {"error": "plugin crashed"}, status=502)
+
+    resp_status = resp.get("status", 200)
+    resp_headers = resp.get("headers", {})
+    try:
+        resp_body = base64.b64decode(resp["body_b64"]) if resp.get("body_b64") else b""
+    except (binascii.Error, KeyError, ValueError):
+        return j(handler, {"error": "plugin returned invalid response"}, status=502)
+
+    _allowed_resp = {"cache-control", "content-type", "etag", "last-modified"}
+    handler.send_response(resp_status)
+    if handler.headers.get("Origin") == "null":
+        handler.send_header("Access-Control-Allow-Origin", "null")
+    for k, v in resp_headers.items():
+        kl = k.lower()
+        if kl in _allowed_resp or kl.startswith("x-"):
+            # Strip CRLF to prevent header injection from plugin-controlled values.
+            k = k.replace("\r", "").replace("\n", "")
+            v = str(v).replace("\r", "").replace("\n", "")
+            handler.send_header(k, v)
+    handler.send_header("Content-Length", str(len(resp_body)))
+    handler.end_headers()
+    handler.wfile.write(resp_body)
+    return True
 
 
 _CSRF_FAILURE_ATTR = "_hermes_csrf_failure_reason"
@@ -5297,6 +5399,17 @@ def handle_get(handler, parsed) -> bool:
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
+
+    if parsed.path.startswith("/api/plugins/"):
+        import urllib.parse
+        parts = parsed.path.split("/")
+        if len(parts) != 5:
+            return False
+        plugin_name = parts[3]
+        sub_route = "/" + urllib.parse.unquote(parts[4])
+        if ".." in sub_route:
+            return False
+        return _dispatch_plugin_subprocess(handler, plugin_name, sub_route, handler.command, parsed)
     if parsed.path == "/api/provider/quota":
         query = parse_qs(parsed.query)
         provider_id = (query.get("provider", [""])[0] or None)
@@ -6556,6 +6669,7 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Plugin pages (HTML shell) ──
     from api.plugins import PLUGIN_MANIFESTS, _PLUGIN_STATIC_ROOTS
+    _FETCH_WRAPPER = b'<script>(function(){var _f=fetch;window.fetch=function(u,o){if(!u||u.indexOf("/api/plugins/")!==0)return _f(u,o);o=o||{};o.headers=new Headers(o.headers||{});if(!o.headers.has("X-Plugin-Request"))o.headers.set("X-Plugin-Request","1");return _f(u,o)}})()</script>'
     for name, manifest in PLUGIN_MANIFESTS.items():
         tab = manifest.get("tab", {})
         tab_path = tab.get("path", f"/{name}")
@@ -6569,9 +6683,10 @@ def handle_get(handler, parsed) -> bool:
                 index_html = dashboard_dir / "dist" / "index.html"
                 if index_html.is_file():
                     data = index_html.read_bytes()
+                    data = data.replace(b"</head>", _FETCH_WRAPPER + b"</head>")
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
-                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
                     handler.send_header("Content-Length", str(len(data)))
                     handler.end_headers()
                     handler.wfile.write(data)
@@ -6581,9 +6696,10 @@ def handle_get(handler, parsed) -> bool:
                 static_html = plugin_root / "static" / "index.html"
                 if static_html.is_file():
                     data = static_html.read_bytes()
+                    data = data.replace(b"</head>", _FETCH_WRAPPER + b"</head>")
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
-                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
                     handler.send_header("Content-Length", str(len(data)))
                     handler.end_headers()
                     handler.wfile.write(data)
@@ -6597,22 +6713,23 @@ def handle_get(handler, parsed) -> bool:
                     name_escaped = html.escape(name)
                     css_tag = f'<link rel="stylesheet" href="/dashboard-plugins/{name_escaped}/{css}">' if css else ""
                     html_content = (
-                        f"<!doctype html>\n"
-                        f"<html lang=\"en\">\n"
-                        f"<head>\n"
-                        f"  <meta charset=\"utf-8\">\n"
-                        f"  <title>{label}</title>\n"
-                        f"  {css_tag}\n"
-                        f"</head>\n"
-                        f"<body>\n"
-                        f'  <div id="pluginPageContainer"></div>\n'
+                        '<!doctype html>\n'
+                        "<html lang=\"en\">\n"
+                        "<head>\n"
+                        '  <meta charset="utf-8">\n'
+                        f'  <title>{label}</title>\n'
+                        f'  {css_tag}\n'
+                        '  <script>(function(){{var _f=fetch;window.fetch=function(u,o){{if(!u||u.indexOf("/api/plugins/")!==0)return _f(u,o);o=o||{{}};o.headers=new Headers(o.headers||{{}});if(!o.headers.has("X-Plugin-Request"))o.headers.set("X-Plugin-Request","1");return _f(u,o)}}}})()</script>\n'
+                        '</head>\n'
+                        '<body>\n'
+                        '  <div id="pluginPageContainer"></div>\n'
                         f'  <script src="/dashboard-plugins/{name_escaped}/dist/index.js"></script>\n'
-                        f"</body>\n"
-                        f"</html>\n"
+                        '</body>\n'
+                        '</html>\n'
                     ).encode("utf-8")
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
-                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
                     handler.send_header("Content-Length", str(len(html_content)))
                     handler.end_headers()
                     handler.wfile.write(html_content)
@@ -6640,12 +6757,23 @@ def handle_post(handler, parsed) -> bool:
     # is intentionally unauthenticated for browser-generated violation reports.
     if diag:
         diag.stage("csrf")
-    if not _csrf_exempt_path(parsed.path) and not _check_csrf(handler):
+    if not _csrf_exempt_path(parsed.path) and not _is_plugin_request(handler, parsed.path) and not _check_csrf(handler):
         try:
             return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
         finally:
             if diag:
                 diag.finish()
+
+    if parsed.path.startswith("/api/plugins/"):
+        import urllib.parse
+        parts = parsed.path.split("/")
+        if len(parts) != 5:
+            return False
+        plugin_name = parts[3]
+        sub_route = "/" + urllib.parse.unquote(parts[4])
+        if ".." in sub_route:
+            return False
+        return _dispatch_plugin_subprocess(handler, plugin_name, sub_route, handler.command, parsed)
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
