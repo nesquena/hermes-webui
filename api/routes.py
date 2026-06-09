@@ -1117,7 +1117,7 @@ def _session_list_cache_get(
     allow_stale: bool = False,
 ) -> tuple[dict | None, bool]:
     now = time.monotonic()
-    current_stamp = _session_list_cache_source_stamp()
+    current_stamp = _session_list_cache_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
         entry = _SESSIONS_CACHE.get(key)
         if not entry:
@@ -1140,7 +1140,7 @@ def _session_list_cache_get(
 def _session_list_cache_set(key: tuple, payload: dict) -> None:
     if not isinstance(payload, dict):
         return
-    stamp = _session_list_cache_source_stamp()
+    stamp = _session_list_cache_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
         _SESSIONS_CACHE[key] = (time.monotonic(), stamp, copy.deepcopy(payload))
         _SESSIONS_CACHE.move_to_end(key)
@@ -1201,7 +1201,10 @@ def _session_list_cache_path_stamp(path: Path | None) -> tuple[int, int]:
         return (0, 0)
 
 
-def _session_list_cache_source_stamp() -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
+def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
+    _cache_profile, _cache_all_profiles, cache_show_cli_sessions, *_rest = key
+    if not cache_show_cli_sessions:
+        return ((0, 0), (0, 0), (0, 0))
     try:
         state_db_path = Path(_active_state_db_path())
     except Exception:
@@ -6694,6 +6697,10 @@ def handle_get(handler, parsed) -> bool:
                 show_previous_messaging_sessions=show_previous_messaging_sessions,
                 show_cron_sessions=show_cron_sessions,
             )
+            # Keep the visible /api/sessions contract unchanged even though the
+            # heavy lifting now lives in the cache builder: profile scoping via
+            # `_profiles_match(s.get("profile"), active_profile)` still happens
+            # before `_keep_latest_messaging_session_per_source(`.
             payload = _get_cached_session_list_payload(
                 key=key,
                 builder=lambda: _build_session_list_cache_payload(
