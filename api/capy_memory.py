@@ -1860,6 +1860,10 @@ def _github_releases_path_repo(origin_uri: str) -> str:
     return f"{path[2]}/{path[3]}"
 
 
+def _github_releases_path_matches(origin_uri: str) -> bool:
+    return bool(_github_releases_path_repo(origin_uri))
+
+
 def _github_release_list_row_is_safe(row: Any) -> bool:
     if not isinstance(row, dict):
         return False
@@ -11226,6 +11230,8 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    if _github_releases_path_repo(origin_uri):
+        raise ValueError("refresh failed")
     latest_release_repo = _github_latest_release_path_repo(origin_uri)
     if latest_release_repo:
         if not _json_payload_is_github_latest_release_metadata(origin_uri, payload):
@@ -11997,6 +12003,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_latest_release_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_latest_release_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_releases_path_matches(raw_origin_uri):
+        if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_releases_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_release_assets_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or _github_release_assets_path_info(raw_origin_uri) is None:
             raise RuntimeError("refresh fetcher disabled")
@@ -12176,6 +12185,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_latest_release_path_matches(safe_origin_uri):
         if not _github_latest_release_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_releases_path_matches(safe_origin_uri):
+        if not _github_releases_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_release_assets_path_matches(safe_origin_uri):
@@ -12669,6 +12682,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_latest_release_path_matches(safe_origin_uri) and (
             not _github_latest_release_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_releases_path_matches(safe_origin_uri) and (
+            not _github_releases_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")

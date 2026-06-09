@@ -96,6 +96,10 @@ Recent completed slices:
   - Added RED/GREEN backend coverage by strengthening `_assert_widget_sdk_helper_receipts` so no-space widget SDK helpers must return the server-generated Memory Tree advisory/no-authority envelope beside existing prompt-preflight, autonomy-policy, progress, and compaction receipts.
   - Threaded advisory boundary metadata into helper compaction evidence for widget API version, size/position/rendered-size helpers, ID normalizers, and current-id lookups while preserving no-space progress run ids and omitting forged memory authority, renderer/source/html/API-auth/raw-prompt/script/token/secret fixture values.
 
+- `fix(capy-memory): harden GitHub release-list refresh route`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub release-list API payloads (`/repos/{owner}/{repo}/releases`) request `application/json` and reject text fallback, JSON Feed-shaped bypass payloads, and malformed tail rows before vault/search persistence.
+  - Release-list summaries remain metadata-only, reconstructing only safe repository path, release count, bounded release names/tags, draft/prerelease flags, and publish timestamps while omitting release bodies, assets/archive URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-looking fixture values.
+
 - `feat(capy-memory): ingest GitHub commit activity metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub commit-activity API payloads (`/repos/{owner}/{repo}/stats/commit_activity`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries only from safe repository path, week count, total commits, and active-week count while omitting raw week timestamps, URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
