@@ -1529,6 +1529,18 @@ def _next_inline_thinking_opener(text, start):
     return best
 
 
+def _text_tail_is_partial_opener(text):
+    """True when the END of `text` is a non-empty proper prefix of some thinking
+    opener (e.g. ``<thi`` for ``<think>``). Used to decide whether a streaming
+    tail might be a forming block worth code-aware handling."""
+    for open_tag, _close in _INLINE_THINKING_TAG_PAIRS:
+        m = min(len(open_tag) - 1, len(text))
+        for n in range(m, 0, -1):
+            if open_tag.startswith(text[-n:]):
+                return True
+    return False
+
+
 def _line_is_indented_code(text, line_start):
     """True when the line beginning at `line_start` is a markdown indented code
     block line (>=4 leading spaces or a leading tab, and not blank). `line_start`
@@ -1632,25 +1644,19 @@ def _extract_inline_thinking_from_content(raw_content, existing_reasoning='', *,
             next_opener = _next_inline_thinking_opener(text, index)
         if next_opener == -1:
             # No further COMPLETE opener ahead. The remaining tail is plain
-            # visible content — except during streaming, where a tail that is a
-            # prefix of an opener (e.g. "...<thi") must be suppressed as a
-            # possibly-forming block. Handle that, then stop (avoids re-walking
-            # the whole growing answer tail every token — #3633 perf catch).
-            if streaming:
-                rest = text[index:]
-                partial_len = 0
-                for open_tag, _close in _INLINE_THINKING_TAG_PAIRS:
-                    m = min(len(open_tag) - 1, len(rest))
-                    for n in range(m, 0, -1):
-                        if open_tag.startswith(rest[-n:]):
-                            partial_len = max(partial_len, n)
-                            break
-                if partial_len:
-                    visible.append(text[cursor:length - partial_len])
-                    if not seen_nonspace and text[:length - partial_len].strip() == '':
-                        leading_removed = True
-                    cursor = length
-            break
+            # visible content and can be appended in one slice — EXCEPT during
+            # streaming when the tail is a prefix of an opener (e.g. "...<thi"):
+            # that may be a forming block and must be suppressed, but ONLY if it
+            # is outside code context (a partial opener inside inline-backtick /
+            # fenced / indented code stays visible — master parity). Determining
+            # code state needs the char walk, so in that case fall through to the
+            # normal loop (bounded — a partial tail is a transient single token)
+            # rather than bulk-skipping. Otherwise stop (avoids re-walking the
+            # growing answer tail every token — #3633 perf catch).
+            if streaming and _text_tail_is_partial_opener(text):
+                pass  # fall through to the code-aware char walk for the tail
+            else:
+                break
         ch = text[index]
         if index > 0 and text[index - 1] == '\n':
             line_is_indented_code = _line_is_indented_code(text, index)

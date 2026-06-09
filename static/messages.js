@@ -138,6 +138,17 @@ function _nextThinkingOpener(text, start){
   return best;
 }
 
+function _textTailIsPartialOpener(text){
+  // True when the END of text is a non-empty proper prefix of some opener
+  // (e.g. "<thi" for "<think>"). Decides whether a streaming tail might be a
+  // forming block worth code-aware handling.
+  for(const p of _thinkPairs){
+    const m=Math.min(p.open.length-1,text.length);
+    for(let n=m;n>0;n--){ if(p.open.startsWith(text.slice(text.length-n))) return true; }
+  }
+  return false;
+}
+
 function _lineIsIndentedCode(text, lineStart){
   // True when the line beginning at lineStart is a markdown indented code block
   // line (>=4 leading spaces or a leading tab, and not blank). lineStart must be
@@ -223,24 +234,18 @@ function _extractInlineThinkingFromContent(rawContent, existingReasoning, option
   while(index<text.length){
     if(nextOpener===-1||index>nextOpener) nextOpener=_nextThinkingOpener(text,index);
     if(nextOpener===-1){
-      // No further COMPLETE opener ahead — remaining tail is plain, except during
-      // streaming where a tail that is a prefix of an opener ("...<thi") must be
-      // suppressed as a possibly-forming block. Then stop (avoids re-walking the
-      // growing answer tail every token).
-      if(streaming){
-        const rest=text.slice(index);
-        let partialLen=0;
-        for(const p of _thinkPairs){
-          const m=Math.min(p.open.length-1,rest.length);
-          for(let n=m;n>0;n--){ if(p.open.startsWith(rest.slice(rest.length-n))){partialLen=Math.max(partialLen,n);break;} }
-        }
-        if(partialLen){
-          visible.push(text.slice(cursor,text.length-partialLen));
-          if(!seenNonspace&&text.slice(0,text.length-partialLen).trim()==='') leadingRemoved=true;
-          cursor=text.length;
-        }
+      // No further COMPLETE opener ahead — remaining tail is plain and is
+      // appended in one slice, EXCEPT during streaming when the tail is a prefix
+      // of an opener ("...<thi"): it may be a forming block and must be
+      // suppressed, but ONLY if outside code context (a partial opener inside
+      // inline-backtick / fenced / indented code stays visible — master parity).
+      // Code state needs the char walk, so fall through in that case (bounded —
+      // a partial tail is a transient single token) instead of bulk-skipping.
+      if(streaming&&_textTailIsPartialOpener(text)){
+        // fall through to the code-aware char walk for the tail
+      } else {
+        break;
       }
-      break;
     }
     const ch=text[index];
     if(index>0&&text[index-1]==='\n') lineIsIndentedCode=_lineIsIndentedCode(text,index);

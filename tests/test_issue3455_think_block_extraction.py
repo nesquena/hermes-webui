@@ -54,6 +54,7 @@ _DRIVER = """
 %s
 %s
 %s
+%s
 const args = JSON.parse(process.argv[2]);
 process.stdout.write(JSON.stringify(_splitThinkFromContent(args.raw, args.existing || '')));
 """
@@ -66,12 +67,13 @@ def driver(tmp_path_factory):
     pairs = _extract_block(MESSAGES_JS, "const _thinkPairs=")
     fence = _extract_block(MESSAGES_JS, "function _thinkingFenceMarkerAt(")
     nextopener = _extract_block(MESSAGES_JS, "function _nextThinkingOpener(")
+    tailpartial = _extract_block(MESSAGES_JS, "function _textTailIsPartialOpener(")
     indented = _extract_block(MESSAGES_JS, "function _lineIsIndentedCode(")
     merge = _extract_block(MESSAGES_JS, "function _mergeInlineThinkingReasoning(")
     extract = _extract_block(MESSAGES_JS, "function _extractInlineThinkingFromContent(")
     fn = _extract_block(MESSAGES_JS, "function _splitThinkFromContent(")
     p = tmp_path_factory.mktemp("think3455") / "driver.js"
-    p.write_text(_DRIVER % (pairs, fence, nextopener, indented, merge, extract, fn), encoding="utf-8")
+    p.write_text(_DRIVER % (pairs, fence, nextopener, tailpartial, indented, merge, extract, fn), encoding="utf-8")
     return str(p)
 
 

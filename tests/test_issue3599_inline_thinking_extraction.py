@@ -174,6 +174,20 @@ def test_per_token_streaming_scan_is_not_quadratic():
     assert with_tag < 3.0, f"with-tag per-token stream took {with_tag:.1f}s — quadratic"
 
 
+def test_streaming_partial_opener_tail_respects_code_context():
+    """#3633 perf-fix follow-up (Codex): the bulk-skip fast path must not suppress
+    a trailing partial opener that sits inside code — only a partial opener in
+    PLAIN text is a forming block. Mirrors master parity for inline-backtick,
+    fenced, and indented code; a plain partial tail is still suppressed."""
+    ext = _extract_inline_thinking_from_content
+    # Inside code → the partial opener tail stays visible.
+    assert ext("answer `<thi", "", streaming=True)[0] == "answer `<thi"
+    assert ext("```\n<thi", "", streaming=True)[0] == "```\n<thi"
+    assert ext("    <thi", "", streaming=True)[0] == "    <thi"
+    # Plain text → the forming partial opener is suppressed from display.
+    assert ext("answer <thi", "", streaming=True)[0] == "answer "
+
+
 def test_timeout_wrapper_remains_out_of_scope():
     assert "Request timed out. Please try again." in WORKSPACE_JS
     assert "AbortController" in WORKSPACE_JS
