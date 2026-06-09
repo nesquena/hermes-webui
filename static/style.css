@@ -1208,8 +1208,8 @@
   .toast.success{background:color-mix(in srgb,var(--success) 14%,var(--surface));border-color:color-mix(in srgb,var(--success) 45%,var(--surface));color:var(--success);}
   .toast.error{background:color-mix(in srgb,var(--error) 14%,var(--surface));border-color:color-mix(in srgb,var(--error) 45%,var(--surface));color:var(--error);}
   .toast-message{min-width:0;overflow-wrap:anywhere;white-space:pre-wrap;}
-  .toast-copy{border:1px solid currentColor;background:transparent;color:inherit;border-radius:8px;padding:4px 8px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;opacity:.85;}
-  .toast-copy:hover,.toast-copy:focus-visible{opacity:1;background:color-mix(in srgb,currentColor 10%,transparent);outline:none;}
+  .toast-copy,.toast-dismiss{border:1px solid currentColor;background:transparent;color:inherit;border-radius:8px;padding:4px 8px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;opacity:.85;}
+  .toast-copy:hover,.toast-copy:focus-visible,.toast-dismiss:hover,.toast-dismiss:focus-visible{opacity:1;background:color-mix(in srgb,currentColor 10%,transparent);outline:none;}
   .toast.warning{background:color-mix(in srgb,var(--warning) 14%,var(--surface));border-color:color-mix(in srgb,var(--warning) 45%,var(--surface));color:var(--warning);}
   .onboarding-overlay{position:fixed;inset:0;z-index:1050;background:rgba(7,12,19,.78);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:24px;}
   .onboarding-card{width:min(980px,100%);max-height:min(760px,94vh);overflow:auto;border:1px solid var(--accent-bg-strong);border-radius:24px;background:linear-gradient(180deg,rgba(20,30,44,.98),rgba(11,17,27,.98));box-shadow:0 24px 80px rgba(0,0,0,.45);}
@@ -1589,6 +1589,8 @@
   /* Overlay scroll controls so they do not affect the transcript's native scroll geometry. */
   .scroll-to-bottom-btn{position:absolute;right:20px;bottom:16px;width:32px;height:32px;border-radius:50%;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:10;transition:color .12s,border-color .12s,background .12s,transform .12s;}
   .scroll-to-bottom-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);}
+  .scroll-to-bottom-btn.scroll-to-bottom-btn--new-message{width:auto;min-width:32px;max-width:min(220px,calc(100% - 40px));border-radius:999px;font-size:12px;font-weight:600;gap:5px;padding:0 11px;color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
+  .scroll-to-bottom-btn.scroll-to-bottom-btn--new-message .session-jump-btn__text{display:inline;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .session-jump-btn__text{display:none;}
   .session-jump-btn{position:absolute;right:20px;height:32px;border-radius:999px;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;padding:0 11px;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:11;transition:color .12s,border-color .12s,background .12s,opacity .12s,transform .12s;}
   .session-jump-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);transform:translateY(-1px);}
@@ -4077,6 +4079,14 @@ main.main > #mainPlugin{display:none;}
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}
 .cron-new-dot{width:7px;height:7px;border-radius:50%;background:var(--success,#22c55e);flex-shrink:0;animation:cron-dot-pulse 2s ease-in-out infinite;}
 .cron-agent-badge{flex-shrink:0;font-size:12px;line-height:1;}
+.cron-script-badge{flex-shrink:0;font-size:12px;line-height:1;opacity:.92;}
+.cron-script-job-banner{margin-bottom:12px;}
+.cron-script-job-banner .detail-alert-title{font-weight:600;}
+.detail-script{background:var(--sidebar);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;white-space:pre-wrap;line-height:1.55;color:var(--text);font-family:'SF Mono',ui-monospace,monospace;word-break:break-word;}
+.detail-hint{font-size:11px;color:var(--muted);line-height:1.5;}
+.cron-script-card .detail-hint,.cron-script-card-hint{margin-top:8px;}
+.detail-badge.cron-mode-badge.script{background:rgba(148,163,184,.14);color:var(--text-secondary);}
+.detail-badge.cron-mode-badge.agent{background:rgba(99,179,237,.14);color:#90cdf4;}
 @keyframes cron-dot-pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
 .has-new-run{border-color:var(--success,#22c55e)!important;box-shadow:0 0 0 1px var(--success,#22c55e);}
 
@@ -5319,3 +5329,14 @@ main.main.showing-logs > #mainLogs{display:flex;}
 }
 
 #composerMobileCtxBadge { display: none !important; }
+
+/* Interim progress note collapse (#2403) */
+.interim-collapsed { display: none; }
+.interim-collapse-toggle {
+  cursor: pointer;
+  color: var(--accent-color, #4a9eff);
+  font-size: 0.85em;
+  margin: 4px 0;
+  display: block;
+}
+.interim-collapse-toggle:hover { text-decoration: underline; }

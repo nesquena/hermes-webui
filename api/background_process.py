@@ -866,6 +866,14 @@ def _process_one(evt: dict) -> None:
                     session_id,
                 )
             else:
+                # Idle-path sibling of the F1 (409/teardown) fix: pass
+                # ``process_id`` so that if this idle wakeup's daemon thread
+                # loses the per-session lock race and 409s, the re-defer in
+                # ``_start_server_side_wakeup_turn`` records the entry WITH its
+                # process_id — keeping the ``record_deferred_wakeup`` dedup
+                # guard (``if process_id and any(...)``) live on that re-defer
+                # path so a second 409 race cannot accumulate a duplicate
+                # deferred entry (which would deliver the same wakeup twice).
                 _start_server_side_wakeup_turn(
                     session_id, wakeup_prompt, process_id=process_id
                 )
