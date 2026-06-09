@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,6 +73,7 @@ def _hardened_git_argv(
     destructive: bool = False,
     attributes_file: str | None = None,
     hooks_path: str | None = None,
+    extra_configs: list[tuple[str, str]] | None = None,
 ) -> list[str]:
     argv = ["git"]
     for key, value in _GIT_HARDENED_CONFIG:
@@ -83,6 +85,8 @@ def _hardened_git_argv(
             argv.extend(["-c", f"core.hooksPath={hooks_path}"])
     if attributes_file:
         argv.extend(["-c", f"core.attributesFile={attributes_file}"])
+    for key, value in extra_configs or ():
+        argv.extend(["-c", f"{key}={value}"])
     argv.extend(args)
     return argv
 
@@ -193,6 +197,7 @@ def _run_git(
     effective_destructive = destructive and workspace_git_destructive_enabled()
     attributes_file = None
     hooks_path = None
+    extra_configs: list[tuple[str, str]] = []
     temporary_attributes: list[str] = []
     temporary_dirs: list[str] = []
     if effective_destructive and disable_filter_attributes:
@@ -200,6 +205,7 @@ def _run_git(
         os.close(fd)
         attributes_file = attributes_path
         temporary_attributes = [attributes_path]
+        extra_configs = _destructive_filter_overrides(cwd, run_env)
     if effective_destructive:
         hooks_path = tempfile.mkdtemp(prefix="hermes-webui-git-hooks-")
         temporary_dirs = [hooks_path]
@@ -210,6 +216,7 @@ def _run_git(
                 destructive=effective_destructive,
                 attributes_file=attributes_file,
                 hooks_path=hooks_path,
+                extra_configs=extra_configs,
             ),
             cwd=str(cwd),
             shell=False,
@@ -233,6 +240,40 @@ def _run_git(
         message = (result.stderr or result.stdout or "Git command failed").strip()
         raise GitWorkspaceError(message, _classify_git_error(message, args))
     return result
+
+
+_FILTER_CONFIG_RE = re.compile(r"^filter\.(.+)\.(clean|smudge|process|required)$")
+
+
+def _destructive_filter_overrides(cwd: Path, env: dict[str, str]) -> list[tuple[str, str]]:
+    result = subprocess.run(
+        ["git", "config", "--local", "--name-only", "--get-regexp", r"^filter\..*\.(clean|smudge|process|required)$"],
+        cwd=str(cwd),
+        shell=False,
+        text=True,
+        capture_output=True,
+        timeout=GIT_TIMEOUT,
+        env=env,
+    )
+    if result.returncode not in {0, 1}:
+        message = (result.stderr or result.stdout or "Git command failed").strip()
+        raise GitWorkspaceError(message, _classify_git_error(message, ["config"]))
+    names: set[str] = set()
+    for line in (result.stdout or "").splitlines():
+        match = _FILTER_CONFIG_RE.match(line.strip())
+        if match:
+            names.add(match.group(1))
+    overrides: list[tuple[str, str]] = []
+    for name in sorted(names):
+        overrides.extend(
+            [
+                (f"filter.{name}.clean", "cat"),
+                (f"filter.{name}.smudge", "cat"),
+                (f"filter.{name}.process", ""),
+                (f"filter.{name}.required", "false"),
+            ]
+        )
+    return overrides
 
 
 def resolve_git_context(workspace: str | Path) -> GitContext | None:
@@ -339,7 +380,13 @@ def _collect_diff_paths(ctx: GitContext, cached: bool, *, ignore_cr_at_eol: bool
     if cached:
         args.append("--cached")
     args.extend(["--", _workspace_pathspec(ctx)])
-    result = _run_git(ctx, args, check=False)
+    result = _run_git(
+        ctx,
+        args,
+        check=False,
+        destructive=workspace_git_destructive_enabled(),
+        disable_filter_attributes=workspace_git_destructive_enabled(),
+    )
     if result.returncode != 0:
         return None
     return _parse_path_list(result.stdout, ctx)
@@ -357,7 +404,13 @@ def _collect_numstat(
     if cached:
         args.append("--cached")
     args.extend(["--", _workspace_pathspec(ctx)])
-    result = _run_git(ctx, args, check=False)
+    result = _run_git(
+        ctx,
+        args,
+        check=False,
+        destructive=workspace_git_destructive_enabled(),
+        disable_filter_attributes=workspace_git_destructive_enabled(),
+    )
     if result.returncode != 0:
         return {}
     return _parse_numstat(result.stdout, ctx)
@@ -387,6 +440,7 @@ def git_status(workspace: str | Path) -> dict:
     if ctx is None:
         return {"is_git": False}
 
+    destructive_reads = workspace_git_destructive_enabled()
     result = _run_git(
         ctx,
         [
@@ -400,6 +454,8 @@ def git_status(workspace: str | Path) -> dict:
             _workspace_pathspec(ctx),
         ],
         check=True,
+        destructive=destructive_reads,
+        disable_filter_attributes=destructive_reads,
     )
     staged_stats = _collect_numstat(ctx, cached=True)
     unstaged_stats = _collect_numstat(ctx, cached=False)
