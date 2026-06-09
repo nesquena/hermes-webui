@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **The post-create-folder workspace prompt now offers `No` instead of `Cancel` for the negative action.** The folder has already been created when the follow-up dialog asks whether to add it as a workspace/space, so `No` more clearly answers the question and avoids implying that folder creation itself will be undone. (#3856, @b3nw)
+
 ## [v0.51.337] — 2026-06-09 — Release LA (model-picker keyboard nav + mobile new-chat)
 
 ### Added

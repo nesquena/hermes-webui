@@ -11125,6 +11125,7 @@ async function promptNewFolder(){
         title:t('folder_add_as_space_title'),
         message:t('folder_add_as_space_msg'),
         confirmLabel:t('folder_add_as_space_btn'),
+        cancelLabel:t('status_no'),
         focusCancel:true
       });
       if(addAsSpace){

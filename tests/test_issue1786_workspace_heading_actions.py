@@ -41,3 +41,11 @@ def test_workspace_heading_affordance_requires_workspace():
     guard_idx = UI_JS.find("if(!(S.session&&S.session.workspace)) return;", context_idx)
     prevent_idx = UI_JS.find("e.preventDefault()", context_idx)
     assert context_idx < guard_idx < prevent_idx
+
+
+def test_new_folder_add_as_workspace_prompt_uses_no_for_cancel_label():
+    """The post-create-folder workspace prompt should offer an explicit 'No' option."""
+    assert "title:t('folder_add_as_space_title')" in UI_JS
+    assert "message:t('folder_add_as_space_msg')" in UI_JS
+    assert "confirmLabel:t('folder_add_as_space_btn')" in UI_JS
+    assert "cancelLabel:t('status_no')" in UI_JS
