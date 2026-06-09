@@ -26,6 +26,11 @@
 - Focused background-task completion viewers still emit `/api/bg-task-complete-ack` for server cleanup/diagnostics while keeping the focused-session toast suppressed. (#2979)
 - A failed session load (network error / server 4xx/5xx) no longer permanently silences the per-session SSE stream. `loadSession` stops the stream on entry but previously only restarted it on the success path; a mid-load failure left the on-screen session's stream closed, silently dropping `bg_task_complete` events until the user navigated again. The metadata-fetch error path now restarts the stream for the session still on screen, skipping the restart when a newer load is in flight or when the current session 404'd and self-healed away. (#2979)
 
+## [v0.51.336] — 2026-06-08 — Release KZ (fix inline-thinking streaming perf regression)
+
+### Fixed
+- **Long streaming responses no longer slow down as they grow.** A follow-up to v0.51.335: the inline-thinking extractor runs on the full in-progress message on every streamed token, and the v0.51.335 rewrite made that scan re-walk the whole buffer each time (quadratic over a long response — most noticeable on reasoning-model replies with a `<think>` block). It now fast-paths content with no thinking tags and skips already-settled trailing text, keeping per-token work flat. No behavior change — verified identical to the prior release across streaming, reload, persistence, and code-block cases. (#3633 follow-up)
+
 ## [v0.51.335] — 2026-06-08 — Release KY (normalize inline thinking extraction)
 
 ### Fixed
