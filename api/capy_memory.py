@@ -297,16 +297,19 @@ def _safe_origin_uri(value: Any, *, source_id: str) -> str:
         issue_reactions_matcher = globals().get("_github_issue_reactions_path_matches")
         issue_comment_reactions_matcher = globals().get("_github_issue_comment_reactions_path_matches")
         pull_comment_reactions_matcher = globals().get("_github_pull_comment_reactions_path_matches")
+        check_suites_matcher = globals().get("_github_check_suites_route_path_matches")
         authority_checker = globals().get("_github_https_authority_is_exact")
         if callable(authority_checker):
-            reaction_route = False
+            strict_authority_route = False
             if callable(issue_reactions_matcher) and issue_reactions_matcher(raw):
-                reaction_route = True
+                strict_authority_route = True
             if callable(issue_comment_reactions_matcher) and issue_comment_reactions_matcher(raw):
-                reaction_route = True
+                strict_authority_route = True
             if callable(pull_comment_reactions_matcher) and pull_comment_reactions_matcher(raw):
-                reaction_route = True
-            if reaction_route and not authority_checker(raw, "api.github.com"):
+                strict_authority_route = True
+            if callable(check_suites_matcher) and check_suites_matcher(raw):
+                strict_authority_route = True
+            if strict_authority_route and not authority_checker(raw, "api.github.com"):
                 return f"capy-memory://{source_id}"
     if parts.scheme and parts.netloc and parts.scheme not in {"http", "https"} and (parts.username or parts.password or "@" in parts.netloc):
         return f"capy-memory://{source_id}"
@@ -3409,6 +3412,131 @@ def _github_check_runs_refresh_summary(origin_uri: str, payload: dict[str, Any])
         if completed:
             run_parts.append(f"completed: {completed}")
         parts.append("; ".join(run_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_check_suites_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    path = unquote(parts.path or "").lower()
+    return "/commits/" in path and "/check-suites" in path
+
+
+def _github_check_suites_path_info(origin_uri: str) -> tuple[str, str] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "commits"
+        or not re.fullmatch(r"[A-Fa-f0-9]{40}", path[5])
+        or path[6] != "check-suites"
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", path[5].lower()
+
+
+def _github_check_suites_path_matches(origin_uri: str) -> bool:
+    return _github_check_suites_path_info(origin_uri) is not None
+
+
+def _github_check_suite_app_name_is_safe(value: Any) -> bool:
+    return _github_check_run_name_is_safe(value)
+
+
+def _github_check_suite_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    suite_id = _safe_optional_nonnegative_int(row.get("id"))
+    if suite_id is None or suite_id <= 0:
+        return False
+    status = _safe_public_text(row.get("status"), limit=60).lower()
+    if not status or status not in _GITHUB_WORKFLOW_RUN_STATUSES:
+        return False
+    conclusion = _safe_public_text(row.get("conclusion"), limit=80).lower()
+    if conclusion and conclusion not in _GITHUB_WORKFLOW_RUN_CONCLUSIONS:
+        return False
+    app = row.get("app")
+    if not isinstance(app, dict) or not _github_check_suite_app_name_is_safe(app.get("name")):
+        return False
+    for field in ("created_at", "updated_at"):
+        raw_value = row.get(field)
+        if raw_value is not None and not _safe_iso_timestamp(raw_value):
+            return False
+    for raw_value in (row.get("id"), row.get("status"), row.get("conclusion"), row.get("created_at"), row.get("updated_at"), app.get("name")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_check_suites_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_check_suites_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if _json_payload_is_feed(payload) or any(key in payload for key in ("version", "items")):
+        return False
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    if total_count is None:
+        return False
+    check_suites = payload.get("check_suites")
+    if not isinstance(check_suites, list):
+        return False
+    if not check_suites:
+        return total_count == 0
+    return all(_github_check_suite_row_is_safe(row) for row in check_suites)
+
+
+def _github_check_suites_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo, sha = _github_check_suites_path_info(origin_uri) or ("repository", "")
+    raw_suites = payload.get("check_suites")
+    check_suites = raw_suites if isinstance(raw_suites, list) else []
+    safe_suites = [row for row in check_suites if _github_check_suite_row_is_safe(row)]
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    conclusion_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    parts = [
+        f"GitHub check suites for {repo} at {sha[:12]}",
+        f"check-suite count: {total_count if total_count is not None else len(check_suites)}",
+    ]
+    for row in safe_suites:
+        status = _safe_public_text(row.get("status"), limit=60).lower()
+        conclusion = _safe_public_text(row.get("conclusion"), limit=80).lower()
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if conclusion:
+            conclusion_counts[conclusion] = conclusion_counts.get(conclusion, 0) + 1
+    for status in sorted(status_counts):
+        parts.append(f"status {status}: {status_counts[status]}")
+    for conclusion in sorted(conclusion_counts):
+        parts.append(f"conclusion {conclusion}: {conclusion_counts[conclusion]}")
+    for row in safe_suites[:5]:
+        suite_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        status = _safe_public_text(row.get("status"), limit=60).lower()
+        conclusion = _safe_public_text(row.get("conclusion"), limit=80).lower()
+        app = row.get("app") if isinstance(row.get("app"), dict) else {}
+        app_name = _safe_public_text(app.get("name") if isinstance(app, dict) else "", limit=200)
+        created = _safe_iso_timestamp(row.get("created_at")) if row.get("created_at") is not None else ""
+        updated = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
+        suite_parts = [f"check suite {suite_id}", f"status: {status}"]
+        if conclusion:
+            suite_parts.append(f"conclusion: {conclusion}")
+        if app_name:
+            suite_parts.append(f"app: {app_name}")
+        if created:
+            suite_parts.append(f"created: {created}")
+        if updated:
+            suite_parts.append(f"updated: {updated}")
+        parts.append("; ".join(suite_parts))
     return _bounded_refresh_summary("; ".join(parts))
 
 
@@ -12853,6 +12981,11 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             check_runs_repo, check_runs_sha = check_runs_info or (source_id, "")
             title = f"GitHub check runs {check_runs_repo} {check_runs_sha[:12]}".strip()
             summary = _github_check_runs_refresh_summary(origin_uri, payload)
+        elif _json_payload_is_github_check_suites_metadata(origin_uri, payload):
+            check_suites_info = _github_check_suites_path_info(origin_uri)
+            check_suites_repo, check_suites_sha = check_suites_info or (source_id, "")
+            title = f"GitHub check suites {check_suites_repo} {check_suites_sha[:12]}".strip()
+            summary = _github_check_suites_refresh_summary(origin_uri, payload)
         elif _json_payload_is_github_commit_metadata(origin_uri, payload):
             title = f"GitHub commit {(_github_commit_path_sha(origin_uri) or source_id)[:12]}"
             summary = _github_commit_refresh_summary(origin_uri, payload)
@@ -13204,6 +13337,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_pages_path_matches(raw_origin_uri):
         if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_pages_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_check_suites_route_path_matches(raw_origin_uri):
+        check_suites_origin = _safe_origin_uri(raw_origin_uri, source_id=_safe_public_id(source_id, fallback="source"))
+        if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or _github_check_suites_path_info(check_suites_origin) is None:
+            raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     issue_timeline_safe_origin = _github_issue_timeline_safe_origin(raw_origin_uri)
@@ -13448,6 +13585,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_repository_artifacts_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_check_suites_path_matches(safe_origin_uri):
+        if _github_check_suites_path_info(safe_origin_uri) is None or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_workflow_run_timing_path_run_id(safe_origin_uri) is not None:
         request_accept = "application/json"
     if _github_workflow_timing_path_info(safe_origin_uri) is not None:
@@ -13565,6 +13706,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_repository_artifacts_path_repo(final_url)
             or _github_repository_artifacts_path_repo(final_url) != _github_repository_artifacts_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_check_suites_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or _github_check_suites_path_info(final_url) is None
+            or _github_check_suites_path_info(final_url) != _github_check_suites_path_info(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_traffic_popular_paths_path_matches(safe_origin_uri) and (
@@ -14055,6 +14202,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_repository_artifacts_path_matches(safe_origin_uri) and (
             not _github_repository_artifacts_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_check_suites_path_matches(safe_origin_uri) and (
+            _github_check_suites_path_info(safe_origin_uri) is None
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
