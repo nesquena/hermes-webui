@@ -709,6 +709,17 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         else:
             origin_uri = f"github actions public key {actions_secrets_public_key_repo}"
             fetch_origin_uri = actions_secrets_public_key_origin
+    if _github_autolinks_route_path_matches(raw_origin_text):
+        autolinks_origin = _github_autolinks_safe_origin(raw_origin_text)
+        autolinks_repo = _github_autolinks_path_repo(autolinks_origin or "")
+        if not autolinks_origin or not autolinks_repo:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = f"github autolinks {autolinks_repo}"
+            fetch_origin_uri = autolinks_origin
+    elif _github_autolinks_route_path_looks_like(raw_origin_text):
+        origin_uri = f"capy-memory://{source_id}"
+        fetch_origin_uri = ""
     if _github_deploy_keys_route_path_matches(raw_origin_text):
         deploy_keys_origin = _github_deploy_keys_safe_origin(raw_origin_text)
         deploy_keys_repo = _github_deploy_keys_path_repo(deploy_keys_origin or "")
@@ -6942,6 +6953,154 @@ def _github_actions_secrets_public_key_refresh_summary(origin_uri: str, payload:
     return _bounded_refresh_summary(f"GitHub Actions public key for {repo}; key id: {key_id}")
 
 
+def _github_autolinks_route_path_matches(origin_text: str) -> bool:
+    try:
+        parts = urlsplit(str(origin_text or ""))
+    except Exception:
+        return False
+    if (parts.scheme or "").lower() != "https" or (parts.hostname or "").lower() != "api.github.com":
+        return False
+    path_parts = [unquote(part) for part in (parts.path or "").split("/") if part]
+    if len(path_parts) == 4 and path_parts[0] == "repos" and path_parts[3] == "autolinks":
+        return True
+    return len(path_parts) >= 4 and path_parts[0] == "repos" and path_parts[3].startswith("autolinks")
+
+
+def _github_autolinks_path_repo(origin_text: str) -> str | None:
+    try:
+        parts = urlsplit(str(origin_text or ""))
+    except Exception:
+        return None
+    if (parts.scheme or "").lower() != "https" or not _github_raw_authority_is_exact(origin_text, "api.github.com"):
+        return None
+    path_parts = (parts.path or "").split("/")
+    if len(path_parts) != 5 or path_parts[0] != "" or path_parts[1] != "repos" or path_parts[4] != "autolinks":
+        return None
+    owner, repo = path_parts[2], path_parts[3]
+    if not _github_repo_path_segment_is_safe(owner) or not _github_repo_path_segment_is_safe(repo):
+        return None
+    return f"{owner}/{repo}"
+
+
+def _github_autolinks_route_path_looks_like(origin_text: str) -> bool:
+    try:
+        parts = urlsplit(str(origin_text or ""))
+    except Exception:
+        return False
+    path_parts = [unquote(part) for part in (parts.path or "").split("/") if part]
+    return len(path_parts) >= 4 and path_parts[0] == "repos" and path_parts[3].startswith("autolinks")
+
+
+def _github_autolinks_path_info(origin_text: str) -> tuple[str, str] | None:
+    repo = _github_autolinks_path_repo(origin_text)
+    if not repo or "/" not in repo:
+        return None
+    owner, name = repo.split("/", 1)
+    return owner, name
+
+
+def _github_autolinks_path_matches(origin_text: str) -> bool:
+    return _github_autolinks_path_repo(origin_text) is not None
+
+
+def _github_autolinks_safe_origin(origin_text: str) -> str | None:
+    try:
+        parts = urlsplit(str(origin_text or ""))
+        explicit_port = parts.port is not None
+    except ValueError:
+        return None
+    if explicit_port or not _github_autolinks_path_repo(origin_text):
+        return None
+    return urlunsplit(("https", "api.github.com", parts.path, "", ""))
+
+
+def _github_autolink_key_prefix_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    prefix = _safe_public_text(value, limit=80)
+    if not prefix or prefix != value.strip():
+        return False
+    if _refresh_value_is_blocked(value) or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(prefix):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9._:-]{0,79}", prefix))
+
+
+def _github_autolink_url_template_public_value(value: Any, *, limit: int = 160) -> str:
+    if not isinstance(value, str):
+        return ""
+    template = value.strip()
+    try:
+        parts = urlsplit(template.replace("<num>", "12345"))
+    except ValueError:
+        return ""
+    if not parts.hostname:
+        return ""
+    label = f"{parts.scheme} host {parts.hostname}"
+    return _safe_public_text(label, limit=limit)
+
+
+def _github_autolink_url_template_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    template = value.strip()
+    if not template or len(template) > 240 or any(ord(ch) < 32 for ch in template):
+        return False
+    try:
+        parts = urlsplit(template.replace("<num>", "12345"))
+    except ValueError:
+        return False
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return False
+    if parts.username or parts.password:
+        return False
+    public_template = _github_autolink_url_template_public_value(value, limit=240)
+    if not public_template or _refresh_value_is_blocked(public_template):
+        return False
+    return "<num>" in template and bool(re.fullmatch(r"[A-Za-z0-9:/?#[\]@!$&'()*+,;=._~%<>-]{1,240}", template))
+
+
+def _github_autolink_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    autolink_id = _safe_optional_nonnegative_int(row.get("id"))
+    if autolink_id is None or autolink_id <= 0:
+        return False
+    if not _github_autolink_key_prefix_is_safe(row.get("key_prefix")):
+        return False
+    if not _github_autolink_url_template_is_safe(row.get("url_template")):
+        return False
+    if not isinstance(row.get("is_alphanumeric"), bool):
+        return False
+    return True
+
+
+def _json_payload_is_github_autolinks_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_autolinks_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list) or len(payload) > 100:
+        return False
+    return all(_github_autolink_row_is_safe(row) for row in payload)
+
+
+def _github_autolinks_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_autolinks_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_autolink_row_is_safe(row)]
+    parts = [f"GitHub autolinks for {repo}", f"autolink count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        autolink_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        key_prefix = _safe_public_text(row.get("key_prefix"), limit=80)
+        parts.append(
+            "; ".join(
+                [
+                    f"autolink id: {autolink_id}",
+                    f"key prefix: {key_prefix}",
+                    f"alphanumeric: {str(row.get('is_alphanumeric') is True).lower()}",
+                ]
+            )
+        )
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_deploy_keys_route_path_matches(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -11669,6 +11828,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_actions_secrets_public_key_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    autolinks_repo = _github_autolinks_path_repo(origin_uri)
+    if autolinks_repo:
+        if not _json_payload_is_github_autolinks_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub autolinks {autolinks_repo}",
+            "summary": _github_autolinks_refresh_summary(origin_uri, payload),
+            "origin_uri": f"github autolinks {autolinks_repo}",
+        }
+    if _github_autolinks_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     deploy_keys_repo = _github_deploy_keys_path_repo(origin_uri)
     if deploy_keys_repo:
         if not _json_payload_is_github_deploy_keys_metadata(origin_uri, payload):
@@ -12080,6 +12251,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_actions_secrets_public_key_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_secrets_public_key_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_autolinks_route_path_looks_like(raw_origin_uri):
+        if not _github_autolinks_safe_origin(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_deploy_keys_route_path_matches(raw_origin_uri):
         if not _github_deploy_keys_safe_origin(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -12285,6 +12459,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_actions_secrets_public_key_path_matches(safe_origin_uri):
         if not _github_actions_secrets_public_key_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_autolinks_path_matches(safe_origin_uri):
+        if not _github_autolinks_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_deploy_keys_path_matches(safe_origin_uri):
@@ -12537,6 +12715,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_actions_secrets_public_key_path_repo(final_url)
             or _github_actions_secrets_public_key_path_repo(final_url) != _github_actions_secrets_public_key_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_autolinks_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or _github_autolinks_path_info(final_url) is None
+            or _github_autolinks_path_info(final_url) != _github_autolinks_path_info(safe_origin_uri)
+            or final_url != safe_origin_uri
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_deploy_keys_path_matches(safe_origin_uri) and (
@@ -12807,6 +12992,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_secrets_public_key_path_matches(safe_origin_uri) and (
             not _github_actions_secrets_public_key_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_autolinks_path_matches(safe_origin_uri) and (
+            not _github_autolinks_path_repo(safe_origin_uri)
+            or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com")
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -13475,6 +13666,9 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
             public_key_fetch_origin = _github_actions_secrets_public_key_safe_origin(str(payload.get("fetch_origin_uri") or ""))
             if public_key_fetch_origin and _github_actions_secrets_public_key_path_repo(public_key_fetch_origin):
                 updated_payload["fetch_origin_uri"] = public_key_fetch_origin
+            autolinks_fetch_origin = _github_autolinks_safe_origin(str(payload.get("fetch_origin_uri") or ""))
+            if autolinks_fetch_origin and _github_autolinks_path_repo(autolinks_fetch_origin):
+                updated_payload["fetch_origin_uri"] = autolinks_fetch_origin
             deploy_keys_fetch_origin = _github_deploy_keys_safe_origin(str(payload.get("fetch_origin_uri") or ""))
             if deploy_keys_fetch_origin and _github_deploy_keys_path_repo(deploy_keys_fetch_origin):
                 updated_payload["fetch_origin_uri"] = deploy_keys_fetch_origin
