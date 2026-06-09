@@ -1,8 +1,9 @@
 # Transparent Stream — A Chronological Activity Display Mode
 
-- **Status:** Proposed
+- **Status:** Accepted (direction confirmed by @nesquena; RFC merged via [#3862](https://github.com/nesquena/hermes-webui/pull/3862))
 - **Author:** @franksong2702
 - **Created:** 2026-06-09
+- **Updated:** 2026-06-09
 - **Tracking issue:** [#3820](https://github.com/nesquena/hermes-webui/issues/3820)
 - **Parent contract:** [Live-to-Final Assistant Replies](./live-to-final-assistant-replies.md) ([#3400](https://github.com/nesquena/hermes-webui/issues/3400) / #3401 / #3741)
 
@@ -166,6 +167,17 @@ drift; the function names are the durable anchors.
   and `_syncToolCallGroupSummary`. This is the "missing half" the maintainer
   identified, and the highest-value fix because it kills the settle/reload
   collapse.
+
+  **Spike-validated (2026-06-09).** A throwaway prototype against `master`
+  confirmed this branch is ~31 lines and needs no new data: `activityOrder` is
+  already sorted chronologically, and the standalone `buildToolCard(tc)` /
+  `_thinkingActivityNode(text)` builders supply the compact-preview cards
+  directly (so acceptance criterion 3 is met by existing code on this path).
+  Reload/re-render consistency (criterion 4, settled) comes for free because the
+  rebuild cleanup already removes `.tool-card-row` and `.agent-activity-thinking`
+  before each render. DOM insertion order — including the shared-anchor fallback
+  case where two activity entries resolve to the same assistant segment — was
+  verified with a small node harness. The spike was local-only and not pushed.
 
 - **B. Live** — `ensureLiveWorklogShell()` and the live
   `reasoning`/`tool`/`interim_assistant` handlers. The transparent branch must
