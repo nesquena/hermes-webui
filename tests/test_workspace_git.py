@@ -1256,7 +1256,8 @@ def test_git_stage_skips_repo_local_filters_when_destructive_mode_enabled(tmp_pa
     helper.write_text(
         "#!/usr/bin/env python3\n"
         "import pathlib, sys\n"
-        "pathlib.Path(sys.argv[1]).write_text('filter ran', encoding='utf-8')\n",
+        "pathlib.Path(sys.argv[1]).write_text('filter ran', encoding='utf-8')\n"
+        "print(sys.stdin.read(), end='')\n",
         encoding="utf-8",
     )
     helper.chmod(0o755)
@@ -1265,6 +1266,7 @@ def test_git_stage_skips_repo_local_filters_when_destructive_mode_enabled(tmp_pa
 
     (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
     _commit_all(repo)
+    marker.unlink(missing_ok=True)
     (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
 
     monkeypatch.setenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
@@ -1293,7 +1295,8 @@ def test_git_checkout_skips_repo_local_filters_when_destructive_mode_enabled(tmp
     helper.write_text(
         "#!/usr/bin/env python3\n"
         "import pathlib, sys\n"
-        "pathlib.Path(sys.argv[1]).write_text('filter ran', encoding='utf-8')\n",
+        "pathlib.Path(sys.argv[1]).write_text('filter ran', encoding='utf-8')\n"
+        "print(sys.stdin.read(), end='')\n",
         encoding="utf-8",
     )
     helper.chmod(0o755)
@@ -1308,6 +1311,7 @@ def test_git_checkout_skips_repo_local_filters_when_destructive_mode_enabled(tmp
     _git(repo, "add", "tracked.txt")
     _git(repo, "commit", "-m", "Feature update")
     _git(repo, "checkout", "main")
+    marker.unlink(missing_ok=True)
 
     monkeypatch.setenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
     result = git_checkout(repo, "feature", "local")
@@ -1333,7 +1337,8 @@ def test_git_discard_skips_repo_local_filters_when_destructive_mode_enabled(tmp_
     helper.write_text(
         "#!/usr/bin/env python3\n"
         "import pathlib, sys\n"
-        "pathlib.Path(sys.argv[1]).write_text('filter ran', encoding='utf-8')\n",
+        "pathlib.Path(sys.argv[1]).write_text('filter ran', encoding='utf-8')\n"
+        "print(sys.stdin.read(), end='')\n",
         encoding="utf-8",
     )
     helper.chmod(0o755)
