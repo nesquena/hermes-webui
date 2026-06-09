@@ -3817,6 +3817,23 @@ def _stream_writeback_can_supersede_recovery_marker(session, msg_text):
     return False
 
 
+def _retire_truncation_watermark_after_commit(session) -> None:
+    """Clear a positive truncation watermark once a new user turn is committed
+    to ``session.messages`` (#3831).
+
+    retry/undo/Edit set a positive watermark to suppress the *replaced* tail from
+    the append-only state.db merge; Session.save() deliberately never auto-clears
+    it (#2914). But nothing retired it when the user then sent a NEW turn, so it
+    froze at the old edit boundary and later dropped those post-edit turns on an
+    empty-sidecar reconcile. Once the new turn is durably in messages the merge's
+    max-sidecar guard suppresses the replaced tail without the watermark, so it is
+    safe — and necessary — to retire it here. Cleared to None, never 0.0 (the
+    truncate-to-empty sentinel that must keep blocking replay, #2914).
+    """
+    if getattr(session, 'truncation_watermark', None):
+        session.truncation_watermark = None
+
+
 def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text):
     """Keep UI transcript durable while allowing model context to compact.
 
@@ -4412,6 +4429,14 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     if pending_attachments:
         recovered['attachments'] = list(pending_attachments)
     session.messages.append(recovered)
+    # The new user turn is now committed to messages (#3831): retire a positive
+    # truncation watermark left over from a prior retry/undo/edit so it cannot
+    # freeze at the old edit boundary and later drop these post-edit turns on an
+    # empty-sidecar reconcile. Cleared to None — never 0.0 (the truncate-to-empty
+    # sentinel, #2914). Safe here because the row is durably in messages, so the
+    # merge's max-sidecar guard suppresses the replaced tail without the watermark.
+    if getattr(session, 'truncation_watermark', None):
+        session.truncation_watermark = None
     return True
 
 
@@ -6444,6 +6469,7 @@ def _run_agent_streaming(
                     _restore_display_reasoning_metadata(_previous_messages, _result_messages),
                     msg_text,
                 )
+                _retire_truncation_watermark_after_commit(s)  # #3831
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -6723,6 +6749,7 @@ def _run_agent_streaming(
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
                                 )
+                                _retire_truncation_watermark_after_commit(s)  # #3831
                                 # Skip the error block — jump directly to the
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
@@ -7671,6 +7698,7 @@ def _run_agent_streaming(
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
                                 )
+                                _retire_truncation_watermark_after_commit(s)  # #3831
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
                         return  # skip error emission
