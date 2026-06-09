@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- Revision history/recovery list tool responses now include the shared server-generated Memory Tree advisory/no-authority envelope beside required recovery prompt-preflight, autonomy-policy, `recovery.revision.list:<space_id>` progress, and output-compaction receipts. Revision timeline context remains untrusted and cannot let caller-forged memory authority, raw memory context, renderer/source/API-auth fields, scripts, tokens, or secret-looking fixtures bypass recovery gates.
+
 - Source-style current-space viewport/reposition helpers now include the shared server-generated Memory Tree advisory/no-authority envelope beside creator-commit prompt-preflight, `layout.reposition:<space_id>` progress, autonomy-policy, and metadata-only output-compaction receipts. Viewport/reposition context remains advisory-only, cannot bypass prompt-preflight/approval/sandbox/visual-QA/rollback gates, and caller-forged memory authority plus top-level or nested viewport raw memory context, renderer/source/API-auth fields, scripts, tokens, and secret-looking fixtures stay out of receipts.
 
 - High-risk template installs and Big Bang template resets now include the shared server-generated Memory Tree advisory/no-authority envelope beside template prompt-preflight, autonomy-policy, structured progress when present, and metadata-only output-compaction receipts. Template setup/reset remains advisory-only and cannot let caller-forged trusted memory authority, raw memory context, renderer/source/API-auth/script/token/secret fixture values, or generated widget bodies bypass prompt-preflight, approval, sandbox preview, visual QA, or rollback/recovery gates.

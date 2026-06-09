@@ -9622,6 +9622,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="recovery.revision.list")
         prompt_preflight = _recovery_required_prompt_preflight_receipt(name)
         autonomy_policy = _recovery_toggle_action_policy_receipt(name)
+        memory_advisory = _memory_advisory_public_envelope()
         result = {
             "ok": True,
             "action": name,
@@ -9629,6 +9630,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -9636,6 +9638,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 include_widget_count=False,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
         if is_current:
