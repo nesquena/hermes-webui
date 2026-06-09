@@ -750,3 +750,72 @@ def test_backend_emitter_stamps_event_id_on_every_bg_task_complete():
     assert "uuid.uuid4().hex" in fn_src, (
         "event_id should be a per-emit uuid hex (R2 §Q1)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression (Greptile P1 r3377162160): session stream must NOT stay dead
+# after a failed / early-returned loadSession (sessions.js:754 re-arm).
+# ---------------------------------------------------------------------------
+#
+# Bug: loadSession() tears down the live per-session SSE unconditionally at the
+# top — `if (typeof stopSessionStream==='function') stopSessionStream();` — but
+# only RE-arms it on the success path (`startSessionStream(S.session.session_id)`
+# near the end). Every early-return exit leaves the session the user is still
+# viewing with _sessionEventSource === null and no path back to a live stream:
+#   - fetch error (network / non-404)          → returns after stopSessionStream
+#   - api() returned undefined (401 redirect)  → returns
+#   - stale-load race (_loadingSessionId !== sid) → returns
+#   - same-session no-op guard (currentSid===sid && !forceReload) → returns
+#     BEFORE the teardown, but a *prior* failed load already nulled the source,
+#     and re-selecting the same session would otherwise no-op forever.
+# Net effect: bg_task_complete delivery silently dies until a full page reload.
+#
+# Fix: a single idempotent helper `_rearmActiveSessionStream()` calls
+# startSessionStream(S.session.session_id) for whatever session is actually on
+# screen, and it is invoked on every post-teardown early-return AND the
+# same-session no-op guard. startSessionStream() is idempotent (its top guard
+# `_sessionStreamSessionId === sid && _sessionEventSource` no-ops when already
+# live) so the success path is never double-armed. Mirrors the G3 #2979
+# messages.js reconnect fix (CLOSED EventSource → fresh reconnect).
+
+def test_load_session_rearms_stream_on_every_early_return():
+    js = (REPO_ROOT / "static" / "sessions.js").read_text()
+
+    # The idempotent re-arm helper must exist and arm the on-screen session.
+    assert "function _rearmActiveSessionStream(" in js, (
+        "expected a dedicated idempotent re-arm helper"
+    )
+    helper_ix = js.index("function _rearmActiveSessionStream(")
+    helper_src = js[helper_ix:helper_ix + 400]
+    assert "S.session" in helper_src and "startSessionStream(" in helper_src, (
+        "helper must (re)arm startSessionStream for the currently-shown S.session"
+    )
+
+    # Isolate the loadSession body.
+    fn_ix = js.index("async function loadSession(")
+    # Next top-level function after loadSession bounds the slice generously.
+    body = js[fn_ix:fn_ix + 12000]
+
+    # The unconditional teardown must still be there (this is what creates the
+    # dead-stream window the re-arm closes).
+    assert "stopSessionStream()" in body
+
+    # Every post-teardown early-return path must re-arm. We assert the helper
+    # is called at least as many times as there are early-return exits we know
+    # about (same-session guard, stale-await, fetch-error, undefined-data,
+    # stale-response) — 5 sites + the helper definition reference = 6 mentions
+    # in the file is the floor.
+    assert js.count("_rearmActiveSessionStream()") >= 5, (
+        "each failed/early-return loadSession exit after stopSessionStream() "
+        "must re-arm the on-screen session's stream, else bg_task_complete "
+        "delivery dies until a page reload (Greptile P1 r3377162160)"
+    )
+
+    # Specifically: the same-session no-op guard must re-arm before returning.
+    guard_ix = body.index("currentSid===sid && !forceReload && !_loadingSessionId")
+    guard_src = body[guard_ix:guard_ix + 700]
+    assert "_rearmActiveSessionStream()" in guard_src, (
+        "the same-session no-op guard must re-arm before returning so a "
+        "previously-killed stream is revived on re-selecting the session"
+    )
+

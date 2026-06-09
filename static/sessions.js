@@ -730,6 +730,25 @@ async function newSession(flash, options={}){
   }
 }
 
+// #2971 (Greptile P1 r3377162160): loadSession() tears down the live
+// per-session SSE at the top via stopSessionStream() (line ~754), but only the
+// success path re-arms it via startSessionStream() (line ~875). Every
+// early-return exit (fetch error, auth-redirect undefined) — and the
+// same-session no-op guard, which returns BEFORE the teardown — could leave
+// the session the user actually remains on with a permanently null
+// EventSource, silently dropping bg_task_complete delivery until a full page
+// reload or a forced loadSession. This helper re-arms the stream for whatever
+// session is currently on screen (S.session). startSessionStream() is
+// idempotent — it no-ops when already live for that sid (top guard
+// `_sessionStreamSessionId === sid && _sessionEventSource`) — so this never
+// double-arms the success path, which arms the *newly assigned* S.session
+// only after this point.
+function _rearmActiveSessionStream(){
+  if(typeof startSessionStream!=='function') return;
+  const activeSid = S.session ? S.session.session_id : null;
+  if(activeSid) startSessionStream(activeSid);
+}
+
 async function loadSession(sid){
   const opts = arguments[1] || {};
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
@@ -746,7 +765,15 @@ async function loadSession(sid){
   // Do not no-op a same-session click while another load is in flight: the
   // previous transcript may already have been cleared for the pending switch.
   // Static force-reload invariant: if(currentSid===sid && !forceReload) return;
-  if(currentSid===sid && !forceReload && !_loadingSessionId) return;
+  if(currentSid===sid && !forceReload && !_loadingSessionId){
+    // #2971: a prior failed/early-returned loadSession may have torn down this
+    // session's stream (stopSessionStream at the top) without ever reaching
+    // the success-path startSessionStream(). Re-selecting the same session
+    // would otherwise no-op here and leave it with a dead EventSource. Re-arm
+    // before returning (idempotent: no-ops if already live for this sid).
+    _rearmActiveSessionStream();
+    return;
+  }
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
@@ -769,7 +796,15 @@ async function loadSession(sid){
     // continuation can't wipe S.messages / write the loading placeholder /
     // close streams for the session the user actually landed on (#1060 guard,
     // extended to cover the new pre-switch await).
-    if (_loadingSessionId !== sid) return;
+    if (_loadingSessionId !== sid) {
+      // #2971: stale continuation after the draft-save await — a newer load
+      // (rapid B→C) took over and owns final arming. Re-arm the genuinely
+      // displayed S.session so our top-of-function teardown doesn't leave it
+      // stream-dead in the handoff window (idempotent; the newer load's own
+      // stop+start reconciles its target).
+      _rearmActiveSessionStream();
+      return;
+    }
   }
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
@@ -842,6 +877,12 @@ async function loadSession(sid){
     }
     _clearSameSessionForceReloadHint(sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
+    // #2971: loadSession() called stopSessionStream() at the top, so failing
+    // here would leave the session the user is still viewing (S.session — the
+    // load for `sid` never replaced it) with a dead EventSource. Re-arm it so
+    // bg_task_complete delivery survives a failed switch. (404 self-heal with
+    // !currentSid already threw above and never reaches here.) Idempotent.
+    _rearmActiveSessionStream();
     return;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
@@ -849,10 +890,21 @@ async function loadSession(sid){
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
+    // #2971: re-arm the still-displayed session's stream (defensive — harmless
+    // if the 401 redirect is already tearing the page down). Idempotent.
+    _rearmActiveSessionStream();
     return;
   }
   // Stale response? A newer loadSession() call has already started (#1060).
-  if (_loadingSessionId !== sid) return;
+  if (_loadingSessionId !== sid) {
+    // #2971: a newer in-flight load owns the final stream arming, but until it
+    // assigns S.session and reaches startSessionStream() the currently-shown
+    // session must not be left stream-dead by our top-of-function teardown.
+    // Re-arm the genuinely-displayed S.session (idempotent — no-ops once the
+    // newer load arms its own sid).
+    _rearmActiveSessionStream();
+    return;
+  }
   S.session=data.session;
   if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
   S.session._modelResolutionDeferred=true;
