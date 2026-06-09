@@ -18,6 +18,8 @@ import os
 import sqlite3
 import stat
 
+import pytest
+
 import api.agent_sessions as agent_sessions
 
 
@@ -158,6 +160,13 @@ def test_prime_skipped_without_timestamp_column(tmp_path):
 def test_prime_degrades_on_readonly_db(tmp_path):
     """A read-only db (can't create the index) must not raise — the listing
     still returns, just without the perf benefit."""
+    # Root bypasses POSIX permission bits, so chmod 0444 doesn't make the file
+    # read-only for root and the prime would succeed — validating the wrong path
+    # and giving false confidence on root-run CI (greptile). Skip under root; the
+    # production handler's `except sqlite3.Error: pass` covers read-only/locked/
+    # corrupted/older-schema regardless, and the other cases pin that contract.
+    if hasattr(os, "getuid") and os.getuid() == 0:
+        pytest.skip("chmod-based read-only test is a no-op under root")
     db = tmp_path / "state.db"
     _full_schema_db(db)
     os.chmod(db, stat.S_IREAD)
