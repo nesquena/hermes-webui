@@ -2695,13 +2695,10 @@ def _row_may_need_sidecar_metadata_refresh(
             or session.get('_lineage_root_id')
             or session.get('_compression_segment_count')
         )
-        if lineage_shaped and _sidecar_mtime_after_index_timestamp(session):
-            return True
-        if (
-            sid
-            and _looks_like_stale_zero_message_row(session)
-            and _sidecar_mtime_after_index_timestamp(session)
-        ):
+        needs_mtime_check = lineage_shaped or (
+            sid and _looks_like_stale_zero_message_row(session)
+        )
+        if needs_mtime_check and _sidecar_mtime_after_index_timestamp(session):
             return True
         return False
     if (
