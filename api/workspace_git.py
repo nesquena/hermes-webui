@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -57,9 +58,9 @@ _GIT_HARDENED_CONFIG = (
     ("core.gitProxy", ""),
 )
 _GIT_DESTRUCTIVE_HARDENED_CONFIG = (
-    # Disable repository-local hooks and signing helper command resolution while
-    # performing destructive Git operations.
-    ("core.hooksPath", ""),
+    # Disable signing helper command resolution while performing destructive
+    # Git operations. Hooks are redirected to a temporary empty directory in
+    # _run_git() so Git never falls back to .git/hooks.
     ("commit.gpgSign", "false"),
     ("gpg.program", ""),
 )
@@ -70,6 +71,7 @@ def _hardened_git_argv(
     *,
     destructive: bool = False,
     attributes_file: str | None = None,
+    hooks_path: str | None = None,
 ) -> list[str]:
     argv = ["git"]
     for key, value in _GIT_HARDENED_CONFIG:
@@ -77,6 +79,8 @@ def _hardened_git_argv(
     if destructive:
         for key, value in _GIT_DESTRUCTIVE_HARDENED_CONFIG:
             argv.extend(["-c", f"{key}={value}"])
+        if hooks_path:
+            argv.extend(["-c", f"core.hooksPath={hooks_path}"])
     if attributes_file:
         argv.extend(["-c", f"core.attributesFile={attributes_file}"])
     argv.extend(args)
@@ -188,18 +192,24 @@ def _run_git(
     run_env = _clean_git_env(env)
     effective_destructive = destructive and workspace_git_destructive_enabled()
     attributes_file = None
+    hooks_path = None
     temporary_attributes: list[str] = []
+    temporary_dirs: list[str] = []
     if effective_destructive and disable_filter_attributes:
         fd, attributes_path = tempfile.mkstemp(prefix="hermes-webui-git-attrs-")
         os.close(fd)
         attributes_file = attributes_path
         temporary_attributes = [attributes_path]
+    if effective_destructive:
+        hooks_path = tempfile.mkdtemp(prefix="hermes-webui-git-hooks-")
+        temporary_dirs = [hooks_path]
     try:
         result = subprocess.run(
             _hardened_git_argv(
                 args,
                 destructive=effective_destructive,
                 attributes_file=attributes_file,
+                hooks_path=hooks_path,
             ),
             cwd=str(cwd),
             shell=False,
@@ -217,6 +227,8 @@ def _run_git(
     finally:
         for path in temporary_attributes:
             Path(path).unlink(missing_ok=True)
+        for path in temporary_dirs:
+            shutil.rmtree(path, ignore_errors=True)
     if check and result.returncode != 0:
         message = (result.stderr or result.stdout or "Git command failed").strip()
         raise GitWorkspaceError(message, _classify_git_error(message, args))

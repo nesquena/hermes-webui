@@ -1105,6 +1105,45 @@ def test_git_commit_skips_repo_local_hooks_when_destructive_mode_enabled(tmp_pat
     assert not marker.exists()
 
 
+def test_git_commit_skips_default_repo_hooks_when_destructive_mode_enabled(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("hook script setup is POSIX-only")
+
+    from api.workspace_git import WORKSPACE_GIT_DESTRUCTIVE_ENV, git_commit, git_stage
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    marker = tmp_path / "default-pre-commit-ran"
+    helper = tmp_path / "default_pre_commit_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('default pre-commit executed', encoding='utf-8')\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    pre_commit = repo / ".git" / "hooks" / "pre-commit"
+    pre_commit.write_text(
+        "#!/bin/sh\n"
+        f"\"{sys.executable}\" \"{helper}\" \"{marker}\"\n",
+        encoding="utf-8",
+    )
+    pre_commit.chmod(0o755)
+
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    git_stage(repo, ["tracked.txt"])
+
+    monkeypatch.setenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
+    git_commit(repo, "Commit with default hooks disabled")
+
+    assert not marker.exists()
+
+
 def test_git_checkout_skips_repo_local_hooks_when_destructive_mode_enabled(tmp_path, monkeypatch):
     import os
     import sys
