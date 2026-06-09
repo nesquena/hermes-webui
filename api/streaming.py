@@ -1255,9 +1255,111 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
         'HERMES_SESSION_KEY': session_id,
         'HERMES_SESSION_ID': session_id,
         'HERMES_SESSION_PLATFORM': 'webui',
+        # process_complete agent-wakeup wiring (ours-original, Option B): the
+        # terminal_tool watcher routing gate (terminal_tool.py:~1940) reads
+        # HERMES_SESSION_CHAT_ID to populate pending_watchers for WebUI
+        # sessions so notify_on_complete completions enqueue and the agent
+        # can be woken. HERMES_SESSION_ID/PLATFORM come from upstream #2279.
+        'HERMES_SESSION_CHAT_ID': str(session_id),
         'HERMES_HOME': profile_home,
     })
     return env
+
+
+# ── Per-turn session identity (xsession wakeup misroute root fix — Option 1) ─
+# WebUI bound per-turn session identity ONLY to the process-global
+# os.environ['HERMES_SESSION_KEY'] (turn-start, line ~3263) and released the
+# env lock BEFORE the agent ran. WebUI never called any contextvar setter, so
+# gateway.session_context._SESSION_KEY stayed _UNSET and
+# tools.approval.get_current_session_key (the EXACT call a
+# notify_on_complete background spawn makes in terminal_tool.py:~1928) fell
+# back to that racy process-global slot. Two concurrent WebUI turns therefore
+# raced on one slot: session A's spawn could capture session B's id, and at
+# completion the server-side wakeup turn started for the WRONG session
+# (RCA t_f62ff1e8, agent.log:6632). The agent worker runs synchronously inside
+# the _run_agent_streaming thread (concurrent tool batches use
+# contextvars.copy_context() so children inherit this binding); binding the
+# context-local here makes the capture task/thread-local and race-immune.
+def _set_turn_session_identity(session_id: str):
+    """Bind THIS turn's session identity to the current (task/thread-local)
+    context and return an opaque token for _reset_turn_session_identity.
+
+    Binds two context-locals so every session-key consumer is covered without
+    a race:
+      * ``tools.approval._approval_session_key`` — checked FIRST by
+        ``get_current_session_key`` (the exact call terminal_tool.py makes for
+        a notify_on_complete background spawn: the bug path).
+      * ``gateway.session_context._SESSION_KEY`` — read by direct
+        ``get_session_env("HERMES_SESSION_KEY")`` consumers (e.g. the sudo
+        password cache scope, terminal_tool.py:272).
+
+    It deliberately does NOT call ``gateway.session_context.set_session_vars``:
+    that blanket setter also zeroes the platform/chat_id/user contextvars,
+    flipping ``HERMES_SESSION_PLATFORM`` from its env fallback (``'webui'``,
+    still written to os.environ at turn-start) to an explicit ``""`` — which
+    would break the ``notify_on_complete`` watcher registration gate in
+    terminal_tool.py:~1966. Only the session-key identity is bound; every
+    other session var keeps its existing os.environ fallback (CLI/cron compat
+    preserved — when these contextvars are _UNSET, get_session_env still falls
+    back to os.environ).
+    """
+    sid = str(session_id or "")
+    tokens: dict = {}
+    try:
+        from tools.approval import set_current_session_key
+        tokens["approval"] = set_current_session_key(sid)
+    except Exception:
+        logger.debug("per-turn approval session-key bind failed", exc_info=True)
+    try:
+        from gateway.session_context import _SESSION_KEY as _SK
+        tokens["session_key"] = _SK.set(sid)
+    except Exception:
+        logger.debug("per-turn _SESSION_KEY bind failed", exc_info=True)
+    return tokens
+
+
+def _reset_turn_session_identity(tokens) -> None:
+    """Restore the context-locals bound by ``_set_turn_session_identity`` via
+    contextvars reset-token semantics.
+
+    Reset-token (not a blanket clear) is the canonical idiom: it composes
+    correctly under nesting and restores ``_UNSET`` for the top-level turn so
+    a reused thread-pool worker leaks no identity and CLI/cron env fallback
+    resumes. Order mirrors the bind in reverse.
+    """
+    if not tokens:
+        return
+    tok = tokens.get("session_key")
+    if tok is not None:
+        try:
+            from gateway.session_context import _SESSION_KEY as _SK
+            _SK.reset(tok)
+        except Exception:
+            logger.debug("per-turn _SESSION_KEY reset failed", exc_info=True)
+    tok = tokens.get("approval")
+    if tok is not None:
+        try:
+            from tools.approval import reset_current_session_key
+            reset_current_session_key(tok)
+        except Exception:
+            logger.debug("per-turn approval session-key reset failed", exc_info=True)
+
+
+@contextlib.contextmanager
+def _bind_turn_session_identity(session_id: str):
+    """Context-manager form of the per-turn session-identity binding.
+
+    The ``_run_agent_streaming`` worker uses the explicit ``_set``/``_reset``
+    pair directly because its single ``try/finally`` already spans the whole
+    turn (~2k lines) and the binding must cover every mid-turn background
+    spawn; this wrapper is the canonical single-call API for other callers and
+    for tests, and shares the exact same code path.
+    """
+    tokens = _set_turn_session_identity(session_id)
+    try:
+        yield
+    finally:
+        _reset_turn_session_identity(tokens)
 
 
 def _format_process_notification(evt: dict) -> str:
@@ -4226,6 +4328,56 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
+# ── SSE write deadline (Defect A: per-connection thread exhaustion) ─────────
+# server.py runs QuietHTTPServer(ThreadingHTTPServer): one OS thread per
+# connection, no pool cap (request_queue_size=64). Every SSE endpoint holds
+# its thread for the connection's whole lifetime. If a tab is slow or
+# backgrounded its TCP receive window fills; the next handler.wfile.write()/
+# flush() then blocks *indefinitely* (sockets have no write timeout by
+# default). That thread is pinned forever — it never reaches its
+# `finally: unsubscribe`, so the SessionChannel reaper can never reclaim the
+# channel either. N such tabs * M sessions pile threads up until new
+# requests queue past request_queue_size and the UI shows "streaming
+# pending".
+#
+# Fix: arm a socket-level timeout on the connection. A genuinely healthy
+# keepalive/event write completes in well under a millisecond, so a
+# multi-second deadline never trips for a live tab; only a backpressured
+# (stuck) socket blocks past it. When it trips, the write raises
+# socket.timeout — which on Python 3.10+ *is* TimeoutError, already a member
+# of api.routes._CLIENT_DISCONNECT_ERRORS — so each SSE handler's existing
+# `except _CLIENT_DISCONNECT_ERRORS:` breaks the loop, `finally` drops the
+# subscriber, the browser's EventSource auto-reconnects, and the OS thread
+# is released. SessionChannel already supports reconnect + offline buffer,
+# so no events are lost for a tab that comes back. Operators behind unusual
+# proxies can tune the deadline without code changes.
+try:
+    _raw_deadline = os.getenv("HERMES_WEBUI_SSE_WRITE_DEADLINE") or os.getenv("HERMES_SSE_WRITE_DEADLINE")
+    SSE_WRITE_DEADLINE_SECONDS = float(_raw_deadline or "20.0")
+except (TypeError, ValueError):
+    SSE_WRITE_DEADLINE_SECONDS = 20.0
+if SSE_WRITE_DEADLINE_SECONDS <= 0:
+    SSE_WRITE_DEADLINE_SECONDS = 20.0
+
+
+def _sse_set_write_deadline(handler, seconds=None):
+    """Best-effort: arm a socket write deadline on an SSE handler.
+
+    Call once, right after end_headers(), in every long-lived SSE endpoint.
+    Never raises — an unusual/missing transport just keeps the pre-fix
+    (no-deadline) behaviour for that single connection rather than breaking
+    the stream setup.
+    """
+    if seconds is None:
+        seconds = SSE_WRITE_DEADLINE_SECONDS
+    try:
+        conn = getattr(handler, "connection", None)
+        if conn is not None and hasattr(conn, "settimeout"):
+            conn.settimeout(seconds)
+    except Exception:
+        logger.debug("Failed to arm SSE write deadline", exc_info=True)
+
+
 def _materialize_pending_user_turn_before_error(session) -> bool:
     """Persist the pending user prompt before clearing runtime stream state.
 
@@ -4970,6 +5122,11 @@ def _run_agent_streaming(
         if _is_fallback_notice:
             put('warning', {'type': 'fallback', 'message': _message})
 
+    # xsession wakeup misroute root fix (Option 1): pre-init so the outer
+    # finally can always reset even if an exception fires before the bind.
+    # Placed ABOVE the _checkpoint_stop cluster so that cluster stays adjacent
+    # to the `try:` (preserves the Issue #765 static-locator invariant).
+    _turn_session_identity_tokens = None
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -4977,6 +5134,12 @@ def _run_agent_streaming(
     _ckpt_thread = None
     _agent_lock = None
     try:
+        # Bind THIS turn's session identity to the worker thread/context BEFORE
+        # any agent work (so every mid-turn notify_on_complete background spawn
+        # captures THIS session, not a concurrent turn's process-global env).
+        # Co-located with the existing env-restore lifecycle: set here, reset
+        # in the outer finally next to _clear_thread_env().
+        _turn_session_identity_tokens = _set_turn_session_identity(session_id)
         s = get_session(session_id)
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
@@ -5052,7 +5215,15 @@ def _run_agent_streaming(
             _profile_home,
         )
         _set_thread_env(**_thread_env)
-        # Prewarm skill-tool imports *before* acquiring the lock so that
+        # process_complete agent-wakeup wiring (ours-original, Option B): bind
+        # this session's HERMES_SESSION_KEY to its WebUI session_id so the
+        # drain thread can route notify_on_complete events back to the right
+        # SSE channel / server-side wakeup.
+        try:
+            from api.background_process import register_process_session
+            register_process_session(session_id, session_id)
+        except Exception:
+            logger.debug("register_process_session failed", exc_info=True)
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
@@ -5067,6 +5238,7 @@ def _run_agent_streaming(
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
             old_session_id = os.environ.get('HERMES_SESSION_ID')
             old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
+            old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             old_hermes_home = os.environ.get('HERMES_HOME')
             os.environ.update(_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
@@ -5074,6 +5246,9 @@ def _run_agent_streaming(
             os.environ['HERMES_SESSION_KEY'] = session_id
             os.environ['HERMES_SESSION_ID'] = session_id
             os.environ['HERMES_SESSION_PLATFORM'] = 'webui'
+            # process_complete wiring (ours-original, Option B): see
+            # _build_agent_thread_env above.
+            os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
                 # Patch module-level caches to match the active profile.
@@ -7361,6 +7536,8 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_ID'] = old_session_id
                 if old_session_platform is None: os.environ.pop('HERMES_SESSION_PLATFORM', None)
                 else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
+                if old_session_chat_id is None: os.environ.pop('HERMES_SESSION_CHAT_ID', None)
+                else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
                 if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
                 else: os.environ['HERMES_HOME'] = old_hermes_home
 
@@ -7588,6 +7765,12 @@ def _run_agent_streaming(
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
+        # xsession wakeup misroute root fix (Option 1): restore the per-turn
+        # session-identity context-locals (reset-token semantics). MUST run on
+        # every exit path so a reused thread-pool worker leaks no identity and
+        # CLI/cron env fallback resumes — same lifecycle slot as the env
+        # restore above.
+        _reset_turn_session_identity(_turn_session_identity_tokens)
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
@@ -7607,6 +7790,36 @@ def _run_agent_streaming(
             # POST /api/chat/start round-trip and erase the marker before
             # the next stream can read it, breaking the goal-continuation
             # chain. Stage-326 critical fix per Opus advisor review.
+
+        # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
+        # The session has just transitioned active→idle: unregister_active_run
+        # above cleared this stream's ACTIVE_RUNS row (under ACTIVE_RUNS_LOCK,
+        # independent of STREAMS_LOCK), so _session_has_active_turn() is now
+        # False for this session unless a *different* stream is still active
+        # (cancel/reconnect — drain_deferred_wakeups_for_session guards on
+        # that and leaves the marker for the later teardown). A FAST
+        # background task that completed while this turn was tearing down was
+        # deferred by api/background_process._process_one (it could not start
+        # a turn → would 409) and its wakeup_prompt persisted in
+        # DEFERRED_PROCESS_WAKEUPS. For an autonomous agent there is no next
+        # user turn, so the PR #2279 next-turn drain never runs; without this
+        # hook the deferred wakeup is lost forever (the Test B failure). This
+        # makes the busy-at-completion case symmetric with the idle case:
+        # idle now → fire now (Option Z idle branch); busy now → fire here at
+        # turn-end. claim_deferred_wakeups pops atomically, so this is
+        # idempotent with the next-turn drain (no double-fire) and the wakeup
+        # turn's own teardown finds nothing claimed (no wakeup loop). The
+        # drain spawns its own daemon thread, so teardown never blocks.
+        try:
+            from api.background_process import drain_deferred_wakeups_for_session
+
+            drain_deferred_wakeups_for_session(session_id)
+        except Exception:
+            logger.debug(
+                "turn-teardown deferred-wakeup drain failed for session %s",
+                session_id,
+                exc_info=True,
+            )
 
 # ============================================================
 # SECTION: HTTP Request Handler
