@@ -96,6 +96,11 @@ Recent completed slices:
   - Added RED/GREEN backend coverage by strengthening `_assert_widget_sdk_helper_receipts` so no-space widget SDK helpers must return the server-generated Memory Tree advisory/no-authority envelope beside existing prompt-preflight, autonomy-policy, progress, and compaction receipts.
   - Threaded advisory boundary metadata into helper compaction evidence for widget API version, size/position/rendered-size helpers, ID normalizers, and current-id lookups while preserving no-space progress run ids and omitting forged memory authority, renderer/source/html/API-auth/raw-prompt/script/token/secret fixture values.
 
+- `feat(capy-memory): ingest GitHub commit activity metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub commit-activity API payloads (`/repos/{owner}/{repo}/stats/commit_activity`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries only from safe repository path, week count, total commits, and active-week count while omitting raw week timestamps, URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
+  - Userinfo/query/fragment origins sanitize to the exact safe fetch route, while `application/feed+json`, malformed rows, extra keys, mismatched totals, and encoded/null-suffixed route bypasses fail closed before unsafe fetch or persistence.
+
 - `feat(capy-memory): ingest GitHub interaction-limits metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub interaction-limits API payloads (`/repos/{owner}/{repo}/interaction-limits`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, allow-listed limit/origin values, and safe expiry timestamp while omitting raw URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.

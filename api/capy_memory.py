@@ -559,6 +559,14 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
             origin_uri = punch_card_origin
         else:
             origin_uri = f"capy-memory://{source_id}"
+    if _github_commit_activity_path_matches(raw_origin_text):
+        commit_activity_origin = _github_commit_activity_fetch_origin(raw_origin_text)
+        commit_activity_public_origin = _github_commit_activity_public_origin(commit_activity_origin)
+        if commit_activity_origin:
+            origin_uri = commit_activity_public_origin or f"capy-memory://{source_id}"
+            fetch_origin_uri = commit_activity_origin
+        else:
+            origin_uri = f"capy-memory://{source_id}"
     if _github_participation_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_participation_path_repo(origin_uri)
@@ -4658,6 +4666,39 @@ def _github_punch_card_path_matches(origin_uri: str) -> bool:
     )
 
 
+def _github_commit_activity_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 6
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "stats"
+            and lowered[5] == "commit_activity"
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    double_decoded_path = unquote(unquote(parts.path)).split("/")
+    if _segments_match(double_decoded_path):
+        return True
+    return any(
+        segment.lower().startswith(("stats%", "commit_activity%", "commit%5factivity"))
+        for segment in raw_path
+    )
+
+
 def _github_code_frequency_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -4742,6 +4783,55 @@ def _github_punch_card_fetch_origin(origin_uri: str) -> str:
     return f"https://api.github.com/repos/{path[2]}/{path[3]}/stats/punch_card"
 
 
+def _github_commit_activity_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "stats"
+        or path[5] != "commit_activity"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_commit_activity_fetch_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_hostname_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "stats"
+        or path[5] != "commit_activity"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"https://api.github.com/repos/{path[2]}/{path[3]}/stats/commit_activity"
+
+
+def _github_commit_activity_public_origin(origin_uri: str) -> str:
+    repo = _github_commit_activity_path_repo(origin_uri)
+    if not repo:
+        return ""
+    return f"github commit activity {repo}"
+
+
 def _github_code_frequency_row_is_safe(row: Any) -> bool:
     if not isinstance(row, list) or len(row) != 3:
         return False
@@ -4775,6 +4865,47 @@ def _github_code_frequency_refresh_summary(origin_uri: str, payload: list[Any]) 
             f"additions: {additions}",
             f"deletions: {deletions}",
             f"net lines changed: {net_changed}",
+            f"active weeks: {active_weeks}",
+        ])
+    )
+
+
+def _github_commit_activity_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if set(row.keys()) != {"total", "week", "days"}:
+        return False
+    week = _safe_optional_nonnegative_int(row.get("week"))
+    total = _safe_optional_nonnegative_int(row.get("total"))
+    days = row.get("days")
+    if week is None or total is None:
+        return False
+    if not isinstance(days, list) or len(days) != 7:
+        return False
+    day_counts = [_safe_optional_nonnegative_int(day) for day in days]
+    if any(day_count is None for day_count in day_counts):
+        return False
+    return sum(int(day_count) for day_count in day_counts if day_count is not None) == total
+
+
+def _json_payload_is_github_commit_activity_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_commit_activity_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list) or not payload or len(payload) > 52:
+        return False
+    return all(_github_commit_activity_row_is_safe(row) for row in payload)
+
+
+def _github_commit_activity_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_commit_activity_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_commit_activity_row_is_safe(row)]
+    total_commits = sum(int(row.get("total") or 0) for row in safe_rows)
+    active_weeks = sum(1 for row in safe_rows if int(row.get("total") or 0) > 0)
+    return _bounded_refresh_summary(
+        "; ".join([
+            f"GitHub commit activity for {repo}",
+            f"weeks: {len(safe_rows)}",
+            f"total commits: {total_commits}",
             f"active weeks: {active_weeks}",
         ])
     )
@@ -6311,6 +6442,12 @@ def _source_catalog_public_origin_uri(value: Any, *, source_id: str) -> str:
     if custom_properties_text:
         return custom_properties_text
     raw_text = str(value or "").strip()
+    if _github_commit_activity_path_matches(raw_text):
+        commit_activity_origin = _github_commit_activity_fetch_origin(raw_text)
+        commit_activity_public_origin = _github_commit_activity_public_origin(commit_activity_origin)
+        if commit_activity_origin and commit_activity_public_origin:
+            return commit_activity_public_origin
+        return f"capy-memory://{source_id}"
     if _github_actions_runners_route_path_matches(raw_text):
         try:
             parts = urlsplit(raw_text)
@@ -10852,6 +10989,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_code_frequency_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    commit_activity_repo = _github_commit_activity_path_repo(origin_uri)
+    if commit_activity_repo:
+        if not _json_payload_is_github_commit_activity_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub commit activity {commit_activity_repo}",
+            "summary": _github_commit_activity_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_commit_activity_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     participation_repo = _github_participation_path_repo(origin_uri)
     if participation_repo:
         if not _json_payload_is_github_participation_metadata(origin_uri, payload):
@@ -11987,6 +12136,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     punch_card_fetch_origin = _github_punch_card_fetch_origin(raw_origin_uri)
     if punch_card_fetch_origin:
         safe_origin_uri = punch_card_fetch_origin
+    commit_activity_fetch_origin = _github_commit_activity_fetch_origin(raw_origin_uri)
+    if commit_activity_fetch_origin:
+        safe_origin_uri = commit_activity_fetch_origin
     if not _source_refresh_allowed(safe_origin_uri):
         raise RuntimeError("refresh fetcher disabled")
     request_accept = "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8"
@@ -12040,6 +12192,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_punch_card_path_matches(safe_origin_uri):
         if not _github_punch_card_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_commit_activity_path_matches(safe_origin_uri):
+        if not _github_commit_activity_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_participation_path_matches(safe_origin_uri):
@@ -12285,6 +12441,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_punch_card_path_repo(final_url) != _github_punch_card_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_commit_activity_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_commit_activity_path_repo(final_url)
+            or _github_commit_activity_path_repo(final_url) != _github_commit_activity_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
         if _github_participation_path_matches(safe_origin_uri) and (
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_participation_path_repo(final_url)
@@ -12527,6 +12689,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_punch_card_path_matches(safe_origin_uri) and (
             not _github_punch_card_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_commit_activity_path_matches(safe_origin_uri) and (
+            not _github_commit_activity_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -13233,6 +13400,11 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
             workflow_timing_fetch_origin = _github_workflow_timing_fetch_origin(
                 str(payload.get("fetch_origin_uri") or "")
             ) or _github_workflow_timing_fetch_origin(str(payload.get("origin_uri") or ""))
+            commit_activity_fetch_origin = (
+                _github_commit_activity_fetch_origin(str(payload.get("fetch_origin_uri") or ""))
+                or _github_commit_activity_fetch_origin(str(payload.get("origin_uri") or ""))
+                or _github_commit_activity_fetch_origin(raw_source_origin_uri)
+            )
             if actions_runners_origin_text:
                 origin_uri = actions_runners_origin_text
             elif _github_actions_runners_route_path_matches(raw_source_origin_uri):
@@ -13245,6 +13417,8 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
                 origin_uri = custom_properties_origin_text
             elif interaction_limits_origin_text:
                 origin_uri = interaction_limits_origin_text
+            elif commit_activity_fetch_origin:
+                origin_uri = _github_commit_activity_public_origin(commit_activity_fetch_origin) or f"capy-memory://{source_id}"
             elif workflow_timing_fetch_origin:
                 origin_uri = _github_workflow_timing_public_origin(workflow_timing_fetch_origin)
             elif _github_repository_custom_properties_route_path_matches(raw_source_origin_uri):
@@ -13291,6 +13465,8 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
             ) or _github_interaction_limits_fetch_origin_from_origin_text(origin_uri)
             if interaction_limits_fetch_origin and _github_interaction_limits_path_repo(interaction_limits_fetch_origin):
                 updated_payload["fetch_origin_uri"] = interaction_limits_fetch_origin
+            if commit_activity_fetch_origin and _github_commit_activity_path_repo(commit_activity_fetch_origin):
+                updated_payload["fetch_origin_uri"] = commit_activity_fetch_origin
             if workflow_timing_fetch_origin and _github_workflow_timing_path_info(workflow_timing_fetch_origin) is not None:
                 updated_payload["fetch_origin_uri"] = workflow_timing_fetch_origin
             cursor = conn.execute(
@@ -13486,6 +13662,12 @@ def run_source_refresh_jobs(
                 origin_uri = code_frequency_origin
             else:
                 origin_uri = f"capy-memory://{source_id}"
+        elif _github_commit_activity_path_matches(raw_origin_uri):
+            commit_activity_origin = _github_commit_activity_fetch_origin(raw_origin_uri)
+            if commit_activity_origin:
+                origin_uri = commit_activity_origin
+            else:
+                origin_uri = f"capy-memory://{source_id}"
         elif _github_workflow_run_timing_route_path_matches(raw_origin_uri):
             if _github_workflow_run_timing_path_run_id(raw_origin_uri) is None:
                 origin_uri = f"capy-memory://{source_id}"
@@ -13615,6 +13797,8 @@ def run_source_refresh_jobs(
         else:
             origin_uri = _safe_origin_uri(raw_origin_uri, source_id=source_id)
         record_origin_uri = origin_uri
+        if _github_commit_activity_path_repo(origin_uri):
+            record_origin_uri = _github_commit_activity_public_origin(origin_uri) or record_origin_uri
         if _github_workflow_timing_path_info(origin_uri) is not None:
             workflow_timing_public_origin = _github_workflow_timing_public_origin(origin_uri)
             if workflow_timing_public_origin:

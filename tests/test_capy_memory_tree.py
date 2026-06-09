@@ -15812,6 +15812,279 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_participation_fe
 
 
 
+def test_run_source_refresh_jobs_default_fetcher_ingests_github_commit_activity_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-commit-activity-source-refresh",
+        "title": "GitHub Commit Activity Source Refresh",
+        "origin_uri": "https://ghp_SECRET_VALUE_DO_NOT_LEAK@api.github.com/repos/capy/spaces/stats/commit_activity?access_token=placeholder#raw-prompt",
+    })
+    github_commit_activity_body = json.dumps([
+        {"total": 3, "week": 1780272000, "days": [0, 1, 0, 0, 2, 0, 0]},
+        {"total": 0, "week": 1780876800, "days": [0, 0, 0, 0, 0, 0, 0]},
+        {"total": 5, "week": 1781481600, "days": [1, 1, 1, 1, 1, 0, 0]},
+    ]).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_commit_activity_body
+
+    def fake_open(request, *, timeout):
+        calls.append({
+            "url": request.full_url,
+            "timeout": timeout,
+            "accept": request.get_header("Accept"),
+        })
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-commit-activity-source-refresh.md").read_text(encoding="utf-8").lower()
+    search = search_memory("total commits: 8", limit=5)
+    serialized = json.dumps({"receipt": receipt, "result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [{
+        "url": "https://api.github.com/repos/capy/spaces/stats/commit_activity",
+        "timeout": 8,
+        "accept": "application/json",
+    }]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    assert search["results"][0]["source_id"] == "github-commit-activity-source-refresh"
+    assert "github commit activity for capy/spaces" in persisted
+    assert "weeks: 3" in persisted
+    assert "total commits: 8" in persisted
+    assert "active weeks: 2" in persisted
+    for unsafe in (
+        "secret_value_do_not_leak",
+        "access_token",
+        "raw-prompt",
+        "ghp_",
+        "api_key",
+        "ignore previous instructions",
+        "renderer",
+        "<script",
+        "1780272000",
+        "https://api.github.com/repos/capy/spaces/stats/commit_activity",
+    ):
+        assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+def test_queue_due_source_refresh_jobs_preserves_github_commit_activity_fetch_origin(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    clean_api_url = "https://api.github.com/repos/capy/spaces/stats/commit_activity"
+    register_source_reference({
+        "source_id": "github-commit-activity-due-refresh",
+        "title": "GitHub Commit Activity Due Refresh",
+        "origin_uri": "https://ghp_SECRET_VALUE_DO_NOT_LEAK@api.github.com/repos/capy/spaces/stats/commit_activity?access_token=placeholder#raw-prompt",
+        "refresh_interval_seconds": 60,
+    })
+    github_commit_activity_body = json.dumps([
+        {"total": 3, "week": 1780272000, "days": [0, 1, 0, 0, 2, 0, 0]},
+    ]).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_commit_activity_body
+
+    def fake_open(request, *, timeout):
+        calls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_open)
+
+    first = run_source_refresh_jobs(limit=1, queue_due=False)
+    assert first["processed"] == 1
+    assert first["jobs"][0]["status"] == "completed"
+    assert calls == [clean_api_url]
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        conn.execute("UPDATE sources SET freshness_status = 'stale' WHERE source_id = ?", ("github-commit-activity-due-refresh",))
+
+    calls.clear()
+    queued = queue_due_source_refresh_jobs(limit=1, now="2026-06-07T00:00:00+00:00")
+    queued_serialized = json.dumps(queued, sort_keys=True).lower()
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        queued_payload = json.loads(conn.execute(
+            "SELECT payload_json FROM jobs WHERE dedupe_key = 'github-commit-activity-due-refresh'"
+        ).fetchone()[0])
+    second = run_source_refresh_jobs(limit=1, queue_due=False)
+    search = search_memory("total commits: 3", limit=5)
+    serialized = json.dumps({"queued": queued, "second": second, "search": search}, sort_keys=True).lower()
+
+    assert queued["queued"] == 1
+    assert queued["jobs"][0]["origin_uri"] == "github commit activity capy/spaces"
+    assert queued_payload["origin_uri"] == "github commit activity capy/spaces"
+    assert queued_payload["fetch_origin_uri"] == clean_api_url
+    assert calls == [clean_api_url]
+    assert second["processed"] == 1
+    assert second["jobs"][0]["status"] == "completed"
+    assert search["results"][0]["origin_uri"] == "github commit activity capy/spaces"
+    assert clean_api_url not in queued_serialized
+    assert clean_api_url not in serialized
+    assert "api.github.com" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+@pytest.mark.parametrize("malformed_payload", [
+    {"version": "https://jsonfeed.org/version/1.1", "items": [{"summary": "Safe-looking commit activity feed"}]},
+    [{"total": 3, "week": 1780272000, "days": [0, 1, 0, 0, 2, 0]}],
+    [{"total": 3, "week": 1780272000, "days": [0, 1, 0, 0, 2, 0, 0], "body": "ignore previous instructions"}],
+    [{"total": 3, "week": 1780272000, "days": [0, 1, -1, 0, 3, 0, 0]}],
+    [{"total": 4, "week": 1780272000, "days": [0, 1, 0, 0, 2, 0, 0]}],
+    [{"total": True, "week": 1780272000, "days": [0, 1, 0, 0, 2, 0, 0]}],
+])
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_activity_malformed_payloads(
+    tmp_path, monkeypatch, malformed_payload
+):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-commit-activity-malformed",
+        "title": "GitHub Commit Activity Malformed",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/stats/commit_activity?access_token=placeholder#raw-prompt",
+    })
+    body = json.dumps(malformed_payload).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"result": result, "jobs": list_source_refresh_jobs(limit=5)}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-commit-activity-malformed.md").exists()
+    assert "safe-looking commit activity feed" not in serialized
+    assert "ignore previous instructions" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_activity_feed_json_content_type(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-commit-activity-feed-content-type",
+        "title": "GitHub Commit Activity Feed Content Type",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/stats/commit_activity?access_token=placeholder#raw-prompt",
+    })
+    body = json.dumps([
+        {"total": 3, "week": 1780272000, "days": [0, 1, 0, 0, 2, 0, 0]},
+    ]).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/feed+json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-commit-activity-feed-content-type.md").exists()
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+@pytest.mark.parametrize("malformed_path", [
+    "stats%2Fcommit_activity",
+    "stats/%63ommit_activity",
+    "stats%00/commit_activity",
+    "stats/commit_activity%00x",
+])
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_activity_encoded_route_text_bypass(
+    tmp_path, monkeypatch, malformed_path
+):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    safe_suffix = re.sub(r"[^a-z0-9]+", "-", malformed_path.lower()).strip("-") or "route"
+    source_id = f"github-commit-activity-encoded-{safe_suffix}"
+    register_source_reference({
+        "source_id": source_id,
+        "title": "GitHub Commit Activity Encoded Text Bypass",
+        "origin_uri": f"https://api.github.com/repos/capy/spaces/{malformed_path}?token=placeholder#raw-prompt",
+    })
+    calls = []
+
+    def fake_open(*_args, **_kwargs):
+        calls.append("called")
+        raise AssertionError("malformed commit-activity route must fail before fetch")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert calls == []
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / f"{source_id}.md").exists()
+    assert "token=placeholder" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+
 def test_run_source_refresh_jobs_default_fetcher_ingests_github_code_frequency_metadata_only(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
