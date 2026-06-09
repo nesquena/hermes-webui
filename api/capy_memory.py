@@ -502,6 +502,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         origin_uri = f"capy-memory://{source_id}"
     if _github_issue_events_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_pull_review_comments_path_matches(raw_origin_text) and (
+        not _github_https_authority_is_exact(raw_origin_text, "api.github.com")
+        or _github_pull_review_comments_path_number(origin_uri) is None
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_issue_comments_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or _github_issue_comments_path_info(origin_uri) is None
@@ -8522,6 +8527,109 @@ def _json_payload_is_github_issue_comments_metadata(origin_uri: str, payload: An
     return all(_github_comment_row_is_safe(row) for row in payload)
 
 
+def _github_pull_review_comments_path_info(origin_uri: str) -> tuple[str, str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if parts.scheme != "https" or (parts.netloc or "").strip() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or lowered[4] != "pulls"
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+        or lowered[6] != "comments"
+    ):
+        return None
+    return (path[2], path[3], int(path[5]))
+
+
+def _github_pull_review_comments_path_number(origin_uri: str) -> int | None:
+    info = _github_pull_review_comments_path_info(origin_uri)
+    if info is None:
+        return None
+    return info[2]
+
+
+def _github_pull_review_comments_path_matches(origin_uri: str) -> bool:
+    if _github_pull_comment_reactions_path_info(origin_uri) is not None:
+        return False
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _candidate_paths(raw_path: str) -> list[str]:
+        paths = [raw_path]
+        current = raw_path
+        for _ in range(6):
+            decoded = unquote(current)
+            if decoded == current:
+                break
+            paths.append(decoded)
+            current = decoded
+        return paths
+
+    def _matches_pull_review_comments_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        compacted_lowered = [segment.lower() for segment in path if segment]
+
+        def _has_pull_comments_shape(candidate: list[str]) -> bool:
+            for repo_index, segment in enumerate(candidate):
+                if segment != "repos" or len(candidate) <= repo_index + 3:
+                    continue
+                for pulls_index in range(repo_index + 3, len(candidate)):
+                    if candidate[pulls_index] != "pulls":
+                        continue
+                    tail = candidate[pulls_index + 1:]
+                    if any(part.startswith("comments") or "%2fcomments" in part for part in tail):
+                        return True
+            return False
+
+        exact_layout_candidate = lowered[1:] if len(lowered) > 1 and path[0] == "" else lowered
+        return _has_pull_comments_shape(exact_layout_candidate) or _has_pull_comments_shape(compacted_lowered)
+
+    return any(_matches_pull_review_comments_shape(path) for path in _candidate_paths(parts.path))
+
+
+def _github_pull_review_comment_row_is_safe(row: Any) -> bool:
+    if not _github_comment_row_is_safe(row):
+        return False
+    assert isinstance(row, dict)
+    review_id = row.get("pull_request_review_id")
+    if _is_present_public_value(review_id):
+        safe_review_id = _safe_optional_nonnegative_int(review_id)
+        if safe_review_id is None or safe_review_id <= 0:
+            return False
+    raw_side = row.get("side")
+    if _is_present_public_value(raw_side):
+        side = _safe_public_text(raw_side, limit=20)
+        if not side or side.lower() not in {"left", "right"}:
+            return False
+    for field in ("position", "line", "original_position", "original_line", "start_line", "original_start_line"):
+        raw_value = row.get(field)
+        if _is_present_public_value(raw_value) and _safe_optional_nonnegative_int(raw_value) is None:
+            return False
+    return True
+
+
+def _json_payload_is_github_pull_review_comments_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_pull_review_comments_path_number(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_pull_review_comment_row_is_safe(row) for row in payload)
+
+
 _GITHUB_REACTION_CONTENTS = {"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"}
 
 
@@ -9096,6 +9204,41 @@ def _github_issue_comments_refresh_summary(origin_uri: str, payload: list[Any]) 
         if len(row_summaries) < 5:
             row_summaries.append("; ".join(row_parts))
     parts = [f"GitHub {kind} #{number} comments", f"comment count: {len(payload)}"]
+    if commenters:
+        parts.append(f"commenters: {', '.join(commenters[:5])}")
+    parts.extend(row_summaries)
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_pull_review_comments_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    number = _github_pull_review_comments_path_number(origin_uri) or 0
+    safe_rows = [row for row in payload if _github_pull_review_comment_row_is_safe(row)]
+    commenters: list[str] = []
+    row_summaries: list[str] = []
+    for row in safe_rows:
+        user = row.get("user") if isinstance(row.get("user"), dict) else {}
+        login = _safe_public_text(user.get("login") if isinstance(user, dict) else "", limit=80)
+        comment_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        review_id = _safe_optional_nonnegative_int(row.get("pull_request_review_id"))
+        side = _safe_public_text(row.get("side"), limit=20).lower()
+        created = _safe_public_text(row.get("created_at"), limit=80)
+        updated = _safe_public_text(row.get("updated_at"), limit=80)
+        if login and login not in commenters:
+            commenters.append(login)
+        row_parts = [f"comment {comment_id}"]
+        if login:
+            row_parts[-1] = f"comment {comment_id} by {login}"
+        if review_id:
+            row_parts.append(f"review id: {review_id}")
+        if side:
+            row_parts.append(f"side: {side}")
+        if created:
+            row_parts.append(f"created: {created}")
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        if len(row_summaries) < 5:
+            row_summaries.append("; ".join(row_parts))
+    parts = [f"GitHub pull request #{number} review comments", f"comment count: {len(payload)}"]
     if commenters:
         parts.append(f"commenters: {', '.join(commenters[:5])}")
     parts.extend(row_summaries)
@@ -11935,6 +12078,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    pull_review_comments_number = _github_pull_review_comments_path_number(origin_uri)
+    if pull_review_comments_number is not None:
+        if not _json_payload_is_github_pull_review_comments_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub PR review comments #{pull_review_comments_number}",
+            "summary": _github_pull_review_comments_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_pull_review_comments_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     comments_path_info = _github_issue_comments_path_info(origin_uri)
     if comments_path_info is not None:
         if not _json_payload_is_github_issue_comments_metadata(origin_uri, payload):
@@ -12910,6 +13065,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_pull_requested_reviewers_path_info(raw_origin_uri) is None
         ):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_pull_review_comments_path_matches(raw_origin_uri):
+        pull_review_comments_origin = _safe_origin_uri(raw_origin_uri, source_id=_safe_public_id(source_id, fallback="source"))
+        if (
+            not _github_https_authority_is_exact(raw_origin_uri, "api.github.com")
+            or _github_pull_review_comments_path_number(pull_review_comments_origin) is None
+        ):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_issue_comments_path_matches(raw_origin_uri):
         issue_comments_origin = _safe_origin_uri(raw_origin_uri, source_id=_safe_public_id(source_id, fallback="source"))
         if (
@@ -13104,6 +13266,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_issue_labels_path_matches(safe_origin_uri):
         if _github_issue_labels_path_info(safe_origin_uri) is None or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_pull_review_comments_path_matches(safe_origin_uri):
+        if _github_pull_review_comments_path_number(safe_origin_uri) is None or not _github_https_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_issue_comment_reactions_path_matches(safe_origin_uri):
@@ -13571,6 +13737,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_secret_scanning_alerts_path_repo(final_url) != _github_secret_scanning_alerts_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_pull_review_comments_path_matches(safe_origin_uri) and (
+            not _github_https_authority_is_exact(final_url, "api.github.com")
+            or _github_pull_review_comments_path_info(final_url) is None
+            or _github_pull_review_comments_path_info(final_url) != _github_pull_review_comments_path_info(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
         if _github_issue_comments_path_matches(safe_origin_uri) and (
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or _github_issue_comments_path_info(final_url) is None
@@ -13639,6 +13811,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if _github_issue_labels_path_matches(safe_origin_uri) and (
             _github_issue_labels_path_info(safe_origin_uri) is None
             or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com")
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_pull_review_comments_path_matches(safe_origin_uri) and (
+            _github_pull_review_comments_path_number(safe_origin_uri) is None
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
