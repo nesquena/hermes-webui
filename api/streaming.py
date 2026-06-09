@@ -1517,6 +1517,18 @@ def _inline_thinking_fence_marker_at(text, index):
     return ''
 
 
+def _next_inline_thinking_opener(text, start):
+    """Index of the earliest complete thinking opener at/after `start`, or -1.
+    Cheap str.find per opener — lets the scanner bulk-skip plain trailing content
+    instead of walking it char-by-char (#3633 Codex per-token perf catch)."""
+    best = -1
+    for open_tag, _close in _INLINE_THINKING_TAG_PAIRS:
+        i = text.find(open_tag, start)
+        if i != -1 and (best == -1 or i < best):
+            best = i
+    return best
+
+
 def _line_is_indented_code(text, line_start):
     """True when the line beginning at `line_start` is a markdown indented code
     block line (>=4 leading spaces or a leading tab, and not blank). `line_start`
@@ -1570,6 +1582,26 @@ def _extract_inline_thinking_from_content(raw_content, existing_reasoning='', *,
     text = '' if raw_content is None else str(raw_content)
     if not text:
         return text, str(existing_reasoning or '').strip()
+    # Fast path (#3633 Codex perf catch — _parseStreamState / syncInflight call
+    # this on the FULL accumulator on every streamed token, so the common no-tag
+    # case must not do the O(length) char walk per call). If the text contains no
+    # complete thinking opener AND — when streaming — its tail is not a prefix of
+    # any opener (a partial opener mid-stream), there is nothing to extract:
+    # return the text unchanged. Two cheap substring scans instead of a full walk.
+    if not any(open_tag in text for open_tag, _close in _INLINE_THINKING_TAG_PAIRS):
+        tail_is_partial_opener = False
+        if streaming:
+            for open_tag, _close in _INLINE_THINKING_TAG_PAIRS:
+                # Does the END of text look like the START of an opener?
+                max_prefix = min(len(open_tag) - 1, len(text))
+                for n in range(max_prefix, 0, -1):
+                    if open_tag.startswith(text[-n:]):
+                        tail_is_partial_opener = True
+                        break
+                if tail_is_partial_opener:
+                    break
+        if not tail_is_partial_opener:
+            return text, str(existing_reasoning or '').strip()
     visible = []
     extracted = []
     cursor = 0
@@ -1589,7 +1621,36 @@ def _extract_inline_thinking_from_content(raw_content, existing_reasoning='', *,
     # indented code / whitespace and has NO leading thinking wrapper keeps its
     # leading whitespace — #3633 Codex catch).
     leading_removed = False
+    # Index of the next opener at/after `index` (recomputed only when we pass it).
+    # When no opener remains ahead, the rest of the text is plain and can be
+    # appended in one slice — this keeps a stream that DID contain a leading
+    # thinking block from re-walking the whole growing answer tail every token
+    # (#3633 Codex perf catch: the per-token full walk was O(n^2) over a stream).
+    next_opener = _next_inline_thinking_opener(text, 0)
     while index < length:
+        if next_opener == -1 or index > next_opener:
+            next_opener = _next_inline_thinking_opener(text, index)
+        if next_opener == -1:
+            # No further COMPLETE opener ahead. The remaining tail is plain
+            # visible content — except during streaming, where a tail that is a
+            # prefix of an opener (e.g. "...<thi") must be suppressed as a
+            # possibly-forming block. Handle that, then stop (avoids re-walking
+            # the whole growing answer tail every token — #3633 perf catch).
+            if streaming:
+                rest = text[index:]
+                partial_len = 0
+                for open_tag, _close in _INLINE_THINKING_TAG_PAIRS:
+                    m = min(len(open_tag) - 1, len(rest))
+                    for n in range(m, 0, -1):
+                        if open_tag.startswith(rest[-n:]):
+                            partial_len = max(partial_len, n)
+                            break
+                if partial_len:
+                    visible.append(text[cursor:length - partial_len])
+                    if not seen_nonspace and text[:length - partial_len].strip() == '':
+                        leading_removed = True
+                    cursor = length
+            break
         ch = text[index]
         if index > 0 and text[index - 1] == '\n':
             line_is_indented_code = _line_is_indented_code(text, index)

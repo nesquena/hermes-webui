@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from api.streaming import _split_thinking_from_content
+from api.streaming import (
+    _extract_inline_thinking_from_content,
+    _split_thinking_from_content,
+)
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -145,6 +148,30 @@ def test_extraction_is_linear_on_long_no_newline_content():
     assert content == big
     assert reasoning == ""
     assert elapsed < 1.0, f"extraction took {elapsed:.2f}s — likely quadratic"
+
+
+def test_per_token_streaming_scan_is_not_quadratic():
+    """#3633 Codex CORE perf catch: _parseStreamState / syncInflightAssistantMessage
+    call the extractor on the FULL accumulator on every streamed token. Simulate a
+    long stream (both no-tag and leading-thinking-block cases) and assert the
+    cumulative cost stays bounded — a per-token full walk over the growing buffer
+    was O(n^2) (~88s no-tag / ~103s with-tag for 2000x100-char tokens)."""
+    import time
+
+    def sim(n_tokens, tok_len, lead_tag):
+        acc = "<think>short reasoning</think>" if lead_tag else ""
+        start = time.time()
+        for _ in range(n_tokens):
+            acc += "x" * tok_len
+            # mimic the two per-token extractor calls (_streamDisplay + _parseStreamState)
+            _extract_inline_thinking_from_content(acc, "", streaming=True)
+            _extract_inline_thinking_from_content(acc, "", streaming=True)
+        return time.time() - start
+
+    no_tag = sim(2000, 100, False)
+    with_tag = sim(2000, 100, True)
+    assert no_tag < 3.0, f"no-tag per-token stream took {no_tag:.1f}s — quadratic"
+    assert with_tag < 3.0, f"with-tag per-token stream took {with_tag:.1f}s — quadratic"
 
 
 def test_timeout_wrapper_remains_out_of_scope():
