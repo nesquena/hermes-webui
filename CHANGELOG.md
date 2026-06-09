@@ -3,7 +3,13 @@
 
 ## [Unreleased]
 
-## [v0.51.340] — 2026-06-09 — Release LD (background-task agent wakeup in WebUI) — ⛔ HELD pending independent review
+## [v0.51.341] — 2026-06-09 — Release LE (stale thinking-dot placeholder fix)
+
+### Fixed
+
+- **Legacy thinking placeholders no longer pile up as stale three-dot rows.** Empty pre-stream thinking spinners are now removed when the thinking phase finalizes instead of being mistaken for durable Thinking content. The live-to-final redesign (#3401) made the `thinking-card-row` wrapper class unconditional, which broke `finalizeThinkingCard()`'s dots-only detection (it treated the wrapper class itself as a "has content" signal); the check is now narrowed to the actual `.thinking-card` element so dots-only spinners are removed on finalize while real Worklog Thinking Cards are preserved. (#3869, #3876)
+
+## [v0.51.340] — 2026-06-09 — Release LD (background-task agent wakeup in WebUI)
 
 ### Added
 
