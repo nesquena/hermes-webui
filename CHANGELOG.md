@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.337] — 2026-06-09 — Release LA (model-picker keyboard nav + mobile new-chat)
+
+### Added
+- **Keyboard navigation in the model picker.** With the model dropdown open, ↑/↓ move a highlight through the filtered models (wrapping at the ends) and Enter selects the highlighted one; Escape closes. The highlight reuses the existing hover styling and is invisible until you use the keyboard. (#2952, #2791, @Sanjays2402)
+- **A "New chat" button in the mobile titlebar.** On narrow screens the app titlebar now shows a `+` button to start a new conversation without opening the sidebar; it shares the existing reload-button styling and mirrors the new-chat in-flight/disabled state. (#3531, @franksong2702)
+
 ## [v0.51.336] — 2026-06-08 — Release KZ (fix inline-thinking streaming perf regression)
 
 ### Fixed

@@ -934,6 +934,7 @@
   :root{--app-titlebar-safe-top:0px;}
   .pwa-standalone{overscroll-behavior:none;}
   .pwa-standalone body{-webkit-tap-highlight-color:transparent;}
+  .app-titlebar-new-chat{display:none;}
   .pwa-standalone .app-titlebar-reload{display:inline-flex;}
   .pwa-offline .app-titlebar::after{content:'';position:absolute;left:50%;bottom:5px;width:5px;height:5px;border-radius:999px;background:var(--warning);box-shadow:0 0 0 3px color-mix(in srgb,var(--warning) 22%,transparent);transform:translateX(-50%);}
   .pwa-resumed .app-titlebar-title{animation:pwa-title-resume .6s ease-out;}
@@ -948,8 +949,10 @@
     .pull-to-refresh-indicator.active{opacity:1;transform:translateY(0);}
     .pull-to-refresh-indicator .ptr-icon{display:inline-block;transition:transform .2s;font-size:16px;}
     .pull-to-refresh-indicator .ptr-icon.ready{transform:rotate(180deg);color:var(--accent);}
-    /* Reload button — visible only in PWA standalone / fullscreen */
+    /* Reload and mobile new-chat titlebar controls with shared icon-button styles */
+    .app-titlebar-new-chat,
     .app-titlebar-reload{display:none;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0;background:none;border:none;color:var(--muted);border-radius:8px;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;transition:background-color .15s,color .15s;}
+    .app-titlebar-new-chat:hover,
     .app-titlebar-reload:hover{background:var(--hover-bg);color:var(--text);}
     @media (display-mode: standalone), (display-mode: fullscreen){
       :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);}
@@ -2316,6 +2319,7 @@
     /* Hamburger button (in app titlebar on mobile) */
     .app-titlebar{justify-content:space-between;}
     .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}
+    .app-titlebar-new-chat{display:inline-flex;}
     .app-titlebar-inner{flex:1 1 auto;}
     .system-health-panel.insights-card{gap:10px;padding:12px;}
     .system-health-head{align-items:flex-start;}
@@ -2483,7 +2487,9 @@
 .model-group{padding:8px 14px 4px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--muted);text-transform:uppercase;border-top:1px solid var(--border2);margin-top:2px;}
 .model-opt{padding:10px 14px;cursor:pointer;transition:background .12s;display:flex;flex-direction:column;gap:3px;align-items:flex-start;}
 .model-opt:hover{background:rgba(255,255,255,.07);}
+.model-opt.is-highlighted{background:rgba(255,255,255,.1);outline:1px solid var(--border2);outline-offset:-1px;}
 .model-opt.active{background:var(--accent-bg);}
+.model-opt.active.is-highlighted{background:var(--accent-bg);outline:1px solid var(--accent);outline-offset:-1px;}
 .model-opt-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;}
 .model-opt-name{display:block;font-size:13px;color:var(--text);font-weight:500;line-height:1.25;}
 .model-opt-badge{display:inline-flex;align-items:center;justify-content:center;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;border:1px solid transparent;}
@@ -3613,6 +3619,8 @@ main.main > #mainPlugin{display:none;}
 .panel-head-btn:hover{background:var(--accent-bg);color:var(--accent-text);}
 .panel-head-btn:disabled,.panel-head-btn[aria-busy="true"]{opacity:.5;cursor:wait;}
 .panel-head-btn:disabled:hover,.panel-head-btn[aria-busy="true"]:hover{background:transparent;color:var(--muted);}
+.app-titlebar-new-chat:disabled,.app-titlebar-new-chat[aria-busy="true"]{opacity:.5;cursor:wait;}
+.app-titlebar-new-chat:disabled:hover,.app-titlebar-new-chat[aria-busy="true"]:hover{background:transparent;color:var(--muted);}
 .panel-head-btn svg{width:14px;height:14px;display:block;}
 .panel-head-sub{padding:6px 12px 8px;font-size:11px;color:var(--muted);flex-shrink:0;}
 .side-menu{display:flex;flex-direction:column;gap:2px;padding:8px;overflow-y:auto;}
