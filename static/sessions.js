@@ -765,10 +765,10 @@ async function loadSession(sid){
   // Do not no-op a same-session click while another load is in flight: the
   // previous transcript may already have been cleared for the pending switch.
   // Static force-reload invariant: if(currentSid===sid && !forceReload) return;
-  if(currentSid===sid && !forceReload && !_loadingSessionId){
-    _rearmActiveSessionStream(); // #2971: revive stream on same-session re-select
-    return;
-  }
+  // #2971: idempotent re-arm before the no-op guard revives a stream a prior
+  // failed loadSession killed; no-ops on real switches.
+  _rearmActiveSessionStream();
+  if(currentSid===sid && !forceReload && !_loadingSessionId) return;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
