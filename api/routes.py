@@ -10643,12 +10643,19 @@ def _handle_session_sse_stream(handler, parsed):
         return bad(handler, "session_id is required")
 
     from api.background_process import (
-        get_or_create_session_channel,
+        subscribe_to_session_channel,
         active_stream_id_for_session,
     )
 
-    ch = get_or_create_session_channel(sid)
-    q = ch.subscribe(maxsize=64)
+    # Atomic get-or-create + subscribe under SESSION_CHANNELS_LOCK. Doing these
+    # two steps separately (get_or_create_session_channel then ch.subscribe)
+    # left a TOCTOU gap where the reaper — which also holds
+    # SESSION_CHANNELS_LOCK and collects idle 0-subscriber channels in one
+    # critical section — could collect the channel between the two calls,
+    # orphaning this subscriber on a channel no longer in SESSION_CHANNELS.
+    # bg_task_complete emits would then never reach this queue. See
+    # subscribe_to_session_channel for the full rationale (PR #2971 Greptile P1).
+    ch, q = subscribe_to_session_channel(sid, maxsize=64)
 
     handler.send_response(200)
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')

@@ -165,6 +165,98 @@ def test_reaper_collects_via_registry():
     assert bp.get_session_channel(sid) is None
 
 
+def test_subscribe_to_session_channel_is_atomic_get_create_subscribe():
+    """The atomic helper returns a registered channel with the subscriber
+    already attached, in one SESSION_CHANNELS_LOCK critical section.
+
+    First call creates; second call reuses the same instance.
+    """
+    from api import background_process as bp
+
+    sid = "sess-atomic-subscribe"
+    with bp.SESSION_CHANNELS_LOCK:
+        bp.SESSION_CHANNELS.pop(sid, None)
+    try:
+        ch, q = bp.subscribe_to_session_channel(sid)
+        # Channel is registered and the slot is already counted.
+        assert bp.get_session_channel(sid) is ch
+        assert ch.subscriber_count() == 1
+        # An emit reaches our queue immediately — proves we're on the live channel.
+        ch.emit("bg_task_complete", {"n": 1})
+        assert q.get_nowait() == ("bg_task_complete", {"n": 1})
+
+        # Second call reuses the same instance and adds a second subscriber.
+        ch2, q2 = bp.subscribe_to_session_channel(sid)
+        assert ch2 is ch
+        assert ch.subscriber_count() == 2
+        ch.unsubscribe(q2)
+    finally:
+        with bp.SESSION_CHANNELS_LOCK:
+            bp.SESSION_CHANNELS.pop(sid, None)
+
+
+def test_subscribe_to_session_channel_survives_concurrent_reaper():
+    """Regression for PR #2971 Greptile P1 (background_process.py:215).
+
+    Reproduces the reaper TOCTOU: an idle, past-grace channel exists in the
+    registry; a subscriber arrives while the reaper sweeps concurrently. With
+    the old split ``get_or_create_session_channel()`` + ``ch.subscribe()`` the
+    reaper could collect the channel in the gap, orphaning the subscriber so
+    later emits never reach its queue. The atomic helper holds
+    SESSION_CHANNELS_LOCK across both steps, so the post-subscribe registry
+    entry must be the EXACT channel the subscriber is attached to, and a
+    subsequent emit must be delivered.
+    """
+    import threading
+    from api import background_process as bp, config as cfg
+
+    sid = "sess-reaper-toctou"
+
+    # Seed an idle channel that is already eligible for collection (no subs,
+    # drop time pushed well past the grace window) — the dangerous precondition.
+    with bp.SESSION_CHANNELS_LOCK:
+        bp.SESSION_CHANNELS.pop(sid, None)
+        seed = bp.SessionChannel(sid)
+        seed.last_subscriber_drop_at = (
+            time.time() - (cfg.SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS + 5)
+        )
+        bp.SESSION_CHANNELS[sid] = seed
+
+    stop = threading.Event()
+
+    def _reaper_spin():
+        # Hammer the exact reaper critical section concurrently.
+        while not stop.is_set():
+            now = time.time()
+            with bp.SESSION_CHANNELS_LOCK:
+                for k, channel in list(bp.SESSION_CHANNELS.items()):
+                    if channel.reaper_should_collect(now):
+                        bp.SESSION_CHANNELS.pop(k, None)
+
+    t = threading.Thread(target=_reaper_spin, daemon=True)
+    t.start()
+    try:
+        for _ in range(200):
+            ch, q = bp.subscribe_to_session_channel(sid)
+            # Post-condition: the channel we're subscribed to is the one in the
+            # registry (atomicity guarantee). The reaper cannot have evicted it
+            # between create and subscribe because both ran under the lock and
+            # the channel now has a live subscriber.
+            assert bp.get_session_channel(sid) is ch
+            assert ch.subscriber_count() >= 1
+            # And an emit on the registry-resolved channel reaches our queue —
+            # i.e. we are NOT orphaned on a collected channel.
+            resolved = bp.get_session_channel(sid)
+            resolved.emit("bg_task_complete", {"ping": 1})
+            assert q.get(timeout=1.0) == ("bg_task_complete", {"ping": 1})
+            ch.unsubscribe(q)
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
+        with bp.SESSION_CHANNELS_LOCK:
+            bp.SESSION_CHANNELS.pop(sid, None)
+
+
 # ---------------------------------------------------------------------------
 # Dual emit: STREAMS empty + SESSION_CHANNELS has subscriber → delivered
 # ---------------------------------------------------------------------------
