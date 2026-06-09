@@ -261,6 +261,7 @@ function _clearMessageVirtualHeightCache() {
   _messageVirtualWindowKey = '';
 }
 eval(extractFunc('_messageVirtualHeightEntryMatches'));
+eval(extractFunc('_messageVirtualHeightPrefixEntryMatches'));
 eval(extractFunc('_syncMessageVirtualHeightCache'));
 const first = {id: 'first'};
 const second = {id: 'second'};
@@ -285,6 +286,57 @@ console.log(JSON.stringify({
     metrics = json.loads(_run_node(source))
     assert metrics["cache"][:2] == [180, 220]
     assert len(metrics["cache"]) == 3
+    assert metrics["estimated"] == 200
+    assert metrics["windowKey"] == ""
+
+
+def test_height_cache_preserves_measured_suffix_across_prepended_history():
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT = 140;
+let _messageVirtualHeightCache = [180, 220];
+let _messageVirtualHeightCacheEntries = [];
+let _messageVirtualHeightCacheLen = 2;
+let _messageVirtualHeightCacheSrc = null;
+let _messageVirtualEstimatedRowHeight = 200;
+let _messageVirtualWindowKey = 'stale-key';
+function _clearMessageVirtualHeightCache() {
+  _messageVirtualHeightCache = [];
+  _messageVirtualHeightCacheEntries = [];
+  _messageVirtualHeightCacheLen = 0;
+  _messageVirtualHeightCacheSrc = null;
+  _messageVirtualEstimatedRowHeight = MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
+  _messageVirtualWindowKey = '';
+}
+eval(extractFunc('_messageVirtualHeightEntryMatches'));
+eval(extractFunc('_messageVirtualHeightPrefixEntryMatches'));
+eval(extractFunc('_syncMessageVirtualHeightCache'));
+const first = {id: 'first'};
+const second = {id: 'second'};
+let S = {messages: [first, second]};
+_messageVirtualHeightCacheEntries = [
+  {rawIdx: 0, m: first},
+  {rawIdx: 1, m: second},
+];
+_messageVirtualHeightCacheSrc = S.messages;
+const olderA = {id: 'older-a'};
+const olderB = {id: 'older-b'};
+S = {messages: [olderA, olderB, first, second]};
+_syncMessageVirtualHeightCache([
+  {rawIdx: 0, m: olderA},
+  {rawIdx: 1, m: olderB},
+  {rawIdx: 2, m: first},
+  {rawIdx: 3, m: second},
+]);
+console.log(JSON.stringify({
+  cache: _messageVirtualHeightCache,
+  estimated: _messageVirtualEstimatedRowHeight,
+  windowKey: _messageVirtualWindowKey,
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["cache"][2:] == [180, 220]
+    assert len(metrics["cache"]) == 4
     assert metrics["estimated"] == 200
     assert metrics["windowKey"] == ""
 
