@@ -1478,8 +1478,8 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
 
-    cached, _ = _session_list_cache_get(key)
-    if cached is not None:
+    cached, is_fresh = _session_list_cache_get(key, allow_stale=True)
+    if cached is not None and is_fresh:
         if diag is not None:
             try:
                 diag.stage("session_list_cache_hit")
@@ -1487,7 +1487,7 @@ def _get_cached_session_list_payload(
                 pass
         return cached
 
-    stale, _ = _session_list_cache_get(key, allow_stale=True)
+    stale = cached
     event, is_owner = _session_list_cache_claim_rebuild(key)
     if is_owner:
         if diag is not None:

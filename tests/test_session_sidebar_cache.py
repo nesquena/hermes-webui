@@ -170,6 +170,67 @@ def test_session_list_cache_follower_wait_stage_when_rebuild_inflight():
     assert "session_list_cache_hit" in owner_diag.stages or "session_list_cache_stored" in owner_diag.stages
 
 
+def test_session_list_cache_follower_reuses_stale_payload_during_slow_rebuild():
+    routes._session_list_cache_clear()
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+    with routes._SESSIONS_CACHE_LOCK:
+        ts, stamp, payload = routes._SESSIONS_CACHE[key]
+        routes._SESSIONS_CACHE[key] = (
+            ts - routes._SESSIONS_CACHE_TTL_SECONDS - 1.0,
+            stamp,
+            payload,
+        )
+
+    started = threading.Event()
+    release = threading.Event()
+    owner_result = {}
+    follower_result = {}
+    owner_diag = _StageRecorder()
+    follower_diag = _StageRecorder()
+
+    def builder():
+        started.set()
+        release.wait()
+        return _session_cache_payload("fresh")
+
+    def owner():
+        owner_result["payload"] = routes._get_cached_session_list_payload(
+            key=key,
+            builder=builder,
+            diag=owner_diag,
+        )
+
+    def follower():
+        follower_result["payload"] = routes._get_cached_session_list_payload(
+            key=key,
+            builder=builder,
+            diag=follower_diag,
+        )
+
+    owner_thread = threading.Thread(target=owner)
+    follower_thread = threading.Thread(target=follower)
+    owner_thread.start()
+    assert started.wait(1.0)
+    follower_thread.start()
+    follower_thread.join(1.0)
+    assert not follower_thread.is_alive()
+    release.set()
+    owner_thread.join(2.0)
+
+    assert follower_result["payload"] == _session_cache_payload("stale")
+    assert owner_result["payload"] == _session_cache_payload("fresh")
+    assert "session_list_cache_wait_stale" in follower_diag.stages
+    assert "session_list_cache_wait_stale_fallback" in follower_diag.stages
+
+
 def test_session_list_cache_invalidated_on_session_list_publish():
     routes._session_list_cache_clear()
 
