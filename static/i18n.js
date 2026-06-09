@@ -16387,6 +16387,8 @@ const LOCALES = {
     saved_prompts_saved: 'Prompt zapisany',
     saved_prompts_delete: 'Usuń prompt',
     saved_prompts_empty_input: 'Najpierw wpisz prompt do zapisania',
+    context_block_name_default: 'Kontekst',
+    context_block_flush_aria: 'Bloki kontekstu zostaną dołączone podczas wysyłania',
 
     diff_loading: 'Ładowanie zmian (diff)',
     diff_error: 'Nie można załadować pliku poprawki',
