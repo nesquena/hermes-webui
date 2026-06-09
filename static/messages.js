@@ -1207,7 +1207,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     ? (_liveInflightAssistantMessages.length>1
       ? (_fullInflightAssistant || _joinedInflightSegments)
       : (_liveInflightAssistant
-        ? (_liveInflightAssistant.content || '')
+        ? (_fullInflightAssistant || _liveInflightAssistant.content || '')
         : _fullInflightAssistant))
     : '';
   const _lastLiveReasoning = reconnecting
