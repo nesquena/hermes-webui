@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sidebar no longer stalls for seconds on a state.db that is missing the agent's message index.** The CLI-session scan orders candidate sessions by a correlated `MAX(timestamp)` subquery over `messages`, which collapses to a full per-session table scan when `idx_messages_session ON messages(session_id, timestamp)` is absent — stalling `/api/sessions` for several seconds on every refresh (the 5s cache TTL never settles, so repeated "Slow WebUI request still running" warnings appear). A normally-migrated hermes-agent state.db has this index, but a db that lost its migrations (older hermes-agent, or a hand-rebuilt/reimported db) does not. WebUI now primes the index with `CREATE INDEX IF NOT EXISTS` before the scan — a no-op when it already exists, and a ~20ms self-heal otherwise (measured 13.3s → 0.009s on a no-index 8k-session db). Best-effort: degrades silently on a read-only db, a locked db, or a minimal schema without a `timestamp` column. (#3887)
+
 ## [v0.51.341] — 2026-06-09 — Release LE (stale thinking-dot placeholder fix)
 
 ### Fixed
