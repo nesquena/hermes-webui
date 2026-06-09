@@ -1806,7 +1806,31 @@ function renderModelDropdown(){
   };
   // Event handlers for search input
   _si.addEventListener('input',()=>_filterModels(_si.value));
-  _si.addEventListener('keydown',e=>{if(e.key==='Enter') {e.preventDefault();}if(e.key==='Escape') {closeModelDropdown();}});
+  // Keyboard navigation through filtered model rows (#2791).
+  const _visibleModelRows=()=>Array.from(dd.querySelectorAll('.model-opt'));
+  const _activeRowIndex=(rows)=>rows.findIndex(r=>r.classList.contains('is-highlighted'));
+  const _highlightRow=(rows,idx)=>{
+    for(const r of rows) r.classList.remove('is-highlighted');
+    if(idx<0||idx>=rows.length) return;
+    const row=rows[idx];
+    row.classList.add('is-highlighted');
+    if(typeof row.scrollIntoView==='function') row.scrollIntoView({block:'nearest'});
+  };
+  _si.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){closeModelDropdown();return;}
+    if(e.key==='ArrowDown'||e.key==='ArrowUp'||e.key==='Enter'){
+      const rows=_visibleModelRows();
+      if(!rows.length){if(e.key==='Enter') e.preventDefault();return;}
+      const cur=_activeRowIndex(rows);
+      if(e.key==='ArrowDown'){e.preventDefault();_highlightRow(rows,cur<0?0:Math.min(rows.length-1,cur+1));return;}
+      if(e.key==='ArrowUp'){e.preventDefault();_highlightRow(rows,cur<=0?rows.length-1:cur-1);return;}
+      if(e.key==='Enter'){
+        e.preventDefault();
+        const pick=cur>=0?rows[cur]:rows[0];
+        if(pick) pick.click();
+      }
+    }
+  });
   _si.addEventListener('click',e=>e.stopPropagation());
   // Event handlers for clear button
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
