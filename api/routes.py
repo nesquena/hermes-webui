@@ -6333,6 +6333,11 @@ def handle_get(handler, parsed) -> bool:
         with cron_profile_context():
             return _handle_cron_delivery_options(handler)
 
+    if parsed.path == "/api/crons/delivery-aliases":
+        from api.profiles import cron_profile_context
+        with cron_profile_context():
+            return _handle_cron_delivery_aliases_list(handler)
+
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
         qs = parse_qs(parsed.query)
@@ -7777,6 +7782,24 @@ def handle_post(handler, parsed) -> bool:
 
         with cron_profile_context():
             return _handle_cron_resume(handler, body)
+
+    if parsed.path == "/api/crons/delivery-aliases":
+        from api.profiles import cron_profile_context
+
+        with cron_profile_context():
+            return _handle_cron_delivery_aliases_add(handler, body)
+
+    if parsed.path == "/api/crons/delivery-aliases/delete":
+        from api.profiles import cron_profile_context
+
+        with cron_profile_context():
+            return _handle_cron_delivery_aliases_delete(handler, body)
+
+    if parsed.path == "/api/crons/delivery-aliases/update":
+        from api.profiles import cron_profile_context
+
+        with cron_profile_context():
+            return _handle_cron_delivery_aliases_update(handler, body)
 
     # ── Git workspace ops (POST) ──
     if parsed.path == "/api/git/stage":
@@ -12753,8 +12776,152 @@ def _handle_cron_delivery_options(handler):
     ]
     for name in sorted(_KNOWN_DELIVERY_PLATFORMS):
         platforms.append({"value": name, "label": name.capitalize()})
+
+    # ── Load delivery aliases ──────────────────────────────────────────────
+    # Primary source: <hermes-home>/delivery_aliases.yaml (survives updates)
+    # Fallback: DELIVERY_ALIASES in .env (pre-4.x compatibility)
+    import os
+    from api.profiles import get_active_hermes_home
+
+    aliases_loaded = False
+    yaml_path = str(get_active_hermes_home() / "delivery_aliases.yaml")
+    try:
+        import yaml
+        if os.path.isfile(yaml_path):
+            with open(yaml_path, "r") as f:
+                data = yaml.safe_load(f) or {}
+            for entry in data.get("aliases", []):
+                val = (entry.get("value") or "").strip()
+                lbl = (entry.get("label") or "").strip()
+                if val and lbl:
+                    platforms.append({"value": val, "label": lbl})
+            aliases_loaded = True
+    except (yaml.YAMLError, OSError) as e:
+        import logging
+        logging.getLogger("hermes").error("Failed to load delivery aliases from %s: %s", yaml_path, e)
+
+    if not aliases_loaded:
+        raw = os.getenv("DELIVERY_ALIASES", "").strip()
+        if raw:
+            for entry in raw.split(","):
+                entry = entry.strip()
+                if not entry or ":" not in entry:
+                    continue
+                alias, target = entry.split(":", 1)
+                alias = alias.strip()
+                target = target.strip()
+                if alias and target:
+                    platforms.append({"value": target, "label": alias})
+
     return j(handler, {"platforms": platforms})
 
+# ── Delivery alias CRUD ─────────────────────────────────────────────────
+
+def _load_delivery_aliases_yaml():
+    """Load delivery aliases from <hermes-home>/delivery_aliases.yaml.
+    Returns (aliases_list, yaml_path_str)."""
+    import os
+    from api.profiles import get_active_hermes_home
+    path = str(get_active_hermes_home() / "delivery_aliases.yaml")
+    if not os.path.isfile(path):
+        return [], path
+    try:
+        import yaml
+        with open(path, "r") as f:
+            data = yaml.safe_load(f) or {}
+        return data.get("aliases", []) or [], path
+    except (yaml.YAMLError, OSError) as e:
+        import logging
+        logging.getLogger("hermes").error("Failed to load delivery aliases from %s: %s", path, e)
+        return [], path
+
+def _save_delivery_aliases_yaml(aliases, path):
+    """Write aliases list back to YAML file."""
+    import os
+    try:
+        import yaml
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("# Delivery aliases for Hermes cron jobs\n")
+            f.write("# Format: list of {value, label} pairs\n")
+            f.write("# value: the actual delivery target (e.g., telegram:123456789)\n")
+            f.write("# label: the user-friendly name shown in the UI dropdown\n")
+            f.write("#\n")
+            f.write("# This file persists across Hermes WebUI updates.\n")
+            f.write("# Modify it directly to add/remove/rename delivery aliases.\n")
+            f.write("\n")
+            yaml.safe_dump({"aliases": aliases}, f, allow_unicode=True, sort_keys=False)
+        return True
+    except (yaml.YAMLError, OSError) as e:
+        import logging
+        logging.getLogger("hermes").error("Failed to save delivery aliases to %s: %s", path, e)
+        return False
+
+def _handle_cron_delivery_aliases_list(handler):
+    """GET /api/crons/delivery-aliases — list all user aliases."""
+    aliases, _ = _load_delivery_aliases_yaml()
+    return j(handler, {"aliases": aliases})
+
+def _validate_alias_value(value):
+    """Reject values that don't follow platform:id pattern (e.g. telegram:123456789)."""
+    import re
+    if not re.match(r'^[a-z]+:[^\s]+$', value):
+        return False, "Value must follow platform:id format (e.g. telegram:123456789)"
+    return True, None
+
+def _handle_cron_delivery_aliases_add(handler, body):
+    """POST /api/crons/delivery-aliases — add an alias."""
+    value = (body.get("value") or "").strip()
+    label = (body.get("label") or "").strip()
+    if not value or not label:
+        return bad(handler, "Both 'value' and 'label' are required")
+    valid, err = _validate_alias_value(value)
+    if not valid:
+        return bad(handler, err)
+    aliases, path = _load_delivery_aliases_yaml()
+    # Prevent duplicates
+    for entry in aliases:
+        if entry.get("value", "").strip() == value:
+            return bad(handler, "Alias with this value already exists")
+    aliases.append({"value": value, "label": label})
+    if _save_delivery_aliases_yaml(aliases, path):
+        return j(handler, {"ok": True, "alias": {"value": value, "label": label}})
+    return bad(handler, "Failed to save aliases file")
+
+def _handle_cron_delivery_aliases_update(handler, body):
+    """POST /api/crons/delivery-aliases/update — update alias label by value."""
+    value = (body.get("value") or "").strip()
+    label = (body.get("label") or "").strip()
+    if not value or not label:
+        return bad(handler, "Both 'value' and 'label' are required")
+    valid, err = _validate_alias_value(value)
+    if not valid:
+        return bad(handler, err)
+    aliases, path = _load_delivery_aliases_yaml()
+    found = False
+    for entry in aliases:
+        if entry.get("value", "").strip() == value:
+            entry["label"] = label
+            found = True
+            break
+    if not found:
+        return bad(handler, "Alias not found", 404)
+    if _save_delivery_aliases_yaml(aliases, path):
+        return j(handler, {"ok": True, "alias": {"value": value, "label": label}})
+    return bad(handler, "Failed to save aliases file")
+
+def _handle_cron_delivery_aliases_delete(handler, body):
+    """DELETE /api/crons/delivery-aliases — remove an alias by value."""
+    value = (body.get("value") or "").strip()
+    if not value:
+        return bad(handler, "'value' is required to delete an alias")
+    aliases, path = _load_delivery_aliases_yaml()
+    new_aliases = [e for e in aliases if e.get("value", "").strip() != value]
+    if len(new_aliases) == len(aliases):
+        return bad(handler, "Alias not found", 404)
+    if _save_delivery_aliases_yaml(new_aliases, path):
+        return j(handler, {"ok": True, "removed": value})
+    return bad(handler, "Failed to save aliases file")
 
 def _handle_cron_update(handler, body):
     try:

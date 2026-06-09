@@ -6579,14 +6579,14 @@ function ensureLiveWorklogContainer(blocks, opts){
   if(!worklog) worklog=blocks.querySelector('.live-worklog[data-live-worklog-shell="1"][data-live-activity-current="1"]');
   if(!worklog){
     worklog=document.createElement('div');
-    worklog.className='live-worklog worklog';
+    worklog.className='live-worklog worklog collapsed';
     worklog.setAttribute('data-live-worklog-shell','1');
     worklog.setAttribute('data-live-tool-worklog-group','1');
     worklog.setAttribute('data-live-tool-call-group','1');
     worklog.setAttribute('data-live-activity-current','1');
     worklog.setAttribute('data-tool-worklog-group','1');
     worklog.setAttribute('data-tool-worklog-key',activityKey||'');
-    worklog.innerHTML='<div class="tool-worklog-list"></div>';
+    worklog.innerHTML='<div class="worklog-toggle" onclick="(function(w){w.classList.toggle(\'collapsed\');var t=w.querySelector(\'.worklog-toggle-label\');if(t)t.textContent=w.classList.contains(\'collapsed\')?\'Regarder le live\':\'Cacher le live\'})(this.closest(\'.live-worklog\'))"><span class="worklog-toggle-icon">\u25b6</span><span class="worklog-toggle-label">Regarder le live</span></div><div class="tool-worklog-list"></div>';
     const anchor=opts.anchor||null;
     const footer=blocks.querySelector('#liveRunStatus');
     if(anchor&&anchor.parentElement===blocks) anchor.insertAdjacentElement('afterend',worklog);
@@ -9256,6 +9256,14 @@ function _syncToolCallGroupSummary(group){
       durationEl.textContent=durationText?` Done in ${durationText}`:'';
       durationEl.style.display=durationText?'':'none';
     }
+  }
+  // Update worklog toggle label with live count
+  const toggleLabel = group.querySelector('.worklog-toggle-label');
+  if (toggleLabel && toolCount > 0) {
+    const collapsed = group.classList.contains('collapsed');
+    toggleLabel.textContent = collapsed
+      ? `Voir les actions (${toolCount})`
+      : `Masquer les actions (${toolCount})`;
   }
 }
 

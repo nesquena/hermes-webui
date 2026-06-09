@@ -3,6 +3,13 @@
 
 ## [Unreleased]
 
+### Added
+- **Delivery aliases for cron jobs.** Users can now assign human-readable labels to technical delivery targets in the cron job detail panel. (#3775, @ideesimple)
+
+### Security
+- **Fixed stored XSS in delivery alias panel.** Inline `onclick` handlers were replaced with delegated event listeners using `data-action` attributes and `CSS.escape()`. (#3775, @ideesimple)
+- **Added server-side validation for alias values.** Values containing whitespace are now rejected at the API layer, preventing broken HTML IDs. (#3775, @ideesimple)
+
 ## [v0.51.340] — 2026-06-09 — Release LD (background-task agent wakeup in WebUI) — ⛔ HELD pending independent review
 
 ### Added
