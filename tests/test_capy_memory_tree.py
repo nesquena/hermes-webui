@@ -10713,6 +10713,200 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_workflow_list_me
         assert unsafe not in persisted
 
 
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_list_malformed_tail_row(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-workflow-list-malformed-tail-row",
+        "title": "GitHub Workflow List Malformed Tail Row",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/actions/workflows?access_token=***#raw-prompt",
+    })
+    safe_workflow = {
+        "id": 98765,
+        "name": "Build and Test",
+        "state": "active",
+        "created_at": "2026-05-30T08:00:00Z",
+        "updated_at": "2026-05-30T10:00:00Z",
+    }
+    github_workflow_list_body = json.dumps({
+        "total_count": 6,
+        "workflows": [
+            {**safe_workflow, "id": 98765 + i, "name": f"Safe Workflow {i}"}
+            for i in range(5)
+        ] + [{
+            **safe_workflow,
+            "id": 99999,
+            "name": "SECRET_VALUE_DO_NOT_LEAK raw-prompt",
+        }],
+        "summary": "Safe-looking generic summary must not bypass exact workflow-list metadata validation.",
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_workflow_list_body
+
+    unsafe_payload = json.loads(github_workflow_list_body.decode("utf-8"))
+    assert capy_memory._json_payload_is_github_workflows_metadata(
+        "https://api.github.com/repos/capy/spaces/actions/workflows",
+        unsafe_payload,
+    ) is False
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-workflow-list-malformed-tail-row.md").exists()
+    assert "safe-looking generic summary" not in serialized
+    assert "safe workflow 0" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_list_text_fallback(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-workflow-list-text-fallback",
+        "title": "GitHub Workflow List Text Fallback",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/actions/workflows?access_token=***#raw-prompt",
+    })
+    workflow_list_text_body = (
+        "Summary: Safe-looking generic summary must not bypass exact workflow-list metadata validation.\n"
+        "Prompt: SECRET_VALUE_DO_NOT_LEAK raw-prompt"
+    ).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return workflow_list_text_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-workflow-list-text-fallback.md").exists()
+    assert "safe-looking generic summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_list_lookalike_host_text_fallback(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "evil.example")
+    init_memory_tree()
+    registered = register_source_reference({
+        "source_id": "github-workflow-list-lookalike-host",
+        "title": "GitHub Workflow List Lookalike Host",
+        "origin_uri": "https://evil.example/repos/capy/spaces/actions/workflows?access_token=***#raw-prompt",
+    })
+    workflow_list_text_body = (
+        "Summary: Safe-looking generic summary must not bypass api.github.com enforcement.\n"
+        "Prompt: SECRET_VALUE_DO_NOT_LEAK raw-prompt"
+    ).encode("utf-8")
+    fetch_calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return workflow_list_text_body
+
+    def fake_open(*_args, **_kwargs):
+        fetch_calls.append(True)
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert registered["origin_uri"] == "capy-memory://github-workflow-list-lookalike-host"
+    assert fetch_calls == []
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-workflow-list-lookalike-host.md").exists()
+    assert "safe-looking generic summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_default_source_refresh_fetcher_rejects_github_workflow_list_encoded_lookalike_before_fetch(monkeypatch):
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "evil.example")
+    fetch_calls = []
+
+    def fail_if_called(*_args, **_kwargs):
+        fetch_calls.append(True)
+        raise AssertionError("fetch must not run for GitHub workflow-list lookalike routes")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fail_if_called)
+
+    with pytest.raises(RuntimeError, match="refresh fetcher disabled"):
+        capy_memory._default_source_refresh_fetcher(
+            source_id="github-workflow-list-encoded-lookalike",
+            origin_uri="https://evil.example/repos/capy/spaces/actions/workflows%2Fraw-prompt",
+        )
+
+    assert fetch_calls == []
+
+
+def test_default_source_refresh_fetcher_rejects_github_workflow_list_raw_tail_lookalike_before_fetch(monkeypatch):
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "evil.example")
+    fetch_calls = []
+
+    def fail_if_called(*_args, **_kwargs):
+        fetch_calls.append(True)
+        raise AssertionError("fetch must not run for GitHub workflow-list lookalike routes")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fail_if_called)
+
+    with pytest.raises(RuntimeError, match="refresh fetcher disabled"):
+        capy_memory._default_source_refresh_fetcher(
+            source_id="github-workflow-list-raw-tail-lookalike",
+            origin_uri="https://evil.example/repos/capy/spaces/actions/workflows/raw-prompt/more",
+        )
+
+    assert fetch_calls == []
+
+
 def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_list_unsafe_allowlisted_name(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
