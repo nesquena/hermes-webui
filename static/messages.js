@@ -3700,7 +3700,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     window._carryForwardEphemeralTurnFields=_carryForwardEphemeralTurnFields;
   }
 
-  async function _restoreSettledSession(source, options){
+  async function _restoreSettledSession(source){
+    const options=arguments.length>1?arguments[1]:null;
     const returnStatus=!!(options&&options.status);
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
