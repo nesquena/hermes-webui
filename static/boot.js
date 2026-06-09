@@ -1648,6 +1648,16 @@ document.addEventListener('keydown',async e=>{
       $('msg').blur();
     }
   }
+  // Cmd/Ctrl+Shift+T toggles tiling mode
+  if((e.metaKey||e.ctrlKey)&&e.shiftKey&&(e.key==='t'||e.key==='T')){
+    const t=e.target;
+    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    if(!isText){
+      e.preventDefault();
+      if(typeof toggleTilingMode==='function') toggleTilingMode();
+      return;
+    }
+  }
 });
 const LARGE_TEXT_PASTE_CHAR_THRESHOLD=4000;
 const LARGE_TEXT_PASTE_LINE_THRESHOLD=100;

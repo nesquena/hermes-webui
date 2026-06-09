@@ -79,6 +79,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       panels.js            Cron, skills, memory, profiles, todo, settings (Control Center)
       commands.js          Slash command registry, parser, autocomplete dropdown
       boot.js              Event wiring, mobile nav, voice input, theme/skin boot, bfcache handler
+      tiles.js             Tiling chat interface: multi-session tiles, grid layout, minimize/focus/close
       onboarding.js        First-run wizard overlay, provider setup flow
       i18n.js              Localization catalog (en, es, de, zh, zh-Hant, ru, …)
       login.js             Login page + open-redirect guard

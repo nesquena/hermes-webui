@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Tiling chat interface** — Multiple chat sessions open in parallel via a CSS Grid tiling layout. Toggle with titlebar 4-square icon or `Cmd/Ctrl+Shift+T`. In tiling mode, clicking sidebar sessions opens them in new tiles (minimize to tab bar, focus, close). Each tile has its own composer, scroll position, and stream state. Max 6 tiles with oldest-idle eviction. Sidebar shows tile count badges. Fully opt-in — zero behavior change when off. Vanilla JS + CSS Grid, no new dependencies.
+
 ## [v0.51.614] — 2026-06-23 — Release VU (Kanban consolidated view toggle)
 
 ### Added
@@ -1766,6 +1769,10 @@ contributor tally; see the credit-attribution fix in the same change._
 
 ### Fixed
 - **Long streaming responses no longer slow down as they grow.** A follow-up to v0.51.335: the inline-thinking extractor runs on the full in-progress message on every streamed token, and the v0.51.335 rewrite made that scan re-walk the whole buffer each time (quadratic over a long response — most noticeable on reasoning-model replies with a `<think>` block). It now fast-paths content with no thinking tags and skips already-settled trailing text, keeping per-token work flat. No behavior change — verified identical to the prior release across streaming, reload, persistence, and code-block cases. (#3633 follow-up)
+=======
+### Added
+- **Tiling chat interface** — Multiple chat sessions open in parallel via a CSS Grid tiling layout. Toggle with titlebar 4-square icon or `Cmd/Ctrl+Shift+T`. In tiling mode, clicking sidebar sessions opens them in new tiles (minimize to tab bar, focus, close). Each tile has its own composer, scroll position, and stream state. Max 6 tiles with oldest-idle eviction. Sidebar shows tile count badges. Fully opt-in — zero behavior change when off. Vanilla JS + CSS Grid, no new dependencies.
+>>>>>>> feat(tiling): add multi-session tiling chat interface
 
 ## [v0.51.335] — 2026-06-08 — Release KY (normalize inline thinking extraction)
 
