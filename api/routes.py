@@ -2953,6 +2953,20 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             cli_meta["model"] = state_db_row["model"]
         if not cli_meta.get("workspace") and state_db_row.get("cwd"):
             cli_meta["workspace"] = state_db_row["cwd"]
+        # Map state.db timestamps to created_at/updated_at on the
+        # synthesized Session.  Without this, the first POST writes
+        # epoch (0) timestamps into the permanent sidecar and the
+        # sidebar sorts/dates the session as "Jan 1 1970" (Greptile
+        # #4911 follow-up, P1).  updated_at prefers ended_at (last
+        # activity) and falls back to started_at; created_at always
+        # comes from started_at.
+        if not cli_meta.get("created_at") and state_db_row.get("started_at"):
+            cli_meta["created_at"] = state_db_row["started_at"]
+        if not cli_meta.get("updated_at"):
+            _ended = state_db_row.get("ended_at")
+            _started = state_db_row.get("started_at")
+            if _ended or _started:
+                cli_meta["updated_at"] = _ended or _started
     claimable, _reason = _is_claimable_cli_source(cli_meta, state_db_source)
     if not claimable:
         # The session is real and viewable, but the foreign source forbids
