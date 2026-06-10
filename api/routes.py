@@ -108,12 +108,6 @@ def _normalize_cron_job_ids(job_ids) -> list[str]:
     return normalized
 
 
-def _cron_session_like_pattern(job_id: str) -> str:
-    escaped = str(job_id or "")
-    escaped = escaped.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"cron_{escaped}_%"
-
-
 def _latest_cron_session_info_for_jobs(job_ids) -> dict[str, dict[str, int | str | None]]:
     """Return newest persisted cron session info keyed by cron job id."""
     normalized = _normalize_cron_job_ids(job_ids)
@@ -130,53 +124,53 @@ def _latest_cron_session_info_for_jobs(job_ids) -> dict[str, dict[str, int | str
             session_cols = {row[1] for row in cur.fetchall()}
             if "id" not in session_cols or "source" not in session_cols:
                 return {jid: {"session_id": "", "message_count": None} for jid in normalized}
-            case_clauses = " ".join(["WHEN s.id LIKE ? ESCAPE '\\' THEN ?"] * len(normalized))
-            where_clauses = " OR ".join(["s.id LIKE ? ESCAPE '\\'"] * len(normalized))
             select_message_count = (
                 "COALESCE(s.message_count, NULL) AS message_count"
                 if "message_count" in session_cols
                 else "NULL AS message_count"
             )
-            params = []
-            for jid in normalized:
-                params.extend((_cron_session_like_pattern(jid), jid))
-            for jid in normalized:
-                params.append(_cron_session_like_pattern(jid))
             if "started_at" in session_cols:
                 query = f"""
                     SELECT s.id,
-                           {select_message_count},
-                           CASE {case_clauses} ELSE '' END AS job_id
+                           {select_message_count}
                     FROM sessions s
                     WHERE LOWER(COALESCE(s.source, '')) = 'cron'
-                      AND ({where_clauses})
                     ORDER BY COALESCE(s.started_at, 0) DESC, s.id DESC
                 """
             else:
                 query = f"""
                     SELECT s.id,
-                           {select_message_count},
-                           CASE {case_clauses} ELSE '' END AS job_id
+                           {select_message_count}
                     FROM sessions s
                     WHERE LOWER(COALESCE(s.source, '')) = 'cron'
-                      AND ({where_clauses})
                     ORDER BY s.id DESC
                 """
-            cur.execute(query, params)
+            cur.execute(query)
             results = {
                 jid: {"session_id": "", "message_count": None} for jid in normalized
             }
+            prefixes = {jid: f"cron_{jid}_" for jid in normalized}
             for row in cur.fetchall():
-                jid = str(row["job_id"] or "")
-                if jid and not results[jid]["session_id"]:
+                sid = str(row["id"] or "")
+                if not sid:
+                    continue
+                matches = [
+                    jid
+                    for jid in normalized
+                    if not results[jid]["session_id"] and sid.startswith(prefixes[jid])
+                ]
+                if matches:
+                    jid = max(matches, key=len)
                     results[jid] = {
-                        "session_id": str(row["id"] or ""),
+                        "session_id": sid,
                         "message_count": (
                             int(row["message_count"])
                             if row["message_count"] is not None
                             else None
                         ),
                     }
+                if all(info["session_id"] for info in results.values()):
+                    break
             return results
     except sqlite3.Error:
         return {jid: {"session_id": "", "message_count": None} for jid in normalized}

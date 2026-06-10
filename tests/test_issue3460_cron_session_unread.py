@@ -201,6 +201,63 @@ def test_cron_recent_escapes_like_wildcards_in_job_id(monkeypatch, tmp_path):
     assert body["completions"][0]["message_count"] == 11
 
 
+def test_cron_recent_does_not_cross_match_shared_job_prefixes(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT,
+                started_at REAL,
+                message_count INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO sessions(id, source, started_at, message_count) VALUES (?, ?, ?, ?)",
+            ("cron_backup_20260610_090000", "cron", 100.0, 4),
+        )
+        conn.execute(
+            "INSERT INTO sessions(id, source, started_at, message_count) VALUES (?, ?, ?, ?)",
+            ("cron_backup_full_20260610_100000", "cron", 200.0, 8),
+        )
+
+    cron_pkg = types.ModuleType("cron")
+    cron_pkg.__path__ = []
+    cron_jobs = types.ModuleType("cron.jobs")
+    cron_jobs.list_jobs = lambda include_disabled=True: [
+        {
+            "id": "backup",
+            "name": "Backup",
+            "last_run_at": 150,
+            "last_status": "success",
+        },
+        {
+            "id": "backup_full",
+            "name": "Backup Full",
+            "last_run_at": 250,
+            "last_status": "success",
+        },
+    ]
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: db_path)
+    monkeypatch.setitem(sys.modules, "cron", cron_pkg)
+    monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
+
+    handler = _JSONHandler()
+    routes._handle_cron_recent(handler, SimpleNamespace(query="since=0"))
+
+    body = _payload(handler)
+    assert handler.status == 200
+    by_id = {item["job_id"]: item for item in body["completions"]}
+    assert by_id["backup"]["session_id"] == "cron_backup_20260610_090000"
+    assert by_id["backup"]["message_count"] == 4
+    assert by_id["backup_full"]["session_id"] == "cron_backup_full_20260610_100000"
+    assert by_id["backup_full"]["message_count"] == 8
+
+
 def test_sessions_helper_marks_background_completion_with_existing_snapshot():
     script = f"""
 const fs = require('fs');
