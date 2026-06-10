@@ -8988,6 +8988,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="space.duplicate")
         preflight_receipt = result.get("prompt_preflight") if isinstance(result.get("prompt_preflight"), dict) else None
         autonomy_policy = _space_layout_action_policy_receipt(name, preflight_receipt)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -8995,6 +8996,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "space": space,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 source_space_id=result.get("source_space_id"),
@@ -9003,6 +9005,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_id=result.get("revision_event_id"),
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name in {"space.spaces.savespacemeta", "space.current.savemeta"}:

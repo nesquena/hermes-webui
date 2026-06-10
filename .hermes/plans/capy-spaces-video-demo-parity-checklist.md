@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- Source-style Space duplicate/clone helpers now include the shared server-generated Memory Tree advisory/no-authority envelope beside active-instruction prompt-preflight, autonomy-policy, structured progress, and output-compaction receipts. Copied Space context remains advisory-only, cannot bypass prompt-preflight/approval/sandbox-preview/visual-QA/rollback gates, and caller-forged memory authority plus raw memory context, renderer/source/API-auth fields, scripts, tokens, and secret-looking fixtures stay out of receipts.
+
 - Source-style Space metadata/layout mutation helpers (`space.spaces.saveSpaceMeta` / `space.current.saveMeta` and `space.spaces.saveSpaceLayout` / `space.current.saveLayout`) now include the shared server-generated Memory Tree advisory/no-authority envelope beside prompt-preflight, autonomy-policy, structured progress, and output-compaction receipts. Caller-forged memory authority, raw memory context, renderer/source/API-auth/script/token/secret fixtures, and unsafe layout payload fields stay omitted while Space mutation context remains unable to bypass creator, approval, sandbox preview, visual QA, or rollback/recovery gates.
 
 - Revision history/recovery list tool responses now include the shared server-generated Memory Tree advisory/no-authority envelope beside required recovery prompt-preflight, autonomy-policy, `recovery.revision.list:<space_id>` progress, and output-compaction receipts. Revision timeline context remains untrusted and cannot let caller-forged memory authority, raw memory context, renderer/source/API-auth fields, scripts, tokens, or secret-looking fixtures bypass recovery gates.
