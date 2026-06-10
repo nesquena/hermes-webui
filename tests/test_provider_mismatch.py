@@ -1005,6 +1005,86 @@ def test_stale_at_provider_model_falls_back_when_family_mismatches(monkeypatch):
     assert effective == "gpt-5.5"
 
 
+def test_at_provider_third_party_model_survives_cold_catalog(monkeypatch):
+    """A non-first-party @provider:model selection must NOT revert to the default
+    just because the provider's group is missing from the current catalog snapshot.
+
+    Regression for the "@ollama-cloud:minimax-m3 snaps to default" report: providers
+    like ollama-cloud / deepseek / xai normalize to "" and discover their models
+    live, so a cold/partial catalog can momentarily lack the group even though the
+    provider is configured. The @provider:model resolver used to fall through to
+    ``default_model`` here, silently discarding the user's choice on the 2nd+ turn
+    and on chat switch (explicit_model_pick is False on those paths). Because the
+    bare id (minimax-m3) is not a first-party family id, the selection is preserved.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            # Active provider is something else and the ollama-cloud group is
+            # absent from THIS snapshot (live discovery not yet folded in).
+            "active_provider": "anthropic",
+            "default_model": "claude-opus-4.8",
+            "groups": [
+                {
+                    "provider": "Anthropic",
+                    "provider_id": "anthropic",
+                    "models": [{"id": "claude-opus-4.8", "label": "Opus"}],
+                },
+            ],
+        },
+    )
+
+    # Both the explicit-pick (1st turn) and the non-explicit (2nd+ turn / chat
+    # switch) paths must keep the selection.
+    for explicit in (True, False):
+        model, provider, changed = routes._resolve_compatible_session_model_state(
+            "@ollama-cloud:minimax-m3",
+            "ollama-cloud",
+            explicit_model_pick=explicit,
+        )
+        assert model == "@ollama-cloud:minimax-m3", (
+            f"explicit_model_pick={explicit}: third-party @provider model must "
+            f"survive a cold catalog snapshot, got {model!r}"
+        )
+        assert provider == "ollama-cloud"
+        assert changed is False
+
+
+def test_at_provider_explicit_pick_is_honored_even_when_unroutable(monkeypatch):
+    """An explicit @provider:model pick is honored even if its bare id is a
+    first-party family name and the provider is absent — mirrors the bare-model
+    branch's #3737 'user explicitly chose it' guard. Only the *non-explicit*
+    stale path repairs to the default (see the test above)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    model, _provider, changed = routes._resolve_compatible_session_model_state(
+        "@copilot:claude-opus-4.6",
+        None,
+        explicit_model_pick=True,
+    )
+    assert model == "@copilot:claude-opus-4.6"
+    assert changed is False
+
+
 def test_google_active_provider_keeps_valid_gemini_session_model(monkeypatch):
     """A Google-configured session must keep its Gemini model."""
     import api.routes as routes

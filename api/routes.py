@@ -2663,6 +2663,32 @@ def _resolve_compatible_session_model_state(
                 else None
             )
             return bare_model, provider_context, True
+        # Do NOT revert to the default when the user explicitly named a provider
+        # we can't find in *this* catalog snapshot but have no positive reason to
+        # treat as stale:
+        #   * explicit_model_pick — the user just chose this exact @provider:model,
+        #     so honor it (mirrors the bare-model branch's #3737 guard below).
+        #   * a non-first-party provider hint (provider_normalized == "", e.g.
+        #     ollama-cloud / deepseek / xai) whose BARE model is itself not a
+        #     first-party family id (gpt/claude/gemini). Those providers discover
+        #     their models live, so a cold/partial catalog can momentarily lack the
+        #     group even though the provider is configured; reverting here silently
+        #     discards the selection on the 2nd+ turn / chat switch (the
+        #     "@ollama-cloud:minimax-m3" snapping-to-default report). This mirrors
+        #     the slash-qualified branch, which already passes models whose provider
+        #     normalizes to "" through unchanged (see the active_provider in
+        #     {custom,openrouter} branch and #1023 below).
+        # A first-party family bare id under a vanished provider (e.g.
+        # "@copilot:claude-opus-4.6" while the agent now runs openai-codex) is a
+        # genuinely stale, misrouted first-party model and still falls through to
+        # the default-repair below.
+        _bare_is_first_party_family = any(
+            bare_model.lower().startswith(_p) for _p in ("gpt", "claude", "gemini")
+        )
+        if explicit_model_pick or (
+            not provider_normalized and not _bare_is_first_party_family
+        ):
+            return model, provider_raw, False
         if default_model:
             provider_context = (
                 raw_active_provider
