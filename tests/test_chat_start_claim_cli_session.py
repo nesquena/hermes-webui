@@ -817,3 +817,99 @@ def test_import_cli_reads_read_only_from_persisted_session():
         "directly — that misses source-refused cases (Greptile #4911 "
         "follow-up)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Residual gap from nesquena-hermes review 2026-06-10 03:58Z:
+# platformless gateway fallbacks ("gateway", "unknown") slipped the
+# original denylist.  These tests pin the tightened refusal list.
+# ---------------------------------------------------------------------------
+
+
+def test_helper_refuses_bare_gateway_session(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """Bare ``"gateway"`` source (gateway/run.py:3461 — no platform
+    set) must be refused.  Platform-tagged gateways (telegram,
+    discord, etc.) are caught by the existing messaging check; this
+    test covers the residual platformless window."""
+    SID = "20260610_bare_gateway_session"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=1,
+        title="Bare gateway", source="gateway", cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid: {"session_id": SID, "source_tag": "gateway",
+                      "raw_source": "gateway",
+                      "session_source": "other"},
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "not_claimable", (
+        "bare 'gateway' sessions must be refused — the conversation "
+        "is owned by the gateway process, not WebUI (#4911 residual "
+        "review gap)"
+    )
+    assert sess.read_only is True
+
+
+def test_helper_refuses_bare_unknown_session(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """Bare ``"unknown"`` source (gateway/slash_commands.py:2454) must
+    be refused with the same reasoning as bare-gateway."""
+    SID = "20260610_bare_unknown_session"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=1,
+        title="Bare unknown", source="unknown", cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid: {"session_id": SID, "source_tag": "unknown",
+                      "raw_source": "unknown",
+                      "session_source": "other"},
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "not_claimable"
+    assert sess.read_only is True
+
+
+def test_helper_refuses_gateway_via_state_db_source(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """Same refusal must fire when cli_meta is empty (the typical
+    TUI/Desktop case where the foreign store doesn't have the row)
+    and state.db has ``source='gateway'``."""
+    SID = "20260610_gateway_via_state_db"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=1,
+        title="Gateway", source="gateway", cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata", lambda _sid: {},
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "not_claimable"
+    assert sess.read_only is True
+
+
+def test_helper_denylist_includes_gateway_and_unknown():
+    """Direct check on the denylist set — guards against a future
+    refactor that splits the denylist and forgets the gateway/
+    unknown literals."""
+    import re
+    src = open("/opt/hermes-webui/api/routes.py", encoding="utf-8").read()
+    # Find the function body
+    m = re.search(
+        r"def _is_claimable_cli_source.*?(?=\n\ndef |\Z)",
+        src, re.DOTALL,
+    )
+    assert m, "could not locate _is_claimable_cli_source"
+    body = m.group(0)
+    # Both the cli_meta branch and the state.db-source branch must
+    # list gateway and unknown.
+    assert '"gateway"' in body and '"unknown"' in body, (
+        "_is_claimable_cli_source must denylist 'gateway' and "
+        "'unknown' in both the cli_meta and state_db branches "
+        "(#4911 residual review gap)"
+    )

@@ -3310,9 +3310,11 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
     surfaced as read-only stubs but never materialised as writable
     WebUI sidecars. We extend that with a denylist of foreign-source
     families whose ownership belongs to a non-WebUI process
-    (messaging channels, external agents, Claude Code), so a WebUI
-    POST cannot accidentally turn them into writable sidecars and
-    violate their ownership boundary (#4911 review).
+    (messaging channels, external agents, Claude Code, and
+    platformless gateway fallbacks), so a WebUI POST cannot
+    accidentally turn them into writable sidecars and violate their
+    ownership boundary (#4911 review + the residual gateway/unknown
+    gap flagged in the follow-up).
 
     The check is denylist-based: if a source is in any of the
     refused families below, it is non-claimable. Everything else
@@ -3321,7 +3323,10 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
     in ``get_cli_sessions()`` due to the CLI cap) fall through to
     ``state_db_source``; state.db has a ``source`` column with values
     like ``tui``, ``desktop``, ``cli``, ``cron``, ``claude_code``,
-    ``messaging``, etc.
+    ``messaging``, ``external_agent``, ``gateway`` (platform-tagged
+    gateways land in ``_MESSAGING_RAW_SOURCES`` and are caught by
+    the messaging check above; bare ``"gateway"`` / ``"unknown"``
+    literals are caught here).
     """
     cm = cli_meta or {}
     if bool(cm.get("read_only")):
@@ -3330,15 +3335,19 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
     if session_source in {"messaging", "external_agent"}:
         return False, f"session_source={session_source}"
     source_tag = (cm.get("source_tag") or cm.get("raw_source") or "").strip().lower()
-    if source_tag == "claude_code":
-        return False, "claude_code"
+    if source_tag in {"claude_code", "gateway", "unknown"}:
+        # gateway/unknown are the platformless gateway fallbacks
+        # (gateway/run.py:3461, gateway/slash_commands.py:2640,2454)
+        # — they own the conversation in the gateway, not in WebUI.
+        return False, f"foreign_source={source_tag}"
     if _is_messaging_session_record(cm):
         return False, "messaging_record"
     # Empty cli_meta is the common case for TUI/Desktop; fall through
     # to state.db's source column.  Refuse known-foreign state.db sources.
     if not source_tag and state_db_source:
         source_tag = state_db_source.strip().lower()
-    if source_tag in {"claude_code", "messaging", "external_agent"}:
+    if source_tag in {"claude_code", "messaging", "external_agent",
+                       "gateway", "unknown"}:
         return False, f"state_db_source={source_tag}"
     return True, ""
 
