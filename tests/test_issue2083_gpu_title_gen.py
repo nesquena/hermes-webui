@@ -4,7 +4,7 @@ Covers:
   1. _title_should_skip_remaining_attempts('llm_empty_reasoning') returns True
   2. _title_should_skip_remaining_attempts('llm_empty_reasoning_aux') returns True
   3. generate_title_raw_via_agent with mock agent returns (None, 'llm_empty_reasoning')
-  4. The constructed api_kwargs['extra_body'] contains both thinking and reasoning disabled
+  4. Reasoning-capable models get thinking/reasoning disabled in extra_body; non-reasoning models do not
   5. _run_background_title_update falls through to local fallback when agent returns llm_empty_reasoning
 """
 import sys
@@ -100,8 +100,8 @@ class TestGenerateTitleRawViaAgent(unittest.TestCase):
         self.assertIsNone(raw)
         self.assertEqual(status, 'llm_empty_reasoning')
 
-    def test_api_kwargs_includes_thinking_disabled(self):
-        """Verify that the constructed api_kwargs includes thinking disabled."""
+    def test_api_kwargs_includes_thinking_disabled_for_reasoning_model(self):
+        """Reasoning-capable models get thinking/reasoning disabled in extra_body."""
         from api.streaming import generate_title_raw_via_agent
 
         user_text = 'Test user input'
@@ -109,18 +109,17 @@ class TestGenerateTitleRawViaAgent(unittest.TestCase):
 
         mock_agent = MagicMock()
         mock_agent.provider = 'openai'
-        mock_agent.model = 'gpt-4'
+        mock_agent.model = 'o3-mini'
         mock_agent.base_url = None
         mock_agent.api_mode = None
         mock_agent.reasoning_config = None
 
         base_kwargs = {
-            'model': 'gpt-4',
+            'model': 'o3-mini',
             'messages': [],
         }
         mock_agent._build_api_kwargs.return_value = base_kwargs.copy()
 
-        # Track what api_kwargs are passed to the OpenAI client
         captured_kwargs = {}
 
         def capture_kwargs(**kwargs):
@@ -137,13 +136,52 @@ class TestGenerateTitleRawViaAgent(unittest.TestCase):
 
         generate_title_raw_via_agent(mock_agent, user_text, assistant_text)
 
-        # Verify extra_body was set with both thinking and reasoning disabled
         self.assertIn('extra_body', captured_kwargs)
         extra_body = captured_kwargs['extra_body']
         self.assertIn('thinking', extra_body)
         self.assertEqual(extra_body['thinking'], {'type': 'disabled'})
         self.assertIn('reasoning', extra_body)
         self.assertEqual(extra_body['reasoning'], {'enabled': False})
+
+    def test_api_kwargs_omits_reasoning_keys_for_non_reasoning_model(self):
+        """Non-reasoning models must not get thinking/reasoning in extra_body."""
+        from api.streaming import generate_title_raw_via_agent
+
+        user_text = 'Test user input'
+        assistant_text = 'Test assistant output'
+
+        mock_agent = MagicMock()
+        mock_agent.provider = 'mistral'
+        mock_agent.model = 'mistral-large'
+        mock_agent.base_url = None
+        mock_agent.api_mode = None
+        mock_agent.reasoning_config = None
+
+        base_kwargs = {
+            'model': 'mistral-large',
+            'messages': [],
+        }
+        mock_agent._build_api_kwargs.return_value = base_kwargs.copy()
+
+        captured_kwargs = {}
+
+        def capture_kwargs(**kwargs):
+            captured_kwargs.update(kwargs)
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = 'A nice title'
+            mock_response.choices[0].message.reasoning = None
+            return mock_response
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = capture_kwargs
+        mock_agent._ensure_primary_openai_client.return_value = mock_client
+
+        generate_title_raw_via_agent(mock_agent, user_text, assistant_text)
+
+        extra_body = captured_kwargs.get('extra_body', {})
+        self.assertNotIn('thinking', extra_body)
+        self.assertNotIn('reasoning', extra_body)
 
     def test_minimax_reasoning_split_preserved(self):
         """Verify that Minimax reasoning_split is added alongside disabled reasoning."""

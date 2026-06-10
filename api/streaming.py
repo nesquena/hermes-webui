@@ -38,6 +38,7 @@ from api.config import (
     load_settings,
     parse_reasoning_effort,
     coerce_reasoning_effort_for_model,
+    resolve_model_reasoning_efforts,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -2446,9 +2447,12 @@ def generate_title_raw_via_aux(
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
-    reasoning_extra = {"reasoning": {"enabled": False}}
-    if _is_minimax_route(provider, model, base_url):
-        reasoning_extra["reasoning_split"] = True
+    _is_minimax = _is_minimax_route(provider, model, base_url)
+    reasoning_extra = {}
+    if _is_minimax or resolve_model_reasoning_efforts(model, provider_id=provider, base_url=base_url):
+        reasoning_extra["reasoning"] = {"enabled": False}
+        if _is_minimax:
+            reasoning_extra["reasoning_split"] = True
     try:
         _timeout = _aux_title_timeout()
         from agent.auxiliary_client import call_llm
@@ -2471,7 +2475,7 @@ def generate_title_raw_via_aux(
                         max_tokens=max_tokens,
                         temperature=0.2,
                         timeout=_timeout,
-                        extra_body=reasoning_extra,
+                        extra_body=reasoning_extra or None,
                     )
                     raw, empty_status = _extract_title_response(resp, aux=True)
                     if raw:
@@ -2560,11 +2564,17 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         api_kwargs['temperature'] = 0.1
                         api_kwargs['timeout'] = 15.0
                         _tg_extra = dict(api_kwargs.get('extra_body') or {})
-                        _tg_extra.setdefault('thinking', {'type': 'disabled'})
-                        _tg_extra.setdefault('reasoning', {'enabled': False})
-                        api_kwargs['extra_body'] = _tg_extra
-                        if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
-                            api_kwargs['extra_body']['reasoning_split'] = True
+                        _agent_provider = getattr(agent, 'provider', '')
+                        _agent_model = getattr(agent, 'model', '')
+                        _agent_base_url = getattr(agent, 'base_url', '')
+                        _is_minimax = _is_minimax_route(_agent_provider, _agent_model, _agent_base_url)
+                        if _is_minimax or resolve_model_reasoning_efforts(_agent_model, provider_id=_agent_provider, base_url=_agent_base_url):
+                            _tg_extra.setdefault('thinking', {'type': 'disabled'})
+                            _tg_extra.setdefault('reasoning', {'enabled': False})
+                            if _is_minimax:
+                                _tg_extra['reasoning_split'] = True
+                        if _tg_extra:
+                            api_kwargs['extra_body'] = _tg_extra
                         if 'max_completion_tokens' in api_kwargs:
                             api_kwargs['max_completion_tokens'] = max_tokens
                         else:
