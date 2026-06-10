@@ -1060,10 +1060,15 @@ def test_session_model_display_resolver_is_read_only(monkeypatch):
     """Read-path model resolution must not mutate or save the session."""
     import api.routes as routes
 
+    # Accept **kwargs: the read-only display resolver now opts into the
+    # cache-only catalog via get_available_models(prefer_cache=True) so the
+    # hot GET /api/session path never triggers the cold live provider rebuild
+    # (multi-tab streaming interlock RCA). The stub must mirror the real
+    # signature; the contract under test here is read-only-ness, not arity.
     monkeypatch.setattr(
         routes,
         "get_available_models",
-        lambda: {
+        lambda **_kw: {
             "active_provider": "openai-codex",
             "default_model": "gpt-5.4-mini",
         },
@@ -1436,6 +1441,43 @@ def test_custom_namespace_model_always_preserved_on_custom_provider(monkeypatch)
 
     assert changed is False
     assert effective == "custom/my-local-llm"
+
+
+def test_explicit_pick_survives_profile_family_mismatch():
+    """When explicit_model_pick=True, a cross-family bare model survives
+    the profile-aware normalization instead of being rewritten to the
+    profile default (#3737)."""
+    import api.routes as routes
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "gpt-5.4-mini",
+        None,
+        profile_provider="anthropic",
+        profile_default_model="claude-sonnet-4",
+        explicit_model_pick=True,
+    )
+
+    assert changed is False, "explicit pick must not be normalized"
+    assert effective == "gpt-5.4-mini", "user's model must survive"
+    assert provider == "anthropic", "profile provider context preserved"
+
+
+def test_explicit_pick_false_allows_profile_family_normalization():
+    """Without explicit_model_pick, the same cross-family model IS rewritten
+    to the profile default (existing behavior, must not regress)."""
+    import api.routes as routes
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "gpt-5.4-mini",
+        None,
+        profile_provider="anthropic",
+        profile_default_model="claude-sonnet-4",
+        explicit_model_pick=False,
+    )
+
+    assert changed is True, "stale model must be normalized"
+    assert effective == "claude-sonnet-4", "rewritten to profile default"
+    assert provider == "anthropic", "profile provider context preserved"
 
 
 def test_stale_ui_js_does_not_inject_unavailable_option():

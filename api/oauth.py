@@ -83,6 +83,7 @@ def resolve_runtime_provider_with_anthropic_env_lock(resolver, *args, **kwargs):
 
 
 def _normalize_onboarding_oauth_provider(provider: str) -> str:
+    """Normalize Anthropic aliases (claude, claude-code) to 'anthropic'; defaults to 'openai-codex' when blank."""
     provider = str(provider or "").strip().lower()
     if provider in _ANTHROPIC_PROVIDER_ALIASES:
         return "anthropic"
@@ -90,6 +91,7 @@ def _normalize_onboarding_oauth_provider(provider: str) -> str:
 
 
 def _get_active_hermes_home() -> Path:
+    """Return the active Hermes profile home directory, falling back to ~/.hermes when profile resolution fails."""
     try:
         from api.profiles import get_active_hermes_home
 
@@ -156,6 +158,7 @@ def _write_auth_json(data: dict[str, Any], auth_path: Path | None = None) -> Pat
 
 
 def _now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string ending in Z."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -230,6 +233,7 @@ def _persist_codex_credentials(hermes_home: Path, token_data: dict[str, Any]) ->
 
 # Backward-compatible wrapper used by older code/tests.
 def _save_codex_credentials(token_data):
+    """Backward-compatible wrapper: persist Codex OAuth tokens to the active-profile auth.json."""
     return _persist_codex_credentials(_get_active_hermes_home(), token_data)
 
 
@@ -338,6 +342,7 @@ def _link_anthropic_credentials(hermes_home: Path) -> None:
 
 
 def _anthropic_public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    """Build the browser-safe start payload for an Anthropic credential-linking flow, omitting server-side secrets."""
     payload: dict[str, Any] = {
         "ok": True,
         "provider": "anthropic",
@@ -357,6 +362,7 @@ def _anthropic_public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[
 
 
 def _anthropic_public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    """Build the browser-safe status payload for an Anthropic flow, replacing internal error with a safe string."""
     payload: dict[str, Any] = {
         "ok": True,
         "provider": "anthropic",
@@ -369,6 +375,7 @@ def _anthropic_public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict
 
 
 def _spawn_anthropic_credential_worker(flow_id: str) -> None:
+    """Launch a daemon thread that polls for Claude Code credentials and transitions the Anthropic flow to success."""
     worker = threading.Thread(
         target=_run_anthropic_credential_worker, args=(flow_id,), daemon=True,
     )
@@ -462,6 +469,7 @@ def _remove_anthropic_link_marker(hermes_home: Path) -> None:
 # ── Codex protocol ──────────────────────────────────────────────────────────
 
 def _json_request(url: str, payload: dict[str, Any], *, form: bool = False) -> dict[str, Any]:
+    """POST a JSON or form-encoded payload to url and return the parsed JSON response."""
     if form:
         data = urllib.parse.urlencode(payload).encode("utf-8")
         content_type = "application/x-www-form-urlencoded"
@@ -479,10 +487,12 @@ def _json_request(url: str, payload: dict[str, Any], *, form: bool = False) -> d
 
 
 def _request_codex_user_code() -> dict[str, Any]:
+    """Request a new device-auth user code and device_auth_id from the Codex endpoint."""
     return _json_request(CODEX_USER_CODE_URL, {"client_id": CODEX_CLIENT_ID})
 
 
 def _poll_codex_authorization(device_auth_id: str, user_code: str) -> dict[str, Any] | None:
+    """Poll the Codex device token endpoint; returns None on 403/404 (not yet authorized) or raises otherwise."""
     try:
         return _json_request(
             CODEX_DEVICE_TOKEN_URL,
@@ -495,6 +505,7 @@ def _poll_codex_authorization(device_auth_id: str, user_code: str) -> dict[str, 
 
 
 def _exchange_codex_authorization(authorization_code: str, code_verifier: str) -> dict[str, Any]:
+    """Exchange a Codex authorization code and PKCE verifier for access/refresh tokens."""
     return _json_request(
         CODEX_TOKEN_URL,
         {
@@ -509,6 +520,7 @@ def _exchange_codex_authorization(authorization_code: str, code_verifier: str) -
 
 
 def _codex_public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    """Build the browser-safe start payload for a Codex device-code flow, including user_code and verification_uri."""
     return {
         "ok": True,
         "provider": "openai-codex",
@@ -522,6 +534,7 @@ def _codex_public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str,
 
 
 def _codex_public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    """Build the browser-safe status payload for a Codex flow, capping error strings at 200 characters."""
     payload = {
         "ok": True,
         "provider": "openai-codex",
@@ -534,6 +547,7 @@ def _codex_public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str
 
 
 def _public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    """Dispatch to the provider-specific start payload builder based on flow['provider']."""
     provider = flow.get("provider", "openai-codex")
     if provider == "anthropic":
         return _anthropic_public_start_payload(flow_id, flow)
@@ -541,6 +555,7 @@ def _public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    """Dispatch to the provider-specific status payload builder based on flow['provider']."""
     provider = flow.get("provider", "openai-codex")
     if provider == "anthropic":
         return _anthropic_public_status_payload(flow_id, flow)
@@ -548,6 +563,7 @@ def _public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]
 
 
 def _drop_sensitive_flow_fields(flow: dict[str, Any]) -> None:
+    """Remove device codes, authorization codes, and token material from a flow dict in place."""
     for key in (
         "device_auth_id",
         "authorization_code",
@@ -560,6 +576,7 @@ def _drop_sensitive_flow_fields(flow: dict[str, Any]) -> None:
 
 
 def _cleanup_oauth_flows(now: float | None = None) -> None:
+    """Expire pending flows past their deadline and purge terminal flows older than 300 seconds from memory."""
     now = now or time.time()
     cutoff = now - 300
     with _OAUTH_FLOWS_LOCK:
@@ -573,11 +590,13 @@ def _cleanup_oauth_flows(now: float | None = None) -> None:
 
 
 def _spawn_codex_oauth_worker(flow_id: str) -> None:
+    """Launch a daemon thread that drives the Codex device-code polling and token exchange loop."""
     worker = threading.Thread(target=_run_codex_oauth_worker, args=(flow_id,), daemon=True)
     worker.start()
 
 
 def _set_flow_status(flow_id: str, status: str, **fields: Any) -> None:
+    """Update a flow's status under the lock, then strip sensitive fields on terminal transitions."""
     with _OAUTH_FLOWS_LOCK:
         flow = _OAUTH_FLOWS.get(flow_id)
         if not flow:
@@ -590,6 +609,7 @@ def _set_flow_status(flow_id: str, status: str, **fields: Any) -> None:
 
 
 def _run_codex_oauth_worker(flow_id: str) -> None:
+    """Drive the Codex device-code polling loop until the user authorizes, the flow cancels, or it expires."""
     while True:
         with _OAUTH_FLOWS_LOCK:
             flow = dict(_OAUTH_FLOWS.get(flow_id) or {})
@@ -726,6 +746,7 @@ def start_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def poll_onboarding_oauth_flow(flow_id: str) -> dict[str, Any]:
+    """Return the current browser-safe status for an in-flight OAuth flow, expiring it if past its deadline."""
     _cleanup_oauth_flows()
     fid = str(flow_id or "").strip()
     if not fid:
@@ -742,6 +763,7 @@ def poll_onboarding_oauth_flow(flow_id: str) -> dict[str, Any]:
 
 
 def cancel_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
+    """Cancel a pending OAuth flow by flow_id and return the final status payload."""
     fid = str((body or {}).get("flow_id") or "").strip()
     if not fid:
         raise ValueError("flow_id is required")
@@ -763,8 +785,10 @@ def cancel_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
 # Backward-compatible names from the abandoned spike. They intentionally do not
 # expose provider device secrets to callers anymore.
 def start_codex_device_code():
+    """Backward-compatible shim: start a Codex device-code flow via start_onboarding_oauth_flow."""
     return start_onboarding_oauth_flow({"provider": "openai-codex"})
 
 
 def poll_codex_token(device_code, interval=5):
+    """Backward-compatible stub that always yields an error directing callers to the /api/onboarding/oauth/poll endpoint."""
     yield {"status": "error", "error": "Use /api/onboarding/oauth/poll with flow_id"}

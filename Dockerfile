@@ -30,6 +30,26 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Optional GPU user-space acceleration libraries for users who pass through
+# host GPU devices. The default image remains CPU-only.
+ARG INSTALL_GPU_LIBS=0
+RUN if [ "$INSTALL_GPU_LIBS" = "1" ]; then \
+        apt-get update -y --fix-missing --no-install-recommends \
+        && apt-get install -y --no-install-recommends \
+            libva2 \
+            vainfo \
+            mesa-va-drivers \
+        && if apt-cache show intel-media-va-driver-non-free >/dev/null 2>&1; then \
+            apt-get install -y --no-install-recommends intel-media-va-driver-non-free; \
+        else \
+            echo "intel-media-va-driver-non-free is not available from the configured Debian repositories; skipping Intel non-free VA-API driver."; \
+        fi \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/*; \
+    else \
+        echo "Skipping optional GPU user-space acceleration libraries (INSTALL_GPU_LIBS=0)."; \
+    fi
+
 # UTF-8
 RUN localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 ENV LANG=en_US.utf8

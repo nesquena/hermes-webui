@@ -132,6 +132,42 @@ def test_orphan_parent_reference_not_exposed_in_metadata(tmp_path):
     )
 
 
+def test_old_schema_without_source_or_messages_table_keeps_lineage(tmp_path):
+    """Old state.db schemas may lack optional source/message tables but still carry lineage."""
+    from api.agent_sessions import read_session_lineage_metadata
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+    CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        started_at REAL NOT NULL,
+        parent_session_id TEXT,
+        ended_at REAL,
+        end_reason TEXT
+    );
+    CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+    """)
+    t0 = time.time() - 100
+    conn.execute(
+        "INSERT INTO sessions (id, title, started_at, ended_at, end_reason) VALUES (?, ?, ?, ?, ?)",
+        ("old_root", "old_root", t0, t0 + 5, "compression"),
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, title, started_at, parent_session_id) VALUES (?, ?, ?, ?)",
+        ("old_tip", "old_tip", t0 + 6, "old_root"),
+    )
+    conn.commit()
+    conn.close()
+
+    result = read_session_lineage_metadata(db, ["old_tip"])
+
+    assert result["old_tip"]["parent_session_id"] == "old_root"
+    assert result["old_tip"]["_lineage_root_id"] == "old_root"
+    assert result["old_tip"]["_compression_segment_count"] == 2
+
+
 def test_cycle_in_parent_chain_terminates(tmp_path):
     """Pathological data with a parent cycle (A→B→A) must not infinite-loop."""
     from api.agent_sessions import read_session_lineage_metadata
@@ -282,3 +318,133 @@ def test_non_compression_parent_does_not_extend_lineage(tmp_path):
     # _lineage_root_id should NOT be set — chain doesn't span the boundary
     assert "_lineage_root_id" not in entry
     assert "_compression_segment_count" not in entry
+
+
+
+# ── #3751 backward-compat: messages-table schema variants must not collapse
+# the lineage metadata (regression for the gate finding on stage-a2/v0.51.306) ──
+
+def _make_db_with_messages(path, *, timestamp_type):
+    """Build a state.db with a compression lineage and a messages table whose
+    timestamp column is REAL, absent, or TEXT (ISO-8601)."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+    CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        source TEXT,
+        title TEXT,
+        model TEXT,
+        started_at REAL NOT NULL,
+        message_count INTEGER DEFAULT 0,
+        parent_session_id TEXT,
+        ended_at REAL,
+        end_reason TEXT
+    );
+    CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+    """)
+    if timestamp_type == "absent":
+        conn.execute("CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT)")
+    else:
+        conn.execute(f"CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, timestamp {timestamp_type})")
+    # Compression chain: root --(compression)--> tip
+    now = time.time()
+    conn.execute(
+        "INSERT INTO sessions (id, source, title, model, started_at, parent_session_id, ended_at, end_reason) "
+        "VALUES ('root', 'webui', 'root', 'openai/gpt-5', ?, NULL, ?, 'compression')",
+        (now - 100, now - 50),
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, title, model, started_at, parent_session_id, ended_at, end_reason) "
+        "VALUES ('tip', 'webui', 'tip', 'openai/gpt-5', ?, 'root', NULL, NULL)",
+        (now - 40,),
+    )
+    if timestamp_type == "absent":
+        conn.execute("INSERT INTO messages (session_id, role, content) VALUES ('tip', 'user', 'hi')")
+    elif timestamp_type == "TEXT":
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES ('tip', 'user', 'hi', '2026-06-06T12:00:00Z')"
+        )
+    else:  # REAL
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES ('tip', 'user', 'hi', ?)",
+            (now - 35,),
+        )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("timestamp_type", ["REAL", "absent", "TEXT"])
+def test_lineage_metadata_survives_messages_timestamp_schema_variants(tmp_path, timestamp_type):
+    """The branchy-lineage tip resolver pulls per-session message stats from the
+    messages table. Older/minimal state.db schemas can have a messages table with
+    NO timestamp column, or a non-numeric (ISO-8601 text) timestamp. Neither may
+    raise out of the DB block and collapse ALL lineage metadata to {} — which is
+    a silent regression vs. the prior behavior that returned metadata.
+    """
+    from api.agent_sessions import read_session_lineage_metadata
+
+    db = tmp_path / "state.db"
+    _make_db_with_messages(db, timestamp_type=timestamp_type)
+
+    result = read_session_lineage_metadata(db, ["tip"])
+    entry = result.get("tip", {})
+    # The compression lineage must still be reported (not silently dropped).
+    assert entry.get("_lineage_root_id") == "root", (
+        f"lineage metadata collapsed for messages.timestamp={timestamp_type}: {result!r}"
+    )
+    # And the canonical tip must resolve to the messageful continuation.
+    assert entry.get("_lineage_tip_id") == "tip"
+
+
+def test_importable_rows_survive_text_timestamp_in_messages(tmp_path):
+    """read_importable_agent_session_rows() builds a per-session MAX(timestamp)
+    and the compression_tip() DFS scores tips by last_activity. An older/
+    non-standard messages.timestamp stored as ISO-8601 TEXT must not raise a
+    TypeError out of the projection (get_cli_sessions() would swallow it and
+    return [] — silently hiding ALL imported agent rows). Sibling-path guard to
+    the read_session_lineage_metadata fix.
+    """
+    from api.agent_sessions import read_importable_agent_session_rows
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+    CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        source TEXT,
+        title TEXT,
+        model TEXT,
+        started_at REAL NOT NULL,
+        message_count INTEGER DEFAULT 0,
+        parent_session_id TEXT,
+        ended_at REAL,
+        end_reason TEXT
+    );
+    CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+    CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp TEXT);
+    """)
+    now = time.time()
+    # compression chain root --(compression)--> tip, tip has a messageful row
+    conn.execute(
+        "INSERT INTO sessions (id, source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason) "
+        "VALUES ('root', 'cli', 'root', 'openai/gpt-5', ?, 0, NULL, ?, 'compression')",
+        (now - 100, now - 50),
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason) "
+        "VALUES ('tip', 'cli', 'tip', 'openai/gpt-5', ?, 1, 'root', NULL, NULL)",
+        (now - 40,),
+    )
+    # ISO-8601 TEXT timestamp — the value MAX() would return as a string
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES ('tip', 'user', 'hi', '2026-06-06T12:00:00Z')"
+    )
+    conn.commit()
+    conn.close()
+
+    # Must NOT raise; must surface the imported chain (cli source).
+    rows = read_importable_agent_session_rows(db, limit=None, exclude_sources=None)
+    ids = {r["id"] for r in rows}
+    assert ids, "import projection returned no rows on a TEXT messages.timestamp (would hide all CLI sessions)"
+    # the chain collapses to its tip
+    assert "tip" in ids

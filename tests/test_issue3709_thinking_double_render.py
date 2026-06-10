@@ -1,34 +1,16 @@
-"""#3709 -- Thinking card must not render twice (inside Activity AND below the answer).
+"""#3709 -- #3401 Worklog Thinking must not render exact duplicates.
 
-Regression coverage for the double-render introduced by #3592's inline branch
-(v0.51.258). In a turn that has BOTH a tool-bearing message and a trailing
-thinking-only message, two code paths emitted a thinking card from the same
-``assistantThinking`` map:
+Master fixed a double-render bug in the older Activity rendering path: a turn
+with tools plus a sibling thinking-only message could show the same Thinking
+card twice. #3401 replaces that old structure with a folded Worklog made of
+sibling items: process prose, Thinking Card, and Tool Card/Group.
 
-  1. the Activity-group path (tool-bearing message) put the thinking at the top
-     of the collapsed Activity group, and
-  2. the inline path (thinking-only message) appended a SECOND card via
-     ``insertAdjacentHTML('beforeend')`` -- which, because the segment already
-     carried the answer body + ``msg-foot`` footer, stranded the card *below*
-     the "Done in ..." line.
+These static assertions keep the #3709 invariant in the #3401 model:
 
-The fix keeps the #3592 inline behaviour for genuinely thinking-only turns (so
-their thinking is not buried in a collapsed group) but:
-
-  A1. only renders inline when the turn has NO Activity group at all
-      (``turnsWithActivityGroup`` gate), so a tool-bearing turn's thinking-only
-      sibling does not emit a duplicate card;
-  A2. inserts the inline card BEFORE the answer body / footer
-      (``insertAdjacentHTML('beforebegin')`` on ``.msg-body,.msg-foot``) so it
-      reads above the answer instead of orphaned below "Done in ...";
-  B.  strips the thinking against the TURN's combined visible answer
-      (``_turnVisibleTextByRawIdx``) so a trailing thinking-only message whose
-      answer prose lives on a sibling message still gets its answer-echo removed.
-
-These are static source-structure assertions (the render path is DOM-driven and
-exercised live); they lock the invariants so the double-render cannot silently
-return, and so a future blunt "just delete the inline branch" change (which would
-re-break #3592) fails fast here instead.
+* settled Thinking is rendered through the Worklog item path, not the old inline
+  sibling path below the answer;
+* exact duplicate Thinking cards are keyed by normalized content and suppressed;
+* different sibling reasoning can still become distinct Worklog items.
 """
 from __future__ import annotations
 
@@ -39,127 +21,123 @@ UI_JS = (Path(__file__).resolve().parent.parent / "static" / "ui.js").read_text(
 
 
 def _render_messages_body() -> str:
-    """Return the body of renderMessages() (best-effort slice) for scoped asserts."""
     start = UI_JS.find("function renderMessages(")
     assert start != -1, "renderMessages() not found"
-    # Slice a generous window; the activityIdxs loop + footer logic live within.
-    return UI_JS[start:start + 60000]
+    return UI_JS[start:start + 80000]
 
 
-def test_inline_thinking_branch_still_exists_for_thinking_only_turns():
-    """#3592 must NOT be reverted: a thinking-only turn still renders its thinking
-    inline (not buried in a collapsed Activity group)."""
-    assert "!cards.length&&assistantThinking.has(aIdx)" in UI_JS, (
-        "the thinking-only inline branch (#3592) must remain — deleting it "
-        "re-buries thinking-only turns in a collapsed Activity group"
-    )
-    assert "_thinkingCardHtml(" in UI_JS
+def _function_body(name: str) -> str:
+    match = re.search(rf"function\s+{re.escape(name)}\s*\(", UI_JS)
+    assert match, f"{name}() not found"
+    brace = UI_JS.find("{", match.end())
+    assert brace != -1, f"{name}() has no body"
+    depth = 1
+    i = brace + 1
+    in_string = None
+    escaped = False
+    in_line_comment = False
+    in_block_comment = False
+    while i < len(UI_JS) and depth:
+        ch = UI_JS[i]
+        nxt = UI_JS[i + 1] if i + 1 < len(UI_JS) else ""
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+        if in_block_comment:
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == in_string:
+                in_string = None
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if ch in ("'", '"', "`"):
+            in_string = ch
+            i += 1
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    return UI_JS[brace + 1:i - 1]
 
 
-def test_inline_branch_gated_on_turn_having_no_activity_group():
-    """A1: the inline card must only render when the turn has no Activity group,
-    so a tool-bearing turn's thinking-only sibling does not duplicate the card."""
+def test_settled_thinking_renders_through_worklog_item_path():
     body = _render_messages_body()
-    assert "turnsWithActivityGroup" in body, (
-        "must precompute the set of turns that already own an Activity group (#3709 A1)"
+    assert "_appendWorklogStep(state.group, anchorRow, cards, thinkingText" in body, (
+        "Settled Thinking should render through the #3401 Worklog item path."
     )
-    # The inline render must be guarded by a membership check on that set.
-    assert re.search(
-        r"turnsWithActivityGroup\.has\(\s*anchorTurn\s*\)",
-        body,
-    ), "the inline thinking render must be gated on turnsWithActivityGroup.has(anchorTurn)"
+    assert "_thinkingActivityNode(thinkingText, false)" in UI_JS, (
+        "Thinking should remain a dedicated Worklog Thinking Card node."
+    )
+    assert "data-worklog-thinking-card" in UI_JS, (
+        "Thinking Cards need a stable Worklog-specific hook."
+    )
 
 
-def test_turns_with_activity_group_built_from_tool_bearing_segments():
-    """The turnsWithActivityGroup set must be populated from tool-bearing message
-    segments' enclosing .assistant-turn nodes."""
+def test_settled_worklog_thinking_uses_content_key_for_exact_duplicate_suppression():
+    body_min = re.sub(r"\s+", "", _render_messages_body())
+    assert "thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:''" in body_min, (
+        "Settled Worklog should suppress duplicate Thinking by normalized content, "
+        "not by assistant message index."
+    )
+    append_body = _function_body("_appendWorklogStep")
+    assert "seenReasons.has(thinkingKey)" in append_body
+    assert "seenReasons.add(thinkingKey)" in append_body
+
+
+def test_exact_echo_suppression_compares_turn_visible_texts():
     body = _render_messages_body()
-    block = re.search(
-        r"const turnsWithActivityGroup=new Set\(\);(.*?)const activityIdxs=",
-        body,
-        re.DOTALL,
+    helper = _function_body("_worklogReasoningTextFromMessage")
+    assert "assistantTurnVisibleContentByRawIdx" in body
+    assert "_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents)" in body
+    assert "_stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts)" in helper, (
+        "A thinking-only sibling that exactly echoes the visible process/final text "
+        "should be suppressed after settlement."
     )
-    assert block, "turnsWithActivityGroup population block not found"
-    text = block.group(1)
-    assert "closest('.assistant-turn')" in text, (
-        "must map tool-bearing segments to their enclosing .assistant-turn"
-    )
-    assert "turnsWithActivityGroup.add(" in text
 
 
-def test_inline_card_inserted_before_body_and_footer():
-    """A2: when the inline render is correct, the card must land BEFORE the answer
-    body / msg-foot (beforebegin), not appended after the 'Done in ...' footer."""
+def test_distinct_sibling_reasoning_is_still_available_to_worklog():
     body = _render_messages_body()
-    # The inline branch selects the body/foot element and inserts before it.
-    assert re.search(r"querySelector\(\s*'\.msg-body,\.msg-foot'\s*\)", body), (
-        "inline branch must locate the .msg-body/.msg-foot element to anchor before it"
+    assert "for(const aIdx of assistantThinking.keys())" in body, (
+        "Each assistant reasoning entry should still be eligible for a Worklog item."
     )
-    assert "insertAdjacentHTML('beforebegin'" in body, (
-        "the inline thinking card must be inserted 'beforebegin' the answer body/footer "
-        "(not 'beforeend', which strands it below 'Done in ...') (#3709 A2)"
+    assert "const thinkingText=thinkingIdx!==null?assistantThinking.get(thinkingIdx):''" in body
+    assert "seenReasons:state.seenReasons" in body, (
+        "Duplicate suppression should be scoped to rendered Worklog keys, not by "
+        "dropping reasoning metadata up front."
     )
 
 
-def test_no_unconditional_beforeend_thinking_in_inline_branch():
-    """The old orphaning insert ('beforeend' of the raw thinking card on the anchor
-    row) must be gone from the inline branch."""
+def test_old_inline_activity_double_render_path_is_not_restored():
     body = _render_messages_body()
-    # The specific regression pattern: appending the thinking card to the end of
-    # the anchor row unconditionally. It must no longer be the inline path.
+    assert "!cards.length&&assistantThinking.has(aIdx)" not in body, (
+        "The old thinking-only inline Activity branch should not return in the "
+        "#3401 Worklog model."
+    )
     assert "anchorRow.insertAdjacentHTML('beforeend',_thinkingCardHtml(assistantThinking.get(aIdx)))" not in body, (
-        "the inline branch must not append the thinking card to the end of the "
-        "anchor row (that stranded it below the footer — the #3709 bug)"
+        "Thinking must not be appended below the final answer/footer."
     )
-
-
-def test_turn_level_echo_strip_exists():
-    """B: thinking is stripped against the TURN's combined visible answer, not only
-    the same message's body — so a trailing thinking-only message that echoes the
-    answer gets de-duped too."""
-    body = _render_messages_body()
-    assert "_turnVisibleTextByRawIdx" in body, (
-        "must build a per-turn combined visible-answer map (#3709 defect B)"
+    assert "mergedThinking" not in body, (
+        "The old Activity mergedThinking implementation should not be required "
+        "after #3401 moves Thinking into Worklog sibling items."
     )
-    # The strip site must consult the turn-level text in addition to displayContent.
-    assert re.search(
-        r"_turnVisibleTextByRawIdx\.get\(\s*rawIdx\s*\)",
-        body,
-    ), "the echo-strip must look up the turn's combined visible text"
-    # And it must feed that into the echo-strip helper.
-    strip_block = re.search(
-        r"_turnVisibleTextByRawIdx\.get\(\s*rawIdx\s*\)(.*?)_stripVisibleAssistantEchoFromThinking\(\s*thinkingText\s*,\s*turnVisible\s*\)",
-        body,
-        re.DOTALL,
-    )
-    assert strip_block, (
-        "the turn-level visible text must be passed to "
-        "_stripVisibleAssistantEchoFromThinking"
-    )
-
-
-def test_suppressed_sibling_thinking_merged_into_group_not_dropped():
-    """When the A1 gate suppresses a thinking-only sibling's inline card (because
-    its turn has an Activity group), that sibling's thinking must NOT be lost — the
-    group must render the TURN's merged thinking, not only the tool message's own
-    entry. (Codex re-gate finding: rendering only assistantThinking.get(aIdx) for
-    the tool index dropped a distinct sibling's reasoning.)"""
-    body = _render_messages_body()
-    # A per-turn thinking aggregation must exist...
-    assert "turnThinkingParts" in body, (
-        "must aggregate thinking per turn so a suppressed sibling's reasoning is "
-        "carried into the Activity group, not dropped (#3709 / Codex re-gate)"
-    )
-    # ...and the Activity group must render the MERGED text, de-duped, once per turn.
-    assert "mergedThinking" in body, (
-        "the Activity group must render the turn's merged thinking"
-    )
-    assert "_renderedTurnThinking" in body, (
-        "merged thinking must render once per turn (guard against double-emit when "
-        "a turn has multiple tool messages)"
-    )
-    # The group node must be built from the merged text, not the single-index entry.
-    assert re.search(
-        r"_thinkingActivityNode\(\s*mergedThinking\s*,",
-        body,
-    ), "the Activity group thinking node must be built from mergedThinking"

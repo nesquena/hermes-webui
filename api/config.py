@@ -249,6 +249,18 @@ else:
     _HERMES_FOUND = False
 
 # ── Config file (reloadable -- supports profile switching) ──────────────────
+
+def _expand_env_vars(obj):
+    """Recursively expand ${VAR} references in config values using os.environ."""
+    if isinstance(obj, str):
+        return re.sub(r"\${([^}]+)}", lambda m: os.environ.get(m.group(1), m.group(0)), obj)
+    if isinstance(obj, dict):
+        return {k: _expand_env_vars(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_env_vars(item) for item in obj]
+    return obj
+
+
 _cfg_cache = {}
 _cfg_lock = threading.Lock()
 _cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
@@ -308,6 +320,22 @@ def _get_config_path() -> Path:
 
 _WEBUI_SESSION_SAVE_MODES = {"deferred", "eager"}
 _DEFAULT_WEBUI_SESSION_SAVE_MODE = "deferred"
+_DEFAULT_EXPERIMENTAL_CONFIG = {
+    # Dormant first slice for the unified SessionDB migration. Runtime WebUI
+    # session call sites must continue using the existing JSON paths unless a
+    # later PR deliberately enables and wires this flag.
+    "unified_session_db": False,
+}
+
+
+def _apply_config_defaults(config_data: dict) -> None:
+    """Populate documented default-only config keys in-place."""
+    experimental = config_data.get("experimental")
+    if not isinstance(experimental, dict):
+        experimental = {}
+        config_data["experimental"] = experimental
+    for key, value in _DEFAULT_EXPERIMENTAL_CONFIG.items():
+        experimental.setdefault(key, value)
 
 
 def get_config() -> dict:
@@ -355,6 +383,19 @@ def get_webui_session_save_mode(config_data: dict | None = None) -> str:
     return _DEFAULT_WEBUI_SESSION_SAVE_MODE
 
 
+def is_unified_session_db_enabled(config_data: dict | None = None) -> bool:
+    """Return the dormant unified-session-db feature flag.
+
+    The default is intentionally false so adding the JSON adapter cannot change
+    runtime persistence until a later migration PR switches call sites.
+    """
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    experimental = active_cfg.get("experimental", {}) if isinstance(active_cfg, dict) else {}
+    if not isinstance(experimental, dict):
+        return False
+    return experimental.get("unified_session_db") is True
+
+
 def reload_config() -> None:
     """Reload config.yaml from the active profile's directory."""
     global _cfg_mtime, _cfg_path, _cfg_fingerprint
@@ -372,13 +413,14 @@ def reload_config() -> None:
             if config_path.exists():
                 loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
-                    _cfg_cache.update(loaded)
+                    _cfg_cache.update(_expand_env_vars(loaded))
                     try:
                         _cfg_mtime = Path(config_path).stat().st_mtime
                     except OSError:
                         _cfg_mtime = 0.0
         except Exception:
             logger.debug("Failed to load yaml config from %s", config_path)
+        _apply_config_defaults(_cfg_cache)
         _cfg_fingerprint = _fingerprint_config(_cfg_cache)
         # Bust the models cache so the next request sees fresh config values.
         # Only delete the disk cache when config has actually changed -- not on
@@ -399,7 +441,7 @@ def _load_yaml_config_file(config_path: Path) -> dict:
         return {}
     try:
         loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        return loaded if isinstance(loaded, dict) else {}
+        return _expand_env_vars(loaded) if isinstance(loaded, dict) else {}
     except Exception:
         logger.debug("Failed to parse yaml config from %s", config_path)
         return {}
@@ -2749,6 +2791,142 @@ _available_models_cache_lock = threading.RLock()  # must be RLock: cold path ref
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
 
+# Hard wall-clock budget for a COLD live provider-catalog rebuild when it is
+# run from a foreground request path. The live rebuild does one network probe
+# per detected provider (Copilot token-exchange HTTPS, OpenRouter /v1/models,
+# Nous /models, ...). On a flaky / corp / WSL network any single probe can
+# stall for its full per-call timeout (Copilot urllib timeout=10s) and, summed
+# across N providers, block the request thread for tens of seconds. This bounds
+# the time a foreground caller will wait: past the budget it returns a usable
+# fallback (last-known disk cache or a network-free minimal catalog) and lets
+# the rebuild finish out-of-band and populate the cache for the next call.
+# Set HERMES_WEBUI_MODELS_REBUILD_BUDGET=0 to restore the legacy synchronous
+# (unbounded) behaviour.
+try:
+    _LIVE_REBUILD_BUDGET_SECONDS: float = float(
+        os.getenv("HERMES_WEBUI_MODELS_REBUILD_BUDGET", "4") or "4"
+    )
+except (TypeError, ValueError):
+    _LIVE_REBUILD_BUDGET_SECONDS = 4.0
+
+
+# ── Budget-exceeded warning rate-limit ───────────────────────────────────────
+# Q-2979-A3 / Copilot discussion_r3305864400: the live-rebuild-budget-exceeded
+# warning at _invoke_models_rebuild's slow-path is potentially high-volume —
+# every provider catalog refresh that runs past _LIVE_REBUILD_BUDGET_SECONDS
+# emits one, so a hung upstream probe (or a sustained burst of cold callers)
+# could flood the log at warning level. Rate-limit per reason: the FIRST
+# occurrence in a cooldown window logs at warning; subsequent occurrences in
+# the same window log at info (so log signal stays useful but volume bounded).
+# Override the default cooldown via HERMES_WEBUI_BUDGET_WARN_COOLDOWN (seconds).
+try:
+    _BUDGET_WARN_COOLDOWN_SECONDS: float = float(
+        os.getenv("HERMES_WEBUI_BUDGET_WARN_COOLDOWN", "300") or "300"
+    )
+except (TypeError, ValueError):
+    _BUDGET_WARN_COOLDOWN_SECONDS = 300.0
+
+_BUDGET_WARN_STATE: dict[str, float] = {}
+_BUDGET_WARN_LOCK = threading.Lock()
+
+
+def _should_warn_budget(reason: str, cooldown_s: float | None = None) -> bool:
+    """Return True iff the budget warning for ``reason`` should log at
+    warning level (first hit, or last warn-level emit was more than
+    ``cooldown_s`` seconds ago). Otherwise False — the caller should demote
+    to info for the same payload so the signal is retained but the noise is
+    capped. Thread-safe; the cooldown is shared across all live-rebuild
+    callers in this process.
+    """
+    cooldown = (
+        _BUDGET_WARN_COOLDOWN_SECONDS if cooldown_s is None else float(cooldown_s)
+    )
+    now = time.monotonic()
+    with _BUDGET_WARN_LOCK:
+        last = _BUDGET_WARN_STATE.get(reason)
+        if last is None or (now - last) >= cooldown:
+            _BUDGET_WARN_STATE[reason] = now
+            return True
+        return False
+
+
+def _invoke_models_rebuild(builder):
+    """Indirection seam around the cold catalog rebuild.
+
+    Production simply calls ``builder()``. Exists so tests can simulate a
+    slow / hanging provider probe without having to reach the closure that
+    actually does the per-provider network calls.
+    """
+    return builder()
+
+
+def _minimal_static_models_catalog() -> dict:
+    """Return a network-free /api/models catalog derived from config + auth.
+
+    Used as the fast fallback when a foreground caller must NOT pay the live
+    provider probe: server-initiated wakeup turns (Option Z) and the
+    bounded-rebuild timeout path. It is enough for
+    ``_resolve_compatible_session_model_state`` (which only needs
+    ``default_model`` / ``active_provider`` plus the persisted session model)
+    and keeps the picker non-empty. Intentionally NOT written to the 24h
+    cache so a subsequent human ``/api/models`` still triggers a real rebuild.
+    """
+    try:
+        active_provider = None
+        cfg_base_url = ""
+        model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+        if isinstance(model_cfg, dict):
+            active_provider = model_cfg.get("provider")
+            cfg_base_url = model_cfg.get("base_url", "") or ""
+        if active_provider:
+            try:
+                active_provider = _resolve_configured_provider_id(
+                    active_provider, cfg, base_url=cfg_base_url
+                )
+            except Exception:
+                active_provider = str(active_provider or "").strip() or None
+        if not active_provider:
+            try:
+                _ap = _get_auth_store_path()
+                if _ap.exists():
+                    _store = json.loads(_ap.read_text(encoding="utf-8"))
+                    active_provider = (
+                        _resolve_configured_provider_id(
+                            _store.get("active_provider"), cfg, base_url=cfg_base_url
+                        )
+                        or None
+                    )
+            except Exception:
+                pass
+        default_model = get_effective_default_model(cfg)
+        groups: list[dict] = []
+        if default_model:
+            try:
+                label = _get_label_for_model(default_model, [])
+            except Exception:
+                label = default_model
+            groups.append(
+                {
+                    "provider": "Default",
+                    "provider_id": active_provider or "default",
+                    "models": [{"id": default_model, "label": label}],
+                }
+            )
+        return {
+            "active_provider": active_provider,
+            "default_model": default_model,
+            "configured_model_badges": {},
+            "groups": groups,
+        }
+    except Exception:
+        logger.debug("minimal static models catalog build failed", exc_info=True)
+        return {
+            "active_provider": None,
+            "default_model": "",
+            "configured_model_badges": {},
+            "groups": [],
+        }
+
 # Cache for credential pool results -- calling load_pool() per-provider per-server
 # session is expensive (~10s for zai due to endpoint probing).  The credential pool
 # only changes when the user adds/removes credentials, which is rare; a 24h TTL
@@ -3393,7 +3571,7 @@ def _read_visible_codex_cache_model_ids() -> list[str]:
     return ordered
 
 
-def get_available_models() -> dict:
+def get_available_models(*, prefer_cache: bool = False) -> dict:
     """
     Return available models grouped by provider.
 
@@ -3408,6 +3586,15 @@ def get_available_models() -> dict:
         'default_model': str,
         'groups': [{'provider': str, 'models': [{'id': str, 'label': str}]}]
     }
+
+    ``prefer_cache=True`` resolves WITHOUT ever triggering a live provider
+    probe: it serves the warm in-memory cache, then the last-known on-disk
+    cache, and only as a last resort a network-free minimal catalog
+    (config/auth derived). It NEVER does the per-provider live rebuild (the
+    Copilot token-exchange HTTPS call et al.). This is the path a
+    server-initiated wakeup turn (Option Z) takes so a cold catalog can never
+    block the wakeup chat/start on a flaky network. A normal human request
+    leaves this False and keeps the full live-discovery behaviour.
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint, _cache_build_cv
     # Config mtime check — must come before any config reads.
@@ -4825,25 +5012,175 @@ def get_available_models() -> dict:
             _save_models_cache_to_disk(disk_groups)
             return copy.deepcopy(disk_groups)
 
+        # ── prefer_cache: NEVER run the live provider rebuild ────────────────
+        # Server-initiated wakeup turns (Option Z) reach here with a cold
+        # cache (the drain thread fires while idle; the catalog warmed by a
+        # human's /api/models has expired or was never built). The live
+        # rebuild does a Copilot token-exchange HTTPS call per the proven
+        # thread-stack; on this WSL/corp network it stalls the wakeup
+        # chat/start indefinitely. A wakeup turn does NOT need the full live
+        # catalog — _resolve_compatible_session_model_state only needs
+        # default_model/active_provider and trusts the persisted session
+        # model. Serve a network-free minimal catalog instead and let a later
+        # human request do the real live rebuild.
+        if prefer_cache:
+            # NOTE (Greptile P1): do NOT touch _cache_build_in_progress here.
+            # This branch never set the flag (only the cold path below does),
+            # and `should_wait` is sampled outside the lock (line ~4964). A
+            # concurrent cold-path caller can flip the flag to True after our
+            # sample but before we acquire the lock; clearing it here would
+            # prematurely release that rebuild's serialization, waking waiters
+            # to an empty cache and triggering a second live rebuild. Just
+            # serve the network-free minimal catalog and leave the flag alone.
+            return copy.deepcopy(_minimal_static_models_catalog())
+
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
             _cache_build_in_progress = True
-        try:
-            result = _build_available_models_uncached()
-        except Exception:
-            # Always reset the flag so waiting threads don't block for 60s
+
+        # Legacy synchronous (unbounded) rebuild — opt-in via budget<=0.
+        if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
+            try:
+                result = _invoke_models_rebuild(_build_available_models_uncached)
+            except BaseException:
+                # Always reset the flag so waiting threads don't block for 60s
+                with _cache_build_cv:
+                    _cache_build_in_progress = False
+                    _cache_build_cv.notify_all()
+                raise
+            with _cache_build_cv:
+                _available_models_cache = result
+                _available_models_cache_ts = time.monotonic()
+                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                _cache_build_in_progress = False
+                _cache_build_cv.notify_all()
+            _save_models_cache_to_disk(result)
+            return copy.deepcopy(result)
+
+        # ── Bounded rebuild (defense-in-depth) ───────────────────────────────
+        # The live rebuild does a network probe per provider (Copilot token
+        # exchange over HTTPS, OpenRouter/Nous /models, ...). On a flaky / corp
+        # / WSL network any single probe can stall for its full per-call
+        # timeout and, summed across providers, pin a foreground request
+        # thread for tens of seconds (the wakeup-turn / chat-start hang).
+        #
+        # Run the rebuild on a daemon worker; the foreground waits at most
+        # _LIVE_REBUILD_BUDGET_SECONDS.
+        #
+        # WITHIN budget (the normal fast case): the FOREGROUND publishes the
+        # result synchronously and only then returns — preserving the exact
+        # pre-existing contract (cache + on-disk file populated by the time
+        # get_available_models() returns). The worker stays hands-off.
+        #
+        # OVER budget (a provider probe is slow/hung): the foreground returns
+        # the best fallback immediately and the still-running worker publishes
+        # its result out-of-band when it finally finishes, so the next caller
+        # gets a warm cache instead of paying the cold rebuild again.
+        #
+        # ``_publish_models_result`` / ``box["published"]`` ensure exactly one
+        # publisher even at the budget boundary (no double write, no lost
+        # refresh). The worker only touches _cache_build_cv after the
+        # foreground releases the RLock by returning, so no lock inversion.
+        build_done = threading.Event()
+        budget_exceeded = threading.Event()
+        publish_lock = threading.Lock()
+        box: dict = {}
+
+        def _publish_models_result(result):
+            global _cache_build_in_progress, _available_models_cache
+            global _available_models_cache_ts, _available_models_cache_source_fingerprint
+            with _cache_build_cv:
+                _available_models_cache = result
+                _available_models_cache_ts = time.monotonic()
+                _available_models_cache_source_fingerprint = (
+                    _models_cache_source_fingerprint()
+                )
+                _cache_build_in_progress = False
+                _cache_build_cv.notify_all()
+            try:
+                _save_models_cache_to_disk(result)
+            except Exception:
+                logger.debug("models cache disk save failed", exc_info=True)
+
+        def _clear_build_in_progress():
+            global _cache_build_in_progress
             with _cache_build_cv:
                 _cache_build_in_progress = False
                 _cache_build_cv.notify_all()
-            raise
-        with _cache_build_cv:
-            _available_models_cache = result
-            _available_models_cache_ts = time.monotonic()
-            _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-            _cache_build_in_progress = False
-            _cache_build_cv.notify_all()
-        _save_models_cache_to_disk(result)
-        return copy.deepcopy(result)
+
+        def _claim_publish() -> bool:
+            """Return True iff the caller won the right to publish."""
+            with publish_lock:
+                if box.get("published"):
+                    return False
+                box["published"] = True
+                return True
+
+        def _rebuild_worker():
+            try:
+                box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
+            except Exception as exc:  # noqa: BLE001 — propagated to caller
+                box["error"] = exc
+            finally:
+                build_done.set()
+                # Only publish out-of-band if the foreground already gave up
+                # (over budget). Within budget the foreground publishes
+                # synchronously, so the worker must NOT touch the cache.
+                if budget_exceeded.is_set() and _claim_publish():
+                    if "result" in box:
+                        _publish_models_result(box["result"])
+                    else:
+                        _clear_build_in_progress()
+
+        _worker = threading.Thread(
+            target=_rebuild_worker,
+            name="models-catalog-rebuild",
+            daemon=True,
+        )
+        _worker.start()
+
+        if build_done.wait(timeout=_LIVE_REBUILD_BUDGET_SECONDS):
+            # Build finished within budget — foreground publishes
+            # synchronously, exactly like the legacy path.
+            if "error" in box:
+                _clear_build_in_progress()
+                raise box["error"]
+            if _claim_publish():
+                _publish_models_result(box["result"])
+            return copy.deepcopy(box["result"])
+
+        # Budget elapsed. Mark it so the worker knows it owns out-of-band
+        # publication. Handle the tiny race where the build completed between
+        # wait() returning False and here: if so, still publish synchronously
+        # so this caller honours the cache contract.
+        budget_exceeded.set()
+        if build_done.is_set() and "error" not in box and "result" in box:
+            if _claim_publish():
+                _publish_models_result(box["result"])
+            return copy.deepcopy(box["result"])
+
+        # Genuinely slow/hung probe: serve the best fallback now; the worker
+        # keeps going and refreshes the cache for the next caller.
+        # Rate-limit the warning per Q-2979-A3 — see _should_warn_budget; a
+        # sustained budget breach demotes to info after the first emit in
+        # each cooldown window so log volume stays bounded.
+        _budget_log_msg = (
+            "live provider-catalog rebuild exceeded %.1fs budget — serving "
+            "fallback, refreshing catalog out-of-band"
+        )
+        if _should_warn_budget("live_rebuild_budget_exceeded"):
+            logger.warning(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
+        else:
+            logger.info(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
+        # Note: ``disk_groups``, if non-None, was already consumed by the
+        # cold-path early-return at the "Cold path: disk cache hit" branch
+        # above (line ~4608). Any execution that reaches HERE necessarily
+        # took the live-rebuild branch, which means ``disk_groups is None``
+        # at this point — so we don't re-check it. Per Copilot review on
+        # PR #2971: the previous ``if disk_groups is not None`` branch
+        # here was dead code. Fall back directly to the static minimal
+        # catalog (no second disk read).
+        return copy.deepcopy(_minimal_static_models_catalog())
 
 
 # ── Static file path ─────────────────────────────────────────────────────────
@@ -4871,8 +5208,13 @@ class StreamChannel:
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue] = []
         self._offline_buffer: list[tuple[str, object]] = []
+        self._last_event_id: str | None = None
 
     def subscribe(self) -> queue.Queue:
+        q, _snapshot = self.subscribe_with_snapshot()
+        return q
+
+    def subscribe_with_snapshot(self) -> tuple[queue.Queue, dict[str, object]]:
         q: queue.Queue = queue.Queue()
         with self._lock:
             # Replay buffered events to the new subscriber INSIDE the lock so a
@@ -4882,8 +5224,12 @@ class StreamChannel:
             # is safe. Per Opus advisor on stage-292.
             for item in self._offline_buffer:
                 q.put_nowait(item)
+            snapshot = {
+                "offline_buffered_events": len(self._offline_buffer),
+                "last_event_id": self._last_event_id,
+            }
             self._subscribers.append(q)
-        return q
+        return q, snapshot
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
@@ -4892,8 +5238,18 @@ class StreamChannel:
             except ValueError:
                 pass
 
-    def put_nowait(self, item: tuple[str, object]) -> None:
+    def note_last_event_id(self, event_id: str | None) -> None:
+        """Record the latest journal event id without changing the queue shape."""
+        if not event_id:
+            return
         with self._lock:
+            self._last_event_id = event_id
+
+    def put_nowait(self, item: tuple[str, object] | tuple[str, object, str | None]) -> None:
+        event_id = item[2] if len(item) >= 3 else None
+        with self._lock:
+            if event_id:
+                self._last_event_id = event_id
             subscribers = list(self._subscribers)
             if not subscribers:
                 self._offline_buffer.append(item)
@@ -4902,7 +5258,7 @@ class StreamChannel:
         for q in subscribers:
             q.put_nowait(item)
 
-    def diagnostic_snapshot(self) -> dict[str, int]:
+    def diagnostic_snapshot(self) -> dict[str, object]:
         """Return non-sensitive stream observation counters for health checks."""
         with self._lock:
             return {
@@ -4925,6 +5281,51 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+
+# ── notify_on_complete agent-wakeup wiring ─────────────────────────────────
+# When terminal(notify_on_complete=true, background=true) fires, the process
+# registry pushes a completion event onto tools.process_registry.completion_queue.
+# A drain task spawned at WebUI startup (api/background_process.py) reads that
+# queue and emits an SSE `process_complete` event to the matching session.
+# PROCESS_SESSION_INDEX maps the per-process "session_key" (set in the spawned
+# subprocess via HERMES_SESSION_KEY) back to the WebUI session_id that owns it,
+# so the drain task can route the event to the right SSE channel.
+# PENDING_BG_TASK_COMPLETIONS mirrors PENDING_GOAL_CONTINUATION: server-side
+# marker discarded atomically by routes.py when the frontend re-POSTs the
+# wakeup_prompt as the next user turn. (process_complete event, agent wakeup fix)
+PROCESS_SESSION_INDEX: dict = {}  # process_registry session_key -> WebUI session_id
+PROCESS_SESSION_INDEX_LOCK = threading.Lock()
+PENDING_BG_TASK_COMPLETIONS: set = set()  # session_ids awaiting a process_complete wakeup turn
+BG_TASK_COMPLETE_EVENTS_SEEN: dict = {}  # session_id -> set[process_id] for idempotency
+BG_TASK_COMPLETE_EVENTS_SEEN_LOCK = threading.Lock()
+
+# Defer-path fix (fast-bg-task wakeup race): when a completion arrives while a
+# turn is active, Option Z's drain branch CANNOT start a turn (would 409). The
+# pre-existing PENDING_BG_TASK_COMPLETIONS marker was a bare session_id flag —
+# the wakeup_prompt was DISCARDED, and the only consumer (PR #2279 next-turn
+# drain) reads completion_queue, which the Option Z drain thread already
+# emptied. So for an autonomous agent (no next user turn) the deferred wakeup
+# was lost forever. DEFERRED_PROCESS_WAKEUPS persists the actual prompt(s) so a
+# turn-teardown idle-hook (api/streaming) can redeliver them once the session
+# goes idle — symmetric with the idle branch (idle now → fire now; busy now →
+# fire at turn-end). Atomic claim (pop under lock) guarantees single delivery:
+# whoever claims first (teardown hook OR next-turn drain) fires; the other
+# finds nothing → no double-fire, no wakeup loop.
+DEFERRED_PROCESS_WAKEUPS: dict = {}  # session_id -> list[{"process_id", "wakeup_prompt"}]
+DEFERRED_PROCESS_WAKEUPS_LOCK = threading.Lock()
+
+# ── Persistent per-session SSE channel (Option X) ──────────────────────────
+# A long-lived SSE channel scoped to a WebUI session_id rather than a single
+# agent turn (stream_id). Subscribed to by the frontend on session mount,
+# torn down on session unmount, and refcounted across tabs. Used to deliver
+# events (currently process_complete) that fire while no agent turn is
+# active — bridging the gap that PR #2242 + #2279 left when STREAMS has
+# already been torn down. The registry lives in api.background_process; this
+# constant is the idle-cap before the reaper collects an unsubscribed
+# channel. 4h is a defensive ceiling against zombie connections; the
+# subscribers-empty grace path (60s) handles ordinary tab-close traffic.
+SESSION_CHANNEL_IDLE_TTL_SECS: int = 14400  # 4 hours
+SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
 
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
 # than SSE lifecycle: cancel/reconnect may remove STREAMS while the worker is
@@ -5087,7 +5488,7 @@ _SETTINGS_DEFAULTS = {
     "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
-    "activity_feed_expanded_default": False,  # expand Activity disclosures by default for new turns
+    "worklog_details_expanded_default": False,  # opt-in: expand Worklog details by default; default remains folded
     "pinned_sessions_limit": 3,  # maximum active pinned sessions shown in the sidebar
     "inflight_state_max_sessions": 8,  # max active-stream recovery snapshots kept in browser localStorage
     "inflight_state_max_messages": 24,  # max recent messages kept per recovery snapshot
@@ -5104,7 +5505,7 @@ _SETTINGS_DEFAULTS = {
     "rtl": False,  # right-to-left chat layout (chat messages + composer only)
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
-    "simplified_tool_calling": True,  # render tools/thinking as compact inline timeline activity
+    "simplified_tool_calling": True,  # legacy compatibility; Worklog renderer remains enabled
     "terminal_auto_expand_on_output": False,  # auto-expand terminal panel when output arrives while collapsed
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
     "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
@@ -5113,7 +5514,13 @@ _SETTINGS_DEFAULTS = {
     "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
-_SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
+_SETTINGS_LEGACY_DROP_KEYS = {
+    "assistant_language",
+    "bubble_layout",
+    "default_model",
+    "activity_feed_expanded_default",
+    "simplified_tool_calling",
+}
 _SETTINGS_THEME_VALUES = {"light", "dark", "system"}
 _SETTINGS_SKIN_VALUES = {
     "default",
@@ -5194,6 +5601,13 @@ def load_settings() -> dict:
         try:
             stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             if isinstance(stored, dict):
+                if (
+                    "worklog_details_expanded_default" not in stored
+                    and "activity_feed_expanded_default" in stored
+                ):
+                    settings["worklog_details_expanded_default"] = bool(
+                        stored.get("activity_feed_expanded_default")
+                    )
                 settings.update(
                     {
                         k: v
@@ -5220,6 +5634,7 @@ def load_settings() -> dict:
 _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     "password_hash",
     "default_model",
+    "simplified_tool_calling",
 }
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter"},
@@ -5254,12 +5669,11 @@ _SETTINGS_BOOL_KEYS = {
     "rtl",
     "notifications_enabled",
     "show_thinking",
-    "simplified_tool_calling",
     "terminal_auto_expand_on_output",
     "api_redact_enabled",
     "session_jump_buttons",
     "session_endless_scroll",
-    "activity_feed_expanded_default",
+    "worklog_details_expanded_default",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
@@ -5268,6 +5682,15 @@ _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8}
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
     current = load_settings()
+    if (
+        "worklog_details_expanded_default" not in settings
+        and "activity_feed_expanded_default" in settings
+    ):
+        settings["worklog_details_expanded_default"] = settings.get(
+            "activity_feed_expanded_default"
+        )
+    settings.pop("activity_feed_expanded_default", None)
+    settings.pop("simplified_tool_calling", None)
     pending_theme = current.get("theme")
     pending_skin = current.get("skin")
     theme_was_explicit = False

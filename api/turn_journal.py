@@ -242,5 +242,40 @@ def iter_turn_journal_session_ids(session_dir: Path) -> list[str]:
     return sorted(session_ids)
 
 
+def delete_turn_journal(session_id: str, *, session_dir: Path | None = None) -> int:
+    """Remove every turn-journal shard for ``session_id``.
+
+    Deletes both the pid-scoped shards (``{sid}~{pid}.jsonl``) written by
+    :func:`append_turn_journal_event` and the legacy single-file form
+    (``{sid}.jsonl``) that :func:`read_turn_journal` still merges. Returns the
+    number of files removed. Invalid/empty ids and a missing journal directory
+    are treated as a no-op so callers can invoke this unconditionally on delete.
+    """
+    sid = str(session_id or "").strip()
+    # Reject "."/".." for parity with delete_run_journal — the regex permits
+    # dots, and a traversal id has no legitimate use here.
+    if sid in (".", "..") or not sid or "/" in sid or "\\" in sid or not _SESSION_ID_RE.fullmatch(sid):
+        return 0
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    journal_dir = root / TURN_JOURNAL_DIR_NAME
+    if not journal_dir.exists():
+        return 0
+    removed = 0
+    shards = list(journal_dir.glob(f"{sid}~*.jsonl"))
+    legacy = journal_dir / f"{sid}.jsonl"
+    if legacy.exists():
+        shards.append(legacy)
+    for shard in shards:
+        try:
+            shard.unlink()
+            removed += 1
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Best-effort cleanup; the caller logs the overall delete outcome.
+            pass
+    return removed
+
+
 def is_terminal_turn_event(event: dict) -> bool:
     return str((event or {}).get("event") or "") in _TERMINAL_EVENTS

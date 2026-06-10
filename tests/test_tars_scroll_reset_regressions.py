@@ -78,17 +78,21 @@ def test_message_scroll_listener_does_not_downgrade_explicit_bottom_pin_on_first
 def test_user_scroll_cancels_delayed_bottom_settling():
     listener_block = _scroll_listener_block()
     record = _function_body(UI_JS, "function _recordNonMessageScrollIntent")
+    pinned = _function_body(UI_JS, "function scrollIfPinned")
 
     assert "function _cancelBottomSettle" in UI_JS
     assert "_cancelBottomSettle();" in listener_block
     assert "e.deltaY<0" in record
     assert "_cancelBottomSettle();" in record
     assert "_scrollPinned=false" in record
+    assert "if(_messageUserUnpinned) return;" in pinned
+    assert "_recentMessageUpwardIntent()" not in pinned
 
 
 def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
     render = _function_body(UI_JS, "function renderMessages")
     after_render = _function_body(UI_JS, "function _scrollAfterMessageRender")
+    follow = _function_body(UI_JS, "function _followMessagesAfterDomReplace")
     restore = _function_body(UI_JS, "function _restoreMessageScrollSnapshot")
 
     snapshot_idx = render.index("const scrollSnapshot=preserveScroll?_captureMessageScrollSnapshot():null")
@@ -99,7 +103,9 @@ def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
         "renderMessages({preserveScroll:true}) must capture #messages.scrollTop before "
         "replacing transcript DOM, then pass that snapshot to the post-render scroll helper"
     )
-    assert "if(_scrollPinned) scrollIfPinned()" in after_render
-    assert "else _restoreMessageScrollSnapshot(scrollSnapshot)" in after_render
+    assert "if(_followMessagesAfterDomReplace()) return;" in after_render
+    assert "_restoreMessageScrollSnapshot(scrollSnapshot);\n    _maybeShowNewMessageScrollCue(scrollSnapshot);" in after_render
+    assert "_shouldFollowMessagesOnDomReplace()" in follow
+    assert "scrollToBottom();" in follow
     assert "el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop))" in restore
     assert "_programmaticScroll=true" in restore

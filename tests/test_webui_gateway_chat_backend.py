@@ -315,6 +315,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     events = []
     while not subscriber.empty():
         events.append(subscriber.get_nowait())
+    event_pairs = [(item[0], item[1]) for item in events]
     assert ("tool", {
         "event_type": "tool.started",
         "name": "terminal",
@@ -322,7 +323,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "args": {},
         "is_error": False,
         "tid": "call-1",
-    }) in events
+    }) in event_pairs
     assert ("tool_complete", {
         "event_type": "tool.completed",
         "name": "terminal",
@@ -330,7 +331,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "args": {},
         "is_error": False,
         "tid": "call-1",
-    }) in events
+    }) in event_pairs
+    assert all(len(item) == 3 and item[2] for item in events)
 
 
 def test_gateway_chat_worker_normalizes_prefill_slice_before_system_prefix(tmp_path, monkeypatch):

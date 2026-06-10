@@ -30,7 +30,7 @@ STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
 # Both fallback callsites must pass these kwargs into get_model_context_length.
 _REQUIRED_KWARGS = (
     "config_context_length=_cfg_ctx_len",
-    "provider=resolved_provider or ''",
+    "provider=_cfg_provider",
     "custom_providers=_cfg_custom_providers",
 )
 
@@ -120,11 +120,11 @@ def test_both_callsites_pass_config_context_length():
 
 
 def test_both_callsites_pass_provider():
-    """Both callsites must pass `provider=resolved_provider or ''`."""
+    """Both callsites must pass the effective provider into the resolver."""
     blocks = _both_callsites()
     for i, block in enumerate(blocks):
-        assert "provider=resolved_provider" in block, (
-            f"Callsite #{i+1} is missing `provider=resolved_provider...`. "
+        assert "provider=_cfg_provider" in block, (
+            f"Callsite #{i+1} is missing `provider=_cfg_provider`. "
             f"Provider is needed for the registry lookup step (models.dev "
             f"provider-aware lookup). See #1896.\n\nBlock:\n{block}"
         )
@@ -170,13 +170,15 @@ def test_cfg_custom_providers_resolved_from_cfg_dict():
     """The kwargs source must be the per-profile config (`_cfg`), not a
     module-level snapshot — otherwise profile switches with different
     custom_providers wouldn't take effect."""
-    # Look for the resolution pattern.
-    assert "_cfg.get('custom_providers')" in STREAMING_PY, (
-        "_cfg_custom_providers must be sourced from `_cfg.get('custom_providers')` "
+    # The parsing now lives in the shared route helper so session-load,
+    # session-save, and SSE fallbacks cannot drift.
+    assert "_context_length_lookup_inputs_for_model(" in STREAMING_PY
+    assert 'cfg.get("custom_providers")' in ROUTES_PY, (
+        "_cfg_custom_providers must be sourced from `cfg.get('custom_providers')` "
         "(per-profile config) so profile-scoped custom_providers entries work."
     )
-    assert "_cfg.get('model', {})" in STREAMING_PY, (
-        "_cfg_ctx_len must be sourced from `_cfg.get('model', {}).get('context_length')` "
+    assert 'cfg.get("model", {})' in ROUTES_PY, (
+        "_cfg_ctx_len must be sourced from `cfg.get('model', {}).get('context_length')` "
         "(per-profile config) so profile-scoped model.context_length overrides work."
     )
 
@@ -218,7 +220,7 @@ def test_routes_session_load_fallback_passes_config_overrides():
         "session-load fallback in api/routes.py must pass config_context_length= "
         "so user-set model.context_length wins over the 256K default. See #1896."
     )
-    assert "provider=provider or" in helper, (
+    assert "provider=_ctx_lookup.provider or provider or" in helper, (
         "session-load fallback in api/routes.py must pass provider= "
         "so the registry lookup is provider-aware. See #1896."
     )
