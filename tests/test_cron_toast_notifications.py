@@ -87,6 +87,7 @@ def test_cron_recent_marks_muted_jobs_without_requesting_toast(monkeypatch):
             "toast_notifications": False,
         },
     ]
+    monkeypatch.setattr(routes, "_latest_cron_session_id_for_job", lambda job_id: f"cron_{job_id}_latest")
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
 
@@ -97,7 +98,9 @@ def test_cron_recent_marks_muted_jobs_without_requesting_toast(monkeypatch):
     assert handler.status == 200
     by_id = {item["job_id"]: item for item in body["completions"]}
     assert by_id["loud"]["toast_notifications"] is True
+    assert by_id["loud"]["session_id"] == "cron_loud_latest"
     assert by_id["muted"]["toast_notifications"] is False
+    assert by_id["muted"]["session_id"] == "cron_muted_latest"
 
 
 def test_cron_create_persists_muted_toast_setting_after_create(monkeypatch):
@@ -149,6 +152,8 @@ def test_cron_polling_suppresses_toasts_but_keeps_unread_badges():
     assert "c.toast_notifications !== false" in body
     assert "showToast(t('cron_completion_status'" in body
     assert "if(c.job_id) _cronNewJobIds.add(String(c.job_id));" in body
+    assert "if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function')" in body
+    assert "_markSessionCompletionUnreadIfBackground(c.session_id);" in body
 
 
 def test_cron_toast_i18n_keys_exist():

@@ -8235,6 +8235,9 @@ function startCronPolling(){
           }
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
           if(c.job_id) _cronNewJobIds.add(String(c.job_id));
+          if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
+            _markSessionCompletionUnreadIfBackground(c.session_id);
+          }
         }
         // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
         updateCronBadge();

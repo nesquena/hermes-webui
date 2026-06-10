@@ -96,6 +96,40 @@ _CLIENT_EVENT_ALLOWED_FIELDS = {
 }
 
 
+def _latest_cron_session_id_for_job(job_id: str) -> str:
+    """Return the newest persisted cron session id for ``job_id``."""
+    normalized = str(job_id or "").strip()
+    if not normalized:
+        return ""
+    db_path = _active_state_db_path()
+    if not db_path or not Path(db_path).exists():
+        return ""
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {row[1] for row in cur.fetchall()}
+            if "id" not in session_cols or "source" not in session_cols:
+                return ""
+            order_expr = "COALESCE(s.started_at, 0) DESC, s.id DESC" if "started_at" in session_cols else "s.id DESC"
+            cur.execute(
+                f"""
+                SELECT s.id
+                FROM sessions s
+                WHERE LOWER(COALESCE(s.source, '')) = 'cron'
+                  AND s.id LIKE ?
+                ORDER BY {order_expr}
+                LIMIT 1
+                """,
+                (f"cron_{normalized}_%",),
+            )
+            row = cur.fetchone()
+            return str(row["id"]) if row and row["id"] else ""
+    except sqlite3.Error:
+        return ""
+
+
 def _session_field(session, field, default=None):
     if isinstance(session, dict):
         return session.get(field, default)
@@ -11732,6 +11766,7 @@ def _handle_cron_recent(handler, parsed):
         jobs = list_jobs(include_disabled=True)
         completions = []
         for job in jobs:
+            job_id = str(job.get("id", "") or "")
             last_run = job.get("last_run_at")
             if not last_run:
                 continue
@@ -11747,7 +11782,8 @@ def _handle_cron_recent(handler, parsed):
             if ts > since:
                 completions.append(
                     {
-                        "job_id": job.get("id", ""),
+                        "job_id": job_id,
+                        "session_id": _latest_cron_session_id_for_job(job_id),
                         "name": job.get("name", "Unknown"),
                         "status": job.get("last_status", "unknown"),
                         "completed_at": ts,
