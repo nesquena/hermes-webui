@@ -131,8 +131,12 @@ _account_usage_probe_semaphore: threading.BoundedSemaphore | None = None
 # represented as non-None snapshots and remain cacheable.
 _account_usage_status_cache: dict[tuple[str, str, str], tuple[float, Any]] = {}
 _account_usage_status_cache_lock = threading.Lock()
-_account_usage_worker_pool: dict[str, "_AccountUsageProbeWorker"] = {}
+_account_usage_worker_pool: dict[str, list["_AccountUsageProbeWorker"]] = {}
 _account_usage_worker_pool_lock = threading.Lock()
+
+# Per-home worker pool configuration for probe tail-latency reduction (#3787)
+_ACCOUNT_USAGE_WORKERS_PER_HOME = 2
+_ACCOUNT_USAGE_WORKER_WAIT_SECONDS = 0.5
 
 
 def _get_account_usage_probe_semaphore() -> threading.BoundedSemaphore:
@@ -1421,14 +1425,21 @@ def _fetch_account_usage_once_for_home(provider: str, home: Path, *, api_key: st
     return _account_usage_payload_to_snapshot(payload)
 
 
-def _get_account_usage_probe_worker(home: Path) -> _AccountUsageProbeWorker:
+def _get_account_usage_probe_worker(home: Path) -> "_AccountUsageProbeWorker | None":
     key = str(Path(home))
     with _account_usage_worker_pool_lock:
-        worker = _account_usage_worker_pool.get(key)
-        if worker is None:
-            worker = _AccountUsageProbeWorker(Path(home))
-            _account_usage_worker_pool[key] = worker
-        return worker
+        workers = _account_usage_worker_pool.get(key)
+        if not workers:
+            workers = [_AccountUsageProbeWorker(Path(home)) for _ in range(_ACCOUNT_USAGE_WORKERS_PER_HOME)]
+            _account_usage_worker_pool[key] = workers
+    for w in workers:
+        if w._lock.acquire(blocking=False):
+            w._lock.release()
+            return w
+    if workers[0]._lock.acquire(timeout=_ACCOUNT_USAGE_WORKER_WAIT_SECONDS):
+        workers[0]._lock.release()
+        return workers[0]
+    return None
 
 
 def _cleanup_account_usage_probe_workers(
@@ -1439,23 +1450,29 @@ def _cleanup_account_usage_probe_workers(
     cutoff = time.monotonic() if now is None else now
     stale: list[tuple[str, _AccountUsageProbeWorker]] = []
     with _account_usage_worker_pool_lock:
-        for key, worker in list(_account_usage_worker_pool.items()):
-            if worker._lock.acquire(blocking=False):
-                try:
-                    proc = worker._proc
-                    is_dead = proc is None or proc.poll() is not None
-                    if is_dead or cutoff - worker.last_used >= idle_seconds:
-                        stale.append((key, worker))
-                        _account_usage_worker_pool.pop(key, None)
-                finally:
-                    worker._lock.release()
+        for key, workers in list(_account_usage_worker_pool.items()):
+            for worker in workers:
+                if worker._lock.acquire(blocking=False):
+                    try:
+                        proc = worker._proc
+                        is_dead = proc is None or proc.poll() is not None
+                        if is_dead or cutoff - worker.last_used >= idle_seconds:
+                            stale.append((key, worker))
+                    finally:
+                        worker._lock.release()
+            # Remove the entire key if all workers are stale
+            remaining_workers = [w for w in workers if not any(k == key and w == sw for k, sw in stale)]
+            if not remaining_workers:
+                _account_usage_worker_pool.pop(key, None)
+            else:
+                _account_usage_worker_pool[key] = remaining_workers
     for _key, worker in stale:
         worker.close()
 
 
 def _close_account_usage_probe_workers() -> None:
     with _account_usage_worker_pool_lock:
-        workers = list(_account_usage_worker_pool.values())
+        workers = [w for wlist in _account_usage_worker_pool.values() for w in wlist]
         _account_usage_worker_pool.clear()
     _close_account_usage_probe_worker_list(workers)
 
@@ -1465,15 +1482,23 @@ def _close_account_usage_probe_worker_list(workers: list[_AccountUsageProbeWorke
         worker.close()
 
 
-def _close_account_usage_probe_workers_async() -> None:
+def _close_account_usage_probe_workers_async(*, provider_id: str | None = None) -> None:
     with _account_usage_worker_pool_lock:
-        workers = list(_account_usage_worker_pool.values())
-        _account_usage_worker_pool.clear()
-    if not workers:
+        if provider_id:
+            active_home = str(_get_hermes_home())
+            workers_to_close = []
+            for key, wlist in list(_account_usage_worker_pool.items()):
+                if key == active_home:
+                    workers_to_close.extend(wlist)
+                    _account_usage_worker_pool.pop(key, None)
+        else:
+            workers_to_close = [w for wlist in _account_usage_worker_pool.values() for w in wlist]
+            _account_usage_worker_pool.clear()
+    if not workers_to_close:
         return
     thread = threading.Thread(
         target=_close_account_usage_probe_worker_list,
-        args=(workers,),
+        args=(workers_to_close,),
         daemon=True,
         name="account-usage-worker-close",
     )
@@ -1512,7 +1537,7 @@ def invalidate_account_usage_status_cache(provider_id: str | None = None) -> Non
             for key in list(_account_usage_status_cache):
                 if key[0] == normalized:
                     _account_usage_status_cache.pop(key, None)
-    _close_account_usage_probe_workers_async()
+    _close_account_usage_probe_workers_async(provider_id=normalized or None)
 
 
 def _set_cached_account_usage(
@@ -1545,7 +1570,10 @@ def _set_cached_account_usage(
 def _agent_fetch_account_usage_for_home(provider: str, home: Path, *, api_key: str | None = None) -> Any:
     try:
         _cleanup_account_usage_probe_workers()
-        return _get_account_usage_probe_worker(home).fetch(provider, api_key=api_key)
+        worker = _get_account_usage_probe_worker(home)
+        if worker is not None:
+            return worker.fetch(provider, api_key=api_key)
+        return _fetch_account_usage_once_for_home(provider, home, api_key=api_key)
     except Exception:
         logger.debug("Account usage probe for %s failed", provider, exc_info=True)
         return None
