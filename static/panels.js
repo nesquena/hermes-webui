@@ -151,6 +151,7 @@ function syncAppTitlebar() {
 
 function _beginSettingsPanelSession() {
   _settingsIndex = null;
+  _settingsIndexPromise = null;
   _settingsDirty = false;
   _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
   _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
@@ -5891,6 +5892,8 @@ let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 let _currentSettingsSection = 'conversation';
 let _settingsIndex = null;
+let _settingsIndexPromise = null;
+let _settingsSearchSeq = 0;
 let _settingsSearchDismissListenerRegistered = false;
 let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
@@ -6119,13 +6122,21 @@ function switchSettingsSection(name){
   if(section==='plugins') loadPluginsPanel();
 }
 
-function _buildSettingsIndex() {
+async function _buildSettingsIndex() {
   if (_settingsIndex) return;
+  // Memoize the in-flight build so concurrent searches share one pass; the
+  // lazy pane loaders are not guaranteed re-entrant.
+  if (_settingsIndexPromise) return _settingsIndexPromise;
+  _settingsIndexPromise = (async () => {
+  // Ensure lazy-loaded panes are populated before reading the DOM
+  await Promise.all([loadProvidersPanel(), loadPluginsPanel()]);
   _settingsIndex = [];
   const sectionMap = {
     settingsPaneConversation: 'conversation',
     settingsPaneAppearance: 'appearance',
     settingsPanePreferences: 'preferences',
+    settingsPaneProviders: 'providers',
+    settingsPanePlugins: 'plugins',
     settingsPaneSystem: 'system',
     settingsPaneHelp: 'help',
   };
@@ -6140,28 +6151,19 @@ function _buildSettingsIndex() {
       if (label) _settingsIndex.push({ label, sectionKey, i18nKey, el: field });
     });
   }
-  const providerPane = $('settingsPaneProviders');
-  if (providerPane) {
-    providerPane.querySelectorAll('.settings-field label[data-i18n]').forEach(labelEl => {
-      const label = t(labelEl.dataset.i18n) || labelEl.textContent.trim();
-      if (label) _settingsIndex.push({ label, sectionKey: 'providers', i18nKey: labelEl.dataset.i18n, el: labelEl.closest('.settings-field') });
-    });
-  }
-  const pluginsPane = $('settingsPanePlugins');
-  if (pluginsPane) {
-    pluginsPane.querySelectorAll('.settings-field label[data-i18n]').forEach(labelEl => {
-      const label = t(labelEl.dataset.i18n) || labelEl.textContent.trim();
-      if (label) _settingsIndex.push({ label, sectionKey: 'plugins', i18nKey: labelEl.dataset.i18n, el: labelEl.closest('.settings-field') });
-    });
-  }
+  })().catch(e => { _settingsIndex = null; _settingsIndexPromise = null; throw e; });
+  return _settingsIndexPromise;
 }
 
-function filterSettings(query) {
+async function filterSettings(query) {
   const resultsEl = $('settingsSearchResults');
   if (!resultsEl) return;
   const q = (query || '').trim().toLowerCase();
   if (!q) { resultsEl.style.display = 'none'; resultsEl.innerHTML = ''; return; }
-  _buildSettingsIndex();
+  const seq = ++_settingsSearchSeq;
+  await _buildSettingsIndex();
+  // A newer keystroke superseded this query while the index was building.
+  if (seq !== _settingsSearchSeq) return;
   const sectionLabels = {
     conversation: t('settings_tab_conversation') || 'Conversation',
     appearance: t('settings_tab_appearance') || 'Appearance',
@@ -6199,9 +6201,9 @@ function filterSettings(query) {
   resultsEl.style.display = '';
 }
 
-function _navigateToSettingsField(entry) {
-  if (entry.sectionKey === 'providers') loadProvidersPanel();
-  if (entry.sectionKey === 'plugins') loadPluginsPanel();
+async function _navigateToSettingsField(entry) {
+  if (entry.sectionKey === 'providers') await loadProvidersPanel();
+  if (entry.sectionKey === 'plugins') await loadPluginsPanel();
   switchSettingsSection(entry.sectionKey);
   if (!entry.el) return;
   requestAnimationFrame(() => {
