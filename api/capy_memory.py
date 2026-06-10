@@ -678,7 +678,7 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         origin_uri = f"capy-memory://{source_id}"
     if _github_rulesets_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
-        or not _github_rulesets_path_repo(origin_uri)
+        or (not _github_rulesets_path_repo(origin_uri) and _github_ruleset_path_info(origin_uri) is None)
     ):
         origin_uri = f"capy-memory://{source_id}"
     if (
@@ -6041,6 +6041,102 @@ def _github_rulesets_path_repo(origin_uri: str) -> str:
     ):
         return ""
     return f"{path[2]}/{path[3]}"
+
+
+def _github_ruleset_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if parts.netloc.strip() != "api.github.com" or parts.scheme != "https":
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "rulesets"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return None
+    try:
+        ruleset_id = int(path[5])
+    except (TypeError, ValueError):
+        return None
+    if ruleset_id <= 0 or str(ruleset_id) != path[5]:
+        return None
+    return f"{path[2]}/{path[3]}", ruleset_id
+
+
+def _github_ruleset_path_repo(origin_uri: str) -> str:
+    info = _github_ruleset_path_info(origin_uri)
+    return info[0] if info else ""
+
+
+def _github_ruleset_rule_count(payload: dict[str, Any], key: str) -> int | None:
+    raw_value = payload.get(key)
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, list) or len(raw_value) > 500:
+        return None
+    return len(raw_value)
+
+
+def _github_ruleset_payload_is_safe(payload: Any) -> bool:
+    if not _github_ruleset_row_is_safe(payload):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if "version" in payload or "items" in payload:
+        return False
+    for field in ("created_at", "updated_at"):
+        if not _safe_iso_timestamp(payload.get(field)):
+            return False
+    for key in ("rules", "bypass_actors"):
+        raw_value = payload.get(key)
+        if raw_value is None or not isinstance(raw_value, list) or len(raw_value) > 500:
+            return False
+    return True
+
+
+def _json_payload_is_github_ruleset_metadata(origin_uri: str, payload: Any) -> bool:
+    info = _github_ruleset_path_info(origin_uri)
+    if info is None or not isinstance(payload, dict):
+        return False
+    ruleset_id = _safe_optional_nonnegative_int(payload.get("id"))
+    if ruleset_id != info[1]:
+        return False
+    return _github_ruleset_payload_is_safe(payload)
+
+
+def _github_ruleset_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    info = _github_ruleset_path_info(origin_uri)
+    repo, ruleset_id = info if info else ("repository", _safe_optional_nonnegative_int(payload.get("id")) or 0)
+    name = _safe_public_text(payload.get("name"), limit=200)
+    target = _safe_public_text(payload.get("target"), limit=40).lower()
+    enforcement = _safe_public_text(payload.get("enforcement"), limit=40).lower()
+    source_type = _safe_public_text(payload.get("source_type"), limit=40).lower()
+    parts = [
+        f"GitHub repository ruleset #{ruleset_id} for {repo}",
+        f"ruleset: {name}",
+        f"target: {target}",
+        f"enforcement: {enforcement}",
+        f"source type: {source_type}",
+    ]
+    rule_count = _github_ruleset_rule_count(payload, "rules")
+    if rule_count is not None:
+        parts.append(f"rule count: {rule_count}")
+    bypass_actor_count = _github_ruleset_rule_count(payload, "bypass_actors")
+    if bypass_actor_count is not None:
+        parts.append(f"bypass actor count: {bypass_actor_count}")
+    created = _safe_iso_timestamp(payload.get("created_at")) if payload.get("created_at") is not None else ""
+    updated = _safe_iso_timestamp(payload.get("updated_at")) if payload.get("updated_at") is not None else ""
+    if created:
+        parts.append(f"created: {created}")
+    if updated:
+        parts.append(f"updated: {updated}")
+    return _bounded_refresh_summary("; ".join(parts))
 
 
 def _github_ruleset_name_is_safe(value: Any) -> bool:
@@ -13467,6 +13563,17 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_environment_variables_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    ruleset_info = _github_ruleset_path_info(origin_uri)
+    if ruleset_info is not None:
+        ruleset_repo, ruleset_id = ruleset_info
+        if not _json_payload_is_github_ruleset_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub ruleset {ruleset_repo} #{ruleset_id}",
+            "summary": _github_ruleset_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     rulesets_repo = _github_rulesets_path_repo(origin_uri)
     if rulesets_repo:
         if not _json_payload_is_github_rulesets_metadata(origin_uri, payload):
@@ -14074,7 +14181,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_environments_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
     if _github_rulesets_path_matches(raw_origin_uri):
-        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_rulesets_path_repo(raw_origin_uri):
+        if (
+            not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
+            or (not _github_rulesets_path_repo(raw_origin_uri) and _github_ruleset_path_info(raw_origin_uri) is None)
+        ):
             raise RuntimeError("refresh fetcher disabled")
     if _github_milestones_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_milestones_path_repo(raw_origin_uri):
@@ -14357,7 +14467,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_rulesets_path_matches(safe_origin_uri):
-        if not _github_rulesets_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+        if (
+            not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com")
+            or (not _github_rulesets_path_repo(safe_origin_uri) and _github_ruleset_path_info(safe_origin_uri) is None)
+        ):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_milestones_path_matches(safe_origin_uri):
@@ -14540,11 +14653,18 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_branch_protection_path_info(final_url) != _github_branch_protection_path_info(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
-        if _github_rulesets_path_matches(safe_origin_uri) and (
-            not _github_raw_hostname_is_exact(final_url, "api.github.com")
-            or not _github_rulesets_path_repo(safe_final_url)
-        ):
-            raise RuntimeError("refresh fetcher disabled")
+        if _github_rulesets_path_matches(safe_origin_uri):
+            origin_ruleset_info = _github_ruleset_path_info(safe_origin_uri)
+            final_ruleset_info = _github_ruleset_path_info(safe_final_url)
+            origin_rulesets_repo = _github_rulesets_path_repo(safe_origin_uri)
+            final_rulesets_repo = _github_rulesets_path_repo(safe_final_url)
+            if not _github_raw_hostname_is_exact(final_url, "api.github.com") or final_url != safe_final_url:
+                raise RuntimeError("refresh fetcher disabled")
+            if origin_ruleset_info is not None:
+                if final_ruleset_info != origin_ruleset_info:
+                    raise RuntimeError("refresh fetcher disabled")
+            elif not final_rulesets_repo or final_rulesets_repo != origin_rulesets_repo:
+                raise RuntimeError("refresh fetcher disabled")
         if _github_repository_events_path_matches(safe_origin_uri) and (
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_repository_events_path_repo(final_url)
@@ -15021,7 +15141,7 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_rulesets_path_matches(safe_origin_uri) and (
-            not _github_rulesets_path_repo(safe_origin_uri)
+            (not _github_rulesets_path_repo(safe_origin_uri) and _github_ruleset_path_info(safe_origin_uri) is None)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
