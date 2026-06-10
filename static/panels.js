@@ -1509,10 +1509,11 @@ function _renderScriptsList(scripts) {
     const el = document.createElement('div');
     el.className = 'script-item';
     const ext = s.name.split('.').pop();
+    const stem = s.name.replace(/\.[^.]+$/, '');
     const langClass = ext === 'py' ? 'language-python' : 'language-bash';
     el.innerHTML = `
       <div class="script-header" onclick="this.closest('.script-item').classList.toggle('expanded')">
-        <span class="script-name">${esc(s.name)}</span>
+        <span class="script-name">${esc(stem)}</span>
         <span class="script-ext">.${esc(ext)}</span>
       </div>
       ${s.description ? `<div class="script-desc">${esc(s.description)}</div>` : ''}
