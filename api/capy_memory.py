@@ -296,6 +296,7 @@ def _safe_origin_uri(value: Any, *, source_id: str) -> str:
     if parts.scheme in {"http", "https"} and parts.netloc and "api.github.com" in parts.netloc.lower():
         issue_reactions_matcher = globals().get("_github_issue_reactions_path_matches")
         issue_comment_reactions_matcher = globals().get("_github_issue_comment_reactions_path_matches")
+        release_reactions_matcher = globals().get("_github_release_reactions_path_matches")
         pull_comment_reactions_matcher = globals().get("_github_pull_comment_reactions_path_matches")
         check_suites_matcher = globals().get("_github_check_suites_route_path_matches")
         authority_checker = globals().get("_github_https_authority_is_exact")
@@ -304,6 +305,8 @@ def _safe_origin_uri(value: Any, *, source_id: str) -> str:
             if callable(issue_reactions_matcher) and issue_reactions_matcher(raw):
                 strict_authority_route = True
             if callable(issue_comment_reactions_matcher) and issue_comment_reactions_matcher(raw):
+                strict_authority_route = True
+            if callable(release_reactions_matcher) and release_reactions_matcher(raw):
                 strict_authority_route = True
             if callable(pull_comment_reactions_matcher) and pull_comment_reactions_matcher(raw):
                 strict_authority_route = True
@@ -523,6 +526,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
     if _github_pull_comment_reactions_path_matches(raw_origin_text) and (
         not _github_https_authority_is_exact(raw_origin_text, "api.github.com")
         or _github_pull_comment_reactions_path_info(origin_uri) is None
+    ):
+        origin_uri = f"capy-memory://{source_id}"
+    if _github_release_reactions_path_matches(raw_origin_text) and (
+        not _github_https_authority_is_exact(raw_origin_text, "api.github.com")
+        or _github_release_reactions_path_info(origin_uri) is None
     ):
         origin_uri = f"capy-memory://{source_id}"
     if _github_issue_labels_path_matches(raw_origin_text) and not _github_raw_authority_is_exact(raw_origin_text, "api.github.com"):
@@ -1794,7 +1802,7 @@ def _github_release_path_matches(origin_uri: str) -> bool:
         tail = lowered[5]
         if len(path) == 6 and tail == "latest":
             return False
-        if len(path) == 7 and re.fullmatch(r"[1-9][0-9]*", path[5]) and lowered[6] == "assets":
+        if len(path) == 7 and re.fullmatch(r"[1-9][0-9]*", path[5]) and lowered[6] in {"assets", "reactions"}:
             return False
         return True
 
@@ -2090,6 +2098,118 @@ def _github_release_assets_refresh_summary(origin_uri: str, payload: list[Any]) 
             if timestamp:
                 asset_parts.append(f"{label}: {timestamp}")
         parts.append("; ".join(asset_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_release_reactions_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if not _github_https_authority_is_exact(origin_uri, "api.github.com"):
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "releases"
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+        or path[6] != "reactions"
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", int(path[5])
+
+
+def _github_release_reactions_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _candidate_paths(raw_path: str) -> list[str]:
+        paths = [raw_path]
+        current = raw_path
+        for _ in range(6):
+            decoded = unquote(current)
+            if decoded == current:
+                break
+            paths.append(decoded)
+            current = decoded
+        return paths
+
+    def _segment_looks_like_reactions(raw_segment: str) -> bool:
+        segment = raw_segment.lower()
+        return segment == "reactions" or segment.startswith(("reactions%", "reactions?", "reactions\x00", "reactions.", "reactions;"))
+
+    def _matches_release_reactions_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        compacted_lowered = [segment.lower() for segment in path if segment]
+
+        def _has_reactions_after_release(candidate: list[str]) -> bool:
+            if len(candidate) < 5:
+                return False
+            if candidate[0] not in {"repos", "repo"}:
+                return False
+            try:
+                releases_index = candidate.index("releases", 3)
+            except ValueError:
+                return False
+            later_segments = candidate[releases_index + 1 :]
+            if len(later_segments) < 2:
+                return False
+            return any(_segment_looks_like_reactions(segment) for segment in later_segments[1:]) or any(
+                "%2freactions" in segment.lower() for segment in later_segments
+            )
+
+        exact_layout_candidate = lowered[1:] if len(lowered) > 1 and path[0] == "" else lowered
+        return _has_reactions_after_release(exact_layout_candidate) or _has_reactions_after_release(compacted_lowered)
+
+    return any(_matches_release_reactions_shape(path) for path in _candidate_paths(parts.path))
+
+
+def _json_payload_is_github_release_reactions_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_release_reactions_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_reaction_row_is_safe(row) for row in payload)
+
+
+def _github_release_reactions_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo, release_id = _github_release_reactions_path_info(origin_uri) or ("repository", 0)
+    safe_rows = [row for row in payload if _github_reaction_row_is_safe(row)]
+    reaction_counts: dict[str, int] = {}
+    reactors: list[str] = []
+    row_summaries: list[str] = []
+    for row in safe_rows:
+        content = _safe_public_text(row.get("content"), limit=20)
+        reaction_counts[content] = reaction_counts.get(content, 0) + 1
+        user = row.get("user") if isinstance(row.get("user"), dict) else {}
+        login = _safe_public_text(user.get("login") if isinstance(user, dict) else "", limit=80)
+        reaction_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        created = _safe_public_text(row.get("created_at"), limit=80)
+        if login and login not in reactors:
+            reactors.append(login)
+        row_parts = [f"reaction {reaction_id}"]
+        if login:
+            row_parts[-1] = f"reaction {reaction_id} by {login}"
+        row_parts.append(f"content: {content}")
+        if created:
+            row_parts.append(f"created: {created}")
+        if len(row_summaries) < 5:
+            row_summaries.append("; ".join(row_parts))
+    parts = [f"GitHub release #{release_id} reactions for {repo}", f"reaction count: {len(payload)}"]
+    for content in sorted(reaction_counts):
+        parts.append(f"reaction {content}: {reaction_counts[content]}")
+    if reactors:
+        parts.append(f"reactors: {', '.join(reactors[:5])}")
+    parts.extend(row_summaries)
     return _bounded_refresh_summary("; ".join(parts))
 
 
@@ -13015,6 +13135,19 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    release_reactions_info = _github_release_reactions_path_info(origin_uri)
+    if release_reactions_info is not None:
+        if not _json_payload_is_github_release_reactions_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        repo, release_id = release_reactions_info
+        return {
+            "metadata_only": True,
+            "title": f"GitHub release {release_id} reactions {repo}",
+            "summary": _github_release_reactions_refresh_summary(origin_uri, payload),
+            "origin_uri": f"github release reactions {repo} #{release_id}",
+        }
+    if _github_release_reactions_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     if _json_payload_is_github_contributors_metadata(origin_uri, payload):
         title = f"GitHub contributors {(_github_contributors_path_repo(origin_uri) or source_id)}"
         summary = _github_contributors_refresh_summary(origin_uri, payload)
@@ -13884,6 +14017,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if _github_release_assets_path_info(safe_origin_uri) is None or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_release_reactions_path_matches(safe_origin_uri):
+        if _github_release_reactions_path_info(safe_origin_uri) is None or not _github_https_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_release_path_matches(safe_origin_uri):
         if _github_release_path_info(safe_origin_uri) is None or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -14376,6 +14513,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_commit_comment_reactions_path_info(final_url) != _github_commit_comment_reactions_path_info(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_release_reactions_path_matches(safe_origin_uri) and (
+            not _github_https_authority_is_exact(final_url, "api.github.com")
+            or _github_release_reactions_path_info(final_url) is None
+            or _github_release_reactions_path_info(final_url) != _github_release_reactions_path_info(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
         if _github_commit_comments_path_matches(safe_origin_uri) and (
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or _github_commit_comments_path_info(final_url) is None
@@ -14505,6 +14648,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_release_assets_path_matches(safe_origin_uri) and (
             _github_release_assets_path_info(safe_origin_uri) is None
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_release_reactions_path_matches(safe_origin_uri) and (
+            _github_release_reactions_path_info(safe_origin_uri) is None
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
