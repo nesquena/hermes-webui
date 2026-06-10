@@ -20,10 +20,8 @@ from api.providers import (
     _ACCOUNT_USAGE_WORKER_WAIT_SECONDS,
     _account_usage_worker_pool,
     _account_usage_worker_pool_lock,
-    _AccountUsageProbeWorker,
     _cleanup_account_usage_probe_workers,
     _close_account_usage_probe_workers,
-    _close_account_usage_probe_workers_async,
     _get_account_usage_probe_worker,
     invalidate_account_usage_status_cache,
 )
