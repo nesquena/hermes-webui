@@ -430,17 +430,34 @@ function _cronDiagnostics(job) {
   return JSON.stringify(fields, null, 2);
 }
 
+function _gatewayStatusReason(status) {
+  const health = status && typeof status.health === 'object' ? status.health : null;
+  if (!health) return '';
+  return typeof health.reason === 'string' ? health.reason.trim() : '';
+}
+
 function _cronGatewayNoticeHtml(status) {
   if (!status || (status.configured && status.running)) return '';
+  const reason = _gatewayStatusReason(status);
+  const isStaleMetadata = reason === 'gateway_stale_running_state';
+  const isRemoteUnreachable = reason === 'remote_gateway_unreachable';
   const notConfigured = !status.configured;
   const title = notConfigured
     ? 'Gateway not configured'
-    : 'Gateway not running';
+    : isStaleMetadata
+      ? 'Gateway metadata stale'
+      : isRemoteUnreachable
+        ? 'Gateway endpoint not reachable'
+        : 'Gateway not running';
   const body = notConfigured
     ? 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon. If this is a single-container Docker install, jobs can be created and run manually here, but scheduled ticks need a gateway container or `hermes gateway` running outside the WebUI.'
-    : 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon to be running. Start the gateway container or `hermes gateway` before relying on offline scheduled runs.';
+    : isStaleMetadata
+      ? 'The gateway is marked as configured, but its health metadata has gone stale. In Docker, scheduled jobs require a live gateway daemon that refreshes runtime metadata while ticking cron.'
+      : isRemoteUnreachable
+        ? 'The gateway health endpoint is not reachable from WebUI. Verify the configured gateway URL env var (`GATEWAY_HEALTH_URL`, `HERMES_GATEWAY_HEALTH_URL`, `HERMES_API_URL`, or `HERMES_WEBUI_GATEWAY_BASE_URL`) points to a reachable gateway service and network path before relying on cron ticking.'
+        : 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon to be running. Start the gateway container or `hermes gateway` before relying on offline scheduled runs.';
   const docsHref = 'https://github.com/nesquena/hermes-webui/blob/master/docs/docker.md#scheduled-jobs-and-the-gateway-daemon';
-  const helpLink = notConfigured
+  const helpLink = notConfigured || isRemoteUnreachable || isStaleMetadata
     ? `<p><a href="${docsHref}" target="_blank" rel="noopener">How to enable scheduled jobs in Docker ↗</a></p>`
     : '';
   return `
@@ -499,7 +516,7 @@ async function loadCrons(animate) {
       item.innerHTML = `
         <div class="cron-header">
           ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
-          ${isAgentMode ? '<span class="cron-agent-badge" title="Agent mode">🤖</span>' : ''}
+          ${isAgentMode ? '<span class="cron-agent-badge" title="Agent mode">🤖</span>' : `<span class="cron-script-badge" title="${esc(t('cron_script_badge_title') || 'Script job (no agent)')}">📜</span>`}
           <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
           <span class="cron-profile-badge" title="${esc(profileTitle)}">${esc(profileLabel)}</span>
           <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
@@ -562,6 +579,55 @@ function toggleCronRunExpanded(jobId, filename, runId){
   }
 }
 
+function _isCronScriptJob(job){
+  return !!(job && job.no_agent);
+}
+
+function _cronModeLabel(job){
+  return _isCronScriptJob(job)
+    ? (t('cron_mode_script') || 'Script')
+    : (t('cron_mode_agent') || 'Agent');
+}
+
+function _cronOutputTitle(job){
+  return _isCronScriptJob(job)
+    ? (t('cron_script_output') || 'Script output')
+    : (t('cron_last_output') || 'Last output');
+}
+
+function _cronScriptJobBannerHtml(){
+  return `<div class="detail-alert cron-script-job-banner">
+        <div class="detail-alert-title">${esc(t('cron_mode_script') || 'Script')}</div>
+        <p>${esc(t('cron_script_job_banner') || 'Runs a script on schedule — stdout is delivered to the target. No agent, prompt, or skills.')}</p>
+      </div>`;
+}
+
+function _cronScriptCardHtml(job){
+  const script = String(job && job.script || '').trim() || '—';
+  const workdir = String(job && job.workdir || '').trim();
+  const workdirRow = workdir
+    ? `<div class="detail-row"><div class="detail-row-label">${esc(t('cron_workdir_label') || 'Working directory')}</div><div class="detail-row-value"><code>${esc(workdir)}</code></div></div>`
+    : '';
+  return `<div class="detail-card cron-script-card">
+        <div class="detail-card-title">${esc(t('cron_script_card_title') || 'Script')}</div>
+        <div class="detail-script">${esc(script)}</div>
+        ${workdirRow}
+        <div class="detail-hint cron-script-card-hint">${esc(t('cron_script_path_hint') || 'Resolved under ~/.hermes/scripts/ unless an absolute path. Edit the script file on the server to change behavior.')}</div>
+      </div>`;
+}
+
+function _cronAgentPromptCardHtml(job){
+  const promptExpanded = _cronExpansionGet(_cronPanelExpandKey(job.id, 'prompt'));
+  const promptToggleLabel = promptExpanded ? (t('cron_collapse_prompt') || 'Collapse prompt') : (t('cron_expand_prompt') || 'Expand prompt');
+  return `<div class="detail-card">
+        <div class="detail-card-title detail-card-title-row">
+          <span>${esc(t('cron_prompt_label') || 'Prompt')}</span>
+          <button type="button" class="detail-expand-toggle" onclick="toggleCronPromptExpanded('${esc(job.id)}')" title="${esc(promptToggleLabel)}" aria-label="${esc(promptToggleLabel)}">${esc(promptExpanded ? '▴' : '▾')}</button>
+        </div>
+        <div class="detail-prompt ${promptExpanded ? 'expanded' : ''}">${esc(job.prompt || '')}</div>
+      </div>`;
+}
+
 function _renderCronDetail(job){
   _currentCronDetail = job;
   const title = $('taskDetailTitle');
@@ -575,14 +641,13 @@ function _renderCronDetail(job){
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
-  const isNoAgent = !!job.no_agent;
-  const cronJobMode = isNoAgent ? 'no-agent' : 'agent';
+  const isNoAgent = _isCronScriptJob(job);
+  const cronJobMode = _cronModeLabel(job);
   const modelProvider =
     job.provider && job.model ? `${esc(job.provider)}/${esc(job.model)}` :
     job.model ? esc(job.model) :
     job.provider ? esc(job.provider) :
     isNoAgent ? '' : 'default';
-  const script = job.script || '';
   const profileLabel = _cronProfileLabel(job.profile);
   const profileTitle = _cronProfileTitle(job.profile);
   const lastError = job.last_error ? `<div class="detail-row"><div class="detail-row-label">${esc(t('error_prefix').replace(/:\s*$/,''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>` : '';
@@ -602,11 +667,13 @@ function _renderCronDetail(job){
         </div>
       </div>` : '';
   const toastNotifications = job.toast_notifications !== false;
-  const promptExpanded = _cronExpansionGet(_cronPanelExpandKey(job.id, 'prompt'));
-  const promptToggleLabel = promptExpanded ? (t('cron_collapse_prompt') || 'Collapse prompt') : (t('cron_expand_prompt') || 'Expand prompt');
+  const outputTitle = _cronOutputTitle(job);
+  const skillsRow = isNoAgent ? '' : `<div class="detail-row"><div class="detail-row-label">${esc(t('cron_skills_label') || 'Skills')}</div><div class="detail-row-value">${esc(skills)}</div></div>`;
+  const instructionCard = isNoAgent ? _cronScriptCardHtml(job) : _cronAgentPromptCardHtml(job);
   body.innerHTML = `
     <div class="main-view-content">
       ${attentionBanner}
+      ${isNoAgent ? _cronScriptJobBannerHtml() : ''}
       <div class="detail-card">
         <div class="detail-card-title">${esc(t('cron_status_active').replace(/./,c=>c.toUpperCase()))}</div>
         <div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value"><span class="detail-badge ${status.detailClass}">${esc(status.label)}</span></div></div>
@@ -614,22 +681,15 @@ function _renderCronDetail(job){
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_next'))}</div><div class="detail-row-value">${esc(nextRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_last'))}</div><div class="detail-row-value">${esc(lastRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">Deliver</div><div class="detail-row-value">${esc(deliver)}</div></div>
-        <div class="detail-row"><div class="detail-row-label">Mode</div><div class="detail-row-value"><span class="detail-badge" id="cronJobMode">${esc(cronJobMode)}</span>${modelProvider ? ` <code>${modelProvider}</code>` : ''}</div></div>
-        ${isNoAgent ? `<div class="detail-row"><div class="detail-row-label">No-agent script</div><div class="detail-row-value"><code>${esc(script || '—')}</code></div></div>` : ''}
+        <div class="detail-row"><div class="detail-row-label">${esc(t('cron_mode_label') || 'Mode')}</div><div class="detail-row-value"><span class="detail-badge cron-mode-badge ${isNoAgent ? 'script' : 'agent'}" id="cronJobMode">${esc(cronJobMode)}</span>${modelProvider ? ` <code>${modelProvider}</code>` : ''}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</div><div class="detail-row-value"><span class="detail-badge ${toastNotifications ? 'active' : ''}">${esc(toastNotifications ? (t('cron_toast_notifications_enabled') || 'Enabled') : (t('cron_toast_notifications_disabled') || 'Disabled'))}</span></div></div>
-        <div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(skills)}</div></div>
+        ${skillsRow}
         ${lastError}
       </div>
-      <div class="detail-card">
-        <div class="detail-card-title detail-card-title-row">
-          <span>Prompt</span>
-          <button type="button" class="detail-expand-toggle" onclick="toggleCronPromptExpanded('${esc(job.id)}')" title="${esc(promptToggleLabel)}" aria-label="${esc(promptToggleLabel)}">${esc(promptExpanded ? '▴' : '▾')}</button>
-        </div>
-        <div class="detail-prompt ${promptExpanded ? 'expanded' : ''}">${esc(job.prompt || '')}</div>
-      </div>
+      ${instructionCard}
       <div class="detail-card ${_cronNewJobIds.has(String(job.id)) ? 'has-new-run' : ''}" id="cronDetailRuns">
-        <div class="detail-card-title">${esc(t('cron_last_output'))}</div>
+        <div class="detail-card-title">${esc(outputTitle)}</div>
         <div style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>
       </div>
     </div>`;
@@ -676,8 +736,10 @@ async function _loadCronDetailRuns(jobId){
     if (!_currentCronDetail || _currentCronDetail.id !== jobId) return;
     const card = $('cronDetailRuns');
     if (!card) return;
+    const outputTitle = _cronOutputTitle(_currentCronDetail);
+    const isScriptJob = _isCronScriptJob(_currentCronDetail);
     if (!data.runs || !data.runs.length) {
-      card.innerHTML = `<div class="detail-card-title">${esc(t('cron_last_output'))}</div><div style="color:var(--muted);font-size:12px">${esc(t('cron_no_runs_yet'))}</div>`;
+      card.innerHTML = `<div class="detail-card-title">${esc(outputTitle)}</div><div style="color:var(--muted);font-size:12px">${esc(t('cron_no_runs_yet'))}</div>`;
       return;
     }
     const rows = data.runs.map((run, i) => {
@@ -685,7 +747,7 @@ async function _loadCronDetailRuns(jobId){
       const sizeStr = run.size > 1024 ? (run.size/1024).toFixed(1)+' KB' : run.size+' B';
       const dateStr = new Date(run.modified * 1000).toLocaleString();
       const rid = `cron-det-run-${jobId}-${i}`;
-      const usageStrip = _formatCronRunUsageStrip(run.usage);
+      const usageStrip = isScriptJob ? '' : _formatCronRunUsageStrip(run.usage);
       const runExpanded = _cronExpansionGet(_cronRunExpandKey(jobId, run.filename));
       const runToggleLabel = runExpanded ? (t('cron_collapse_output') || 'Collapse output') : (t('cron_expand_output') || 'Expand output');
       return `<div class="detail-run-item" id="${rid}">
@@ -700,7 +762,7 @@ async function _loadCronDetailRuns(jobId){
       </div>`;
     }).join('');
     const countLabel = data.total > 50 ? ` (${data.total} runs, showing latest 50)` : ` (${data.total} runs)`;
-    card.innerHTML = `<div class="detail-card-title">${esc(t('cron_last_output'))}${countLabel}</div>${rows}`;
+    card.innerHTML = `<div class="detail-card-title">${esc(outputTitle)}${countLabel}</div>${rows}`;
   } catch(e) { /* ignore */ }
 }
 
@@ -708,9 +770,20 @@ async function _loadRunContent(jobId, filename, runId){
   const body = document.querySelector(`#${runId} .detail-run-body`);
   if (!body) return;
   const item = document.getElementById(runId);
-  if (!item.classList.contains('open')) {
-    item.classList.add('open');
+  if (item.classList.contains('open')) {
+    // Already open → collapse and return (toggle behaviour)
+    item.classList.remove('open');
+    body.classList.remove('expanded');
+    _cronExpansionSet(_cronRunExpandKey(jobId, filename), false);
+    const btn = item ? item.querySelector('.detail-expand-toggle') : null;
+    if (btn) {
+      btn.textContent = '▾';
+      btn.title = (t('cron_expand_output') || 'Expand output');
+      btn.setAttribute('aria-label', btn.title);
+    }
+    return;
   }
+  item.classList.add('open');
   body.classList.toggle('expanded', _cronExpansionGet(_cronRunExpandKey(jobId, filename)));
   body.innerHTML = `<span style="opacity:.5">${esc(t('loading'))}</span>`;
   try {
@@ -824,6 +897,10 @@ function duplicateCurrentCron(){
     deliver: job.deliver || 'local',
     profile: job.profile || '',
     toast_notifications: job.toast_notifications !== false,
+    no_agent: !!job.no_agent,
+    script: job.script || '',
+    model: job.model || '',
+    provider: job.provider || '',
     isEdit: false,
   });
   if (!_cronSkillsCache) {
@@ -858,7 +935,7 @@ function openCronCreate(){
   _cronMode = 'create';
   _cronIsDuplicate = false;
   _cronSelectedSkills = [];
-  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', toast_notifications:true, isEdit:false });
+  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', toast_notifications:true, model:'', provider:'', isEdit:false });
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
   loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
@@ -879,6 +956,8 @@ function openCronEdit(job){
     toast_notifications: job.toast_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
+    model: job.model || '',
+    provider: job.provider || '',
     isEdit: true,
   });
   if (!_cronSkillsCache) {
@@ -889,7 +968,7 @@ function openCronEdit(job){
   loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', isEdit }){
+function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', model='', provider='', isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
@@ -897,8 +976,30 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
   const isNoAgent = !!no_agent;
   const toastNotifications = toast_notifications !== false;
   title.textContent = isEdit ? (t('edit') + ' · ' + (name || schedule || t('scheduled_jobs'))) : t('new_job');
+  const promptBlock = isNoAgent ? '' : `
+        <div class="detail-form-row">
+          <label for="cronFormPrompt">${esc(t('cron_prompt_label') || 'Prompt')}</label>
+          <textarea id="cronFormPrompt" rows="6" placeholder="${esc(t('cron_prompt_placeholder') || 'Must be self-contained')}" required>${esc(prompt || '')}</textarea>
+        </div>`;
+  const scriptBlock = isNoAgent ? `
+        <div class="detail-form-row">
+          <label for="cronFormScript">${esc(t('cron_script_path_label') || 'Script path')}</label>
+          <input type="text" id="cronFormScript" value="${esc(script || '')}" readonly autocomplete="off">
+          <div class="detail-form-hint">${esc(t('cron_script_path_hint') || 'Resolved under ~/.hermes/scripts/ unless an absolute path. Edit the script file on the server to change behavior.')}</div>
+        </div>` : '';
+  const skillsBlock = isNoAgent ? '' : `
+        <div class="detail-form-row">
+          <label for="cronFormSkillSearch">${esc(t('cron_skills_label') || 'Skills')}</label>
+          <div class="skill-picker-wrap">
+            <input type="text" id="cronFormSkillSearch" placeholder="${esc(t('cron_skills_placeholder') || 'Add skills (optional)...')}" autocomplete="off" ${isEdit ? 'disabled' : ''}>
+            <div id="cronFormSkillDropdown" class="skill-picker-dropdown" style="display:none"></div>
+            <div id="cronFormSkillTags" class="skill-picker-tags"></div>
+          </div>
+          ${isEdit ? `<div class="detail-form-hint">${esc(t('cron_skills_edit_hint') || 'Skill list is not editable after creation.')}</div>` : ''}
+        </div>`;
   body.innerHTML = `
     <div class="main-view-content">
+      ${isNoAgent ? _cronScriptJobBannerHtml() : ''}
       <form class="detail-form" onsubmit="event.preventDefault(); saveCronForm();">
         <div class="detail-form-row">
           <label for="cronFormName">${esc(t('cron_name_label') || 'Name')}</label>
@@ -910,11 +1011,8 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           <div class="detail-form-hint">${esc(t('cron_schedule_hint') || "Cron expression or shorthand like 'every 1h'.")}</div>
           <div id="cronFormScheduleOnceWarning" class="detail-form-warning cron-once-warning" style="display:none">${esc(t('cron_schedule_once_warning') || "Duration forms like '30m' run once and are removed after running. Use 'every 30m' to keep a recurring job.")}</div>
         </div>
-        <div class="detail-form-row ${isNoAgent ? 'cron-no-agent-prompt-row' : ''}">
-          <label for="cronFormPrompt">${esc(t('cron_prompt_label') || 'Prompt')}</label>
-          <textarea id="cronFormPrompt" rows="6" placeholder="${esc(t('cron_prompt_placeholder') || 'Must be self-contained')}"${isNoAgent ? ' disabled' : ' required'}>${esc(prompt || '')}</textarea>
-          ${isNoAgent ? `<div class="detail-form-hint cron-no-agent-hint">No-agent mode runs the configured script directly; Prompt is unused. No-agent script: <code>${esc(script || '—')}</code></div>` : ''}
-        </div>
+        ${scriptBlock}
+        ${promptBlock}
         <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
           <select id="cronFormDeliver">
@@ -929,21 +1027,20 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           <div class="detail-form-hint">${esc(t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time')}</div>
         </div>
         <div class="detail-form-row">
+          <label for="cronFormModel">${esc(t('cron_model_label') || 'Model Override')}</label>
+          <select id="cronFormModel"${isNoAgent ? ' disabled' : ''}>
+            <option value="">loading...</option>
+          </select>
+          <div class="detail-form-hint">${esc(t('cron_model_hint') || 'Override the default model for this job.')}</div>
+        </div>
+        <div class="detail-form-row">
           <label for="cronFormToastNotifications">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</label>
           <label class="detail-form-check" for="cronFormToastNotifications">
             <input type="checkbox" id="cronFormToastNotifications" ${toastNotifications ? 'checked' : ''}>
             <span>${esc(t('cron_toast_notifications_hint') || 'Show a toast when this cron finishes.')}</span>
           </label>
         </div>
-        <div class="detail-form-row">
-          <label for="cronFormSkillSearch">${esc(t('cron_skills_label') || 'Skills')}</label>
-          <div class="skill-picker-wrap">
-            <input type="text" id="cronFormSkillSearch" placeholder="${esc(t('cron_skills_placeholder') || 'Add skills (optional)...')}" autocomplete="off" ${isEdit ? 'disabled' : ''}>
-            <div id="cronFormSkillDropdown" class="skill-picker-dropdown" style="display:none"></div>
-            <div id="cronFormSkillTags" class="skill-picker-tags"></div>
-          </div>
-          ${isEdit ? `<div class="detail-form-hint">${esc(t('cron_skills_edit_hint') || 'Skill list is not editable after creation.')}</div>` : ''}
-        </div>
+        ${skillsBlock}
         <div id="cronFormError" class="detail-form-error" style="display:none"></div>
       </form>
     </div>`;
@@ -951,7 +1048,8 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
   if (empty) empty.style.display = 'none';
   _setCronHeaderButtons(isEdit ? 'edit' : 'create');
   _populateCronDeliverOptions(deliver, isEdit);
-  _renderCronSkillTags();
+  _populateCronFormModelSelect(model, provider, isNoAgent);
+  if (!isNoAgent) _renderCronSkillTags();
   const scheduleEl = $('cronFormSchedule');
   if (scheduleEl) {
     scheduleEl.addEventListener('input', _syncCronScheduleWarning);
@@ -991,6 +1089,72 @@ async function _populateCronDeliverOptions(selectedValue, isEdit) {
     sel.innerHTML = '<option value="local">Local (save output only)</option>';
   }
   sel.disabled = false;
+}
+
+async function _populateCronFormModelSelect(selectedModel, selectedProvider, disabled){
+  const sel = $('cronFormModel');
+  if (!sel) return;
+  delete sel.dataset.loaded;
+  sel.disabled = true;
+  sel.innerHTML = `<option value="">${esc(t('cron_model_use_default') || 'Default (use profile/system default)')}</option>`;
+  try {
+    const data = await api('/api/models');
+    const groups = (Array.isArray(data && data.groups) && data.groups.length) ? data.groups : [];
+    for (const g of groups) {
+      const og = document.createElement('optgroup');
+      og.label = g.provider || g.provider_id || 'Configured';
+      if (g.provider_id) og.dataset.provider = g.provider_id;
+      for (const m of (Array.isArray(g.models) ? g.models : [])) {
+        if (!m || !m.id) continue;
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.label || m.id;
+        if (g.provider_id) opt.dataset.provider = g.provider_id;
+        og.appendChild(opt);
+      }
+      if (og.children.length) sel.appendChild(og);
+    }
+
+    let found = false;
+    if (selectedModel) {
+      if (typeof _applyModelToDropdown === 'function') {
+        found = !!_applyModelToDropdown(selectedModel, sel, selectedProvider || null);
+      }
+      if (!found) {
+        for (const opt of sel.options) {
+          if (opt.value !== selectedModel) continue;
+          const prov = opt.dataset.provider || (opt.parentElement && opt.parentElement.dataset.provider) || '';
+          if (!selectedProvider || prov === selectedProvider) {
+            opt.selected = true;
+            found = true;
+            break;
+          }
+        }
+      }
+    } else {
+      found = true;
+    }
+
+    if (selectedModel && !found) {
+      const opt = document.createElement('option');
+      opt.value = selectedModel;
+      opt.textContent = `${selectedModel} (${t('not_available') || 'not available'})`;
+      if (selectedProvider) opt.dataset.provider = selectedProvider;
+      opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.dataset.loaded = '1';
+  } catch (e) {
+    console.warn('Failed to load cron model picker:', e.message);
+    // Load failed: dataset.loaded stays unset so saveCronForm omits model/provider
+    // and preserves any existing override. Keep the select DISABLED rather than
+    // re-enabling it showing only "Default" — an enabled "Default"-only select
+    // would let the user think they cleared the override when a save actually
+    // preserves it (Opus advisor, stage-345). A reopen retries the load.
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = !!disabled;
 }
 
 function _renderCronSkillTags(){
@@ -1060,23 +1224,40 @@ async function saveCronForm(){
   const profileEl=$('cronFormProfile');
   const toastEl=$('cronFormToastNotifications');
   const errEl=$('cronFormError');
-  if(!schEl||!promptEl||!errEl) return;
+  if(!schEl||!errEl) return;
+  const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);
+  if(!isNoAgent && !promptEl) return;
   const name=(nameEl?nameEl.value:'').trim();
   const schedule=schEl.value.trim();
-  const prompt=promptEl.value.trim();
+  const prompt=promptEl ? promptEl.value.trim() : '';
   const deliver=delivEl?delivEl.value:'local';
   const profile=profileEl?profileEl.value:'';
   const toastNotifications=toastEl?!!toastEl.checked:true;
-  const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
   try{
+    const modelEl = $('cronFormModel');
+    const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
+    const selectedModel = modelEl ? (modelEl.value || '').trim() : '';
     if (_editingCronId) {
       const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications};
       if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       if (deliver) updates.deliver = deliver;
+      if (modelEl) {
+        if (selectedModel && modelLoaded) {
+          const modelState = (typeof _modelStateForSelect === 'function')
+            ? _modelStateForSelect(modelEl, selectedModel)
+            : { model: selectedModel, model_provider: null };
+          updates.model = modelState.model || null;
+          updates.provider = modelState.model_provider || null;
+        } else if (modelLoaded) {
+          updates.model = null;
+          updates.provider = null;
+        }
+        // else: select not yet populated — omit model/provider to preserve saved value
+      }
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
       _editingCronId = null;
@@ -1091,6 +1272,18 @@ async function saveCronForm(){
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
+    if (modelEl && modelLoaded) {
+      if (selectedModel) {
+        const modelState = (typeof _modelStateForSelect === 'function')
+          ? _modelStateForSelect(modelEl, selectedModel)
+          : { model: selectedModel, model_provider: null };
+        body.model = modelState.model || null;
+        body.provider = modelState.model_provider || null;
+      }
+    } else if (_cronIsDuplicate && _cronPreFormDetail && _cronPreFormDetail.model) {
+      body.model = _cronPreFormDetail.model;
+      body.provider = _cronPreFormDetail.provider || null;
+    }
     const res = await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
     _cronPreFormDetail = null;
     _cronIsDuplicate = false;
@@ -2649,34 +2842,69 @@ async function loadKanbanTask(taskId){
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
 
+// Phase 2: Single-source-of-truth render.
+//
+// Reads `S.todos` (set by the `todo_state` SSE listener, INFLIGHT
+// restore, or session cold-load — see _hydrateTodosFromSession in
+// ui.js).  When `S.todoStateMeta` is null we have never seen an
+// explicit signal and fall through to the legacy reverse-scan over
+// settled tool messages — this keeps the panel populated against
+// pre-Phase-1 servers and during the upgrade window.
+//
+// The render is short-circuited via `_todosLastRenderedHash` (defined
+// in ui.js): repeated emissions that yield identical DOM are no-ops.
+// Coalescing of bursty live updates happens upstream in
+// scheduleTodosRefresh().
 function loadTodos() {
   const panel = $('todoPanel');
   if (!panel) return;
 
-  const sessionTodoState = S.session && S.session.todo_state;
   let todos;
-  if (sessionTodoState && Array.isArray(sessionTodoState.todos)) {
-    todos = sessionTodoState.todos;
+  if (S.todoStateMeta) {
+    todos = Array.isArray(S.todos) ? S.todos : [];
   } else {
     todos = _legacyTodosFromMessages();
   }
 
   if (!todos.length) {
+    if (typeof _todosLastRenderedHash !== 'undefined' && _todosLastRenderedHash === '__empty__') return;
     panel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:4px 0">${esc(t('todos_no_active'))}</div>`;
+    if (typeof _todosLastRenderedHash !== 'undefined') _todosLastRenderedHash = '__empty__';
     return;
   }
+
+  if (typeof _todosHash === 'function' && typeof _todosLastRenderedHash !== 'undefined') {
+    const hash = _todosHash(todos);
+    if (hash === _todosLastRenderedHash) return;
+    _todosLastRenderedHash = hash;
+  }
+
   const statusIcon = {pending:li('square',14), in_progress:li('loader',14), completed:li('check',14), cancelled:li('x',14)};
   const statusColor = {pending:'var(--muted)', in_progress:'var(--blue)', completed:'rgba(100,200,100,.8)', cancelled:'rgba(200,100,100,.5)'};
-  panel.innerHTML = todos.map(todo => `
+  // Single innerHTML join is the cheapest correct way to materialize
+  // ~10–50 leaf nodes.  All user-controlled content goes through esc().
+  panel.innerHTML = todos.map(td => `
     <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[todo.status]||'var(--muted)'}">${statusIcon[todo.status]||li('square',14)}</span>
+      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[td.status]||'var(--muted)'}">${statusIcon[td.status]||li('square',14)}</span>
       <div style="flex:1;min-width:0">
-        <div style="font-size:13px;color:${todo.status==='completed'?'var(--muted)':todo.status==='in_progress'?'var(--text)':'var(--text)'};${todo.status==='completed'?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(todo.content)}</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(todo.id)} · ${esc(todo.status)}</div>
+        <div style="font-size:13px;color:${td.status==='completed'?'var(--muted)':td.status==='in_progress'?'var(--text)':'var(--text)'};${td.status==='completed'?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(td.content)}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(td.status)}</div>
       </div>
     </div>`).join('');
 }
 
+// Legacy fallback: reverse-scan settled tool messages for the most
+// recent {"todos":[...]} payload.  Used only when no `todo_state`
+// signal has been seen for the current session — primarily during
+// upgrade windows where the server has not yet been redeployed with
+// Phase 1.  Once Phase 1 is universally deployed and a stabilization
+// period has passed, this can be removed (Phase 3).
+//
+// Variable name `sourceMessages` is preserved verbatim from the
+// original loadTodos() implementation so the matching regression
+// test (R-todo-survive-refresh in tests/test_regressions.py) keeps
+// catching any future refactor that drops the raw-session-messages
+// fallback. See the test for the exact contract.
 function _legacyTodosFromMessages() {
   const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;
   if (!Array.isArray(sourceMessages)) return [];
@@ -2690,7 +2918,7 @@ function _legacyTodosFromMessages() {
     if (!content || content.indexOf('"todos"') < 0) continue;
     try {
       const d = JSON.parse(content);
-      if (d && Array.isArray(d.todos) && d.todos.length) return d.todos;
+      if (d && Array.isArray(d.todos)) return d.todos;
     } catch (_) {}
   }
   return [];
@@ -3352,6 +3580,7 @@ function _bucketDailyTokensForChart(rows) {
     const slice = rows.slice(i, i + bucketSize);
     const input_tokens = slice.reduce((s, r) => s + Number(r.input_tokens || 0), 0);
     const output_tokens = slice.reduce((s, r) => s + Number(r.output_tokens || 0), 0);
+    const cache_read_tokens = slice.reduce((s, r) => s + Number(r.cache_read_tokens || 0), 0);
     const sessions = slice.reduce((s, r) => s + Number(r.sessions || 0), 0);
     const cost = slice.reduce((s, r) => s + Number(r.cost || 0), 0);
 
@@ -3369,6 +3598,7 @@ function _bucketDailyTokensForChart(rows) {
       date: firstDate,
       input_tokens,
       output_tokens,
+      cache_read_tokens,
       sessions,
       cost,
     });
@@ -3407,11 +3637,13 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   };
 
   // Overview cards
+  const fmtPct = n => n != null && n >= 0 ? n + '%' : t('insights_no_cost');
   const overviewCards = [
     { label: t('insights_sessions'), value: fmtNum(d.total_sessions), icon: li('message-square', 18) },
     { label: t('insights_messages'), value: fmtNum(d.total_messages), icon: li('hash', 18) },
     { label: t('insights_tokens'), value: fmtTokens(d.total_tokens), icon: li('cpu', 18) },
     { label: t('insights_cost'), value: fmtCost(d.total_cost), icon: li('dollar-sign', 18) },
+    { label: t('insights_cache_hit'), value: fmtPct(d.total_cache_hit_percent), icon: li('zap', 18) },
   ];
 
   // Daily token trend — bucket long ranges to avoid horizontal overflow
@@ -3429,7 +3661,9 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
         const outputPct = Math.max((output / maxDailyTokens) * 100, output ? 2 : 0).toFixed(1);
         const showLabel = idx === 0 || idx === chartRows.length - 1 || idx % labelEvery === 0;
         const titleDate = r.title || r.date;
-        const title = `${titleDate} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
+        const cacheRead = Number(r.cache_read_tokens || 0);
+        const cachePct = cacheRead > 0 && input > 0 ? Math.round((cacheRead / input) * 100) + '%' : t('insights_no_cost');
+        const title = `${titleDate} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')} · ${t('insights_cache_hit')} ${cachePct}`;
         const labelText = r.label !== undefined ? r.label : String(r.date).slice(5);
         return `<div class="insights-daily-bar" title="${esc(title)}"><div class="insights-daily-stack" aria-label="${esc(title)}"><div class="insights-daily-bar-output" style="height:${outputPct}%"></div><div class="insights-daily-bar-input" style="height:${inputPct}%"></div></div><span>${showLabel ? esc(labelText) : ''}</span></div>`;
       }).join('') +
@@ -3441,11 +3675,12 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   // Models table
   let modelsHtml = '';
   if (d.models && d.models.length) {
-    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table insights-model-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_sessions'))}</span><span>${esc(t('insights_model_tokens'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
+    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table insights-model-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_sessions'))}</span><span>${esc(t('insights_model_tokens'))}</span><span>${esc(t('insights_model_cache'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
       d.models.map(m => {
         const share = Number(m.cost_share || m.token_share || m.session_share || 0);
         const title = `${m.model} · ${fmtTokens(m.input_tokens)} ${t('insights_input_tokens')} · ${fmtTokens(m.output_tokens)} ${t('insights_output_tokens')}`;
-        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span><span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
+        const cachePct = m.cache_hit_percent != null ? m.cache_hit_percent + '%' : t('insights_no_cost');
+        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span><span class="insights-model-cache">${cachePct}</span><span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
       }).join('') +
       `</div></div>`;
   } else {
@@ -4342,8 +4577,10 @@ function syncWorkspaceDisplays(){
 async function loadWorkspaceList(){
   try{
     const data = await api('/api/workspaces');
+    if(typeof syncTerminalBackendState==='function') syncTerminalBackendState(data);
     _workspaceList = data.workspaces || [];
     syncWorkspaceDisplays();
+    if(typeof syncTerminalButton==='function') syncTerminalButton();
     return data;
   }catch(e){ return {workspaces:[], last:''}; }
 }
@@ -5009,7 +5246,11 @@ function _refreshProfileSwitchBackground(gen){
     if (gen !== _profileSwitchGeneration) return;
     var hidden = (s && Array.isArray(s.hidden_tabs)) ? s.hidden_tabs : [];
     hidden = hidden.filter(function(x){ return typeof x === 'string' && x.trim(); });
+    var order = (s && Array.isArray(s.tab_order)) ? s.tab_order : [];
+    order = order.filter(function(x){ return typeof x === 'string' && x.trim(); });
     if (typeof _setHiddenTabs === 'function') _setHiddenTabs(hidden);
+    if (typeof _setTabOrder === 'function') _setTabOrder(order);
+    if (typeof _applyTabOrder === 'function') _applyTabOrder(order);
     if (typeof _applyTabVisibility === 'function') _applyTabVisibility(hidden);
   }).catch(function(){});
 }
@@ -5057,10 +5298,11 @@ async function loadProfilesPanel() {
       const isActive = p.name === activeName;
       const activeBadge = isActive ? `<span style="color:var(--link);font-size:10px;font-weight:600;margin-left:6px">${esc(t('profile_active'))}</span>` : '';
       const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
+      const hiddenBadge = p.visible === false ? ' <span class="detail-badge" title="Hidden from chat">Hidden from chat</span>' : '';
       card.innerHTML = `
         <div class="profile-card-header">
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}</div>
+            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}${hiddenBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
         </div>`;
@@ -5205,10 +5447,11 @@ function renderProfileDropdown(data) {
   const dd = $('profileDropdown');
   if (!dd) return;
   dd.innerHTML = '';
-  const profiles = data.profiles || [];
-  const active = (S.activeProfile && profiles.some(p => p.name === S.activeProfile))
+  const allProfiles = data.profiles || [];
+  const active = (S.activeProfile && allProfiles.some(p => p.name === S.activeProfile))
     ? S.activeProfile
     : (data.active || 'default');
+  const profiles = allProfiles.filter(p => p && (p.visible !== false || p.name === active));
   for (const p of profiles) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
@@ -5293,6 +5536,7 @@ async function switchToProfile(name) {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }) });
     if (_switchGen !== _profileSwitchGeneration) return;
     S.activeProfile = data.active || name;
+    S.activeProfileIsDefault = !!data.is_default;
 
     // Update composer placeholder and title bar while the core profile-switch
     // state is still close to the profile API response.
@@ -5645,21 +5889,84 @@ let _settingsAppearanceAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
 
-// ── Sidebar tab visibility ─────────────────────────────────────────────────
+// ── Sidebar tab visibility/order ────────────────────────────────────────────
 const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
 const _HIDDEN_TABS_LS_KEY = 'hermes-webui-hidden-tabs';
+const _TAB_ORDER_LS_KEY = 'hermes-webui-tab-order';
+let _tabVisibilityDragSuppressUntil = 0;
+
+function _sanitizeTabPanelList(panels){
+  if(!Array.isArray(panels)) return [];
+  var out=[];
+  panels.forEach(function(panel){
+    if(typeof panel!=='string') return;
+    panel=panel.trim();
+    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel)) return;
+    if(out.indexOf(panel)===-1) out.push(panel);
+  });
+  return out;
+}
 
 function _getHiddenTabs(){
-  try{var h=localStorage.getItem(_HIDDEN_TABS_LS_KEY);if(h){var p=JSON.parse(h);if(Array.isArray(p))return p;}}catch(e){}
+  try{var h=localStorage.getItem(_HIDDEN_TABS_LS_KEY);if(h)return _sanitizeTabPanelList(JSON.parse(h));}catch(e){}
   return[];
 }
 
 function _setHiddenTabs(panels){
-  try{localStorage.setItem(_HIDDEN_TABS_LS_KEY,JSON.stringify(panels));}catch(e){}
+  try{localStorage.setItem(_HIDDEN_TABS_LS_KEY,JSON.stringify(_sanitizeTabPanelList(panels)));}catch(e){}
+}
+
+function _getTabOrder(){
+  try{var h=localStorage.getItem(_TAB_ORDER_LS_KEY);if(h)return _sanitizeTabPanelList(JSON.parse(h));}catch(e){}
+  return[];
+}
+
+function _setTabOrder(panels){
+  try{localStorage.setItem(_TAB_ORDER_LS_KEY,JSON.stringify(_sanitizeTabPanelList(panels)));}catch(e){}
+}
+
+function _availableSidebarPanels(){
+  var out=[];
+  var tabs=document.querySelectorAll('.rail .rail-btn.nav-tab[data-panel], .sidebar-nav .nav-tab[data-panel]');
+  tabs.forEach(function(tab){
+    var panel=tab.dataset.panel;
+    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel)) return;
+    if(tab.classList.contains('dashboard-link')||tab.hasAttribute('data-dashboard-link')) return;
+    if(out.indexOf(panel)===-1) out.push(panel);
+  });
+  return out;
+}
+
+function _orderedSidebarPanels(order){
+  var available=_availableSidebarPanels();
+  var requested=_sanitizeTabPanelList(Array.isArray(order)?order:_getTabOrder());
+  var out=[];
+  requested.forEach(function(panel){ if(available.indexOf(panel)!==-1&&out.indexOf(panel)===-1) out.push(panel); });
+  available.forEach(function(panel){ if(out.indexOf(panel)===-1) out.push(panel); });
+  return out;
+}
+
+function _applyTabOrder(order){
+  var ordered=_orderedSidebarPanels(order);
+  ['.rail','.sidebar-nav'].forEach(function(selector){
+    var container=document.querySelector(selector);
+    if(!container) return;
+    var anchor=Array.prototype.find.call(container.children,function(child){
+      if(child.classList&&child.classList.contains('rail-spacer')) return true;
+      if(child.classList&&child.classList.contains('dashboard-link')) return true;
+      if(child.hasAttribute&&child.hasAttribute('data-dashboard-link')) return true;
+      return child.dataset&&child.dataset.panel==='settings';
+    });
+    ordered.forEach(function(panel){
+      var node=container.querySelector('.nav-tab[data-panel="'+panel+'"]');
+      if(node) container.insertBefore(node,anchor||null);
+    });
+  });
 }
 
 function _applyTabVisibility(hidden){
-  if(!Array.isArray(hidden)) hidden=[];
+  hidden=_sanitizeTabPanelList(hidden);
+  _applyTabOrder(_getTabOrder());
   // Hide/unhide all [data-panel] elements (sidebar-nav buttons + rail buttons)
   document.querySelectorAll('[data-panel]').forEach(function(el){
     var panel=el.dataset.panel;
@@ -5682,14 +5989,12 @@ function _renderTabVisibilityChips(){
   var container=$('tabVisibilityChips');
   if(!container)return;
   var hidden=_getHiddenTabs();
-  // Scan rail buttons to discover all available panels (skip always-visible + dashboard-link)
-  var tabs=document.querySelectorAll('.rail .rail-btn.nav-tab[data-panel]');
+  var panels=_orderedSidebarPanels();
   container.innerHTML='';
-  tabs.forEach(function(tab){
-    var panel=tab.dataset.panel;
-    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel))return;
-    if(tab.classList.contains('dashboard-link'))return;
-    var label=tab.dataset.tooltip||tab.dataset.label||panel;
+  panels.forEach(function(panel){
+    var tab=document.querySelector('.rail .rail-btn.nav-tab[data-panel="'+panel+'"]')
+      ||document.querySelector('.sidebar-nav .nav-tab[data-panel="'+panel+'"]');
+    var label=(tab&&(tab.dataset.tooltip||tab.dataset.label))||panel;
     // Capitalize first letter
     label=label.charAt(0).toUpperCase()+label.slice(1);
     var chip=document.createElement('button');
@@ -5699,15 +6004,57 @@ function _renderTabVisibilityChips(){
     if(isOff)chip.classList.add('chip-off');
     chip.textContent=label;
     chip.setAttribute('data-tab-panel',panel);
+    chip.setAttribute('draggable','true');
     // Use role="switch" + aria-checked instead of aria-pressed so screen
     // readers narrate "Tasks switch on/off" (matches user mental model) rather
     // than "Tasks toggle button pressed/not-pressed" (where the polarity is
     // confusing because chip-off looks like the "off" state).
     chip.setAttribute('role','switch');
     chip.setAttribute('aria-checked',isOff?'false':'true');
-    chip.onclick=function(){_toggleTabVisibilityChip(panel);};
+    chip.onclick=function(){
+      if(Date.now()<_tabVisibilityDragSuppressUntil)return;
+      _toggleTabVisibilityChip(panel);
+    };
+    _wireTabChipDrag(chip,panel);
     container.appendChild(chip);
   });
+}
+
+function _wireTabChipDrag(chip,panel){
+  if(!chip)return;
+  chip.addEventListener('dragstart',function(e){
+    chip.classList.add('dragging');
+    if(e.dataTransfer){
+      e.dataTransfer.effectAllowed='move';
+      e.dataTransfer.setData('text/plain',panel);
+    }
+  });
+  chip.addEventListener('dragend',function(){chip.classList.remove('dragging');});
+  chip.addEventListener('dragover',function(e){e.preventDefault();chip.classList.add('drag-over');if(e.dataTransfer)e.dataTransfer.dropEffect='move';});
+  chip.addEventListener('dragleave',function(){chip.classList.remove('drag-over');});
+  chip.addEventListener('drop',function(e){_handleTabVisibilityChipDrop(e,panel);});
+}
+
+function _moveTabOrderPanel(sourcePanel,targetPanel){
+  if(!sourcePanel||!targetPanel||sourcePanel===targetPanel) return false;
+  var order=_orderedSidebarPanels();
+  var from=order.indexOf(sourcePanel);
+  var to=order.indexOf(targetPanel);
+  if(from===-1||to===-1) return false;
+  order.splice(from,1);
+  order.splice(to,0,sourcePanel);
+  _setTabOrder(order);
+  _applyTabOrder(order);
+  _renderTabVisibilityChips();
+  _scheduleAppearanceAutosave();
+  return true;
+}
+
+function _handleTabVisibilityChipDrop(e,targetPanel){
+  if(e){e.preventDefault();e.stopPropagation();}
+  document.querySelectorAll('.tab-visibility-chip.drag-over').forEach(function(el){el.classList.remove('drag-over');});
+  var sourcePanel=e&&e.dataTransfer?e.dataTransfer.getData('text/plain'):'';
+  if(_moveTabOrderPanel(sourcePanel,targetPanel)) _tabVisibilityDragSuppressUntil=Date.now()+250;
 }
 
 function _toggleTabVisibilityChip(panel){
@@ -5736,7 +6083,7 @@ function switchSettingsSection(name){
       });
     }
   }
-  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
+  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system'||name==='help')?name:'conversation';
   // Deep-linking to the Plugins pane when the tab is hidden (no plugins
   // installed, #3457) falls back to Conversation. Resolve this BEFORE toggling
   // panes/sidebar/dropdown below so every downstream selection uses the
@@ -5748,13 +6095,13 @@ function switchSettingsSection(name){
   }
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System',help:'Help'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','system'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','plugins','system','help'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -5865,14 +6212,17 @@ function _applyTtsEnabled(enabled){
 }
 
 function _appearancePayloadFromUi(){
+  const worklogDetailsExpanded=!!($('settingsWorklogDetailsExpandedDefault')||{}).checked;
   return {
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
-    activity_feed_expanded_default: !!($('settingsActivityFeedExpandedDefault')||{}).checked,
+    worklog_details_expanded_default: worklogDetailsExpanded,
+    activity_feed_expanded_default: worklogDetailsExpanded,
     hidden_tabs: _getHiddenTabs(),
+    tab_order: _getTabOrder(),
   };
 }
 
@@ -5925,8 +6275,15 @@ async function _autosaveAppearanceSettings(payload){
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
-    if(saved&&Object.prototype.hasOwnProperty.call(saved,'activity_feed_expanded_default')){
-      window._activityFeedExpandedDefault=!!saved.activity_feed_expanded_default;
+    if(saved&&payload&&Object.prototype.hasOwnProperty.call(payload,'worklog_details_expanded_default')&&(
+      Object.prototype.hasOwnProperty.call(saved,'worklog_details_expanded_default') ||
+      Object.prototype.hasOwnProperty.call(saved,'activity_feed_expanded_default')
+    )){
+      window._worklogDetailsExpandedByDefault=!!(
+        Object.prototype.hasOwnProperty.call(saved,'worklog_details_expanded_default')
+          ? saved.worklog_details_expanded_default
+          : saved.activity_feed_expanded_default
+      );
     }
     _setAppearanceAutosaveStatus('saved');
   }catch(e){
@@ -5959,14 +6316,17 @@ function _preferencesPayloadFromUi(){
   if(showTpsCb) payload.show_tps=showTpsCb.checked;
   const fadeTextCb=$('settingsFadeTextEffect');
   if(fadeTextCb) payload.fade_text_effect=fadeTextCb.checked;
-  const simplifiedToolCb=$('settingsSimplifiedToolCalling');
-  if(simplifiedToolCb) payload.simplified_tool_calling=simplifiedToolCb.checked;
   const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
   if(terminalAutoExpandCb) payload.terminal_auto_expand_on_output=terminalAutoExpandCb.checked;
   const apiRedactCb=$('settingsApiRedact');
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
   const showCliCb=$('settingsShowCliSessions');
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
+  const showCronCb=$('settingsShowCronSessions');
+  // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
+  // identically to the explicit saveSettings() path, so neither save route can
+  // persist show_cron_sessions=true while show_cli_sessions=false. (#3514)
+  if(showCronCb) payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked);
   const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
@@ -6032,11 +6392,6 @@ function _schedulePreferencesAutosave(){
 async function _autosavePreferencesSettings(payload){
   try{
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
-    if(payload&&payload.simplified_tool_calling!==undefined){
-      window._simplifiedToolCalling=(saved&&saved.simplified_tool_calling!==false);
-      if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
-      if(typeof renderMessages==='function') renderMessages();
-    }
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -6147,16 +6502,20 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
-    const activityExpandedCb=$('settingsActivityFeedExpandedDefault');
-    if(activityExpandedCb){
-      activityExpandedCb.checked=!!settings.activity_feed_expanded_default;
-      window._activityFeedExpandedDefault=activityExpandedCb.checked;
-      activityExpandedCb.onchange=function(){
-        window._activityFeedExpandedDefault=this.checked;
+    const worklogDetailsExpandedCb=$('settingsWorklogDetailsExpandedDefault');
+    if(worklogDetailsExpandedCb){
+      const worklogDetailsExpanded=Object.prototype.hasOwnProperty.call(settings,'worklog_details_expanded_default')
+        ? settings.worklog_details_expanded_default
+        : settings.activity_feed_expanded_default;
+      worklogDetailsExpandedCb.checked=!!worklogDetailsExpanded;
+      window._worklogDetailsExpandedByDefault=worklogDetailsExpandedCb.checked;
+      worklogDetailsExpandedCb.onchange=function(){
+        window._worklogDetailsExpandedByDefault=this.checked;
+        if(typeof _applyWorklogDetailsExpandedDefault==='function') _applyWorklogDetailsExpandedDefault();
         _scheduleAppearanceAutosave();
       };
     }
-    // Tab visibility chips (dynamically populated from DOM)
+    // Tab visibility/order chips (dynamically populated from DOM)
     var hiddenTabs=[];
     if(Array.isArray(settings.hidden_tabs)){
       // Server value takes priority — even an empty array means "no tabs hidden"
@@ -6165,6 +6524,14 @@ async function loadSettingsPanel(){
       // Server has no hidden_tabs key — fall back to localStorage
       hiddenTabs=_getHiddenTabs();
     }
+    var tabOrder=[];
+    if(Array.isArray(settings.tab_order)){
+      tabOrder=settings.tab_order.filter(function(s){return typeof s==='string'&&s.trim();});
+    }else{
+      tabOrder=_getTabOrder();
+    }
+    _setTabOrder(tabOrder);
+    _applyTabOrder(tabOrder);
     _setHiddenTabs(hiddenTabs);
     _applyTabVisibility(hiddenTabs);
     _renderTabVisibilityChips();
@@ -6230,7 +6597,10 @@ async function loadSettingsPanel(){
         }
       }
       langSel.value=resolvedLanguage;
-      langSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      langSel.addEventListener('change',function(){
+        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();}
+        _schedulePreferencesAutosave();
+      },{once:false});
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -6268,14 +6638,19 @@ async function loadSettingsPanel(){
     }
     const fadeTextCb=$('settingsFadeTextEffect');
     if(fadeTextCb){fadeTextCb.checked=!!settings.fade_text_effect;window._fadeTextEffect=fadeTextCb.checked;fadeTextCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const simplifiedToolCb=$('settingsSimplifiedToolCalling');
-    if(simplifiedToolCb){simplifiedToolCb.checked=settings.simplified_tool_calling!==false;simplifiedToolCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
     if(terminalAutoExpandCb){terminalAutoExpandCb.checked=!!settings.terminal_auto_expand_on_output;window._terminalAutoExpandOnOutput=terminalAutoExpandCb.checked;terminalAutoExpandCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const apiRedactCb=$('settingsApiRedact');
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb){showCliCb.checked=!!settings.show_cli_sessions;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const showCronCb=$('settingsShowCronSessions');
+    if(showCronCb){
+      showCronCb.checked=!!settings.show_cron_sessions;
+      showCronCb.disabled=showCliCb?!showCliCb.checked:true;
+      showCronCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      if(showCliCb){showCliCb.addEventListener('change',function(){showCronCb.disabled=!showCliCb.checked;},{once:false});}
+    }
     const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
@@ -6660,11 +7035,14 @@ async function loadProvidersPanel(){
   try{
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
-    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom);
+    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider);
     list.innerHTML='';
     _providerCardEls.clear();
     const quotaCard=_buildProviderQuotaCard(quota);
-    if(quotaCard) list.appendChild(quotaCard);
+    if(quotaCard){
+      list.appendChild(quotaCard);
+      renderProviderCostChart(quotaCard); // async, fire-and-forget
+    }
     if(providers.length===0){
       list.style.display='none';
       if(empty) empty.style.display='';
@@ -6700,6 +7078,10 @@ async function _refreshProviderQuota(card,button){
     const fresh=_buildProviderQuotaCard(next);
     if(fresh){
       card.replaceWith(fresh);
+      // Re-render the 7-day spend chart onto the rebuilt card — the quota
+      // refresh replaces the whole card, which would otherwise drop the chart
+      // until the next full panel reload (#3600).
+      renderProviderCostChart(fresh); // async, fire-and-forget
       if(typeof showToast==='function') showToast(failed?t('provider_quota_refresh_failed'):t('provider_quota_refresh_succeeded'));
       return;
     }
@@ -6924,6 +7306,43 @@ function _buildProviderQuotaCard(status){
     });
   }
   return card;
+}
+
+async function renderProviderCostChart(card){
+  let history;
+  try{
+    history=await api('/api/provider/cost-history?provider=openrouter');
+  }catch(e){
+    return; // silently skip if endpoint unavailable
+  }
+  const body=card.querySelector('.provider-quota-body');
+  if(!body||body.querySelector('.provider-cost-chart-wrap')) return;
+  if(!history||history.ok===false) return;
+  const snaps=Array.isArray(history.snapshots)?history.snapshots:[];
+  // need at least 2 snapshots to have one non-null delta
+  const hasData=snaps.filter(s=>s.delta!=null).length>=1;
+  if(!hasData){
+    const empty=document.createElement('div');
+    empty.className='provider-cost-chart-wrap';
+    empty.innerHTML='<div class="provider-cost-chart-title">7-day spend</div><div class="provider-quota-message">Not enough data yet. Cost chart builds after 2 daily snapshots.</div>';
+    body.appendChild(empty);
+    return;
+  }
+  const maxDelta=Math.max(...snaps.map(s=>s.delta!=null?Number(s.delta):0),1e-9);
+  const nonNull=snaps.filter(s=>s.delta!=null).map(s=>Number(s.delta));
+  const avg=nonNull.length?nonNull.reduce((a,b)=>a+b,0)/nonNull.length:0;
+  const pace='$'+(avg*30).toFixed(2);
+  const bars=snaps.map(s=>{
+    const delta=s.delta!=null?Number(s.delta):null;
+    const pct=delta!=null?Math.max((delta/maxDelta)*100,delta>0?2:0).toFixed(1):'0';
+    const label=String(s.date||'').slice(5);
+    const tip=delta!=null?`${s.date} · $${delta.toFixed(4)}`:`${s.date} · no baseline`;
+    return `<div class="insights-daily-bar" title="${esc(tip)}"><div class="insights-daily-stack" aria-label="${esc(tip)}"><div class="insights-daily-bar-input" style="height:${pct}%"></div></div><span>${esc(label)}</span></div>`;
+  }).join('');
+  const wrap=document.createElement('div');
+  wrap.className='provider-cost-chart-wrap';
+  wrap.innerHTML=`<div class="provider-cost-chart-title">7-day spend <span class="provider-cost-chart-pace">Monthly pace: ${esc(pace)}</span></div><div class="provider-cost-chart-bars insights-daily-token-chart">${bars}</div>`;
+  body.appendChild(wrap);
 }
 
 function _buildProviderCard(p){
@@ -7209,11 +7628,12 @@ async function _refreshProviderModels(providerId, btn){
     const res=await api('/api/models/refresh',{method:'POST',body:JSON.stringify({provider:providerId})});
     if(res.ok){
       showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
+      _refreshModelDropdownsAfterProviderChange();
     }else{
       showToast(res.error||'Failed to refresh models');
     }
   }catch(e){
-    showToast('Error: '+e.message);
+    showToast(e.status===404?'Refresh not available for this provider.':(e.message||'Failed to refresh models'));
   }finally{
     btn.disabled=false;
     btn.innerHTML=orig;
@@ -7328,7 +7748,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._notificationsEnabled=body.notifications_enabled;
   window._whatsNewSummaryEnabled=!!body.whats_new_summary_enabled;
   window._showThinking=body.show_thinking!==false;
-  window._simplifiedToolCalling=body.simplified_tool_calling!==false;
+  window._simplifiedToolCalling=true;
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
@@ -7371,7 +7791,7 @@ async function checkUpdatesNow(){
   if(label) label.textContent=t('settings_checking');
   if(status) status.textContent='';
   try {
-    const data=await api('/api/updates/check?force=1',{timeoutMs:60000});
+    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify({force:true}),timeoutMs:60000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
@@ -7647,6 +8067,7 @@ async function saveSettings(andClose){
   const showTps=!!($('settingsShowTps')||{}).checked;
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
+  const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
@@ -7669,10 +8090,12 @@ async function saveSettings(andClose){
   body.show_quota_chip=showQuotaChip===true;
   body.show_tps=showTps;
   body.fade_text_effect=fadeTextEffect;
-  body.simplified_tool_calling=!!($('settingsSimplifiedToolCalling')||{}).checked;
   body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
+  // Cron sessions are gated on CLI sessions (server short-circuits otherwise);
+  // mirror the autosave path so the explicit Save Settings button persists it too. (#3514)
+  body.show_cron_sessions=showCliSessions&&showCronSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
@@ -8075,11 +8498,17 @@ function loadGatewayStatus(){
   api('/api/gateway/status').then(r=>{
     if(!r) return;
     if(!r.configured){
-      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>Gateway not configured</div>`;
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>${esc(t('gateway_not_configured'))}</div>`;
       return;
     }
     if(!r.running){
-      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>Gateway not running</div>`;
+      const reason = _gatewayStatusReason(r);
+      const statusLabel = reason === 'gateway_stale_running_state'
+        ? t('gateway_metadata_stale')
+        : reason === 'remote_gateway_unreachable'
+          ? t('gateway_endpoint_unreachable')
+          : t('gateway_not_running');
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>${esc(statusLabel)}</div>`;
       return;
     }
     const platformIcons={telegram:'💬',discord:'🎮',slack:'📝',web:'🌐',api:'🔌'};
@@ -8090,15 +8519,16 @@ function loadGatewayStatus(){
         return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
       }).join(' ');
     }
-    const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">Last active: ${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
-    const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} session${r.session_count!==1?'s':''}</span>`:'';
-    card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">Running</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
-  }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">Failed to load gateway status</div>`});
+    const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_last_active'))}${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
+    const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_session_count',r.session_count))}</span>`:'';
+    card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running_label'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
+  }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('gateway_load_failed'))}</div>`});
 }
 // Load MCP servers when system settings tab opens
 const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name){
   _origSwitchSettings(name);
+  if(name==='preferences') updateNotificationPermissionStatus();
   if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
 };
 
@@ -8208,4 +8638,13 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
   }catch(e){
     showToast(t('checkpoint_restore')+': '+e.message,'error');
   }
+}
+
+
+function updateNotificationPermissionStatus(){
+  const el=$('notificationPermissionStatus');
+  if(!el) return;
+  if(!('Notification' in window)){el.textContent=t('notifications_unsupported');return;}
+  const perm=Notification.permission||'default';
+  el.textContent=t('notifications_permission_status', perm);
 }
