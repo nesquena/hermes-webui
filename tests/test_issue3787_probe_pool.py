@@ -203,6 +203,49 @@ class TestProbeWorkerPoolPerHome(unittest.TestCase):
             else:
                 self.assertNotIn(str(Path(home)), _account_usage_worker_pool)
 
+    def test_partial_cleanup_replenishes_pool(self):
+        """When cleanup removes one stale worker but the other is busy, pool replenishes to N=2."""
+        home = Path("/tmp/test_replenish")
+
+        worker = _get_account_usage_probe_worker(home)
+        self.assertIsNotNone(worker)
+        worker._lock.release()
+
+        with _account_usage_worker_pool_lock:
+            key = str(Path(home))
+            workers = _account_usage_worker_pool[key]
+            self.assertEqual(len(workers), 2)
+
+        # Hold workers[1] locked from a background thread (simulating active use)
+        lock_holder = threading.Event()
+        release_signal = threading.Event()
+
+        def hold_lock():
+            workers[1]._lock.acquire()
+            lock_holder.set()
+            release_signal.wait(timeout=5.0)
+            workers[1]._lock.release()
+
+        thread = threading.Thread(target=hold_lock, daemon=True)
+        thread.start()
+        lock_holder.wait(timeout=2.0)
+
+        try:
+            # Run cleanup far in the future; workers[0] is idle and stale,
+            # workers[1] is locked so it survives
+            now = time.monotonic() + 100000
+            _cleanup_account_usage_probe_workers(now=now, idle_seconds=1.0)
+
+            with _account_usage_worker_pool_lock:
+                remaining = _account_usage_worker_pool.get(key, [])
+                # Pool should be replenished back to 2
+                self.assertEqual(len(remaining), _ACCOUNT_USAGE_WORKERS_PER_HOME)
+                # The original busy worker should still be present
+                self.assertIn(workers[1], remaining)
+        finally:
+            release_signal.set()
+            thread.join(timeout=1.0)
+
     def test_synchronous_close_flattens_nested_lists(self):
         """Synchronous close should flatten nested lists correctly."""
         home = Path.home() / ".hermes"

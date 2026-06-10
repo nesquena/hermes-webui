@@ -1461,11 +1461,13 @@ def _cleanup_account_usage_probe_workers(
                             stale.append((key, worker))
                     finally:
                         worker._lock.release()
-            # Remove the entire key if all workers are stale
             remaining_workers = [w for w in workers if not any(k == key and w == sw for k, sw in stale)]
             if not remaining_workers:
                 _account_usage_worker_pool.pop(key, None)
             else:
+                # Replenish to N so partial cleanup doesn't permanently shrink the pool
+                while len(remaining_workers) < _ACCOUNT_USAGE_WORKERS_PER_HOME:
+                    remaining_workers.append(_AccountUsageProbeWorker(Path(key)))
                 _account_usage_worker_pool[key] = remaining_workers
     for _key, worker in stale:
         worker.close()
