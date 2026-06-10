@@ -148,29 +148,50 @@ def test_get_session_route_uses_shared_synthesiser():
 
 
 def test_get_session_preserves_cli_read_only_flag():
-    """Regression for nesquena-hermes review 2026-06-09: the GET stub
-    must report ``read_only`` from cli_meta (matching master) rather
-    than hardcoding False, so a Telegram/external-agent session that
-    the foreign store flagged read-only is still gated as read-only on
-    the WebUI side until the user explicitly POSTs to claim it."""
+    """Greptile #4911 follow-up: the GET stub must report read_only
+    from the synthesized Session, NOT from cli_meta directly.
+
+    Why this changed: the initial refactor + the master-revert
+    commit (b298b886) had the GET handler read
+    ``bool((cli_meta or {}).get("read_only"))``.  That works for
+    sessions where the foreign store explicitly sets read_only=True
+    on cli_meta, but it MISSES the source-refused cases — messaging
+    / claude_code / external_agent sessions whose refusal comes
+    from the source check rather than an explicit flag.  For those,
+    cli_meta.get("read_only") returns None, the GET response
+    advertises read_only=False, the frontend renders the composer,
+    and the user only discovers the block at POST time with a
+    confusing 403.
+
+    The fix: read from synth.read_only, which the helper correctly
+    sets to True for BOTH the explicit AND the source-refused
+    refusal paths."""
     block = re.search(
-        r'if parsed\.path == "/api/session":.*?return j\(handler, \{"session": redact_session_data\(sess\)\}\)',
+        r'if parsed\.path == "/api/session":.*?return j\(handler, \{"session": redact_session_data\(sess\)\}\)\)?',
         ROUTES_PY.read_text(encoding="utf-8"),
         re.DOTALL,
     )
     assert block, "could not locate /api/session GET block"
     text = block.group(0)
-    # Master did: bool((cli_meta or {}).get("read_only"))
-    assert 'bool((cli_meta or {}).get("read_only"))' in text, (
-        "GET /api/session must derive read_only from cli_meta (not hardcode "
-        "False) so the foreign store's read-only flag survives to the wire. "
-        "The POST path claims the session writeable when it materialises the "
-        "sidecar; the GET path stays read-only-faithful until then."
+    # Must read read_only from the synthesized Session.
+    assert "synth.read_only" in text, (
+        "GET /api/session must read read_only from the synthesized "
+        "Session (synth.read_only), not from cli_meta directly.  The "
+        "helper sets synth.read_only=True for BOTH explicit and "
+        "source-refused refusals, but cli_meta.get('read_only') only "
+        "captures the explicit case (Greptile #4911 follow-up)."
+    )
+    # And must NOT read it from cli_meta directly.
+    assert 'bool((cli_meta or {}).get("read_only"))' not in text, (
+        "GET /api/session must not read read_only from cli_meta "
+        "directly — that misses source-refused cases (messaging / "
+        "claude_code / external_agent) and the frontend renders the "
+        "composer for sessions it should be displaying as read-only"
     )
     assert '"read_only": False' not in text, (
-        "GET /api/session must not hardcode read_only: False — that was a "
-        "side effect of the initial refactor and is a UX shift from master "
-        "for sessions where the foreign store explicitly sets read_only"
+        "GET /api/session must not hardcode read_only: False — that "
+        "was a side effect of the initial refactor and is a UX shift "
+        "from the helper-correct path"
     )
 
 
@@ -720,4 +741,79 @@ def test_helper_does_not_mutate_callers_cli_meta_when_empty(
     assert caller_meta == snapshot, (
         f"helper mutated caller's empty dict: "
         f"before={snapshot} after={caller_meta}"
+    )
+
+
+def test_helper_sets_read_only_for_source_refused_sessions(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """Greptile #4911 follow-up: the synthesized Session must
+    carry read_only=True for source-refused sessions (messaging /
+    claude_code / external_agent), not just for explicit
+    read_only=True cli_meta.  The GET response reads read_only
+    from synth.read_only (line ~6043), so the GET wire shape
+    inherits this for free.  Pin the helper contract here."""
+    SID = "20260610_telegram_refused_session"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=2,
+        title="Telegram", source="telegram", cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid: {"session_id": SID, "source_tag": "telegram",
+                      "raw_source": "telegram",
+                      "session_source": "messaging"},
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "not_claimable"
+    # The contract: source-refused sessions have read_only=True on
+    # the synthesized Session, even though cli_meta.read_only is None.
+    assert sess.read_only is True, (
+        "synth.read_only must be True for source-refused sessions — "
+        "the GET response reads it from synth.read_only (line ~6043) "
+        "and the frontend renders the read-only banner based on this"
+    )
+
+
+def test_import_cli_reads_read_only_from_persisted_session():
+    """Greptile #4911 follow-up: the import_cli refresh path
+    (line ~15708) must read read_only from the persisted Session
+    (existing.read_only), NOT from cli_meta directly.  The same
+    rationale as the GET fix: cli_meta.get("read_only") is only
+    populated for explicit cases, so reading it from there gives
+    the wrong answer for sessions whose refusal comes from the
+    source check.
+
+    This is the same pattern in two different response builders;
+    the audit grep should also catch any future sibling paths."""
+    block = re.search(
+        r'def _handle_session_import_cli.*?(?=\n\ndef |\Z)',
+        ROUTES_PY.read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    assert block, "could not locate _handle_session_import_cli"
+    text = block.group(0)
+    # The refresh path (top branch) is the first 'return j(...)' that
+    # mentions existing.compact().  Find the read_only line within
+    # that return block and inspect the right-hand side.
+    refresh_block = re.search(
+        r'existing\.compact\(\)[\s\S]*?\}',
+        text, re.DOTALL,
+    )
+    assert refresh_block, "could not locate existing.compact() spread"
+    rb = refresh_block.group(0)
+    # Accept either the attribute access (`existing.read_only`) or the
+    # safer `getattr(existing, "read_only", False)` form — both
+    # correctly derive the value from the persisted Session.
+    assert (
+        "existing.read_only" in rb
+        or 'getattr(existing, "read_only"' in rb
+    ), (
+        "import_cli refresh path must read read_only from "
+        "existing (the persisted Session), not from cli_meta"
+    )
+    assert 'bool((cli_meta or {}).get("read_only"))' not in rb, (
+        "import_cli refresh path must not read read_only from cli_meta "
+        "directly — that misses source-refused cases (Greptile #4911 "
+        "follow-up)"
     )
