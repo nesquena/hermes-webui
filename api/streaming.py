@@ -39,6 +39,8 @@ from api.config import (
     parse_reasoning_effort,
     coerce_reasoning_effort_for_model,
     resolve_model_reasoning_efforts,
+    _candidate_supports_reasoning,
+    _reasoning_name_candidates,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -2450,8 +2452,10 @@ def generate_title_raw_via_aux(
     _is_minimax = _is_minimax_route(provider, model, base_url)
     _aux_base_lower = (base_url or '').lower()
     _aux_route_ok = any(h in _aux_base_lower for h in ('openrouter', 'nousresearch.com', 'localhost', '127.0.0.1', '0.0.0.0')) or (provider or '').strip().lower() == 'lmstudio'
+    _aux_caps = resolve_model_reasoning_efforts(model, provider_id=provider, base_url=base_url)
+    _aux_name_heuristic = _aux_route_ok and not _aux_caps and any(_candidate_supports_reasoning(c) for c in _reasoning_name_candidates(model))
     reasoning_extra = {}
-    if _is_minimax or (resolve_model_reasoning_efforts(model, provider_id=provider, base_url=base_url) and _aux_route_ok):
+    if _is_minimax or (_aux_caps and _aux_route_ok) or _aux_name_heuristic:
         reasoning_extra["reasoning"] = {"enabled": False}
         if _is_minimax:
             reasoning_extra["reasoning_split"] = True
@@ -2570,8 +2574,11 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         _agent_model = getattr(agent, 'model', '')
                         _agent_base_url = getattr(agent, 'base_url', '')
                         _is_minimax = _is_minimax_route(_agent_provider, _agent_model, _agent_base_url)
-                        _route_ok = callable(getattr(agent, '_supports_reasoning_extra_body', None)) and agent._supports_reasoning_extra_body()
-                        if _is_minimax or (resolve_model_reasoning_efforts(_agent_model, provider_id=_agent_provider, base_url=_agent_base_url) and _route_ok):
+                        _agent_base_lower = (_agent_base_url or '').lower()
+                        _route_ok = any(h in _agent_base_lower for h in ('openrouter', 'nousresearch.com', 'localhost', '127.0.0.1', '0.0.0.0')) or (_agent_provider or '').strip().lower() == 'lmstudio'
+                        _caps = resolve_model_reasoning_efforts(_agent_model, provider_id=_agent_provider, base_url=_agent_base_url)
+                        _name_heuristic = _route_ok and not _caps and any(_candidate_supports_reasoning(c) for c in _reasoning_name_candidates(_agent_model))
+                        if _is_minimax or (_caps and _route_ok) or _name_heuristic:
                             _tg_extra.setdefault('thinking', {'type': 'disabled'})
                             _tg_extra.setdefault('reasoning', {'enabled': False})
                             if _is_minimax:
