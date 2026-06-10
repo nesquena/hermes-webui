@@ -898,7 +898,10 @@ def test_helper_denylist_includes_gateway_and_unknown():
     refactor that splits the denylist and forgets the gateway/
     unknown literals."""
     import re
-    src = open("/opt/hermes-webui/api/routes.py", encoding="utf-8").read()
+    # Use the ROUTES_PY constant (defined at module top) instead of
+    # hardcoding the path so the test runs on any machine with the
+    # project checked out, not just at /opt/hermes-webui/.
+    src = ROUTES_PY.read_text(encoding="utf-8")
     # Find the function body
     m = re.search(
         r"def _is_claimable_cli_source.*?(?=\n\ndef |\Z)",
