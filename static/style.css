@@ -4493,7 +4493,7 @@ main.main > #mainPlugin{display:none;}
 .cron-agent-badge{flex-shrink:0;font-size:12px;line-height:1;}
 .cron-script-badge{flex-shrink:0;font-size:12px;line-height:1;opacity:.92;}
 .cron-script-job-banner{margin-bottom:12px;}
-.cron-script-job-banner .detail-alert-title{font-weight:600;}
+.cron-script-job-banner .detail-alert-title{font-weight:600;color:rgba(245,158,11,.98);}
 .detail-script{background:var(--sidebar);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;white-space:pre-wrap;line-height:1.55;color:var(--text);font-family:'SF Mono',ui-monospace,monospace;word-break:break-word;}
 .detail-hint{font-size:11px;color:var(--muted);line-height:1.5;}
 .cron-script-card .detail-hint,.cron-script-card-hint{margin-top:8px;}
