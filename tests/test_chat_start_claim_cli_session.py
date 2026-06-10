@@ -697,11 +697,11 @@ def test_helper_does_not_mutate_callers_cli_meta(
     routes_module, tmp_path, monkeypatch, isolated_state_db
 ):
     """No-mutation contract (Greptile #4911 follow-up): the GET path
-    passes a pre-computed ``cli_meta`` dict and expects it to be
-    unchanged after the helper returns.  The state.db enrichment
-    block must not silently mutate that dict in place — future
-    refactors of the GET response builder could trip on the
-    implicit mutation.
+    passes a pre-computed ``cli_meta`` dict via the ``cli_meta``
+    kwarg and expects it to be unchanged after the helper returns.
+    The state.db enrichment block must not silently mutate that dict
+    in place — future refactors of the GET response builder could
+    trip on the implicit mutation.
 
     The caller_meta here deliberately omits 'title', 'model', and
     'workspace' so the state.db enrichment block would normally
@@ -722,11 +722,14 @@ def test_helper_does_not_mutate_callers_cli_meta(
         # is the case the old copy-on-write pattern got wrong.
     }
     snapshot = {k: v for k, v in caller_meta.items()}
-    monkeypatch.setattr(
-        routes_module, "_lookup_cli_session_metadata",
-        lambda _sid: caller_meta,
+    # GET path: caller passes the pre-computed cli_meta dict via
+    # the kwarg (no internal _lookup_cli_session_metadata call).
+    # The POST path uses the same helper but without the kwarg;
+    # test_helper_does_not_mutate_callers_cli_meta_when_empty
+    # covers that shape.
+    sess, reason = routes_module._claim_or_synthesize_cli_session(
+        SID, cli_meta=caller_meta,
     )
-    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
     assert reason == "materialized"
     # The session we got back should have the enriched fields.
     assert sess.title == "TUI session", (
