@@ -11,7 +11,7 @@ import sys
 import threading
 import types
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 # Stub agent.auxiliary_client so it is importable in the test environment
 _agent_stub = types.ModuleType('agent')
