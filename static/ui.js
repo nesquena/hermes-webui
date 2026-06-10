@@ -2358,7 +2358,7 @@ let _settleTimer=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
 let _touchStartY=null;
 let _newMessageCueVisible=false;
-function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); }
+function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); cancelAnimationFrame(_settleRAF); }
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
   const target=e&&e.target;
@@ -3038,23 +3038,20 @@ function _settleMessageScrollToBottom(force){
   // position when content settles so late layout does not leave the viewport
   // above the real end. User scroll increments _bottomSettleToken and cancels.
   //
-  // Firefox settles layout more slowly than Safari. The old rAF-polling
-  // approach read scrollHeight across frames and wrote scrollTop once stable,
-  // but Firefox still paints each rAF check as a visible reflow jitter.
+  // Firefox paints each scrollTop write as a visible reflow step. The old
+  // rAF-polling approach read scrollHeight across frames — the read itself
+  // forced a reflow in Firefox, causing visible jitter.
   //
-  // ResizeObserver approach: write scrollTop ONCE now, then observe the
-  // messages container for size changes. When no resize fires for 50ms,
-  // do a single final scrollTop write. No intermediate scrollTop writes,
-  // no rAF polling — Firefox never paints intermediate positions.
+  // ResizeObserver approach: the browser notifies us when the container
+  // resizes (no scrollHeight polling needed). On each notification we write
+  // scrollTop once via rAF (batches multiple resize callbacks per frame into
+  // a single write). After 300ms of no resize events, the observer disconnects.
   const token=++_bottomSettleToken;
   cancelAnimationFrame(_settleRAF);
   if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
   clearTimeout(_settleTimer);
 
-  // Write the first bottom position synchronously. A final renderMessages()
-  // rebuild can queue a native scroll event from the temporary scrollTop=0
-  // layout state; writing early prevents that event from cancelling the
-  // settle (#3319).
+  // Sync write anchors the viewport immediately.
   _setMessageScrollToBottom();
 
   if(force) return;
@@ -3062,35 +3059,29 @@ function _settleMessageScrollToBottom(force){
   const el=document.getElementById('messages');
   if(!el) return;
 
-  // Observe the messages container for layout changes (KaTeX, Mermaid, images,
-  // Prism — anything that grows the DOM after initial render).
-  let settleTimer;
   _settleRO=new ResizeObserver(()=>{
-    if(token!==_bottomSettleToken){ _settleRO.disconnect(); _settleRO=null; return; }
-    // Guard: user scrolled away during settling
+    if(token!==_bottomSettleToken){ if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } return; }
     if(!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
-      _settleRO.disconnect(); _settleRO=null;
+      if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
       _programmaticScroll=false;
       return;
     }
-    clearTimeout(settleTimer);
-    settleTimer=setTimeout(()=>{
-      if(token!==_bottomSettleToken){ _settleRO.disconnect(); _settleRO=null; return; }
-      _settleFinalScroll(token);
-      _settleRO.disconnect();
-      _settleRO=null;
-    },50);
+    // Write scrollTop once per frame — ResizeObserver batches multiple
+    // notifications per frame, so this is at most one write per frame.
+    cancelAnimationFrame(_settleRAF);
+    _settleRAF=requestAnimationFrame(()=>{
+      if(token!==_bottomSettleToken) return;
+      _setMessageScrollToBottom();
+    });
+    // After 300ms of quiet, disconnect — layout is stable.
+    clearTimeout(_settleTimer);
+    _settleTimer=setTimeout(()=>{
+      if(token!==_bottomSettleToken) return;
+      if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
+      _setMessageScrollToBottom();
+    },300);
   });
   _settleRO.observe(el);
-  _settleTimer=settleTimer;
-
-  // Safety cap: if nothing fires for 2s (static content), still do a final
-  // scroll to be safe.
-  _settleRAF=setTimeout(()=>{
-    if(token!==_bottomSettleToken) return;
-    if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
-    _settleFinalScroll(token);
-  },2000);
 }
 
 function _settleFinalScroll(token){
@@ -3117,12 +3108,13 @@ function scrollToBottom(){
   _clearNewMessageScrollCue();
   _scrollPinned=true;
   _messageUserUnpinned=false;
-  // Write the first bottom position synchronously. A final renderMessages()
-  // rebuild can queue a native scroll event from the temporary scrollTop=0
-  // layout state; if we only schedule delayed settles, that event can cancel
-  // them before the viewport ever reaches the bottom.
+  // Write scrollTop once synchronously to anchor the viewport, then let
+  // ResizeObserver settle handle any late layout growth (Prism, KaTeX,
+  // Mermaid, images).  Using force=false so the observer runs — force=true
+  // was skipping the observer and causing Firefox paint jumps when
+  // renderMessages({preserveScroll:true}) + scrollToBottom() fired back-to-back.
   _setMessageScrollToBottom();
-  _settleMessageScrollToBottom(true);
+  _settleMessageScrollToBottom(false);
   _syncScrollToBottomCue(false,{newMessage:false});
   if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
 }
