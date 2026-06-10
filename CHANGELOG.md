@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Custom providers with a remote `base_url` no longer truncate model IDs that contain a `/`.** A `custom` provider (bare or named `custom:<slug>`) pointed at a vendor-routing proxy (LiteLLM, a Bedrock gateway, etc.) is now passed the model ID exactly as selected when the prefix is an intrinsic routing segment — e.g. `bedrock/opus-4-6` reaches the proxy whole instead of being silently truncated to `opus-4-6`, which caused `403 model "opus-4-6" is not allowed`. A prefix that is genuinely redundant with the model's own first-party namespace is still stripped (`openai/gpt-5.4` → `gpt-5.4`), and the strip for real first-party providers pointed at an OpenAI-compatible proxy (e.g. `provider: openai`) is unchanged. If your proxy registers a model under a first-party-prefixed key (e.g. `anthropic/claude-opus-4.6`), list it under a `custom_providers[]` entry to route the full id through. (#3872)
+
 ## [v0.51.348] — 2026-06-10 — Release LL (Phase 0 hotfix: timeout regression + data-loss + leaks)
 
 ### Fixed

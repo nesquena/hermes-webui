@@ -1695,6 +1695,30 @@ def _is_local_server_provider(provider_id: str) -> bool:
     return False
 
 
+def _is_first_party_model(provider_id: str, model_id: str) -> bool:
+    """True when ``model_id`` is listed in ``provider_id``'s own static catalog.
+
+    Used to tell a *redundant* first-party prefix from an *intrinsic* routing
+    prefix on a bare ``custom`` endpoint. ``openai/gpt-5.4`` → gpt-5.4 is a real
+    OpenAI model, so ``openai/`` is a redundant leftover and strippable (#433).
+    But ``bedrock/opus-4-6`` → opus-4-6 is NOT in bedrock's first-party catalog
+    (those ids look like ``global.anthropic.claude-…``), so ``bedrock/`` is a
+    vendor-routing segment a proxy needs whole (#3872). Returns False on any
+    unknown provider or empty model so callers preserve the id.
+    """
+    provider = str(provider_id or "").strip().lower()
+    model = str(model_id or "").strip()
+    if not provider or not model:
+        return False
+    catalog = _PROVIDER_MODELS.get(provider)
+    if not isinstance(catalog, list):
+        return False
+    return any(
+        isinstance(entry, dict) and entry.get("id") == model
+        for entry in catalog
+    )
+
+
 def _base_url_points_at_local_server(base_url: str) -> bool:
     """True if base_url's host is a loopback or private IP (likely local server).
 
@@ -1998,13 +2022,37 @@ def resolve_model_provider(model_id: str) -> tuple:
             if (_is_local_server_provider(config_provider)
                     or _base_url_points_at_local_server(config_base_url)):
                 return model_id, config_provider, config_base_url
-            # Only strip the provider prefix when it's a known provider namespace
-            # (e.g. "openai/gpt-5.4" → "gpt-5.4" for a custom OpenAI-compatible proxy).
-            # Unknown prefixes (e.g. "zai-org/GLM-5.1" on DeepInfra) are intrinsic to
-            # the model ID and must be preserved — stripping them causes model_not_found.
-            if prefix in _PROVIDER_MODELS:
+            # Strip the provider prefix only when it's a known provider namespace
+            # AND stripping is the right call for this configured provider:
+            #
+            #  * A real first-party provider pointed at an OpenAI-compatible proxy
+            #    (e.g. provider=openai + base_url=litellm) expects the bare id —
+            #    "openai/gpt-5.4" → "gpt-5.4", "google/gemma-…" → "gemma-…". This
+            #    is the #433 behaviour and applies whenever config_provider is not
+            #    the bare "custom" pseudo-provider.
+            #
+            #  * A *bare* ``custom`` provider (or a named ``custom:<slug>``) is a
+            #    vendor-routing proxy (LiteLLM, Bedrock gateway, OpenRouter-style
+            #    multi-vendor endpoint). There we strip ONLY a prefix that is
+            #    redundant with the model's own first-party namespace
+            #    ("openai/gpt-5.4" → gpt-5.4, since gpt-5.4 is genuinely an OpenAI
+            #    model — #433). An intrinsic routing prefix whose bare id is NOT a
+            #    first-party model of that namespace is kept whole, because the
+            #    proxy routes on the full string and truncating it 403s "model not
+            #    allowed": "bedrock/opus-4-6" stays intact (opus-4-6 ∉ bedrock
+            #    catalog — #3872).
+            #
+            # Unknown prefixes (e.g. "zai-org/GLM-5.1" on DeepInfra) are intrinsic
+            # to the model ID and always preserved (#548). The redundant-prefix
+            # strip that matches the *configured* provider's own family is handled
+            # earlier by the ``prefix == config_provider`` branch.
+            _cp_lower = (config_provider or "").strip().lower()
+            _is_custom = _cp_lower == "custom" or _cp_lower.startswith("custom:")
+            if prefix in _PROVIDER_MODELS and (
+                not _is_custom or _is_first_party_model(prefix, bare)
+            ):
                 return bare, config_provider, config_base_url
-            # Unknown prefix (not a named provider) — pass full model_id through.
+            # Intrinsic / unknown prefix — pass the full model_id through unchanged.
             return model_id, config_provider, config_base_url
 
         # If prefix does NOT match config provider, the user picked a cross-provider model
