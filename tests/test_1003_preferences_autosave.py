@@ -3,7 +3,7 @@
 Mirrors the structure of test_1003_appearance_autosave.py to verify the
 preferences-panel autosave pattern is wired correctly:
 
-- All 15 preference fields use _schedulePreferencesAutosave (not _markSettingsDirty)
+- All 14 preference fields use _schedulePreferencesAutosave (not _markSettingsDirty)
 - Password field MUST still call _markSettingsDirty (security: never autosave)
 - _preferencesPayloadFromUi covers all 14 fields
 - _setPreferencesAutosaveStatus uses the shared i18n keys
@@ -39,7 +39,6 @@ PREFERENCE_FIELDS_AUTOSAVE = [
     ("settingsLanguage", "language"),
     ("settingsShowTokenUsage", "show_token_usage"),
     ("settingsShowTps", "show_tps"),
-    ("settingsSimplifiedToolCalling", "simplified_tool_calling"),
     ("settingsShowCliSessions", "show_cli_sessions"),
     ("settingsShowPreviousMessagingSessions", "show_previous_messaging_sessions"),
     ("settingsSyncInsights", "sync_to_insights"),
@@ -54,8 +53,8 @@ PREFERENCE_FIELDS_AUTOSAVE = [
 ]
 
 
-def test_all_15_preference_fields_have_autosave_payload_entries():
-    """_preferencesPayloadFromUi must include all 15 preference fields."""
+def test_all_14_preference_fields_have_autosave_payload_entries():
+    """_preferencesPayloadFromUi must include all 14 preference fields."""
     block = _function_block(PANELS_JS, "_preferencesPayloadFromUi")
     for dom_id, field in PREFERENCE_FIELDS_AUTOSAVE:
         assert f"$('{dom_id}')" in block, \

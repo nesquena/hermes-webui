@@ -50,9 +50,15 @@ def test_direct_frontend_event_sources_are_relative_to_current_mount():
     src = read("static/messages.js")
     assert "EventSource('/api/" not in src
     assert 'EventSource("/api/' not in src
-    for endpoint in ("api/approval/stream", "api/clarify/stream", "api/chat/stream"):
+    # #3913 removed the approval/clarify-stream EventSources (they were 2 of the
+    # 6 persistent SSE streams exhausting the browser conn pool). The remaining
+    # long-lived EventSources must still resolve relative to the current mount.
+    for endpoint in ("api/chat/stream", "api/session/stream"):
         assert endpoint in src
         assert "new URL(" in src
+    # The approval/clarify HTTP poll endpoints must also stay mount-relative.
+    for endpoint in ("api/approval/pending", "api/clarify/pending"):
+        assert endpoint in src
 
 
 def test_static_vendor_import_is_relative_to_current_mount():

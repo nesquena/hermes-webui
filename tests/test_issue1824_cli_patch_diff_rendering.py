@@ -116,6 +116,7 @@ def test_rendered_apply_patch_tool_card_html_contains_diff_lines():
         # #3336: buildToolCard now wraps diff snippets via these helpers.
         "_snippetLooksLikeDiff",
         "_colorDiffLines",
+        "_worklogDetailsExpandedDefault",
         # #3544: buildToolCard stamps durable memory/skill-save flags via these.
         "_tcAction",
         "_isMemorySave",
@@ -129,6 +130,7 @@ def test_rendered_apply_patch_tool_card_html_contains_diff_lines():
         function li(){{return '';}}
         function toolIcon(){{return '';}}
         function _toolDisplayName(tc){{return tc.name||'tool';}}
+        const window={{_worklogDetailsExpandedByDefault:false}};
         // #3544: const Sets the _isMemorySave/_isSkillUpdate predicates close over
         // (extracted helpers reference these module-level constants).
         const _MEMORY_SAVE_ACTIONS=new Set(['add','replace']);

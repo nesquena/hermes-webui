@@ -49,6 +49,10 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
 - [`live-to-final-assistant-replies.md`](live-to-final-assistant-replies.md)
   — #3400 product model for long-running assistant replies, live process prose,
   tool activity, recovery, terminal outcomes, and the final-answer boundary.
+- [`transparent-stream-activity-mode.md`](transparent-stream-activity-mode.md)
+  — #3820 opt-in display mode for power users who need a transparent,
+  chronological Thinking / progress / tool-call stream alongside the default
+  Compact Worklog model.
 - [`canonical-session-resolution.md`](canonical-session-resolution.md) — #2361
   focused contract for resolving URL, query parameter, localStorage, sidebar,
   and compression-lineage session IDs to one canonical visible chat target.

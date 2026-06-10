@@ -77,7 +77,7 @@ class TestPromptNewFileNoSession:
 
     def test_prompt_new_file_auto_creates_session(self):
         src = read('static/ui.js')
-        m = re.search(r'async function promptNewFile\(\)\{.*?\n\}', src, re.DOTALL)
+        m = re.search(r'async function promptNewFile\([^)]*\)\{.*?\n\}', src, re.DOTALL)
         assert m, "promptNewFile not found"
         fn = m.group(0)
         # Must have auto-create path (not just early return when no session)
@@ -92,7 +92,7 @@ class TestPromptNewFileNoSession:
 
     def test_prompt_new_folder_auto_creates_session(self):
         src = read('static/ui.js')
-        m = re.search(r'async function promptNewFolder\(\)\{.*?\n\}', src, re.DOTALL)
+        m = re.search(r'async function promptNewFolder\([^)]*\)\{.*?\n\}', src, re.DOTALL)
         assert m, "promptNewFolder not found"
         fn = m.group(0)
         assert '_profileDefaultWorkspace' in fn, (
@@ -105,7 +105,7 @@ class TestPromptNewFileNoSession:
     def test_prompt_new_file_still_returns_early_without_default(self):
         """If no default workspace, the function should return early (not crash)."""
         src = read('static/ui.js')
-        m = re.search(r'async function promptNewFile\(\)\{.*?\n\}', src, re.DOTALL)
+        m = re.search(r'async function promptNewFile\([^)]*\)\{.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
         # Must have a guard for empty workspace
