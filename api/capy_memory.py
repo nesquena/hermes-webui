@@ -549,6 +549,14 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_teams_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_repository_invitations_route_path_matches(raw_origin_text):
+        repository_invitations_origin = _github_repository_invitations_safe_origin(raw_origin_text)
+        repository_invitations_repo = _github_repository_invitations_path_repo(repository_invitations_origin or "")
+        if not repository_invitations_origin or not repository_invitations_repo:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = f"github repository invitations {repository_invitations_repo}"
+            fetch_origin_uri = repository_invitations_origin
     if _github_dependabot_alerts_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_dependabot_alerts_path_repo(raw_origin_text)
@@ -12169,6 +12177,213 @@ def _github_teams_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_repository_invitations_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _segment_looks_like_invitations(raw_segment: str) -> bool:
+        segment = raw_segment.lower()
+        return segment == "invitations" or segment.startswith("invitations")
+
+    def _matches_invitations_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 4 and path[0] == "" and len(lowered) > 1 and lowered[1] == "repos" and any(
+            _segment_looks_like_invitations(segment) for segment in path[3:]
+        )
+
+    return _matches_invitations_shape(parts.path) or _matches_invitations_shape(unquote(parts.path))
+
+
+def _github_repository_invitations_safe_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+        explicit_port = parts.port is not None
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or explicit_port or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "invitations"
+    ):
+        return ""
+    return urlunsplit(("https", "api.github.com", parts.path, "", ""))
+
+
+def _github_repository_invitations_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "invitations"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_repository_invitations_path_matches(origin_uri: str) -> bool:
+    return bool(_github_repository_invitations_path_repo(origin_uri))
+
+
+def _github_repository_invitation_id_is_safe(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and 0 < value <= 99_999_999_999_999_999
+
+
+def _github_repository_invitation_permission_is_safe(value: Any) -> bool:
+    return value in {"pull", "triage", "push", "maintain", "admin", "read", "write"}
+
+
+def _github_repository_invitation_created_at_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or text != value:
+        return False
+    if _safe_public_text(text, limit=40) != text or _refresh_value_is_blocked(text):
+        return False
+    return bool(_safe_iso_timestamp(text))
+
+
+def _github_repository_invitation_user_ignored_value_is_safe(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str)
+            and not _refresh_value_is_blocked(key)
+            and _github_repository_invitation_user_ignored_value_is_safe(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return all(_github_repository_invitation_user_ignored_value_is_safe(item) for item in value)
+    return not _refresh_value_is_blocked(value)
+
+
+def _github_repository_invitation_user_is_safe(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    allowed_summary_keys = {"login", "id"}
+    allowed_ignored_keys = {
+        "avatar_url",
+        "events_url",
+        "followers_url",
+        "following_url",
+        "gists_url",
+        "gravatar_id",
+        "html_url",
+        "node_id",
+        "organizations_url",
+        "received_events_url",
+        "repos_url",
+        "site_admin",
+        "starred_url",
+        "subscriptions_url",
+        "type",
+        "url",
+        "user_view_type",
+    }
+    for key, item in value.items():
+        if key in allowed_summary_keys:
+            continue
+        if key not in allowed_ignored_keys or not _github_repository_invitation_user_ignored_value_is_safe(item):
+            return False
+    if not _github_collaborator_login_is_safe(value.get("login")):
+        return False
+    if "id" in value and not _github_collaborator_id_is_safe(value.get("id")):
+        return False
+    if "site_admin" in value and not isinstance(value.get("site_admin"), bool):
+        return False
+    return True
+
+
+def _github_repository_invitation_ignored_value_is_safe(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str)
+            and not _refresh_value_is_blocked(key)
+            and _github_repository_invitation_ignored_value_is_safe(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return all(_github_repository_invitation_ignored_value_is_safe(item) for item in value)
+    return not _refresh_value_is_blocked(value)
+
+
+def _github_repository_invitation_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    allowed_summary_keys = {"id", "invitee", "inviter", "permissions", "created_at", "expired"}
+    allowed_ignored_keys = {
+        "html_url",
+        "node_id",
+        "repository",
+        "url",
+    }
+    for key, value in row.items():
+        if key in allowed_summary_keys:
+            continue
+        if key not in allowed_ignored_keys or not _github_repository_invitation_ignored_value_is_safe(value):
+            return False
+    if not _github_repository_invitation_id_is_safe(row.get("id")):
+        return False
+    if not _github_repository_invitation_user_is_safe(row.get("invitee")):
+        return False
+    if not _github_repository_invitation_user_is_safe(row.get("inviter")):
+        return False
+    if not _github_repository_invitation_permission_is_safe(row.get("permissions")):
+        return False
+    if not _github_repository_invitation_created_at_is_safe(row.get("created_at")):
+        return False
+    if not isinstance(row.get("expired"), bool):
+        return False
+    return True
+
+
+def _json_payload_is_github_repository_invitations_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_repository_invitations_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list) or len(payload) > 100:
+        return False
+    return all(_github_repository_invitation_row_is_safe(row) for row in payload)
+
+
+def _github_repository_invitations_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_repository_invitations_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_repository_invitation_row_is_safe(row)]
+    parts = [f"GitHub repository invitations for {repo}", f"invitation count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        invitee = _safe_public_text(row.get("invitee", {}).get("login"), limit=80)
+        inviter = _safe_public_text(row.get("inviter", {}).get("login"), limit=80)
+        permission = _safe_public_text(row.get("permissions"), limit=20)
+        created_at = _safe_public_text(row.get("created_at"), limit=40)
+        parts.append(
+            "; ".join([
+                f"invitation id: {int(row.get('id'))}",
+                f"invitee: {invitee}",
+                f"inviter: {inviter}",
+                f"permission: {permission}",
+                f"expired: {str(row.get('expired') is True).lower()}",
+                f"created at: {created_at}",
+            ])
+        )
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -12635,6 +12850,20 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "origin_uri": f"github teams {teams_repo}",
         }
     if _github_teams_path_matches(origin_uri):
+        raise ValueError("refresh failed")
+    repository_invitations_repo = _github_repository_invitations_path_repo(origin_uri)
+    if repository_invitations_repo:
+        if not _json_payload_is_github_repository_invitations_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub repository invitations {repository_invitations_repo}"
+        summary = _github_repository_invitations_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": f"github repository invitations {repository_invitations_repo}",
+        }
+    if _github_repository_invitations_route_path_matches(origin_uri):
         raise ValueError("refresh failed")
     dependabot_alerts_repo = _github_dependabot_alerts_path_repo(origin_uri)
     if dependabot_alerts_repo:
@@ -13346,6 +13575,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_teams_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_teams_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_repository_invitations_route_path_matches(raw_origin_uri):
+        if not _github_repository_invitations_safe_origin(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_dependabot_alerts_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_dependabot_alerts_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -13539,6 +13771,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     deploy_keys_safe_origin = _github_deploy_keys_safe_origin(raw_origin_uri)
     if deploy_keys_safe_origin:
         safe_origin_uri = deploy_keys_safe_origin
+    repository_invitations_safe_origin = _github_repository_invitations_safe_origin(raw_origin_uri)
+    if repository_invitations_safe_origin:
+        safe_origin_uri = repository_invitations_safe_origin
     actions_secrets_safe_origin = _github_actions_secrets_safe_origin(raw_origin_uri)
     if actions_secrets_safe_origin and not actions_secrets_public_key_safe_origin:
         safe_origin_uri = actions_secrets_safe_origin
@@ -13811,6 +14046,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_teams_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_repository_invitations_path_matches(safe_origin_uri):
+        if not _github_repository_invitations_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_dependabot_alerts_path_matches(safe_origin_uri):
         if not _github_dependabot_alerts_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -14050,6 +14289,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_authority_is_exact(final_url, "api.github.com")
             or not _github_deploy_keys_path_repo(final_url)
             or _github_deploy_keys_path_repo(final_url) != _github_deploy_keys_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_repository_invitations_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or not _github_repository_invitations_path_repo(final_url)
+            or _github_repository_invitations_path_repo(final_url) != _github_repository_invitations_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_secrets_path_matches(safe_origin_uri) and not _github_actions_secrets_public_key_path_matches(safe_origin_uri) and (
@@ -14393,6 +14638,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_deploy_keys_path_matches(safe_origin_uri) and (
             not _github_deploy_keys_path_repo(safe_origin_uri)
+            or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com")
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_repository_invitations_path_matches(safe_origin_uri) and (
+            not _github_repository_invitations_path_repo(safe_origin_uri)
             or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com")
             or content_type != "application/json"
         ):
@@ -15074,6 +15325,9 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
             deploy_keys_fetch_origin = _github_deploy_keys_safe_origin(str(payload.get("fetch_origin_uri") or ""))
             if deploy_keys_fetch_origin and _github_deploy_keys_path_repo(deploy_keys_fetch_origin):
                 updated_payload["fetch_origin_uri"] = deploy_keys_fetch_origin
+            repository_invitations_fetch_origin = _github_repository_invitations_safe_origin(str(payload.get("fetch_origin_uri") or ""))
+            if repository_invitations_fetch_origin and _github_repository_invitations_path_repo(repository_invitations_fetch_origin):
+                updated_payload["fetch_origin_uri"] = repository_invitations_fetch_origin
             interaction_limits_fetch_origin = _github_interaction_limits_safe_origin(
                 str(payload.get("fetch_origin_uri") or "")
             ) or _github_interaction_limits_fetch_origin_from_origin_text(origin_uri)
@@ -15368,6 +15622,12 @@ def run_source_refresh_jobs(
                 origin_uri = f"capy-memory://{source_id}"
             else:
                 origin_uri = deploy_keys_origin
+        elif _github_repository_invitations_route_path_matches(raw_origin_uri):
+            repository_invitations_origin = _github_repository_invitations_safe_origin(raw_origin_uri)
+            if not repository_invitations_origin:
+                origin_uri = f"capy-memory://{source_id}"
+            else:
+                origin_uri = repository_invitations_origin
         elif _github_actions_secrets_route_path_matches(raw_origin_uri):
             actions_secrets_origin = _github_actions_secrets_safe_origin(raw_origin_uri)
             if not actions_secrets_origin:
