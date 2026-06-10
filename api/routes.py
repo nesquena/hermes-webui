@@ -1487,7 +1487,7 @@ def _get_cached_session_list_payload(
                 pass
         return cached
 
-    stale = cached
+    stale = cached  # now actually a stale payload when one exists, else None
     event, is_owner = _session_list_cache_claim_rebuild(key)
     if is_owner:
         if diag is not None:
@@ -1534,7 +1534,7 @@ def _get_cached_session_list_payload(
         timeout = _SESSIONS_CACHE_WAIT_SECONDS
     event.wait(timeout)
 
-    latest, _ = _session_list_cache_get(key)
+    latest, is_fresh = _session_list_cache_get(key, allow_stale=False)
     if latest is not None:
         if diag is not None:
             try:
@@ -6687,7 +6687,6 @@ def handle_get(handler, parsed) -> bool:
                 settings.get("show_previous_messaging_sessions")
             )
             show_cron_sessions = bool(settings.get("show_cron_sessions"))
-            diag.stage("active_profile")
             active_profile = get_active_profile_name()
             all_profiles = _all_profiles_query_flag(parsed)
             key = _session_list_cache_key(
