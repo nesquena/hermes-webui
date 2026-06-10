@@ -9074,11 +9074,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = repair_space_layout_from_tool(data)
         preflight_receipt = result.get("prompt_preflight") if isinstance(result.get("prompt_preflight"), dict) else None
         autonomy_policy = _space_layout_action_policy_receipt(name, preflight_receipt)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
             **result,
             "autonomy_policy": autonomy_policy,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=result.get("space_id"),
@@ -9086,6 +9088,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_id=result.get("revision_event_id"),
                 autonomy_policy=autonomy_policy,
                 progress_event=result.get("progress_event"),
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name == "space.spaces.rearrangewidgets":
@@ -9121,6 +9125,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             saved_widgets.append(read_widget_detail(space_id, widget_id))
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.rearrange")
         autonomy_policy = _space_layout_action_policy_receipt(name)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -9132,6 +9137,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -9139,6 +9145,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_ids=revision_event_ids,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name in {"space.spaces.removespace", "space.spaces.deletespace"}:
