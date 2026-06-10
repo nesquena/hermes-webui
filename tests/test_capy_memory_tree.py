@@ -598,7 +598,8 @@ def test_capy_memory_source_refresh_route_runs_bounded_metadata_only_jobs(monkey
     assert compaction["tool"] == "capy-memory-source-refresh"
     assert compaction["command"] == "capy.memory.refresh"
     assert compaction["exit_status"] == 0
-    assert compaction["redaction_status"] == "none"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
     assert "processed: 1" in compaction["text"]
     assert "jobs: 1" in compaction["text"]
     assert "prompt_preflight_status: pass" in compaction["text"]
@@ -726,6 +727,8 @@ def test_capy_memory_source_refresh_route_can_target_one_source_metadata_only(mo
     compaction = payload["output_compaction"]
     assert compaction["tool"] == "capy-memory-source-refresh"
     assert compaction["command"] == "capy.memory.refresh_one"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
     assert "processed: 1" in compaction["text"]
     assert "target_source_id: roadmap-docs" in compaction["text"]
     assert "prompt_preflight_status: pass" in compaction["text"]
@@ -819,7 +822,8 @@ def test_scheduled_source_refresh_tick_queues_due_sources_and_runs_metadata_only
     assert compaction["tool"] == "capy-memory-source-refresh"
     assert compaction["command"] == "capy.memory.refresh.scheduled"
     assert compaction["exit_status"] == 0
-    assert compaction["redaction_status"] == "none"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
     assert "queued: 2" in compaction["text"]
     assert "processed: 1" in compaction["text"]
     assert "queue_jobs: 2" in compaction["text"]
@@ -888,7 +892,8 @@ def test_capy_memory_scheduled_refresh_route_returns_bounded_policy_receipt(monk
                 "compacted_chars": 80,
                 "compacted": True,
                 "rules_applied": ["cap_section_chars", "redact_unsafe_markers", "SECRET_VALUE_DO_NOT_LEAK"],
-                "redaction_status": "none",
+                "metadata_only": True,
+                "redaction_status": "metadata_only",
                 "redacted_count": 0,
                 "retained_artifact_handles": [],
                 "retained_citations": [],
@@ -951,7 +956,8 @@ def test_capy_memory_scheduled_refresh_route_returns_bounded_policy_receipt(monk
             "compacted_chars": 80,
             "compacted": True,
             "rules_applied": ["cap_section_chars", "redact_unsafe_markers"],
-            "redaction_status": "none",
+            "metadata_only": True,
+            "redaction_status": "metadata_only",
             "redacted_count": 0,
             "retained_artifact_handles": [],
             "retained_citations": [],

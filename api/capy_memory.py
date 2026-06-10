@@ -16428,13 +16428,17 @@ def _source_refresh_output_compaction_receipt(
         model_route_hint = _safe_public_text(policy.get("model_route_hint"), limit=80)
         if model_route_hint:
             lines.append(f"model_route_hint: {model_route_hint}")
-    return compact_output(
+    receipt = compact_output(
         "\n".join(lines),
         tool="capy-memory-source-refresh",
         command=safe_command,
         exit_status=0,
         max_chars=1_200,
     )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
 
 
 def _safe_source_refresh_public_output_compaction(value: Any) -> dict[str, Any] | None:
@@ -16445,6 +16449,14 @@ def _safe_source_refresh_public_output_compaction(value: Any) -> dict[str, Any] 
     command = _safe_source_refresh_public_value(value.get("command"), kind="text", limit=120)
     if tool != "capy-memory-source-refresh" or not command.startswith("capy.memory.refresh"):
         return None
+    raw_redaction_status = str(value.get("redaction_status") or "").strip().lower()
+    metadata_only = value.get("metadata_only") is True
+    if raw_redaction_status == "redacted":
+        redaction_status = "redacted"
+    elif raw_redaction_status == "metadata_only" or metadata_only:
+        redaction_status = "metadata_only"
+    else:
+        redaction_status = "none"
     safe: dict[str, Any] = {
         "tool": tool,
         "command": command,
@@ -16453,7 +16465,8 @@ def _safe_source_refresh_public_output_compaction(value: Any) -> dict[str, Any] 
         "compacted_chars": _bounded_public_int(value.get("compacted_chars"), limit=200_000),
         "compacted": value.get("compacted") is True,
         "rules_applied": [],
-        "redaction_status": "redacted" if str(value.get("redaction_status") or "").strip().lower() == "redacted" else "none",
+        "metadata_only": metadata_only,
+        "redaction_status": redaction_status,
         "redacted_count": _bounded_public_int(value.get("redacted_count"), limit=10_000),
         "retained_artifact_handles": [],
         "retained_citations": [],
