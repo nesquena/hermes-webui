@@ -96,6 +96,7 @@ def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeyp
         "date": _day(now),
         "input_tokens": 1200,
         "output_tokens": 300,
+        "cache_read_tokens": 0,
         "sessions": 1,
         "cost": 0.0123,
     }
@@ -103,6 +104,7 @@ def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeyp
         "date": _day(now - 86400),
         "input_tokens": 0,
         "output_tokens": 0,
+        "cache_read_tokens": 0,
         "sessions": 0,
         "cost": 0.0,
     }
@@ -130,6 +132,8 @@ def test_insights_model_breakdown_tracks_tokens_cost_and_shares(monkeypatch, tmp
     assert costly["output_tokens"] == 50
     assert costly["total_tokens"] == 150
     assert costly["cost"] == 0.2
+    assert costly["cache_read_tokens"] == 0
+    assert costly["cache_hit_percent"] is None
     assert costly["session_share"] == 33
     assert costly["token_share"] == 18
     assert costly["cost_share"] == 80
@@ -147,8 +151,10 @@ def test_insights_frontend_renders_daily_token_chart_and_model_usage_table():
     assert "insights-daily-bar-input" in PANELS_JS
     assert "insights-daily-bar-output" in PANELS_JS
     assert "insights_model_tokens" in PANELS_JS
+    assert "insights_model_cache" in PANELS_JS
     assert "insights_model_cost" in PANELS_JS
     assert "insights_model_share" in PANELS_JS
+    assert "insights_cache_hit" in PANELS_JS
     assert "insights_no_usage_data" in PANELS_JS
 
 
@@ -343,6 +349,7 @@ def _call_insights_with_state_db(monkeypatch, tmp_path, entries, state_rows, day
         """CREATE TABLE sessions (
             id TEXT PRIMARY KEY, source TEXT, model TEXT, message_count INTEGER,
             input_tokens INTEGER, output_tokens INTEGER, estimated_cost_usd REAL,
+            cache_read_tokens INTEGER DEFAULT 0,
             started_at REAL, ended_at REAL
         )"""
     )

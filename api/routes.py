@@ -4197,6 +4197,7 @@ def _handle_insights(handler, parsed) -> bool:
     total_messages = 0
     total_input_tokens = 0
     total_output_tokens = 0
+    total_cache_read_tokens = 0
     total_cost = 0.0
     model_stats: dict[str, dict] = {}
     daily_tokens: dict[str, dict] = {}
@@ -4213,17 +4214,21 @@ def _handle_insights(handler, parsed) -> bool:
         total_input_tokens += input_tokens
         total_output_tokens += output_tokens
         total_cost += cost_value
+        cache_read = _safe_usage_int(s.get("cache_read_tokens"))
+        total_cache_read_tokens += cache_read
 
         model = s.get("model") or "unknown"
         bucket = model_stats.setdefault(model, {
             "sessions": 0,
             "input_tokens": 0,
             "output_tokens": 0,
+            "cache_read_tokens": 0,
             "cost": 0.0,
         })
         bucket["sessions"] += 1
         bucket["input_tokens"] += input_tokens
         bucket["output_tokens"] += output_tokens
+        bucket["cache_read_tokens"] += cache_read
         bucket["cost"] += cost_value
 
         # Activity patterns
@@ -4235,11 +4240,13 @@ def _handle_insights(handler, parsed) -> bool:
                 daily_bucket = daily_tokens.setdefault(day_key, {
                     "input_tokens": 0,
                     "output_tokens": 0,
+                    "cache_read_tokens": 0,
                     "sessions": 0,
                     "cost": 0.0,
                 })
                 daily_bucket["input_tokens"] += input_tokens
                 daily_bucket["output_tokens"] += output_tokens
+                daily_bucket["cache_read_tokens"] += cache_read
                 daily_bucket["sessions"] += 1
                 daily_bucket["cost"] += cost_value
                 dow_activity[dt.tm_wday] += 1
@@ -4255,22 +4262,37 @@ def _handle_insights(handler, parsed) -> bool:
             with closing(sqlite3.connect(str(db_path))) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
-                cur.execute("""
-                    SELECT id, model, message_count, input_tokens, output_tokens,
-                           estimated_cost_usd, started_at, ended_at
-                    FROM sessions
-                    WHERE (started_at >= ? OR ended_at >= ?)
-                      AND COALESCE(source, '') != 'webui'
-                """, (cutoff, cutoff))
+                # Try to include cache_read_tokens; the column may not exist
+                # in older state.db schemas, so fall back gracefully.
+                try:
+                    cur.execute("""
+                        SELECT id, model, message_count, input_tokens, output_tokens,
+                               estimated_cost_usd, started_at, ended_at,
+                               COALESCE(cache_read_tokens, 0) AS cache_read_tokens
+                        FROM sessions
+                        WHERE (started_at >= ? OR ended_at >= ?)
+                          AND COALESCE(source, '') != 'webui'
+                    """, (cutoff, cutoff))
+                except Exception:
+                    cur.execute("""
+                        SELECT id, model, message_count, input_tokens, output_tokens,
+                               estimated_cost_usd, started_at, ended_at,
+                               0 AS cache_read_tokens
+                        FROM sessions
+                        WHERE (started_at >= ? OR ended_at >= ?)
+                          AND COALESCE(source, '') != 'webui'
+                    """, (cutoff, cutoff))
                 for row in cur.fetchall():
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])
                     _cost = _safe_cost_float(row["estimated_cost_usd"])
+                    _cache_read = _safe_usage_int(row["cache_read_tokens"])
                     _msgs = _safe_usage_int(row["message_count"])
                     total_sessions += 1
                     total_messages += _msgs
                     total_input_tokens += _input
                     total_output_tokens += _output
+                    total_cache_read_tokens += _cache_read
                     total_cost += _cost
 
                     _model = row["model"] or "unknown"
@@ -4278,11 +4300,13 @@ def _handle_insights(handler, parsed) -> bool:
                         "sessions": 0,
                         "input_tokens": 0,
                         "output_tokens": 0,
+                        "cache_read_tokens": 0,
                         "cost": 0.0,
                     })
                     bucket["sessions"] += 1
                     bucket["input_tokens"] += _input
                     bucket["output_tokens"] += _output
+                    bucket["cache_read_tokens"] += _cache_read
                     bucket["cost"] += _cost
 
                     _ts = row["started_at"] or row["ended_at"] or 0
@@ -4292,11 +4316,13 @@ def _handle_insights(handler, parsed) -> bool:
                         _daily = daily_tokens.setdefault(_day_key, {
                             "input_tokens": 0,
                             "output_tokens": 0,
+                            "cache_read_tokens": 0,
                             "sessions": 0,
                             "cost": 0.0,
                         })
                         _daily["input_tokens"] += _input
                         _daily["output_tokens"] += _output
+                        _daily["cache_read_tokens"] += _cache_read
                         _daily["sessions"] += 1
                         _daily["cost"] += _cost
                         dow_activity[_dt.tm_wday] += 1
@@ -4310,6 +4336,8 @@ def _handle_insights(handler, parsed) -> bool:
     for model, stats in model_stats.items():
         row_total_tokens = stats["input_tokens"] + stats["output_tokens"]
         row_cost = round(stats["cost"], 6)
+        row_cache_read = stats.get("cache_read_tokens", 0)
+        row_cache_pct = int(round((row_cache_read / stats["input_tokens"]) * 100)) if stats["input_tokens"] and row_cache_read > 0 else None
         models_breakdown.append({
             "model": model,
             "sessions": stats["sessions"],
@@ -4317,6 +4345,8 @@ def _handle_insights(handler, parsed) -> bool:
             "output_tokens": stats["output_tokens"],
             "total_tokens": row_total_tokens,
             "cost": row_cost,
+            "cache_read_tokens": row_cache_read,
+            "cache_hit_percent": row_cache_pct,
             "session_share": int(round((stats["sessions"] / total_sessions) * 100)) if total_sessions else 0,
             "token_share": int(round((row_total_tokens / total_tokens) * 100)) if total_tokens else 0,
             "cost_share": int(round((row_cost / total_cost) * 100)) if total_cost else 0,
@@ -4330,6 +4360,7 @@ def _handle_insights(handler, parsed) -> bool:
         bucket = daily_tokens.get(day_key, {
             "input_tokens": 0,
             "output_tokens": 0,
+            "cache_read_tokens": 0,
             "sessions": 0,
             "cost": 0.0,
         })
@@ -4337,6 +4368,7 @@ def _handle_insights(handler, parsed) -> bool:
             "date": day_key,
             "input_tokens": bucket["input_tokens"],
             "output_tokens": bucket["output_tokens"],
+            "cache_read_tokens": bucket["cache_read_tokens"],
             "sessions": bucket["sessions"],
             "cost": round(bucket["cost"], 6),
         })
@@ -4355,6 +4387,8 @@ def _handle_insights(handler, parsed) -> bool:
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
         "total_tokens": total_tokens,
+        "total_cache_read_tokens": total_cache_read_tokens,
+        "total_cache_hit_percent": int(round((total_cache_read_tokens / total_input_tokens) * 100)) if total_input_tokens and total_cache_read_tokens > 0 else None,
         "total_cost": round(total_cost, 6),
         "models": models_breakdown,
         "daily_tokens": daily_series,
