@@ -14888,7 +14888,7 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_workflow_artifacts_path_matches(safe_origin_uri) and (
             _github_workflow_artifacts_path_run_id(safe_origin_uri) is None
-            or content_type not in {"application/json", "application/feed+json"}
+            or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_workflow_run_timing_path_run_id(safe_origin_uri) is not None and content_type != "application/json":

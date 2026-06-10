@@ -13622,6 +13622,57 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_artifac
     assert "raw-prompt" not in serialized
 
 
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_artifacts_feed_json_content_type(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-workflow-artifacts-feed-json-content-type",
+        "title": "GitHub Workflow Artifacts Feed JSON Content Type",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/actions/runs/24680/artifacts?access_token=***#raw-prompt",
+    })
+    github_workflow_artifacts_body = json.dumps({
+        "total_count": 1,
+        "artifacts": [
+            {
+                "id": 201,
+                "name": "safe-artifact-name",
+                "size_in_bytes": 123,
+                "expired": False,
+                "created_at": "2026-05-31T02:00:00Z",
+            }
+        ],
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/feed+json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_workflow_artifacts_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-workflow-artifacts-feed-json-content-type.md").exists()
+    assert "safe-artifact-name" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_artifacts_text_fallback(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
