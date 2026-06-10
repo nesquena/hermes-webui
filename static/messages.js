@@ -1898,13 +1898,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const byTid=new Map();
     liveCalls.forEach((tc,idx)=>{
       if(!tc||typeof tc!=='object') return;
-      const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+      const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
       if(tid&&!byTid.has(tid)) byTid.set(tid,{tc,idx});
     });
     const used=new Set();
     return (rawCalls||[]).map((raw,idx)=>{
       const next={...(raw||{}),done:true};
-      const tid=next.tid||next.id||next.tool_call_id||next.call_id||'';
+      const tid=next.tid||next.id||next.tool_call_id||next.tool_use_id||next.call_id||'';
       let matchEntry=tid?byTid.get(tid):null;
       if(!matchEntry){
         const name=next.name||((next.function||{}).name)||'';
@@ -2463,7 +2463,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _liveToolTid(d, activityBurstId, activitySegmentSeq){
-    const explicit=String(d&&d.tid||'').trim();
+    const explicit=String(d&&(d.tid||d.id||d.tool_call_id||d.tool_use_id||d.call_id)||'').trim();
     if(explicit) return explicit;
     return `live-${activeSid}-${_hashString(_toolCallSignature(d,activityBurstId,activitySegmentSeq))}`;
   }
@@ -2491,7 +2491,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const candidate=toolCalls[i];
         if(!candidate||typeof candidate!=='object') continue;
         if(!allowDone&&candidate.done===true) continue;
-        const candidateTid=String(candidate.tid||candidate.id||candidate.tool_call_id||candidate.call_id||'');
+        const candidateTid=String(candidate.tid||candidate.id||candidate.tool_call_id||candidate.tool_use_id||candidate.call_id||'');
         if(candidateTid&&candidateTid===wantedTid) return i;
       }
     }
@@ -2561,7 +2561,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];
     if(!Array.isArray(inflight.messages)) inflight.messages=[...(inflight.messages||[])];
 
-    const explicitTid=String(d&&d.tid||'').trim();
+    const explicitTid=String(d&&d.tid||d&&d.id||d&&d.tool_call_id||d&&d.tool_use_id||d&&d.call_id||'').trim();
     const isComplete=phase==='complete';
     let signature=_toolCallSignature(d,current.burstId,current.segmentSeq);
     let index=-1;

@@ -1330,6 +1330,222 @@ def _run_journal_status_payload(summary: dict, *, active: bool = False) -> dict:
     }
 
 
+_RUN_JOURNAL_TOOL_ID_KEYS = ("tid", "id", "tool_call_id", "tool_use_id", "call_id")
+
+
+def _run_journal_snapshot_tool_id(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in _RUN_JOURNAL_TOOL_ID_KEYS:
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _truncate_journal_snapshot_value(value, *, limit: int = 120):
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + "..."
+    if isinstance(value, dict):
+        return {str(k): _truncate_journal_snapshot_value(v, limit=limit) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_truncate_journal_snapshot_value(v, limit=limit) for v in value[:20]]
+    return value
+
+
+def _run_journal_live_snapshot(stream_id: str | None) -> dict | None:
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return None
+    summary = find_run_summary(stream_id)
+    if not summary:
+        return None
+    session_id = str(summary.get("session_id") or "")
+    if not session_id:
+        return None
+    journal = read_run_events(session_id, stream_id)
+    events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
+    if not events:
+        return None
+
+    assistant_text = ""
+    reasoning_text = ""
+    messages: list[dict] = []
+    tool_calls: list[dict] = []
+    activity_burst_anchors: list[dict] = []
+    current_activity_burst_id = 0
+    fresh_segment = True
+    last_ts = None
+
+    def mark_boundary() -> int:
+        nonlocal current_activity_burst_id
+        text_end = len(assistant_text)
+        if text_end <= 0:
+            return current_activity_burst_id
+        last_end = max(
+            [int(anchor.get("textEnd") or 0) for anchor in activity_burst_anchors]
+            or [0]
+        )
+        if text_end > last_end:
+            current_activity_burst_id += 1
+            activity_burst_anchors.append(
+                {"id": current_activity_burst_id, "textEnd": text_end}
+            )
+        return current_activity_burst_id
+
+    def update_completed_tool(payload: dict) -> None:
+        tool_id = _run_journal_snapshot_tool_id(payload)
+        name = str(payload.get("name") or "").strip()
+        for call in reversed(tool_calls):
+            if call.get("done"):
+                continue
+            call_id = _run_journal_snapshot_tool_id(call)
+            if (tool_id and call_id == tool_id) or (not tool_id and name and call.get("name") == name):
+                call["done"] = True
+                if payload.get("preview") is not None:
+                    call["snippet"] = str(payload.get("preview") or "")
+                    call["preview"] = call.get("preview") or call["snippet"]
+                if payload.get("duration") is not None:
+                    call["duration"] = payload.get("duration")
+                if payload.get("is_error") is not None:
+                    call["is_error"] = bool(payload.get("is_error"))
+                return
+
+        if not name or name == "clarify":
+            return
+        call = {
+            "name": name,
+            "preview": str(payload.get("preview") or ""),
+            "snippet": str(payload.get("preview") or ""),
+            "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+            "done": True,
+            "_live": True,
+            "_journal_snapshot": True,
+            "_journal_stream_id": stream_id,
+        }
+        tool_id = _run_journal_snapshot_tool_id(payload)
+        if tool_id:
+            call["tid"] = tool_id
+        for key in _RUN_JOURNAL_TOOL_ID_KEYS:
+            if payload.get(key):
+                call[key] = str(payload.get(key))
+        if current_activity_burst_id:
+            call["activityBurstId"] = current_activity_burst_id
+            call["activitySegmentSeq"] = current_activity_burst_id
+        tool_calls.append(call)
+
+    for event in events:
+        event_name = str(event.get("event") or event.get("type") or "")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        last_ts = event.get("created_at", last_ts)
+        if event_name == "token":
+            text = str(payload.get("text") or "")
+            if text:
+                assistant_text += text
+                fresh_segment = False
+            continue
+        if event_name == "reasoning":
+            reasoning_text += str(payload.get("text") or "")
+            continue
+        if event_name == "interim_assistant":
+            visible = str(payload.get("text") or "").strip()
+            if visible:
+                if payload.get("already_streamed"):
+                    if not assistant_text:
+                        assistant_text = visible
+                else:
+                    assistant_text = f"{assistant_text}\n\n{visible}" if assistant_text else visible
+                mark_boundary()
+                fresh_segment = True
+            continue
+        if event_name == "tool":
+            name = str(payload.get("name") or "").strip()
+            if not name or name == "clarify":
+                continue
+            boundary_id = mark_boundary()
+            tool_id = _run_journal_snapshot_tool_id(payload)
+            call = {
+                "name": name,
+                "preview": str(payload.get("preview") or ""),
+                "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+                "done": False,
+                "_live": True,
+                "_journal_snapshot": True,
+                "_journal_stream_id": stream_id,
+            }
+            if tool_id:
+                call["tid"] = tool_id
+            for key in _RUN_JOURNAL_TOOL_ID_KEYS:
+                if payload.get(key):
+                    call[key] = str(payload.get(key))
+            if boundary_id:
+                call["activityBurstId"] = boundary_id
+                call["activitySegmentSeq"] = boundary_id
+            tool_calls.append(call)
+            fresh_segment = True
+            continue
+        if event_name == "tool_complete":
+            update_completed_tool(payload)
+            fresh_segment = True
+
+    if assistant_text or reasoning_text:
+        message = {
+            "role": "assistant",
+            "content": assistant_text,
+            "_live": True,
+            "_journal_snapshot": True,
+            "_journal_stream_id": stream_id,
+        }
+        if reasoning_text:
+            message["reasoning"] = reasoning_text
+        if last_ts is not None:
+            message["_ts"] = last_ts
+        messages.append(message)
+
+    if not messages and not tool_calls:
+        return None
+
+    visible_anchors = [
+        anchor
+        for anchor in activity_burst_anchors
+        if int(anchor.get("textEnd") or 0) < len(assistant_text)
+    ]
+    segment_count = len(visible_anchors) + (1 if assistant_text else 0)
+    current_live_segment_seq = max(segment_count, len(activity_burst_anchors), 0)
+    try:
+        summary_last_seq = max(0, int(summary.get("last_seq") or 0))
+    except (TypeError, ValueError):
+        summary_last_seq = 0
+    try:
+        event_last_seq = max(0, int(events[-1].get("seq") or 0))
+    except (TypeError, ValueError):
+        event_last_seq = 0
+    if event_last_seq >= summary_last_seq:
+        last_seq = event_last_seq
+        last_event_id = events[-1].get("event_id") or (
+            f"{stream_id}:{event_last_seq}" if event_last_seq else summary.get("last_event_id")
+        )
+    else:
+        last_seq = summary_last_seq
+        last_event_id = summary.get("last_event_id") or events[-1].get("event_id")
+
+    return {
+        "session_id": session_id,
+        "stream_id": stream_id,
+        "last_seq": last_seq,
+        "last_event_id": last_event_id,
+        "event_count": len(events),
+        "fresh_segment": fresh_segment,
+        "messages": messages,
+        "tool_calls": tool_calls,
+        "last_assistant_text": assistant_text,
+        "last_reasoning_text": reasoning_text,
+        "activity_burst_anchors": activity_burst_anchors,
+        "current_activity_burst_id": current_activity_burst_id,
+        "current_live_segment_seq": current_live_segment_seq,
+    }
+
+
 def _ensure_full_session_before_mutation(sid: str, session):
     """Reload cached metadata-only sessions before mutating persisted fields.
 
@@ -5691,6 +5907,19 @@ def handle_get(handler, parsed) -> bool:
                         journal,
                         active=journal_active,
                     )
+                    if journal_active:
+                        try:
+                            snapshot = _run_journal_live_snapshot(original_stream_id)
+                        except Exception:
+                            logger.debug(
+                                "Failed to build runtime journal snapshot for %s",
+                                original_stream_id,
+                                exc_info=True,
+                            )
+                            snapshot = None
+                        if snapshot:
+                            raw["runtime_journal_snapshot"] = snapshot
+                            raw["pending_attachments"] = getattr(s, "pending_attachments", []) or []
             # Cold-load: derive the latest settled todo snapshot from the full
             # merged transcript, not the truncated display window. This keeps
             # the Todos panel correct after refresh even when the latest todo
