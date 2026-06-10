@@ -136,7 +136,6 @@ _account_usage_worker_pool_lock = threading.Lock()
 
 # Per-home worker pool configuration for probe tail-latency reduction (#3787)
 _ACCOUNT_USAGE_WORKERS_PER_HOME = 2
-_ACCOUNT_USAGE_WORKER_WAIT_SECONDS = 0.5
 
 
 def _get_account_usage_probe_semaphore() -> threading.BoundedSemaphore:
@@ -1426,6 +1425,12 @@ def _fetch_account_usage_once_for_home(provider: str, home: Path, *, api_key: st
 
 
 def _get_account_usage_probe_worker(home: Path) -> "_AccountUsageProbeWorker | None":
+    """Return a worker with its lock already held, or None if saturated.
+
+    The caller MUST release worker._lock after use (typically via try/finally).
+    Holding the lock across the handoff eliminates the TOCTOU window that would
+    let two concurrent probes both observe the same worker as free.
+    """
     key = str(Path(home))
     with _account_usage_worker_pool_lock:
         workers = _account_usage_worker_pool.get(key)
@@ -1434,11 +1439,7 @@ def _get_account_usage_probe_worker(home: Path) -> "_AccountUsageProbeWorker | N
             _account_usage_worker_pool[key] = workers
     for w in workers:
         if w._lock.acquire(blocking=False):
-            w._lock.release()
             return w
-    if workers[0]._lock.acquire(timeout=_ACCOUNT_USAGE_WORKER_WAIT_SECONDS):
-        workers[0]._lock.release()
-        return workers[0]
     return None
 
 
@@ -1572,7 +1573,10 @@ def _agent_fetch_account_usage_for_home(provider: str, home: Path, *, api_key: s
         _cleanup_account_usage_probe_workers()
         worker = _get_account_usage_probe_worker(home)
         if worker is not None:
-            return worker.fetch(provider, api_key=api_key)
+            try:
+                return worker._fetch_locked(provider, api_key=api_key)
+            finally:
+                worker._lock.release()
         return _fetch_account_usage_once_for_home(provider, home, api_key=api_key)
     except Exception:
         logger.debug("Account usage probe for %s failed", provider, exc_info=True)

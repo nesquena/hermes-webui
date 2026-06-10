@@ -3,10 +3,11 @@
 Focus on:
 - Per-home worker pool size N=2
 - Non-blocking acquire returns an idle worker when available
-- Returns None when all workers are locked and timeout expires
+- Returns None immediately when all workers are locked (no blocking wait)
 - Scoped invalidation only flushes the active home's workers
 - Full invalidation (no provider_id) flushes all workers
 - Cleanup iterates nested worker lists correctly
+- Lock held across selector handoff prevents TOCTOU races
 """
 
 import threading
@@ -17,7 +18,6 @@ from unittest import mock
 
 from api.providers import (
     _ACCOUNT_USAGE_WORKERS_PER_HOME,
-    _ACCOUNT_USAGE_WORKER_WAIT_SECONDS,
     _account_usage_worker_pool,
     _account_usage_worker_pool_lock,
     _cleanup_account_usage_probe_workers,
@@ -45,6 +45,7 @@ class TestProbeWorkerPoolPerHome(unittest.TestCase):
         home = Path.home() / ".hermes"
         worker = _get_account_usage_probe_worker(home)
         self.assertIsNotNone(worker)
+        worker._lock.release()
 
         with _account_usage_worker_pool_lock:
             key = str(Path(home))
@@ -54,20 +55,20 @@ class TestProbeWorkerPoolPerHome(unittest.TestCase):
             self.assertEqual(_ACCOUNT_USAGE_WORKERS_PER_HOME, 2)
 
     def test_nonblocking_acquire_returns_idle_worker(self):
-        """Non-blocking acquire should return an idle worker when available."""
+        """Non-blocking acquire should return an idle worker when one is free."""
         home = Path("/tmp/test_nonblocking_idle")
 
-        # First, populate the pool with two workers
+        # Populate the pool
         worker_initial = _get_account_usage_probe_worker(home)
         self.assertIsNotNone(worker_initial)
+        worker_initial._lock.release()
 
-        # Get reference to the actual workers in pool
         with _account_usage_worker_pool_lock:
             key = str(Path(home))
             workers = _account_usage_worker_pool[key]
             self.assertEqual(len(workers), 2)
 
-        # Hold first worker locked from a background thread to simulate actual use
+        # Hold workers[0] locked from a background thread to simulate actual use
         lock_holder = threading.Event()
         release_signal = threading.Event()
 
@@ -79,33 +80,31 @@ class TestProbeWorkerPoolPerHome(unittest.TestCase):
 
         thread = threading.Thread(target=hold_lock, daemon=True)
         thread.start()
-        lock_holder.wait(timeout=2.0)  # Wait until background thread has the lock
+        lock_holder.wait(timeout=2.0)
 
         try:
-            # Get a worker - should pick the idle one (workers[1])
             worker = _get_account_usage_probe_worker(home)
             self.assertIsNotNone(worker)
-            # Worker should be the second one since first is locked
             self.assertIs(worker, workers[1])
+            worker._lock.release()
         finally:
             release_signal.set()
             thread.join(timeout=1.0)
 
-    def test_returns_none_when_all_workers_locked_and_timeout_expires(self):
-        """Should return None when all workers locked and timeout expires."""
-        home = Path("/tmp/test_timeout_none")
+    def test_returns_none_when_all_workers_locked(self):
+        """Should return None immediately when all workers are locked from other threads."""
+        home = Path("/tmp/test_immediate_none")
 
-        # First populate the pool
+        # Populate the pool
         worker_initial = _get_account_usage_probe_worker(home)
         self.assertIsNotNone(worker_initial)
+        worker_initial._lock.release()
 
-        # Get reference to the workers
         with _account_usage_worker_pool_lock:
             key = str(Path(home))
             workers = _account_usage_worker_pool[key]
-            self.assertEqual(len(workers), 2)
 
-        # Hold both workers locked from background threads
+        # Hold both workers locked from a background thread
         lock_holder = threading.Event()
         release_signal = threading.Event()
 
@@ -119,17 +118,16 @@ class TestProbeWorkerPoolPerHome(unittest.TestCase):
 
         thread = threading.Thread(target=hold_locks, daemon=True)
         thread.start()
-        lock_holder.wait(timeout=2.0)  # Wait until background thread has both locks
+        lock_holder.wait(timeout=2.0)
 
         try:
-            # Now attempt to get a worker; should timeout and return None
             start = time.time()
             result = _get_account_usage_probe_worker(home)
             elapsed = time.time() - start
 
             self.assertIsNone(result)
-            # Verify timeout was respected (within a small margin)
-            self.assertGreaterEqual(elapsed, _ACCOUNT_USAGE_WORKER_WAIT_SECONDS - 0.1)
+            # Should return immediately, not block
+            self.assertLess(elapsed, 0.1)
         finally:
             release_signal.set()
             thread.join(timeout=1.0)
@@ -139,26 +137,24 @@ class TestProbeWorkerPoolPerHome(unittest.TestCase):
         home1 = Path.home() / ".hermes"
         home2 = Path("/tmp/other_home")
 
-        # Create workers for both homes
         worker1 = _get_account_usage_probe_worker(home1)
         worker2 = _get_account_usage_probe_worker(home2)
 
         self.assertIsNotNone(worker1)
         self.assertIsNotNone(worker2)
+        worker1._lock.release()
+        worker2._lock.release()
 
         with _account_usage_worker_pool_lock:
             initial_count = len(_account_usage_worker_pool)
             self.assertEqual(initial_count, 2)
 
-        # Mock _get_hermes_home to return home1
         with mock.patch("api.providers._get_hermes_home", return_value=home1):
             invalidate_account_usage_status_cache(provider_id="anthropic")
-            # Give async thread time to complete
             time.sleep(0.2)
 
         with _account_usage_worker_pool_lock:
             remaining_keys = list(_account_usage_worker_pool.keys())
-            # home1 should be flushed, home2 should remain
             self.assertNotIn(str(Path(home1)), remaining_keys)
             self.assertIn(str(Path(home2)), remaining_keys)
 
@@ -167,19 +163,18 @@ class TestProbeWorkerPoolPerHome(unittest.TestCase):
         home1 = Path.home() / ".hermes"
         home2 = Path("/tmp/other_home")
 
-        # Create workers for both homes
         worker1 = _get_account_usage_probe_worker(home1)
         worker2 = _get_account_usage_probe_worker(home2)
 
         self.assertIsNotNone(worker1)
         self.assertIsNotNone(worker2)
+        worker1._lock.release()
+        worker2._lock.release()
 
         with _account_usage_worker_pool_lock:
             self.assertEqual(len(_account_usage_worker_pool), 2)
 
-        # Full invalidation with no provider_id
         invalidate_account_usage_status_cache(provider_id=None)
-        # Give async thread time to complete
         time.sleep(0.2)
 
         with _account_usage_worker_pool_lock:
@@ -189,116 +184,101 @@ class TestProbeWorkerPoolPerHome(unittest.TestCase):
         """Cleanup should properly iterate over nested worker lists."""
         home = Path.home() / ".hermes"
 
-        # Create workers
         worker = _get_account_usage_probe_worker(home)
         self.assertIsNotNone(worker)
+        worker._lock.release()
 
         with _account_usage_worker_pool_lock:
             key = str(Path(home))
             workers_list = _account_usage_worker_pool.get(key)
             self.assertEqual(len(workers_list), 2)
 
-        # Run cleanup with future timestamp (should mark workers as stale)
-        now = time.monotonic() + 100000  # Far in the future
+        now = time.monotonic() + 100000
         _cleanup_account_usage_probe_workers(now=now, idle_seconds=1.0)
 
-        # Pool should be cleared of stale workers
         with _account_usage_worker_pool_lock:
             if _account_usage_worker_pool.get(str(Path(home))):
-                # If key still exists, it should have no workers
                 remaining = _account_usage_worker_pool.get(str(Path(home)), [])
                 self.assertEqual(len(remaining), 0)
             else:
-                # Key should be removed entirely if no workers
                 self.assertNotIn(str(Path(home)), _account_usage_worker_pool)
 
     def test_synchronous_close_flattens_nested_lists(self):
         """Synchronous close should flatten nested lists correctly."""
         home = Path.home() / ".hermes"
 
-        # Create workers
         worker = _get_account_usage_probe_worker(home)
         self.assertIsNotNone(worker)
+        worker._lock.release()
 
         with _account_usage_worker_pool_lock:
             key = str(Path(home))
             workers_list = _account_usage_worker_pool.get(key)
             self.assertEqual(len(workers_list), 2)
 
-        # Close all workers synchronously
         _close_account_usage_probe_workers()
 
-        # Pool should be empty
         with _account_usage_worker_pool_lock:
             self.assertEqual(len(_account_usage_worker_pool), 0)
 
-    def test_multiple_gets_return_different_idle_workers(self):
-        """Multiple rapid gets should return different workers when available."""
-        home = Path("/tmp/test_multiple_gets")
+    def test_concurrent_selector_no_double_claim(self):
+        """Two threads holding returned workers simultaneously never share the same instance."""
+        home = Path("/tmp/test_concurrent")
 
-        # First populate the pool
-        worker_initial = _get_account_usage_probe_worker(home)
-        self.assertIsNotNone(worker_initial)
+        # Pre-populate pool
+        initial = _get_account_usage_probe_worker(home)
+        self.assertIsNotNone(initial)
+        initial._lock.release()
 
-        # Get reference to the workers
         with _account_usage_worker_pool_lock:
-            key = str(Path(home))
-            workers = _account_usage_worker_pool[key]
-            self.assertEqual(len(workers), 2)
+            workers = _account_usage_worker_pool[str(Path(home))]
 
-        # Hold first worker locked from background thread
-        lock_holder1 = threading.Event()
-        release_signal1 = threading.Event()
+        # Lock workers[0] from a background thread so only workers[1] is free
+        lock_holder = threading.Event()
+        release_signal = threading.Event()
 
-        def hold_lock1():
+        def hold_first():
             workers[0]._lock.acquire()
-            lock_holder1.set()
-            release_signal1.wait(timeout=2.0)
+            lock_holder.set()
+            release_signal.wait(timeout=5.0)
             workers[0]._lock.release()
 
-        thread1 = threading.Thread(target=hold_lock1, daemon=True)
-        thread1.start()
-        lock_holder1.wait(timeout=2.0)
+        holder_thread = threading.Thread(target=hold_first, daemon=True)
+        holder_thread.start()
+        lock_holder.wait(timeout=2.0)
+
+        # Two threads race; each holds its worker until both have finished grabbing
+        results = [None, None]
+        barrier = threading.Barrier(2, timeout=2.0)
+        both_done = threading.Barrier(2, timeout=2.0)
+
+        def grab(idx):
+            barrier.wait()
+            w = _get_account_usage_probe_worker(home)
+            results[idx] = w
+            try:
+                both_done.wait()
+            except threading.BrokenBarrierError:
+                pass
+            if w is not None:
+                w._lock.release()
+
+        t0 = threading.Thread(target=grab, args=(0,), daemon=True)
+        t1 = threading.Thread(target=grab, args=(1,), daemon=True)
+        t0.start()
+        t1.start()
+        t0.join(timeout=3.0)
+        t1.join(timeout=3.0)
 
         try:
-            # First call should get workers[1] (idle)
-            worker1 = _get_account_usage_probe_worker(home)
-            self.assertIsNotNone(worker1)
-            self.assertIs(worker1, workers[1])
-
-            # Lock workers[1] too from another background thread, then release workers[0]
-            lock_holder2 = threading.Event()
-            release_signal2 = threading.Event()
-
-            def hold_lock2():
-                workers[1]._lock.acquire()
-                lock_holder2.set()
-                release_signal2.wait(timeout=2.0)
-                workers[1]._lock.release()
-
-            thread2 = threading.Thread(target=hold_lock2, daemon=True)
-            thread2.start()
-            lock_holder2.wait(timeout=2.0)
-
-            # Now release workers[0] but keep workers[1] locked
-            release_signal1.set()
-            thread1.join(timeout=1.0)
-
-            try:
-                # Second call should timeout waiting for workers[1], then get workers[0] which is now free
-                # But the timeout in _get_account_usage_probe_worker is 0.5s, and workers[1] holds for 2s,
-                # so it should return workers[0] after the timeout
-                worker2 = _get_account_usage_probe_worker(home)
-                self.assertIsNotNone(worker2)
-                # Should get workers[0] since workers[1] is still locked
-                self.assertIs(worker2, workers[0])
-            finally:
-                release_signal2.set()
-                thread2.join(timeout=1.0)
-        except Exception:
-            release_signal1.set()
-            thread1.join(timeout=1.0)
-            raise
+            got = [r for r in results if r is not None]
+            # At most one thread should have gotten a worker (workers[1]);
+            # the other gets None because the lock is already held
+            self.assertEqual(len(got), 1, "Expected exactly one winner, got %d" % len(got))
+            self.assertIs(got[0], workers[1])
+        finally:
+            release_signal.set()
+            holder_thread.join(timeout=1.0)
 
 
 class TestWorkerPoolConfiguration(unittest.TestCase):
@@ -307,10 +287,6 @@ class TestWorkerPoolConfiguration(unittest.TestCase):
     def test_workers_per_home_is_two(self):
         """Should have exactly 2 workers per home."""
         self.assertEqual(_ACCOUNT_USAGE_WORKERS_PER_HOME, 2)
-
-    def test_worker_wait_seconds_is_half(self):
-        """Should wait 0.5 seconds for worker availability."""
-        self.assertEqual(_ACCOUNT_USAGE_WORKER_WAIT_SECONDS, 0.5)
 
 
 if __name__ == "__main__":
