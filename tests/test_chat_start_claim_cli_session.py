@@ -414,6 +414,18 @@ def test_helper_materialises_state_db_only_session(
     assert sess.workspace == "/root"  # from CLI metadata
     assert len(sess.messages) == 3
     assert sess.messages[0]["role"] == "user"
+    # Greptile #4911 P1: created_at/updated_at must be populated from
+    # state.db (started_at/ended_at), not left as epoch (0).  Otherwise
+    # the first POST writes "Jan 1 1970" into the permanent sidecar.
+    assert sess.created_at > 0, (
+        f"created_at must be populated from state.db.started_at — got "
+        f"{sess.created_at} (epoch), the synthesized Session will be "
+        "written into the sidecar with a 1970 timestamp on first save"
+    )
+    assert sess.updated_at > 0, (
+        f"updated_at must be populated from state.db.ended_at or "
+        f"started_at — got {sess.updated_at} (epoch)"
+    )
     # Source-tag metadata is preserved so the sidebar still shows the badge.
     assert sess.is_cli_session is True
     assert sess.source_tag == "tui"
@@ -589,6 +601,19 @@ def test_helper_uses_state_db_source_when_cli_meta_empty(
     )
     assert sess.read_only is False
     assert sess.source_tag == "tui"
+    # Greptile #4911 P1: timestamps must come from state.db, not be
+    # left as epoch.  This test is the worst-case for the bug — empty
+    # cli_meta means nothing else in the path can populate the dates.
+    assert sess.created_at > 0, (
+        f"empty cli_meta path must still get created_at from "
+        f"state.db.started_at — got {sess.created_at} (epoch), the "
+        "sidecar would sort this session as 'Jan 1 1970'"
+    )
+    assert sess.updated_at > 0, (
+        f"empty cli_meta path must still get updated_at from "
+        f"state.db.ended_at or started_at — got {sess.updated_at} "
+        "(epoch)"
+    )
 
 
 def test_helper_refuses_claude_code_via_state_db_source(
