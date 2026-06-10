@@ -6657,7 +6657,17 @@ def handle_get(handler, parsed) -> bool:
                 "raw_source": synth.raw_source,
                 "session_source": synth.session_source,
                 "source_label": synth.source_label,
-                "read_only": bool((cli_meta or {}).get("read_only")),
+                # Greptile #4911 follow-up: read read_only from the
+                # synthesized Session, NOT from cli_meta directly.
+                # The helper sets synth.read_only=True for BOTH
+                # explicit read_only=True cli_meta AND source-refused
+                # sessions (messaging / claude_code / external_agent).
+                # cli_meta.get("read_only") is only populated for the
+                # explicit case, so reading it from there causes the
+                # frontend to render the composer for source-refused
+                # sessions and the user only discovers the block at
+                # POST time with a confusing 403.
+                "read_only": bool(getattr(synth, "read_only", False)),
                 "messages": msgs,
                 "tool_calls": [],
             }
@@ -16391,7 +16401,14 @@ def _handle_session_import_cli(handler, body):
                 | {
                     "messages": existing.messages,
                     "is_cli_session": True,
-                    "read_only": bool((cli_meta or {}).get("read_only")),
+                    # Greptile #4911 follow-up: read read_only from
+                    # the persisted Session, NOT from cli_meta.  This
+                    # refresh path is for an already-WebUI-owned
+                    # session; the WebUI's persisted view is the
+                    # source of truth for the response, not the
+                    # foreign store's current value.  (Mirrors the
+                    # GET /api/session fix at line ~6043.)
+                    "read_only": bool(getattr(existing, "read_only", False)),
                 },
                 "imported": False,
             },
