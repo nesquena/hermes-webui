@@ -1372,8 +1372,9 @@ function showCmdDropdown(matches){
       }
       $('msg').focus();
       if(!isSubArg&&c.source!=='skill'&&nextValue.endsWith(' ')&&typeof getSlashAutocompleteMatches==='function'){
-        getSlashAutocompleteMatches(nextValue).then(matches=>{
-          if(($('msg').value||'')!==nextValue) return;
+        const _fullValue=$('msg').value;
+        getSlashAutocompleteMatches(_fullValue).then(matches=>{
+          if($('msg').value!==_fullValue) return;
           if(matches.length) showCmdDropdown(matches);
           else hideCmdDropdown();
         });
