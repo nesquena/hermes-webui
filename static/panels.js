@@ -150,6 +150,7 @@ function syncAppTitlebar() {
 }
 
 function _beginSettingsPanelSession() {
+  _settingsIndex = null;
   _settingsDirty = false;
   _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
   _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
@@ -160,6 +161,18 @@ function _beginSettingsPanelSession() {
     _settingsAppearanceAutosaveTimer = null;
   }
   _settingsAppearanceAutosaveRetryPayload = null;
+  if (!_settingsSearchDismissListenerRegistered) {
+    _settingsSearchDismissListenerRegistered = true;
+    document.addEventListener('click', e => {
+      if (!e.target.closest('#settingsMenu')) {
+        const r = $('settingsSearchResults');
+        if (r) {
+          r.style.display = 'none';
+          r.innerHTML = '';
+        }
+      }
+    });
+  }
   _resetSettingsPanelState();
 }
 
@@ -5877,6 +5890,8 @@ let _settingsFontSizeOnOpen = null; // track font size at open time for discard 
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 let _currentSettingsSection = 'conversation';
+let _settingsIndex = null;
+let _settingsSearchDismissListenerRegistered = false;
 let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveTimer = null;
@@ -6102,6 +6117,105 @@ function switchSettingsSection(name){
   // Lazy-load integration panels when their tabs are opened
   if(section==='providers') loadProvidersPanel();
   if(section==='plugins') loadPluginsPanel();
+}
+
+function _buildSettingsIndex() {
+  if (_settingsIndex) return;
+  _settingsIndex = [];
+  const sectionMap = {
+    settingsPaneConversation: 'conversation',
+    settingsPaneAppearance: 'appearance',
+    settingsPanePreferences: 'preferences',
+    settingsPaneSystem: 'system',
+    settingsPaneHelp: 'help',
+  };
+  for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
+    const pane = $(paneId);
+    if (!pane) continue;
+    pane.querySelectorAll('.settings-field').forEach(field => {
+      const labelEl = field.querySelector('label[data-i18n]');
+      if (!labelEl) return;
+      const i18nKey = labelEl.dataset.i18n;
+      const label = t(i18nKey) || labelEl.textContent.trim();
+      if (label) _settingsIndex.push({ label, sectionKey, i18nKey, el: field });
+    });
+  }
+  const providerPane = $('settingsPaneProviders');
+  if (providerPane) {
+    providerPane.querySelectorAll('.settings-field label[data-i18n]').forEach(labelEl => {
+      const label = t(labelEl.dataset.i18n) || labelEl.textContent.trim();
+      if (label) _settingsIndex.push({ label, sectionKey: 'providers', i18nKey: labelEl.dataset.i18n, el: labelEl.closest('.settings-field') });
+    });
+  }
+  const pluginsPane = $('settingsPanePlugins');
+  if (pluginsPane) {
+    pluginsPane.querySelectorAll('.settings-field label[data-i18n]').forEach(labelEl => {
+      const label = t(labelEl.dataset.i18n) || labelEl.textContent.trim();
+      if (label) _settingsIndex.push({ label, sectionKey: 'plugins', i18nKey: labelEl.dataset.i18n, el: labelEl.closest('.settings-field') });
+    });
+  }
+}
+
+function filterSettings(query) {
+  const resultsEl = $('settingsSearchResults');
+  if (!resultsEl) return;
+  const q = (query || '').trim().toLowerCase();
+  if (!q) { resultsEl.style.display = 'none'; resultsEl.innerHTML = ''; return; }
+  _buildSettingsIndex();
+  const sectionLabels = {
+    conversation: t('settings_tab_conversation') || 'Conversation',
+    appearance: t('settings_tab_appearance') || 'Appearance',
+    preferences: t('settings_tab_preferences') || 'Preferences',
+    providers: t('providers_tab_title') || 'Providers',
+    plugins: t('settings_tab_plugins') || 'Plugins',
+    system: t('settings_tab_system') || 'System',
+    help: t('settings_tab_help') || 'Help',
+  };
+  const matches = (_settingsIndex || []).filter(entry =>
+    entry.label.toLowerCase().includes(q)
+  );
+  if (!matches.length) {
+    resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
+    resultsEl.style.display = '';
+    return;
+  }
+  resultsEl.innerHTML = '';
+  for (const m of matches.slice(0, 12)) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'settings-search-result';
+    item.innerHTML = `<span class="settings-search-section">${esc(sectionLabels[m.sectionKey] || m.sectionKey)}</span>` +
+      `<span class="settings-search-arrow">›</span>` +
+      `<span class="settings-search-label">${esc(m.label)}</span>`;
+    item.addEventListener('click', () => {
+      _navigateToSettingsField(m);
+      resultsEl.style.display = 'none';
+      resultsEl.innerHTML = '';
+      const input = $('settingsSearch');
+      if (input) input.value = '';
+    });
+    resultsEl.appendChild(item);
+  }
+  resultsEl.style.display = '';
+}
+
+function _navigateToSettingsField(entry) {
+  if (entry.sectionKey === 'providers') loadProvidersPanel();
+  if (entry.sectionKey === 'plugins') loadPluginsPanel();
+  switchSettingsSection(entry.sectionKey);
+  if (!entry.el) return;
+  requestAnimationFrame(() => {
+    entry.el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    _highlightSettingsField(entry.el);
+  });
+}
+
+function _highlightSettingsField(el) {
+  if (!el) return;
+  el.classList.remove('settings-field-highlight');
+  void el.offsetWidth;
+  el.classList.add('settings-field-highlight');
+  setTimeout(() => el.classList.remove('settings-field-highlight'), 1800);
 }
 
 function _syncHermesPanelSessionActions(){

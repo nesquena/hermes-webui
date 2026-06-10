@@ -596,6 +596,8 @@ const LOCALES = {
     settings_help_issue_desc: 'Search existing reports or open a new one on GitHub.',
     settings_help_issue_link: 'Open GitHub Issues',
     settings_title: 'Settings',
+    settings_search_placeholder: 'Search settings…',
+    settings_search_no_results: 'No settings found.',
     settings_save_btn: 'Save Settings',
     settings_label_model: 'Default Model',
     settings_desc_model: 'Used for new conversations. Existing conversations keep their selected model.',
