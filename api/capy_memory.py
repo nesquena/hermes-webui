@@ -801,6 +801,16 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         else:
             origin_uri = f"github deploy keys {deploy_keys_repo}"
             fetch_origin_uri = deploy_keys_origin
+    if _github_private_vulnerability_reporting_route_path_matches(raw_origin_text):
+        private_vulnerability_reporting_origin = _github_private_vulnerability_reporting_safe_origin(raw_origin_text)
+        private_vulnerability_reporting_repo = _github_private_vulnerability_reporting_path_repo(
+            private_vulnerability_reporting_origin or ""
+        )
+        if not private_vulnerability_reporting_origin or not private_vulnerability_reporting_repo:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = f"github private vulnerability reporting {private_vulnerability_reporting_repo}"
+            fetch_origin_uri = private_vulnerability_reporting_origin
     if _github_actions_secrets_route_path_matches(raw_origin_text) and not _github_actions_secrets_public_key_path_matches(raw_origin_text):
         actions_secrets_origin = _github_actions_secrets_safe_origin(raw_origin_text)
         if not actions_secrets_origin:
@@ -7980,6 +7990,95 @@ def _github_deploy_keys_refresh_summary(origin_uri: str, payload: list[Any]) -> 
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_private_vulnerability_reporting_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 5
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4].startswith("private-vulnerability-reporting")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return False
+
+
+def _github_private_vulnerability_reporting_safe_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+        explicit_port = parts.port is not None
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or explicit_port or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "private-vulnerability-reporting"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return urlunsplit(("https", "api.github.com", parts.path, "", ""))
+
+
+def _github_private_vulnerability_reporting_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "private-vulnerability-reporting"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_private_vulnerability_reporting_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    return (parts.hostname or "").strip().lower() == "api.github.com" and _github_private_vulnerability_reporting_route_path_matches(origin_uri)
+
+
+def _json_payload_is_github_private_vulnerability_reporting_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_private_vulnerability_reporting_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return isinstance(payload.get("enabled"), bool)
+
+
+def _github_private_vulnerability_reporting_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_private_vulnerability_reporting_path_repo(origin_uri) or "repository"
+    enabled = str(payload.get("enabled") is True).lower()
+    return _bounded_refresh_summary(
+        f"GitHub private vulnerability reporting for {repo}; private vulnerability reporting enabled: {enabled}"
+    )
+
+
 def _json_payload_is_github_actions_secrets_metadata(origin_uri: str, payload: Any) -> bool:
     if not _github_actions_secrets_path_repo(origin_uri):
         return False
@@ -13538,6 +13637,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_deploy_keys_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    private_vulnerability_reporting_repo = _github_private_vulnerability_reporting_path_repo(origin_uri)
+    if private_vulnerability_reporting_repo:
+        if not _json_payload_is_github_private_vulnerability_reporting_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub private vulnerability reporting {private_vulnerability_reporting_repo}",
+            "summary": _github_private_vulnerability_reporting_refresh_summary(origin_uri, payload),
+            "origin_uri": f"github private vulnerability reporting {private_vulnerability_reporting_repo}",
+        }
+    if _github_private_vulnerability_reporting_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     actions_secrets_repo = _github_actions_secrets_path_repo(origin_uri)
     if actions_secrets_repo:
         if not _json_payload_is_github_actions_secrets_metadata(origin_uri, payload):
@@ -14012,6 +14123,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_deploy_keys_route_path_matches(raw_origin_uri):
         if not _github_deploy_keys_safe_origin(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_private_vulnerability_reporting_route_path_matches(raw_origin_uri):
+        if not _github_private_vulnerability_reporting_safe_origin(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_actions_secrets_route_path_matches(raw_origin_uri) and not _github_actions_secrets_public_key_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_secrets_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -14066,6 +14180,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     deploy_keys_safe_origin = _github_deploy_keys_safe_origin(raw_origin_uri)
     if deploy_keys_safe_origin:
         safe_origin_uri = deploy_keys_safe_origin
+    private_vulnerability_reporting_safe_origin = _github_private_vulnerability_reporting_safe_origin(raw_origin_uri)
+    if private_vulnerability_reporting_safe_origin:
+        safe_origin_uri = private_vulnerability_reporting_safe_origin
     repository_invitations_safe_origin = _github_repository_invitations_safe_origin(raw_origin_uri)
     if repository_invitations_safe_origin:
         safe_origin_uri = repository_invitations_safe_origin
@@ -14295,6 +14412,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_deploy_keys_path_matches(safe_origin_uri):
         if not _github_deploy_keys_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_private_vulnerability_reporting_path_matches(safe_origin_uri):
+        if not _github_private_vulnerability_reporting_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_actions_secrets_path_matches(safe_origin_uri) and not _github_actions_secrets_public_key_path_matches(safe_origin_uri):
@@ -14598,6 +14719,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_authority_is_exact(final_url, "api.github.com")
             or not _github_deploy_keys_path_repo(final_url)
             or _github_deploy_keys_path_repo(final_url) != _github_deploy_keys_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_private_vulnerability_reporting_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or not _github_private_vulnerability_reporting_path_repo(final_url)
+            or _github_private_vulnerability_reporting_path_repo(final_url) != _github_private_vulnerability_reporting_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_repository_invitations_path_matches(safe_origin_uri) and (
@@ -14958,6 +15085,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_deploy_keys_path_matches(safe_origin_uri) and (
             not _github_deploy_keys_path_repo(safe_origin_uri)
+            or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com")
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_private_vulnerability_reporting_path_matches(safe_origin_uri) and (
+            not _github_private_vulnerability_reporting_path_repo(safe_origin_uri)
             or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com")
             or content_type != "application/json"
         ):
@@ -15650,6 +15783,13 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
             deploy_keys_fetch_origin = _github_deploy_keys_safe_origin(str(payload.get("fetch_origin_uri") or ""))
             if deploy_keys_fetch_origin and _github_deploy_keys_path_repo(deploy_keys_fetch_origin):
                 updated_payload["fetch_origin_uri"] = deploy_keys_fetch_origin
+            private_vulnerability_reporting_fetch_origin = _github_private_vulnerability_reporting_safe_origin(
+                str(payload.get("fetch_origin_uri") or "")
+            )
+            if private_vulnerability_reporting_fetch_origin and _github_private_vulnerability_reporting_path_repo(
+                private_vulnerability_reporting_fetch_origin
+            ):
+                updated_payload["fetch_origin_uri"] = private_vulnerability_reporting_fetch_origin
             repository_invitations_fetch_origin = _github_repository_invitations_safe_origin(str(payload.get("fetch_origin_uri") or ""))
             if repository_invitations_fetch_origin and _github_repository_invitations_path_repo(repository_invitations_fetch_origin):
                 updated_payload["fetch_origin_uri"] = repository_invitations_fetch_origin
@@ -15947,6 +16087,12 @@ def run_source_refresh_jobs(
                 origin_uri = f"capy-memory://{source_id}"
             else:
                 origin_uri = deploy_keys_origin
+        elif _github_private_vulnerability_reporting_route_path_matches(raw_origin_uri):
+            private_vulnerability_reporting_origin = _github_private_vulnerability_reporting_safe_origin(raw_origin_uri)
+            if not private_vulnerability_reporting_origin:
+                origin_uri = f"capy-memory://{source_id}"
+            else:
+                origin_uri = private_vulnerability_reporting_origin
         elif _github_repository_invitations_route_path_matches(raw_origin_uri):
             repository_invitations_origin = _github_repository_invitations_safe_origin(raw_origin_uri)
             if not repository_invitations_origin:
