@@ -1112,6 +1112,97 @@ def test_at_provider_removed_provider_still_reverts_to_default(monkeypatch):
     assert changed2 is False
 
 
+def test_at_provider_known_unconfigured_builtin_is_intentionally_preserved(monkeypatch):
+    """Pin the DELIBERATE choice: a KNOWN built-in provider is preserved on a cold
+    catalog even when the user has no key configured for it.
+
+    _provider_is_known_or_configured() counts static-registry membership as "known"
+    and does NOT require authenticated-credential evidence. This is on purpose: the
+    only fully-reliable "is this provider authenticated" signal is the live auth
+    store / catalog rebuild — exactly the cost the hot path avoids — and a cheap
+    env/config-only credential check would mis-classify OAuth/auth-store providers
+    (ollama-cloud among them) and re-introduce the original silent-revert bug. So a
+    known-but-unconfigured pick like "@deepseek:deepseek-v4-pro" under an
+    Anthropic-only setup is kept; the user gets a clear run-time auth error rather
+    than a silent swap to the default.
+
+    If a future change adds reliable cheap credential evidence and flips this to
+    revert-when-unconfigured, update this expectation (and the helper docstring).
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "anthropic",
+            "default_model": "claude-opus-4.8",
+            "groups": [
+                {
+                    "provider": "Anthropic",
+                    "provider_id": "anthropic",
+                    "models": [{"id": "claude-opus-4.8", "label": "Opus"}],
+                },
+            ],
+        },
+    )
+
+    model, provider, changed = routes._resolve_compatible_session_model_state(
+        "@deepseek:deepseek-v4-pro",
+        "deepseek",
+        explicit_model_pick=False,
+    )
+    assert model == "@deepseek:deepseek-v4-pro", (
+        "a known built-in provider is intentionally preserved on a cold catalog "
+        f"even without configured credentials, got {model!r}"
+    )
+    assert provider == "deepseek"
+    assert changed is False
+
+
+def test_at_provider_explicit_pick_not_rerouted_by_family_match(monkeypatch):
+    """An explicit pick must NOT be rerouted by the active-provider family-match
+    repair, even when the bare id looks like the active family and the catalog is
+    cold.
+
+    Regression for the branch-order bug: the explicit-pick guard sits at the top of
+    the @provider:model branch, above the _model_matches_active_provider_family
+    repair. Without that ordering, an explicit "@ollama-cloud:gpt-oss-120b" under an
+    OpenAI-active agent would be stripped to bare "gpt-oss-120b" and routed to
+    OpenAI (the family match fires on the "gpt" prefix) — silently swapping the
+    user's deliberately-chosen ollama-cloud provider.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI",
+                    "provider_id": "openai",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    model, provider, changed = routes._resolve_compatible_session_model_state(
+        "@ollama-cloud:gpt-oss-120b",
+        "ollama-cloud",
+        explicit_model_pick=True,
+    )
+    assert model == "@ollama-cloud:gpt-oss-120b", (
+        "explicit @provider:model pick must survive the family-match repair, "
+        f"got {model!r}"
+    )
+    assert provider == "ollama-cloud"
+    assert changed is False
+
+
 def test_at_provider_explicit_pick_is_honored_even_when_unroutable(monkeypatch):
     """A fresh, explicit @provider:model pick is honored verbatim even when its
     bare id is a first-party family name and the provider is absent from the

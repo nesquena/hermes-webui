@@ -1218,16 +1218,29 @@ def _provider_is_known_or_configured(
     provider_id: object,
     config_obj: dict | None = None,
 ) -> bool:
-    """True when ``provider_id`` is a provider Hermes recognizes or the user has
-    configured, decided from the STATIC registry + config state only — never from
-    a live/cold catalog snapshot.
+    """True when ``provider_id`` is a provider Hermes recognizes (static registry)
+    or the user has configured (named custom provider), decided from the STATIC
+    registry + config state only — never from a live/cold catalog snapshot.
 
-    This distinguishes a *cold live-discovery* provider (e.g. ``ollama-cloud`` is
-    configured; its model group simply isn't folded into the current cached
-    catalog yet) from a *genuinely removed / unknown* one (``@removed:...`` no
-    longer configured anywhere). The former's explicitly-qualified selection must
-    be preserved across a cold catalog; the latter must fall back to the default
-    so chat/start doesn't route to a provider that cannot be reached.
+    This distinguishes a provider Hermes knows how to route (e.g. ``ollama-cloud``,
+    whose model group simply isn't folded into the current cached catalog yet, or a
+    named ``custom_providers`` entry) from a *genuinely unknown* one
+    (``@removed:...`` that is in no registry and configured nowhere). The former's
+    explicitly-qualified selection is preserved across a cold catalog; the latter
+    falls back to the default so chat/start doesn't route to an unrecognized
+    provider.
+
+    DELIBERATE SCOPE (see the @provider:model guard in
+    ``_resolve_compatible_session_model_state``): registry membership counts as
+    "known" even when the user has no key configured for that built-in. We do NOT
+    require authenticated-credential evidence here, on purpose. The only fully
+    reliable "is this provider authenticated" signal is the live auth store /
+    catalog rebuild — exactly the cost the caller's ``prefer_cached_catalog`` hot
+    path avoids — and a cheap env/config-only credential check would mis-classify
+    providers authenticated via OAuth/auth-store (``ollama-cloud`` among them),
+    re-introducing the original silent-revert bug for them. A known-but-unconfigured
+    pick is therefore kept and surfaces a clear run-time auth error rather than a
+    silent swap to the default.
 
     Deliberately does NOT consult ``get_available_models()`` / the catalog groups,
     which are exactly what is cold here — re-deriving them live would defeat the
