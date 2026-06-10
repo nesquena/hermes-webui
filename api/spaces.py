@@ -5492,7 +5492,12 @@ def _record_space_demo_catalog_progress_event() -> dict[str, Any]:
 
 
 def _space_demo_catalog_output_compaction(
-    *, action: str, demos: list[dict[str, Any]], autonomy_policy: dict[str, Any], progress_event: dict[str, Any]
+    *,
+    action: str,
+    demos: list[dict[str, Any]],
+    autonomy_policy: dict[str, Any],
+    progress_event: dict[str, Any],
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return bounded metadata-only compaction evidence for demo catalog reads."""
     from api.capy_compaction import compact_output
@@ -5507,6 +5512,13 @@ def _space_demo_catalog_output_compaction(
             demo_names.append(safe_demo)
     route_hint = _payload_text_summary(autonomy_policy.get("model_route_hint") or "hint:reasoning", 80) or "hint:reasoning"
     progress_run_id = _payload_text_summary(progress_event.get("run_id") or "space-demo:list", 160) or "space-demo:list"
+    advisory = memory_advisory if isinstance(memory_advisory, dict) else _memory_advisory_public_envelope()
+    raw_required_gates = advisory.get("required_gates")
+    required_gates = [
+        _payload_text_summary(gate, 80)
+        for gate in (raw_required_gates if isinstance(raw_required_gates, list) else [])
+    ]
+    required_gates = [gate for gate in required_gates if gate]
     receipt = compact_output(
         "\n".join(
             [
@@ -5517,6 +5529,10 @@ def _space_demo_catalog_output_compaction(
                 f"prompt_preflight_status: {autonomy_policy.get('prompt_preflight_status') or 'required'}",
                 f"model_route_hint: {route_hint}",
                 f"progress_run_id: {progress_run_id}",
+                f"advisory_context: {str(advisory.get('advisory_context') is True).lower()}",
+                f"context_authority: {_payload_text_summary(advisory.get('context_authority') or 'untrusted_advisory', 80) or 'untrusted_advisory'}",
+                f"can_bypass_safety_gates: {str(advisory.get('can_bypass_safety_gates') is True).lower()}",
+                f"required_gates: {', '.join(required_gates)}",
                 "metadata_only: true",
                 "raw_prompt_stored: false",
             ]
@@ -5524,7 +5540,7 @@ def _space_demo_catalog_output_compaction(
         tool="capy-spaces-demo-catalog",
         command=safe_action,
         exit_status=0,
-        max_chars=700,
+        max_chars=1200,
     )
     receipt["metadata_only"] = True
     if receipt.get("redaction_status") == "none":
@@ -5537,17 +5553,26 @@ def _space_demo_catalog_receipt_envelope(action: str, demos: list[dict[str, Any]
     prompt_preflight = _space_demo_required_prompt_preflight_receipt(action, boundary="space_demo_list")
     autonomy_policy = _space_demo_action_policy_receipt_for_action(action)
     progress_event = _record_space_demo_catalog_progress_event()
+    memory_advisory = _memory_advisory_public_envelope()
     return {
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": _space_demo_catalog_output_compaction(
             action=action,
             demos=demos,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
         ),
     }
+
+
+def space_demo_catalog_response(action: str = "space.demo.list") -> dict[str, Any]:
+    """Return public metadata-only demo catalog payload plus trust receipts."""
+    demos = list_space_demo_runs()
+    return {"ok": True, "demos": demos, **_space_demo_catalog_receipt_envelope(action, demos)}
 
 
 def space_demo_run_all() -> dict[str, Any]:

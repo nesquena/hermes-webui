@@ -3768,7 +3768,7 @@ def handle_get(handler, parsed) -> bool:
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():
             return j(handler, {"enabled": False, "demos": []})
-        return j(handler, {"enabled": True, "demos": capy_spaces.list_space_demo_runs()})
+        return j(handler, {"enabled": True, **capy_spaces.space_demo_catalog_response("space.demo.list")})
 
     if parsed.path == "/api/spaces/current":
         from api import spaces as capy_spaces

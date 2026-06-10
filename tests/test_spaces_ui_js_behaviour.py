@@ -123,6 +123,60 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/demo/runs') {
     return response({
       ok: true,
+      prompt_preflight: {
+        available: true,
+        action: 'space.demo.list',
+        boundary: 'space_demo_list',
+        status: 'required',
+        severity: 'none',
+        checks: ['creator_commit_approval_required', 'generated_widget_execution_approval_required', 'prompt_injection_preflight_required'],
+        metadata_only: true,
+        raw_prompt_stored: false,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      autonomy_policy: {
+        available: true,
+        action: 'space.demo.list',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['creator_commit', 'generated_widget_execution'],
+        prompt_preflight_status: 'required',
+        model_route_hint: 'hint:reasoning',
+        model_route_resolution: {provider: 'openai', model: 'gpt-5', api_key: 'SECRET_VALUE_DO_NOT_LEAK'},
+        metadata_only: true,
+        local_only: true,
+      },
+      progress_event: {
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'space-demo:list',
+        redaction_status: 'metadata_only',
+        source: 'SECRET_SOURCE',
+      },
+      memory_advisory: {
+        metadata_only: true,
+        advisory_context: true,
+        context_authority: 'untrusted_advisory',
+        can_bypass_safety_gates: false,
+        required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
+        raw_context: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      output_compaction: {
+        tool: 'capy-spaces-demo-catalog',
+        command: 'space.demo.list',
+        original_chars: 640,
+        compacted_chars: 420,
+        redaction_status: 'metadata_only',
+        redacted_count: 0,
+        compacted: true,
+        metadata_only: true,
+        rules_applied: ['cap_section_chars', 'redact_unsafe_markers'],
+        text: 'Capy Spaces demo catalog metadata-only receipt\ndemo_count: 8\nprogress_run_id: space-demo:list\nadvisory_context: true\ncontext_authority: untrusted_advisory\ncan_bypass_safety_gates: false\nrequired_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery',
+        html: '<script>bad()</script>',
+        api_auth: 'bearer SECRET_VALUE_DO_NOT_LEAK',
+      },
       demos: [
         { demo: 'demo_weather_widget', template: 'weather', title: 'Weather answer → persistent widget', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
         { demo: 'demo_notes_app', template: 'notes', title: 'Notes app', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
@@ -6424,6 +6478,18 @@ def test_spaces_ui_runs_demo_parity_smoke_from_safe_catalog(driver_path):
     assert "Demo parity smoke runner" in out["beforeHtml"]
     assert "Weather answer → persistent widget" in out["beforeHtml"]
     assert "Time travel rollback" in out["beforeHtml"]
+    assert "Prompt preflight" in out["beforeHtml"]
+    assert "Boundary: space_demo_list" in out["beforeHtml"]
+    assert "Action policy" in out["beforeHtml"]
+    assert "Action: space.demo.list" in out["beforeHtml"]
+    assert "Routing hint: hint:reasoning" in out["beforeHtml"]
+    assert "Demo catalog progress" in out["beforeHtml"]
+    assert "space-demo:list" in out["beforeHtml"]
+    assert "Memory advisory" in out["beforeHtml"]
+    assert "Authority: untrusted_advisory" in out["beforeHtml"]
+    assert "Can bypass safety gates: no" in out["beforeHtml"]
+    assert "Compaction evidence" in out["beforeHtml"]
+    assert "capy-spaces-demo-catalog" in out["beforeHtml"]
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_weather_widget"}
     assert not any(

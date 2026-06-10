@@ -62,7 +62,7 @@
       }
       root.dataset.editingSpaceId = '';
       const spaces = data.spaces || [];
-      root.innerHTML = renderSpacesList(spaces, demoData.demos || [], memoryStatus, sourceCatalog, policyStatus, progressStatus);
+      root.innerHTML = renderSpacesList(spaces, demoData || {demos: []}, memoryStatus, sourceCatalog, policyStatus, progressStatus);
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div></div>';
     }
@@ -145,11 +145,12 @@
       renderCompactionEvidence(result && (result.output_compaction || result.compaction)) + '</div>';
   }
 
-  function renderSpacesList(spaces, demos, memoryStatus, sourceCatalog, policyStatus, progressStatus){
+  function renderSpacesList(spaces, demoCatalog, memoryStatus, sourceCatalog, policyStatus, progressStatus){
     const activeSpaceId = safePathIdText(currentActiveSpaceId());
     const safeSpaces = Array.isArray(spaces) ? spaces : [];
-    return renderSpaceAgentHomeShell(safeSpaces, demos || [], activeSpaceId, memoryStatus || {}, sourceCatalog || {}, policyStatus || {}, progressStatus || {}) +
-      renderCapySpacesControlPlane(safeSpaces, demos || [], activeSpaceId);
+    const catalog = demoCatalog && typeof demoCatalog === 'object' && !Array.isArray(demoCatalog) ? demoCatalog : {demos: (Array.isArray(demoCatalog) ? demoCatalog : [])};
+    return renderSpaceAgentHomeShell(safeSpaces, catalog.demos || [], activeSpaceId, memoryStatus || {}, sourceCatalog || {}, policyStatus || {}, progressStatus || {}) +
+      renderCapySpacesControlPlane(safeSpaces, catalog, activeSpaceId);
   }
 
   function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId, memoryStatus, sourceCatalog, policyStatus, progressStatus){
@@ -715,8 +716,14 @@
       '</details>';
   }
 
-  function renderDemoSmokeRunner(demos){
-    const safeDemos = Array.isArray(demos) ? demos : [];
+  function renderDemoSmokeRunner(catalog){
+    const data = catalog && typeof catalog === 'object' && !Array.isArray(catalog) ? catalog : {demos: (Array.isArray(catalog) ? catalog : [])};
+    const safeDemos = Array.isArray(data.demos) ? data.demos : [];
+    const receipts = renderDemoCatalogPromptPreflightEvidence(data.prompt_preflight) +
+      renderDemoCatalogActionPolicyEvidence(data.autonomy_policy) +
+      renderPackageProgressEvidence(data.progress_event, 'Demo catalog progress') +
+      renderMemoryAdvisoryEvidence(data.memory_advisory) +
+      renderCompactionEvidence(data.output_compaction || data.compaction);
     const rows = safeDemos.length ? safeDemos.slice(0, 20).map(function(d){
       const demo = d && d.demo ? String(d.demo) : '';
       const title = d && d.title ? String(d.title) : demo || 'Demo smoke';
@@ -728,6 +735,7 @@
     }).join('') : '<div class="capy-spaces-muted">No metadata-only demo smokes advertised by the backend.</div>';
     return '<div class="capy-spaces-card"><h3>Demo parity smoke runner</h3>' +
       '<div class="capy-spaces-muted">Runs safe Space Agent video-parity fixtures through typed Capy Space APIs only; no generated widget code is executed.</div>' +
+      receipts +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="runAllDemoSmokes">Run all smokes</button></div>' +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
@@ -1313,6 +1321,58 @@
       '<div class="capy-spaces-muted">'+escapeHtml(details.join(' · '))+'</div>' +
       '<div class="capy-spaces-muted">Preflight receipt is metadata-only; raw prompt text remains omitted.</div>' +
       '</div></div></div>';
+  }
+
+  function renderDemoCatalogPromptPreflightEvidence(receipt){
+    const data = receipt && typeof receipt === 'object' && !Array.isArray(receipt) ? receipt : null;
+    if (!data) return '';
+    const status = safeDisplayMetadataText(data.status || 'unknown', 'unknown') || 'unknown';
+    const boundary = safeDisplayMetadataText(data.boundary || 'unknown', 'unknown') || 'unknown';
+    const severity = safeDisplayMetadataText(data.severity || 'unknown', 'unknown') || 'unknown';
+    const checks = [];
+    if (Array.isArray(data.checks)) {
+      data.checks.slice(0, 4).forEach(function(item){
+        const safe = safeDisplayMetadataText(item, '');
+        if (safe && safe !== '[REDACTED]' && checks.indexOf(safe) === -1) checks.push(safe);
+      });
+    }
+    const flags = [];
+    if (data.metadata_only === true) flags.push('metadata-only');
+    if (data.local_only === true) flags.push('local-only');
+    if (data.raw_prompt_stored === false) flags.push('source text omitted');
+    const details = [
+      'Status: '+status,
+      'Boundary: '+boundary,
+      'Severity: '+severity,
+    ];
+    if (flags.length) details.push(flags.join(' · '));
+    if (checks.length) details.push('Checks: '+checks.join(' · '));
+    return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Prompt preflight</strong>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(details.join(' · '))+'</div>' +
+      '<div class="capy-spaces-muted">Demo catalog receipt is metadata-only; source text remains omitted.</div>' +
+      '</div></div></div>';
+  }
+
+  function renderDemoCatalogActionPolicyEvidence(policy){
+    const data = policy && typeof policy === 'object' && !Array.isArray(policy) ? policy : null;
+    if (!data || data.available !== true) return '';
+    const mode = safePolicyMode(data.mode);
+    const label = safeDisplayMetadataText(data.label || safePolicyLabel(mode), safePolicyLabel(mode)) || safePolicyLabel(mode);
+    const approvalRequired = data.approval_required === true ? 'yes' : 'no';
+    const gates = safePolicyGateLabels(data.approval_gates);
+    const promptStatus = safeDisplayMetadataText(data.prompt_preflight_status || 'required', 'required') || 'required';
+    const routeHint = safeModelRouteHint(data.model_route_hint || '');
+    const action = safeProgressPublicId(data.action || '');
+    const flags = [];
+    if (data.metadata_only === true) flags.push('metadata-only');
+    if (data.local_only === true) flags.push('local-only');
+    return '<div class="capy-spaces-card capy-spaces-action-policy"><h4>Action policy</h4>' +
+      '<div class="capy-spaces-muted">Mode: '+escapeHtml(label)+' · Approval required: '+approvalRequired+' · Prompt preflight: '+escapeHtml(promptStatus)+'</div>' +
+      (action ? '<div class="capy-spaces-muted">Action: '+escapeHtml(action)+'</div>' : '') +
+      '<div class="capy-spaces-muted">Gates: '+escapeHtml(gates.join(', '))+'</div>' +
+      (routeHint ? '<div class="capy-spaces-muted">Routing hint: '+escapeHtml(routeHint)+'</div>' : '') +
+      (flags.length ? '<div class="capy-spaces-muted">'+escapeHtml(flags.join(' · '))+'</div>' : '') +
+      '</div>';
   }
 
   function renderDemoSmokeActionPolicyEvidence(policy){

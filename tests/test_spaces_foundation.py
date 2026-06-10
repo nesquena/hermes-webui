@@ -24255,6 +24255,12 @@ def test_spaces_demo_smoke_routes_are_metadata_only(monkeypatch, tmp_path):
     assert body["demos"][0]["mode"] == "metadata-only-smoke"
     demo_names = {demo["demo"] for demo in body["demos"]}
     assert "demo_provider_setup" in demo_names
+    assert body["prompt_preflight"]["boundary"] == "space_demo_list"
+    assert body["prompt_preflight"]["status"] == "required"
+    assert body["autonomy_policy"]["action"] == "space.demo.list"
+    assert body["progress_event"]["run_id"] == "space-demo:list"
+    assert body["output_compaction"]["tool"] == "capy-spaces-demo-catalog"
+    _assert_server_memory_advisory_receipt(body)
 
     handled, status, body = _route_post(
         "/api/spaces/demo/run",
@@ -24365,6 +24371,7 @@ def test_space_demo_list_tool_exposes_metadata_only_policy_progress_and_compacti
     assert receipt["redaction_status"] == "metadata_only"
     assert "demo_count:" in receipt["text"]
     assert "progress_run_id: space-demo:list" in receipt["text"]
+    _assert_server_memory_advisory_receipt(result)
 
     from api.capy_progress import progress_events_log_path
 
