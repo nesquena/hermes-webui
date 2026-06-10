@@ -6083,7 +6083,7 @@ function _toggleTabVisibilityChip(panel){
   _scheduleAppearanceAutosave();
 }
 
-function switchSettingsSection(name){
+function switchSettingsSection(name,opts){
   // If the main content is not showing settings, just remember the section
   // without force-switching the panel. The section will be applied when the
   // user next opens settings via switchPanel(). (#appearance-auto-reopen)
@@ -6117,9 +6117,13 @@ function switchSettingsSection(name){
   // Sync mobile dropdown
   const dd=$('settingsSectionDropdown');
   if(dd && dd.value!==section) dd.value=section;
-  // Lazy-load integration panels when their tabs are opened
-  if(section==='providers') loadProvidersPanel();
-  if(section==='plugins') loadPluginsPanel();
+  // Lazy-load integration panels when their tabs are opened. Search
+  // navigation passes skipLazyLoad: the loaders rebuild the pane DOM from a
+  // fresh fetch, which would detach the field it is about to scroll to.
+  if(!(opts&&opts.skipLazyLoad)){
+    if(section==='providers') loadProvidersPanel();
+    if(section==='plugins') loadPluginsPanel();
+  }
 }
 
 async function _buildSettingsIndex() {
@@ -6127,32 +6131,36 @@ async function _buildSettingsIndex() {
   // Memoize the in-flight build so concurrent searches share one pass; the
   // lazy pane loaders are not guaranteed re-entrant.
   if (_settingsIndexPromise) return _settingsIndexPromise;
-  _settingsIndexPromise = (async () => {
-  // Ensure lazy-loaded panes are populated before reading the DOM
-  await Promise.all([loadProvidersPanel(), loadPluginsPanel()]);
-  _settingsIndex = [];
-  const sectionMap = {
-    settingsPaneConversation: 'conversation',
-    settingsPaneAppearance: 'appearance',
-    settingsPanePreferences: 'preferences',
-    settingsPaneProviders: 'providers',
-    settingsPanePlugins: 'plugins',
-    settingsPaneSystem: 'system',
-    settingsPaneHelp: 'help',
-  };
-  for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
-    const pane = $(paneId);
-    if (!pane) continue;
-    pane.querySelectorAll('.settings-field').forEach(field => {
-      const labelEl = field.querySelector('label[data-i18n]');
-      if (!labelEl) return;
-      const i18nKey = labelEl.dataset.i18n;
-      const label = t(i18nKey) || labelEl.textContent.trim();
-      if (label) _settingsIndex.push({ label, sectionKey, i18nKey, el: field });
-    });
-  }
-  })().catch(e => { _settingsIndex = null; _settingsIndexPromise = null; throw e; });
-  return _settingsIndexPromise;
+  const promise = (async () => {
+    // Ensure lazy-loaded panes are populated before reading the DOM
+    await Promise.all([loadProvidersPanel(), loadPluginsPanel()]);
+    const index = [];
+    const sectionMap = {
+      settingsPaneConversation: 'conversation',
+      settingsPaneAppearance: 'appearance',
+      settingsPanePreferences: 'preferences',
+      settingsPaneProviders: 'providers',
+      settingsPanePlugins: 'plugins',
+      settingsPaneSystem: 'system',
+      settingsPaneHelp: 'help',
+    };
+    for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
+      const pane = $(paneId);
+      if (!pane) continue;
+      pane.querySelectorAll('.settings-field').forEach(field => {
+        const labelEl = field.querySelector('label[data-i18n]');
+        if (!labelEl) return;
+        const i18nKey = labelEl.dataset.i18n;
+        const label = t(i18nKey) || labelEl.textContent.trim();
+        if (label) index.push({ label, sectionKey, i18nKey, el: field });
+      });
+    }
+    // A panel-session reset while building clears the memo; drop this result
+    // instead of resurrecting a stale index for the new session.
+    if (_settingsIndexPromise === promise) _settingsIndex = index;
+  })().catch(e => { if (_settingsIndexPromise === promise) _settingsIndexPromise = null; throw e; });
+  _settingsIndexPromise = promise;
+  return promise;
 }
 
 async function filterSettings(query) {
@@ -6201,15 +6209,38 @@ async function filterSettings(query) {
   resultsEl.style.display = '';
 }
 
-async function _navigateToSettingsField(entry) {
-  if (entry.sectionKey === 'providers') await loadProvidersPanel();
-  if (entry.sectionKey === 'plugins') await loadPluginsPanel();
-  switchSettingsSection(entry.sectionKey);
-  if (!entry.el) return;
+function _navigateToSettingsField(entry) {
+  // The panes were populated when the index was built, so skip the tab-switch
+  // lazy reload: loadProvidersPanel()/loadPluginsPanel() rebuild the pane DOM
+  // from a fresh fetch and would detach the node mid-scroll.
+  switchSettingsSection(entry.sectionKey, { skipLazyLoad: true });
   requestAnimationFrame(() => {
-    entry.el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    _highlightSettingsField(entry.el);
+    const el = _resolveSettingsField(entry);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    _highlightSettingsField(el);
   });
+}
+
+function _resolveSettingsField(entry) {
+  // Re-resolve in the live DOM: any pane re-render since indexing (e.g. the
+  // user visited the tab) replaces the node the index captured.
+  const paneIds = {
+    conversation: 'settingsPaneConversation',
+    appearance: 'settingsPaneAppearance',
+    preferences: 'settingsPanePreferences',
+    providers: 'settingsPaneProviders',
+    plugins: 'settingsPanePlugins',
+    system: 'settingsPaneSystem',
+    help: 'settingsPaneHelp',
+  };
+  const pane = $(paneIds[entry.sectionKey]);
+  const labelEl = pane && entry.i18nKey
+    ? pane.querySelector(`label[data-i18n="${CSS.escape(entry.i18nKey)}"]`)
+    : null;
+  const live = labelEl && labelEl.closest('.settings-field');
+  if (live) return live;
+  return entry.el && entry.el.isConnected ? entry.el : null;
 }
 
 function _highlightSettingsField(el) {
