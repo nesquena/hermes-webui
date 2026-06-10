@@ -588,23 +588,23 @@ def test_new_conversation_closes_mobile_sidebar():
     assert "closeMobileSidebar" in handler_block, \
         "btnNewChat handler must closeMobileSidebar() after creating the new session"
 
-    shortcut_line = next((ln for ln in boot_js.splitlines() if "e.key==='k'" in ln or "e.key === 'k'" in ln), "")
-    assert shortcut_line, "Cmd/Ctrl+K new chat shortcut missing from static/boot.js"
+    shortcut_line = next((ln for ln in boot_js.splitlines() if "e.key==='O'" in ln or "e.key === 'O'" in ln), "")
+    assert shortcut_line, "Cmd/Ctrl+Shift+O new chat shortcut missing from static/boot.js"
     shortcut_block = "\n".join(boot_js.splitlines()[boot_js.splitlines().index(shortcut_line):boot_js.splitlines().index(shortcut_line)+24])
     assert "closeMobileSidebar" in shortcut_block, \
-        "Cmd/Ctrl+K new chat shortcut must closeMobileSidebar() after creating the new session"
+        "Cmd/Ctrl+Shift+O new chat shortcut must closeMobileSidebar() after creating the new session"
 
 
 def test_new_conversation_shortcut_works_while_busy():
-    """Cmd/Ctrl+K should still create a new conversation while the current one is busy.
+    """Cmd/Ctrl+Shift+O should still create a new conversation while the current one is busy.
 
     The previous behavior gated the shortcut on !S.busy, which meant users had
     to wait for a long generation to finish before they could start something
     new — the exact moment they want to switch context.
     """
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    shortcut_line = next((ln for ln in boot_js.splitlines() if "e.key==='k'" in ln or "e.key === 'k'" in ln), "")
-    assert shortcut_line, "Cmd/Ctrl+K new chat shortcut missing from static/boot.js"
+    shortcut_line = next((ln for ln in boot_js.splitlines() if "e.key==='O'" in ln or "e.key === 'O'" in ln), "")
+    assert shortcut_line, "Cmd/Ctrl+Shift+O new chat shortcut missing from static/boot.js"
     # Inspect the next 10 lines after the keybinding match — the gating block
     # would live there if it had been kept.
     idx = boot_js.splitlines().index(shortcut_line)
@@ -612,10 +612,58 @@ def test_new_conversation_shortcut_works_while_busy():
     # Strip the existing message-count guard (which is unrelated and stays) so
     # we only check for an S.busy gate on the newSession() call itself.
     assert "if(!S.busy)" not in shortcut_block, (
-        "Cmd/Ctrl+K must not be blocked by the current session's busy state"
+        "Cmd/Ctrl+Shift+O must not be blocked by the current session's busy state"
     )
     assert "if (!S.busy)" not in shortcut_block, (
-        "Cmd/Ctrl+K must not be blocked by the current session's busy state"
+        "Cmd/Ctrl+Shift+O must not be blocked by the current session's busy state"
+    )
+
+
+def test_mobile_titlebar_has_new_conversation_button():
+    """Mobile titlebar shows the New Conversation action and keeps it next to reload."""
+    header_match = re.search(
+        r'<header class="app-titlebar"[^>]*>(?P<body>.*?)</header>',
+        HTML,
+        re.S,
+    )
+    assert header_match, "app-titlebar header block missing"
+    header_html = header_match.group("body")
+
+    idx_btn = header_html.find('id="btnTitlebarNewChat"')
+    idx_reload = header_html.find('id="btnReload"')
+    idx_spacer = header_html.find('class="app-titlebar-spacer"')
+
+    assert idx_btn != -1, "titlebar mobile new chat button should exist"
+    assert idx_reload != -1, "titlebar reload button should remain present"
+    assert idx_spacer != -1, "titlebar spacer should remain present"
+    assert idx_spacer < idx_btn < idx_reload, (
+        "titlebar new chat button must sit left of the reload button on mobile"
+    )
+    assert "btnTitlebarNewChat" in header_html
+    assert "data-i18n-title=\"new_conversation\"" in header_html
+    assert "data-i18n-aria-label=\"new_conversation\"" in header_html
+    assert "aria-label=\"New conversation\"" in header_html
+    assert "title=\"New conversation\"" in header_html
+    assert "$('btnNewChat').click()" in header_html
+
+
+def test_titlebar_new_chat_button_mobile_visibility_css():
+    """Keep the titlebar new-chat control mobile-only and reuse reload button styling."""
+    base_rule = _declarations(_rule_body(CSS, ".app-titlebar-new-chat"))
+    assert base_rule.get("display") == "none", "app-titlebar new chat button must be hidden by default"
+    mobile_blocks = "".join(_max_width_media_blocks(640))
+    mobile_rule = _declarations(_rule_body(mobile_blocks, ".app-titlebar-new-chat"))
+    assert mobile_rule.get("display") == "inline-flex", (
+        "app-titlebar new chat button must be visible in mobile layout rules"
+    )
+    desktop_css = re.sub(
+        r"@media\(max-width:640px\).*",
+        "",
+        CSS,
+        flags=re.S,
+    )
+    assert ".app-titlebar-new-chat{display:inline-flex;}" not in desktop_css, (
+        "titlebar new chat button must not be exposed by desktop PWA/fullscreen rules"
     )
 
 
