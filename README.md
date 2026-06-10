@@ -452,6 +452,7 @@ Both compose files use **named Docker volumes** by default, which solves the UID
 | Podman shared `.hermes` fails | Podman 3.4 `keep-id` limitation | Use Podman 4+ or single-container |
 | Host API at `localhost` fails from WebUI | Container `localhost` means the container, not your host (#3012) | Use `http://host.docker.internal:<port>` on Docker Desktop, or `http://host.containers.internal:<port>` on Podman |
 | WebUI can't see `~/.hermes` after `sudo docker compose` | `${HOME}` expanded to the root user's home (#3006) | Run Compose as your user, or pass absolute `HERMES_HOME`/`HERMES_WORKSPACE` with `sudo -E` |
+| Healthcheck/probe gets `400 {"error":"Host header not in allowlist"}` | Probe omits the `Host` header (raw HTTP/1.0 or TCP-level checks); HTTP/1.1 mandates `Host`, so hostless requests are rejected | Use an HTTP/1.1 client (the shipped `curl` healthcheck already sends `Host`), or add the probe's hostname to `HERMES_WEBUI_ALLOWED_HOSTS` |
 
 For the deep dive on each of these, see [`docs/docker.md`](docs/docker.md).
 
