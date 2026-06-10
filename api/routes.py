@@ -125,7 +125,7 @@ def _latest_cron_session_info_for_jobs(job_ids) -> dict[str, dict[str, int | str
             if "id" not in session_cols or "source" not in session_cols:
                 return {jid: {"session_id": "", "message_count": None} for jid in normalized}
             select_message_count = (
-                "COALESCE(s.message_count, NULL) AS message_count"
+                "s.message_count AS message_count"
                 if "message_count" in session_cols
                 else "NULL AS message_count"
             )
