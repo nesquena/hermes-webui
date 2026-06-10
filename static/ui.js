@@ -2352,10 +2352,13 @@ let _lastScrollTop=null;
 let _lastNonMessageScrollIntentMs=-Infinity;
 let _messageUserUnpinned=false;
 let _bottomSettleToken=0;
+let _settleRAF=0;
+let _settleRO=null;
+let _settleTimer=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
 let _touchStartY=null;
 let _newMessageCueVisible=false;
-function _cancelBottomSettle(){ _bottomSettleToken++; }
+function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); }
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
   const target=e&&e.target;
@@ -3032,23 +3035,75 @@ function _followMessagesAfterDomReplace(){
 function _settleMessageScrollToBottom(force){
   // Markdown post-processing (Prism, tables, Mermaid/KaTeX/PDF placeholders)
   // can grow the transcript after the first scroll write. Re-apply the bottom
-  // position across a few frames while pinned so late layout does not leave the
-  // viewport a few lines above the real end. User scroll increments
-  // _bottomSettleToken and cancels the delayed passes.
+  // position when content settles so late layout does not leave the viewport
+  // above the real end. User scroll increments _bottomSettleToken and cancels.
+  //
+  // Firefox settles layout more slowly than Safari. The old rAF-polling
+  // approach read scrollHeight across frames and wrote scrollTop once stable,
+  // but Firefox still paints each rAF check as a visible reflow jitter.
+  //
+  // ResizeObserver approach: write scrollTop ONCE now, then observe the
+  // messages container for size changes. When no resize fires for 50ms,
+  // do a single final scrollTop write. No intermediate scrollTop writes,
+  // no rAF polling — Firefox never paints intermediate positions.
   const token=++_bottomSettleToken;
-  const passes=[0,16,80,180];
-  passes.forEach(delay=>setTimeout(()=>{
+  cancelAnimationFrame(_settleRAF);
+  if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
+  clearTimeout(_settleTimer);
+
+  // Write the first bottom position synchronously. A final renderMessages()
+  // rebuild can queue a native scroll event from the temporary scrollTop=0
+  // layout state; writing early prevents that event from cancelling the
+  // settle (#3319).
+  _setMessageScrollToBottom();
+
+  if(force) return;
+
+  const el=document.getElementById('messages');
+  if(!el) return;
+
+  // Observe the messages container for layout changes (KaTeX, Mermaid, images,
+  // Prism — anything that grows the DOM after initial render).
+  let settleTimer;
+  _settleRO=new ResizeObserver(()=>{
+    if(token!==_bottomSettleToken){ _settleRO.disconnect(); _settleRO=null; return; }
+    // Guard: user scrolled away during settling
+    if(!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
+      _settleRO.disconnect(); _settleRO=null;
+      _programmaticScroll=false;
+      return;
+    }
+    clearTimeout(settleTimer);
+    settleTimer=setTimeout(()=>{
+      if(token!==_bottomSettleToken){ _settleRO.disconnect(); _settleRO=null; return; }
+      _settleFinalScroll(token);
+      _settleRO.disconnect();
+      _settleRO=null;
+    },50);
+  });
+  _settleRO.observe(el);
+  _settleTimer=settleTimer;
+
+  // Safety cap: if nothing fires for 2s (static content), still do a final
+  // scroll to be safe.
+  _settleRAF=setTimeout(()=>{
     if(token!==_bottomSettleToken) return;
-    if(!force && (!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent())) return;
-    _setMessageScrollToBottom();
-  },delay));
+    if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
+    _settleFinalScroll(token);
+  },2000);
+}
+
+function _settleFinalScroll(token){
+  if(token!==_bottomSettleToken) return;
+  const el=document.getElementById('messages');
+  if(!el){ _programmaticScroll=false; return; }
+  _programmaticScroll=true;
+  el.scrollTop=el.scrollHeight;
+  _lastScrollTop=el.scrollTop;
+  _nearBottomCount=2;
+  _scrollPinned=true;
   requestAnimationFrame(()=>{
-    if(token!==_bottomSettleToken) return;
-    if(force || (_scrollPinned&&!_messageUserUnpinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
-    requestAnimationFrame(()=>{
-      if(token!==_bottomSettleToken) return;
-      if(force || (_scrollPinned&&!_messageUserUnpinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
-    });
+    setTimeout(()=>{ _programmaticScroll=false; },0);
   });
 }
 function scrollIfPinned(){
