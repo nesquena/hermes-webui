@@ -2269,6 +2269,28 @@ def _github_releases_refresh_summary(origin_uri: str, payload: list[Any]) -> str
 _GITHUB_WORKFLOW_STATES = {"active", "disabled_manually", "disabled_inactivity", "disabled_fork", "deleted"}
 
 
+def _github_branch_protection_safe_branch_name(encoded_branch: str) -> str | None:
+    if not encoded_branch or len(encoded_branch) > 240:
+        return None
+    if "\\" in encoded_branch or "%25" in encoded_branch.lower():
+        return None
+    branch = unquote(encoded_branch)
+    if (
+        not branch
+        or len(branch) > 160
+        or "%" in branch
+        or "\\" in branch
+        or branch.startswith("/")
+        or branch.endswith("/")
+        or _refresh_value_is_blocked(branch)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,159}", branch)
+    ):
+        return None
+    if any(not segment or segment in {".", ".."} for segment in branch.split("/")):
+        return None
+    return branch
+
+
 def _github_branch_protection_path_info(origin_uri: str) -> tuple[str, str] | None:
     try:
         parts = urlsplit(origin_uri)
@@ -2285,11 +2307,12 @@ def _github_branch_protection_path_info(origin_uri: str) -> tuple[str, str] | No
         or path[6] != "protection"
         or not _github_repo_path_segment_is_safe(path[2])
         or not _github_repo_path_segment_is_safe(path[3])
-        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", path[5])
-        or _refresh_value_is_blocked(path[5])
     ):
         return None
-    return f"{path[2]}/{path[3]}", path[5]
+    branch = _github_branch_protection_safe_branch_name(path[5])
+    if branch is None:
+        return None
+    return f"{path[2]}/{path[3]}", branch
 
 
 def _github_branch_protection_route_path_matches(origin_uri: str) -> bool:
@@ -2305,7 +2328,7 @@ def _github_branch_protection_route_path_matches(origin_uri: str) -> bool:
             and path_segments[0] == ""
             and lowered[1] == "repos"
             and lowered[4] == "branches"
-            and lowered[6].startswith("protection")
+            and any(segment.startswith("protection") for segment in lowered[6:])
         )
 
     raw_path = parts.path.split("/")
