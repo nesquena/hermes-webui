@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **New RFC: Stable Assistant Turn Anchors for Live-to-Final rendering.** Defines a frontend presentation/reconciliation model for anchoring one assistant turn across live streaming, settlement, replay/reload/recovery, Compact Worklog, Transparent Stream, terminal states, artifacts, and side effects. (#3926)
+
 ## [v0.51.350] — 2026-06-10 — Release LN (session-move / project-delete timeout fix)
 
 ### Fixed
