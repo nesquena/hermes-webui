@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **First POST on a foreign-origin session no longer silently discards the typed message.** `GET /api/session` already synthesized a read-only stub from `state.db` for CLI/TUI/Desktop sessions, but `POST /api/chat/start` unconditionally 404'd on any session_id without a WebUI JSON sidecar — the user's typed text vanished into the empty-state self-heal. Both endpoints now route through a shared helper, `_claim_or_synthesize_cli_session`, that materialises a WebUI-owned Session on first write (with `synth.save()`) while preserving the `#2782` self-heal contract for deleted WebUI sessions. The claim path is gated to write-claimable local sources only (CLI/TUI/Desktop); foreign-owned sessions (messaging channels, Claude Code, external agents, and the platformless `gateway` / `unknown` fallbacks) surface as read-only stubs and 403 on POST, so the WebUI can't take write ownership of a conversation owned by another process. (#3901, #4911)
+- **GET response advertises the correct `read_only` state for source-refused sessions.** Previously the GET stub read `read_only` from `cli_meta` directly, which only captured the explicit `read_only=True` flag and missed the source-refused cases (messaging / claude_code / external_agent) — the frontend rendered the composer for sessions it should have been displaying as read-only, and the user only discovered the block at POST time with a confusing 403. The GET stub now reads from the synthesized Session, which the helper correctly sets to `read_only=True` for both the explicit and the source-refused refusal paths. (#3901)
+- **Synthesized TUI/Desktop sessions no longer write epoch (`0`) timestamps into the permanent sidecar.** The state.db enrichment block in the claim helper queried `started_at` and `ended_at` but never mapped them to `created_at` / `updated_at` on the synthesized Session, so a session with no `cli_meta` entry (the common case for sessions past the `get_cli_sessions()` cap) carried `created_at=0, updated_at=0` into the sidecar on first save. Frontend then sorted those sessions as "Jan 1 1970" at the bottom of the list. Both timestamps now flow from `state.db` when the foreign store doesn't provide them. (#3901)
+
 ## [v0.51.400] — 2026-06-13 — Release NM (skill bundles in WebUI slash commands, #4087)
 
 ### Fixed
