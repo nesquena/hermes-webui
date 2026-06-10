@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Provider errors and exceptions mid-turn no longer discard all partial work from the session sidecar.** When a turn fails (credential error, provider rate-limit, network drop, unhandled exception), the WebUI now preserves accumulated assistant text, reasoning, and tool calls as a `_partial` message before the error marker — matching the existing user-cancel behavior. This prevents wasted token costs and context desynchronization on subsequent turns. (#3929)
+
 ## [v0.51.350] — 2026-06-10 — Release LN (session-move / project-delete timeout fix)
 
 ### Fixed
