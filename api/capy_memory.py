@@ -698,6 +698,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         not _github_repository_artifacts_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_single_deployment_route_path_matches(raw_origin_text) and (
+        not _github_raw_authority_is_exact(raw_origin_text, "api.github.com")
+        or _github_single_deployment_path_info(origin_uri) is None
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_workflow_run_timing_route_path_matches(raw_origin_text) and (
         _github_workflow_run_timing_path_run_id(raw_origin_text) is None
     ):
@@ -4204,6 +4209,79 @@ def _github_deployments_path_repo(origin_uri: str) -> str:
     return f"{path[2]}/{path[3]}"
 
 
+def _github_single_deployment_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "deployments"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", int(path[5])
+
+
+def _github_single_deployment_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    path = parts.path.split("/")
+    return (
+        len(path) == 6
+        and path[0] == ""
+        and path[1] == "repos"
+        and path[4] == "deployments"
+    )
+
+
+def _github_single_deployment_route_path_matches(origin_uri: str) -> bool:
+    if _github_single_deployment_path_matches(origin_uri):
+        return True
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    raw_path = parts.path
+    if "%" not in raw_path:
+        return False
+
+    def decoded_path_matches(candidate: str) -> bool:
+        decoded_path = candidate.split("/")
+        return (
+            len(decoded_path) >= 6
+            and decoded_path[0] == ""
+            and decoded_path[1] == "repos"
+            and _github_repo_path_segment_is_safe(decoded_path[2])
+            and _github_repo_path_segment_is_safe(decoded_path[3])
+            and decoded_path[4] == "deployments"
+            and re.fullmatch(r"[1-9][0-9]*", decoded_path[5]) is not None
+        )
+
+    decoded = raw_path
+    for _attempt in range(3):
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+        if decoded_path_matches(decoded):
+            return True
+    return False
+
+
 _GITHUB_DEPLOYMENT_TASKS = {"deploy", "deploy:migrations", "rollback", "rollback:migrations"}
 _GITHUB_DEPLOYMENT_TEXT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._/#:+-]{0,119}")
 
@@ -4257,6 +4335,18 @@ def _json_payload_is_github_deployments_metadata(origin_uri: str, payload: Any) 
     return all(_github_deployment_row_is_safe(row) for row in payload)
 
 
+def _json_payload_is_github_single_deployment_metadata(origin_uri: str, payload: Any) -> bool:
+    path_info = _github_single_deployment_path_info(origin_uri)
+    if path_info is None:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if _json_payload_is_feed(payload):
+        return False
+    _repo, deployment_id = path_info
+    return _github_deployment_row_is_safe(payload) and payload.get("id") == deployment_id
+
+
 def _github_deployments_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
     repo = _github_deployments_path_repo(origin_uri) or "repository"
     safe_rows = [row for row in payload if _github_deployment_row_is_safe(row)]
@@ -4279,6 +4369,36 @@ def _github_deployments_refresh_summary(origin_uri: str, payload: list[Any]) -> 
         if updated:
             row_parts.append(f"updated: {updated}")
         parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_single_deployment_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo, deployment_id = _github_single_deployment_path_info(origin_uri) or ("repository", 0)
+    ref = _safe_public_text(payload.get("ref"), limit=120)
+    sha = _safe_public_text(payload.get("sha"), limit=40)[:12]
+    task = _safe_public_text(payload.get("task"), limit=80).lower()
+    environment = _safe_public_text(payload.get("environment"), limit=80)
+    created = _safe_iso_timestamp(payload.get("created_at")) if payload.get("created_at") is not None else ""
+    updated = _safe_iso_timestamp(payload.get("updated_at")) if payload.get("updated_at") is not None else ""
+    creator = payload.get("creator") if isinstance(payload.get("creator"), dict) else {}
+    creator_login = _safe_public_text(creator.get("login") if isinstance(creator, dict) else "", limit=80)
+    parts = [
+        f"GitHub deployment #{deployment_id} for {repo}",
+        f"environment: {environment}",
+        f"ref: {ref}",
+        f"sha: {sha}",
+        f"task: {task}",
+    ]
+    if payload.get("production_environment") is not None:
+        parts.append(f"production: {str(payload.get('production_environment') is True).lower()}")
+    if payload.get("transient_environment") is not None:
+        parts.append(f"transient: {str(payload.get('transient_environment') is True).lower()}")
+    if creator_login and _github_comment_login_is_safe(creator_login):
+        parts.append(f"creator: {creator_login}")
+    if created:
+        parts.append(f"created: {created}")
+    if updated:
+        parts.append(f"updated: {updated}")
     return _bounded_refresh_summary("; ".join(parts))
 
 
@@ -12869,6 +12989,16 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    if _json_payload_is_github_single_deployment_metadata(origin_uri, payload):
+        repo, deployment_id = _github_single_deployment_path_info(origin_uri) or (source_id, 0)
+        title = f"GitHub deployment {repo} #{deployment_id}"
+        summary = _github_single_deployment_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_deployments_metadata(origin_uri, payload):
         repo = _github_deployments_path_repo(origin_uri) or source_id
         title = f"GitHub deployments {repo}"
@@ -12879,6 +13009,8 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    if _github_single_deployment_route_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     deployments_repo = _github_deployments_path_repo(origin_uri)
     if deployments_repo:
         raise ValueError("refresh failed")
@@ -13892,6 +14024,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_repository_artifacts_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_repository_artifacts_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_single_deployment_route_path_matches(raw_origin_uri):
+        single_deployment_origin = _safe_origin_uri(raw_origin_uri, source_id=_safe_public_id(source_id, fallback="source"))
+        if (
+            not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com")
+            or _github_single_deployment_path_info(single_deployment_origin) is None
+        ):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_workflows_route_path_matches(raw_origin_uri) and not _github_workflows_path_repo(raw_origin_uri):
         raise RuntimeError("refresh fetcher disabled")
     if _github_workflow_run_timing_route_path_matches(raw_origin_uri) and (
@@ -14178,6 +14317,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_repository_artifacts_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_single_deployment_route_path_matches(safe_origin_uri):
+        if _github_single_deployment_path_info(safe_origin_uri) is None or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_check_suites_path_matches(safe_origin_uri):
         if _github_check_suites_path_info(safe_origin_uri) is None or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -14303,6 +14446,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_repository_artifacts_path_repo(final_url)
             or _github_repository_artifacts_path_repo(final_url) != _github_repository_artifacts_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_single_deployment_route_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or _github_single_deployment_path_info(final_url) is None
+            or _github_single_deployment_path_info(final_url) != _github_single_deployment_path_info(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_check_suites_path_matches(safe_origin_uri) and (
@@ -14841,6 +14990,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_repository_artifacts_path_matches(safe_origin_uri) and (
             not _github_repository_artifacts_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_single_deployment_route_path_matches(safe_origin_uri) and (
+            _github_single_deployment_path_info(safe_origin_uri) is None
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
