@@ -746,28 +746,55 @@ def test_helper_does_not_mutate_callers_cli_meta(
 def test_helper_does_not_mutate_callers_cli_meta_when_empty(
     routes_module, tmp_path, monkeypatch, isolated_state_db
 ):
-    """Same no-mutation contract, but the caller passes an empty
-    dict (the TUI/Desktop no-cli-meta case).  The state.db
-    enrichment must still not bind cli_meta to a shared mutable
-    reference that the caller could later see mutate."""
+    """No-mutation contract — TUI/Desktop shape (state.db lookup
+    path, POST path's typical invocation).
+
+    This test exists alongside ``test_helper_does_not_mutate_callers_cli_meta``
+    to cover the POST-path shape (caller passes nothing, helper
+    does its own ``_lookup_cli_session_metadata`` internally).  The
+    helper's enrichment block then copies the returned dict and
+    overwrites the missing fields from state.db.
+
+    To actually exercise the copy-on-write guard, the caller's
+    dict must have SOME content but be MISSING the fields the
+    enrichment wants to fill.  An empty dict would not exercise
+    the guard — even the pre-fix buggy code (which used
+    ``setdefault`` on the caller's dict) would pass an empty-dict
+    assertion, because there's nothing to setdefault on.  The
+    non-empty shape below would have failed under the buggy code
+    because the enrichment would have setdefault'd the missing
+    fields, mutating the caller's dict in place."""
     SID = "20260610_tui_no_mutation_empty"
     _make_state_db(
         isolated_state_db["db"], SID, message_count=1,
         title="TUI empty", source="tui", cwd="/root",
     )
-    caller_meta = {}  # empty
-    snapshot = {}
+    # Non-empty dict, but MISSING the fields state.db enrichment
+    # would fill (source_tag, raw_source, title, model, workspace,
+    # created_at, updated_at).  With copy-on-write the helper
+    # builds a fresh dict and fills it; the caller's dict stays
+    # exactly as it was.
+    caller_meta = {
+        "session_source": "other",
+        "profile": "default",
+        # Intentionally missing: source_tag, raw_source, title,
+        # model, workspace, created_at, updated_at — all of these
+        # state.db has and the enrichment will want to fill them.
+    }
+    snapshot = {k: v for k, v in caller_meta.items()}
     monkeypatch.setattr(
         routes_module, "_lookup_cli_session_metadata",
         lambda _sid: caller_meta,
     )
     sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
     assert reason == "materialized"
+    # The synthesized Session picks up state.db fields.
     assert sess.source_tag == "tui"
-    # The empty caller_meta must remain empty — the helper built
-    # its own dict and never touched ours.
+    assert sess.title == "TUI empty"
+    # The caller's dict must still be byte-for-byte the same — no
+    # new keys added, no values overwritten.
     assert caller_meta == snapshot, (
-        f"helper mutated caller's empty dict: "
+        f"helper mutated caller's non-empty dict in place: "
         f"before={snapshot} after={caller_meta}"
     )
 
