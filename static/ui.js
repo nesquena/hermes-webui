@@ -486,8 +486,8 @@ function _userMessageDomId(rawIdx){
 
 function _questionJumpButtonHtml(questionRawIdx, assistantRawIdx){
   if(typeof questionRawIdx!=='number'||questionRawIdx<0) return '';
-  const label=t('jump_to_question')||'Question';
-  const title=t('jump_to_question_label')||'Jump to the question for this response';
+  const label=t('jump_to_question')||'Response';
+  const title=t('jump_to_question_label')||'Jump to the start of this response';
   const aIdx=(typeof assistantRawIdx==='number'&&assistantRawIdx>=0)?assistantRawIdx:-1;
   return `<button class="msg-question-jump-btn" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx},${aIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
 }
@@ -8324,7 +8324,7 @@ function renderMessages(options){
     // user loses the navigation affordance.
     const _qJumpTarget=(!isUser&&!m._live)?questionRawIdxByAssistantRawIdx.get(rawIdx):undefined;
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
-      ? _questionJumpButtonHtml(_qJumpTarget, rawIdx)
+      ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 

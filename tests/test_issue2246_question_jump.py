@@ -9,8 +9,8 @@ I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 
 
 def test_assistant_footer_gets_completed_turn_question_jump_button():
-    assert "function _questionJumpButtonHtml(questionRawIdx)" in UI_JS
-    assert "function jumpToTurnQuestion(questionRawIdx)" in UI_JS
+    assert "function _questionJumpButtonHtml(questionRawIdx, assistantRawIdx)" in UI_JS
+    assert "function jumpToTurnQuestion(questionRawIdx, assistantRawIdx)" in UI_JS
     assert "const questionRawIdxByAssistantRawIdx=new Map()" in UI_JS
     assert "questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx)" in UI_JS
     assert "row.id=_userMessageDomId(rawIdx)" in UI_JS
@@ -22,8 +22,17 @@ def test_assistant_footer_gets_completed_turn_question_jump_button():
     # resolved target instead of isTurnFinalAssistant.
     assert "const _qJumpTarget=(!isUser&&!m._live)?questionRawIdxByAssistantRawIdx.get(rawIdx):undefined;" in UI_JS
     assert "const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)" in UI_JS
-    assert "_questionJumpButtonHtml(_qJumpTarget)" in UI_JS
+    assert "_questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)" in UI_JS
     assert "msg-question-jump-btn" in UI_JS
+
+
+def test_multi_segment_turn_jumps_to_first_assistant_segment():
+    # #3852: the reverse map assistantRawIdxByQuestionRawIdx resolves the FIRST
+    # assistant segment for a given question so multi-step turns (tool_call ->
+    # assistant -> tool_call -> assistant) scroll to the start of the response.
+    assert "const assistantRawIdxByQuestionRawIdx=new Map()" in UI_JS
+    assert "if(!assistantRawIdxByQuestionRawIdx.has(qIdx)) assistantRawIdxByQuestionRawIdx.set(qIdx,aIdx)" in UI_JS
+    assert "assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)" in UI_JS
 
 
 def test_question_jump_expands_windowed_history_and_highlights_question():
