@@ -96,14 +96,32 @@ _CLIENT_EVENT_ALLOWED_FIELDS = {
 }
 
 
-def _latest_cron_session_id_for_job(job_id: str) -> str:
-    """Return the newest persisted cron session id for ``job_id``."""
-    normalized = str(job_id or "").strip()
+def _normalize_cron_job_ids(job_ids) -> list[str]:
+    seen = set()
+    normalized = []
+    for job_id in job_ids or []:
+        jid = str(job_id or "").strip()
+        if not jid or jid in seen:
+            continue
+        seen.add(jid)
+        normalized.append(jid)
+    return normalized
+
+
+def _cron_session_like_pattern(job_id: str) -> str:
+    escaped = str(job_id or "")
+    escaped = escaped.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"cron_{escaped}_%"
+
+
+def _latest_cron_session_info_for_jobs(job_ids) -> dict[str, dict[str, int | str | None]]:
+    """Return newest persisted cron session info keyed by cron job id."""
+    normalized = _normalize_cron_job_ids(job_ids)
     if not normalized:
-        return ""
+        return {}
     db_path = _active_state_db_path()
     if not db_path or not Path(db_path).exists():
-        return ""
+        return {jid: {"session_id": "", "message_count": None} for jid in normalized}
     try:
         with closing(sqlite3.connect(str(db_path))) as conn:
             conn.row_factory = sqlite3.Row
@@ -111,23 +129,72 @@ def _latest_cron_session_id_for_job(job_id: str) -> str:
             cur.execute("PRAGMA table_info(sessions)")
             session_cols = {row[1] for row in cur.fetchall()}
             if "id" not in session_cols or "source" not in session_cols:
-                return ""
-            order_expr = "COALESCE(s.started_at, 0) DESC, s.id DESC" if "started_at" in session_cols else "s.id DESC"
-            cur.execute(
-                f"""
-                SELECT s.id
-                FROM sessions s
-                WHERE LOWER(COALESCE(s.source, '')) = 'cron'
-                  AND s.id LIKE ?
-                ORDER BY {order_expr}
-                LIMIT 1
-                """,
-                (f"cron_{normalized}_%",),
+                return {jid: {"session_id": "", "message_count": None} for jid in normalized}
+            case_clauses = " ".join(["WHEN s.id LIKE ? ESCAPE '\\' THEN ?"] * len(normalized))
+            where_clauses = " OR ".join(["s.id LIKE ? ESCAPE '\\'"] * len(normalized))
+            select_message_count = (
+                "COALESCE(s.message_count, NULL) AS message_count"
+                if "message_count" in session_cols
+                else "NULL AS message_count"
             )
-            row = cur.fetchone()
-            return str(row["id"]) if row and row["id"] else ""
+            params = []
+            for jid in normalized:
+                params.extend((_cron_session_like_pattern(jid), jid))
+            for jid in normalized:
+                params.append(_cron_session_like_pattern(jid))
+            if "started_at" in session_cols:
+                query = f"""
+                    SELECT s.id,
+                           {select_message_count},
+                           CASE {case_clauses} ELSE '' END AS job_id
+                    FROM sessions s
+                    WHERE LOWER(COALESCE(s.source, '')) = 'cron'
+                      AND ({where_clauses})
+                    ORDER BY COALESCE(s.started_at, 0) DESC, s.id DESC
+                """
+            else:
+                query = f"""
+                    SELECT s.id,
+                           {select_message_count},
+                           CASE {case_clauses} ELSE '' END AS job_id
+                    FROM sessions s
+                    WHERE LOWER(COALESCE(s.source, '')) = 'cron'
+                      AND ({where_clauses})
+                    ORDER BY s.id DESC
+                """
+            cur.execute(query, params)
+            results = {
+                jid: {"session_id": "", "message_count": None} for jid in normalized
+            }
+            for row in cur.fetchall():
+                jid = str(row["job_id"] or "")
+                if jid and not results[jid]["session_id"]:
+                    results[jid] = {
+                        "session_id": str(row["id"] or ""),
+                        "message_count": (
+                            int(row["message_count"])
+                            if row["message_count"] is not None
+                            else None
+                        ),
+                    }
+            return results
     except sqlite3.Error:
+        return {jid: {"session_id": "", "message_count": None} for jid in normalized}
+
+
+def _latest_cron_session_ids_for_jobs(job_ids) -> dict[str, str]:
+    return {
+        jid: info.get("session_id", "")
+        for jid, info in _latest_cron_session_info_for_jobs(job_ids).items()
+    }
+
+
+def _latest_cron_session_id_for_job(job_id: str) -> str:
+    """Return the newest persisted cron session id for ``job_id``."""
+    normalized = str(job_id or "").strip()
+    if not normalized:
         return ""
+    return _latest_cron_session_ids_for_jobs([normalized]).get(normalized, "")
 
 
 def _session_field(session, field, default=None):
@@ -11783,13 +11850,20 @@ def _handle_cron_recent(handler, parsed):
                 completions.append(
                     {
                         "job_id": job_id,
-                        "session_id": _latest_cron_session_id_for_job(job_id),
                         "name": job.get("name", "Unknown"),
                         "status": job.get("last_status", "unknown"),
                         "completed_at": ts,
                         "toast_notifications": job.get("toast_notifications") is not False,
                     }
                 )
+        latest_session_info = _latest_cron_session_info_for_jobs(
+            [c.get("job_id", "") for c in completions]
+        )
+        for completion in completions:
+            info = latest_session_info.get(str(completion.get("job_id", "") or ""), {})
+            completion["session_id"] = str(info.get("session_id", "") or "")
+            if info.get("message_count") is not None:
+                completion["message_count"] = int(info["message_count"])
         return j(handler, {"completions": completions, "since": since})
     except ImportError:
         return j(handler, {"completions": [], "since": since})

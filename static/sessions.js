@@ -273,6 +273,7 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null) {
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   return true;
 }
+if (typeof window !== 'undefined') window._markSessionCompletionUnreadIfBackground = _markSessionCompletionUnreadIfBackground;
 
 function _clearSessionCompletionUnread(sid) {
   if (!sid) return;
