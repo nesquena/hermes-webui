@@ -15,7 +15,7 @@ def _read(filename):
 
 
 class TestIssue1432NewChatGuardInFlight:
-    """`+` button and Cmd/Ctrl+K must create a new chat even while the current
+    """`+` button and Cmd/Ctrl+Shift+O must create a new chat even while the current
     session is still streaming. The empty-session guard from #1171 was checking
     `message_count===0` only, which is true the entire time the first user
     message is in flight (server-side count not yet updated). The guard now
@@ -45,19 +45,19 @@ class TestIssue1432NewChatGuardInFlight:
 
     def test_cmdK_handler_checks_in_flight_state(self):
         src = _read('boot.js')
-        # Locate the Cmd/Ctrl+K branch — it sits inside a keydown listener
-        idx = src.find("(e.metaKey||e.ctrlKey)&&e.key==='k'")
-        assert idx >= 0, "Cmd/Ctrl+K handler not found in boot.js"
+        # Locate the Cmd/Ctrl+Shift+O branch — it sits inside a keydown listener
+        idx = src.find("(e.metaKey||e.ctrlKey)&&e.shiftKey&&(e.key==='O'||e.key==='o')")
+        assert idx >= 0, "Cmd/Ctrl+Shift+O handler not found in boot.js"
         # Read the next ~1500 chars (handler body)
         body = src[idx:idx + 1500]
         assert 'message_count' in body, \
-            "Cmd/Ctrl+K guard missing message_count check"
+            "Cmd/Ctrl+Shift+O guard missing message_count check"
         assert 'S.busy' in body, \
-            "Cmd/Ctrl+K guard missing S.busy check (#1432)"
+            "Cmd/Ctrl+Shift+O guard missing S.busy check (#1432)"
         assert 'active_stream_id' in body, \
-            "Cmd/Ctrl+K guard missing active_stream_id check (#1432)"
+            "Cmd/Ctrl+Shift+O guard missing active_stream_id check (#1432)"
         assert 'pending_user_message' in body, \
-            "Cmd/Ctrl+K guard missing pending_user_message check (#1432)"
+            "Cmd/Ctrl+Shift+O guard missing pending_user_message check (#1432)"
 
     def test_in_flight_signal_matches_restoreSettledSession(self):
         """The new in-flight check uses the same signal as the canonical

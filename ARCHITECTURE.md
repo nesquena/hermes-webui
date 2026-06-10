@@ -679,7 +679,7 @@ restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
 | B11 | Low      | GET /api/session no-ID silently creates session      | FIXED Sprint 1   | Returns 400 with error message |
 | B12 | Low      | Preview panel display:none to flex layout jump       | FIXED Sprint 4   | visibility/opacity transition replaces display:none toggle |
 | B13 | Low      | No CORS headers                                      | Open             | Phase H |
-| B14 | Low      | No keyboard shortcut for new chat                    | FIXED Sprint 3   | Cmd/Ctrl+K triggers newSession() from anywhere |
+| B14 | Low      | No keyboard shortcut for new chat                    | FIXED Sprint 3   | Cmd/Ctrl+Shift+O triggers newSession() from anywhere |
 | TD1 | Critical | Env vars are process-global (concurrent request bug) | PARTIAL Sprint 5 | Thread-local _set_thread_env() added. Per-session lock from Sprint 4. Process-level env still written as fallback. Full fix needs terminal tool to read thread-local. |
 | TD2 | High     | SESSIONS cache: no eviction, locking missing         | FIXED Sprint 5   | OrderedDict + LRU cap 100 + move_to_end on access. LOCK from Sprint 1. Complete. |
 | TD3 | High     | No test coverage                                     | PARTIAL Sprint 1 | 19 HTTP integration tests added; unit tests pending Phase A split |
@@ -1501,7 +1501,7 @@ B10: `es.addEventListener('tool', ...)` now calls `removeThinking()` before upda
      status and shows a compact `.msg-role + .msg-body` tool-running row. `ensureAssistantRow()`
      also removes `#toolRunningRow` when first token arrives.
 
-B14: `document.addEventListener('keydown', ...)` at global scope catches Cmd/Ctrl+K
+B14: `document.addEventListener('keydown', ...)` at global scope catches Cmd/Ctrl+Shift+O
      and calls `newSession()` if not busy.
 
 
