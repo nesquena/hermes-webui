@@ -13297,6 +13297,13 @@ def handle_get(handler, parsed) -> bool:
             data["linked_files"] = {}
         return j(handler, data)
 
+    # ── Scripts API (GET) ──
+    if parsed.path == "/api/scripts/list":
+        return _handle_scripts_list(handler)
+
+    if parsed.path == "/api/scripts/raw":
+        return _handle_scripts_raw(handler, parsed)
+
     # ── Memory API (GET) ──
     if parsed.path == "/api/memory":
         return _handle_memory_read(handler, parsed)
@@ -20128,6 +20135,79 @@ def _read_active_project_context(workspace: Path | None) -> dict:
         }
     )
     return payload
+def _hermes_scripts_dir() -> Path:
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser().resolve()
+    return hermes_home / "scripts"
+
+
+def _parse_script_docstring(path: Path) -> str:
+    """Extract leading docstring or comment block from a script file."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    ext = path.suffix.lower()
+    if ext == ".py":
+        import ast
+        try:
+            tree = ast.parse(text)
+            doc = ast.get_docstring(tree)
+            return (doc or "").split("\n")[0].strip()
+        except SyntaxError:
+            pass
+    # .sh and fallback: collect leading # comment lines
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") and not stripped.startswith("#!"):
+            lines.append(stripped.lstrip("#").strip())
+        elif stripped and not lines:
+            continue
+        else:
+            break
+    return " ".join(lines[:3]).strip()
+
+
+def _handle_scripts_list(handler) -> None:
+    scripts_dir = _hermes_scripts_dir()
+    if not scripts_dir.exists():
+        return j(handler, {"scripts": []})
+    scripts = []
+    for p in sorted(scripts_dir.iterdir()):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in (".py", ".sh", ".bash", ".zsh"):
+            continue
+        scripts.append({
+            "name": p.name,
+            "description": _parse_script_docstring(p),
+        })
+    return j(handler, {"scripts": scripts})
+
+
+def _handle_scripts_raw(handler, parsed) -> None:
+    qs = parse_qs(parsed.query)
+    name = qs.get("path", [""])[0]
+    if not name:
+        return bad(handler, "path required", 400)
+    scripts_dir = _hermes_scripts_dir()
+    if not scripts_dir.exists():
+        return bad(handler, "scripts directory not found", 404)
+    try:
+        target = safe_resolve(scripts_dir, name)
+    except ValueError:
+        return bad(handler, "invalid path", 400)
+    if not target.exists() or not target.is_file():
+        return bad(handler, "script not found", 404)
+    try:
+        source = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return bad(handler, _sanitize_error(e), 500)
+    return j(handler, {"name": target.name, "source": source})
 
 
 def _handle_memory_read(handler, parsed=None):

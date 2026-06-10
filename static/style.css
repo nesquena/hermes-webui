@@ -7213,3 +7213,18 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+/* Tasks panel subtabs */
+.tasks-subtabs{display:flex;gap:2px;flex:1;}
+.tasks-subtab{background:none;border:none;padding:4px 10px;font-size:11px;font-weight:600;color:var(--muted);cursor:pointer;border-radius:6px;text-transform:uppercase;letter-spacing:.06em;transition:background .15s,color .15s;}
+.tasks-subtab:hover{background:var(--hover-bg);color:var(--text);}
+.tasks-subtab.active{background:var(--accent-bg);color:var(--accent-text);}
+/* Scripts list */
+.scripts-list{flex:1;overflow-y:auto;padding:8px;}
+.script-item{border:1px solid var(--border);border-radius:8px;margin-bottom:6px;overflow:hidden;}
+.script-header{display:flex;align-items:center;gap:6px;padding:8px 10px;cursor:pointer;user-select:none;}
+.script-header:hover{background:var(--hover-bg);}
+.script-name{font-size:13px;font-weight:500;color:var(--text);}
+.script-ext{font-size:11px;color:var(--muted);}
+.script-desc{padding:0 10px 6px;font-size:12px;color:var(--muted);}
+.script-source{padding:0 10px 10px;}
+.script-source pre{margin:0;background:var(--code-bg);border-radius:6px;padding:8px;overflow-x:auto;font-size:12px;}

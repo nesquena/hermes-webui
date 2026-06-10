@@ -206,14 +206,37 @@
     <!-- Tasks (cron) panel -->
     <div class="panel-view" id="panelTasks">
       <div class="panel-head">
-        <span data-i18n="scheduled_jobs">Scheduled jobs</span>
-        <div class="panel-head-actions">
+        <div class="tasks-subtabs">
+          <button class="tasks-subtab active" id="tasksSubtabJobs"
+            data-i18n="tab_tasks_jobs" onclick="switchTasksSubtab('jobs')">Jobs</button>
+          <button class="tasks-subtab" id="tasksSubtabScripts"
+            data-i18n="tab_tasks_scripts" onclick="switchTasksSubtab('scripts')">Scripts</button>
+        </div>
+        <div class="panel-head-actions" id="tasksJobActions">
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="cronRefreshBtn" onclick="loadCrons(true)" data-tooltip="Refresh job list" aria-label="Refresh job list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openCronCreate()" data-tooltip="New job" data-i18n-title="new_job" aria-label="New job"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
+        <div class="panel-head-actions" id="tasksScriptActions" style="display:none">
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom"
+            id="scriptsRefreshBtn" onclick="loadScripts(true)"
+            data-tooltip="Refresh scripts" aria-label="Refresh scripts">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="23 4 23 10 17 10"/>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+          </button>
+        </div>
       </div>
-      <div id="cronGatewayNotice" class="detail-alert cron-gateway-notice" style="display:none"></div>
-      <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <!-- Jobs subtab -->
+      <div id="tasksJobsPane">
+        <div id="cronGatewayNotice" class="detail-alert cron-gateway-notice" style="display:none"></div>
+        <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      </div>
+      <!-- Scripts subtab -->
+      <div id="tasksScriptsPane" style="display:none">
+        <div class="scripts-list" id="scriptsList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      </div>
     </div>
     <!-- Kanban panel -->
     <div class="panel-view" id="panelKanban">
