@@ -1414,7 +1414,7 @@ def _build_session_list_cache_payload(
     # to its own profile, leaving that profile with zero rows for that
     # source. Filter first so the dedupe operates only within the active
     # profile's rows.
-    diag_stage("active_profile")
+    diag_stage("profile_scope")
     if all_profiles:
         scoped = merged
         other_profile_count = 0
