@@ -8,8 +8,8 @@
 > Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
 > Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
 >
-> Automated coverage: ~7,150 tests collected via `pytest tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.11, 3.12, and 3.13 (3 parallel shards each), alongside a ruff lint gate, a headless browser smoke test, and a Docker smoke test. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 11 languages, and hundreds of issue/PR-pinned regression tests.
-> Run: `pytest tests/ -v --timeout=60`
+> Automated coverage: ~7,150 tests collected via `./scripts/test.sh tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.11, 3.12, and 3.13 (3 parallel shards each), alongside a ruff lint gate, a headless browser smoke test, and a Docker smoke test. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 11 languages, and hundreds of issue/PR-pinned regression tests.
+> Run: `./scripts/test.sh`
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
 
@@ -667,7 +667,7 @@ FAIL: Browser freezes, crash, or security issue.
 
 ## Automated Test Coverage Reference
 
-These behaviors are verified by pytest (run: venv/bin/python -m pytest tests/ -v):
+These behaviors are verified by pytest (run: ./scripts/test.sh tests/ -v):
 
 Sprint 1 tests (test_sprint1.py):
   - Server health, session CRUD (create/load/update/delete/sort)
@@ -719,7 +719,7 @@ If you are a Claude agent with browser access, follow these instructions:
 
 *Last updated: Sprint 2, March 30, 2026*
 *Server version: v0.4 (server.py in webui-mvp/)*
-*Run automated tests: python -m pytest tests/ -v*
+*Run automated tests: ./scripts/test.sh tests/ -v*
 
 ---
 
@@ -900,7 +900,7 @@ Manual-only (not covered by automation):
 
 *Last updated: Sprint 3, March 30, 2026*
 *Total automated tests: 48/48*
-*Run: python -m pytest tests/ -v*
+*Run: ./scripts/test.sh tests/ -v*
 
 ---
 
@@ -1230,7 +1230,7 @@ Manual-only for Sprint 5:
 
 *Last updated: Sprint 5, March 30, 2026*
 *Total automated tests: 86/86*
-*Run: python -m pytest tests/ -v*
+*Run: ./scripts/test.sh tests/ -v*
 *Source: <repo>/ | Static: static/style.css + static/app.js*
 
 ---
@@ -1707,7 +1707,7 @@ Manual-only for Sprint 8:
 *Last updated: Sprint 10 complete, March 31, 2026*
 *Total automated tests: 177/177*
 *Regression gate: tests/test_regressions.py (10 tests, one per introduced bug)*
-*Run: python -m pytest tests/ -v*
+*Run: ./scripts/test.sh tests/ -v*
 *Source: <repo>/*
 *Modules: ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js (app.js deleted)*
 
@@ -1926,7 +1926,7 @@ Bridged CLI sessions:
 ---
 
 *Last updated: v0.51.192, May 31, 2026*
-*Total automated tests collected: ~7,150 (run `pytest tests/ --collect-only -q` for the exact current count)*
+*Total automated tests collected: ~7,150 (run `./scripts/test.sh tests/ --collect-only -q` for the exact current count)*
 *Regression gate: tests/test_regressions.py*
-*Run: pytest tests/ -v --timeout=60*
+*Run: ./scripts/test.sh*
 *Source: <repo>/*

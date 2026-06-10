@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Local pytest runs now use a supported repo-managed Python environment.** `scripts/test.sh` creates or uses `.venv` on Python 3.11-3.13, installs `requirements-dev.txt` when test dependencies are missing, and `tests/conftest.py` fails fast with a clear message if pytest is launched under an unsupported interpreter such as Python 3.9. The runner also treats `HERMES_WEBUI_TEST_PYTHON` as the base interpreter for `.venv` creation, rejects broken/no-pip virtualenvs before dependency installation, and cleans up failed venv creation attempts with actionable guidance. This prevents local runs from dying during collection on newer type syntax before reaching the intended regression tests.
+
 ## [v0.51.426] — 2026-06-15 — Release OM (custom-provider model-prefix routing fix, #4210)
 
 ### Fixed

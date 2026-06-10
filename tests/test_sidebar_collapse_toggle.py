@@ -8,7 +8,7 @@ the CSS rules (collapse states, transition, flash-prevention), and the JS
 (toggleSidebar / expandSidebar / _isSidebarCollapsed / Cmd+B handler).
 
 Run:
-    pytest tests/test_sidebar_collapse_toggle.py -v
+    ./scripts/test.sh tests/test_sidebar_collapse_toggle.py -v
 """
 
 import pathlib

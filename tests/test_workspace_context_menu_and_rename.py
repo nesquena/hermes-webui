@@ -19,7 +19,7 @@ a user dogfooded the workspace panel:
     The `defaultValue` parameter was silently dropped; only the placeholder
     showed (the "ghost" name the user described).
 
-Run: /root/hermes-agent/venv/bin/python -m pytest tests/test_workspace_context_menu_and_rename.py -v
+Run: ./scripts/test.sh tests/test_workspace_context_menu_and_rename.py -v
 """
 
 from __future__ import annotations

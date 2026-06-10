@@ -24,6 +24,14 @@ import urllib.request
 import urllib.error
 import pytest
 
+if not (3, 11) <= sys.version_info[:2] <= (3, 13):
+    pytest.exit(
+        "Hermes WebUI tests require Python 3.11, 3.12, or 3.13. "
+        "Run ./scripts/test.sh so the repo-local supported .venv is used "
+        "instead of an unsupported system python.",
+        returncode=3,
+    )
+
 # ── Repo root discovery ────────────────────────────────────────────────────
 # conftest.py lives at <repo>/tests/conftest.py
 TESTS_DIR  = pathlib.Path(__file__).parent.resolve()
