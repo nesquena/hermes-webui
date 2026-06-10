@@ -163,14 +163,52 @@ function _getSessionQueue(sid, create=false){
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
   return SESSION_QUEUES[sid]||[];
 }
+function _queueStorageKey(sid){
+  return 'hermes-queue-'+sid;
+}
+function _clearPersistedSessionQueue(sid){
+  if(!sid) return;
+  const key=_queueStorageKey(sid);
+  try{sessionStorage.removeItem(key);}catch(_){}
+  try{localStorage.removeItem(key);}catch(_){}
+}
+function _persistSessionQueueStorage(sid, queue){
+  if(!sid) return;
+  const q=Array.isArray(queue)?queue:[];
+  if(!q.length){_clearPersistedSessionQueue(sid);return;}
+  const key=_queueStorageKey(sid);
+  let payload='[]';
+  try{payload=JSON.stringify(q);}catch(_){return;}
+  try{sessionStorage.setItem(key,payload);}catch(_){}
+  try{localStorage.setItem(key,payload);}catch(_){}
+}
+function _readPersistedSessionQueue(sid){
+  if(!sid) return [];
+  const key=_queueStorageKey(sid);
+  const read=(store)=>{
+    try{
+      const raw=store&&store.getItem?store.getItem(key):null;
+      if(!raw) return null;
+      const parsed=JSON.parse(raw);
+      return Array.isArray(parsed)?parsed:null;
+    }catch(_){return null;}
+  };
+  const sessionValue=read(sessionStorage);
+  if(sessionValue&&sessionValue.length) return sessionValue;
+  const localValue=read(localStorage);
+  if(localValue&&localValue.length){
+    try{sessionStorage.setItem(key,JSON.stringify(localValue));}catch(_){}
+    return localValue;
+  }
+  return [];
+}
 function queueSessionMessage(sid, payload){
   if(!sid||!payload) return 0;
   const q=_getSessionQueue(sid,true);
   // Stamp created_at so the restore path can detect stale entries (agent already responded)
   const entry={...payload, _queued_at: Date.now()};
   q.push(entry);
-  // Persist to sessionStorage so the queue survives page refresh
-  try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
+  _persistSessionQueueStorage(sid,q);
   return q.length;
 }
 function shiftQueuedSessionMessage(sid){
@@ -179,9 +217,9 @@ function shiftQueuedSessionMessage(sid){
   const next=q.shift();
   if(!q.length){
     delete SESSION_QUEUES[sid];
-    try{ sessionStorage.removeItem('hermes-queue-'+sid); }catch(_){}
+    _clearPersistedSessionQueue(sid);
   } else {
-    try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
+    _persistSessionQueueStorage(sid,q);
   }
   return next;
 }
@@ -4204,8 +4242,8 @@ function _renderQueueChips(sid){
 
   function _saveAndRefresh(){
     const liveQ=_getSessionQueue(sid,false);
-    if(!liveQ.length){delete SESSION_QUEUES[sid];try{sessionStorage.removeItem('hermes-queue-'+sid);}catch(_){}}
-    else{SESSION_QUEUES[sid]=[...liveQ];try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}}
+    if(!liveQ.length){delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
+    else{SESSION_QUEUES[sid]=[...liveQ];_persistSessionQueueStorage(sid,liveQ);}
     delete _queueRenderKeys[sid];
     updateQueueBadge(sid);
   }
@@ -4232,7 +4270,7 @@ function _renderQueueChips(sid){
         const firstFiles=(snapshot.find(e=>e&&Array.isArray(e.files)&&e.files.length)||{files:[]}).files;
         liveQ.length=0;liveQ.push({text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,_queued_at:Date.now()});
         SESSION_QUEUES[sid]=liveQ;
-        try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}
+        _persistSessionQueueStorage(sid,liveQ);
         delete _queueRenderKeys[sid];
         updateQueueBadge(sid);
       };
@@ -4312,7 +4350,7 @@ function _renderQueueChips(sid){
         const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
         if(idx!==-1){
           liveQ[idx]={...liveQ[idx],text:newText};
-          try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}
+          _persistSessionQueueStorage(sid,liveQ);
           delete _queueRenderKeys[sid];
           updateQueueBadge(sid);
         }
@@ -4351,8 +4389,8 @@ function _renderQueueChips(sid){
       const liveQ=_getSessionQueue(sid,false);
       const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
       if(idx!==-1) liveQ.splice(idx,1);
-      if(!liveQ.length){delete SESSION_QUEUES[sid];try{sessionStorage.removeItem('hermes-queue-'+sid);}catch(_){}}
-      else{SESSION_QUEUES[sid]=[...liveQ];try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}}
+      if(!liveQ.length){delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
+      else{SESSION_QUEUES[sid]=[...liveQ];_persistSessionQueueStorage(sid,liveQ);}
       delete _queueRenderKeys[sid];
       updateQueueBadge(sid);
     };

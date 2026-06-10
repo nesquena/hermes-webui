@@ -3,6 +3,18 @@
 
 ## [Unreleased]
 
+## [v0.51.348] — 2026-06-10 — Release LL (Phase 0 hotfix: timeout regression + data-loss + leaks)
+
+### Fixed
+
+- **"Request timed out" during approval/clarify turns no longer fires from browser connection-pool exhaustion.** v0.51.340 added `/api/session/stream` as a 6th persistent SSE `EventSource`. Browsers cap HTTP/1.1 at 6 connections per origin, so with all 6 long-lived streams open the next `fetch()` — including the approval/clarify POST itself — queued indefinitely and surfaced as a timeout toast even though the server responded normally. Approval and clarify prompts now use HTTP polling (approval 1.5 s, clarify 3 s) via the existing fallback-poll helpers, freeing 2 connection slots. (#3913, fixes #3807 / #3748 / #3014)
+- **Queued follow-up messages and draft-only sessions are more durable across refresh and tab restore.** Session queues now mirror to both `sessionStorage` and `localStorage`, restore through one shared helper (falling back to the durable copy when `sessionStorage` is missing after a tab/process restore), clear stale queue state from both layers, and keep zero-message sessions when they still own unsent composer draft text or files. (#3906, #3108)
+- **Settings panel no longer auto-reopens while you are on the Chat panel.** `switchSettingsSection()` force-mutated the current panel back to `settings` instead of just remembering the section for the next time settings is opened; visible on iPad/touch. (#3909)
+
+### Performance
+
+- **Kanban API requests no longer leak a file descriptor each.** `api/kanban_bridge.py::_conn()` returned a raw connection used as a `with` block, but sqlite3's context manager only scopes the transaction and never closes the FD. On a long-lived server these accumulated, pinning stale WAL snapshots and starving checkpoints for gateway/CLI workers sharing the board DB. `_conn()` now uses the closing context manager. (#3904)
+
 ## [v0.51.347] — 2026-06-09 — Release LK (streaming & render reliability cluster)
 
 ### Fixed

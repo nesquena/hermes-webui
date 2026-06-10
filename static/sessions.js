@@ -1110,34 +1110,29 @@ async function loadSession(sid){
     // Stale? A newer loadSession() call has already started (#1060).
     if (_loadingSessionId !== sid) return;
 
-    // Restore any queued message that survived page refresh via sessionStorage.
+    // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
       try{
-        const _storedQ=sessionStorage.getItem('hermes-queue-'+sid);
-        if(_storedQ){
-          const _entries=JSON.parse(_storedQ);
-          if(Array.isArray(_entries)&&_entries.length){
-            const _lastMsg=S.messages.slice().reverse()
-              .find(m=>m&&m.role==='assistant');
-            const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
-            const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
-            if(_fresh.length){
-              const _first=_fresh[0];
-              const _msg=$&&$('msg');
-              if(_msg&&_first.text&&!_msg.value){
-                _msg.value=_first.text||'';
-                if(typeof autoResize==='function') autoResize();
-                if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
-              }
-              sessionStorage.removeItem('hermes-queue-'+sid);
-            } else {
-              sessionStorage.removeItem('hermes-queue-'+sid);
+        const _entries=typeof _readPersistedSessionQueue==='function'
+          ? _readPersistedSessionQueue(sid)
+          : [];
+        if(Array.isArray(_entries)&&_entries.length){
+          const _lastMsg=S.messages.slice().reverse()
+            .find(m=>m&&m.role==='assistant');
+          const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
+          const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
+          if(_fresh.length){
+            const _first=_fresh[0];
+            const _msg=$&&$('msg');
+            if(_msg&&_first.text&&!_msg.value){
+              _msg.value=_first.text||'';
+              if(typeof autoResize==='function') autoResize();
+              if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
             }
-          } else {
-            sessionStorage.removeItem('hermes-queue-'+sid);
           }
+          if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
         }
-      }catch(_){sessionStorage.removeItem('hermes-queue-'+sid);}
+      }catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}
     }
 
     // Reconstruct tool calls from message metadata, or fall back to session-level summary.
@@ -5840,6 +5835,7 @@ async function deleteSession(sid, beforeDelete=null){
     return false;
   }
   const response=deleteResult&&deleteResult.response;
+  if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;
     _optimisticallyRemoveSessionFromList(sid);

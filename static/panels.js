@@ -6066,15 +6066,13 @@ function _toggleTabVisibilityChip(panel){
 }
 
 function switchSettingsSection(name){
-  // If the main content is not showing settings, switch back first
+  // If the main content is not showing settings, just remember the section
+  // without force-switching the panel. The section will be applied when the
+  // user next opens settings via switchPanel(). (#appearance-auto-reopen)
   if (_currentPanel !== 'settings') {
-    _currentPanel = 'settings';
-    var mainEl = document.querySelector('main.main');
-    if (mainEl) {
-      ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(function(p) {
-        mainEl.classList.toggle('showing-' + p, p === 'settings');
-      });
-    }
+    _currentSettingsSection = name;
+    _settingsSection = name;
+    return;
   }
   let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system'||name==='help')?name:'conversation';
   // Deep-linking to the Plugins pane when the tab is hidden (no plugins
