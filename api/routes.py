@@ -135,7 +135,7 @@ def _latest_cron_session_info_for_jobs(job_ids) -> dict[str, dict[str, int | str
                            {select_message_count}
                     FROM sessions s
                     WHERE LOWER(COALESCE(s.source, '')) = 'cron'
-                    ORDER BY COALESCE(s.started_at, 0) DESC, s.id DESC
+                    ORDER BY COALESCE(s.started_at, 0) DESC, s.id DESC  -- newest start, not last activity
                 """
             else:
                 query = f"""
@@ -177,20 +177,6 @@ def _latest_cron_session_info_for_jobs(job_ids) -> dict[str, dict[str, int | str
     except sqlite3.Error:
         return {jid: {"session_id": "", "message_count": None} for jid in normalized}
 
-
-def _latest_cron_session_ids_for_jobs(job_ids) -> dict[str, str]:
-    return {
-        jid: info.get("session_id", "")
-        for jid, info in _latest_cron_session_info_for_jobs(job_ids).items()
-    }
-
-
-def _latest_cron_session_id_for_job(job_id: str) -> str:
-    """Return the newest persisted cron session id for ``job_id``."""
-    normalized = str(job_id or "").strip()
-    if not normalized:
-        return ""
-    return _latest_cron_session_ids_for_jobs([normalized]).get(normalized, "")
 
 
 def _session_field(session, field, default=None):
@@ -11853,7 +11839,7 @@ def _handle_cron_recent(handler, parsed):
                     }
                 )
         latest_session_info = _latest_cron_session_info_for_jobs(
-            [job.get("id", "") for job in jobs]
+            [c["job_id"] for c in completions]
         )
         for completion in completions:
             info = latest_session_info.get(str(completion.get("job_id", "") or ""), {})
