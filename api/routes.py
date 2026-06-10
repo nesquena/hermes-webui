@@ -157,10 +157,12 @@ def _latest_cron_session_info_for_jobs(job_ids) -> dict[str, dict[str, int | str
                 matches = [
                     jid
                     for jid in normalized
-                    if not results[jid]["session_id"] and sid.startswith(prefixes[jid])
+                    if sid.startswith(prefixes[jid])
                 ]
                 if matches:
                     jid = max(matches, key=len)
+                    if results[jid]["session_id"]:
+                        continue
                     results[jid] = {
                         "session_id": sid,
                         "message_count": (
@@ -11851,7 +11853,7 @@ def _handle_cron_recent(handler, parsed):
                     }
                 )
         latest_session_info = _latest_cron_session_info_for_jobs(
-            [c.get("job_id", "") for c in completions]
+            [job.get("id", "") for job in jobs]
         )
         for completion in completions:
             info = latest_session_info.get(str(completion.get("job_id", "") or ""), {})
