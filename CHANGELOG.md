@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Approval and clarify prompts now use HTTP polling instead of SSE.** Approval cards poll at 1.5-second intervals, clarify cards at 3-second intervals. This prevents browser connection pool exhaustion (browsers limit to 6 connections per origin; with 6 persistent SSE streams, fetch() requests queue indefinitely). Original SSE code is available in git history if needed.
+
 ## [v0.51.347] — 2026-06-09 — Release LK (streaming & render reliability cluster)
 
 ### Fixed
