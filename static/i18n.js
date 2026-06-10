@@ -848,6 +848,7 @@ const LOCALES = {
     insights_model_tokens: 'Tokens',
     insights_model_cost: 'Cost',
     insights_model_share: 'Share',
+    insights_model_team: 'Team',
     insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',
     insights_skill_usage_title: 'Skill Usage',
@@ -2253,6 +2254,7 @@ const LOCALES = {
     insights_model_tokens: 'Token',
     insights_model_cost: 'Costo',
     insights_model_share: 'Quota',
+    insights_model_team: 'Team',
     insights_no_usage_data: 'Nessun dato di utilizzo',
     insights_footer: 'Dati mostrati dagli ultimi {days} giorni',
     insights_skill_usage_title: 'Utilizzo Skill',
@@ -3659,6 +3661,7 @@ const LOCALES = {
     insights_model_tokens: 'トークン',
     insights_model_cost: 'コスト',
     insights_model_share: 'シェア',
+    insights_model_team: 'チーム',
     insights_no_usage_data: '使用データはまだありません',
     insights_footer: '直近 {days} 日間のデータを表示',
     insights_skill_usage_title: 'スキル使用状況',
@@ -5531,6 +5534,7 @@ const LOCALES = {
     insights_model_tokens: 'Tokens',
     insights_model_cost: 'Cost',
     insights_model_share: 'Share',
+    insights_model_team: 'Team',
     insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
     insights_skill_usage_title: 'Skill Usage',  // TODO: translate
@@ -6856,6 +6860,7 @@ const LOCALES = {
     insights_model_tokens: 'Tokens',
     insights_model_cost: 'Cost',
     insights_model_share: 'Share',
+    insights_model_team: 'Equipo',
     insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
     insights_skill_usage_title: 'Skill Usage',  // TODO: translate
@@ -8197,6 +8202,7 @@ const LOCALES = {
     insights_model_tokens: 'Tokens',
     insights_model_cost: 'Cost',
     insights_model_share: 'Share',
+    insights_model_team: 'Team',
     insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
     insights_skill_usage_title: 'Skill Usage',  // TODO: translate
@@ -9531,6 +9537,7 @@ const LOCALES = {
     insights_model_tokens: '令牌',
     insights_model_cost: '费用',
     insights_model_share: '占比',
+    insights_model_team: '团队',
     insights_no_usage_data: '暂无使用数据',
     insights_footer: '显示最近 {days} 天的数据',
     insights_skill_usage_title: '技能使用统计',
@@ -10413,6 +10420,7 @@ const LOCALES = {
     insights_model_tokens: 'Token',
     insights_model_cost: '成本',
     insights_model_share: '占比',
+    insights_model_team: '團隊',
     insights_no_usage_data: '尚無用量資料',
     insights_footer: '顯示最近 {days} 天的資料',
     insights_skill_usage_title: '技能使用情況',
@@ -13542,6 +13550,7 @@ const LOCALES = {
     insights_model_tokens: '토큰',
     insights_model_cost: '비용',
     insights_model_share: '비율',
+    insights_model_team: '팀',
     insights_no_usage_data: '아직 사용 데이터가 없습니다',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
     insights_skill_usage_title: 'Skill Usage',  // TODO: translate
@@ -14293,6 +14302,7 @@ const LOCALES = {
     insights_model_tokens: 'Jetons',
     insights_model_cost: 'Coût',
     insights_model_share: 'Partager',
+    insights_model_team: 'Équipe',
     insights_no_usage_data: 'Aucune donnée d\'utilisation pour l\'instant',
     insights_footer: 'Affichage des données des {days} derniers jours',
     insights_skill_usage_title: 'Utilisation des Skills',
@@ -16279,6 +16289,7 @@ const LOCALES = {
     insights_model_tokens: 'Jetonlar',
     insights_model_cost: 'Maliyet',
     insights_model_share: 'Paylaşmak',
+    insights_model_team: 'Takım',
     insights_no_usage_data: 'Henüz kullanım verisi yok',
     insights_footer: 'Son {days} günün verileri gösteriliyor',
     insights_skill_usage_title: 'Skill Usage',  // TODO: translate
@@ -17149,6 +17160,7 @@ const LOCALES = {
     insights_model_tokens: 'Tokeny',
     insights_model_cost: 'Koszt',
     insights_model_share: 'Udział',
+    insights_model_team: 'Zespół',
     insights_no_usage_data: 'Brak danych o zużyciu',
     insights_footer: 'Wyświetlanie danych z ostatnich {days} dni',
     insights_skill_usage_title: 'Użycie umiejętności',
