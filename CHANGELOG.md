@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+## [v0.51.350] — 2026-06-10 — Release LN (session-move / project-delete timeout fix)
+
 ### Fixed
 
 - **Moving a session into a project, or deleting a project, no longer times out with "Request timed out" while a session is streaming.** Two distinct causes: (1) `/api/session/move` acquired the per-session lock with no deadline, so a slow checkpoint save on the streaming thread (e.g. on WSL/DrvFs) could outlast the browser's 30s abort — it now acquires with a 5s timeout and returns an actionable HTTP 503 instead of hanging; (2) `/api/projects/delete` re-saved every assigned session (O(N) full-history rewrites), which alone could exceed 30s for a project with many large sessions — for an actively-streaming session it now clears the project link on the live in-memory session (persisted by the streaming thread's own next save) instead of issuing a competing write, and guards each per-session update. (#3746)
