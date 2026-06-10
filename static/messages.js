@@ -4156,7 +4156,10 @@ let _approvalSSEHealthTimer = null;
 let _approvalPollingSessionId = null;
 
 function _startApprovalFallbackPoll(sid) {
-  _approvalPollTimer = setInterval(async () => {
+  // Run one tick immediately so a session already blocked on a pending approval
+  // shows its card instantly (the removed SSE 'initial' event used to do this);
+  // then poll on the 1500ms cadence. (#3913 SHOULD-FIX)
+  const _tick = async () => {
     if (!S.busy || !S.session || S.session.session_id !== sid) {
       stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true); return;
     }
@@ -4168,7 +4171,9 @@ function _startApprovalFallbackPoll(sid) {
       else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
     } catch(e) { /* ignore poll errors */ }
     finally { _approvalFallbackPollInFlight = false; }
-  }, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
+  };
+  _approvalPollTimer = setInterval(_tick, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
+  _tick();
 }
 
 function stopApprovalPollingForSession(sid) {
@@ -4870,7 +4875,10 @@ function startClarifyPolling(sid) {
 
 function _startClarifyFallbackPoll(sid) {
   _clarifyPollingSessionId = sid || null;
-  _clarifyFallbackTimer = setInterval(async () => {
+  // Run one tick immediately so a session already blocked on a pending clarify
+  // shows its card instantly (the removed SSE 'initial' event used to do this);
+  // then poll on the 3000ms cadence. (#3913 SHOULD-FIX)
+  const _tick = async () => {
     if (!S.session || S.session.session_id !== sid) {
       stopClarifyPolling(); _hideClarifyCardIfOwner(sid, true, 'session'); return;
     }
@@ -4893,7 +4901,9 @@ function _startClarifyFallbackPoll(sid) {
     } finally {
       _clarifyFallbackPollInFlight = false;
     }
-  }, 3000);
+  };
+  _clarifyFallbackTimer = setInterval(_tick, 3000);
+  _tick();
 }
 
 function stopClarifyPollingForSession(sid) {

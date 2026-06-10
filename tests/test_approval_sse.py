@@ -148,55 +148,53 @@ class TestSSEStaticAnalysis:
 
 
 class TestFrontendSSEImplementation:
-    """Verify the frontend JavaScript SSE implementation."""
+    """Verify the frontend approval prompt transport.
 
-    def test_eventsource_used(self):
-        """Frontend must use EventSource for SSE connection."""
-        assert "new EventSource(" in MESSAGES_JS, \
-            "startApprovalPolling must create an EventSource for SSE"
+    As of #3913 the frontend no longer opens an approval-stream EventSource:
+    six persistent SSE connections exhausted the browser's 6-per-origin
+    HTTP/1.1 pool, hanging the approval POST itself ("Request timed out").
+    ``startApprovalPolling`` now routes straight to the HTTP fallback poller.
+    The backend SSE route remains for compatibility (its tests are above);
+    these assertions pin the poll-only frontend so the regression can't return.
+    """
 
-    def test_sse_url_matches_backend(self):
-        """Frontend SSE URL must match backend approval stream route."""
-        assert "api/approval/stream" in MESSAGES_JS, \
-            "EventSource must connect to the approval stream endpoint"
+    def _approval_polling_body(self):
+        start = MESSAGES_JS.index("function startApprovalPolling(")
+        end = MESSAGES_JS.index("\nfunction ", start + 1)
+        return MESSAGES_JS[start:end]
+
+    def test_frontend_does_not_open_approval_stream(self):
+        """startApprovalPolling must NOT create an approval-stream EventSource (#3913)."""
+        body = self._approval_polling_body()
+        assert "api/approval/stream" not in body, \
+            "Frontend must not open the approval-stream EventSource (browser conn-pool exhaustion, #3913)"
+        assert "new EventSource(" not in body, \
+            "startApprovalPolling must not construct an EventSource — it polls over HTTP now"
+
+    def test_routes_directly_to_fallback_poll(self):
+        """startApprovalPolling must call _startApprovalFallbackPoll directly."""
+        body = self._approval_polling_body()
+        assert "_startApprovalFallbackPoll(sid)" in body, \
+            "startApprovalPolling must route to the HTTP fallback poller"
+
+    def test_fallback_poll_hits_pending_endpoint(self):
+        """The fallback poller must GET the approval/pending endpoint relative to the mount."""
+        assert 'api("/api/approval/pending?session_id="' in MESSAGES_JS, \
+            "Fallback poll must query /api/approval/pending"
         assert "EventSource('/api/approval/stream" not in MESSAGES_JS, \
-            "EventSource URL must stay relative for subpath mounts"
-
-    def test_initial_event_listener(self):
-        """Frontend must listen for 'initial' SSE events."""
-        assert "'initial'" in MESSAGES_JS or '"initial"' in MESSAGES_JS, \
-            "Frontend must addEventListener for 'initial' SSE events"
-
-    def test_approval_event_listener(self):
-        """Frontend must listen for 'approval' SSE events."""
-        assert "'approval'" in MESSAGES_JS or '"approval"' in MESSAGES_JS, \
-            "Frontend must addEventListener for 'approval' SSE events"
-
-    def test_onerror_fallback_to_polling(self):
-        """onerror must fall back to HTTP polling."""
-        assert "_startApprovalFallbackPoll" in MESSAGES_JS, \
-            "SSE onerror handler must call _startApprovalFallbackPoll"
+            "No root-absolute approval EventSource may remain (subpath-mount safety)"
 
     def test_fallback_poll_interval(self):
-        """Fallback polling interval must match v0.50.247's 1500ms cadence."""
+        """Approval fallback polling interval must keep the 1500ms cadence."""
         assert "1500" in MESSAGES_JS, \
-            "Fallback polling interval must be 1500ms to match degraded-mode parity with v0.50.247"
+            "Approval fallback polling interval must be 1500ms (degraded-mode parity with v0.50.247)"
 
-    def test_fallback_closes_eventsource(self):
-        """onerror handler must close the EventSource before falling back."""
-        # The onerror handler should call es.close()
-        assert "es.close()" in MESSAGES_JS, \
-            "onerror handler must close the EventSource before falling back"
-
-    def test_stop_closes_eventsource(self):
-        """stopApprovalPolling must close EventSource."""
-        assert "_approvalEventSource.close()" in MESSAGES_JS, \
-            "stopApprovalPolling must close _approvalEventSource"
-
-    def test_health_timer_cleanup(self):
-        """stopApprovalPolling must clear the SSE health timer."""
-        assert "_approvalSSEHealthTimer" in MESSAGES_JS, \
-            "SSE health timer must be tracked and cleared in stopApprovalPolling"
+    def test_stop_defensively_closes_any_eventsource(self):
+        """stopApprovalPolling must still defensively close a lingering EventSource handle."""
+        # The _approvalEventSource var stays declared (always null now) and the
+        # null-guarded close() remains so any future re-introduction stays safe.
+        assert "_approvalEventSource" in MESSAGES_JS, \
+            "stopApprovalPolling must keep the defensive _approvalEventSource cleanup"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
