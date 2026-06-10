@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Escape now blurs the focused composer so global session keyboard shortcuts work without the mouse.** When the chat composer has focus, pressing Escape leaves text-entry focus after higher-priority Escape actions run, allowing `j`/`k` session navigation to work from the keyboard. (#3952)
+
 ## [v0.51.426] — 2026-06-15 — Release OM (custom-provider model-prefix routing fix, #4210)
 
 ### Fixed
