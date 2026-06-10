@@ -412,7 +412,10 @@ async function switchPanel(name, opts = {}) {
     });
   }
   // Lazy-load panel data
-  if (nextPanel === 'tasks') await loadCrons();
+  if (nextPanel === 'tasks') {
+    if (_tasksSubtab === 'scripts') switchTasksSubtab(_tasksSubtab);
+    else await loadCrons();
+  }
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
@@ -1460,6 +1463,80 @@ function _clearCronDetail(){
   if (body) { body.innerHTML = ''; body.style.display = 'none'; }
   if (empty) empty.style.display = '';
   _setCronHeaderButtons('empty');
+}
+
+let _tasksSubtab = 'jobs';
+function switchTasksSubtab(tab) {
+  _tasksSubtab = tab;
+  $('tasksJobsPane').style.display = tab === 'jobs' ? '' : 'none';
+  $('tasksScriptsPane').style.display = tab === 'scripts' ? '' : 'none';
+  $('tasksJobActions').style.display = tab === 'jobs' ? '' : 'none';
+  $('tasksScriptActions').style.display = tab === 'scripts' ? '' : 'none';
+  document.querySelectorAll('.tasks-subtab').forEach(b =>
+    b.classList.toggle('active', b.id === 'tasksSubtab' + tab.charAt(0).toUpperCase() + tab.slice(1))
+  );
+  if (tab === 'scripts') loadScripts();
+}
+
+let _scriptsData = null;
+async function loadScripts(animate) {
+  const box = $('scriptsList');
+  const refreshBtn = $('scriptsRefreshBtn');
+  if (animate) {
+    _scriptsData = null;
+    if (refreshBtn) { refreshBtn.style.opacity = '0.5'; refreshBtn.disabled = true; }
+  }
+  if (_scriptsData) { _renderScriptsList(_scriptsData); return; }
+  try {
+    const data = await api('/api/scripts/list');
+    _scriptsData = data.scripts || [];
+    _renderScriptsList(_scriptsData);
+  } catch(e) {
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  } finally {
+    if (animate && refreshBtn) { refreshBtn.style.opacity = ''; refreshBtn.disabled = false; }
+  }
+}
+
+function _renderScriptsList(scripts) {
+  const box = $('scriptsList');
+  if (!scripts.length) {
+    box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('scripts_no_scripts'))}</div>`;
+    return;
+  }
+  box.innerHTML = '';
+  for (const s of scripts) {
+    const el = document.createElement('div');
+    el.className = 'script-item';
+    const ext = s.name.split('.').pop();
+    const langClass = ext === 'py' ? 'language-python' : 'language-bash';
+    el.innerHTML = `
+      <div class="script-header" onclick="this.closest('.script-item').classList.toggle('expanded')">
+        <span class="script-name">${esc(s.name)}</span>
+        <span class="script-ext">.${esc(ext)}</span>
+      </div>
+      ${s.description ? `<div class="script-desc">${esc(s.description)}</div>` : ''}
+      <div class="script-source" style="display:none">
+        <pre><code class="${langClass}">${esc(s.source || '')}</code></pre>
+      </div>`;
+    // Toggle source visibility on expand
+    el.querySelector('.script-header').addEventListener('click', async () => {
+      const expanded = el.classList.contains('expanded');
+      const sourceEl = el.querySelector('.script-source');
+      if (expanded && !s._loaded) {
+        try {
+          const r = await api('/api/scripts/raw?path=' + encodeURIComponent(s.name));
+          sourceEl.querySelector('code').textContent = r.source || '';
+          s._loaded = true;
+          if (window.Prism) Prism.highlightElement(sourceEl.querySelector('code'));
+        } catch(e) {
+          sourceEl.querySelector('code').textContent = t('scripts_load_error') || 'Failed to load source.';
+        }
+      }
+      sourceEl.style.display = expanded ? '' : 'none';
+    });
+    box.appendChild(el);
+  }
 }
 
 async function runCurrentCron(){ if (_currentCronDetail) await cronRun(_currentCronDetail.id); }
