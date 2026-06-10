@@ -192,8 +192,9 @@ the same seam:
 - #3401 / #3741 landed the main Live-to-Final redesign.
 - #3707 / #3763 restored live tool cards on reconnect.
 - #3869 / #3876 fixed stale thinking-dot placeholders.
-- #3875 is an open report of recovered reasoning-only turns rendering as a blank
-  transcript; it has not fully settled and is still tracked.
+- #3875 remains open, although v0.51.347 shipped recovered-turn /
+  blank-transcript fixes under that issue; keep it as current evidence that
+  recovery/replay and settled rendering share the same ownership seam.
 - #3877 fixed mid-stream content flicker caused by `renderMessages()` detaching
   the live turn DOM node.
 - #3885 hardened `stream_end` recovery so a transport close does not prematurely
