@@ -5745,6 +5745,7 @@ _SETTINGS_DEFAULTS = {
     "skin": "default",  # accent color skin: default | ares | mono | graphite | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
     "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
+    "render_user_markdown": False,  # opt-in: render full markdown in user messages (#3870)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "worklog_details_expanded_default": False,  # opt-in: expand Worklog details by default; default remains folded
     "pinned_sessions_limit": 3,  # maximum active pinned sessions shown in the sidebar
@@ -5931,6 +5932,7 @@ _SETTINGS_BOOL_KEYS = {
     "terminal_auto_expand_on_output",
     "api_redact_enabled",
     "session_jump_buttons",
+    "render_user_markdown",
     "session_endless_scroll",
     "worklog_details_expanded_default",
 }
