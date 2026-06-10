@@ -20157,7 +20157,7 @@ def _parse_script_docstring(path: Path) -> str:
             tree = ast.parse(text)
             doc = ast.get_docstring(tree)
             return (doc or "").split("\n")[0].strip()
-        except SyntaxError:
+        except (SyntaxError, ValueError):
             pass
     # .sh and fallback: collect leading # comment lines
     lines = []
@@ -20203,6 +20203,8 @@ def _handle_scripts_raw(handler, parsed) -> None:
         return bad(handler, "invalid path", 400)
     if not target.exists() or not target.is_file():
         return bad(handler, "script not found", 404)
+    if target.suffix.lower() not in (".py", ".sh", ".bash", ".zsh"):
+        return bad(handler, "unsupported file type", 400)
     try:
         source = target.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
