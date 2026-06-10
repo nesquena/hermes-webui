@@ -1,3 +1,4 @@
+console.log('[hermes-webui] commands.js v2 — multi-slash+chinese+preserve fix (2026-06-09)');
 // ── Slash commands ──────────────────────────────────────────────────────────
 // Built-in commands intercepted before send(). Each command runs locally
 // (no round-trip to the agent) and shows feedback via toast or local message.
@@ -17,7 +18,6 @@ const COMMANDS=[
   {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
-  {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
   {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
   {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
@@ -95,7 +95,6 @@ function getMatchingCommands(prefix){
   return matches;
 }
 
-let _forcedSkillDirectivePending=null;
 let _slashModelCache=null;
 let _slashModelCachePromise=null;
 let _slashPersonalityCache=null;
@@ -245,15 +244,7 @@ function cliOnlyCommandResponse(cmdName, meta){
   return `\`/${name}\` is a Hermes CLI-only command and cannot run inside the WebUI.${detail}${extra}`;
 }
 
-async function executeAgentCommand(text,_meta){
-  return _runAgentCommandTransport(text,_meta);
-}
-
 async function executeAgentPluginCommand(text,_meta){
-  return _runAgentCommandTransport(text,_meta);
-}
-
-async function _runAgentCommandTransport(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
   const data=await api('/api/commands/exec',{
@@ -264,23 +255,39 @@ async function _runAgentCommandTransport(text,_meta){
 }
 
 function _parseSlashAutocomplete(text){
-  if(!text.startsWith('/')||text.indexOf('\n')!==-1) return null;
-  const raw=text.slice(1);
+  if(text.indexOf('\n')!==-1) return null;
+  const firstSlash=text.indexOf('/');
+  if(firstSlash<0) return null;
+  const beforeSlash=text.slice(0, firstSlash);
+  const raw=text.slice(firstSlash+1);
   const hasSpace=/\s/.test(raw);
   const parts=raw.split(/\s+/);
   const cmdName=(parts[0]||'').toLowerCase();
   const command=COMMANDS.find(c=>c.name===cmdName);
   const subArgSource=(command&&command.subArgs)?command:SLASH_SUBARG_SOURCES[cmdName];
   if(!hasSpace||!subArgSource){
-    return {kind:'commands', query:raw};
+    if(hasSpace && !subArgSource){
+      const lastSlash=raw.lastIndexOf('/');
+      if(lastSlash>=0){
+        const betweenPrefix=raw.slice(0, lastSlash);
+        const afterLastSlash=raw.slice(lastSlash+1);
+        return {kind:'commands', query:afterLastSlash, beforeSlash:beforeSlash, prefix:betweenPrefix};
+      }
+    }
+    return {kind:'commands', query:raw, beforeSlash:beforeSlash, prefix:''};
   }
   const argText=raw.slice(cmdName.length).replace(/^\s+/,'');
   return {kind:'subargs', command:{name:cmdName, desc:subArgSource.desc, subArgs:subArgSource.subArgs}, query:argText.toLowerCase(), rawQuery:argText};
 }
 
+let _currentAutocompleteBeforeSlash='';
+let _currentAutocompletePrefix='';
+
 async function getSlashAutocompleteMatches(text){
   const parsed=_parseSlashAutocomplete(text);
   if(!parsed) return [];
+  _currentAutocompleteBeforeSlash=parsed.beforeSlash||'';
+  _currentAutocompletePrefix=parsed.prefix||'';
   if(parsed.kind==='commands') return getMatchingCommands(parsed.query);
   const options=await _getSlashSubArgOptions(parsed.command.subArgs);
   return options
@@ -291,38 +298,6 @@ async function getSlashAutocompleteMatches(text){
       desc:parsed.command.desc,
       source:'subarg',
       parent:parsed.command.name,
-    }));
-}
-
-function _findComposerPathToken(text,cursor){
-  const value=String(text||'');
-  const rawCursor=Number(cursor);
-  const pos=Number.isFinite(rawCursor)?Math.max(0,Math.min(rawCursor,value.length)):value.length;
-  let start=pos;
-  while(start>0&&!/\s/.test(value.charAt(start-1))) start-=1;
-  let end=pos;
-  while(end<value.length&&!/\s/.test(value.charAt(end))) end+=1;
-  const prefix=value.slice(start,pos);
-  if(!prefix.startsWith('~/')) return null;
-  return {start,end,prefix};
-}
-
-async function getComposerPathAutocompleteMatches(text,cursor){
-  const token=_findComposerPathToken(text,cursor);
-  if(!token||typeof api!=='function') return [];
-  const qs=new URLSearchParams({prefix:token.prefix}).toString();
-  const data=await api(`/api/workspaces/suggest?${qs}`);
-  const needle=token.prefix.toLowerCase();
-  return ((data&&data.suggestions)||[])
-    .map(path=>String(path||''))
-    .filter(path=>path&&path.toLowerCase().startsWith(needle))
-    .map(path=>({
-      name:path,
-      value:path,
-      desc:'Workspace path',
-      source:'path',
-      tokenStart:token.start,
-      tokenEnd:token.end,
     }));
 }
 
@@ -364,114 +339,18 @@ function cmdClear(){
   showToast(t('conversation_cleared'));
 }
 
-// Find the best matching model <option> for a slash-command query.
-// Returns an exact id/label match if present, otherwise the shortest option
-// whose value or label contains the query. Preferring the shortest match keeps
-// a specific query like "mimo-v2.5" from being shadowed by a longer variant
-// such as "mimo-v2.5-pro". See issue #3368.
-//
-// #3368 follow-up: a COMPLETE versioned query (ends in a digit, e.g.
-// "mimo-v2.5") must not match a variant/tier suffix (e.g. "mimo-v2.5-pro") via
-// substring — that silently upgrades the user to a different (paid) tier they
-// did not ask for. Such a candidate is only accepted when the query also
-// matches the option's visible label as a *whole word*, or when the extra text
-// continues a version number. Otherwise the longer tier is rejected here and
-// surfaced as a suggestion instead.
-function _looksLikeVersionedModel(query){
-  // e.g. "mimo-v2.5", "gpt-5.5", "claude-opus-4.6" — ends in a digit.
-  return /\d$/.test(String(query||''));
-}
-// Build the full /model candidate set from the catalog groups returned by
-// /api/models: featured `models` PLUS the truncated `extra_models` tail. Large
-// provider catalogs (e.g. a Nous Portal subscription with >25 models) only
-// render a "featured" subset as <option> entries — the rest live in
-// extra_models and never become <select> options (see _build_nous_featured_set
-// in api/config.py). The slash command exists precisely so power users can reach
-// ANY catalog model by name, the same way the CLI/autocomplete can, so /model
-// must resolve against this full list — not just the rendered picker options.
-// Falls back to the live <select> options when the catalog fetch failed.
-// Each entry mimics the <option> shape (value + textContent) so it can be passed
-// straight to _bestModelMatch / _nearestModelSuggestion. Also returns a
-// value->provider_id map so an extras-only winner can be injected with the right
-// provider. (#3368)
-function _buildModelCandidates(sel,groups){
-  const options=[];
-  const providerMap={};
-  if(Array.isArray(groups)&&groups.length){
-    for(const g of groups){
-      const pid=(g&&g.provider_id)||'';
-      const push=m=>{
-        if(!m||!m.id) return;
-        options.push({value:m.id,textContent:m.label||m.id});
-        if(pid&&!(m.id in providerMap)) providerMap[m.id]=pid;
-      };
-      for(const m of (Array.isArray(g.models)?g.models:[])) push(m);
-      for(const m of (Array.isArray(g.extra_models)?g.extra_models:[])) push(m);
-    }
-  }
-  if(!options.length&&sel){
-    for(const o of Array.from(sel.options||[])) options.push({value:o.value,textContent:o.textContent});
-  }
-  return {options,providerMap};
-}
-function _bestModelMatch(options,query){
-  let best=null;
-  const versioned=_looksLikeVersionedModel(query);
-  for(const opt of options){
-    const value=opt.value.toLowerCase();
-    const text=opt.textContent.toLowerCase();
-    if(value===query||text===query) return opt.value;
-    if(value.includes(query)||text.includes(query)){
-      if(versioned){
-        // Reject a longer variant where the query is immediately followed by a
-        // tier/variant suffix ("-pro", "-flash", " pro", etc.) rather than a
-        // version continuation. Tested on the option value (canonical id).
-        const idx=value.indexOf(query);
-        const after=idx>=0?value.charAt(idx+query.length):'';
-        // after === '' → query is a suffix of value (exact-ish, allow)
-        // after is a digit or '.' → version continuation (allow, e.g. v2 → v2.5)
-        // after is '-' or other → variant/tier suffix (reject)
-        if(after && after!=='.' && !/\d/.test(after)) continue;
-      }
-      if(best===null||opt.value.length<best.length) best=opt.value;
-    }
-  }
-  return best;
-}
-
-// When a versioned query has no clean match, find the closest catalog option
-// (a longer variant that the query is a prefix of) to offer as a suggestion,
-// e.g. "mimo-v2.5" → "mimo-v2.5-pro". Returns the suggested option value, or ''.
-function _nearestModelSuggestion(options,query){
-  let suggestion='';
-  for(const opt of options){
-    const value=opt.value.toLowerCase();
-    if(value.includes(query)){
-      const cand=opt.value;
-      if(!suggestion||cand.length<suggestion.length) suggestion=cand;
-    }
-  }
-  return suggestion;
-}
-
 async function cmdModel(args){
   if(!args){showToast(t('model_usage'));return;}
   const sel=$('modelSelect');
   if(!sel)return;
   let q=args.toLowerCase();
-  // Fetch /api/models once: it carries both the alias map AND the full catalog
-  // groups (featured `models` + truncated `extra_models`). Resolve aliases, then
-  // build the full candidate set so /model can reach ANY catalog model by name —
-  // not just the subset rendered as <option> entries. On large provider catalogs
-  // (e.g. a Nous Portal subscription) the picker only renders ~25 "featured"
-  // models; the rest live in extra_models and are absent from sel.options. The
-  // CLI resolves against the full catalog, so /model must too. (#3368)
-  let modelsData=null;
+  // Resolve alias before fuzzy matching the dropdown.
+  // Fetch /api/models which now includes an "aliases" key.
   try {
     const resp=await fetch('/api/models');
     if(resp.ok){
-      modelsData=await resp.json();
-      const aliases=modelsData.aliases||{};
+      const data=await resp.json();
+      const aliases=data.aliases||{};
       for(const [alias,modelId] of Object.entries(aliases)){
         if(alias.toLowerCase()===q){
           q=modelId.toLowerCase(); // resolve alias to real model id e.g. "deepseek/deepseek-v4-flash"
@@ -480,32 +359,30 @@ async function cmdModel(args){
       }
     }
   } catch(_){/* non-critical, fall through to fuzzy match */}
-  const {options:candidates,providerMap}=_buildModelCandidates(sel,modelsData&&modelsData.groups);
   // First: try exact match within active provider's optgroup.
   // Use _findModelInDropdown (ui.js) which supports preferredProviderId.
   const preferred=(S&&S.session&&S.session.model_provider)||window._activeProvider||null;
   let match=(typeof _findModelInDropdown==='function')?_findModelInDropdown(q,sel,preferred):null;
-  // Fallback: fuzzy match across the FULL catalog (featured + extras), so an
-  // exact bare model living in the extras tail (e.g. "mimo-v2.5" alongside the
-  // featured "mimo-v2.5-pro") still wins — exact/shortest-match in _bestModelMatch.
+  // Fallback: fuzzy match across all options
   if(!match){
-    match=_bestModelMatch(candidates,q);
+    for(const opt of sel.options){
+      if(opt.value.toLowerCase().includes(q)||opt.textContent.toLowerCase().includes(q)){
+        match=opt.value;break;
+      }
+    }
   }
   // Fallback: if q has provider/ prefix (e.g. "deepseek/deepseek-v4-flash"),
   // try the bare model name (which is how options appear for the active provider)
   if(!match && q.includes('/')){
     const bare=q.slice(q.lastIndexOf('/')+1);
-    match=_bestModelMatch(candidates,bare);
-    // #3368: a versioned slash-qualified query whose only near catalog entry is a
-    // rejected tier variant (e.g. "xiaomi/mimo-v2.5" when only "xiaomi/mimo-v2.5-pro"
-    // exists) must NOT silently direct-update to the invalid name — fall through to
-    // the no-match/"did you mean?" toast instead. The cross-provider direct-update
-    // path below is only for genuinely off-catalog providers with no near variant.
-    const nearSuggestion=_nearestModelSuggestion(candidates,q)||_nearestModelSuggestion(candidates,bare);
-    const versionedNoSnap=_looksLikeVersionedModel(bare)&&nearSuggestion;
+    for(const opt of sel.options){
+      if(opt.value.toLowerCase().includes(bare)||opt.textContent.toLowerCase().includes(bare)){
+        match=opt.value;break;
+      }
+    }
     // Cross-provider fallback: if still no match, the model is from a
     // different provider not in the dropdown. Call /api/session/update directly.
-    if(!match && !versionedNoSnap && S&&S.session&&S.session.session_id){
+    if(!match && S&&S.session&&S.session.session_id){
       const provider=q.slice(0,q.indexOf('/'));
       try{
         const resp=await fetch('/api/session/update',{
@@ -527,32 +404,8 @@ async function cmdModel(args){
       }catch(_){/* fall through to "no model match" */}
     }
   }
-  if(!match){
-    // #3368: when a complete versioned name (e.g. "mimo-v2.5") doesn't match
-    // because only a longer tier variant exists ("mimo-v2.5-pro"), don't snap
-    // to it — say no-match and suggest the near variant so the user can opt in.
-    // no_model_match already ends with an opening quote, so close it with args+".
-    let msg=t('no_model_match')+`${args}"`;
-    const suggestion=_nearestModelSuggestion(candidates,q);
-    if(suggestion){
-      // model_did_you_mean is a placeholder template; t() invokes it with the
-      // suggestion as its arg. (Calling t() without the arg renders "undefined".)
-      msg+=t('model_did_you_mean', suggestion);
-    }
-    showToast(msg);
-    return;
-  }
-  // The winning model may live in the extras tail (not a rendered <option>), so
-  // a bare `sel.value=match` would silently no-op. Inject the option with its
-  // provider before selecting so onchange() persists the correct model+provider
-  // end-to-end. _ensureModelOptionInDropdown reuses the existing option when one
-  // is already rendered. (#3368)
-  const hasOption=Array.from(sel.options||[]).some(o=>o.value===match);
-  if(!hasOption && typeof _ensureModelOptionInDropdown==='function'){
-    _ensureModelOptionInDropdown(match,sel,providerMap[match]||null);
-  }else{
-    sel.value=match;
-  }
+  if(!match){showToast(t('no_model_match')+`"${args}"`);return;}
+  sel.value=match;
   await sel.onchange();
   showToast(t('switched_to')+match);
 }
@@ -572,23 +425,13 @@ async function cmdWorkspace(args){
 }
 
 async function cmdTerminal(){
-  let data=null;
-  try{
-    data=await api('/api/workspaces');
-    if(typeof syncTerminalBackendState==='function') syncTerminalBackendState(data);
-    if(data&&data.terminal_remote_backend){
-      const msg=typeof _terminalRemoteBackendUnsupportedMessage==='function'
-        ? _terminalRemoteBackendUnsupportedMessage()
-        : 'Embedded terminal is only supported for local terminal backends.';
-      showToast(msg,3200,'warning');
-      if(typeof syncTerminalButton==='function') syncTerminalButton();
-      return;
-    }
-  }catch(_){}
   if(!S.session&&typeof newSession==='function'){
     if(!S._profileSwitchWorkspace&&!S._profileDefaultWorkspace){
-      const first=(data&&data.workspaces||[])[0];
-      S._profileSwitchWorkspace=(data&&data.last)||(first&&first.path)||null;
+      try{
+        const data=await api('/api/workspaces');
+        const first=(data.workspaces||[])[0];
+        S._profileSwitchWorkspace=data.last||(first&&first.path)||null;
+      }catch(_){}
     }
     await newSession();
     if(typeof renderSessionList==='function') await renderSessionList();
@@ -920,44 +763,6 @@ async function cmdSkills(args){
     renderMessages();
     showToast(t('type_slash'));
   }catch(e){
-    showToast('Failed to load skills: '+e.message);
-  }
-}
-
-async function cmdUse(args){
-  if(!args){
-    S.messages.push({role:'assistant',content:'Usage: `/use <skill-name>` — forces the agent to consult that skill before its next response.'});
-    renderMessages();
-    return;
-  }
-  let resolve;
-  const pending = {sessionId:S.session&&S.session.session_id||null,promise:null};
-  pending.promise = new Promise(r => { resolve = r; });
-  _forcedSkillDirectivePending = pending;
-  const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;
-  try{
-    const data = await api('/api/skills');
-    const skills = data.skills || [];
-    const match = skills.find(s => (s.name||'').toLowerCase() === args.toLowerCase());
-    if(!match){
-      resolve(null);
-      if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
-      if(isCurrentSession()){
-        const msg = {role:'assistant', content:`No skill named \`${args}\`. Use \`/skills\` to see available skills.`};
-        S.messages.push(msg); renderMessages();
-      }
-      return;
-    }
-    const directive = `[USER OVERRIDE] You MUST consult skill '${match.name}' via skill_view before responding to the next message.`;
-    resolve(directive);
-    if(isCurrentSession()){
-      S.messages.push({role:'assistant', content:`Next turn: skill \`${match.name}\` will be forced.`});
-      renderMessages();
-    }
-    showToast(`Skill \`${match.name}\` will be used for next turn.`);
-  }catch(e){
-    resolve(null);
-    if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
     showToast('Failed to load skills: '+e.message);
   }
 }
@@ -1515,7 +1320,7 @@ async function loadSkillCommands(force=false){
 function refreshSlashCommandDropdown(){
   const ta=$('msg');if(!ta)return;
   const text=ta.value||'';
-  if(!text.startsWith('/')||text.indexOf('\n')!==-1){hideCmdDropdown();return;}
+  if(text.indexOf('/')<0||text.indexOf('\n')!==-1){hideCmdDropdown();return;}
   getSlashAutocompleteMatches(text).then(matches=>{
     if(($('msg').value||'')!==text) return;
     if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
@@ -1546,39 +1351,25 @@ function showCmdDropdown(matches){
     if(i===_cmdSelectedIdx) el.classList.add('selected');
     el.dataset.idx=i;
     const isSubArg=c.source==='subarg';
-    const isPath=c.source==='path';
     const usage=(!isSubArg&&c.arg)?` <span class="cmd-item-arg">${esc(c.arg)}</span>`:'';
     const badge=c.source==='skill'?`<span class="cmd-item-badge cmd-item-badge-skill">${esc(t('slash_skill_badge'))}</span>`:'';
     if(c.source==='skill') el.classList.add('cmd-item-skill');
-    if(isPath) el.classList.add('cmd-item-path');
-    const nameHtml=isPath
-      ? `<div class="cmd-item-name"><span class="cmd-item-path-value">${esc(c.value)}</span></div>`
-      : isSubArg
+    const nameHtml=isSubArg
       ? `<div class="cmd-item-name"><span class="cmd-item-parent">/${esc(c.parent)}</span> <span class="cmd-item-subarg">${esc(c.value)}</span></div>`
       : `<div class="cmd-item-name">/${esc(c.name)}${usage}${badge}</div>`;
     const descHtml=`<div class="cmd-item-desc">${esc(c.desc)}</div>`;
     el.innerHTML=`${nameHtml}${descHtml}`;
     el.onmousedown=(e)=>{
       e.preventDefault();
-      if(isPath){
-        const ta=$('msg');
-        if(!ta){hideCmdDropdown();return;}
-        const start=Number.isFinite(Number(c.tokenStart))?Number(c.tokenStart):ta.selectionStart;
-        const end=Number.isFinite(Number(c.tokenEnd))?Number(c.tokenEnd):ta.selectionEnd;
-        const nextPath=String(c.value||'').endsWith('/')?String(c.value||''):`${String(c.value||'')}/`;
-        const current=String(ta.value||'');
-        const safeStart=Math.max(0,Math.min(start,current.length));
-        const safeEnd=Math.max(safeStart,Math.min(end,current.length));
-        ta.value=current.slice(0,safeStart)+nextPath+current.slice(safeEnd);
-        const pos=safeStart+nextPath.length;
-        ta.focus();
-        ta.setSelectionRange(pos,pos);
-        ta.dispatchEvent(new Event('input',{bubbles:true}));
-        hideCmdDropdown();
-        return;
-      }
       const nextValue=isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':''));
-      $('msg').value=nextValue;
+      const _b=_currentAutocompleteBeforeSlash||'';
+      const _p=_currentAutocompletePrefix||'';
+      const _trail=c.arg?' ':'';
+      if(_b||_p){
+        $('msg').value=_b+'/'+(_p?_p+'/':'')+c.name+_trail;
+      }else{
+        $('msg').value=nextValue;
+      }
       $('msg').focus();
       if(!isSubArg&&c.source!=='skill'&&nextValue.endsWith(' ')&&typeof getSlashAutocompleteMatches==='function'){
         getSlashAutocompleteMatches(nextValue).then(matches=>{
