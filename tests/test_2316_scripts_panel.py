@@ -1,7 +1,6 @@
 """Tests for #2316: Scripts panel — list and raw endpoint for ~/.hermes/scripts/."""
 
 import json
-import pathlib
 import shutil
 import urllib.error
 import urllib.request
