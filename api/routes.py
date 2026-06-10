@@ -3301,18 +3301,75 @@ def _session_index_marks_was_webui(sid: str) -> bool:
     return False
 
 
+def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple[bool, str]:
+    """Decide whether a foreign-origin session is safe to claim writeable
+    in WebUI. Returns ``(claimable, reason_if_not)``.
+
+    Policy mirrors ``/api/session/import_cli`` (api/routes.py:~15626):
+    sessions explicitly marked ``read_only`` in their foreign store are
+    surfaced as read-only stubs but never materialised as writable
+    WebUI sidecars. We extend that with a denylist of foreign-source
+    families whose ownership belongs to a non-WebUI process
+    (messaging channels, external agents, Claude Code), so a WebUI
+    POST cannot accidentally turn them into writable sidecars and
+    violate their ownership boundary (#4911 review).
+
+    The check is denylist-based: if a source is in any of the
+    refused families below, it is non-claimable. Everything else
+    (CLI, TUI, Desktop, plus future local agent sources) is allowed.
+    TUI/Desktop sessions whose cli_meta is empty (they don't appear
+    in ``get_cli_sessions()`` due to the CLI cap) fall through to
+    ``state_db_source``; state.db has a ``source`` column with values
+    like ``tui``, ``desktop``, ``cli``, ``cron``, ``claude_code``,
+    ``messaging``, etc.
+    """
+    cm = cli_meta or {}
+    if bool(cm.get("read_only")):
+        return False, "explicit_readonly"
+    session_source = (cm.get("session_source") or "").strip().lower()
+    if session_source in {"messaging", "external_agent"}:
+        return False, f"session_source={session_source}"
+    source_tag = (cm.get("source_tag") or cm.get("raw_source") or "").strip().lower()
+    if source_tag == "claude_code":
+        return False, "claude_code"
+    if _is_messaging_session_record(cm):
+        return False, "messaging_record"
+    # Empty cli_meta is the common case for TUI/Desktop; fall through
+    # to state.db's source column.  Refuse known-foreign state.db sources.
+    if not source_tag and state_db_source:
+        source_tag = state_db_source.strip().lower()
+    if source_tag in {"claude_code", "messaging", "external_agent"}:
+        return False, f"state_db_source={source_tag}"
+    return True, ""
+
+
 def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
     """Resolve a session_id that has no WebUI sidecar.
 
     Returns ``(session_or_None, reason)``. Reasons:
 
       ``'materialized'``
-        A state.db row with messages exists. ``session`` is a fully populated
-        :class:`api.models.Session` ready for writeable use; the caller MUST
-        call ``session.save()`` to persist a WebUI-owned sidecar before the
-        first write.  The Session carries the source-tag metadata from the
-        CLI/state.db lookup (``is_cli_session=True``, ``read_only=False``)
-        so the sidebar still renders the original source badge.
+        A state.db row with messages exists AND the foreign source is
+        claimable per :func:`_is_claimable_cli_source` (CLI / TUI /
+        Desktop, no explicit read_only, not a messaging / claude_code
+        session). ``session`` is a fully populated
+        :class:`api.models.Session` ready for writeable use; the caller
+        MUST call ``session.save()`` to persist a WebUI-owned sidecar
+        before the first write.  The Session carries the source-tag
+        metadata from the CLI/state.db lookup (``is_cli_session=True``,
+        ``read_only=False``) so the sidebar still renders the original
+        source badge.
+
+      ``'not_claimable'``
+        The sid has recoverable state.db messages but the foreign
+        source is owned by a non-WebUI process (messaging channel,
+        claude_code, external_agent, or explicit read_only). ``session``
+        is still returned, but with ``read_only=True`` preserved and
+        the foreign source tag intact, so the GET stub continues to
+        render the original badge and the read-only banner. The POST
+        path must return 403 (not 404) so the user sees a clear
+        refusal instead of the empty-state self-heal that the 404
+        handler triggers (#4911 review).
 
       ``'was_webui'``
         The sid is in the WebUI session index as a webui/fork origin row but
@@ -3358,7 +3415,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
                 workspace = "/"
         return workspace
 
-    def build_session(sid, cli_meta, msgs):
+    def build_session(sid, cli_meta, msgs, read_only_flag):
         return Session(
             session_id=sid,
             title=(cli_meta or {}).get("title") or "CLI Session",
@@ -3374,11 +3431,13 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             raw_source=(cli_meta or {}).get("raw_source"),
             session_source=(cli_meta or {}).get("session_source"),
             source_label=(cli_meta or {}).get("source_label"),
-            # The user is now taking ownership of this session in WebUI; clear
-            # the read-only flag the foreign store set so _start_run can persist
-            # the new turn.  source_tag/source_label stay so the original badge
-            # is still rendered in the sidebar.
-            read_only=False,
+            # ``read_only_flag`` is True for not_claimable sources (foreign
+            # store marked them read-only / messaging / claude_code) and
+            # False for genuine CLI / TUI / Desktop sessions.  Only the
+            # POST claim path with a verified-claimable source can
+            # actually write; the GET stub always reflects whatever the
+            # helper returns so the read-only banner stays accurate.
+            read_only=read_only_flag,
         )
 
     if not is_safe_session_id(sid):
@@ -3390,7 +3449,58 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
     msgs = get_cli_session_messages(sid)
     if not msgs:
         return None, "no_foreign_state"
-    return build_session(sid, cli_meta, msgs), "materialized"
+    # TUI/Desktop sessions often have empty cli_meta (they don't appear in
+    # get_cli_sessions() because of the cap).  Fall back to the state.db
+    # ``source`` column to make the claim-eligibility check robust and to
+    # populate the Session's source-tag metadata so the sidebar still
+    # renders the correct badge for these sessions.
+    state_db_source = ""
+    state_db_row = None
+    try:
+        from api.models import _active_state_db_path
+        db_path = _active_state_db_path()
+        if db_path and Path(db_path).exists():
+            import sqlite3 as _sqlite
+            with closing(_sqlite.connect(str(db_path))) as _conn:
+                _conn.row_factory = _sqlite.Row
+                _row = _conn.execute(
+                    "SELECT source, title, model, cwd, started_at, ended_at "
+                    "FROM sessions WHERE id = ?", (sid,)
+                ).fetchone()
+                if _row is not None:
+                    state_db_row = dict(_row)
+                    state_db_source = str(_row["source"] or "").strip().lower()
+    except Exception:
+        state_db_source = ""
+    # Populate source metadata from state.db when cli_meta is empty so the
+    # synthesized Session carries the right source_tag/source_label.  Only
+    # fill fields that are actually missing from cli_meta; the foreign store
+    # always wins when both are present.
+    if state_db_row:
+        if not (cli_meta or {}).get("source_tag") and state_db_source:
+            cli_meta = dict(cli_meta)
+            cli_meta["source_tag"] = state_db_source
+        if not (cli_meta or {}).get("raw_source") and state_db_source:
+            cli_meta = cli_meta or {}
+            cli_meta.setdefault("raw_source", state_db_source)
+        if not (cli_meta or {}).get("title") and state_db_row.get("title"):
+            cli_meta = cli_meta or {}
+            cli_meta.setdefault("title", state_db_row["title"])
+        if not (cli_meta or {}).get("model") and state_db_row.get("model"):
+            cli_meta = cli_meta or {}
+            cli_meta.setdefault("model", state_db_row["model"])
+        if not (cli_meta or {}).get("workspace") and state_db_row.get("cwd"):
+            cli_meta = cli_meta or {}
+            cli_meta.setdefault("workspace", state_db_row["cwd"])
+    claimable, _reason = _is_claimable_cli_source(cli_meta, state_db_source)
+    if not claimable:
+        # The session is real and viewable, but the foreign source forbids
+        # the WebUI from taking write ownership.  Build the Session with
+        # readonly=True so the GET stub keeps rendering the original
+        # read-only badge, and return 'not_claimable' so the POST path
+        # 403s instead of bare-404ing.
+        return build_session(sid, cli_meta, msgs, read_only_flag=True), "not_claimable"
+    return build_session(sid, cli_meta, msgs, read_only_flag=False), "materialized"
 
 
 def _messaging_session_identity(session: dict, raw_source: str) -> str:
@@ -13220,6 +13330,24 @@ def _handle_chat_start(handler, body, diag=None):
                 # safety violation). All collapse to 404 — the client only
                 # knows the right thing to do for "this session is gone".
                 return bad(handler, "Session not found", 404)
+            if reason == "not_claimable":
+                # Foreign store says this session is read-only / owned by
+                # a non-WebUI process (messaging, claude_code,
+                # external_agent, or explicit read_only flag). The
+                # session is real and viewable, but the WebUI must not
+                # take write ownership of it — that would be an
+                # ownership-boundary violation (#4911 review).  403
+                # (not 404) because 404 triggers the frontend's
+                # empty-state self-heal handler (messages.js:1236) which
+                # strips the URL and clears localStorage; for a
+                # legitimately-listed read-only session the user
+                # should keep their URL and see a refusal, not have
+                # their session vanish.
+                return bad(
+                    handler,
+                    "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
+                    403,
+                )
             try:
                 synth.save()
             except Exception as _save_err:

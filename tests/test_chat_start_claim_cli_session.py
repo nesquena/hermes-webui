@@ -18,7 +18,6 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from unittest import mock
 
 import pytest
 
@@ -194,9 +193,8 @@ def _make_state_db(path: Path, sid: str, *, message_count: int = 2,
     conn = sqlite3.connect(str(path))
     conn.executescript(
         """
-        CREATE TABLE schema_version (version INTEGER);
-        INSERT INTO schema_version (version) VALUES (1);
-        CREATE TABLE sessions (
+        CREATE TABLE IF NOT EXISTS schema_version (version INTEGER);
+        CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             source TEXT,
             user_id TEXT,
@@ -231,7 +229,7 @@ def _make_state_db(path: Path, sid: str, *, message_count: int = 2,
             rewind_count INTEGER DEFAULT 0,
             archived INTEGER DEFAULT 0
         );
-        CREATE TABLE messages (
+        CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT,
             role TEXT,
@@ -428,3 +426,222 @@ def test_helper_uses_get_last_workspace_when_cwd_missing(
     assert reason == "materialized"
     assert sess is not None
     assert Path(sess.workspace).resolve() == fallback_workspace.resolve()
+
+
+# ---------------------------------------------------------------------------
+# Refusal tests — the #4911 security gate
+# ---------------------------------------------------------------------------
+# A WebUI POST must NOT be able to claim a session owned by another process
+# (messaging channel, Claude Code, external_agent) and turn it into a
+# writable WebUI sidecar.  The helper returns the Session anyway (so the
+# GET stub still renders the read-only banner), but the reason is
+# 'not_claimable' and the Session is built with read_only=True.  The
+# POST handler maps that reason to 403.  The four refusal families
+# below correspond to the maintainer's required-before-merge list.
+
+
+def test_helper_refuses_claude_code_session(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """Claude Code sessions are owned by the Claude Code app.  A WebUI
+    POST must not be able to materialise a writable sidecar from them.
+
+    Note: ``get_cli_session_messages`` short-circuits to a JSONL-on-disk
+    reader for sids that start with the ``claude_code_`` prefix, so the
+    test sid deliberately doesn't use that prefix and goes through the
+    regular state.db path."""
+    SID = "20260610_claude_code_xyz"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=2,
+        title="Claude Code chat", source="claude_code", cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid: {"session_id": SID, "source_tag": "claude_code",
+                      "raw_source": "claude_code",
+                      "session_source": "external_agent"},
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "not_claimable", (
+        "Claude Code sessions must surface as 'not_claimable' — "
+        "claim would convert a Claude-Code-owned session into a "
+        "writable WebUI sidecar (#4911 review)"
+    )
+    assert sess is not None, "GET stub must still return a read-only view"
+    assert sess.read_only is True, (
+        "refused sessions must keep read_only=True so the GET stub's "
+        "read-only banner stays accurate"
+    )
+    assert sess.is_cli_session is True
+    assert sess.source_tag == "claude_code"
+
+
+def test_helper_refuses_messaging_session(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """A Telegram/Discord/etc session is owned by the gateway, not
+    WebUI.  A WebUI POST must not be able to claim it."""
+    SID = "20260610_telegram_chat_42"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=2,
+        title="Telegram chat", source="telegram", cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid: {"session_id": SID, "source_tag": "telegram",
+                      "raw_source": "telegram",
+                      "session_source": "messaging"},
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "not_claimable"
+    assert sess is not None
+    assert sess.read_only is True
+    assert sess.session_source == "messaging"
+
+
+def test_helper_refuses_external_agent_session_source(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """session_source='external_agent' is a hard refusal regardless of
+    which raw source tag the foreign store used."""
+    SID = "20260610_external_agent_99"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=1,
+        title="External agent", source="unknown", cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid: {"session_id": SID, "source_tag": "agent_x",
+                      "raw_source": "agent_x",
+                      "session_source": "external_agent"},
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "not_claimable"
+    assert sess.read_only is True
+
+
+def test_helper_refuses_explicit_readonly_flag(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """If the foreign store marks a session read_only=True, the WebUI
+    must respect that.  Mirrors /api/session/import_cli policy at
+    routes.py:~15626."""
+    SID = "20260610_explicit_ro_session"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=1,
+        title="Read-only", source="cli", cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid: {"session_id": SID, "source_tag": "cli",
+                      "raw_source": "cli",
+                      "session_source": "other", "read_only": True},
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "not_claimable"
+    assert sess.read_only is True, (
+        "explicit read_only=True from cli_meta must be preserved "
+        "even when the source looks claimable"
+    )
+
+
+def test_helper_uses_state_db_source_when_cli_meta_empty(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """TUI/Desktop sessions often have empty cli_meta (they don't
+    appear in get_cli_sessions() because of the cap).  The helper
+    must fall back to state.db's source column to make the
+    claim-eligibility check robust."""
+    SID = "20260610_tui_no_cli_meta"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=2,
+        title="TUI session", source="tui", cwd="/root",
+    )
+    # Empty cli_meta (the typical case for TUI)
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata", lambda _sid: {},
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "materialized", (
+        "TUI sessions with empty cli_meta must still be claimable — "
+        "the helper must read state.db.source as the fallback"
+    )
+    assert sess.read_only is False
+    assert sess.source_tag == "tui"
+
+
+def test_helper_refuses_claude_code_via_state_db_source(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """Same as test_helper_refuses_claude_code_session but with empty
+    cli_meta — the state.db source column is the fallback."""
+    SID = "20260610_claude_via_state_db"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=1,
+        title="Claude Code", source="claude_code", cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata", lambda _sid: {},
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "not_claimable"
+    assert sess.read_only is True
+
+
+def test_post_chat_start_returns_403_for_not_claimable(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """Static check: the POST _handle_chat_start KeyError arm must map
+    the 'not_claimable' reason to a 403 (not 404).  404 would trigger
+    the frontend's empty-state self-heal which is the wrong UX for a
+    legitimately-listed read-only session."""
+    src = ROUTES_PY.read_text(encoding="utf-8")
+    # The new arm sits between the bare-404 collapse and the synth.save()
+    # call.  Locate it via the "not_claimable" string and the 403 marker.
+    m = re.search(
+        r'if reason == "not_claimable":(.*?)(?=\n\s*try:\s*\n\s*synth\.save)',
+        src, re.DOTALL,
+    )
+    assert m, "could not find the 'not_claimable' arm in _handle_chat_start"
+    arm = m.group(1)
+    assert "403" in arm, (
+        "'not_claimable' must return 403, not 404, so the frontend "
+        "keeps the user's URL and shows a refusal bubble instead of "
+        "triggering the empty-state self-heal"
+    )
+    assert "read-only" in arm.lower(), (
+        "403 response body should mention read-only so the user "
+        "understands why the claim was refused"
+    )
+    # And critically: the 'not_claimable' arm must NOT call synth.save()
+    assert "synth.save()" not in arm, (
+        "'not_claimable' must skip synth.save() — claiming a "
+        "read-only / foreign-owned session into a writable sidecar "
+        "is the ownership-boundary violation #4911 review called out"
+    )
+
+
+def test_tui_session_still_claimable_regression(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """Regression for the original bug (#4911): TUI sessions must
+    still be claimable after the security gate lands.  This is the
+    happy path — if it breaks, the whole PR regresses.  The
+    state.db source-column fallback is exercised by
+    ``test_helper_uses_state_db_source_when_cli_meta_empty``."""
+    SID = "20260610_tui_happy_path"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=3,
+        title="TUI chat", source="tui", cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid: {"session_id": SID, "source_tag": "tui",
+                      "raw_source": "tui",
+                      "session_source": "other"},
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "materialized"
+    assert sess.read_only is False
+    assert sess.is_cli_session is True
+    assert sess.source_tag == "tui"
