@@ -1079,6 +1079,7 @@ from api.config import (
     _resolve_cli_toolsets,
     _INDEX_HTML_PATH,
     get_available_models,
+    _provider_is_known_or_configured,
     IMAGE_EXTS,
     MD_EXTS,
     MIME_MAP,
@@ -2663,42 +2664,53 @@ def _resolve_compatible_session_model_state(
                 else None
             )
             return bare_model, provider_context, True
-        # Do NOT revert to the default when the user explicitly named a provider
-        # that is merely absent from *this* catalog snapshot, with no positive
-        # signal that the selection is stale. Two cases are preserved:
+        # An explicit, fresh user pick is always honored. The caller sets
+        # explicit_model_pick only when the model was just chosen in the picker, so
+        # it must never be second-guessed against the catalog — even if the named
+        # provider is gone, the user gets a clear run-time error rather than a
+        # silent model swap.
+        if explicit_model_pick:
+            return model, provider_raw, False
+        # On NON-explicit resolves (2nd+ turn, chat switch), preserve the selection
+        # only when all three hold:
         #
-        #   * explicit_model_pick — the caller sets this flag only when the model
-        #     was just chosen by the user in the picker (a deliberate, fresh pick).
-        #     A fresh pick must be honored as-is, never second-guessed against the
-        #     catalog.
+        #   * provider_normalized == "" — a non-first-party provider hint
+        #     (ollama-cloud / deepseek / xai / a named custom proxy). First-party
+        #     families fall through to the stale-cross-provider repair below.
         #
-        #   * a non-first-party provider hint (provider_normalized == "", e.g.
-        #     ollama-cloud / deepseek / xai) whose BARE model is not a first-party
-        #     family id (does not start with gpt/claude/gemini). Such providers
-        #     discover their models live, so a cold/minimal catalog can momentarily
-        #     omit the group even though the provider is configured. Reverting here
-        #     would silently swap the user's model on the next turn or on chat
-        #     switch. This matches the slash-qualified branch above, which already
-        #     passes models whose provider normalizes to "" through unchanged.
+        #   * the BARE model is not a first-party family id (does not start with
+        #     gpt/claude/gemini), i.e. not a misrouted first-party model that a
+        #     vanished provider used to host (e.g. "@copilot:claude-opus-4.6").
         #
-        # A first-party-family bare id under such a provider (e.g.
-        # "@copilot:claude-opus-4.6" while the agent now runs a different provider)
-        # is treated as a genuinely stale, misrouted first-party model and still
-        # falls through to the default-repair below.
+        #   * the provider is still KNOWN or CONFIGURED. This is the load-bearing
+        #     distinction: catalog-absence has two causes, and only one should be
+        #     preserved —
+        #       (a) a cold live-discovery provider (ollama-cloud IS configured; its
+        #           group just isn't in this cached snapshot yet) → preserve, and
+        #       (b) a genuinely removed/unknown provider ("@removed:mistral-large"
+        #           no longer configured anywhere) → must still fall through to the
+        #           default so chat/start doesn't route to an unreachable provider.
+        #     _provider_is_known_or_configured() decides this from the static
+        #     provider registry + config state, NOT from the cold catalog snapshot
+        #     (re-deriving that live would defeat the prefer_cached_catalog win).
+        #
+        # This preservation matches the slash-qualified branch above, which already
+        # passes configured/known "" -provider models through unchanged.
         #
         # KNOWN LIMITATION: the first-party-family test is a bare-name prefix match
         # (the same approximation _model_matches_active_provider_family uses). A
         # genuine third-party model whose name merely *starts* with gpt/claude/
         # gemini (e.g. "@ollama:gpt4all-mini") is therefore still mis-classified as
         # first-party and reverted on non-explicit paths. A name-based check cannot
-        # disambiguate that case; only consulting the user's configured providers
-        # could. The behavior is pinned by
+        # disambiguate that; the behavior is pinned by
         # test_at_provider_first_party_named_third_party_model_known_limitation.
         _bare_is_first_party_family = any(
             bare_model.lower().startswith(_p) for _p in ("gpt", "claude", "gemini")
         )
-        if explicit_model_pick or (
-            not provider_normalized and not _bare_is_first_party_family
+        if (
+            not provider_normalized
+            and not _bare_is_first_party_family
+            and _provider_is_known_or_configured(provider_raw)
         ):
             return model, provider_raw, False
         if default_model:

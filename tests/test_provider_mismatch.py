@@ -1054,6 +1054,64 @@ def test_at_provider_third_party_model_survives_cold_catalog(monkeypatch):
         assert changed is False
 
 
+def test_at_provider_removed_provider_still_reverts_to_default(monkeypatch):
+    """The catalog-absence preservation must NOT extend to a genuinely
+    removed/unconfigured provider.
+
+    Catalog-absence has two causes and only one is a cold-discovery artifact:
+      * ollama-cloud is configured, its group is just missing from this snapshot
+        -> preserve (covered by the sibling test).
+      * @removed:mistral-large names a provider that is no longer configured
+        anywhere -> preserving it would route chat/start to an unreachable
+        provider, so it must still fall through to the default-repair.
+
+    The guard tells the two apart via _provider_is_known_or_configured() (static
+    registry + config state), never via the cold catalog. "removed" is neither a
+    known built-in provider nor a configured custom provider, so a non-explicit
+    resolve reverts to the active default. An explicit pick is still honored,
+    leaving the user a deliberate escape hatch.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "anthropic",
+            "default_model": "claude-opus-4.8",
+            "groups": [
+                {
+                    "provider": "Anthropic",
+                    "provider_id": "anthropic",
+                    "models": [{"id": "claude-opus-4.8", "label": "Opus"}],
+                },
+            ],
+        },
+    )
+
+    # Non-explicit (2nd+ turn / chat switch): unknown provider -> repair to default.
+    model, _provider, changed = routes._resolve_compatible_session_model_state(
+        "@removed:mistral-large",
+        "removed",
+        explicit_model_pick=False,
+    )
+    assert model == "claude-opus-4.8", (
+        f"a removed/unconfigured @provider model must revert to the default on a "
+        f"non-explicit resolve, got {model!r}"
+    )
+    assert changed is True
+
+    # Explicit pick is still honored even for an unknown provider.
+    model2, provider2, changed2 = routes._resolve_compatible_session_model_state(
+        "@removed:mistral-large",
+        "removed",
+        explicit_model_pick=True,
+    )
+    assert model2 == "@removed:mistral-large"
+    assert provider2 == "removed"
+    assert changed2 is False
+
+
 def test_at_provider_explicit_pick_is_honored_even_when_unroutable(monkeypatch):
     """A fresh, explicit @provider:model pick is honored verbatim even when its
     bare id is a first-party family name and the provider is absent from the

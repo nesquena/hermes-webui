@@ -1214,6 +1214,46 @@ def _named_custom_provider_slug_for_base_url(
     return ""
 
 
+def _provider_is_known_or_configured(
+    provider_id: object,
+    config_obj: dict | None = None,
+) -> bool:
+    """True when ``provider_id`` is a provider Hermes recognizes or the user has
+    configured, decided from the STATIC registry + config state only — never from
+    a live/cold catalog snapshot.
+
+    This distinguishes a *cold live-discovery* provider (e.g. ``ollama-cloud`` is
+    configured; its model group simply isn't folded into the current cached
+    catalog yet) from a *genuinely removed / unknown* one (``@removed:...`` no
+    longer configured anywhere). The former's explicitly-qualified selection must
+    be preserved across a cold catalog; the latter must fall back to the default
+    so chat/start doesn't route to a provider that cannot be reached.
+
+    Deliberately does NOT consult ``get_available_models()`` / the catalog groups,
+    which are exactly what is cold here — re-deriving them live would defeat the
+    ``prefer_cached_catalog`` hot-path win this guards.
+    """
+    raw = str(provider_id or "").strip().lower()
+    if not raw:
+        return False
+    # Configured custom provider: a named slug in custom_providers, or any
+    # ``custom`` / ``custom:<slug>`` form when custom_providers are defined.
+    if _named_custom_provider_slug_for_provider(raw, config_obj):
+        return True
+    if raw == "custom" or raw.startswith("custom:"):
+        return bool(_custom_provider_entries(config_obj))
+    # Known first-party / built-in provider id (alias-resolved). Static registry
+    # knowledge that is always available, so a live-discovery provider whose
+    # catalog group is momentarily absent still counts as known.
+    canonical = _resolve_provider_alias(raw)
+    return (
+        raw in _PROVIDER_DISPLAY
+        or canonical in _PROVIDER_DISPLAY
+        or raw in _PROVIDER_MODELS
+        or canonical in _PROVIDER_MODELS
+    )
+
+
 # Well-known models per provider (used to populate dropdown for direct API providers)
 _PROVIDER_MODELS = {
     "anthropic": [
