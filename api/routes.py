@@ -3476,22 +3476,24 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
     # synthesized Session carries the right source_tag/source_label.  Only
     # fill fields that are actually missing from cli_meta; the foreign store
     # always wins when both are present.
+    #
+    # No-mutation contract (Greptile #4911 follow-up): the GET path passes
+    # a pre-computed cli_meta dict and expects it to be unchanged after
+    # this helper returns.  We use a single copy-on-write rebind at the
+    # top of the block and then plain subscript assignment so the
+    # caller's dict is never touched in place.
     if state_db_row:
-        if not (cli_meta or {}).get("source_tag") and state_db_source:
-            cli_meta = dict(cli_meta)
+        cli_meta = dict(cli_meta or {})
+        if not cli_meta.get("source_tag") and state_db_source:
             cli_meta["source_tag"] = state_db_source
-        if not (cli_meta or {}).get("raw_source") and state_db_source:
-            cli_meta = cli_meta or {}
-            cli_meta.setdefault("raw_source", state_db_source)
-        if not (cli_meta or {}).get("title") and state_db_row.get("title"):
-            cli_meta = cli_meta or {}
-            cli_meta.setdefault("title", state_db_row["title"])
-        if not (cli_meta or {}).get("model") and state_db_row.get("model"):
-            cli_meta = cli_meta or {}
-            cli_meta.setdefault("model", state_db_row["model"])
-        if not (cli_meta or {}).get("workspace") and state_db_row.get("cwd"):
-            cli_meta = cli_meta or {}
-            cli_meta.setdefault("workspace", state_db_row["cwd"])
+        if not cli_meta.get("raw_source") and state_db_source:
+            cli_meta["raw_source"] = state_db_source
+        if not cli_meta.get("title") and state_db_row.get("title"):
+            cli_meta["title"] = state_db_row["title"]
+        if not cli_meta.get("model") and state_db_row.get("model"):
+            cli_meta["model"] = state_db_row["model"]
+        if not cli_meta.get("workspace") and state_db_row.get("cwd"):
+            cli_meta["workspace"] = state_db_row["cwd"]
     claimable, _reason = _is_claimable_cli_source(cli_meta, state_db_source)
     if not claimable:
         # The session is real and viewable, but the foreign source forbids

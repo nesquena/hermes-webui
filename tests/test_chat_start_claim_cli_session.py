@@ -645,3 +645,79 @@ def test_tui_session_still_claimable_regression(
     assert sess.read_only is False
     assert sess.is_cli_session is True
     assert sess.source_tag == "tui"
+
+
+def test_helper_does_not_mutate_callers_cli_meta(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """No-mutation contract (Greptile #4911 follow-up): the GET path
+    passes a pre-computed ``cli_meta`` dict and expects it to be
+    unchanged after the helper returns.  The state.db enrichment
+    block must not silently mutate that dict in place — future
+    refactors of the GET response builder could trip on the
+    implicit mutation.
+
+    The caller_meta here deliberately omits 'title', 'model', and
+    'workspace' so the state.db enrichment block would normally
+    want to fill them.  After the helper returns, the caller's
+    dict must still equal the snapshot taken before the call."""
+    SID = "20260610_tui_no_mutation"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=2,
+        title="TUI session", source="tui", cwd="/root",
+    )
+    caller_meta = {
+        "session_id": SID,
+        "source_tag": "tui",
+        "raw_source": "tui",
+        "session_source": "other",
+        # Intentionally NO title/model/workspace — the state.db
+        # enrichment block would normally want to add them.  This
+        # is the case the old copy-on-write pattern got wrong.
+    }
+    snapshot = {k: v for k, v in caller_meta.items()}
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid: caller_meta,
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "materialized"
+    # The session we got back should have the enriched fields.
+    assert sess.title == "TUI session", (
+        "the synthesized Session should pick up state.db title "
+        "into its own session object"
+    )
+    # But the caller's dict must be byte-for-byte unchanged.
+    assert caller_meta == snapshot, (
+        f"helper mutated caller's cli_meta in place: "
+        f"before={snapshot} after={caller_meta}"
+    )
+
+
+def test_helper_does_not_mutate_callers_cli_meta_when_empty(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """Same no-mutation contract, but the caller passes an empty
+    dict (the TUI/Desktop no-cli-meta case).  The state.db
+    enrichment must still not bind cli_meta to a shared mutable
+    reference that the caller could later see mutate."""
+    SID = "20260610_tui_no_mutation_empty"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=1,
+        title="TUI empty", source="tui", cwd="/root",
+    )
+    caller_meta = {}  # empty
+    snapshot = {}
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid: caller_meta,
+    )
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "materialized"
+    assert sess.source_tag == "tui"
+    # The empty caller_meta must remain empty — the helper built
+    # its own dict and never touched ours.
+    assert caller_meta == snapshot, (
+        f"helper mutated caller's empty dict: "
+        f"before={snapshot} after={caller_meta}"
+    )
