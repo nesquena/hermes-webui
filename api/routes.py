@@ -8297,9 +8297,26 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Project not found", 404)
             if not _profiles_match(target.get("profile"), _session_profile):
                 return bad(handler, "Project not found", 404)
-        with _get_session_agent_lock(body["session_id"]):
+        # #3746: acquire the per-session agent lock with a bounded timeout
+        # instead of blocking indefinitely. The streaming thread holds this same
+        # lock during checkpoint saves; on slow file I/O (e.g. WSL/DrvFs) a bare
+        # blocking acquire could outlast the client's 30s abort and surface as a
+        # silent "Request timed out" toast with no server-side signal. Bounding
+        # the wait converts that into an actionable HTTP 503 the client can retry.
+        # We keep the lock (rather than dropping it for this metadata-only write)
+        # because s.save() still races the streaming thread's atomic writer.
+        _move_lock = _get_session_agent_lock(body["session_id"])
+        if not _move_lock.acquire(timeout=5):
+            return j(
+                handler,
+                {"error": "Session is busy (streaming). Please try again in a moment."},
+                status=503,
+            )
+        try:
             s.project_id = target_pid
             s.save()
+        finally:
+            _move_lock.release()
         publish_session_list_changed("session_move", profile=getattr(s, "profile", None))
         return j(handler, {"ok": True, "session": s.compact()})
 
@@ -8384,18 +8401,53 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Project not found", 404)
         projects = [p for p in projects if p["project_id"] != body["project_id"]]
         save_projects(projects)
-        # Unassign all sessions that belonged to this project
+        # Unassign all sessions that belonged to this project.
+        # #3746: this loop is O(N) full-JSON read+save per session, and each
+        # save() reserializes the entire messages array. For a project with many
+        # messageful sessions that throughput alone can blow past the client's
+        # 30s timeout. For an actively-streaming session we must NOT issue our own
+        # s.save() — it would race the streaming thread's atomic writer and it
+        # carries the largest in-memory message array. Instead we clear project_id
+        # on the live cached Session object (under LOCK); the streaming thread owns
+        # that object and persists it on its next checkpoint/final save (the worker
+        # always does a final s.save() at turn completion), so the unlink still
+        # lands without a competing write. (If the streaming session isn't in the
+        # cache for some reason, fall back to a direct save.) Guard each per-session
+        # update so one slow/failing session can't abort the whole request.
         if SESSION_INDEX_FILE.exists():
             try:
                 index = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+                active_ids = _active_stream_ids()
+                deferred_to_stream = []
                 for entry in index:
-                    if entry.get("project_id") == body["project_id"]:
-                        try:
-                            s = get_session(entry["session_id"])
-                            s.project_id = None
-                            s.save()
-                        except Exception:
-                            logger.debug("Failed to update session %s", entry.get("session_id"))
+                    if entry.get("project_id") != body["project_id"]:
+                        continue
+                    sid = entry.get("session_id")
+                    try:
+                        if entry.get("active_stream_id") in active_ids:
+                            # Clear on the live cached object so the streaming
+                            # thread's own next save persists project_id=None.
+                            cleared_in_cache = False
+                            with LOCK:
+                                cached = SESSIONS.get(sid)
+                                if cached is not None:
+                                    cached.project_id = None
+                                    cleared_in_cache = True
+                            if cleared_in_cache:
+                                deferred_to_stream.append(sid)
+                                continue
+                            # Not cached — fall through to a direct save.
+                        s = get_session(sid)
+                        s.project_id = None
+                        s.save()
+                    except Exception:
+                        logger.debug("Failed to update session %s", sid)
+                if deferred_to_stream:
+                    logger.info(
+                        "projects/delete: cleared project_id on %d streaming session(s) "
+                        "in-cache; streaming thread will persist: %s",
+                        len(deferred_to_stream), deferred_to_stream,
+                    )
             except Exception:
                 logger.debug("Failed to load session index for project unlink")
         return j(handler, {"ok": True})

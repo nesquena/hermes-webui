@@ -5955,11 +5955,17 @@ function _showProjectPicker(session, anchorEl){
     const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:name.trim(),color,profile})});
     if(res.project){
       _allProjects.push(res.project);
-      // Now move session into it
-      await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:res.project.project_id})});
-      session.project_id=res.project.project_id;
-      await renderSessionList();
-      showToast('Created "'+res.project.name+'" and moved session');
+      // Guard the move so a 503 (session busy/streaming, #3746) shows a toast
+      // instead of an unhandled rejection. Keep the authoritative refetch (#2551).
+      try{
+        await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:res.project.project_id})});
+        session.project_id=res.project.project_id;
+        await renderSessionList();
+        showToast('Created "'+res.project.name+'" and moved session');
+      }catch(e){
+        await renderSessionList();
+        showToast('Created "'+res.project.name+'" but move failed: '+(e&&e.message||'try again'));
+      }
     }
   };
   picker.appendChild(createItem);
