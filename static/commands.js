@@ -273,19 +273,22 @@ function _parseSlashAutocomplete(text){
   const beforeSlash=text.slice(0,firstSlash);
   const raw=text.slice(firstSlash+1);
   const hasSpace=/\s/.test(raw);
+  // Multi-slash check runs before subArgs branch so that inputs like
+  // "/think /karpathy" are handled as a second slash-command lookup
+  // even when the first command (e.g. "think") has a subArgSource.
+  if(hasSpace){
+    const lastSlash=raw.lastIndexOf('/');
+    if(lastSlash>=0){
+      const betweenPrefix=raw.slice(0,lastSlash);
+      const afterLastSlash=raw.slice(lastSlash+1);
+      return {kind:'commands', query:afterLastSlash, beforeSlash:beforeSlash, prefix:betweenPrefix};
+    }
+  }
   const parts=raw.split(/\s+/);
   const cmdName=(parts[0]||'').toLowerCase();
   const command=COMMANDS.find(c=>c.name===cmdName);
   const subArgSource=(command&&command.subArgs)?command:SLASH_SUBARG_SOURCES[cmdName];
   if(!hasSpace||!subArgSource){
-    if(hasSpace&&!subArgSource){
-      const lastSlash=raw.lastIndexOf('/');
-      if(lastSlash>=0){
-        const betweenPrefix=raw.slice(0,lastSlash);
-        const afterLastSlash=raw.slice(lastSlash+1);
-        return {kind:'commands', query:afterLastSlash, beforeSlash:beforeSlash, prefix:betweenPrefix};
-      }
-    }
     return {kind:'commands', query:raw, beforeSlash:beforeSlash, prefix:''};
   }
   const argText=raw.slice(cmdName.length).replace(/^\s+/,'');

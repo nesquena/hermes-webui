@@ -1081,7 +1081,7 @@ async function send(){
       if(_afterMatch==='/') continue;
       const _raw=_m[1].toLowerCase();
       let _match=_skillCommandCache.find(s=>s.name===_raw);
-      if(!_match)_match=_skillCommandCache.find(s=>s.name.startsWith(_raw));
+      if(!_match&&_raw.length>=2)_match=_skillCommandCache.find(s=>s.name.startsWith(_raw));
       if(_match&&_match.source==='skill'&&!_seenSkills.has(_match.name)){
         _seenSkills.add(_match.name);
       }
