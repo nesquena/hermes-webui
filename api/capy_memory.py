@@ -13199,6 +13199,8 @@ def _github_pages_cname_is_safe(value: Any) -> bool:
 def _github_pages_payload_is_safe(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
+    if _json_payload_is_feed(payload) or "items" in payload or "version" in payload:
+        return False
     if "status" not in payload or payload.get("status") not in _GITHUB_PAGES_STATUSES:
         return False
     if "build_type" in payload and payload.get("build_type") is not None and payload.get("build_type") not in _GITHUB_PAGES_BUILD_TYPES:

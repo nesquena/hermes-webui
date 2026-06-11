@@ -88,6 +88,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `fix(capy-memory): harden GitHub Pages feed bypass`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub Pages API payloads (`/repos/{owner}/{repo}/pages`) reject JSON Feed-shaped `version` / `items` keys even when an otherwise valid Pages `status` is present.
+  - Preserved metadata-only Pages summaries for safe status/build/CNAME/public/HTTPS/protected-domain fields while failing closed before vault/search persistence for feed summaries, API-auth markers, raw prompts, renderer/source/data/html fields, scripts, and secret-looking fixtures.
+
 - `feat(capy-memory): ingest GitHub workflow-run approvals metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub Actions workflow-run approval API payloads (`/repos/{owner}/{repo}/actions/runs/{run_id}/approvals`) request `application/json` and persist only metadata-only deployment approval summaries.
   - The parser reconstructs summaries from safe repository path, run id, approval count, allow-listed approval state, actor login, environment names, and safe timestamps while omitting approval comments, URLs, API-auth query/fragment markers, raw prompts, scripts, renderer/source fields, and secret-like fixture values from receipts/search/vault output.
