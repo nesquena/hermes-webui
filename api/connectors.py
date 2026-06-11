@@ -235,31 +235,286 @@ CONNECTOR_MANIFESTS: dict[str, dict[str, Any]] = {
             },
         ],
     },
+}
+
+DOCUMENTED_CONNECTOR_ORDER = [
+    "telegram",
+    "discord",
+    "slack",
+    "google_chat",
+    "whatsapp",
+    "signal",
+    "sms",
+    "email",
+    "homeassistant",
+    "mattermost",
+    "matrix",
+    "dingtalk",
+    "feishu",
+    "wecom",
+    "wecom_callback",
+    "weixin",
+    "bluebubbles",
+    "photon",
+    "qqbot",
+    "yuanbao",
+    "teams",
+    "line",
+    "ntfy",
+    "browser",
+    "api_server",
+    "webhook",
+    "msgraph_webhook",
+    "simplex",
+    "irc",
+]
+
+_MESSAGING_DOC_BASE = "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/"
+
+DOCUMENTED_RUNTIME_CONNECTORS: dict[str, dict[str, Any]] = {
     "slack": {
-        "id": "slack",
         "label": "Slack",
-        "kind": "messaging",
-        "description": "Slack is supported by Hermes, but its adapter requires SLACK_BOT_TOKEN and SLACK_APP_TOKEN in the runtime environment.",
-        "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/slack",
-        "configuration_supported": False,
-        "toggle_supported": False,
-        "test_supported": False,
+        "docs_slug": "slack",
         "required_env": ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"],
-        "fields": [],
+    },
+    "google_chat": {
+        "label": "Google Chat",
+        "docs_slug": "google_chat",
+        "required_env": [
+            "GOOGLE_CHAT_PROJECT_ID",
+            "GOOGLE_CHAT_SUBSCRIPTION_NAME",
+            "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON",
+        ],
+    },
+    "whatsapp": {
+        "label": "WhatsApp",
+        "docs_slug": "whatsapp",
+        "required_env": ["WHATSAPP_ENABLED"],
+        "notes": ["WhatsApp setup is currently handled by Hermes gateway tooling and bridge state."],
+    },
+    "signal": {
+        "label": "Signal",
+        "docs_slug": "signal",
+        "required_env": ["SIGNAL_HTTP_URL", "SIGNAL_ACCOUNT"],
+    },
+    "sms": {
+        "label": "SMS",
+        "docs_slug": "sms",
+        "required_env": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"],
     },
     "email": {
-        "id": "email",
         "label": "Email",
-        "kind": "messaging",
-        "description": "Email is supported by Hermes, but its adapter reads EMAIL_* credentials from the runtime environment.",
-        "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/email",
+        "docs_slug": "email",
+        "required_env": ["EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_IMAP_HOST", "EMAIL_SMTP_HOST"],
+    },
+    "homeassistant": {
+        "label": "Home Assistant",
+        "docs_slug": "homeassistant",
+        "required_env": ["HASS_TOKEN"],
+    },
+    "mattermost": {
+        "label": "Mattermost",
+        "docs_slug": "mattermost",
+        "required_env": ["MATTERMOST_URL", "MATTERMOST_TOKEN"],
+    },
+    "matrix": {
+        "label": "Matrix",
+        "docs_slug": "matrix",
+        "required_env": ["MATRIX_HOMESERVER"],
+        "notes": ["Matrix also requires MATRIX_ACCESS_TOKEN or MATRIX_PASSWORD depending on the auth mode."],
+    },
+    "dingtalk": {
+        "label": "DingTalk",
+        "docs_slug": "dingtalk",
+        "required_env": ["DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET"],
+    },
+    "feishu": {
+        "label": "Feishu / Lark",
+        "docs_slug": "feishu",
+        "required_env": ["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
+    },
+    "wecom": {
+        "label": "WeCom",
+        "docs_slug": "wecom",
+        "required_env": ["WECOM_BOT_ID", "WECOM_SECRET"],
+    },
+    "wecom_callback": {
+        "label": "WeCom Callback",
+        "docs_slug": "wecom-callback",
+        "required_env": [
+            "WECOM_CALLBACK_CORP_ID",
+            "WECOM_CALLBACK_CORP_SECRET",
+            "WECOM_CALLBACK_AGENT_ID",
+            "WECOM_CALLBACK_TOKEN",
+            "WECOM_CALLBACK_ENCODING_AES_KEY",
+        ],
+    },
+    "weixin": {
+        "label": "Weixin",
+        "docs_slug": "weixin",
+        "required_env": ["WEIXIN_TOKEN", "WEIXIN_ACCOUNT_ID"],
+    },
+    "bluebubbles": {
+        "label": "BlueBubbles / iMessage",
+        "docs_slug": "bluebubbles",
+        "required_env": ["BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD"],
+    },
+    "photon": {
+        "label": "iMessage via Photon",
+        "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/photon",
+        "required_env": ["PHOTON_PROJECT_ID", "PHOTON_PROJECT_SECRET"],
+    },
+    "qqbot": {
+        "label": "QQ",
+        "docs_slug": "qqbot",
+        "required_env": ["QQ_APP_ID", "QQ_CLIENT_SECRET"],
+    },
+    "yuanbao": {
+        "label": "Yuanbao",
+        "docs_slug": "yuanbao",
+        "required_env": ["YUANBAO_APP_SECRET"],
+        "notes": ["Yuanbao also requires YUANBAO_APP_ID or YUANBAO_APP_KEY."],
+    },
+    "teams": {
+        "label": "Microsoft Teams",
+        "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/teams",
+        "required_env": ["TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_TENANT_ID"],
+    },
+    "line": {
+        "label": "LINE",
+        "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/line",
+        "required_env": ["LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET"],
+    },
+    "ntfy": {
+        "label": "ntfy",
+        "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/ntfy",
+        "required_env": ["NTFY_TOPIC"],
+    },
+    "browser": {
+        "label": "Browser / Open WebUI",
+        "kind": "http",
+        "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/open-webui",
+        "required_env": ["API_SERVER_KEY"],
+        "description": "Browser messaging is supported through Hermes' Open WebUI/API Server path and is not a separate gateway adapter.",
+    },
+    "msgraph_webhook": {
+        "label": "Microsoft Graph Webhook",
+        "kind": "http",
+        "docs_slug": "webhooks",
+        "required_env": ["MSGRAPH_WEBHOOK_CLIENT_STATE"],
+    },
+    "simplex": {
+        "label": "SimpleX Chat",
+        "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/simplex",
+        "required_env": ["SIMPLEX_WS_URL"],
+    },
+    "irc": {
+        "label": "IRC",
+        "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/irc",
+        "required_env": ["IRC_SERVER", "IRC_CHANNEL", "IRC_NICKNAME"],
+    },
+}
+
+
+def _humanize_connector_id(connector_id: str) -> str:
+    overrides = {
+        "api_server": "API Server",
+        "google_chat": "Google Chat",
+        "homeassistant": "Home Assistant",
+        "msgraph_webhook": "Microsoft Graph Webhook",
+        "qqbot": "QQ",
+        "wecom": "WeCom",
+        "wecom_callback": "WeCom Callback",
+    }
+    if connector_id in overrides:
+        return overrides[connector_id]
+    return connector_id.replace("_", " ").replace("-", " ").title()
+
+
+def _runtime_managed_manifest(connector_id: str, spec: dict[str, Any]) -> dict[str, Any]:
+    label = spec.get("label") or _humanize_connector_id(connector_id)
+    docs_url = spec.get("docs_url")
+    if not docs_url and spec.get("docs_slug"):
+        docs_url = _MESSAGING_DOC_BASE + str(spec["docs_slug"])
+    description = spec.get("description") or (
+        f"{label} is supported by Hermes Agent and is configured from the Hermes gateway runtime."
+    )
+    notes = list(spec.get("notes") or [])
+    notes.append("This connector is listed from Hermes Agent support metadata; WebUI editing is enabled only after its config shape is verified.")
+    return {
+        "id": connector_id,
+        "label": label,
+        "kind": spec.get("kind") or "messaging",
+        "description": description,
+        "docs_url": docs_url or "",
         "configuration_supported": False,
         "toggle_supported": False,
         "test_supported": False,
-        "required_env": ["EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_IMAP_HOST", "EMAIL_SMTP_HOST"],
+        "required_env": list(spec.get("required_env") or []),
         "fields": [],
-    },
-}
+        "notes": notes,
+        "source": spec.get("source") or "hermes_agent",
+    }
+
+
+def _discover_runtime_managed_platforms() -> dict[str, dict[str, Any]]:
+    discovered: dict[str, dict[str, Any]] = {}
+    try:
+        from gateway.config import Platform
+
+        for platform in Platform:
+            connector_id = getattr(platform, "value", platform)
+            connector_id = str(connector_id)
+            if connector_id == "local":
+                continue
+            discovered.setdefault(
+                connector_id,
+                {
+                    "label": _humanize_connector_id(connector_id),
+                    "source": "gateway.config.Platform",
+                },
+            )
+    except Exception:
+        pass
+
+    try:
+        from gateway.platform_registry import platform_registry
+
+        for entry in platform_registry.all_entries():
+            connector_id = str(getattr(entry, "name", "") or "").strip()
+            if not connector_id or connector_id == "local":
+                continue
+            current = discovered.setdefault(connector_id, {})
+            current["label"] = getattr(entry, "label", "") or current.get("label") or _humanize_connector_id(connector_id)
+            required_env = getattr(entry, "required_env", None)
+            if required_env:
+                current["required_env"] = list(required_env)
+            current["source"] = getattr(entry, "source", "") or "gateway.platform_registry"
+    except Exception:
+        pass
+
+    return {
+        connector_id: _runtime_managed_manifest(connector_id, spec)
+        for connector_id, spec in discovered.items()
+        if connector_id not in CONNECTOR_MANIFESTS
+    }
+
+
+def _connector_manifests() -> dict[str, dict[str, Any]]:
+    manifests = copy.deepcopy(CONNECTOR_MANIFESTS)
+    for connector_id, spec in DOCUMENTED_RUNTIME_CONNECTORS.items():
+        if connector_id not in manifests:
+            manifests[connector_id] = _runtime_managed_manifest(connector_id, spec)
+    for connector_id, manifest in _discover_runtime_managed_platforms().items():
+        manifests.setdefault(connector_id, manifest)
+
+    ordered: dict[str, dict[str, Any]] = {}
+    for connector_id in DOCUMENTED_CONNECTOR_ORDER:
+        if connector_id in manifests:
+            ordered[connector_id] = manifests.pop(connector_id)
+    for connector_id in sorted(manifests):
+        ordered[connector_id] = manifests[connector_id]
+    return ordered
 
 
 def _load_yaml_config_raw() -> dict[str, Any]:
@@ -303,7 +558,7 @@ def _save_yaml_config_raw(config: dict[str, Any]) -> None:
 def _manifest(connector_id: str) -> dict[str, Any]:
     if not _CONNECTOR_ID_RE.fullmatch(connector_id or ""):
         raise ConnectorError("Invalid connector id.", 400)
-    manifest = CONNECTOR_MANIFESTS.get(connector_id)
+    manifest = _connector_manifests().get(connector_id)
     if not manifest:
         raise ConnectorError("Connector not found.", 404)
     return manifest
@@ -447,6 +702,11 @@ def _gateway_runtime_status() -> dict[str, Any]:
 
 def _connector_status(manifest: dict[str, Any], platform_cfg: dict[str, Any], runtime: dict[str, Any]) -> str:
     if not manifest.get("configuration_supported"):
+        required_env = [str(name) for name in manifest.get("required_env") or []]
+        if platform_cfg.get("enabled") is True:
+            return "configured"
+        if required_env and all(os.getenv(name, "").strip() for name in required_env):
+            return "configured"
         return "unknown"
     enabled = platform_cfg.get("enabled") is True
     missing = _required_missing(manifest, platform_cfg)
@@ -496,7 +756,7 @@ def list_connectors() -> dict[str, Any]:
     runtime = _gateway_runtime_status()
     connectors = [
         _connector_summary(manifest, config, runtime)
-        for manifest in CONNECTOR_MANIFESTS.values()
+        for manifest in _connector_manifests().values()
     ]
     return {
         "connectors": connectors,

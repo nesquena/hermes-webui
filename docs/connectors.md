@@ -18,8 +18,42 @@ It does not create a WebUI-specific connector store.
 
 ## Supported In The Panel
 
-The first panel version exposes only fields verified against Hermes Agent
-gateway configuration and adapters:
+The panel now lists the Hermes Agent gateway platforms documented and exposed
+by Hermes runtime metadata. This intentionally includes platforms that the
+original WebUI did not show yet:
+
+- Telegram
+- Discord
+- Slack
+- Google Chat
+- WhatsApp
+- Signal
+- SMS
+- Email
+- Home Assistant
+- Mattermost
+- Matrix
+- DingTalk
+- Feishu / Lark
+- WeCom
+- WeCom Callback
+- Weixin
+- BlueBubbles / iMessage
+- QQ
+- Yuanbao
+- Microsoft Teams
+- LINE
+- ntfy
+- Browser / Open WebUI
+- API Server
+- Webhook
+
+The panel also augments this list from `gateway.config.Platform` and
+`gateway.platform_registry` when Hermes exposes additional runtime/plugin
+platforms.
+
+Only fields verified against Hermes Agent gateway configuration and adapters are
+editable from WebUI:
 
 - Telegram: bot token, reply mode, mention/group/topic filters.
 - Discord: bot token, reply mode, mention/free-response channel filters.
@@ -27,10 +61,11 @@ gateway configuration and adapters:
   `config.yaml` or Hermes gateway tooling.
 - API Server: API key, host, port, model name and CORS origins.
 
-Slack and Email are listed as supported by Hermes but read-only in WebUI because
-their current adapters require runtime environment variables such as
-`SLACK_APP_TOKEN` or `EMAIL_*`. They should be configured in the runtime
-environment until Hermes exposes a safe editable config shape for them.
+The other platforms are listed as runtime-managed/read-only. This is deliberate:
+they are real Hermes Agent gateway channels, but their current setup relies on
+environment variables, OAuth/device setup, bridge state, or platform-specific
+gateway tooling. WebUI should not present those as editable until the
+corresponding Hermes config shape has been verified.
 
 ## Secrets
 
@@ -66,6 +101,8 @@ gateway liveness logic.
 ## Source References
 
 - Hermes gateway configuration: `gateway/config.py`
+- Hermes platform registry: `gateway/platform_registry.py`
+- Hermes platform plugins: `plugins/platforms/*/plugin.yaml`
 - Telegram docs: `website/docs/user-guide/messaging/telegram.md`
 - Discord docs: `website/docs/user-guide/messaging/discord.md`
 - Slack docs: `website/docs/user-guide/messaging/slack.md`

@@ -16,7 +16,33 @@ def test_list_connectors_exposes_only_safe_manifest_payload(tmp_path, monkeypatc
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(_config_path(tmp_path)))
     payload = connectors.list_connectors()
     ids = {connector["id"] for connector in payload["connectors"]}
-    assert {"telegram", "discord", "webhook", "api_server", "slack", "email"} <= ids
+    assert {
+        "telegram",
+        "discord",
+        "slack",
+        "google_chat",
+        "whatsapp",
+        "signal",
+        "sms",
+        "email",
+        "homeassistant",
+        "mattermost",
+        "matrix",
+        "dingtalk",
+        "feishu",
+        "wecom",
+        "wecom_callback",
+        "weixin",
+        "bluebubbles",
+        "qqbot",
+        "yuanbao",
+        "teams",
+        "line",
+        "ntfy",
+        "browser",
+        "webhook",
+        "api_server",
+    } <= ids
 
     telegram = next(connector for connector in payload["connectors"] if connector["id"] == "telegram")
     assert telegram["configuration_supported"] is True
@@ -25,6 +51,37 @@ def test_list_connectors_exposes_only_safe_manifest_payload(tmp_path, monkeypatc
     slack = next(connector for connector in payload["connectors"] if connector["id"] == "slack")
     assert slack["configuration_supported"] is False
     assert "SLACK_APP_TOKEN" in slack["required_env"]
+
+    google_chat = next(connector for connector in payload["connectors"] if connector["id"] == "google_chat")
+    assert google_chat["configuration_supported"] is False
+    assert google_chat["toggle_supported"] is False
+    assert "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON" in google_chat["required_env"]
+
+
+def test_dynamic_runtime_managed_platforms_are_listed(tmp_path, monkeypatch):
+    from api import connectors
+
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(_config_path(tmp_path)))
+    monkeypatch.setattr(
+        connectors,
+        "_discover_runtime_managed_platforms",
+        lambda: {
+            "future_chat": connectors._runtime_managed_manifest(
+                "future_chat",
+                {
+                    "label": "Future Chat",
+                    "required_env": ["FUTURE_CHAT_TOKEN"],
+                    "source": "test",
+                },
+            )
+        },
+    )
+
+    payload = connectors.list_connectors()
+    future = next(connector for connector in payload["connectors"] if connector["id"] == "future_chat")
+    assert future["label"] == "Future Chat"
+    assert future["configuration_supported"] is False
+    assert future["required_env"] == ["FUTURE_CHAT_TOKEN"]
 
 
 def test_connectors_runtime_reuses_gateway_status_payload(tmp_path, monkeypatch):
