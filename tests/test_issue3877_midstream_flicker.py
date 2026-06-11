@@ -117,19 +117,28 @@ def test_reattach_swaps_when_preserved_ties_or_beats_rebuilt():
 
 
 def test_reattach_swaps_at_segment_level_to_preserve_rebuilt_structure():
-    """The swap replaces only the rebuilt LIVE SEGMENT with the preserved one, so a
-    multi-segment turn (earlier settled segments + tool/worklog groups built by the
-    rebuild) keeps that rebuilt-only structure. A whole-turn replaceWith would discard
-    it when the preserved snapshot predates those segments. Whole-turn replace is only
-    the fallback when the rebuilt turn has no live segment to target."""
+    """When the rebuild is the structural superset, the swap replaces only the rebuilt
+    LIVE SEGMENT with the preserved one, so a multi-segment turn (earlier settled
+    segments + tool/worklog groups built by the rebuild) keeps that rebuilt-only
+    structure. When the preserved (live) turn has MORE structural blocks than the
+    rebuild — a live-only tool/worklog group landed before the throttled persist
+    caught up — the whole preserved turn is restored so nothing the user saw vanishes
+    for a frame. Whole-turn replace is also the fallback when there's no live segment
+    to target."""
     body = _function_body(UI_JS, "renderMessages")
     reattach = body[body.find("Re-attach the preserved live turn (#3877)") :]
-    # Segment-level swap is the primary path.
+    # Structural-count comparison routes segment-swap vs whole-turn restore.
+    assert "_structuralCount" in reattach
+    assert "_rebuiltStructure>=_preservedStructure" in reattach, (
+        "segment-level swap only when the rebuild is the structural superset; "
+        "otherwise restore the whole preserved turn so live-only tool cards are kept"
+    )
+    # Segment-level swap is the superset path.
     assert "_rebuiltSeg.replaceWith(_preservedSeg)" in reattach, (
         "the swap must be segment-level (replace the rebuilt live segment with the "
         "preserved one) so rebuilt-only structure in a multi-segment turn is kept"
     )
-    # Whole-turn replace remains as the no-live-segment fallback.
+    # Whole-turn replace remains for the live-ahead / no-live-segment cases.
     assert "replaceWith(_preservedLiveTurn)" in reattach
     # The preserved live segment is resolved for the swap.
     assert "_preservedSeg" in reattach and "_rebuiltSeg" in reattach

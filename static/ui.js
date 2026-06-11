@@ -9021,12 +9021,29 @@ function renderMessages(options){
       const _rebuiltLen=_rebuilt?_liveAssistantSegmentTextLength(_rebuiltSeg||_rebuilt):-1;
       if(_rebuiltLen<=_preservedLen){
         if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
-        if(_rebuilt&&_rebuiltSeg&&_preservedSeg){
-          // Segment-level swap: keep the rebuilt turn (and its other segments /
-          // tool groups) but restore the parser-referenced (tail) live segment.
+        // Decide segment-level vs whole-turn restore. Segment-level keeps the
+        // rebuilt turn's structure (good when the rebuild is the structural
+        // superset). But the whole premise here is that the live DOM can be
+        // AHEAD of S.messages: a tool/worklog group can land in the live turn
+        // between the last throttled persist and this rebuild, so the rebuilt
+        // turn (built from the lagging S.messages) may have FEWER structural
+        // blocks. In that case a segment-only swap would drop those live-only
+        // blocks for a frame — so restore the WHOLE preserved turn instead.
+        // Otherwise (rebuild has >= the preserved turn's structural blocks) do
+        // the precise segment swap so rebuilt-only structure is kept.
+        const _structuralCount=(turn)=> turn?turn.querySelectorAll(
+          '[data-live-assistant="1"],.tool-call-group,.tool-card-row,.tool-worklog-group,.agent-activity-thinking,.thinking-card-row'
+        ).length:0;
+        const _preservedStructure=_structuralCount(_preservedLiveTurn);
+        const _rebuiltStructure=_structuralCount(_rebuilt);
+        if(_rebuilt&&_rebuiltSeg&&_preservedSeg&&_rebuiltStructure>=_preservedStructure){
+          // Rebuild is the structural superset — swap only the parser-owned
+          // (tail) live segment, keeping rebuilt-only segments / tool groups.
           _rebuiltSeg.replaceWith(_preservedSeg);
         }else if(_rebuilt){
-          // Rebuilt turn has no live segment to target — replace the whole turn.
+          // Rebuilt turn lacks structure the live turn already has (live-only
+          // tool card not yet persisted), or has no live segment to target —
+          // restore the whole preserved turn so nothing the user saw vanishes.
           _rebuilt.replaceWith(_preservedLiveTurn);
         }else{
           inner.appendChild(_preservedLiveTurn);
