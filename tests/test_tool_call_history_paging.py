@@ -16,7 +16,7 @@ def test_sessions_js_resyncs_tool_calls_after_history_window_replacement():
     assert "function _syncToolCallsForLoadedMessages(messages, sessionToolCalls)" in SESSIONS_JS
     assert "_syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);" in SESSIONS_JS
     assert "S.messages = nextMessages;\n    _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);" in SESSIONS_JS
-    assert "S.messages = msgs;\n    _messagesTruncated = false;\n    _oldestIdx = 0;\n    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);" in SESSIONS_JS
+    assert "S.messages = _msgsToAssign;\n    _messagesTruncated = false;\n    _oldestIdx = 0;\n    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);" in SESSIONS_JS
 
 
 def test_sessions_js_clears_session_tool_calls_when_messages_have_own_metadata():

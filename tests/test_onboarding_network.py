@@ -30,7 +30,18 @@ from tests._pytest_port import BASE
 # Unit tests — directly test the IP-resolution + guard logic in routes.py
 # without needing a live server. We replicate the logic to keep tests fast
 # and independent of server startup.
-# ---------------------------------------------------------------------------
+#
+# ⚠️ STALE CONTRACT (see #3765): this mirror encodes the PRE-#3758 model where an
+# unauthenticated `X-Forwarded-For` / `X-Real-IP` was trusted to establish
+# locality (`_xff or _xri or raw_ip`). As of #3758 (v0.51.307) the real gate
+# `api.routes._onboarding_request_is_local()` IGNORES forwarded headers unless
+# `HERMES_WEBUI_TRUST_FORWARDED_FOR=1`, and only loopback counts as local when an
+# untrusted forwarded header is present. The authoritative trust-matrix tests now
+# live in `tests/test_security_review_fixes.py`. This mirror + its
+# `TestOnboardingIPLogic` cases are retained only as historical fast-path unit
+# coverage of the IP-parsing shape; DO NOT treat them as the current security
+# contract. (Migrating them to delegate to the real helper is tracked as
+# follow-up test debt, intentionally out of scope for the #3765 hotfix.)
 
 def _is_local_from_handler(
     raw_ip: str,
@@ -40,9 +51,9 @@ def _is_local_from_handler(
     open_env: bool = False,
 ) -> bool | str:
     """
-    Mirror of the onboarding IP check in api/routes.py.
-    Returns True if the request would be allowed, False if blocked,
-    or the error message string if blocked.
+    Mirror of the LEGACY (pre-#3758) onboarding IP check. See the stale-contract
+    note above — the live gate no longer trusts forwarded headers by default.
+    Returns True if the request would be allowed, False if blocked.
     """
     import ipaddress
 

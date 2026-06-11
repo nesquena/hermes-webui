@@ -619,6 +619,54 @@ def test_new_conversation_shortcut_works_while_busy():
     )
 
 
+def test_mobile_titlebar_has_new_conversation_button():
+    """Mobile titlebar shows the New Conversation action and keeps it next to reload."""
+    header_match = re.search(
+        r'<header class="app-titlebar"[^>]*>(?P<body>.*?)</header>',
+        HTML,
+        re.S,
+    )
+    assert header_match, "app-titlebar header block missing"
+    header_html = header_match.group("body")
+
+    idx_btn = header_html.find('id="btnTitlebarNewChat"')
+    idx_reload = header_html.find('id="btnReload"')
+    idx_spacer = header_html.find('class="app-titlebar-spacer"')
+
+    assert idx_btn != -1, "titlebar mobile new chat button should exist"
+    assert idx_reload != -1, "titlebar reload button should remain present"
+    assert idx_spacer != -1, "titlebar spacer should remain present"
+    assert idx_spacer < idx_btn < idx_reload, (
+        "titlebar new chat button must sit left of the reload button on mobile"
+    )
+    assert "btnTitlebarNewChat" in header_html
+    assert "data-i18n-title=\"new_conversation\"" in header_html
+    assert "data-i18n-aria-label=\"new_conversation\"" in header_html
+    assert "aria-label=\"New conversation\"" in header_html
+    assert "title=\"New conversation\"" in header_html
+    assert "$('btnNewChat').click()" in header_html
+
+
+def test_titlebar_new_chat_button_mobile_visibility_css():
+    """Keep the titlebar new-chat control mobile-only and reuse reload button styling."""
+    base_rule = _declarations(_rule_body(CSS, ".app-titlebar-new-chat"))
+    assert base_rule.get("display") == "none", "app-titlebar new chat button must be hidden by default"
+    mobile_blocks = "".join(_max_width_media_blocks(640))
+    mobile_rule = _declarations(_rule_body(mobile_blocks, ".app-titlebar-new-chat"))
+    assert mobile_rule.get("display") == "inline-flex", (
+        "app-titlebar new chat button must be visible in mobile layout rules"
+    )
+    desktop_css = re.sub(
+        r"@media\(max-width:640px\).*",
+        "",
+        CSS,
+        flags=re.S,
+    )
+    assert ".app-titlebar-new-chat{display:inline-flex;}" not in desktop_css, (
+        "titlebar new chat button must not be exposed by desktop PWA/fullscreen rules"
+    )
+
+
 # ── Viewport and scroll safety ────────────────────────────────────────────────
 
 def test_body_overflow_hidden():
@@ -1114,13 +1162,21 @@ def test_mobile_composer_primary_controls_keep_touch_friendly_sizing():
     assert ctx_wrap.get("display") == "none!important", \
         "context indicator must not add a late-appearing composer-right slot on phones"
 
-    ctx_badge = _declarations(_rule_body(CSS, ".composer-mobile-ctx-badge"))
-    assert ctx_badge.get("position") == "absolute", \
-        "mobile context usage should be shown as a badge on the config button, not a separate slot"
-    assert ctx_badge.get("pointer-events") == "none", \
-        "mobile context badge must not shrink or steal the config button touch target"
-    assert 'id="composerMobileCtxBadge"' in HTML, \
-        "mobile context badge element must exist in the composer config button"
+    # #3062 replaced the old text badge (composerMobileCtxBadge / .composer-mobile-ctx-badge)
+    # with an SVG context-usage ring overlaid on the config button. The invariant is the
+    # same: the ring is a visual indicator hosted ON the 44px config button (whose sizing is
+    # asserted above), and it must not steal/shrink that touch target. The ring SVG is
+    # aria-hidden and uses currentColor; it carries no pointer events of its own.
+    assert 'id="composerMobileCtxRing"' in HTML, \
+        "mobile context-usage ring element must exist in the composer config button"
+    assert 'id="composerMobileCtxBadge"' not in HTML, \
+        "old text badge should be fully replaced by the ring, not left dangling"
+    # Locate the ring's markup and confirm it does not become an interactive/sized control
+    # that would compete with the config button's 44px target.
+    _ring_idx = HTML.find('id="composerMobileCtxRing"')
+    _ring_tag = HTML[HTML.rfind("<", 0, _ring_idx):HTML.find(">", _ring_idx) + 1]
+    assert "aria-hidden" in _ring_tag, \
+        "the context ring is decorative overlay — it must be aria-hidden so it doesn't steal the config button's role/touch target"
 
     icon_btn = _declarations(_rule_body(mobile_css, ".icon-btn"))
     assert icon_btn.get("min-width") == "44px", \

@@ -361,6 +361,10 @@ class TestStreamingReasoningWiring:
             "api/streaming.py must import parse_reasoning_effort to translate "
             "config.yaml agent.reasoning_effort into AIAgent reasoning_config"
         )
+        assert 'coerce_reasoning_effort_for_model' in src, (
+            "api/streaming.py must clamp/drop unsupported model-specific effort "
+            "levels before sending reasoning_config to the provider"
+        )
         assert "reasoning_config" in src and "'reasoning_config' in _agent_params" in src, (
             "api/streaming.py must guard the reasoning_config kwarg with "
             "inspect.signature so older hermes-agent builds don't TypeError"

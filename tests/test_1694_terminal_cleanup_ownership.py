@@ -99,9 +99,15 @@ def test_stream_end_without_done_restores_settled_session_before_closing():
     never replaces the pane with the persisted transcript when done is missing.
     """
     body = _event_body("stream_end")
-    restore_idx = body.find("_restoreSettledSession(source)")
-    close_idx = body.rfind("_closeSource(source)")
-    finalized_idx = body.find("_streamFinalized=true")
+    restore_idx = body.find("_restoreSettledSession(source,{status:true})")
+    if restore_idx == -1:
+        restore_idx = body.find("_restoreSettledSession(source)")
+    close_idx = body.find("_closeSource(source)", restore_idx)
+    if close_idx == -1:
+        close_idx = body.find("_finalizeStreamEndFallback(source)", restore_idx)
+    finalized_idx = body.find("_streamFinalized=true", restore_idx)
+    if finalized_idx == -1:
+        finalized_idx = body.find("_finalizeStreamEndFallback(source)", restore_idx)
     assert restore_idx != -1, "stream_end handler must restore settled session when done is absent"
     assert close_idx != -1, "stream_end handler must still close the owning EventSource"
     assert restore_idx < close_idx, "restore must be attempted before closing the stream"
@@ -113,7 +119,7 @@ def test_settled_restore_and_error_close_only_the_event_source_owner():
     restore_body = _function_body("_restoreSettledSession")
     error_body = _function_body("_handleStreamError")
     event_body = _event_body("error")
-    assert "async function _restoreSettledSession(source)" in MESSAGES_JS
+    assert "async function _restoreSettledSession(source, options=null)" in MESSAGES_JS
     assert "function _handleStreamError(source)" in MESSAGES_JS
     assert "_closeSource(source);" in restore_body
     assert "_closeSource(source);" in error_body

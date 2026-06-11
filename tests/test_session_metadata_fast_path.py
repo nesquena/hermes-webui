@@ -54,7 +54,9 @@ def test_deferred_model_resolution_refreshes_context_metadata():
     )
     assert "S.session.threshold_tokens" in block
     assert "_syncCtxIndicator" in block
-    assert "context_length:data.session.context_length||0" in block.replace(" ", "")
+    compact = block.replace(" ", "")
+    assert "constresolvedContextLength=data.session.context_length||S.session.context_length||0;" in compact
+    assert "context_length:resolvedContextLength||u.context_length||0" in compact
 
 
 def test_boot_does_not_block_session_restore_on_model_catalog():

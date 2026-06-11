@@ -161,6 +161,60 @@ def test_metadata_poll_uses_sidecar_message_count_for_external_updates(monkeypat
     assert session["last_message_at"] == 1001.0
 
 
+def test_deferred_session_model_resolution_uses_profile_provider(monkeypatch, tmp_path):
+    """Deferred GET /api/session resolution must repair against profile config."""
+    import api.profiles as profiles
+    import api.routes as routes
+
+    sid = "webui_profile_resolve_model_001"
+    session = _install_test_session(monkeypatch, tmp_path, sid, [])
+    session.model = "openai/gpt-5.4-mini"
+    session.model_provider = None
+    session.profile = "anthropic"
+    session.save(touch_updated_at=False)
+
+    profile_home = tmp_path / "profiles" / "anthropic"
+    profile_home.mkdir(parents=True)
+    (profile_home / "config.yaml").write_text(
+        "model:\n"
+        "  provider: anthropic\n"
+        "  default: claude-sonnet-4.6\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: profile_home,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [],
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_context_length_for_session_model",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    session_path = tmp_path / "sessions" / f"{sid}.json"
+    before = session_path.read_text(encoding="utf-8")
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=0&resolve_model=1")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    payload = handler.response_json["session"]
+    assert payload["model"] == "claude-sonnet-4.6"
+    assert payload["model_provider"] == "anthropic"
+    assert session_path.read_text(encoding="utf-8") == before
+
+
 def test_metadata_poll_prefers_sidecar_count_when_index_is_stale(monkeypatch, tmp_path):
     """A stale sidebar index must not hide externally appended sidecar turns."""
     import api.config as config
@@ -510,6 +564,49 @@ def test_api_session_reload_drops_stale_cached_user_tail_after_saved_assistant(m
     assert messages[-1]["role"] == "assistant"
     assert messages[-1]["content"] == "final audit complete"
     assert handler.response_json["session"]["message_count"] == 2
+
+
+def test_get_session_reloads_when_cached_session_lags_disk(monkeypatch, tmp_path):
+    import api.models as models
+
+    sid = "webui_reconcile_cache_lags_disk"
+    old_messages = [
+        {"role": "user", "content": "old user", "timestamp": 1000.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, old_messages)
+
+    cached = models.Session.load(sid)
+    assert cached is not None
+    cached.active_stream_id = "stream-cache-lags-disk"
+    cached.pending_user_message = "next prompt"
+    models.SESSIONS[sid] = cached
+
+    newer = models.Session(
+        session_id=sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=old_messages + [
+            {"role": "user", "content": "new user", "timestamp": 1002.0},
+            {"role": "assistant", "content": "new final answer", "timestamp": 1003.0},
+        ],
+        created_at=1000.0,
+        updated_at=1003.0,
+        active_stream_id="stream-cache-lags-disk",
+        pending_user_message="next prompt",
+    )
+    newer.save(touch_updated_at=False)
+
+    loaded = models.get_session(sid)
+
+    assert [m["content"] for m in loaded.messages] == [
+        "old user",
+        "old assistant",
+        "new user",
+        "new final answer",
+    ]
+    assert models.SESSIONS[sid] is loaded
 
 
 def test_metadata_fast_path_uses_summary_without_full_merge_for_restamped_replays(monkeypatch, tmp_path):

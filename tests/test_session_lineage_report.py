@@ -263,3 +263,30 @@ def test_lineage_report_endpoint_returns_404_for_unknown_session(tmp_path):
         routes.handle_get(handler, parsed)
 
     assert captured == {"status": 404, "message": "Session not found"}
+
+
+def test_lineage_report_preserves_child_order_for_each_segment_parent(tmp_path):
+    """Behavioural coverage for batched child fetch: started_at DESC per parent."""
+    conn = _ensure_state_db(tmp_path / "state.db")
+    t0 = time.time() - 200
+    try:
+        _insert_state_row(conn, "lineage_report_root", started_at=t0, ended_at=t0 + 5, end_reason="compression")
+        _insert_state_row(
+            conn,
+            "lineage_report_tip",
+            parent="lineage_report_root",
+            started_at=t0 + 6,
+            ended_at=t0 + 15,
+            end_reason="user_stop",
+        )
+        _insert_state_row(conn, "lineage_report_child_old", parent="lineage_report_tip", started_at=t0 + 8)
+        _insert_state_row(conn, "lineage_report_child_new", parent="lineage_report_tip", started_at=t0 + 20)
+
+        report = agent_sessions.read_session_lineage_report(tmp_path / "state.db", "lineage_report_tip")
+
+        assert [child["session_id"] for child in report["children"]] == [
+            "lineage_report_child_new",
+            "lineage_report_child_old",
+        ]
+    finally:
+        conn.close()

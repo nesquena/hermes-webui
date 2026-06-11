@@ -89,6 +89,7 @@ def test_authenticated_reverse_proxy_same_origin_accepts_valid_csrf_token(monkey
     cookie = _signed_cookie("g" * 64)
     token = auth.csrf_token_for_session(cookie)
     monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "1")
     try:
         headers = {
             "Origin": "https://example.com",
@@ -100,6 +101,24 @@ def test_authenticated_reverse_proxy_same_origin_accepts_valid_csrf_token(monkey
         assert routes._check_csrf(_FakeHandler(headers))
     finally:
         auth._sessions.pop("g" * 64, None)
+
+
+def test_authenticated_forwarded_host_is_ignored_without_proxy_opt_in(monkeypatch):
+    cookie = _signed_cookie("h" * 64)
+    token = auth.csrf_token_for_session(cookie)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.delenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", raising=False)
+    try:
+        headers = {
+            "Origin": "https://example.com",
+            "Host": "127.0.0.1:8787",
+            "X-Forwarded-Host": "example.com:443",
+            "Cookie": f"{auth.COOKIE_NAME}={cookie}",
+            auth.CSRF_HEADER_NAME: token,
+        }
+        assert not routes._check_csrf(_FakeHandler(headers))
+    finally:
+        auth._sessions.pop("h" * 64, None)
 
 
 def test_non_browser_mcp_style_authenticated_post_remains_compatible(monkeypatch):
