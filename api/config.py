@@ -1918,7 +1918,7 @@ def _get_provider_base_url(provider_id):
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = cfg.get("providers", {}).get(provider_id, {}) or {}
+    prov_cfg = (cfg.get("providers") or {}).get(provider_id, {}) or {}
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
@@ -4181,7 +4181,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
         # and a phantom ``Opencode_Go`` group for the config-key form (#1568).
         # The same applies to mixed-case ids like ``OpenCode-Go`` and to
         # legitimate aliases like ``z-ai`` → ``zai``.
-        _cfg_providers = cfg.get("providers", {})
+        _cfg_providers = (cfg.get("providers") or {})
         # Map canonical provider IDs back to raw config keys so the
         # generic-provider branch can preserve mixed-case/underscore
         # provider_cfg values (#2245).
@@ -4224,7 +4224,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     if provider_hint:
                         return str(provider_hint).strip().lower()
 
-            providers_cfg = cfg.get("providers", {})
+            providers_cfg = (cfg.get("providers") or {})
             if isinstance(providers_cfg, dict):
                 for provider_key, provider_cfg in providers_cfg.items():
                     if not isinstance(provider_cfg, dict):
@@ -4418,7 +4418,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
             if isinstance(model_cfg, dict):
                 api_key = (model_cfg.get("api_key") or "").strip()
             if not api_key:
-                providers_cfg = cfg.get("providers", {})
+                providers_cfg = (cfg.get("providers") or {})
                 if isinstance(providers_cfg, dict):
                     for provider_key in filter(None, [active_provider, "custom"]):
                         provider_cfg = providers_cfg.get(provider_key, {})
@@ -4578,7 +4578,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                 isinstance(_cp, dict) and not (_cp.get("name") or "").strip()
                 for _cp in _custom_providers_cfg
             )
-            if not _has_unnamed:
+            if not _has_unnamed and not auto_detected_models:
                 detected_providers.discard("custom")
 
         _named_custom_slugs = _named_custom_provider_slugs(cfg)
@@ -4590,13 +4590,13 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     detected_providers.discard(_pid)
 
         # Filter providers if providers.only_configured is set
-        providers_cfg = cfg.get("providers", {})
+        providers_cfg = (cfg.get("providers") or {})
         only_show_configured = providers_cfg.get("only_configured", False) if isinstance(providers_cfg, dict) else False
         if only_show_configured:
             configured_providers = set()
             if active_provider:
                 configured_providers.add(active_provider)
-            cfg_providers = cfg.get("providers", {})
+            cfg_providers = (cfg.get("providers") or {})
             if isinstance(cfg_providers, dict):
                 # Canonicalise here too — same rationale as #1568 detection
                 # path. Without this, only_show_configured mode could
@@ -4927,7 +4927,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         # `cfg["providers"]["lmstudio"]["base_url"]` or
                         # `cfg["model"]["base_url"]` (via _get_provider_base_url),
                         # so the historical model-block config shape still works.
-                        lm_cfg = cfg.get("providers", {}).get("lmstudio", {}) or {}
+                        lm_cfg = (cfg.get("providers") or {}).get("lmstudio", {}) or {}
                         lm_base_url = _get_provider_base_url("lmstudio") or ""
                         lm_api_key = str(lm_cfg.get("api_key") or "").strip() if isinstance(lm_cfg, dict) else ""
                         if lm_base_url:
@@ -4968,7 +4968,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     # (#2245).  Fall back to the canonical pid for providers
                     # that appear in _PROVIDER_MODELS but not in cfg.
                     _raw_key = _canonical_to_raw_provider_key.get(pid, pid)
-                    provider_cfg = cfg.get("providers", {}).get(_raw_key, {})
+                    provider_cfg = (cfg.get("providers") or {}).get(_raw_key, {})
                     raw_models = []
 
                     # User-configured model allowlists are explicit local
@@ -5009,7 +5009,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     detected_models = auto_detected_models_by_provider.get(pid)
                     if detected_models:
                         models_for_group = copy.deepcopy(detected_models)
-                    elif auto_detected_models:
+                    elif pid in ("custom", "local") and auto_detected_models:
                         # Don't fall back to the global auto_detected_models
                         # list for the bare "custom" PID when the active
                         # provider is something concrete (e.g. ai-gateway,
@@ -5134,7 +5134,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
         except Exception:
             pass
         try:
-            _cfg_providers = cfg.get("providers", {})
+            _cfg_providers = (cfg.get("providers") or {})
             if isinstance(_cfg_providers, dict):
                 for _pk, _pv in _cfg_providers.items():
                     if isinstance(_pv, dict) and (_pv.get("api_key") or _pv.get("key_env")):
