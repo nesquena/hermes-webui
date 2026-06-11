@@ -28,6 +28,7 @@ from contextlib import closing
 from urllib.parse import parse_qs, urlsplit
 from api.agent_sessions import (
     MESSAGING_SOURCES,
+    _looks_like_default_cli_title,
     is_cli_session_row,
     is_cli_session_row_visible,
     read_session_lineage_report,
@@ -54,6 +55,79 @@ def _publish_session_list_changed(reason: str, *, profile: str | None = None) ->
         # historical one-argument shape. Preserve the old signal instead of
         # turning unrelated session mutations into 500s.
         publish_session_list_changed(reason)
+
+
+def _sync_session_title_to_insights(session) -> None:
+    """Write title-only session metadata updates through to state.db when enabled."""
+    try:
+        if not load_settings().get("sync_to_insights"):
+            return
+        from api.state_sync import sync_session_usage
+
+        messages = getattr(session, "messages", None) or []
+        sync_session_usage(
+            session_id=session.session_id,
+            input_tokens=getattr(session, "input_tokens", None) or 0,
+            output_tokens=getattr(session, "output_tokens", None) or 0,
+            estimated_cost=getattr(session, "estimated_cost", 0.0),
+            model=getattr(session, "model", ""),
+            title=session.title,
+            message_count=len(messages),
+            profile=getattr(session, "profile", None),
+        )
+    except Exception:
+        logger.debug("Failed to update session title in state.db", exc_info=True)
+
+
+def _persist_generated_session_title(session, next_title: str, *, event_reason: str) -> str:
+    normalized_title = str(next_title or "").strip()[:80] or "Untitled"
+    with _get_session_agent_lock(session.session_id):
+        session.title = normalized_title
+        from api.session_ops import mark_session_title_generated
+
+        # mark_session_title_generated sets s.llm_title_generated = True and clears manual_title.
+        mark_session_title_generated(session)
+        session.save(touch_updated_at=False)
+    _sync_session_title_to_insights(session)
+    _publish_session_list_changed(event_reason, profile=getattr(session, "profile", None))
+    return session.title
+
+
+def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) -> None:
+    cli_meta = dict(cli_meta or {})
+    if not session or cli_meta.get("read_only") or not _looks_like_default_cli_title(cli_meta):
+        return
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid:
+        return
+
+    def _run() -> None:
+        try:
+            current = Session.load(sid)
+            if not current:
+                return
+            current = _ensure_full_session_before_mutation(sid, current)
+            if getattr(current, "read_only", False):
+                return
+            current_meta = {
+                "title": getattr(current, "title", None),
+                "source_tag": getattr(current, "source_tag", None),
+                "raw_source": getattr(current, "raw_source", None),
+                "session_source": getattr(current, "session_source", None),
+                "source_label": getattr(current, "source_label", None),
+            }
+            if not _looks_like_default_cli_title(current_meta):
+                return
+            next_title, _reason, _raw_preview = generate_session_title_for_session(current)
+            normalized_current = str(getattr(current, "title", "") or "").strip()
+            normalized_next = str(next_title or "").strip()
+            if not normalized_next or normalized_next == normalized_current:
+                return
+            _persist_generated_session_title(current, normalized_next, event_reason="session_title_regenerate")
+        except Exception:
+            logger.debug("Failed to generate imported session title for %s", sid, exc_info=True)
+
+    threading.Thread(target=_run, daemon=True, name=f"imported-title-{sid}").start()
 
 
 # ── Cron run tracking ────────────────────────────────────────────────────────
@@ -7391,27 +7465,6 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/sessions/cleanup_zero_message":
         return _handle_sessions_cleanup(handler, body, zero_only=True)
 
-    def _sync_session_title_to_insights(session):
-        """Write title-only session metadata updates through to state.db when enabled."""
-        try:
-            if not load_settings().get("sync_to_insights"):
-                return
-            from api.state_sync import sync_session_usage
-
-            messages = getattr(session, "messages", None) or []
-            sync_session_usage(
-                session_id=session.session_id,
-                input_tokens=getattr(session, "input_tokens", None) or 0,
-                output_tokens=getattr(session, "output_tokens", None) or 0,
-                estimated_cost=getattr(session, "estimated_cost", 0.0),
-                model=getattr(session, "model", ""),
-                title=session.title,
-                message_count=len(messages),
-                profile=getattr(session, "profile", None),
-            )
-        except Exception:
-            logger.debug("Failed to update session title in state.db", exc_info=True)
-
     if parsed.path == "/api/session/rename":
         try:
             require(body, "session_id", "title")
@@ -7443,19 +7496,12 @@ def handle_post(handler, parsed) -> bool:
             s = _ensure_full_session_before_mutation(sid, s)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        if getattr(s, "read_only", False) or getattr(s, "is_imported", False):
+        if getattr(s, "read_only", False):
             return bad(handler, "Read-only imported sessions cannot be renamed", 403)
         next_title, reason, raw_preview = generate_session_title_for_session(s, prefer_latest=prefer_latest)
         if not next_title:
             return bad(handler, f"Could not generate a better title ({reason or 'empty'})", 422)
-        with _get_session_agent_lock(sid):
-            s.title = str(next_title).strip()[:80] or "Untitled"
-            from api.session_ops import mark_session_title_generated
-            # mark_session_title_generated sets s.llm_title_generated = True and clears manual_title.
-            mark_session_title_generated(s)
-            s.save(touch_updated_at=False)
-        _sync_session_title_to_insights(s)
-        publish_session_list_changed("session_title_regenerate", profile=getattr(s, "profile", None))
+        _persist_generated_session_title(s, next_title, event_reason="session_title_regenerate")
         return j(handler, {
             "session": s.compact(),
             "title": s.title,
@@ -15895,6 +15941,17 @@ def _handle_session_import_cli(handler, body):
     publish_session_list_changed(
         "session_import_cli",
         profile=getattr(s, "profile", None),
+    )
+    _queue_generated_title_for_imported_session(
+        s,
+        {
+            "title": cli_title,
+            "source_tag": cli_source_tag,
+            "raw_source": cli_raw_source,
+            "session_source": cli_session_source,
+            "source_label": cli_source_label,
+            "read_only": cli_read_only,
+        },
     )
     return j(
         handler,

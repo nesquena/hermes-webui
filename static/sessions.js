@@ -3102,39 +3102,33 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
-  // Title regeneration matches the backend guard (api/routes.py rejects
-  // read_only OR is_imported with 403). read_only sessions already bailed at
-  // the isReadOnly early-return above; skip imported sessions here so the
-  // action is hidden rather than failing with a 403 toast. This keeps the
-  // is_imported gate scoped to regenerate instead of broadening the shared
-  // _isReadOnlySession() helper (which gates rename/pin/archive/etc.).
-  if(!session.is_imported){
-    menu.appendChild(_buildSessionAction(
-      t('session_title_regenerate'),
-      t('session_title_regenerate_desc'),
-      ICONS.spark,
-      async()=>{
-        closeSessionActionMenu();
-        try{
-          if(typeof showToast==='function') showToast(t('session_title_regenerating'), 1600);
-          const response=await api('/api/session/title/regenerate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
-          const nextTitle=(response&&response.title)||(response&&response.session&&response.session.title)||'';
-          if(nextTitle){
-            session.title=nextTitle;
-            const cached=(_allSessions||[]).find(item=>item&&item.session_id===session.session_id);
-            if(cached) cached.title=nextTitle;
-            if(S.session&&S.session.session_id===session.session_id){S.session.title=nextTitle;syncTopbar();}
-            renderSessionListFromCache();
-          }
-          if(typeof showToast==='function') showToast(t('session_title_regenerated', nextTitle||t('untitled')), 2400);
-        }catch(err){
-          const msg=t('session_title_regenerate_failed')+(err&&err.message?err.message:String(err));
-          setStatus(msg);
-          if(typeof showToast==='function') showToast(msg,3000,'error');
+  // Title regeneration stays available for writable imported sessions.
+  // Read-only sessions return earlier through the shared action-menu guard.
+  menu.appendChild(_buildSessionAction(
+    t('session_title_regenerate'),
+    t('session_title_regenerate_desc'),
+    ICONS.spark,
+    async()=>{
+      closeSessionActionMenu();
+      try{
+        if(typeof showToast==='function') showToast(t('session_title_regenerating'), 1600);
+        const response=await api('/api/session/title/regenerate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
+        const nextTitle=(response&&response.title)||(response&&response.session&&response.session.title)||'';
+        if(nextTitle){
+          session.title=nextTitle;
+          const cached=(_allSessions||[]).find(item=>item&&item.session_id===session.session_id);
+          if(cached) cached.title=nextTitle;
+          if(S.session&&S.session.session_id===session.session_id){S.session.title=nextTitle;syncTopbar();}
+          renderSessionListFromCache();
         }
+        if(typeof showToast==='function') showToast(t('session_title_regenerated', nextTitle||t('untitled')), 2400);
+      }catch(err){
+        const msg=t('session_title_regenerate_failed')+(err&&err.message?err.message:String(err));
+        setStatus(msg);
+        if(typeof showToast==='function') showToast(msg,3000,'error');
       }
-    ));
-  }
+    }
+  ));
   if(!isExternalSession){
     if(session.worktree_path){
       menu.appendChild(_buildSessionAction(
