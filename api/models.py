@@ -59,6 +59,7 @@ _STALE_TMP_AGE_SECONDS = 3600  # 1 hour
 _INDEX_WRITE_LOCK = threading.RLock()
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
+_SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
 
 # Path-safety contract for session IDs.  Accept alphanumerics, underscore, and
 # hyphen so API/gateway-issued ids (``api-*``, ``reachy-voice-*``) round-trip
@@ -146,26 +147,46 @@ def _session_dir_has_persisted_session_files() -> bool:
         return False
 
 
-def _rebuild_session_index_background() -> None:
+def _rebuild_session_index_background(expected_session_dir: Path, expected_index_file: Path) -> None:
+    global _SESSION_INDEX_REBUILD_THREAD, _SESSION_INDEX_REBUILD_THREAD_TARGET
     try:
-        _write_session_index(updates=None)
+        with _SESSION_INDEX_REBUILD_LOCK:
+            if SESSION_DIR != expected_session_dir or SESSION_INDEX_FILE != expected_index_file:
+                return
+        _write_session_index(
+            updates=None,
+            session_dir=expected_session_dir,
+            session_index_file=expected_index_file,
+        )
     except Exception:
         logger.debug("Background session-index rebuild failed", exc_info=True)
+    finally:
+        with _SESSION_INDEX_REBUILD_LOCK:
+            if _SESSION_INDEX_REBUILD_THREAD_TARGET == (
+                expected_session_dir,
+                expected_index_file,
+            ):
+                _SESSION_INDEX_REBUILD_THREAD = None
+                _SESSION_INDEX_REBUILD_THREAD_TARGET = None
 
 
 def _start_session_index_rebuild_thread() -> None:
     """Start one background full-index rebuild if the index is missing."""
-    global _SESSION_INDEX_REBUILD_THREAD
+    global _SESSION_INDEX_REBUILD_THREAD, _SESSION_INDEX_REBUILD_THREAD_TARGET
+    target = (SESSION_DIR, SESSION_INDEX_FILE)
     with _SESSION_INDEX_REBUILD_LOCK:
         if SESSION_INDEX_FILE.exists():
             return
         if (
             _SESSION_INDEX_REBUILD_THREAD is not None
             and _SESSION_INDEX_REBUILD_THREAD.is_alive()
+            and _SESSION_INDEX_REBUILD_THREAD_TARGET == target
         ):
             return
+        _SESSION_INDEX_REBUILD_THREAD_TARGET = target
         _SESSION_INDEX_REBUILD_THREAD = threading.Thread(
             target=_rebuild_session_index_background,
+            args=target,
             name="session-index-rebuild",
             daemon=True,
         )
@@ -191,7 +212,7 @@ def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
     return p.exists()
 
 
-def _write_session_index(updates=None):
+def _write_session_index(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
     """Update the session index file.
 
     When *updates* is provided (a list of Session objects whose compact
@@ -202,18 +223,20 @@ def _write_session_index(updates=None):
     LOCK protects in-memory state snapshots and payload construction only;
     disk I/O (write/flush/fsync/replace) always runs outside LOCK.
     """
-    _tmp = SESSION_INDEX_FILE.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+    session_dir = session_dir or SESSION_DIR
+    session_index_file = session_index_file or SESSION_INDEX_FILE
+    _tmp = session_index_file.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
 
     with _INDEX_WRITE_LOCK:
         # Lazy full-rebuild path — used when index doesn't exist yet.
-        if updates is None or not SESSION_INDEX_FILE.exists():
+        if updates is None or not session_index_file.exists():
             _cleanup_stale_tmp_files()  # best-effort sweep on startup / first call
             entry_map: dict[str, dict] = {}
-            for p in SESSION_DIR.glob('*.json'):
+            for p in session_dir.glob('*.json'):
                 if p.name.startswith('_'):
                     continue
                 try:
-                    s = Session.load(p.stem)
+                    s = _load_session_from_path(p)
                     if s:
                         c = s.compact()
                         sid = c.get('session_id')
@@ -243,7 +266,7 @@ def _write_session_index(updates=None):
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(_tmp, SESSION_INDEX_FILE)
+                os.replace(_tmp, session_index_file)
             except Exception:
                 # Best-effort cleanup of stale tmp on failure
                 try:
@@ -261,7 +284,7 @@ def _write_session_index(updates=None):
             # on-disk IDs once before entering the critical section.
             on_disk_ids = _persisted_session_ids_snapshot()
             with LOCK:
-                existing = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+                existing = json.loads(session_index_file.read_text(encoding='utf-8'))
                 in_memory_ids = set(SESSIONS.keys())
 
                 existing = [
@@ -289,7 +312,7 @@ def _write_session_index(updates=None):
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(_tmp, SESSION_INDEX_FILE)
+                os.replace(_tmp, session_index_file)
             except Exception:
                 try:
                     _tmp.unlink(missing_ok=True)
@@ -300,8 +323,16 @@ def _write_session_index(updates=None):
             _fallback = True
 
     if _fallback:
-        # Corrupt or missing index — fall back to full rebuild (called outside LOCK to avoid deadlock)
-        _write_session_index(updates=None)
+        # Corrupt or missing index — fall back to full rebuild (called outside LOCK to avoid deadlock).
+        # Propagate the resolved target so a rebuild scoped to a specific session dir
+        # (the background rebuild thread) falls back to rebuilding THAT dir's index,
+        # not the global SESSION_DIR (Opus advisor, stage-344 — defensive; today the
+        # only kwargs-caller passes updates=None and never reaches the fast path).
+        _write_session_index(
+            updates=None,
+            session_dir=session_dir,
+            session_index_file=session_index_file,
+        )
 
 
 def prune_session_from_index(session_id: str) -> None:
@@ -389,6 +420,12 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)
     _append_recovered_turn_to_context(session, recovered)
+    # The new user turn is now committed to messages (#3831): retire a positive
+    # truncation watermark from a prior retry/undo/edit so it can't freeze at the
+    # old edit boundary and drop these post-edit turns on a later empty-sidecar
+    # reconcile. None, never 0.0 (the truncate-to-empty sentinel, #2914).
+    if getattr(session, 'truncation_watermark', None):
+        session.truncation_watermark = None
     return recovered
 
 
@@ -511,26 +548,53 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     return None
 
 
-def _lookup_index_message_count(session_id):
-    """Return the indexed message count without loading the full session file."""
+def _load_session_from_path(path: Path) -> "Session | None":
+    """Load a session from an explicit JSON path without consulting SESSION_DIR."""
     try:
-        entries = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+        data = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         return None
+    data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+    return Session(**data)
+
+
+def _lookup_index_message_count(session_id):
+    """Return the indexed message count without loading the full session file."""
+    return _index_message_count_map().get(str(session_id))
+
+
+def _index_message_count_map(entries=None) -> dict[str, int]:
+    """Return indexed message counts keyed by session id.
+
+    ``load_metadata_only()`` is called in loops for stale lineage/sidebar rows.
+    Reading and parsing ``_index.json`` once per row turns /api/sessions into an
+    accidental O(n²) poll for old sidecars that predate persisted
+    ``message_count``. Accepting already-loaded index rows lets callers reuse
+    the index they just parsed.
+    """
+    if entries is None:
+        try:
+            entries = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+        except Exception:
+            return {}
     if not isinstance(entries, list):
-        return None
+        return {}
+    counts: dict[str, int] = {}
     for entry in entries:
-        if entry.get('session_id') != session_id:
+        if not isinstance(entry, dict):
+            continue
+        sid = str(entry.get('session_id') or '')
+        if not sid:
             continue
         count = entry.get('message_count')
-        if isinstance(count, int) and count >= 0:
-            return count
-        try:
-            count = int(count)
-        except (TypeError, ValueError):
-            return None
-        return count if count >= 0 else None
-    return None
+        if not isinstance(count, int):
+            try:
+                count = int(count)
+            except (TypeError, ValueError):
+                continue
+        if count >= 0:
+            counts[sid] = count
+    return counts
 
 
 def _parse_nonnegative_int(value):
@@ -791,7 +855,7 @@ class Session:
         return session
 
     @classmethod
-    def load_metadata_only(cls, sid):
+    def load_metadata_only(cls, sid, *, index_message_counts=None):
         """Load only the compact metadata fields, skipping the messages array.
 
         Session JSON files have metadata fields (session_id, title, model, etc.)
@@ -820,7 +884,10 @@ class Session:
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None
             if sidecar_message_count is None:
-                index_message_count = _lookup_index_message_count(sid)
+                if index_message_counts is not None:
+                    index_message_count = index_message_counts.get(str(sid))
+                else:
+                    index_message_count = _lookup_index_message_count(sid)
             # Modern sidecars carry an accurate message_count, so it is the
             # source of truth and we skip the per-row _index.json read in the
             # common case. The sidebar index is only a cache (it can lag behind
@@ -1354,6 +1421,30 @@ def _append_journaled_partial_output(
         # A stream can start with tools before any text. Keep those tools
         # visible after restart with an empty recovered assistant anchor instead
         # of inventing synthetic progress prose.
+        #
+        # Dedup guard (#3875): reuse an existing empty recovered anchor for THIS
+        # stream instead of appending a fresh one. The lazy read-side retry path
+        # (_retry_journal_recovery_in_place) re-runs this recovery on repeated
+        # get_session() calls, and a tool-first stream that never emitted text
+        # has no content to dedup on (flush_assistant() returns early on empty),
+        # so without this guard each retry — and each distinct interrupted stream
+        # over the session's life — appends another empty anchor. A session that
+        # was interrupted-and-recovered many times then accumulates thousands of
+        # empty content-less assistant rows, bloating the file and (combined with
+        # the render path) painting the transcript blank. One anchor per stream
+        # is all that's needed to host its recovered tool cards.
+        for _existing_idx in range(len(session.messages) - 1, -1, -1):
+            _m = session.messages[_existing_idx]
+            if not isinstance(_m, dict):
+                continue
+            if (
+                _m.get('_recovered_from_run_journal')
+                and _m.get('_recovered_stream_id') == stream_id
+                and _m.get('role') == 'assistant'
+                and not str(_m.get('content') or '').strip()
+            ):
+                current_assistant_idx = _existing_idx
+                return _existing_idx
         session.messages.append({
             'role': 'assistant',
             'content': '',
@@ -2191,6 +2282,33 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
     return _message_content_text(cached_tail) == _message_content_text(previous_disk_user)
 
 
+def _cached_session_lags_disk(cached) -> bool:
+    """Return True when a cached full session is older than its sidecar.
+
+    Active/reconnect paths can update the persisted sidecar through another
+    Session object while the LRU cache still holds an older object for the same
+    id. Serving the cache then makes recent assistant results disappear from
+    GET /api/session even though disk and _index.json are correct. Compare only
+    cheap metadata here; full reload happens only if disk is strictly ahead.
+    """
+    if cached is None:
+        return False
+    sid = getattr(cached, 'session_id', None)
+    if not sid:
+        return False
+    try:
+        disk_meta = Session.load_metadata_only(sid)
+    except Exception:
+        return False
+    if disk_meta is None:
+        return False
+    cached_count = len(getattr(cached, 'messages', None) or [])
+    disk_count = _parse_nonnegative_int(getattr(disk_meta, '_metadata_message_count', None))
+    if disk_count is None:
+        disk_count = _lookup_index_message_count(sid)
+    return bool(disk_count is not None and disk_count > cached_count)
+
+
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping the messages array).
 
@@ -2220,6 +2338,18 @@ def get_session(sid, metadata_only=False):
                     SESSIONS.pop(sid, None)
             cached = None
     if cached is not None:
+        if not metadata_only and _cached_session_lags_disk(cached):
+            try:
+                disk_session = Session.load(sid)
+                with LOCK:
+                    SESSIONS[sid] = disk_session
+                    SESSIONS.move_to_end(sid)
+                cached = disk_session
+            except Exception:
+                logger.debug(
+                    "cached session disk-freshness check failed for session %s",
+                    sid, exc_info=True,
+                )
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             try:
                 disk_session = Session.load(sid)
@@ -2393,9 +2523,18 @@ def _sidebar_message_count(session: dict) -> int:
 
 def _sidebar_lineage_root_id(session: dict, sessions_by_id: dict[str, dict]) -> str:
     sid = str(session.get('session_id') or '')
+    explicit = str(session.get('_lineage_root_id') or '').strip()
+    if explicit:
+        return explicit
+    relationship_type = str(session.get('relationship_type') or '').strip().lower()
+    if relationship_type == 'child_session':
+        return sid
     root = sid
     parent = session.get('parent_session_id')
+    source = str(session.get('session_source') or '').strip().lower()
     seen = {sid}
+    if source == 'fork':
+        return root
     while parent and parent not in seen and parent in sessions_by_id:
         root = str(parent)
         seen.add(root)
@@ -2589,6 +2728,14 @@ def _strip_sidebar_internal_flags(sessions: list[dict]) -> None:
         session.pop('_show_pre_compression_snapshot', None)
 
 
+def _looks_like_stale_zero_message_row(session: dict) -> bool:
+    """Return True for indexed rows that likely need sidecar metadata repair."""
+    return bool(
+        int(session.get('message_count') or 0) == 0
+        and int(session.get('user_message_count') or 0) > 0
+    )
+
+
 def _row_may_need_sidecar_metadata_refresh(
     session: dict,
     *,
@@ -2628,7 +2775,19 @@ def _row_may_need_sidecar_metadata_refresh(
             or session.get('_lineage_root_id')
             or session.get('_compression_segment_count')
         )
-        return bool(lineage_shaped and sid and _sidecar_mtime_after_index_timestamp(session))
+        needs_mtime_check = lineage_shaped or (
+            sid and _looks_like_stale_zero_message_row(session)
+        )
+        if needs_mtime_check and _sidecar_mtime_after_index_timestamp(session):
+            return True
+        return False
+    if (
+        sid
+        and _looks_like_stale_zero_message_row(session)
+        and str(session.get('session_source') or '').strip().lower() != 'fork'
+        and _sidecar_mtime_after_index_timestamp(session)
+    ):
+        return True
     if session.get('message_count') is None or session.get('last_message_at') is None:
         return True
     return bool(sid and stale_snapshot_ids and sid in stale_snapshot_ids)
@@ -2689,7 +2848,11 @@ def _stale_snapshot_metadata_refresh_ids(sessions: list[dict]) -> set[str]:
     return refresh_ids
 
 
-def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict]:
+def _refresh_index_rows_from_sidecar_metadata(
+    sessions: list[dict],
+    *,
+    index_message_counts: dict[str, int] | None = None,
+) -> list[dict]:
     """Overlay fuller sidecar metadata onto stale sidebar index rows.
 
     ``_index.json`` is a cache and can lag behind the canonical session sidecar
@@ -2710,7 +2873,10 @@ def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict
         if not sid:
             out.append(session)
             continue
-        sidecar = Session.load_metadata_only(sid)
+        sidecar = Session.load_metadata_only(
+            sid,
+            index_message_counts=index_message_counts,
+        )
         if not sidecar:
             out.append(session)
             continue
@@ -3012,7 +3178,11 @@ def all_sessions(diag=None):
                         active_stream_ids=active_stream_ids,
                     )
             _diag_stage(diag, "all_sessions.refresh_sidecar_metadata")
-            refreshed_index_rows = _refresh_index_rows_from_sidecar_metadata(list(index_map.values()))
+            index_message_counts = _index_message_count_map(index)
+            refreshed_index_rows = _refresh_index_rows_from_sidecar_metadata(
+                list(index_map.values()),
+                index_message_counts=index_message_counts,
+            )
             index_map = {
                 row['session_id']: row
                 for row in refreshed_index_rows
@@ -3038,6 +3208,8 @@ def all_sessions(diag=None):
                 and not s.get('has_pending_user_message')
                 and not s.get('worktree_path')
             )]
+            _diag_stage(diag, "all_sessions.lineage_metadata")
+            _enrich_sidebar_lineage_metadata(result)
             result = _prefer_fuller_snapshots_for_sidebar(result)
             sidebar_candidates = result
             visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
@@ -3049,8 +3221,6 @@ def all_sessions(diag=None):
             for s in result:
                 if not s.get('profile'):
                     s['profile'] = 'default'
-            _diag_stage(diag, "all_sessions.lineage_metadata")
-            _enrich_sidebar_lineage_metadata(result)
             return result
         except Exception:
             logger.debug("Failed to load session index, falling back to full scan")
@@ -3079,6 +3249,8 @@ def all_sessions(diag=None):
         and not s.pending_user_message
         and not getattr(s, 'worktree_path', None)
     )]
+    _diag_stage(diag, "all_sessions.lineage_metadata")
+    _enrich_sidebar_lineage_metadata(result)
     result = _prefer_fuller_snapshots_for_sidebar(result)
     sidebar_candidates = result
     visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
@@ -3088,8 +3260,6 @@ def all_sessions(diag=None):
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
-    _diag_stage(diag, "all_sessions.lineage_metadata")
-    _enrich_sidebar_lineage_metadata(result)
     return result
 
 

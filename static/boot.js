@@ -1779,8 +1779,14 @@ function applyBotName(){
     const s=await api('/api/settings');
     _bootSettings=s;
     window._sendKey=s.send_key||'enter';
+    // Persist default workspace so the blank new-chat page can show it
+    // and workspace actions (New file/folder) work before the first session (#804).
+    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._showTokenUsage=!!s.show_token_usage;
     window._showQuotaChip=s.show_quota_chip===true;
+    window._showConversationOutline=s.show_conversation_outline===true;
+    document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
+    if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
     applyEmptyStateSuggestionPref();
     window._showTps=!!s.show_tps;
@@ -1789,14 +1795,15 @@ function applyBotName(){
     window._showPreviousMessagingSessions=!!s.show_previous_messaging_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
-    // Persist default workspace so the blank new-chat page can show it
-    // and workspace actions (New file/folder) work before the first session (#804).
-    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
-    window._simplifiedToolCalling=s.simplified_tool_calling!==false;
+    window._simplifiedToolCalling=true;
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
-    window._activityFeedExpandedDefault=!!s.activity_feed_expanded_default;
+    window._worklogDetailsExpandedByDefault=!!(
+      Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')
+        ? s.worklog_details_expanded_default
+        : s.activity_feed_expanded_default
+    );
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
     window._inflightStateLimits={
@@ -1883,6 +1890,9 @@ function applyBotName(){
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showQuotaChip=false;
+    window._showConversationOutline=false;
+    document.documentElement.dataset.conversationOutline='disabled';
+    if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
     window._showTps=false;
@@ -2040,7 +2050,13 @@ function applyBotName(){
         S.session.active_stream_id ||
         S.session.pending_user_message
       );
-      if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight){
+      const _restoredDraft = (S.session && S.session.composer_draft) || {};
+      const _restoredDraftText = String(_restoredDraft.text||'').trim();
+      const _restoredDraftFiles = Array.isArray(_restoredDraft.files)
+        ? _restoredDraft.files.filter(Boolean)
+        : [];
+      const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles.length);
+      if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){
         S.session=null; S.messages=[];
         S._bootReady=true;
         // Restore panel pref before syncing so the workspace panel stays visible

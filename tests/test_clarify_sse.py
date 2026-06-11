@@ -73,34 +73,54 @@ class TestClarifySSERoutesCode:
 
 
 class TestClarifySSEFrontendCode:
+    """Frontend clarify transport.
+
+    As of #3913 the frontend no longer opens a clarify-stream EventSource
+    (it was one of six persistent SSE streams that exhausted the browser's
+    6-per-origin HTTP/1.1 pool). ``startClarifyPolling`` now routes straight
+    to the HTTP fallback poller. The backend SSE route stays for compatibility
+    (tests above); these pin the poll-only frontend against regression.
+    """
+
     @pytest.fixture(autouse=True)
     def _load_js(self):
         self.js = _read(_MESSAGES)
 
-    def test_uses_event_source(self):
-        assert "new EventSource" in self.js
-        assert "api/clarify/stream" in self.js
-        assert "EventSource('/api/clarify/stream" not in self.js
+    def _clarify_polling_body(self):
+        start = self.js.index("function startClarifyPolling(")
+        end = self.js.index("\nfunction ", start + 1)
+        return self.js[start:end]
 
-    def test_frontend_listens_initial_event(self):
-        assert "'initial'" in self.js or '"initial"' in self.js
+    def test_does_not_open_clarify_stream(self):
+        body = self._clarify_polling_body()
+        assert "api/clarify/stream" not in body, \
+            "Frontend must not open the clarify-stream EventSource (conn-pool exhaustion, #3913)"
+        assert "new EventSource" not in body, \
+            "startClarifyPolling must not construct an EventSource — it polls over HTTP now"
 
-    def test_frontend_listens_clarify_event(self):
-        assert "'clarify'" in self.js or '"clarify"' in self.js
+    def test_routes_directly_to_fallback_poll(self):
+        body = self._clarify_polling_body()
+        assert "_startClarifyFallbackPoll(sid)" in body, \
+            "startClarifyPolling must route to the HTTP fallback poller"
 
     def test_frontend_has_fallback_poll(self):
-        assert "_startClarifyFallbackPoll" in self.js or "clarifyFallbackTimer" in self.js
+        assert "_startClarifyFallbackPoll" in self.js or "_clarifyFallbackTimer" in self.js
+
+    def test_fallback_poll_hits_pending_endpoint(self):
+        assert 'api("/api/clarify/pending?session_id="' in self.js, \
+            "Clarify fallback poll must query /api/clarify/pending"
+        assert "EventSource('/api/clarify/stream" not in self.js, \
+            "No root-absolute clarify EventSource may remain (subpath-mount safety)"
 
     def test_frontend_fallback_interval_3s(self):
         # Fallback poll interval should be 3000ms
         assert "3000" in self.js
 
-    def test_frontend_stop_closes_event_source(self):
+    def test_frontend_stop_defensively_closes_event_source(self):
+        # _clarifyEventSource stays declared (always null now) with a
+        # null-guarded close() so any future re-introduction stays safe.
         assert "_clarifyEventSource" in self.js
         assert ".close()" in self.js
-
-    def test_frontend_has_health_timer(self):
-        assert "_clarifyHealthTimer" in self.js
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -437,6 +437,76 @@ def test_pre_compression_snapshot_hidden_from_active_sidebar_but_file_remains(mo
     assert [row["session_id"] for row in rows] == ["new_sid"]
 
 
+def test_forked_child_of_snapshot_stays_visible_when_snapshot_is_fuller(monkeypatch):
+    """A manual fork should not be grouped into a snapshot's hidden continuation lineage.
+
+    Even when the parent snapshot has a fuller transcript and a newer
+    timestamp, a `/branch` fork is independently discoverable and should stay in
+    the active sidebar rows as its own root.
+    """
+    snapshot = Session(
+        session_id="snapshot_parent",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "root"},
+            {"role": "assistant", "content": "compressed context"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ],
+        pre_compression_snapshot=True,
+        parent_session_id="snapshot_origin",
+        updated_at=300.0,
+        last_message_at=300.0,
+    )
+    fork = Session(
+        session_id="manual_fork_child",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "new branch"},
+            {"role": "assistant", "content": "reply"},
+        ],
+        parent_session_id="snapshot_parent",
+        session_source="fork",
+        updated_at=200.0,
+        last_message_at=200.0,
+    )
+    snapshot.save(touch_updated_at=False)
+    fork.save(touch_updated_at=False)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert snapshot.path.exists(), "snapshot JSON must stay available for lineage traversal"
+    assert rows[0]["session_id"] == "manual_fork_child"
+    assert rows[0]["session_source"] == "fork"
+    assert models._sidebar_lineage_root_id(
+        {
+            "session_id": "lineage_child",
+            "_lineage_root_id": "lineage_root",
+            "parent_session_id": "snapshot_parent",
+        },
+        {
+            "snapshot_parent": {
+                "session_id": "snapshot_parent",
+                "parent_session_id": "snapshot_origin",
+            }
+        },
+    ) == "lineage_root"
+    assert models._sidebar_lineage_root_id(
+        {
+            "session_id": "child_session_sid",
+            "relationship_type": "child_session",
+            "parent_session_id": "snapshot_parent",
+        },
+        {
+            "snapshot_parent": {
+                "session_id": "snapshot_parent",
+                "parent_session_id": "snapshot_origin",
+            }
+        },
+    ) == "child_session_sid"
+
+
 def test_fuller_pre_compression_snapshot_replaces_shorter_visible_segment(monkeypatch):
     """If the hidden snapshot has the fuller transcript, keep it reachable.
 
@@ -869,6 +939,118 @@ def test_all_sessions_refreshes_stale_visible_continuation_metadata(monkeypatch)
     assert rows[0]["last_message_at"] == 103.0
 
 
+def test_all_sessions_refreshes_stale_zero_count_row_from_sidecar(monkeypatch):
+    """A zero-message indexed row can still have real transcript content on disk."""
+    session = Session(
+        session_id="stale_zero_count",
+        title="Recovered Session",
+        messages=[
+            {"role": "user", "content": "first", "timestamp": 100.0},
+            {"role": "assistant", "content": "second", "timestamp": 101.0},
+        ],
+        updated_at=101.0,
+        last_message_at=101.0,
+    )
+    session.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "stale_zero_count",
+                "title": "Recovered Session",
+                "message_count": 0,
+                "user_message_count": 1,
+                "created_at": 100.0,
+                "updated_at": 1.0,
+                "last_message_at": 1.0,
+                "pinned": False,
+                "archived": False,
+            },
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["stale_zero_count"]
+    assert rows[0]["message_count"] == 2
+    assert rows[0]["last_message_at"] == 101.0
+
+
+def test_all_sessions_refreshes_stale_zero_count_snapshot_row_from_sidecar(monkeypatch):
+    """Snapshot rows follow the same stale-zero sidecar refresh path."""
+    session = Session(
+        session_id="stale_zero_snapshot_count",
+        title="Recovered Snapshot Session",
+        messages=[
+            {"role": "user", "content": "first", "timestamp": 100.0},
+            {"role": "assistant", "content": "second", "timestamp": 101.0},
+        ],
+        updated_at=101.0,
+        last_message_at=101.0,
+        pre_compression_snapshot=True,
+    )
+    session.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "stale_zero_snapshot_count",
+                "title": "Recovered Snapshot Session",
+                "message_count": 0,
+                "user_message_count": 1,
+                "created_at": 100.0,
+                "updated_at": 1.0,
+                "last_message_at": 1.0,
+                "pinned": False,
+                "archived": False,
+                "pre_compression_snapshot": True,
+            },
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["stale_zero_snapshot_count"]
+    assert rows[0]["message_count"] == 2
+    assert rows[0]["last_message_at"] == 101.0
+
+
+def test_all_sessions_skips_refresh_for_real_empty_untitled_drafts(monkeypatch):
+    """Keep genuine empty drafts on the cheap path when they have no user turns."""
+    draft = Session(
+        session_id="untitled_empty_draft",
+        title="Untitled",
+        messages=[],
+        updated_at=100.0,
+        last_message_at=100.0,
+    )
+    draft.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "untitled_empty_draft",
+                "title": "Untitled",
+                "message_count": 0,
+                "user_message_count": 0,
+                "created_at": 100.0,
+                "updated_at": 100.0,
+                "last_message_at": 100.0,
+                "pinned": False,
+                "archived": False,
+            },
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    with patch.object(Session, "load_metadata_only", side_effect=AssertionError("empty draft should not refresh sidecar")):
+        rows = models.all_sessions()
+
+    assert rows == []
+
+
 def test_all_sessions_does_not_refresh_plain_branch_fork_from_sidecar(monkeypatch):
     """A plain /branch fork (session_source='fork') must NOT trigger a sidecar refresh.
 
@@ -942,6 +1124,67 @@ def test_load_metadata_only_skips_index_read_when_sidecar_has_message_count(monk
 
     assert meta is not None
     assert meta.compact()["message_count"] == 1
+
+
+
+
+def test_all_sessions_reuses_loaded_index_counts_for_legacy_sidecar_refresh(monkeypatch):
+    """Refreshing multiple legacy lineage rows must not parse _index.json per row."""
+    index_file = models.SESSION_INDEX_FILE
+    rows = []
+    for sid, count in (("legacy_lineage_a", 3), ("legacy_lineage_b", 4)):
+        payload = {
+            "session_id": sid,
+            "title": sid,
+            "workspace": "/tmp",
+            "model": "test",
+            "created_at": 100.0,
+            "updated_at": 200.0,
+            "pinned": False,
+            "archived": False,
+            "parent_session_id": "lineage_parent",
+            "messages": [{"role": "user", "content": "legacy"}],
+            "tool_calls": [],
+        }
+        # Deliberately bypass Session.save(): pre-fix legacy sidecars do not have
+        # a persisted message_count field in their metadata prefix.
+        (models.SESSION_DIR / f"{sid}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        rows.append({
+            "session_id": sid,
+            "title": sid,
+            "workspace": "/tmp",
+            "model": "test",
+            "created_at": 100.0,
+            "updated_at": 100.0,
+            "last_message_at": 100.0,
+            "message_count": count,
+            "pinned": False,
+            "archived": False,
+            "parent_session_id": "lineage_parent",
+        })
+    _write_index_file(index_file, rows)
+
+    original_read_text = Path.read_text
+    index_reads = 0
+
+    def _counting_read_text(self, *args, **kwargs):
+        nonlocal index_reads
+        if self == index_file:
+            index_reads += 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _counting_read_text)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    result = models.all_sessions()
+
+    counts = {row["session_id"]: row["message_count"] for row in result}
+    assert counts["legacy_lineage_a"] == 3
+    assert counts["legacy_lineage_b"] == 4
+    assert index_reads == 1
 
 
 def test_session_save_does_not_persist_metadata_message_count_hint():
@@ -1239,3 +1482,50 @@ def test_all_sessions_ignores_stale_index_entries():
     ids = {e["session_id"] for e in rows}
     assert "sess_a" in ids
     assert "ghost_sid" not in ids
+
+
+def test_background_index_rebuild_skips_after_session_dir_switch(tmp_path, monkeypatch):
+    """A delayed rebuild thread must not write into a newer isolated session dir."""
+    original_session_dir = models.SESSION_DIR
+    original_index_file = models.SESSION_INDEX_FILE
+    new_session_dir = tmp_path / "other-sessions"
+    new_session_dir.mkdir()
+    new_index_file = new_session_dir / "_index.json"
+
+    monkeypatch.setattr(models, "_SESSION_INDEX_REBUILD_THREAD", object())
+    monkeypatch.setattr(models, "_SESSION_INDEX_REBUILD_THREAD_TARGET", (
+        original_session_dir,
+        original_index_file,
+    ))
+    monkeypatch.setattr(models, "SESSION_DIR", new_session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", new_index_file)
+
+    models._rebuild_session_index_background(
+        original_session_dir,
+        original_index_file,
+    )
+
+    assert not new_index_file.exists()
+    monkeypatch.setattr(models, "SESSION_DIR", original_session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", original_index_file)
+    session = _make_session("late_switch_sid", "Late switch", updated_at=100.0)
+    session.save(skip_index=True)
+
+    original_write_session_index = models._write_session_index
+
+    def _switch_globals_then_write(*args, **kwargs):
+        monkeypatch.setattr(models, "SESSION_DIR", new_session_dir)
+        monkeypatch.setattr(models, "SESSION_INDEX_FILE", new_index_file)
+        return original_write_session_index(*args, **kwargs)
+
+    monkeypatch.setattr(models, "_write_session_index", _switch_globals_then_write)
+
+    models._rebuild_session_index_background(
+        original_session_dir,
+        original_index_file,
+    )
+
+    assert original_index_file.exists()
+    assert not new_index_file.exists()
+    rows = _read_index(original_index_file)
+    assert [row["session_id"] for row in rows] == ["late_switch_sid"]

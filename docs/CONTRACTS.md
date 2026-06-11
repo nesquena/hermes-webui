@@ -31,6 +31,10 @@ does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
   proposed product model for long-running assistant replies, live process text,
   tool activity, recovery, terminal outcomes, and final-answer boundaries. Start
   here for UI/UX changes to running-session assistant reply rendering.
+- [`docs/architecture/stable-assistant-turn-anchor-phase0.md`](architecture/stable-assistant-turn-anchor-phase0.md):
+  current Phase 0 inventory for the Stable Assistant Turn Anchors work under
+  #3926. Use this before wiring anchor helpers into live SSE, replay,
+  settlement, `INFLIGHT`, or `renderMessages()` paths.
 - [`docs/rfcs/canonical-session-resolution.md`](rfcs/canonical-session-resolution.md):
   proposed contract for resolving URL routes, query parameters, localStorage,
   sidebar rows, and compression-lineage IDs to one canonical visible session
@@ -48,6 +52,12 @@ does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
   Start here for issue #2491 and Docker/source-boundary migration slices.
 - [`docs/rfcs/turn-journal.md`](rfcs/turn-journal.md): proposed crash-safe
   write-ahead journal for browser-originated chat turns.
+- [`docs/rfcs/webui-pending-intent-controls.md`](rfcs/webui-pending-intent-controls.md):
+  proposed control-surface companion to the long-running-session reply model for
+  Queue, Steer, Stop-and-send, Interrupt, and leftover-steer inputs submitted
+  while an agent run is active. Start here for busy-composer behavior, pending
+  queued messages, interrupt replacement, steer visibility, or leftover-steer
+  recovery changes.
 - [`docs/rfcs/README.md`](rfcs/README.md): RFC conventions and current RFC index.
 
 When a change touches streaming, recovery, replay, compression, context

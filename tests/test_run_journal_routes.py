@@ -264,9 +264,106 @@ def test_replay_emits_event_ids_and_stale_restart_diagnostic():
 def test_session_payload_exposes_runtime_journal_for_stale_streams():
     assert "original_stream_id = getattr(s, \"active_stream_id\", None)" in ROUTES_SRC
     assert '"runtime_journal"' in ROUTES_SRC
+    assert '"runtime_journal_snapshot"' in ROUTES_SRC
+    assert "_run_journal_live_snapshot(original_stream_id)" in ROUTES_SRC
     assert 'terminal_state = "lost-worker-bookkeeping"' in ROUTES_SRC
     assert "active=journal_active" in ROUTES_SRC
     assert "journal_active = bool(original_stream_id in active_stream_ids)" in ROUTES_SRC
+
+
+def test_live_journal_snapshot_reconstructs_visible_progress_and_tool_aliases(monkeypatch):
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda stream_id: {
+            "session_id": "session_1",
+            "run_id": stream_id,
+            "last_seq": 4,
+            "last_event_id": f"{stream_id}:4",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "read_run_events",
+        lambda session_id, run_id: {
+            "events": [
+                {
+                    "seq": 1,
+                    "event": "token",
+                    "payload": {"text": "First segment."},
+                    "event_id": f"{run_id}:1",
+                    "created_at": 1000.0,
+                },
+                {
+                    "seq": 2,
+                    "event": "tool",
+                    "payload": {
+                        "name": "terminal",
+                        "preview": "running tests",
+                        "tool_use_id": "toolu_123",
+                        "args": {"command": "pytest -q", "extra": "x" * 200},
+                    },
+                    "event_id": f"{run_id}:2",
+                },
+                {
+                    "seq": 3,
+                    "event": "tool_complete",
+                    "payload": {
+                        "name": "terminal",
+                        "preview": "passed",
+                        "tool_use_id": "toolu_123",
+                        "duration": 1.25,
+                    },
+                    "event_id": f"{run_id}:3",
+                },
+                {
+                    "seq": 4,
+                    "event": "reasoning",
+                    "payload": {"text": "Checked result."},
+                    "event_id": f"{run_id}:4",
+                },
+                {
+                    "seq": 5,
+                    "event": "token",
+                    "payload": {"text": " Second segment."},
+                    "event_id": f"{run_id}:5",
+                    "created_at": 1001.0,
+                },
+            ]
+        },
+    )
+
+    snapshot = routes._run_journal_live_snapshot("run_1")
+
+    assert snapshot["last_seq"] == 5
+    assert snapshot["last_event_id"] == "run_1:5"
+    assert snapshot["last_assistant_text"] == "First segment. Second segment."
+    assert snapshot["last_reasoning_text"] == "Checked result."
+    assert snapshot["current_live_segment_seq"] == 2
+    assert snapshot["activity_burst_anchors"] == [{"id": 1, "textEnd": len("First segment.")}]
+    assert snapshot["messages"] == [
+        {
+            "role": "assistant",
+            "content": "First segment. Second segment.",
+            "reasoning": "Checked result.",
+            "_live": True,
+            "_journal_snapshot": True,
+            "_journal_stream_id": "run_1",
+            "_ts": 1001.0,
+        }
+    ]
+    tool = snapshot["tool_calls"][0]
+    assert tool["name"] == "terminal"
+    assert tool["done"] is True
+    assert tool["tid"] == "toolu_123"
+    assert tool["tool_use_id"] == "toolu_123"
+    assert tool["activityBurstId"] == 1
+    assert tool["activitySegmentSeq"] == 1
+    assert tool["snippet"] == "passed"
+    assert tool["duration"] == 1.25
+    assert len(tool["args"]["extra"]) <= 123
 
 
 def test_status_payload_marks_non_terminal_dead_journal_as_stale():

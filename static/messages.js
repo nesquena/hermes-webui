@@ -4,6 +4,52 @@ function _markSessionViewed(sid, messageCount) {
   _setSessionViewedCount(sid, next);
 }
 
+function _apiUrl(path) {
+  return new URL(path, document.baseURI || location.href).href;
+}
+
+// Module-scope dedupe ring buffer for bg_task_complete events. Shared between
+// the in-turn STREAMS path (per-turn EventSource inside the chat-stream wirer)
+// and the persistent session-scoped path (/api/session/stream), so the
+// frontend never double-fires a toast or ack for the same (session_id,
+// event_id) regardless of which channel delivered it first. (Option X)
+//
+// Keyed by `${session_id}|${event_id}` → expiry timestamp (ms since epoch).
+// Bounded by a 60-second TTL plus a 256-entry soft cap with insertion-order
+// eviction on overflow. Events without `event_id` are ignored by the caller
+// (the server contract guarantees `event_id` on every completion emit).
+const _BG_TASK_COMPLETE_TTL_MS = 60000;
+const _BG_TASK_COMPLETE_CAP = 256;
+const _bgTaskCompleteSeenIds = new Map();
+
+function _bgTaskCompleteRingBufferAdd(sid, evt_id) {
+  // Missing key → treat as "seen/skip" (return true). The sole caller already
+  // guards with `if (!evt_id) return;` before invoking this, so this branch is
+  // defensive: returning true (skip) rather than false (proceed) means a
+  // future call site that forgets that guard drops the un-keyable event
+  // instead of processing a completion with no dedupe key.
+  if (!sid || !evt_id) return true;
+  const key = sid + '|' + evt_id;
+  const now = Date.now();
+  // Lazy purge: walk insertion-order; drop any entry whose expiry has passed.
+  // Map iteration is insertion-order so this also surfaces the oldest entries
+  // first when we need to evict for the soft cap below.
+  for (const [k, exp] of _bgTaskCompleteSeenIds) {
+    if (exp <= now) {
+      _bgTaskCompleteSeenIds.delete(k);
+    }
+  }
+  if (_bgTaskCompleteSeenIds.has(key)) return true;  // duplicate
+  _bgTaskCompleteSeenIds.set(key, now + _BG_TASK_COMPLETE_TTL_MS);
+  // Soft cap: insertion-order eviction.
+  while (_bgTaskCompleteSeenIds.size > _BG_TASK_COMPLETE_CAP) {
+    const firstKey = _bgTaskCompleteSeenIds.keys().next().value;
+    if (firstKey === undefined) break;
+    _bgTaskCompleteSeenIds.delete(firstKey);
+  }
+  return false;
+}
+
 function _isDocumentVisibleAndFocused() {
   if(typeof document!=='undefined' && document.visibilityState && document.visibilityState!=='visible') return false;
   if(typeof document!=='undefined' && typeof document.hasFocus==='function' && !document.hasFocus()) return false;
@@ -66,6 +112,37 @@ function _deferStreamErrorIfOffline(){
 
 document.addEventListener('visibilitychange', _markActiveSessionViewedOnReturn);
 window.addEventListener('focus', _markActiveSessionViewedOnReturn);
+
+// Delegated click handler for the interim-progress-note collapse toggle (#2403).
+// Delegation (not a per-element listener) is required because the live turn's
+// DOM is snapshotted/restored via outerHTML/innerHTML on session switch
+// (snapshotLiveTurnHtmlForSession / restoreLiveTurnHtmlForSession in ui.js),
+// which strips element listeners. A document-level handler survives the
+// restore so a restored toggle stays interactive and collapsed notes never
+// become permanently unreachable. State lives in the DOM (presence of
+// .interim-collapsed + data-threshold on the toggle), so the handler is
+// stateless and works on freshly-created and restored toggles alike.
+function _interimCollapseDelegatedClick(e){
+  const toggle=e.target&&e.target.closest?e.target.closest('.interim-collapse-toggle'):null;
+  if(!toggle) return;
+  const blocks=toggle.parentElement;
+  if(!blocks) return;
+  const threshold=parseInt(toggle.dataset.threshold,10)||3;
+  const hidden=blocks.querySelectorAll('.interim-collapsed');
+  if(hidden.length){
+    hidden.forEach(el=>el.classList.remove('interim-collapsed'));
+    toggle.dataset.expanded='1';
+    toggle.textContent='Collapse';
+  } else {
+    const all=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
+    const rehide=all.slice(0,all.length-threshold);
+    rehide.forEach(el=>el.classList.add('interim-collapsed'));
+    toggle.dataset.expanded='';
+    toggle.textContent='Show '+rehide.length+' earlier update'+(rehide.length===1?'':'s');
+  }
+}
+document.addEventListener('click', _interimCollapseDelegatedClick);
+
 // TTS: pause speech synthesis when user focuses the composer (#499)
 const _msgEl=document.getElementById('msg');
 if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
@@ -75,6 +152,217 @@ let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';
 let _selectedTextReplyRaf=0;
 const _persistentStateToastSeen=new Set();
+const _thinkPairs=[
+  {open:'<think>',close:'</think>'},
+  {open:'<|channel>thought\n',close:'<channel|>'},
+  {open:'<|turn|>thinking\n',close:'<turn|>'}
+];
+
+function _thinkingFenceMarkerAt(text, index){
+  // A fenced code block opener may be indented up to 3 spaces in Markdown
+  // (4+ spaces is an indented code block, handled separately). Only treat the
+  // marker as a fence when it sits at a line start after optional 1-3 spaces.
+  if(index>0&&text[index-1]!=='\n'){
+    let back=index-1, spaces=0;
+    while(back>=0&&text[back]===' '&&spaces<3){back--;spaces++;}
+    if(!(back<0||text[back]==='\n')) return '';
+  }
+  if(text.startsWith('```',index)) return '```';
+  if(text.startsWith('~~~',index)) return '~~~';
+  return '';
+}
+
+function _nextThinkingOpener(text, start){
+  // Index of the earliest complete thinking opener at/after `start`, or -1.
+  // Cheap indexOf per opener — lets the scanner bulk-skip plain trailing content
+  // instead of walking it char-by-char (#3633 Codex per-token perf catch).
+  let best=-1;
+  for(const p of _thinkPairs){
+    const i=text.indexOf(p.open,start);
+    if(i!==-1&&(best===-1||i<best)) best=i;
+  }
+  return best;
+}
+
+function _textTailIsPartialOpener(text){
+  // True when the END of text is a non-empty proper prefix of some opener
+  // (e.g. "<thi" for "<think>"). Decides whether a streaming tail might be a
+  // forming block worth code-aware handling.
+  for(const p of _thinkPairs){
+    const m=Math.min(p.open.length-1,text.length);
+    for(let n=m;n>0;n--){ if(p.open.startsWith(text.slice(text.length-n))) return true; }
+  }
+  return false;
+}
+
+function _lineIsIndentedCode(text, lineStart){
+  // True when the line beginning at lineStart is a markdown indented code block
+  // line (>=4 leading spaces or a leading tab, and not blank). lineStart must be
+  // the first char of the line. Only inspects the line's leading chars, not the
+  // whole document (the per-character variant was O(n^2) on long no-newline
+  // content — #3633 Codex perf catch).
+  if(lineStart>=text.length) return false;
+  if(text[lineStart]==='\t'||text.startsWith('    ',lineStart)){
+    let nl=text.indexOf('\n',lineStart);
+    if(nl===-1) nl=text.length;
+    return text.slice(lineStart,nl).trim()!=='';
+  }
+  return false;
+}
+
+function _mergeInlineThinkingReasoning(existingReasoning, extractedParts){
+  let out=String(existingReasoning||'').trim();
+  (Array.isArray(extractedParts)?extractedParts:[]).forEach(function(part){
+    const item=String(part||'').trim();
+    if(!item) return;
+    if(!out){out=item;return;}
+    if(out===item||out.split('\n\n').some(function(existing){return existing.trim()===item;})) return;
+    out += '\n\n' + item;
+  });
+  return out;
+}
+
+function _extractInlineThinkingFromContent(rawContent, existingReasoning, options){
+  // Code-aware extraction (must mirror api/streaming.py
+  // _extract_inline_thinking_from_content): thinking tags inside a triple-fence,
+  // an inline single-backtick code span, or an indented code block are LEFT
+  // VISIBLE. options.streaming gates partial/unclosed handling — only during a
+  // live stream does an unmatched open tag mean "still thinking"; on the
+  // reload/render path an unclosed tag stays visible content (#3633 Codex catch).
+  const streaming=!!(options&&options.streaming);
+  const text=String(rawContent||'');
+  if(!text){
+    const reasoning=String(existingReasoning||'').trim();
+    return {reasoning,content:text,thinkingText:reasoning,displayText:text,inThinking:false};
+  }
+  // Fast path (#3633 Codex perf catch — _parseStreamState / syncInflightAssistantMessage
+  // call this on the FULL accumulator on every streamed token, so the common no-tag
+  // case must not do the O(length) char walk per call). If no complete opener is
+  // present AND — when streaming — the tail is not a prefix of an opener, there is
+  // nothing to extract: return the text unchanged (two cheap substring scans).
+  if(!_thinkPairs.some(p=>text.indexOf(p.open)!==-1)){
+    let tailIsPartialOpener=false;
+    if(streaming){
+      for(const p of _thinkPairs){
+        const maxPrefix=Math.min(p.open.length-1,text.length);
+        for(let n=maxPrefix;n>0;n--){
+          if(p.open.startsWith(text.slice(text.length-n))){tailIsPartialOpener=true;break;}
+        }
+        if(tailIsPartialOpener) break;
+      }
+    }
+    if(!tailIsPartialOpener){
+      const reasoning=String(existingReasoning||'').trim();
+      return {reasoning,content:text,thinkingText:reasoning,displayText:text,inThinking:false};
+    }
+  }
+  const visible=[];
+  const extracted=[];
+  let cursor=0;
+  let index=0;
+  let fence='';
+  let inBacktick=false;
+  let inThinking=false;
+  // Incremental O(1)-per-iteration line state + seen-nonspace flag (the previous
+  // per-character line scan + slice(0,index).trim() were O(n^2) on long
+  // no-newline content — #3633 Codex perf catch).
+  let lineIsIndentedCode=_lineIsIndentedCode(text,0);
+  let seenNonspace=false;
+  // Only lstrip the final content when a LEADING thinking block/prefix was
+  // removed — a reply that legitimately starts with indented code / whitespace
+  // and has no leading thinking wrapper keeps its leading whitespace (#3633
+  // Codex catch).
+  let leadingRemoved=false;
+  // Index of the next complete opener at/after `index` — lets the scanner bulk-skip
+  // plain trailing content instead of walking it char-by-char every streamed token
+  // (#3633 Codex per-token perf catch).
+  let nextOpener=_nextThinkingOpener(text,0);
+  while(index<text.length){
+    if(nextOpener===-1||index>nextOpener) nextOpener=_nextThinkingOpener(text,index);
+    if(nextOpener===-1){
+      // No further COMPLETE opener ahead — remaining tail is plain and is
+      // appended in one slice, EXCEPT during streaming when the tail is a prefix
+      // of an opener ("...<thi"): it may be a forming block and must be
+      // suppressed, but ONLY if outside code context (a partial opener inside
+      // inline-backtick / fenced / indented code stays visible — master parity).
+      // Code state needs the char walk, so fall through in that case (bounded —
+      // a partial tail is a transient single token) instead of bulk-skipping.
+      if(streaming&&_textTailIsPartialOpener(text)){
+        // fall through to the code-aware char walk for the tail
+      } else {
+        break;
+      }
+    }
+    const ch=text[index];
+    if(index>0&&text[index-1]==='\n') lineIsIndentedCode=_lineIsIndentedCode(text,index);
+    const marker=_thinkingFenceMarkerAt(text,index);
+    if(marker) fence=(fence===marker)?'':(fence||marker);
+    if(!fence&&!marker&&ch==='`') inBacktick=!inBacktick;
+    const inCode=!!fence||inBacktick||lineIsIndentedCode;
+    if(!inCode){
+      let pair=null;
+      for(const candidate of _thinkPairs){
+        if(text.startsWith(candidate.open,index)){pair=candidate;break;}
+      }
+      if(pair){
+        const closeIndex=text.indexOf(pair.close,index+pair.open.length);
+        if(closeIndex===-1){
+          // Unclosed open tag. A LEADING unclosed block (nothing visible before
+          // it) is a genuine thinking trace cut off mid-thought → reasoning
+          // (master #3455 leading-only intent + live "still thinking"). An
+          // unclosed tag AFTER visible content on the reload/render path is
+          // almost always a literal typed tag — leave it (and following prose)
+          // visible so nothing is silently truncated (#3633 Codex catch).
+          const leading=!seenNonspace;
+          if(!streaming&&!leading) break;
+          if(leading) leadingRemoved=true;
+          visible.push(text.slice(cursor,index));
+          const partial=text.slice(index+pair.open.length);
+          if(partial) extracted.push(partial);
+          inThinking=true;
+          cursor=text.length;
+          index=text.length;
+          break;
+        }
+        visible.push(text.slice(cursor,index));
+        extracted.push(text.slice(index+pair.open.length,closeIndex));
+        if(!seenNonspace) leadingRemoved=true;
+        seenNonspace=true;
+        index=closeIndex+pair.close.length;
+        cursor=index;
+        continue;
+      }
+      if(streaming){
+        let matchedPartial=false;
+        for(const candidate of _thinkPairs){
+          const rest=text.slice(index);
+          if(rest.length<candidate.open.length&&candidate.open.startsWith(rest)){
+            if(!seenNonspace) leadingRemoved=true;
+            visible.push(text.slice(cursor,index));
+            inThinking=true;
+            cursor=text.length;
+            index=text.length;
+            matchedPartial=true;
+            break;
+          }
+        }
+        if(matchedPartial||index>=text.length) break;
+      }
+    }
+    if(ch.trim()!=='') seenNonspace=true;
+    index++;
+  }
+  if(cursor<text.length) visible.push(text.slice(cursor));
+  const content=leadingRemoved?visible.join('').replace(/^\s+/,''):visible.join('');
+  const reasoning=_mergeInlineThinkingReasoning(existingReasoning,extracted);
+  return {reasoning,content,thinkingText:reasoning,displayText:content,inThinking};
+}
+
+if(typeof window!=='undefined'){
+  window._extractInlineThinkingFromContentForRender=function(rawContent, existingReasoning){
+    return _extractInlineThinkingFromContent(rawContent, existingReasoning, {streaming:false});
+  };
+}
 
 function enhanceMarkdownTables(root){
   if(!root||!root.querySelectorAll) return;
@@ -315,6 +603,113 @@ function _appendSelectedTextReplyToComposer(text){
   if(typeof showToast==='function') showToast(_selectedTextReplyT('selected_text_reply_appended', 'Selected text added to composer'), 1600);
   return true;
 }
+
+function insertSavedPromptIntoComposer(text){
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  if(!composer||!text)return;
+  const current=String(composer.value||'');
+  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${text}\n\n`:`${text}\n\n`;
+  composer.focus();
+  try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
+  composer.dispatchEvent(new Event('input',{bubbles:true}));
+  if(typeof autoResize==='function') autoResize();
+}
+
+let _savedPromptsCache=null;
+
+async function _loadSavedPrompts(){
+  try{
+    const data=await api('/api/prompts');
+    _savedPromptsCache=Array.isArray(data&&data.prompts)?data.prompts:[];
+  }catch(_e){_savedPromptsCache=[];}
+  return _savedPromptsCache;
+}
+
+async function toggleSavedPromptsPopup(){
+  const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
+  const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
+  if(!popup)return;
+  if(popup.style.display!=='none'){
+    popup.style.display='none';
+    if(btn)btn.setAttribute('aria-expanded','false');
+    return;
+  }
+  popup.innerHTML='<div class="saved-prompts-loading">Loading…</div>';
+  popup.style.display='flex';
+  if(btn)btn.setAttribute('aria-expanded','true');
+  const prompts=await _loadSavedPrompts();
+  popup.innerHTML='';
+  if(!prompts.length){
+    const empty=document.createElement('div');
+    empty.className='saved-prompts-empty';
+    empty.textContent=(typeof t==='function'&&t('saved_prompts_empty'))||'No saved prompts yet.';
+    popup.appendChild(empty);
+  }else{
+    for(const p of prompts){
+      const row=document.createElement('div');
+      row.className='saved-prompt-row';
+      row.setAttribute('role','menuitem');
+      const label=document.createElement('span');
+      label.className='saved-prompt-label';
+      label.textContent=p.label||p.text;
+      label.title=p.text;
+      row.onclick=()=>{
+        insertSavedPromptIntoComposer(p.text);
+        popup.style.display='none';
+        if(btn)btn.setAttribute('aria-expanded','false');
+      };
+      const del=document.createElement('button');
+      del.className='saved-prompt-delete';
+      del.type='button';
+      del.title=(typeof t==='function'&&t('saved_prompts_delete'))||'Delete';
+      del.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      del.onclick=async(e)=>{
+        e.stopPropagation();
+        try{await api('/api/prompts',{method:'DELETE',body:JSON.stringify({id:p.id})});}catch(_e){}
+        _savedPromptsCache=null;
+        await toggleSavedPromptsPopup();
+        await toggleSavedPromptsPopup();
+      };
+      row.appendChild(label);
+      row.appendChild(del);
+      popup.appendChild(row);
+    }
+  }
+  const addRow=document.createElement('div');
+  addRow.className='saved-prompt-add-row';
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='saved-prompt-save-btn';
+  saveBtn.textContent=(typeof t==='function'&&t('saved_prompts_save_current'))||'Save current input';
+  saveBtn.onclick=async()=>{
+    const msgEl=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+    const text=(msgEl&&msgEl.value||'').trim();
+    if(!text){
+      if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_empty_input'))||'Type a prompt first',2000,'error');
+      return;
+    }
+    try{await api('/api/prompts',{method:'POST',body:JSON.stringify({text})});}catch(_e){
+      if(typeof showToast==='function') showToast(_e&&_e.message||'Failed to save prompt',2000,'error');
+      return;
+    }
+    _savedPromptsCache=null;
+    popup.style.display='none';
+    if(btn)btn.setAttribute('aria-expanded','false');
+    if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_saved'))||'Prompt saved',1600);
+  };
+  addRow.appendChild(saveBtn);
+  popup.appendChild(addRow);
+}
+
+document.addEventListener('click',(e)=>{
+  const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
+  const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
+  if(!popup||popup.style.display==='none')return;
+  if(!popup.contains(e.target)&&e.target!==btn&&!(btn&&btn.contains(e.target))){
+    popup.style.display='none';
+    if(btn)btn.setAttribute('aria-expanded','false');
+  }
+},{capture:false});
 
 function _selectedTextReplyButton(){
   if(_selectedTextReplyBtn)return _selectedTextReplyBtn;
@@ -1028,7 +1423,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     ? (_liveInflightAssistantMessages.length>1
       ? (_fullInflightAssistant || _joinedInflightSegments)
       : (_liveInflightAssistant
-        ? (_liveInflightAssistant.content || '')
+        ? (_fullInflightAssistant || _liveInflightAssistant.content || '')
         : _fullInflightAssistant))
     : '';
   const _lastLiveReasoning = reconnecting
@@ -1073,13 +1468,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // On reconnect, the assistantBody already has partial smd-rendered content.
   // We clear it on first new token and restart the parser from the reconnect point.
   let _smdReconnect=reconnecting;
-  // Thinking tag patterns for streaming display
-  const _thinkPairs=[
-    {open:'<think>',close:'</think>'},
-    {open:'<|channel>thought\n',close:'<channel|>'},
-    {open:'<|turn|>thinking\n',close:'<turn|>'}  // Gemma 4
-  ];
-
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
@@ -1201,6 +1589,72 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _closeSource(source){
     closeLiveStream(activeSid, streamId, source);
   }
+  function _clearStreamEndRecovery(){
+    if(_streamEndRecoveryTimer){
+      clearTimeout(_streamEndRecoveryTimer);
+      _streamEndRecoveryTimer=null;
+    }
+    _pendingStreamEndRecovery=false;
+    _streamEndRecoveryAttempts=0;
+  }
+  function _liveStreamEndScenePresent(){
+    if(assistantText||assistantRow) return true;
+    if(String(liveReasoningText||reasoningText||'').trim()) return true;
+    const inflight=INFLIGHT[activeSid];
+    if(inflight&&Array.isArray(inflight.toolCalls)&&inflight.toolCalls.length) return true;
+    if(!_isActiveSession()||typeof document==='undefined') return false;
+    const turn=$('liveAssistantTurn');
+    return !!(turn&&turn.querySelector(
+      '[data-live-assistant="1"],'+
+      '.live-worklog[data-live-worklog-shell="1"],'+
+      '.tool-card-row[data-live-tid],'+
+      '.agent-activity-thinking[data-thinking-active="1"]'
+    ));
+  }
+  function _scheduleStreamEndRecovery(source, delay=180){
+    if(_streamEndRecoveryTimer) clearTimeout(_streamEndRecoveryTimer);
+    _pendingStreamEndRecovery=true;
+    _streamEndRecoveryTimer=setTimeout(()=>{void _runStreamEndRecovery(source);},delay);
+  }
+  function _finalizeStreamEndFallback(source){
+    _clearStreamEndRecovery();
+    if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+    _terminalStateReached=true;
+    _streamFinalized=true;
+    _cancelAnimationFramePendingStreamRender();
+    _streamFadeCleanupReduceMotionListener();
+    _smdEndParser();
+    if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+    _clearOwnerInflightState();
+    _clearApprovalForOwner();
+    _clearClarifyForOwner('terminal');
+    if(_isActiveSession()){
+      S.activeStreamId=null;
+      clearLiveToolCards();if(!assistantText)removeThinking();
+      renderMessages({preserveScroll:true});
+    }
+    renderSessionList();
+    _setActivePaneIdleIfOwner();
+    _closeSource(source);
+  }
+  async function _runStreamEndRecovery(source){
+    if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery){
+      _clearStreamEndRecovery();
+      return;
+    }
+    _streamEndRecoveryTimer=null;
+    const status=await _restoreSettledSession(source,{status:true});
+    if(status==='restored'){
+      _clearStreamEndRecovery();
+      return;
+    }
+    if(status==='active'&&_streamEndRecoveryAttempts<10){
+      _streamEndRecoveryAttempts+=1;
+      _scheduleStreamEndRecovery(source,200);
+      return;
+    }
+    _finalizeStreamEndFallback(source);
+  }
   function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
     (Array.isArray(snippets)?snippets:[]).forEach(snippet=>{
@@ -1237,30 +1691,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // reasoning channel, which would otherwise bloat the persisted session
   // message by 30-50% and miss the m.reasoning field used by the thinking card.
   function _splitThinkFromContent(rawContent, existingReasoning){
-    const text=String(rawContent||'');
-    if(!text) return {reasoning:existingReasoning||'', content:text};
-    // Extract exactly ONE leading think block (after lstrip), matching the
-    // streaming renderer's _streamDisplay/_parseStreamState semantics EXACTLY —
-    // both strip only the first leading block. A closed <think>...</think> that
-    // appears MID-BODY is, by the renderer's definition, visible content (e.g. a
-    // literal tag inside a fenced code block); a whole-body scan would silently
-    // move it into m.reasoning. And looping multiple leading blocks here (when the
-    // renderer strips only one) would make persisted/reload content diverge from
-    // the live stream. So: leading, single, partial-open left intact (#3455 review, Codex).
-    let extracted='';
-    let remaining=text;
-    const trimmed=text.trimStart();
-    for(const {open,close} of _thinkPairs){
-      if(!trimmed.startsWith(open)) continue;
-      const ci=trimmed.indexOf(close,open.length);
-      if(ci===-1) break; // partial open — leave intact for the live renderer
-      extracted=trimmed.slice(open.length,ci);
-      remaining=trimmed.slice(ci+close.length).replace(/^\s+/,'');
-      break;
-    }
-    if(!extracted) return {reasoning:existingReasoning||'', content:rawContent};
-    const finalReasoning=existingReasoning?existingReasoning+'\n\n'+extracted:extracted;
-    return {reasoning:finalReasoning, content:remaining};
+    return _extractInlineThinkingFromContent(rawContent, existingReasoning, {streaming:false});
   }
   function syncInflightAssistantMessage(){
     const inflight=INFLIGHT[activeSid];
@@ -1374,6 +1805,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _reconnectAttempted=false;
   let _terminalStateReached=false;
   let _deferredStreamRecoveryBound=false;
+  let _pendingStreamEndRecovery=false;
+  let _streamEndRecoveryTimer=null;
+  let _streamEndRecoveryAttempts=0;
 
   function _pageHiddenForStreamError(){
     return (typeof document!=='undefined'&&document.visibilityState==='hidden')||
@@ -1464,13 +1898,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const byTid=new Map();
     liveCalls.forEach((tc,idx)=>{
       if(!tc||typeof tc!=='object') return;
-      const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+      const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
       if(tid&&!byTid.has(tid)) byTid.set(tid,{tc,idx});
     });
     const used=new Set();
     return (rawCalls||[]).map((raw,idx)=>{
       const next={...(raw||{}),done:true};
-      const tid=next.tid||next.id||next.tool_call_id||next.call_id||'';
+      const tid=next.tid||next.id||next.tool_call_id||next.tool_use_id||next.call_id||'';
       let matchEntry=tid?byTid.get(tid):null;
       if(!matchEntry){
         const name=next.name||((next.function||{}).name)||'';
@@ -1510,57 +1944,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return s.trim();
   }
   function _streamDisplay(){
-    const raw=_stripXmlToolCalls(assistantText);
-    // Always run think-block stripping even when reasoningText is populated.
-    // Some providers emit reasoning content via on_reasoning AND wrap it in
-    // <think> tags in the token stream — the early-return caused the thinking
-    // card and main response to show identical content (closes #852).
-    for(const {open,close} of _thinkPairs){
-      // Trim leading whitespace before checking for the open tag — some models
-      // (e.g. MiniMax) emit newlines before <think>.
-      const trimmed=raw.trimStart();
-      if(trimmed.startsWith(open)){
-        const ci=trimmed.indexOf(close,open.length);
-        if(ci!==-1){
-          // Thinking block complete — strip it, show the rest
-          return trimmed.slice(ci+close.length).replace(/^\s+/,'');
-        }
-        // Still inside thinking block — show placeholder
-        return '';
-      }
-      // Hide partial tag prefixes while streaming so users don't see
-      // `<thi`, `<think`, etc. before the model finishes the token.
-      if(open.startsWith(trimmed)) return '';
-    }
-    return raw;
+    return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true}).content;
   }
   function _parseStreamState(){
-    const raw=_stripXmlToolCalls(assistantText);
-    if(reasoningText){
-      return {thinkingText:liveReasoningText, displayText:_streamDisplay(), inThinking:false};
-    }
-    for(const {open,close} of _thinkPairs){
-      const trimmed=raw.trimStart();
-      if(trimmed.startsWith(open)){
-        const ci=trimmed.indexOf(close,open.length);
-        if(ci!==-1){
-          return {
-            thinkingText: trimmed.slice(open.length, ci).trim(),
-            displayText: trimmed.slice(ci+close.length).replace(/^\s+/,''),
-            inThinking:false,
-          };
-        }
-        return {
-          thinkingText: trimmed.slice(open.length).trim(),
-          displayText:'',
-          inThinking:true,
-        };
-      }
-      if(open.startsWith(trimmed)){
-        return {thinkingText:'', displayText:'', inThinking:true};
-      }
-    }
-    return {thinkingText:'', displayText:raw, inThinking:false};
+    return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true});
   }
   function _renderLiveThinking(parsed){
     if(window._showThinking===false){removeThinking();return;}
@@ -1832,8 +2219,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _streamFadePauseAfter(text, paragraphBreakIndex){
     if(paragraphBreakIndex>=0) return 90;
     const trimmed=String(text||'').trimEnd();
-    if(/[.!?]["')\]]*$/.test(trimmed)) return 45;
-    if(/[:;]["')\]]*$/.test(trimmed)) return 30;
+    if(/[.!?]["\x27)\]]*$/.test(trimmed)) return 45;
+    if(/[:;]["\x27)\]]*$/.test(trimmed)) return 30;
     return 0;
   }
   function _streamFadeNextText(targetText){
@@ -2076,7 +2463,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _liveToolTid(d, activityBurstId, activitySegmentSeq){
-    const explicit=String(d&&d.tid||'').trim();
+    const explicit=String(d&&(d.tid||d.id||d.tool_call_id||d.tool_use_id||d.call_id)||'').trim();
     if(explicit) return explicit;
     return `live-${activeSid}-${_hashString(_toolCallSignature(d,activityBurstId,activitySegmentSeq))}`;
   }
@@ -2104,7 +2491,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const candidate=toolCalls[i];
         if(!candidate||typeof candidate!=='object') continue;
         if(!allowDone&&candidate.done===true) continue;
-        const candidateTid=String(candidate.tid||candidate.id||candidate.tool_call_id||candidate.call_id||'');
+        const candidateTid=String(candidate.tid||candidate.id||candidate.tool_call_id||candidate.tool_use_id||candidate.call_id||'');
         if(candidateTid&&candidateTid===wantedTid) return i;
       }
     }
@@ -2174,7 +2561,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];
     if(!Array.isArray(inflight.messages)) inflight.messages=[...(inflight.messages||[])];
 
-    const explicitTid=String(d&&d.tid||'').trim();
+    const explicitTid=String(d&&d.tid||d&&d.id||d&&d.tool_call_id||d&&d.tool_use_id||d&&d.call_id||'').trim();
     const isComplete=phase==='complete';
     let signature=_toolCallSignature(d,current.burstId,current.segmentSeq);
     let index=-1;
@@ -2292,7 +2679,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Throttling to 66ms intervals prevents this pileup without noticeable
     // visual degradation — streaming text updates still feel immediate.
     // performance.now() is monotonic so tab suspend/resume and NTP adjustments
-    // can't produce negative or enormous deltas.
+    // cannot produce negative or enormous deltas.
     const sinceLastMs=performance.now()-_lastRenderMs;
     const _doRender=()=>{
       _pendingRafHandle=null;
@@ -2433,9 +2820,39 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _completeAutomaticCompressionOnLiveProgress(activeSid);
       ensureAssistantRow(true);
+      if(assistantRow) assistantRow.setAttribute('data-interim','1');
       _flushPendingSegmentRender({force:true});
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
+      // Collapse old interim notes once more than INTERIM_COLLAPSE_THRESHOLD accumulate.
+      const INTERIM_COLLAPSE_THRESHOLD=3;
+      if(visibleInterimSnippets.length>INTERIM_COLLAPSE_THRESHOLD&&assistantRow){
+        const blocks=assistantRow.parentElement;
+        if(blocks){
+          const allInterim=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
+          const toHide=allInterim.slice(0,allInterim.length-INTERIM_COLLAPSE_THRESHOLD);
+          let toggle=blocks.querySelector('.interim-collapse-toggle');
+          if(!toggle){
+            toggle=document.createElement('span');
+            toggle.className='interim-collapse-toggle';
+            // No per-element listener: clicks are handled by a delegated
+            // document-level handler (see _interimCollapseDelegatedClick) so
+            // the toggle keeps working after a live-turn DOM restore
+            // (snapshotLiveTurnHtmlForSession/restoreLiveTurnHtmlForSession
+            // rebuild via innerHTML, which would drop a direct listener and
+            // leave the collapsed notes permanently unreachable). The
+            // threshold rides on the markup so the handler stays stateless.
+            toggle.dataset.threshold=String(INTERIM_COLLAPSE_THRESHOLD);
+            if(toHide.length) toHide[0].before(toggle);
+          }
+          // Skip re-collapse when the user expanded manually; always update the stored count.
+          if(!toggle.dataset.expanded){
+            toHide.forEach(el=>el.classList.add('interim-collapsed'));
+          }
+          const stillHidden=blocks.querySelectorAll('[data-interim="1"].interim-collapsed').length;
+          if(stillHidden) toggle.textContent='Show '+stillHidden+' earlier update'+(stillHidden===1?'':'s');
+        }
+      }
       recordActivityBoundary();
       _resetAssistantSegment();
       _scheduleRender();
@@ -2563,14 +2980,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       showApprovalForSession(activeSid, d, 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed');
+      sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
     });
 
     source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed');
+      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
     });
 
     source.addEventListener('state_saved',e=>{
@@ -2669,8 +3086,32 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    // bg_task_complete: terminal(notify_on_complete=true) background process
+    // exited. Option Z PIVOT: the agent wakeup is started SERVER-SIDE by the
+    // drain thread (api/background_process._process_one →
+    // routes.start_session_turn) with NO browser round-trip — so the
+    // closed-tab case works (parity with CLI/Telegram). The browser does NOT
+    // re-POST /api/chat/start anymore. This SSE event is pure LIVE-VIEW: if
+    // a tab is open the server-initiated turn streams live via the normal
+    // /api/chat/stream EventSource; if the tab is closed the turn still runs
+    // server-side and persists to the session store.
+    //
+    // Idempotency: dedupe by (session_id, event_id) via a Map+TTL ring
+    // buffer (`_bgTaskCompleteRingBufferAdd`).
+    //
+    // Option X: this handler is the in-turn (STREAMS-bound) path. The server
+    // dual-emits to the persistent session-scoped channel too — the
+    // `_handleBgTaskCompleteEvent` function below is shared between both
+    // paths (dedupe only; the wakeup itself is server-side).
+    source.addEventListener('bg_task_complete',e=>{
+      if(typeof _handleBgTaskCompleteEvent==='function'){
+        _handleBgTaskCompleteEvent(e, activeSid, {source:'stream'});
+      }
+    });
+
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
+      _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
@@ -2880,7 +3321,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         renderSessionList();
         _setActivePaneIdleIfOwner();
         playNotificationSound();
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
+        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{sid:activeSid});
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -2895,27 +3336,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource(source);
         return;
       }
+      _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
-      _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
       }catch(_){}
+      if(S.activeStreamId===streamId && _liveStreamEndScenePresent()){
+        _scheduleStreamEndRecovery(source);
+        return;
+      }
       // Some replay/journal paths can deliver stream_end without a preceding
       // done event. In that case closing the EventSource is not enough: the
       // live DOM/inflight state remains projected and can duplicate Thinking or
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
-      if(await _restoreSettledSession(source)){
+      const status=await _restoreSettledSession(source,{status:true});
+      if(status==='restored'){
         return;
       }
-      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
-      _streamFinalized=true;
-      _cancelAnimationFramePendingStreamRender();
-      _streamFadeCleanupReduceMotionListener();
-      _smdEndParser();
-      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      _closeSource(source);
+      if(status==='active'&&S.activeStreamId===streamId){
+        _scheduleStreamEndRecovery(source,200);
+        return;
+      }
+      _finalizeStreamEndFallback(source);
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
@@ -3027,6 +3471,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('apperror',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      _clearStreamEndRecovery();
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -3123,6 +3568,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource(source);
         return;
       }
+      // #3885: if a stream_end recovery is in flight, don't start a competing
+      // reconnect — recovery polls server state and owns the terminal decision
+      // (else its exhaustion could mute a freshly reconnected stream). Opus stage-LK.
+      if(_pendingStreamEndRecovery){
+        _closeSource(source);
+        return;
+      }
       if(typeof recordClientSSEError==='function') recordClientSSEError('chat-response',{ready_state:source?source.readyState:null,session_id:activeSid,stream_id:streamId,reason:'chat EventSource.onerror'});
       source.close();
       if(_deferStreamErrorIfOffline()) return;
@@ -3170,6 +3622,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('cancel',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      _clearStreamEndRecovery();
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -3260,19 +3713,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     window._carryForwardEphemeralTurnFields=_carryForwardEphemeralTurnFields;
   }
 
-  async function _restoreSettledSession(source){
+  async function _restoreSettledSession(source, options=null){
+    const returnStatus=!!(options&&options.status);
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
-      return false;
+      return returnStatus?'stale':false;
     }
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
-      if(_streamFinalized) return true;
+      if(_streamFinalized) return returnStatus?'restored':true;
       const session=data&&data.session;
-      if(!session) return false;
-      if(session.active_stream_id||session.pending_user_message) return false;
+      if(!session) return returnStatus?'missing':false;
+      if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
       _cancelAnimationFramePendingStreamRender();
@@ -3330,9 +3784,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
       _setActivePaneIdleIfOwner();
-      return true;
+      return returnStatus?'restored':true;
     }catch(_){
-      return false;
+      return returnStatus?'error':false;
     }
   }
 
@@ -3341,6 +3795,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _closeSource(source);
       return;
     }
+    _clearStreamEndRecovery();
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -3681,44 +4136,19 @@ async function respondApproval(choice) {
 function startApprovalPolling(sid) {
   stopApprovalPolling();
   _approvalPollingSessionId = sid || null;
-  // ── SSE (preferred): long-lived connection, server pushes instantly ──
-  try {
-    const es = new EventSource(new URL('api/approval/stream?session_id=' + encodeURIComponent(sid), document.baseURI || location.href).href);
-    let _fallbackActive = false;
 
-    es.addEventListener('initial', e => {
-      const d = JSON.parse(e.data);
-      if (d.pending) { showApprovalForSession(sid, d.pending, d.pending_count || 1); }
-      else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
-    });
-
-    es.addEventListener('approval', e => {
-      const d = JSON.parse(e.data);
-      if (d.pending) { showApprovalForSession(sid, d.pending, d.pending_count || 1); }
-      else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
-    });
-
-    es.onerror = () => {
-      // SSE failed — fall back to HTTP polling (3s interval)
-      if (_fallbackActive) return;
-      _fallbackActive = true;
-      try { es.close(); } catch(_){}
-      _startApprovalFallbackPoll(sid);
-    };
-
-    // If the session changes or stops being busy, close the SSE.
-    // We detect this via a periodic check (cheap — no network request).
-    _approvalSSEHealthTimer = setInterval(() => {
-      if (!S.busy || !S.session || S.session.session_id !== sid) {
-        stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true);
-      }
-    }, 5000);
-
-    _approvalEventSource = es;
-  } catch(_e) {
-    // EventSource constructor failed — use polling directly
-    _startApprovalFallbackPoll(sid);
-  }
+  // Use HTTP polling instead of SSE to avoid browser connection pool exhaustion.
+  // Browsers limit to 6 concurrent HTTP connections per origin over HTTP/1.1.
+  // With 6 persistent SSE streams (sessions/events, gateway/stream,
+  // session/stream, approval/stream, clarify/stream, chat/stream), the pool
+  // fills and all fetch() requests queue indefinitely. The server responds
+  // normally (curl works), but the browser has no available sockets.
+  //
+  // This was introduced in v0.51.340 when /api/session/stream was added as
+  // the 6th persistent SSE connection. Until we multiplex streams or serve
+  // SSE from a separate origin, use HTTP polling to free 2 connection slots.
+  // (1.5-second interval, acceptable tradeoff)
+  _startApprovalFallbackPoll(sid);
 }
 
 let _approvalEventSource = null;
@@ -3726,7 +4156,10 @@ let _approvalSSEHealthTimer = null;
 let _approvalPollingSessionId = null;
 
 function _startApprovalFallbackPoll(sid) {
-  _approvalPollTimer = setInterval(async () => {
+  // Run one tick immediately so a session already blocked on a pending approval
+  // shows its card instantly (the removed SSE 'initial' event used to do this);
+  // then poll on the 1500ms cadence. (#3913 SHOULD-FIX)
+  const _tick = async () => {
     if (!S.busy || !S.session || S.session.session_id !== sid) {
       stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true); return;
     }
@@ -3738,7 +4171,9 @@ function _startApprovalFallbackPoll(sid) {
       else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
     } catch(e) { /* ignore poll errors */ }
     finally { _approvalFallbackPollInFlight = false; }
-  }, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
+  };
+  _approvalPollTimer = setInterval(_tick, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
+  _tick();
 }
 
 function stopApprovalPollingForSession(sid) {
@@ -3752,6 +4187,194 @@ function stopApprovalPolling() {
   if (_approvalSSEHealthTimer) { clearInterval(_approvalSSEHealthTimer); _approvalSSEHealthTimer = null; }
   _approvalFallbackPollInFlight = false;
   _approvalPollingSessionId = null;
+}
+
+// ── Session-scoped SSE stream (Option X) ──────────────────────────────────
+// Long-lived EventSource bound to /api/session/stream?session_id=<sid>.
+// Lives across agent turns (unlike the per-turn /api/chat/stream which is
+// torn down at end-of-turn). Carries bg_task_complete events fired while no
+// turn is active — the architectural fix for the notify_on_complete wakeup
+// gap that #2242 + #2279 papered over.
+//
+// Lifecycle: opened on session mount (loadSession / newSession), closed on
+// session switch / unmount. The browser closes it implicitly on tab close
+// (server detects disconnect via the SSE read-loop and unsubscribes).
+let _sessionEventSource = null;
+let _sessionStreamSessionId = null;
+let _sessionStreamReconnectTimer = null;
+
+function startSessionStream(sid) {
+  if (!sid) return;
+  // Already on this session? No-op (loadSession is a no-op when re-selecting
+  // the same session; this defends against external re-callers).
+  if (_sessionStreamSessionId === sid && _sessionEventSource) return;
+  stopSessionStream();
+  _sessionStreamSessionId = sid;
+  try {
+    const es = new EventSource(_apiUrl('api/session/stream?session_id=' + encodeURIComponent(sid)));
+    _sessionEventSource = es;
+    es.addEventListener('initial', () => { /* connection confirmed */ });
+    es.addEventListener('bg_task_complete', e => {
+      // Shared handler — same dedupe set as the in-turn STREAMS path.
+      if (typeof _handleBgTaskCompleteEvent === 'function') {
+        _handleBgTaskCompleteEvent(e, sid, {source: 'session'});
+      }
+    });
+    // ── Defect B: live-view of server-initiated (Option Z) turns ──────────
+    // The drain thread starts the wakeup turn server-side and the server
+    // fans a `server_turn_started` {stream_id} frame onto this per-session
+    // channel. No browser POSTed /api/chat/start, so nothing is attached to
+    // that STREAMS[stream_id] yet. Attach the EXISTING chat-stream renderer
+    // (attachLiveStream — the exact path /api/chat/start uses) to the
+    // server-created stream so the open tab renders the turn live. Reuses
+    // the one renderer; does NOT hand-roll a second one.
+    es.addEventListener('server_turn_started', e => {
+      try {
+        const d = JSON.parse(e.data || '{}');
+        const evSid = d.session_id || sid;
+        const streamId = String(d.stream_id || '');
+        if (!streamId || evSid !== sid) return;
+        // `recovered` marks an on-subscribe replay from the server: the tab
+        // (re)connected to /api/session/stream AFTER the original
+        // fire-and-forget server_turn_started had already been broadcast, so
+        // the live stream is mid-flight. Attach via the reconnecting (replay)
+        // path so the renderer rebuilds from the run journal instead of
+        // expecting token 0 (which would render a truncated turn). A fresh
+        // (non-recovered) frame still attaches from the first token.
+        const recovered = !!d.recovered;
+        // Only drive the renderer when this session is the one on screen.
+        const isCurrent = (typeof _isSessionCurrentPane === 'function')
+          ? _isSessionCurrentPane(sid)
+          : (S.session && S.session.session_id === sid);
+        if (!isCurrent) return;
+        // A turn is already rendering in this tab (user-initiated, or we
+        // already attached to this very stream). attachLiveStream is
+        // idempotent per (sid, streamId); bail if we're already on it.
+        if (S.activeStreamId === streamId) return;
+        const existingLive = (typeof LIVE_STREAMS !== 'undefined') ? LIVE_STREAMS[sid] : null;
+        if (existingLive && existingLive.streamId === streamId) return;
+        // Mirror the loadSession reattach setup. For a fresh frame the turn
+        // renders from its first token; for a recovered (replay) frame
+        // attachLiveStream reconstructs the in-progress stream.
+        S.busy = true;
+        S.activeStreamId = streamId;
+        if (S.session && S.session.session_id === sid) S.session.active_stream_id = streamId;
+        if (typeof updateSendBtn === 'function') updateSendBtn();
+        if (typeof setComposerStatus === 'function') setComposerStatus('');
+        if (typeof syncTopbar === 'function') syncTopbar();
+        if (typeof appendThinking === 'function') appendThinking();
+        if (typeof startApprovalPolling === 'function') startApprovalPolling(sid);
+        if (typeof startClarifyPolling === 'function') startClarifyPolling(sid);
+        if (typeof attachLiveStream === 'function') {
+          attachLiveStream(
+            sid, streamId,
+            (S.session && S.session.pending_attachments) || [],
+            recovered ? {reconnecting: true} : {},
+          );
+        }
+        if (typeof renderSessionList === 'function') void renderSessionList();
+      } catch (_) {}
+    });
+    es.onerror = () => {
+      // Browser already auto-reconnects EventSource on most transient
+      // failures. We only intervene if the connection has been closed for
+      // good (readyState === 2) — schedule a one-shot re-open after 5s.
+      if (es.readyState === 2 && _sessionStreamSessionId === sid) {
+        if (_sessionStreamReconnectTimer) clearTimeout(_sessionStreamReconnectTimer);
+        // The CLOSED EventSource (readyState === 2) will never reconnect on
+        // its own, and startSessionStream's top guard
+        // (`_sessionStreamSessionId === sid && _sessionEventSource`) would
+        // short-circuit the re-open while this dead object is still pinned.
+        // Drop our reference (and close it for good measure) so the timer's
+        // startSessionStream() reaches stopSessionStream() and builds a FRESH
+        // EventSource instead of reusing the closed one. Only clear if `es`
+        // is still the active source — a newer connection may have replaced
+        // it in the interim (stale onerror from a superseded stream), in
+        // which case we must not stomp the live one.
+        if (_sessionEventSource === es) {
+          try { es.close(); } catch (_) {}
+          _sessionEventSource = null;
+        }
+        _sessionStreamReconnectTimer = setTimeout(() => {
+          _sessionStreamReconnectTimer = null;
+          if (_sessionStreamSessionId === sid) startSessionStream(sid);
+        }, 5000);
+      }
+    };
+  } catch(_) {
+    // EventSource ctor threw — silently disabled; the in-turn STREAMS path
+    // still works for events that fire during an active turn.
+    _sessionEventSource = null;
+  }
+}
+
+function stopSessionStream() {
+  if (_sessionStreamReconnectTimer) { clearTimeout(_sessionStreamReconnectTimer); _sessionStreamReconnectTimer = null; }
+  if (_sessionEventSource) {
+    try { _sessionEventSource.close(); } catch(_){}
+    _sessionEventSource = null;
+  }
+  _sessionStreamSessionId = null;
+}
+
+// Shared bg_task_complete handler — invoked from BOTH the in-turn STREAMS
+// channel (legacy path, still kept as defense-in-depth) AND the session-
+// scoped channel (Option X primary path). Dedupes by (session_id, event_id)
+// via the Map+TTL ring buffer declared at the top of this module.
+// Events without `event_id` are ignored — the server contract guarantees one
+// on every completion emit, so a missing key signals a malformed or replayed
+// payload we should not surface or ack.
+// PR (c) UX surface: post-dedupe the handler marks the session viewed (when
+// the session pane is current and the doc is visible+focused), then runs the
+// T4 drop-when-focused gate; only out-of-focus or off-pane completions spawn
+// a toast. The diagnostic ack POST still fires for both focused and
+// unfocused viewers so the server receives the delivery/cleanup signal;
+// the focus gate suppresses UI noise only.
+function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
+  try {
+    const d = JSON.parse(e.data || '{}');
+    const sid = d.session_id || expectedSid;
+    if (sid !== expectedSid) return;
+    const evt_id = d.event_id ? String(d.event_id) : '';
+    if (!evt_id) return;  // server contract requires event_id; ignore otherwise
+    if (_bgTaskCompleteRingBufferAdd(sid, evt_id)) return;  // duplicate
+    const pid = String(d.task_id || '');
+    const _viewed = typeof _isSessionActivelyViewed === 'function' && _isSessionActivelyViewed(sid);
+    if (_viewed) {
+      try { _markSessionViewed(sid, (S&&S.session&&S.session.session_id===sid)?(S.session.message_count??(S.messages&&S.messages.length)??0):0); } catch(_){}
+      try { if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(sid); } catch(_){}
+    } else {
+      // T4 drop-when-focused: suppress toast only; ack below still fires.
+      try {
+        const tid = (d.task_id || '').slice(0, 8) || '?';
+        const tail = d.summary ? `: ${String(d.summary).slice(0, 80)}` : '';
+        showToast(`Task ${tid} done${tail}`, 2600);
+      } catch (_) {}
+    }
+
+    // Fire-and-forget ack (diagnostic only — Option Z made this a no-op for
+    // state. The agent wakeup is now started SERVER-SIDE by the drain thread
+    // in api/background_process._process_one → start_session_turn; the
+    // browser is no longer in the wakeup path at all.)
+    try {
+      fetch(_apiUrl('api/bg-task-complete-ack'), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'include',
+        body: JSON.stringify({session_id: sid, task_id: pid, event_id: evt_id}),
+      }).catch(() => {});
+    } catch(_) {}
+
+    // Option Z PIVOT: the browser NO LONGER re-POSTs the chat-start endpoint
+    // to wake the agent. Server-side wakeup is the PRIMARY mechanism — the
+    // drain thread starts the turn directly (no tab required), so the
+    // closed-tab case works (parity with CLI/Telegram). The per-session SSE
+    // channel this handler is wired into is DEMOTED to a pure live-view
+    // layer: if a tab is open the server-initiated turn streams live via the
+    // existing chat-stream EventSource; if the tab is closed the turn still
+    // runs server-side and the result is persisted to the session store.
+    // The user-facing toast + drop-when-focused gate land in PR (c).
+  } catch(_) {}
 }
 
 // ── Clarify polling ──
@@ -4236,64 +4859,26 @@ function startClarifyPolling(sid) {
   _clarifyPollingSessionId = sid || null;
   _clarifyMissingEndpointWarned = false;
 
-  // SSE primary path: long-lived connection pushes events instantly.
-  try {
-    _clarifyEventSource = new EventSource(new URL('api/clarify/stream?session_id=' + encodeURIComponent(sid), document.baseURI || location.href).href);
-  } catch(e) {
-    _startClarifyFallbackPoll(sid);
-    return;
-  }
-
-  _clarifyEventSource.addEventListener('initial', function(ev) {
-    try {
-      var d = JSON.parse(ev.data);
-      if (d.pending) { showClarifyForSession(sid, d.pending); }
-      else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
-    } catch(e) {}
-  });
-
-  _clarifyEventSource.addEventListener('clarify', function(ev) {
-    try {
-      var d = JSON.parse(ev.data);
-      if (d.pending) { showClarifyForSession(sid, d.pending); }
-      else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
-    } catch(e) {}
-  });
-
-  _clarifyEventSource.onerror = function() {
-    if (_clarifyEventSource) { try { _clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
-    if (_clarifyHealthTimer) { clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null; }
-    _startClarifyFallbackPoll(sid);
-  };
-
-  // Stale-detector: track last event timestamp; only reconnect if no event
-  // (initial or clarify) has arrived in 60s. The server sends a keepalive
-  // comment line every 30s but EventSource silently consumes those; we only
-  // bump lastEventAt on actual application events. With no real events for
-  // 60s on a long-lived clarify connection the server is effectively silent
-  // and a reconnect is the safe move.
+  // Use HTTP polling instead of SSE to avoid browser connection pool exhaustion.
+  // Browsers limit to 6 concurrent HTTP connections per origin over HTTP/1.1.
+  // With 6 persistent SSE streams (sessions/events, gateway/stream,
+  // session/stream, approval/stream, clarify/stream, chat/stream), the pool
+  // fills and all fetch() requests queue indefinitely. The server responds
+  // normally (curl works), but the browser has no available sockets.
   //
-  // Without the lastEventAt gate the original PR force-reconnected every 60s
-  // regardless of activity, which churned one TCP/SSE setup per minute per
-  // active session. (Opus pre-release review of v0.50.249.)
-  let _lastClarifyEventAt = Date.now();
-  const _markClarifyEvent = () => { _lastClarifyEventAt = Date.now(); };
-  _clarifyEventSource.addEventListener('initial', _markClarifyEvent);
-  _clarifyEventSource.addEventListener('clarify', _markClarifyEvent);
-  _clarifyHealthTimer = setInterval(function() {
-    if (Date.now() - _lastClarifyEventAt < 60000) return;
-    if (_clarifyEventSource) {
-      try { _clarifyEventSource.close(); } catch(_){}
-      _clarifyEventSource = null;
-    }
-    clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null;
-    startClarifyPolling(sid);
-  }, 60000);
+  // This was introduced in v0.51.340 when /api/session/stream was added as
+  // the 6th persistent SSE connection. Until we multiplex streams or serve
+  // SSE from a separate origin, use HTTP polling to free 2 connection slots.
+  // (3-second interval, acceptable tradeoff)
+  _startClarifyFallbackPoll(sid);
 }
 
 function _startClarifyFallbackPoll(sid) {
   _clarifyPollingSessionId = sid || null;
-  _clarifyFallbackTimer = setInterval(async () => {
+  // Run one tick immediately so a session already blocked on a pending clarify
+  // shows its card instantly (the removed SSE 'initial' event used to do this);
+  // then poll on the 3000ms cadence. (#3913 SHOULD-FIX)
+  const _tick = async () => {
     if (!S.session || S.session.session_id !== sid) {
       stopClarifyPolling(); _hideClarifyCardIfOwner(sid, true, 'session'); return;
     }
@@ -4316,7 +4901,9 @@ function _startClarifyFallbackPoll(sid) {
     } finally {
       _clarifyFallbackPollInFlight = false;
     }
-  }, 3000);
+  };
+  _clarifyFallbackTimer = setInterval(_tick, 3000);
+  _tick();
 }
 
 function stopClarifyPollingForSession(sid) {
@@ -4387,16 +4974,59 @@ function playAttentionSound(key){
   }catch(e){console.warn('Attention sound failed:',e);}
 }
 
-function sendBrowserNotification(title,body){
-  if(!window._notificationsEnabled||!document.hidden) return;
-  if(!('Notification' in window)) return;
+function _notificationOptions(body,options={}){
+  const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
+  const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
+  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:false,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+}
+function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
+  const opts=_notificationOptions(body,options);
+  const direct=()=>new Notification(title||botName,opts);
+  // Prefer the service worker (the only path that works in a standalone PWA,
+  // notably iOS). Use getRegistration() + a short timeout race rather than
+  // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
+  // registration ever activates for the scope (e.g. a reverse proxy serving
+  // sw.js with the wrong MIME type, or SW disabled in the browser) — which
+  // would silently drop every notification instead of falling back.
+  if(navigator.serviceWorker&&navigator.serviceWorker.getRegistration){
+    const reg$=Promise.race([
+      navigator.serviceWorker.getRegistration().catch(()=>null),
+      new Promise(res=>setTimeout(()=>res(null),2000))
+    ]);
+    return reg$.then(reg=>(reg&&reg.active&&reg.showNotification)
+      ? reg.showNotification(title||botName,opts)
+      : direct());
+  }
+  return Promise.resolve(direct());
+}
+function requestNotificationPermission(){
+  if(!('Notification' in window)){
+    if(typeof showToast==='function') showToast(t('notifications_unsupported'),3000,'error');
+    return Promise.resolve('unsupported');
+  }
+  if(Notification.permission==='granted') return Promise.resolve('granted');
+  if(Notification.permission==='denied'){
+    if(typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+    return Promise.resolve('denied');
+  }
+  return Notification.requestPermission().then(p=>{
+    if(typeof showToast==='function') showToast(p==='granted'?t('notifications_enabled_toast'):t('notifications_denied'),3000,p==='granted'?undefined:'error');
+    if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
+    return p;
+  });
+}
+function sendBrowserNotification(title,body,options={}){
+  const force=!!(options&&options.force);
+  if(!force&&(!window._notificationsEnabled||!document.hidden)) return;
+  if(!('Notification' in window)) return;
   if(Notification.permission==='granted'){
-    new Notification(title||botName,{body:body});
-  }else if(Notification.permission!=='denied'){
-    Notification.requestPermission().then(p=>{
-      if(p==='granted') new Notification(title||botName,{body:body});
-    });
+    _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+  }else if(Notification.permission==='denied'){
+    // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
+    if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+  }else{
+    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});});
   }
 }
 

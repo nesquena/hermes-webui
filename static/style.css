@@ -934,6 +934,7 @@
   :root{--app-titlebar-safe-top:0px;}
   .pwa-standalone{overscroll-behavior:none;}
   .pwa-standalone body{-webkit-tap-highlight-color:transparent;}
+  .app-titlebar-new-chat{display:none;}
   .pwa-standalone .app-titlebar-reload{display:inline-flex;}
   .pwa-offline .app-titlebar::after{content:'';position:absolute;left:50%;bottom:5px;width:5px;height:5px;border-radius:999px;background:var(--warning);box-shadow:0 0 0 3px color-mix(in srgb,var(--warning) 22%,transparent);transform:translateX(-50%);}
   .pwa-resumed .app-titlebar-title{animation:pwa-title-resume .6s ease-out;}
@@ -948,8 +949,10 @@
     .pull-to-refresh-indicator.active{opacity:1;transform:translateY(0);}
     .pull-to-refresh-indicator .ptr-icon{display:inline-block;transition:transform .2s;font-size:16px;}
     .pull-to-refresh-indicator .ptr-icon.ready{transform:rotate(180deg);color:var(--accent);}
-    /* Reload button — visible only in PWA standalone / fullscreen */
+    /* Reload and mobile new-chat titlebar controls with shared icon-button styles */
+    .app-titlebar-new-chat,
     .app-titlebar-reload{display:none;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0;background:none;border:none;color:var(--muted);border-radius:8px;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;transition:background-color .15s,color .15s;}
+    .app-titlebar-new-chat:hover,
     .app-titlebar-reload:hover{background:var(--hover-bg);color:var(--text);}
     @media (display-mode: standalone), (display-mode: fullscreen){
       :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);}
@@ -1208,8 +1211,8 @@
   .toast.success{background:color-mix(in srgb,var(--success) 14%,var(--surface));border-color:color-mix(in srgb,var(--success) 45%,var(--surface));color:var(--success);}
   .toast.error{background:color-mix(in srgb,var(--error) 14%,var(--surface));border-color:color-mix(in srgb,var(--error) 45%,var(--surface));color:var(--error);}
   .toast-message{min-width:0;overflow-wrap:anywhere;white-space:pre-wrap;}
-  .toast-copy{border:1px solid currentColor;background:transparent;color:inherit;border-radius:8px;padding:4px 8px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;opacity:.85;}
-  .toast-copy:hover,.toast-copy:focus-visible{opacity:1;background:color-mix(in srgb,currentColor 10%,transparent);outline:none;}
+  .toast-copy,.toast-dismiss{border:1px solid currentColor;background:transparent;color:inherit;border-radius:8px;padding:4px 8px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;opacity:.85;}
+  .toast-copy:hover,.toast-copy:focus-visible,.toast-dismiss:hover,.toast-dismiss:focus-visible{opacity:1;background:color-mix(in srgb,currentColor 10%,transparent);outline:none;}
   .toast.warning{background:color-mix(in srgb,var(--warning) 14%,var(--surface));border-color:color-mix(in srgb,var(--warning) 45%,var(--surface));color:var(--warning);}
   .onboarding-overlay{position:fixed;inset:0;z-index:1050;background:rgba(7,12,19,.78);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:24px;}
   .onboarding-card{width:min(980px,100%);max-height:min(760px,94vh);overflow:auto;border:1px solid var(--accent-bg-strong);border-radius:24px;background:linear-gradient(180deg,rgba(20,30,44,.98),rgba(11,17,27,.98));box-shadow:0 24px 80px rgba(0,0,0,.45);}
@@ -1589,6 +1592,8 @@
   /* Overlay scroll controls so they do not affect the transcript's native scroll geometry. */
   .scroll-to-bottom-btn{position:absolute;right:20px;bottom:16px;width:32px;height:32px;border-radius:50%;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:10;transition:color .12s,border-color .12s,background .12s,transform .12s;}
   .scroll-to-bottom-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);}
+  .scroll-to-bottom-btn.scroll-to-bottom-btn--new-message{width:auto;min-width:32px;max-width:min(220px,calc(100% - 40px));border-radius:999px;font-size:12px;font-weight:600;gap:5px;padding:0 11px;color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
+  .scroll-to-bottom-btn.scroll-to-bottom-btn--new-message .session-jump-btn__text{display:inline;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .session-jump-btn__text{display:none;}
   .session-jump-btn{position:absolute;right:20px;height:32px;border-radius:999px;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;padding:0 11px;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:11;transition:color .12s,border-color .12s,background .12s,opacity .12s,transform .12s;}
   .session-jump-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);transform:translateY(-1px);}
@@ -2284,6 +2289,9 @@
     .composer-left > .composer-model-wrap,
     .composer-left > .composer-reasoning-wrap,
     .composer-left > .composer-toolsets-wrap{display:none!important;}
+    /* Saved prompts is a desktop-only composer affordance — too much for the
+       narrow mobile composer (Nathan 2026-06-09). Hide the button + popup. */
+    #btnSavedPrompts,.saved-prompts-popup{display:none!important;}
     .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
     .composer-mobile-config-panel.open{display:flex;}
     .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
@@ -2314,6 +2322,7 @@
     /* Hamburger button (in app titlebar on mobile) */
     .app-titlebar{justify-content:space-between;}
     .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}
+    .app-titlebar-new-chat{display:inline-flex;}
     .app-titlebar-inner{flex:1 1 auto;}
     .system-health-panel.insights-card{gap:10px;padding:12px;}
     .system-health-head{align-items:flex-start;}
@@ -2378,6 +2387,9 @@
     .composer-left > .composer-model-wrap,
     .composer-left > .composer-reasoning-wrap,
     .composer-left > .composer-toolsets-wrap{display:none!important;}
+    /* Saved prompts is a desktop-only composer affordance — too much for the
+       narrow mobile composer (Nathan 2026-06-09). Hide the button + popup. */
+    #btnSavedPrompts,.saved-prompts-popup{display:none!important;}
     .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
     .composer-mobile-config-panel.open{display:flex;}
     .composer-mobile-config-action{box-sizing:border-box;flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
@@ -2481,7 +2493,9 @@
 .model-group{padding:8px 14px 4px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--muted);text-transform:uppercase;border-top:1px solid var(--border2);margin-top:2px;}
 .model-opt{padding:10px 14px;cursor:pointer;transition:background .12s;display:flex;flex-direction:column;gap:3px;align-items:flex-start;}
 .model-opt:hover{background:rgba(255,255,255,.07);}
+.model-opt.is-highlighted{background:rgba(255,255,255,.1);outline:1px solid var(--border2);outline-offset:-1px;}
 .model-opt.active{background:var(--accent-bg);}
+.model-opt.active.is-highlighted{background:var(--accent-bg);outline:1px solid var(--accent);outline-offset:-1px;}
 .model-opt-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;}
 .model-opt-name{display:block;font-size:13px;color:var(--text);font-weight:500;line-height:1.25;}
 .model-opt-badge{display:inline-flex;align-items:center;justify-content:center;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;border:1px solid transparent;}
@@ -3611,6 +3625,8 @@ main.main > #mainPlugin{display:none;}
 .panel-head-btn:hover{background:var(--accent-bg);color:var(--accent-text);}
 .panel-head-btn:disabled,.panel-head-btn[aria-busy="true"]{opacity:.5;cursor:wait;}
 .panel-head-btn:disabled:hover,.panel-head-btn[aria-busy="true"]:hover{background:transparent;color:var(--muted);}
+.app-titlebar-new-chat:disabled,.app-titlebar-new-chat[aria-busy="true"]{opacity:.5;cursor:wait;}
+.app-titlebar-new-chat:disabled:hover,.app-titlebar-new-chat[aria-busy="true"]:hover{background:transparent;color:var(--muted);}
 .panel-head-btn svg{width:14px;height:14px;display:block;}
 .panel-head-sub{padding:6px 12px 8px;font-size:11px;color:var(--muted);flex-shrink:0;}
 .side-menu{display:flex;flex-direction:column;gap:2px;padding:8px;overflow-y:auto;}
@@ -4077,6 +4093,14 @@ main.main > #mainPlugin{display:none;}
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}
 .cron-new-dot{width:7px;height:7px;border-radius:50%;background:var(--success,#22c55e);flex-shrink:0;animation:cron-dot-pulse 2s ease-in-out infinite;}
 .cron-agent-badge{flex-shrink:0;font-size:12px;line-height:1;}
+.cron-script-badge{flex-shrink:0;font-size:12px;line-height:1;opacity:.92;}
+.cron-script-job-banner{margin-bottom:12px;}
+.cron-script-job-banner .detail-alert-title{font-weight:600;}
+.detail-script{background:var(--sidebar);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;white-space:pre-wrap;line-height:1.55;color:var(--text);font-family:'SF Mono',ui-monospace,monospace;word-break:break-word;}
+.detail-hint{font-size:11px;color:var(--muted);line-height:1.5;}
+.cron-script-card .detail-hint,.cron-script-card-hint{margin-top:8px;}
+.detail-badge.cron-mode-badge.script{background:rgba(148,163,184,.14);color:var(--text-secondary);}
+.detail-badge.cron-mode-badge.agent{background:rgba(99,179,237,.14);color:#90cdf4;}
 @keyframes cron-dot-pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
 .has-new-run{border-color:var(--success,#22c55e)!important;box-shadow:0 0 0 1px var(--success,#22c55e);}
 
@@ -4154,6 +4178,18 @@ main.main > #mainPlugin{display:none;}
 /* Lives as a flex sibling in .session-title-row (between title and time);
    the row's gap:6px handles spacing, no margin/vertical-align needed. */
 .session-project-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block;}
+
+/* ── Saved prompts popup ── */
+.saved-prompts-popup{position:absolute;bottom:calc(100% + 8px);left:0;min-width:280px;max-width:380px;max-height:320px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:200;flex-direction:column;gap:2px;padding:6px;}
+.saved-prompt-row{display:flex;align-items:center;gap:6px;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;}
+.saved-prompt-row:hover{background:var(--hover-bg);}
+.saved-prompt-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
+.saved-prompt-delete{flex-shrink:0;background:none;border:none;cursor:pointer;color:var(--muted);padding:2px;border-radius:4px;display:flex;align-items:center;justify-content:center;}
+.saved-prompt-delete:hover{color:var(--danger,#f56565);background:rgba(245,101,101,.12);}
+.saved-prompt-add-row{padding:6px 4px 2px;border-top:1px solid var(--border);margin-top:4px;}
+.saved-prompt-save-btn{width:100%;padding:6px 10px;border-radius:6px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:12px;font-weight:600;cursor:pointer;text-align:center;}
+.saved-prompt-save-btn:hover{background:var(--accent-bg-strong);}
+.saved-prompts-empty,.saved-prompts-loading{padding:12px 10px;font-size:12px;color:var(--muted);text-align:center;}
 
 /* ── Code copy button ── */
 .code-copy-btn{background:var(--hover-bg);border:1px solid var(--border2);border-radius:4px;color:var(--muted);font-size:11px;cursor:pointer;padding:2px 6px;transition:all .15s;line-height:1.3;}
@@ -5319,3 +5355,76 @@ main.main.showing-logs > #mainLogs{display:flex;}
 }
 
 #composerMobileCtxBadge { display: none !important; }
+
+/* Interim progress note collapse (#2403) */
+.interim-collapsed { display: none; }
+.interim-collapse-toggle {
+  cursor: pointer;
+  color: var(--accent-color, #4a9eff);
+  font-size: 0.85em;
+  margin: 4px 0;
+  display: block;
+}
+.interim-collapse-toggle:hover { text-decoration: underline; }
+
+/* ── Conversation Outline Panel (#2124) ─────────────────────────────────── */
+#outlineToggleBtn{
+  position:fixed;bottom:120px;right:calc(var(--outline-workspace-offset, 0px) + 20px);z-index:9999;
+  width:38px;height:38px;border-radius:50%;
+  background:var(--surface);border:1px solid var(--border2);
+  color:var(--text);cursor:pointer;
+  display:none;align-items:center;justify-content:center;
+  box-shadow:0 2px 8px rgba(0,0,0,.18);
+  font-size:16px;line-height:1;
+  transition:background .15s ease,border-color .15s ease,color .15s ease;
+}
+html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){display:flex;}
+#outlineToggleBtn:hover{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--accent-text);}
+#outlinePanelWrapper{
+  position:fixed;right:calc(var(--outline-workspace-offset, 0px) + 20px);bottom:170px;width:320px;
+  max-height:50vh;z-index:9998;
+  background:var(--surface);border:1px solid var(--border2);
+  border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.22);
+  display:flex;flex-direction:column;overflow:hidden;
+}
+/* The id selector's display:flex outranks the UA [hidden]{display:none}, so the
+   hidden attribute alone won't hide the panel — restore it explicitly. */
+#outlinePanelWrapper[hidden]{display:none;}
+.outline-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 12px 8px;border-bottom:1px solid var(--border2);
+  font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.04em;flex-shrink:0;
+}
+.outline-close-btn{
+  background:none;border:none;cursor:pointer;
+  color:var(--muted);font-size:16px;line-height:1;padding:0 2px;
+}
+.outline-close-btn:hover{color:var(--text);}
+#outlinePanel{overflow-y:auto;flex:1;}
+.outline-entry{
+  display:flex;align-items:baseline;gap:8px;
+  width:100%;padding:7px 12px;
+  background:none;border:none;border-bottom:1px solid var(--border-subtle);
+  cursor:pointer;text-align:left;color:var(--text);
+  transition:background .12s ease;
+}
+.outline-entry:last-child{border-bottom:none;}
+.outline-entry:hover{background:var(--accent-bg);}
+.outline-entry-num{
+  font-size:11px;font-weight:600;color:var(--muted);
+  min-width:18px;flex-shrink:0;
+}
+.outline-entry-text{font-size:13px;line-height:1.4;word-break:break-word;}
+.outline-empty{
+  padding:16px 12px;font-size:13px;color:var(--muted);text-align:center;
+}
+/* Flash animation when jumping to a message */
+@keyframes outline-flash{
+  0%{background:var(--accent-bg-strong);}
+  100%{background:transparent;}
+}
+.outline-jump-flash{animation:outline-flash 1.2s ease-out forwards;}
+@media(max-width:900px){
+  #outlineToggleBtn,#outlinePanelWrapper{display:none!important;}
+}

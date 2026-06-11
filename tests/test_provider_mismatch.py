@@ -1005,6 +1005,296 @@ def test_stale_at_provider_model_falls_back_when_family_mismatches(monkeypatch):
     assert effective == "gpt-5.5"
 
 
+def test_at_provider_third_party_model_survives_cold_catalog(monkeypatch):
+    """A non-first-party @provider:model selection must NOT revert to the default
+    just because the provider's group is missing from the current catalog snapshot.
+
+    Providers like ollama-cloud / deepseek / xai normalize to "" and discover their
+    models live, so a cold/minimal catalog can momentarily lack the group even
+    though the provider is configured. The @provider:model branch of
+    _resolve_compatible_session_model_state used to fall through to ``default_model``
+    in that case, silently swapping the user's chosen model on any non-explicit
+    resolve (2nd+ turn, chat switch — explicit_model_pick is False there). Because
+    the bare id (minimax-m3) is not a first-party family id (gpt/claude/gemini), the
+    selection must instead be preserved.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            # Active provider is something else and the ollama-cloud group is
+            # absent from THIS snapshot (live discovery not yet folded in).
+            "active_provider": "anthropic",
+            "default_model": "claude-opus-4.8",
+            "groups": [
+                {
+                    "provider": "Anthropic",
+                    "provider_id": "anthropic",
+                    "models": [{"id": "claude-opus-4.8", "label": "Opus"}],
+                },
+            ],
+        },
+    )
+
+    # Both the explicit-pick (1st turn) and the non-explicit (2nd+ turn / chat
+    # switch) paths must keep the selection.
+    for explicit in (True, False):
+        model, provider, changed = routes._resolve_compatible_session_model_state(
+            "@ollama-cloud:minimax-m3",
+            "ollama-cloud",
+            explicit_model_pick=explicit,
+        )
+        assert model == "@ollama-cloud:minimax-m3", (
+            f"explicit_model_pick={explicit}: third-party @provider model must "
+            f"survive a cold catalog snapshot, got {model!r}"
+        )
+        assert provider == "ollama-cloud"
+        assert changed is False
+
+
+def test_at_provider_removed_provider_still_reverts_to_default(monkeypatch):
+    """The catalog-absence preservation must NOT extend to a genuinely
+    removed/unconfigured provider.
+
+    Catalog-absence has two causes and only one is a cold-discovery artifact:
+      * ollama-cloud is configured, its group is just missing from this snapshot
+        -> preserve (covered by the sibling test).
+      * @removed:mistral-large names a provider that is no longer configured
+        anywhere -> preserving it would route chat/start to an unreachable
+        provider, so it must still fall through to the default-repair.
+
+    The guard tells the two apart via _provider_is_known_or_configured() (static
+    registry + config state), never via the cold catalog. "removed" is neither a
+    known built-in provider nor a configured custom provider, so a non-explicit
+    resolve reverts to the active default. An explicit pick is still honored,
+    leaving the user a deliberate escape hatch.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "anthropic",
+            "default_model": "claude-opus-4.8",
+            "groups": [
+                {
+                    "provider": "Anthropic",
+                    "provider_id": "anthropic",
+                    "models": [{"id": "claude-opus-4.8", "label": "Opus"}],
+                },
+            ],
+        },
+    )
+
+    # Non-explicit (2nd+ turn / chat switch): unknown provider -> repair to default.
+    model, _provider, changed = routes._resolve_compatible_session_model_state(
+        "@removed:mistral-large",
+        "removed",
+        explicit_model_pick=False,
+    )
+    assert model == "claude-opus-4.8", (
+        f"a removed/unconfigured @provider model must revert to the default on a "
+        f"non-explicit resolve, got {model!r}"
+    )
+    assert changed is True
+
+    # Explicit pick is still honored even for an unknown provider.
+    model2, provider2, changed2 = routes._resolve_compatible_session_model_state(
+        "@removed:mistral-large",
+        "removed",
+        explicit_model_pick=True,
+    )
+    assert model2 == "@removed:mistral-large"
+    assert provider2 == "removed"
+    assert changed2 is False
+
+
+def test_at_provider_known_unconfigured_builtin_is_intentionally_preserved(monkeypatch):
+    """Pin the DELIBERATE choice: a KNOWN built-in provider is preserved on a cold
+    catalog even when the user has no key configured for it.
+
+    _provider_is_known_or_configured() counts static-registry membership as "known"
+    and does NOT require authenticated-credential evidence. This is on purpose: the
+    only fully-reliable "is this provider authenticated" signal is the live auth
+    store / catalog rebuild — exactly the cost the hot path avoids — and a cheap
+    env/config-only credential check would mis-classify OAuth/auth-store providers
+    (ollama-cloud among them) and re-introduce the original silent-revert bug. So a
+    known-but-unconfigured pick like "@deepseek:deepseek-v4-pro" under an
+    Anthropic-only setup is kept; the user gets a clear run-time auth error rather
+    than a silent swap to the default.
+
+    If a future change adds reliable cheap credential evidence and flips this to
+    revert-when-unconfigured, update this expectation (and the helper docstring).
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "anthropic",
+            "default_model": "claude-opus-4.8",
+            "groups": [
+                {
+                    "provider": "Anthropic",
+                    "provider_id": "anthropic",
+                    "models": [{"id": "claude-opus-4.8", "label": "Opus"}],
+                },
+            ],
+        },
+    )
+
+    model, provider, changed = routes._resolve_compatible_session_model_state(
+        "@deepseek:deepseek-v4-pro",
+        "deepseek",
+        explicit_model_pick=False,
+    )
+    assert model == "@deepseek:deepseek-v4-pro", (
+        "a known built-in provider is intentionally preserved on a cold catalog "
+        f"even without configured credentials, got {model!r}"
+    )
+    assert provider == "deepseek"
+    assert changed is False
+
+
+def test_at_provider_explicit_pick_not_rerouted_by_family_match(monkeypatch):
+    """An explicit pick must NOT be rerouted by the active-provider family-match
+    repair, even when the bare id looks like the active family and the catalog is
+    cold.
+
+    Regression for the branch-order bug: the explicit-pick guard sits at the top of
+    the @provider:model branch, above the _model_matches_active_provider_family
+    repair. Without that ordering, an explicit "@ollama-cloud:gpt-oss-120b" under an
+    OpenAI-active agent would be stripped to bare "gpt-oss-120b" and routed to
+    OpenAI (the family match fires on the "gpt" prefix) — silently swapping the
+    user's deliberately-chosen ollama-cloud provider.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI",
+                    "provider_id": "openai",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    model, provider, changed = routes._resolve_compatible_session_model_state(
+        "@ollama-cloud:gpt-oss-120b",
+        "ollama-cloud",
+        explicit_model_pick=True,
+    )
+    assert model == "@ollama-cloud:gpt-oss-120b", (
+        "explicit @provider:model pick must survive the family-match repair, "
+        f"got {model!r}"
+    )
+    assert provider == "ollama-cloud"
+    assert changed is False
+
+
+def test_at_provider_explicit_pick_is_honored_even_when_unroutable(monkeypatch):
+    """A fresh, explicit @provider:model pick is honored verbatim even when its
+    bare id is a first-party family name and the provider is absent from the
+    catalog. explicit_model_pick is only set on a deliberate user pick, so it must
+    win over the stale-cross-provider repair. Only the *non-explicit* path (2nd+
+    turn / chat switch) repairs such a model to the default (see the test below)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    model, provider, changed = routes._resolve_compatible_session_model_state(
+        "@copilot:claude-opus-4.6",
+        None,
+        explicit_model_pick=True,
+    )
+    assert model == "@copilot:claude-opus-4.6"
+    # The explicit pick is returned with its own @-qualified provider hint intact,
+    # not rewritten to the active provider or the default's provider.
+    assert provider == "copilot"
+    assert changed is False
+
+
+def test_at_provider_first_party_named_third_party_model_known_limitation(monkeypatch):
+    """Pin (not endorse) the known false-positive of the bare-name prefix heuristic.
+
+    The first-party-family guard classifies a bare id purely by its name prefix
+    (gpt/claude/gemini), the same approximation _model_matches_active_provider_family
+    uses. A genuine third-party model whose name merely starts with one of those
+    prefixes — e.g. "@ollama:gpt4all-mini" (GPT4All is a third-party family) — is
+    therefore mis-classified as first-party and still reverts to the default on a
+    non-explicit resolve, the very behavior the sibling test prevents for
+    non-first-party-named ids. A name-only check cannot distinguish this case;
+    disambiguating it would require consulting the user's configured providers.
+
+    This test documents the boundary so the limitation is tracked, not silent. If a
+    future change makes the classifier provider-aware, update this expectation to
+    assert preservation instead.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "anthropic",
+            "default_model": "claude-opus-4.8",
+            "groups": [
+                {
+                    "provider": "Anthropic",
+                    "provider_id": "anthropic",
+                    "models": [{"id": "claude-opus-4.8", "label": "Opus"}],
+                },
+            ],
+        },
+    )
+
+    # Non-explicit path: the gpt-prefixed third-party id is (imperfectly) treated
+    # as a stale first-party model and repaired to the default.
+    model, _provider, changed = routes._resolve_compatible_session_model_state(
+        "@ollama:gpt4all-mini",
+        "ollama",
+        explicit_model_pick=False,
+    )
+    assert model == "claude-opus-4.8"
+    assert changed is True
+
+    # An explicit pick still escapes the heuristic and is preserved, so the user
+    # always has a reliable way to select such a model.
+    model2, provider2, changed2 = routes._resolve_compatible_session_model_state(
+        "@ollama:gpt4all-mini",
+        "ollama",
+        explicit_model_pick=True,
+    )
+    assert model2 == "@ollama:gpt4all-mini"
+    assert provider2 == "ollama"
+    assert changed2 is False
+
+
 def test_google_active_provider_keeps_valid_gemini_session_model(monkeypatch):
     """A Google-configured session must keep its Gemini model."""
     import api.routes as routes
@@ -1060,10 +1350,15 @@ def test_session_model_display_resolver_is_read_only(monkeypatch):
     """Read-path model resolution must not mutate or save the session."""
     import api.routes as routes
 
+    # Accept **kwargs: the read-only display resolver now opts into the
+    # cache-only catalog via get_available_models(prefer_cache=True) so the
+    # hot GET /api/session path never triggers the cold live provider rebuild
+    # (multi-tab streaming interlock RCA). The stub must mirror the real
+    # signature; the contract under test here is read-only-ness, not arity.
     monkeypatch.setattr(
         routes,
         "get_available_models",
-        lambda: {
+        lambda **_kw: {
             "active_provider": "openai-codex",
             "default_model": "gpt-5.4-mini",
         },

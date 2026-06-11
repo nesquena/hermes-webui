@@ -25,6 +25,7 @@ const SHELL_ASSETS = [
   './static/style.css' + VQ,
   './static/pwa-startup.js' + VQ,
   './static/boot.js' + VQ,
+  './static/assistant_turn_anchors.js' + VQ,
   './static/ui.js' + VQ,
   './static/messages.js' + VQ,
   './static/sessions.js' + VQ,
@@ -169,5 +170,33 @@ self.addEventListener('fetch', (event) => {
       status: 503,
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     })))
+  );
+});
+
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const rawUrl = (event.notification.data && event.notification.data.url) || './';
+  const targetUrl = new URL(rawUrl, self.registration.scope || './').href;
+  const targetPath = new URL(targetUrl).pathname;
+  const samePath = (clientUrl) => {
+    try { return new URL(clientUrl).pathname === targetPath; } catch (_e) { return false; }
+  };
+  event.waitUntil(
+    self.clients.matchAll({type: 'window', includeUncontrolled: true}).then((clientList) => {
+      // Match on pathname, not the full href: _sessionUrlForSid copies the
+      // current page's query string + hash into the deep link, so an open tab
+      // already on /session/<sid> would fail an exact-href match and spawn a
+      // duplicate window.
+      const targetClient = clientList.find((client) => samePath(client.url) && 'focus' in client);
+      if (targetClient) return targetClient.focus();
+      if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
+      const focusableClient = clientList.find((client) => 'focus' in client);
+      if (focusableClient && 'navigate' in focusableClient) {
+        return focusableClient.navigate(targetUrl)
+          .then((client) => (client && 'focus' in client ? client.focus() : focusableClient.focus()))
+          .catch(() => focusableClient.focus());
+      }
+    })
   );
 });

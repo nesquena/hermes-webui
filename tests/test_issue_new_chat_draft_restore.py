@@ -110,3 +110,19 @@ def test_clear_composer_draft_forgets_same_new_chat_candidate():
     assert "_clearRememberedNewChatDraftSession(sid);" in body, (
         "sending a draft must stop New Chat from restoring that now-cleared candidate"
     )
+
+
+def test_boot_restore_preserves_zero_message_session_with_composer_draft():
+    """A hard refresh should not discard a zero-message session that owns unsent draft text/files."""
+    marker = "const _restoredInFlight = S.session && ("
+    start = BOOT_JS.find(marker)
+    end = BOOT_JS.find("// Restore the panel from localStorage", start)
+    assert start != -1 and end != -1, "boot restored-session cleanup block not found"
+    body = BOOT_JS[start:end]
+    assert "const _restoredDraft = (S.session && S.session.composer_draft) || {};" in body
+    assert "const _restoredDraftText = String(_restoredDraft.text||'').trim();" in body
+    assert "const _restoredDraftFiles = Array.isArray(_restoredDraft.files)" in body
+    assert "const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles.length);" in body
+    assert "&& !_restoredInFlight && !_restoredHasDraft" in body, (
+        "zero-message restored sessions should only be dropped when they have no draft"
+    )

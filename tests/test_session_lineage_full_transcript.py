@@ -274,3 +274,85 @@ def test_webui_fork_session_does_not_stitch_non_snapshot_parent(monkeypatch):
     assert [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)] == [
         "fork child only",
     ]
+
+
+def test_webui_lineage_display_keeps_child_tail_after_snapshot_watermark(monkeypatch):
+    """A child sidecar watermark must not delete the child's persisted continuation tail."""
+    parent = SimpleNamespace(
+        session_id="parent-watermark",
+        parent_session_id=None,
+        pre_compression_snapshot=True,
+        truncation_watermark=None,
+        messages=[
+            {"role": "user", "content": "parent user", "timestamp": 1000.0},
+            {"role": "assistant", "content": "parent assistant", "timestamp": 1001.0},
+        ],
+    )
+    child = SimpleNamespace(
+        session_id="child-watermark",
+        parent_session_id="parent-watermark",
+        pre_compression_snapshot=False,
+        truncation_watermark=1001.0,
+        messages=[
+            {"role": "user", "content": "child user", "timestamp": 1002.0},
+            {"role": "assistant", "content": "child assistant final", "timestamp": 1003.0},
+        ],
+    )
+    monkeypatch.setattr(routes.Session, "load", lambda sid: parent if sid == "parent-watermark" else None)
+
+    contents = [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)]
+
+    assert contents == [
+        "parent user",
+        "parent assistant",
+        "child user",
+        "child assistant final",
+    ]
+
+
+def test_webui_lineage_display_does_not_restitch_ancestor_when_child_replays_parent(monkeypatch):
+    """If the child sidecar already starts with its direct parent snapshot, use it as-is."""
+    grandparent = SimpleNamespace(
+        session_id="grandparent-replayed",
+        parent_session_id=None,
+        pre_compression_snapshot=True,
+        truncation_watermark=None,
+        messages=[
+            {"role": "user", "content": "grandparent user", "timestamp": 1000.0},
+            {"role": "assistant", "content": "grandparent assistant", "timestamp": 1001.0},
+        ],
+    )
+    parent = SimpleNamespace(
+        session_id="parent-replayed",
+        parent_session_id="grandparent-replayed",
+        pre_compression_snapshot=True,
+        truncation_watermark=1001.0,
+        messages=grandparent.messages + [
+            {"role": "user", "content": "parent user", "timestamp": 1002.0},
+            {"role": "assistant", "content": "parent assistant", "timestamp": 1003.0},
+        ],
+    )
+    child = SimpleNamespace(
+        session_id="child-replayed",
+        parent_session_id="parent-replayed",
+        pre_compression_snapshot=False,
+        truncation_watermark=1001.0,
+        messages=parent.messages + [
+            {"role": "user", "content": "followup user", "timestamp": 1004.0},
+            {"role": "assistant", "content": "latest final answer", "timestamp": 1005.0},
+        ],
+    )
+    by_id = {"parent-replayed": parent, "grandparent-replayed": grandparent}
+    monkeypatch.setattr(routes.Session, "load", lambda sid: by_id.get(sid))
+
+    contents = [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)]
+
+    assert contents == [
+        "grandparent user",
+        "grandparent assistant",
+        "parent user",
+        "parent assistant",
+        "followup user",
+        "latest final answer",
+    ]
+    assert contents[-1] == "latest final answer"

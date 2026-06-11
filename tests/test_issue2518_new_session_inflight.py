@@ -25,6 +25,8 @@ def test_new_session_sets_visible_pending_state_for_cold_catalog_wait():
     assert "function _setNewSessionPending(pending)" in src
     assert "btn.disabled=!!pending" in src
     assert "btn.setAttribute('aria-busy',pending?'true':'false')" in src
+    assert "const ids=['btnNewChat','btnTitlebarNewChat']" in src
+    assert "btnTitlebarNewChat" in src
     assert "setComposerStatus(pendingText)" in src
     assert "t('new_session_creating')" in src
 
@@ -33,5 +35,6 @@ def test_new_session_pending_button_style_and_copy_exist():
     css = _source("static/style.css")
     i18n = _source("static/i18n.js")
     assert '.panel-head-btn:disabled,.panel-head-btn[aria-busy="true"]' in css
+    assert '.app-titlebar-new-chat:disabled,.app-titlebar-new-chat[aria-busy="true"]' in css
     assert "cursor:wait" in css
     assert "new_session_creating: 'Creating new conversation…'" in i18n
