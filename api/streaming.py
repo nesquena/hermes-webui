@@ -994,7 +994,7 @@ def _agent_result_tool_limit_reached(result) -> bool:
     if (
         'max_iterations_reached' in haystack
         or 'maximum number of tool-calling iterations' in haystack
-        or 'tool-calling iterations' in haystack and 'maximum' in haystack
+        or ('tool-calling iterations' in haystack and 'maximum' in haystack)
     ):
         return True
     return False
@@ -6796,7 +6796,7 @@ def _run_agent_streaming(
                 # workspace-aware helper from this branch while still
                 # preserving the pre-turn length for downstream self-heal
                 # checks introduced on master.
-                _all_result_messages = _result_messages or []
+                _all_result_messages = result.get('messages') or []
                 _prev_len = len(_previous_context_messages)
                 _assistant_added = _assistant_reply_added_after_current_turn(
                     _all_result_messages,

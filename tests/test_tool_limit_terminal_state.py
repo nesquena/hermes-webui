@@ -12,7 +12,14 @@ from api.models import Session
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _run_streaming_with_fake_agent(tmp_path, monkeypatch, agent_result):
+def _run_streaming_with_fake_agent(
+    tmp_path,
+    monkeypatch,
+    agent_result,
+    *,
+    prior_messages=None,
+    prior_context_messages=None,
+):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
@@ -38,8 +45,8 @@ def _run_streaming_with_fake_agent(tmp_path, monkeypatch, agent_result):
         title="Tool limit test",
         workspace=str(tmp_path),
         model="gpt-4o",
-        messages=[],
-        context_messages=[],
+        messages=list(prior_messages or []),
+        context_messages=list(prior_context_messages or []),
     )
     session.active_stream_id = stream_id
     session.pending_user_message = "Do the long task."
@@ -122,6 +129,12 @@ def test_synthetic_max_iteration_summary_request_is_dropped_from_agent_result():
     assert synthetic not in cleaned
     assert cleaned[-1]["role"] == "assistant"
     assert "here is the summary" in cleaned[-1]["content"]
+
+
+def test_tool_limit_detection_uses_explicit_boolean_grouping():
+    streaming_py = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+
+    assert "or ('tool-calling iterations' in haystack and 'maximum' in haystack)" in streaming_py
 
 
 def test_historical_synthetic_summary_prompt_does_not_mark_normal_result_as_tool_limit():
@@ -285,3 +298,25 @@ def test_streaming_historical_synthetic_prompt_normal_result_does_not_emit_tool_
     assert "terminal_state" not in done_payloads[-1]
     assert payload["messages"][-1]["role"] == "assistant"
     assert payload["messages"][-1]["content"] == "Current task completed normally."
+
+
+def test_streaming_empty_result_messages_do_not_treat_prior_assistant_as_current_answer(tmp_path, monkeypatch):
+    prior = [
+        {"role": "user", "content": "Earlier task."},
+        {"role": "assistant", "content": "Earlier answer."},
+    ]
+    result = {"messages": []}
+
+    events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior,
+        prior_context_messages=prior,
+    )
+
+    apperror_payloads = [payload for event, payload in events if event == "apperror"]
+    assert apperror_payloads, "expected silent-failure apperror"
+    assert apperror_payloads[-1]["type"] == "no_response"
+    assert not [payload for event, payload in events if event == "done"]
+    assert payload["messages"][-1]["_error"] is True

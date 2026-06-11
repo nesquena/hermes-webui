@@ -86,7 +86,7 @@ def _terminal_state_for_event(event_name: str, payload) -> str | None:
     if name == "done" or name == "stream_end":
         if isinstance(payload, dict):
             explicit_state = str(payload.get("terminal_state") or "").strip().lower()
-            if explicit_state:
+            if explicit_state in {"tool_limit_reached"}:
                 return explicit_state
         return "completed"
     if name == "cancel":
