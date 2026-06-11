@@ -22,6 +22,21 @@ The same inventory is encoded in `static/assistant_turn_anchors.js` as
 `HermesAssistantTurnAnchors.stateLayers` so tests can pin the current authority
 order.
 
+## Slice 2 Normalizer Helper
+
+`HermesAssistantTurnAnchors.normalizeAssistantTurnAnchorSourceEvent()` converts a
+single current source event into a normalized anchor event envelope without
+registering it, rendering it, or mutating browser state. It accepts live SSE-like
+events (`type`, `data`, `lastEventId`), replay/journal-like events (`event`,
+`payload`, `event_id`, `seq`), and settled/session payload events such as
+`settled_message`.
+
+`HermesAssistantTurnAnchors.normalizeAssistantTurnAnchorSourceEvents()` applies
+the same helper to a list and dedupes repeated live + replay observations by the
+same event-envelope key. This is still inert: `send()`, `attachLiveStream()`,
+`renderMessages()`, settlement restore, `S.messages`, `INFLIGHT`, and the DOM do
+not consume the helper yet.
+
 ## Source Event Classification
 
 Phase 0 classifies current sources before changing render behavior:

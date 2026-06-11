@@ -1,4 +1,4 @@
-// Stable Assistant Turn Anchors Phase 0 scaffold (#3926).
+// Stable Assistant Turn Anchors scaffold (#3926).
 //
 // This file is intentionally inert: it defines the current ownership inventory,
 // event classifications, and small pure helpers, but it does not register
@@ -117,6 +117,126 @@
     return typeof value==='string'?value.trim():'';
   }
 
+  function _coercePayload(value){
+    if(value==null) return {};
+    if(typeof value==='string'){
+      const raw=value.trim();
+      if(!raw) return {};
+      try{
+        const parsed=JSON.parse(raw);
+        return parsed&&typeof parsed==='object'?parsed:{value:parsed};
+      }catch(_){
+        return {text:value};
+      }
+    }
+    if(typeof value==='object') return value;
+    return {value};
+  }
+
+  function _sanitizePayload(value, depth=0){
+    if(value==null) return value;
+    const type=typeof value;
+    if(type==='string'||type==='number'||type==='boolean') return value;
+    if(type==='bigint') return String(value);
+    if(type!=='object') return undefined;
+    if(depth>=6) return '[MaxDepth]';
+    if(Array.isArray(value)){
+      return value.map((item)=>_sanitizePayload(item,depth+1)).filter((item)=>item!==undefined);
+    }
+    const out={};
+    Object.keys(value).sort().forEach((key)=>{
+      const safe=_sanitizePayload(value[key],depth+1);
+      if(safe!==undefined) out[key]=safe;
+    });
+    return out;
+  }
+
+  function _coerceSeq(value){
+    if(value==null||value==='') return null;
+    const str=String(value);
+    const numeric=Number(str);
+    return Number.isFinite(numeric)?numeric:str;
+  }
+
+  function _eventIdSeq(eventId){
+    const raw=_cleanString(eventId);
+    if(!raw||!raw.includes(':')) return null;
+    return _coerceSeq(raw.slice(raw.lastIndexOf(':')+1));
+  }
+
+  function _eventIdRunId(eventId){
+    const raw=_cleanString(eventId);
+    if(!raw||!raw.includes(':')) return '';
+    return raw.slice(0,raw.lastIndexOf(':'));
+  }
+
+  function _sourceEventType(input, payload){
+    return _cleanString(input&&(
+      input.source_event_type||
+      input.sourceType||
+      input.source_type||
+      input.event_type||
+      input.type||
+      input.event
+    )) || _cleanString(payload&&(payload.source_event_type||payload.type||payload.event));
+  }
+
+  function _sourceEventPayload(input){
+    if(!input||typeof input!=='object') return {};
+    if(Object.prototype.hasOwnProperty.call(input,'payload')) return _coercePayload(input.payload);
+    if(Object.prototype.hasOwnProperty.call(input,'data')) return _coercePayload(input.data);
+    const payload={};
+    const reserved=new Set([
+      'source_event_type',
+      'sourceType',
+      'source_type',
+      'type',
+      'event',
+      'event_id',
+      'lastEventId',
+      'last_event_id',
+      'seq',
+      'session_id',
+      'turn_id',
+      'run_id',
+      'stream_id',
+      'created_at',
+      'timestamp',
+    ]);
+    Object.keys(input).forEach((key)=>{
+      if(!reserved.has(key)) payload[key]=input[key];
+    });
+    return payload;
+  }
+
+  function _statusForSourceEvent(sourceType, kind, payload){
+    const explicit=_cleanString(payload&&(payload.status||payload.state||payload.phase));
+    if(explicit) return explicit;
+    if(kind==='tool_started') return 'running';
+    if(kind==='tool_completed') return payload&&payload.is_error?'error':'completed';
+    if(kind==='terminal_status'){
+      if(sourceType==='done') return 'completed';
+      if(sourceType==='cancel') return 'cancelled';
+      return 'error';
+    }
+    if(kind==='lifecycle_status') return 'running';
+    if(kind==='control_boundary') return 'pending';
+    if(sourceType==='stream_end') return 'transport_closed';
+    return null;
+  }
+
+  function _localIdForSourceEvent(sourceType, context, payload){
+    const explicit=_cleanString(
+      (context&&context.local_id)||
+      (payload&&(payload.local_id||payload.id||payload.tid||payload.tool_call_id||payload.tool_use_id||payload.call_id))
+    );
+    if(explicit) return explicit;
+    const sessionId=_cleanString(context&&context.session_id)||'session';
+    const turnId=_cleanString(context&&context.turn_id)||'turn';
+    const seq=(context&&context.seq!=null&&context.seq!=='')?String(context.seq):'pending';
+    return [sessionId,turnId,sourceType||'event',seq].join(':');
+  }
+
   function assistantTurnAnchorEventDedupeKey(event){
     if(!event||typeof event!=='object') return '';
     const eventId=_cleanString(event.event_id);
@@ -141,6 +261,71 @@
 
   function isAssistantTurnAnchorActivityKind(kind){
     return ACTIVITY_EVENT_KINDS.indexOf(kind)!==-1;
+  }
+
+  function normalizeAssistantTurnAnchorSourceEvent(input, context){
+    const event=(input&&typeof input==='object')?input:{};
+    const ctx=(context&&typeof context==='object')?context:{};
+    const payload=_sanitizePayload(_sourceEventPayload(event))||{};
+    const sourceType=_sourceEventType(event,payload);
+    const meta=classifyAssistantTurnAnchorSourceEvent(sourceType);
+    const classification=meta.classification;
+    if(classification==='excluded'){
+      return Object.freeze({
+        classification,
+        source_event_type:sourceType||'unknown',
+        anchor_event:null,
+        dedupe_key:'',
+      });
+    }
+    const eventId=_cleanString(event.event_id||event.lastEventId||event.last_event_id||payload.event_id);
+    const seq=_coerceSeq(
+      event.seq!==undefined?event.seq:
+        payload.seq!==undefined?payload.seq:
+          ctx.seq!==undefined?ctx.seq:
+            _eventIdSeq(eventId)
+    );
+    const runId=_cleanString(event.run_id||payload.run_id||ctx.run_id)||_eventIdRunId(eventId)||null;
+    const sessionId=_cleanString(event.session_id||payload.session_id||ctx.session_id);
+    const turnId=_cleanString(event.turn_id||payload.turn_id||ctx.turn_id);
+    const streamId=_cleanString(event.stream_id||payload.stream_id||ctx.stream_id)||null;
+    const localId=_localIdForSourceEvent(sourceType, {...ctx,seq}, payload);
+    const anchorEvent={
+      event_id:eventId||null,
+      local_id:localId,
+      session_id:sessionId||null,
+      turn_id:turnId||null,
+      run_id:runId,
+      stream_id:streamId,
+      seq,
+      kind:meta.kind,
+      source_event_type:sourceType,
+      created_at:event.created_at||event.timestamp||payload.created_at||payload.ts||ctx.created_at||null,
+      status:_statusForSourceEvent(sourceType,meta.kind,payload),
+      payload,
+    };
+    const dedupeKey=assistantTurnAnchorEventDedupeKey(anchorEvent);
+    return Object.freeze({
+      classification,
+      source_event_type:sourceType,
+      anchor_event:Object.freeze(anchorEvent),
+      dedupe_key:dedupeKey,
+    });
+  }
+
+  function normalizeAssistantTurnAnchorSourceEvents(events, context){
+    const list=Array.isArray(events)?events:[];
+    const out=[];
+    const seen=new Set();
+    list.forEach((event)=>{
+      const normalized=normalizeAssistantTurnAnchorSourceEvent(event,context);
+      if(!normalized.anchor_event) return;
+      const key=normalized.dedupe_key;
+      if(key&&seen.has(key)) return;
+      if(key) seen.add(key);
+      out.push(normalized);
+    });
+    return out;
   }
 
   function createAssistantTurnAnchorSeed(input){
@@ -186,7 +371,7 @@
   }
 
   ROOT.HermesAssistantTurnAnchors=Object.freeze({
-    version:'phase0',
+    version:'slice2-normalizer',
     activityEventKinds:ACTIVITY_EVENT_KINDS,
     stateLayers:STATE_LAYERS,
     sourceEventClassification:SOURCE_EVENT_CLASSIFICATION,
@@ -194,6 +379,8 @@
     createAssistantTurnAnchorSeed,
     assistantTurnAnchorEventDedupeKey,
     classifyAssistantTurnAnchorSourceEvent,
+    normalizeAssistantTurnAnchorSourceEvent,
+    normalizeAssistantTurnAnchorSourceEvents,
     isAssistantTurnAnchorActivityKind,
   });
 })();
