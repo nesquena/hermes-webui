@@ -29,7 +29,7 @@ def test_toolsets_dropdown_fetches_configured_mcp_server_names():
     assert "api('/api/mcp/servers')" in load
     assert "payload.servers" in normalize
     assert "server.name" in normalize
-    assert "_toolsetsCatalog = null;" in load
+    assert "_toolsetsCatalog = false;" in load
     assert "return [];" in load
     assert "_loadToolsetsCatalog().then(function()" in toggle
 
@@ -84,3 +84,12 @@ def test_toolsets_affordance_i18n_keys_exist_in_locale_blocks():
         assert I18N_JS.count(f"{key}:") >= 8, f"missing locale entries for {key}"
     assert "session_toolsets_custom:'Custom override'" in I18N_JS
     assert "session_toolsets_desc:'Use active profile defaults or choose a custom toolset list for this session'" in I18N_JS
+
+
+def test_toolsets_dropdown_distinguishes_failed_catalog_loads_from_loading():
+    render_sections = _function_body(UI_JS, "function _renderToolsetsPresetSections")
+
+    assert "_toolsetsCatalog === null" in render_sections
+    assert "_toolsetsCatalog === false" in render_sections
+    assert "session_toolsets_loading_servers" in render_sections
+    assert "mcp_load_failed" in render_sections

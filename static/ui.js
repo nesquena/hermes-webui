@@ -2220,7 +2220,7 @@ function _loadToolsetsCatalog() {
       return _toolsetsCatalog;
     })
     .catch(function() {
-      _toolsetsCatalog = null;
+      _toolsetsCatalog = false;
       return [];
     });
 }
@@ -2274,6 +2274,10 @@ function _renderToolsetsPresetSections(opts) {
   _appendToolsetsLabel(section, t('session_toolsets_configured_servers'));
   if (_toolsetsCatalog === null) {
     _appendToolsetsLabel(section, t('session_toolsets_loading_servers'));
+    return;
+  }
+  if (_toolsetsCatalog === false) {
+    _appendToolsetsLabel(section, t('mcp_load_failed'));
     return;
   }
   if (!Array.isArray(_toolsetsCatalog) || !_toolsetsCatalog.length) {
