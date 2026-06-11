@@ -8,10 +8,35 @@ Verifies that:
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+class _FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.sent_headers: list[tuple[str, str]] = []
+        self.body = bytearray()
+        self.wfile = self
+
+    def send_response(self, code):
+        self.status = code
+
+    def send_header(self, key, value):
+        self.sent_headers.append((key, value))
+
+    def end_headers(self):
+        pass
+
+    def write(self, data):
+        self.body.extend(data if isinstance(data, (bytes, bytearray)) else data.encode("utf-8"))
+
+    def get_json(self):
+        return json.loads(self.body.decode("utf-8"))
 
 
 def test_wiki_browse_route_exists_in_routes():
@@ -43,6 +68,32 @@ def test_open_wiki_browser_function_exists():
     assert "async function _openWikiBrowser" in src, "_openWikiBrowser function not defined in panels.js"
     assert "/api/wiki/browse" in src, "/api/wiki/browse fetch not found in panels.js"
     assert "/api/wiki/page" in src, "/api/wiki/page fetch not found in panels.js"
+
+
+def test_wiki_browse_skips_pages_that_disappear_during_listing(monkeypatch, tmp_path):
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    ok = wiki_root / "ok.md"
+    ok.write_text("# ok\n", encoding="utf-8")
+    missing = wiki_root / "gone.md"
+
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+    monkeypatch.setattr(routes, "_llm_wiki_page_files", lambda root: [missing, ok])
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/browse"))
+
+    assert handler.status == 200
+    assert handler.get_json()["pages"] == [
+        {
+            "name": "ok.md",
+            "path": "ok.md",
+            "size": ok.stat().st_size,
+            "mtime": int(ok.stat().st_mtime),
+        }
+    ]
 
 
 def test_i18n_wiki_keys_in_all_locales():

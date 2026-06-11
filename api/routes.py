@@ -5615,7 +5615,10 @@ def handle_get(handler, parsed) -> bool:
                 rel = fp.relative_to(wiki_root)
             except ValueError:
                 continue
-            st = fp.stat()
+            try:
+                st = fp.stat()
+            except OSError:
+                continue
             pages.append({"name": fp.name, "path": str(rel).replace("\\", "/"), "size": st.st_size, "mtime": int(st.st_mtime)})
         return j(handler, {"pages": pages})
     if parsed.path == "/api/wiki/page":
