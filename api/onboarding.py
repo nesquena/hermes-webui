@@ -572,7 +572,7 @@ def _provider_api_key_present(
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
         return True
 
-    providers_cfg = cfg.get("providers", {})
+    providers_cfg = (cfg.get("providers") or {})
     if isinstance(providers_cfg, dict):
         provider_cfg = providers_cfg.get(provider, {})
         if (

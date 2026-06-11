@@ -5626,16 +5626,37 @@ async function switchToProfile(name) {
       await renderSessionList();
       showToast(t('profile_switched_new_conversation', name));
     } else {
-      // No messages yet — just refresh the list and topbar in place
+      // No messages yet — but if we're holding a session from the old profile,
+      // start a new one so subsequent operations (workspace switch, send) don't
+      // operate on a cross-profile session (#2535).
+      const stale = S.session && (S.session.profile ? S.session.profile !== name : name !== 'default');
+      if (stale) {
+        await newSession(false);
+        if (S._profileDefaultWorkspace && S.session) {
+          try {
+            await api('/api/session/update', { method: 'POST', body: JSON.stringify({
+              session_id: S.session.session_id,
+              workspace: S._profileDefaultWorkspace,
+              model: S.session.model,
+              model_provider: S.session.model_provider||null,
+            })});
+            S.session.workspace = S._profileDefaultWorkspace;
+          } catch (_) {}
+        }
+      }
       await renderSessionList();
       if (_switchGen !== _profileSwitchGeneration) return;
       syncTopbar();
+<<<<<<< Updated upstream
       // Refresh workspace file tree so the right panel shows the new
       // profile's workspace, not the previous one (#1214).
       if (S.session && S.session.workspace) {
         const dirLoad = loadDir('.');
         if (typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed') await dirLoad;
       }
+=======
+      if (S.session && S.session.workspace) loadDir('.');
+>>>>>>> Stashed changes
       showToast(t('profile_switched', name));
     }
 

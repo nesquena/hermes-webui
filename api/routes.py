@@ -2341,7 +2341,7 @@ def _context_length_lookup_inputs_for_model(
         custom_providers = None
 
     provider_context_length = None
-    providers_cfg = cfg.get("providers", {}) if isinstance(cfg, dict) else {}
+    providers_cfg = (cfg.get("providers") or {}) if isinstance(cfg, dict) else {}
     if isinstance(providers_cfg, dict):
         for provider_key, provider_cfg in providers_cfg.items():
             if not isinstance(provider_cfg, dict):
@@ -11421,7 +11421,7 @@ def _handle_live_models(handler, parsed):
             if _ep:
                 try:
                     import urllib.request
-                    _providers_cfg = cfg.get("providers", {})
+                    _providers_cfg = (cfg.get("providers") or {})
                     _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
                     # Only use provider-scoped key — never fall back to a top-level
                     # api_key which may belong to a different provider.
