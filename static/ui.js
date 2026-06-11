@@ -6655,7 +6655,6 @@ function _renderWorklogReasonInto(row, text){
   row.innerHTML=html;
 }
 function _worklogReasonNodeFromText(text, attrs){
-  if(window._showThinking===false) return null;
   const html=_worklogReasonHtmlFromText(text);
   if(!html) return null;
   const row=document.createElement('div');
@@ -6689,11 +6688,19 @@ function _syncWorklogReasonFromAnchor(group, anchor, displayTextOverride){
   const list=_toolWorklogListEl(group);
   if(!group||!list) return;
   const anchorKey=_worklogReasonAnchorKey(anchor);
+  const selector=anchorKey?`:scope > .wl-reason[data-worklog-anchor-key="${CSS.escape(anchorKey)}"]`:':scope > .wl-reason[data-worklog-anchor-reason="1"]';
+  let reason=list.querySelector(selector);
+  if(window._showThinking===false){
+    if(reason) reason.remove();
+    if(anchor){
+      anchor.classList.add('assistant-segment-worklog-source');
+      anchor.setAttribute('aria-hidden','true');
+    }
+    return;
+  }
   const html=arguments.length>2
     ? _worklogReasonHtmlFromAnchor(anchor, displayTextOverride)
     : _worklogReasonHtmlFromAnchor(anchor);
-  const selector=anchorKey?`:scope > .wl-reason[data-worklog-anchor-key="${CSS.escape(anchorKey)}"]`:':scope > .wl-reason[data-worklog-anchor-reason="1"]';
-  let reason=list.querySelector(selector);
   if(!html){
     if(reason) reason.remove();
     return;
@@ -6758,6 +6765,13 @@ function _migrateLegacyLiveActivityGroupsToWorklog(blocks, worklog){
 }
 function _appendWorklogReason(list, anchor){
   if(!list) return null;
+  if(window._showThinking===false){
+    if(anchor){
+      anchor.classList.add('assistant-segment-worklog-source');
+      anchor.setAttribute('aria-hidden','true');
+    }
+    return null;
+  }
   const html=_worklogReasonHtmlFromAnchor(anchor);
   if(!html) return null;
   const reason=document.createElement('div');
@@ -10640,7 +10654,7 @@ function removeThinking(){
   const turn=$('liveAssistantTurn');
   const blocks=_assistantTurnBlocks(turn);
   if(blocks) blocks.querySelectorAll('.agent-activity-thinking').forEach(el=>el.remove());
-  if(blocks) blocks.querySelectorAll('.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+  if(blocks) blocks.querySelectorAll('.wl-reason[data-worklog-anchor-reason="1"]').forEach(el=>el.remove());
   if(blocks) blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
     _syncToolCallGroupSummary(group);
     if(!group.querySelector('.tool-card-row,.agent-activity-thinking,.wl-reason')){

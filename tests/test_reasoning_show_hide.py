@@ -4,6 +4,7 @@ Covers:
   - show_thinking in _SETTINGS_DEFAULTS and _SETTINGS_BOOL_KEYS (api/config.py)
   - window._showThinking initialised in boot.js (settings and fallback paths)
   - window._showThinking guard in ui.js renderMessages thinking card
+  - window._showThinking guards in live Worklog reasoning creators
   - _renderLiveThinking guard in messages.js
   - cmdReasoning function present in commands.js with show/hide/effort handling
   - /reasoning in COMMANDS array (not just SLASH_SUBARG_SOURCES)
@@ -12,6 +13,8 @@ Covers:
 
 import pathlib
 import re
+import shutil
+import subprocess
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -97,11 +100,37 @@ class TestUiJsThinkingGate:
                 )
                 break
 
-    def test_worklog_reasoning_rows_are_gated_by_show_thinking(self):
+    def test_live_worklog_reasoning_creators_are_gated_by_show_thinking(self):
         src = read('static/ui.js')
-        node_fn = function_body(src, "_worklogReasonNodeFromText")
-        assert 'window._showThinking===false' in node_fn and 'return null' in node_fn, (
-            "reasoning-source Worklog rows must not be created when thinking is hidden"
+        sync_fn = function_body(src, "_syncWorklogReasonFromAnchor")
+        append_fn = function_body(src, "_appendWorklogReason")
+        assert 'window._showThinking===false' in sync_fn, (
+            "_syncWorklogReasonFromAnchor must honor Hide Thinking for live Worklog rows"
+        )
+        assert 'if(reason) reason.remove()' in sync_fn, (
+            "_syncWorklogReasonFromAnchor must prune an existing live anchor reason row "
+            "when Thinking is hidden"
+        )
+        sync_guard_idx = sync_fn.index('window._showThinking===false')
+        assert sync_guard_idx < sync_fn.index('_worklogReasonHtmlFromAnchor'), (
+            "_syncWorklogReasonFromAnchor must return before rendering anchor text when "
+            "Thinking is hidden"
+        )
+        assert sync_guard_idx < sync_fn.index('document.createElement'), (
+            "_syncWorklogReasonFromAnchor must return before creating a .wl-reason row "
+            "when Thinking is hidden"
+        )
+        assert 'window._showThinking===false' in append_fn and 'return null' in append_fn, (
+            "_appendWorklogReason must skip row creation when Thinking is hidden"
+        )
+        append_guard_idx = append_fn.index('window._showThinking===false')
+        assert append_guard_idx < append_fn.index('_worklogReasonHtmlFromAnchor'), (
+            "_appendWorklogReason must return before rendering anchor text when Thinking "
+            "is hidden"
+        )
+        assert append_guard_idx < append_fn.index('document.createElement'), (
+            "_appendWorklogReason must return before creating a .wl-reason row when "
+            "Thinking is hidden"
         )
 
     def test_show_thinking_gate_does_not_hide_worklog_anchor_text(self):
@@ -115,8 +144,12 @@ class TestUiJsThinkingGate:
     def test_remove_thinking_prunes_reasoning_rows_but_preserves_tool_or_anchor_rows(self):
         src = read('static/ui.js')
         fn = function_body(src, "removeThinking")
-        assert '.wl-reason[data-worklog-reason-source="reasoning"]' in fn, (
-            "removeThinking must sweep already-rendered reasoning Worklog rows"
+        assert '.wl-reason[data-worklog-anchor-reason="1"]' in fn, (
+            "removeThinking must sweep already-rendered live anchor reasoning Worklog rows"
+        )
+        assert '.wl-reason[data-worklog-reason-source="reasoning"]' not in fn, (
+            "removeThinking must target the live anchor reason marker, not the obsolete "
+            "reasoning-source marker"
         )
         assert '.tool-card-row,.agent-activity-thinking,.wl-reason' in fn, (
             "empty-group cleanup must preserve groups that still contain tool cards "
@@ -126,6 +159,89 @@ class TestUiJsThinkingGate:
             "live Worklog shells must be considered for cleanup after their reasoning "
             "rows are removed"
         )
+
+    def test_remove_thinking_removes_live_anchor_reason_dom_but_keeps_tool_rows(self):
+        node = shutil.which("node")
+        if node is None:
+            raise AssertionError("node is required for DOM-ish removeThinking regression test")
+        remove_thinking_src = "function removeThinking(){" + function_body(read('static/ui.js'), "removeThinking") + "}"
+        script = f"""
+class El {{
+  constructor(tag, attrs={{}}, children=[]) {{
+    this.tagName=tag.toUpperCase();
+    this.children=[];
+    this.parentElement=null;
+    this.attributes={{}};
+    this.id=attrs.id||'';
+    this.className=attrs.className||attrs.class||'';
+    for(const [k,v] of Object.entries(attrs.attrs||{{}})) this.setAttribute(k,v);
+    for(const child of children) this.appendChild(child);
+  }}
+  appendChild(child) {{ child.parentElement=this; this.children.push(child); return child; }}
+  getAttribute(name) {{ return Object.prototype.hasOwnProperty.call(this.attributes,name)?this.attributes[name]:null; }}
+  setAttribute(name,value) {{ this.attributes[name]=String(value); }}
+  removeAttribute(name) {{ delete this.attributes[name]; }}
+  remove() {{
+    if(!this.parentElement) return;
+    this.parentElement.children=this.parentElement.children.filter(child=>child!==this);
+    this.parentElement=null;
+  }}
+  get classList() {{
+    const self=this;
+    return {{
+      contains(cls) {{ return self.className.split(/\\s+/).filter(Boolean).includes(cls); }},
+      add(cls) {{ if(!this.contains(cls)) self.className=(self.className?self.className+' ':'')+cls; }},
+      remove(cls) {{ self.className=self.className.split(/\\s+/).filter(Boolean).filter(c=>c!==cls).join(' '); }},
+    }};
+  }}
+  querySelector(selector) {{ return this.querySelectorAll(selector)[0]||null; }}
+  querySelectorAll(selector) {{
+    const selectors=selector.split(',').map(s=>s.trim()).filter(Boolean);
+    const out=[];
+    const visit=(node)=>{{
+      for(const child of node.children){{
+        if(selectors.some(sel=>matches(child,sel))) out.push(child);
+        visit(child);
+      }}
+    }};
+    visit(this);
+    return out;
+  }}
+}}
+function matches(el, selector) {{
+  selector=selector.replace(/^:scope\\s*>\\s*/,'').trim();
+  const classes=[...selector.matchAll(/\\.([A-Za-z0-9_-]+)/g)].map(m=>m[1]);
+  if(classes.some(cls=>!el.classList.contains(cls))) return false;
+  const attrs=[...selector.matchAll(/\\[([A-Za-z0-9_-]+)(?:="([^"]*)")?\\]/g)];
+  for(const attr of attrs){{
+    const actual=el.getAttribute(attr[1]);
+    if(actual===null) return false;
+    if(attr[2]!==undefined&&actual!==attr[2]) return false;
+  }}
+  return classes.length>0||attrs.length>0;
+}}
+const anchorReason=new El('div', {{class:'wl-reason', attrs:{{'data-worklog-anchor-reason':'1'}}}});
+const toolRow=new El('div', {{class:'tool-card-row'}}, [new El('div', {{class:'tool-card'}})]);
+const worklogList=new El('div', {{class:'tool-worklog-list'}}, [anchorReason, toolRow]);
+const worklog=new El('div', {{class:'live-worklog', attrs:{{'data-live-worklog-shell':'1'}}}}, [worklogList]);
+const blocks=new El('div', {{class:'assistant-turn-blocks'}}, [worklog]);
+const turn=new El('div', {{id:'liveAssistantTurn'}}, [blocks]);
+global.window={{_simplifiedToolCalling:true,_showThinking:false}};
+global.$=(id)=>id==='liveAssistantTurn'?turn:null;
+global.isSimplifiedToolCalling=()=>window._simplifiedToolCalling!==false;
+global._assistantTurnBlocks=(node)=>node?node.querySelector('.assistant-turn-blocks'):null;
+global._syncToolCallGroupSummary=()=>{{}};
+global._clearActivityElapsedTimer=()=>{{ throw new Error('tool-bearing group should not be removed'); }};
+{remove_thinking_src}
+removeThinking();
+const remainingAnchorReasons=blocks.querySelectorAll('.wl-reason[data-worklog-anchor-reason="1"]').length;
+const remainingTools=blocks.querySelectorAll('.tool-card-row').length;
+const worklogStillAttached=worklog.parentElement===blocks;
+if(remainingAnchorReasons!==0||remainingTools!==1||!worklogStillAttached){{
+  throw new Error(JSON.stringify({{remainingAnchorReasons,remainingTools,worklogStillAttached}}));
+}}
+"""
+        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
 
 
 # ── static/messages.js ────────────────────────────────────────────────────────
