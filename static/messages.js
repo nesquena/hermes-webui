@@ -4210,6 +4210,19 @@ function startSessionStream(sid) {
   if (_sessionStreamSessionId === sid && _sessionEventSource) return;
   stopSessionStream();
   _sessionStreamSessionId = sid;
+  // Visibility hook (install once) — mirror ensureSessionEventsSSE() pattern
+  if (typeof document !== 'undefined' && !document._hermesSessionStreamVisibilityHook) {
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        stopSessionStream();
+      } else if (_sessionStreamSessionId) {
+        void startSessionStream(_sessionStreamSessionId);
+      }
+    });
+    document._hermesSessionStreamVisibilityHook = true;
+  }
+  // Don't open when tab is hidden — saves connection pool slots
+  if (typeof document !== 'undefined' && document.hidden) return;
   try {
     const es = new EventSource(_apiUrl('api/session/stream?session_id=' + encodeURIComponent(sid)));
     _sessionEventSource = es;

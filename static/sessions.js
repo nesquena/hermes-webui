@@ -3704,6 +3704,19 @@ async function probeGatewaySSEStatus(){
 function startGatewaySSE(){
   stopGatewaySSE();
   if(!window._showCliSessions) return;
+  // Visibility hook (install once) — mirror ensureSessionEventsSSE() pattern
+  if(typeof document !== 'undefined' && !document._hermesGatewaySSEVisibilityHook){
+    document.addEventListener('visibilitychange', () => {
+      if(document.hidden){
+        stopGatewaySSE();
+      }else{
+        void startGatewaySSE();
+      }
+    });
+    document._hermesGatewaySSEVisibilityHook = true;
+  }
+  // Don't open when tab is hidden — saves connection pool slots
+  if(typeof document !== 'undefined' && document.hidden) return;
   try{
     _gatewaySSE = new EventSource('api/sessions/gateway/stream');
     _gatewaySSE.addEventListener('sessions_changed', (ev) => {
