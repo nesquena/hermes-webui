@@ -6074,7 +6074,7 @@ function switchSettingsSection(name){
     _settingsSection = name;
     return;
   }
-  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='connectors'||name==='plugins'||name==='system'||name==='help')?name:'conversation';
+  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='messagingChannels'||name==='eventWebhooks'||name==='developerApi'||name==='plugins'||name==='system'||name==='help')?name:'conversation';
   // Deep-linking to the Plugins pane when the tab is hidden (no plugins
   // installed, #3457) falls back to Conversation. Resolve this BEFORE toggling
   // panes/sidebar/dropdown below so every downstream selection uses the
@@ -6086,13 +6086,13 @@ function switchSettingsSection(name){
   }
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',connectors:'Connectors',plugins:'Plugins',system:'System',help:'Help'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',messagingChannels:'MessagingChannels',eventWebhooks:'EventWebhooks',developerApi:'DeveloperApi',plugins:'Plugins',system:'System',help:'Help'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','connectors','plugins','system','help'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','messagingChannels','eventWebhooks','developerApi','plugins','system','help'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -6101,7 +6101,9 @@ function switchSettingsSection(name){
   if(dd && dd.value!==section) dd.value=section;
   // Lazy-load integration panels when their tabs are opened
   if(section==='providers') loadProvidersPanel();
-  if(section==='connectors') loadConnectorsPanel();
+  if(section==='messagingChannels') loadMessagingChannelsPanel();
+  if(section==='eventWebhooks') loadEventWebhooksPanel();
+  if(section==='developerApi') loadDeveloperApiPanel();
   if(section==='plugins') loadPluginsPanel();
 }
 
@@ -8329,10 +8331,18 @@ function dismissErrorBanner(){
 // ── Connectors / Gateway channels ───────────────────────────────────────────
 let _connectorsCache=[];
 let _connectorsRuntime={};
-let _activeConnectorId=null;
+let _activeConnectorByCategory={messaging:null,event_webhook:null,developer_api:null};
 
 function _connectorById(id){
   return (_connectorsCache||[]).find(c=>c&&c.id===id)||null;
+}
+
+function _connectorSurfaceTargets(category){
+  return {
+    messaging:{list:'messagingChannelsList',detail:'messagingChannelsDetail',runtime:'messagingChannelsRuntime',empty:'messaging_channels_empty'},
+    event_webhook:{list:'eventWebhooksList',detail:'eventWebhooksDetail',runtime:'eventWebhooksRuntime',empty:'event_webhooks_empty'},
+    developer_api:{list:'developerApiList',detail:'developerApiDetail',runtime:'developerApiRuntime',empty:'developer_api_empty'},
+  }[category]||null;
 }
 
 function _connectorStatusLabel(status){
@@ -8361,83 +8371,85 @@ function _connectorCategory(connector){
   return String((connector&&connector.category)||'other').replace(/[^a-z0-9_-]/gi,'').toLowerCase()||'other';
 }
 
-function _connectorCategoryLabel(category){
-  const key={
-    messaging:'connectors_category_messaging',
-    event_webhook:'connectors_category_event_webhook',
-    developer_api:'connectors_category_developer_api',
-    other:'connectors_category_other',
-  }[category]||'connectors_category_other';
-  return t(key);
+function _connectorsForCategory(category){
+  return (_connectorsCache||[]).filter(c=>_connectorCategory(c)===category);
 }
 
-function _connectorCategoryOrder(category){
-  return {messaging:0,event_webhook:1,developer_api:2,other:3}[category] ?? 99;
-}
-
-function _renderConnectorsPanel(){
-  const list=$('connectorsList');
-  const detail=$('connectorDetail');
-  const runtimeEl=$('connectorsRuntime');
+function _renderConnectorSurfacePanel(category){
+  const targets=_connectorSurfaceTargets(category);
+  if(!targets) return;
+  const list=$(targets.list);
+  const detail=$(targets.detail);
+  const runtimeEl=$(targets.runtime);
   if(!list||!detail) return;
   if(runtimeEl) runtimeEl.textContent=_connectorRuntimeMessage(_connectorsRuntime);
-  if(!_connectorsCache.length){
-    list.innerHTML=`<div class="connector-empty">${esc(t('connectors_empty'))}</div>`;
+  const connectors=_connectorsForCategory(category);
+  if(!connectors.length){
+    list.innerHTML=`<div class="connector-empty">${esc(t(targets.empty))}</div>`;
     detail.innerHTML='';
     return;
   }
-  if(!_activeConnectorId||!_connectorById(_activeConnectorId)){
-    _activeConnectorId=_connectorsCache[0].id;
+  let activeId=_activeConnectorByCategory[category];
+  if(!activeId||!connectors.find(c=>c.id===activeId)){
+    activeId=connectors[0].id;
+    _activeConnectorByCategory[category]=activeId;
   }
-  const groups=new Map();
-  (_connectorsCache||[]).forEach(c=>{
-    const category=_connectorCategory(c);
-    if(!groups.has(category)) groups.set(category,[]);
-    groups.get(category).push(c);
-  });
-  const sortedGroups=[...groups.entries()].sort((a,b)=>_connectorCategoryOrder(a[0])-_connectorCategoryOrder(b[0])||a[0].localeCompare(b[0]));
-  list.innerHTML=sortedGroups.map(([category,connectors])=>{
-    const cards=connectors.map(c=>{
-      const statusClass=_connectorStatusClass(c.status);
-      const active=c.id===_activeConnectorId?' active':'';
-      const unsupported=!c.configuration_supported?' connector-card-readonly':'';
-      return `<button type="button" class="connector-card${active}${unsupported}" data-connector-id="${esc(c.id)}" onclick="selectConnector('${esc(c.id)}')">
-        <div class="connector-card-head">
-          <span class="connector-name">${esc(c.label||c.id)}</span>
-          <span class="connector-status connector-status-${statusClass}">${esc(_connectorStatusLabel(c.status))}</span>
-        </div>
-        <div class="connector-kind">${esc(c.kind||'connector')}</div>
-        <div class="connector-description">${esc(c.description||'')}</div>
-      </button>`;
-    }).join('');
-    return `<section class="connector-category-group" data-connector-category="${esc(category)}">
-      <div class="connector-category-title">${esc(_connectorCategoryLabel(category))}</div>
-      ${cards}
-    </section>`;
+  list.innerHTML=connectors.map(c=>{
+    const statusClass=_connectorStatusClass(c.status);
+    const active=c.id===activeId?' active':'';
+    const unsupported=!c.configuration_supported?' connector-card-readonly':'';
+    return `<button type="button" class="connector-card${active}${unsupported}" data-connector-id="${esc(c.id)}" onclick="selectConnector('${esc(c.id)}','${esc(category)}')">
+      <div class="connector-card-head">
+        <span class="connector-name">${esc(c.label||c.id)}</span>
+        <span class="connector-status connector-status-${statusClass}">${esc(_connectorStatusLabel(c.status))}</span>
+      </div>
+      <div class="connector-kind">${esc(c.kind||'surface')}</div>
+      <div class="connector-description">${esc(c.description||'')}</div>
+    </button>`;
   }).join('');
-  const connector=_connectorById(_activeConnectorId);
+  const connector=_connectorById(activeId);
   detail.innerHTML=connector?_connectorDetailHtml(connector):'';
 }
 
-function selectConnector(id){
-  _activeConnectorId=id;
-  _renderConnectorsPanel();
+function _renderAllConnectorSurfacePanels(){
+  ['messaging','event_webhook','developer_api'].forEach(category=>_renderConnectorSurfacePanel(category));
 }
 
-async function loadConnectorsPanel(force=false){
-  const list=$('connectorsList');
-  const detail=$('connectorDetail');
+function selectConnector(id,category){
+  const connector=_connectorById(id);
+  const resolvedCategory=category||_connectorCategory(connector);
+  _activeConnectorByCategory[resolvedCategory]=id;
+  _renderConnectorSurfacePanel(resolvedCategory);
+}
+
+async function loadConnectorSurfacePanel(category,force=false){
+  const targets=_connectorSurfaceTargets(category);
+  if(!targets) return;
+  const list=$(targets.list);
+  const detail=$(targets.detail);
   if(list&&!force) list.innerHTML=`<div class="connector-empty">${esc(t('loading'))}</div>`;
   if(detail&&!force) detail.innerHTML='';
   try{
     const data=await api('/api/connectors',{cache:'no-store'});
     _connectorsCache=Array.isArray(data&&data.connectors)?data.connectors:[];
     _connectorsRuntime=(data&&data.runtime)||{};
-    _renderConnectorsPanel();
+    _renderConnectorSurfacePanel(category);
   }catch(e){
     if(list) list.innerHTML=`<div class="connector-error">${esc(t('connectors_load_failed'))}</div>`;
     if(detail) detail.innerHTML='';
   }
+}
+
+function loadMessagingChannelsPanel(force=false){
+  return loadConnectorSurfacePanel('messaging',force);
+}
+
+function loadEventWebhooksPanel(force=false){
+  return loadConnectorSurfacePanel('event_webhook',force);
+}
+
+function loadDeveloperApiPanel(force=false){
+  return loadConnectorSurfacePanel('developer_api',force);
 }
 
 function _connectorFieldValue(field){
@@ -8554,7 +8566,7 @@ async function saveConnectorConfig(id){
     if(data&&data.connector){
       const idx=_connectorsCache.findIndex(c=>c.id===id);
       if(idx!==-1) _connectorsCache[idx]=data.connector;
-      _renderConnectorsPanel();
+      _renderAllConnectorSurfacePanels();
     }
     showToast(t('connectors_saved'));
   }catch(e){
@@ -8573,7 +8585,7 @@ async function toggleConnector(id,enabled){
     if(data&&data.connector){
       const idx=_connectorsCache.findIndex(c=>c.id===id);
       if(idx!==-1) _connectorsCache[idx]=data.connector;
-      _renderConnectorsPanel();
+      _renderAllConnectorSurfacePanels();
     }
     showToast(enabled?t('connectors_enabled_toast'):t('connectors_disabled_toast'));
   }catch(e){
@@ -8781,7 +8793,7 @@ function loadGatewayStatus(){
   if(!card) return;
   api('/api/gateway/status').then(r=>{
     if(!r) return;
-    const configureBtn=`<button type="button" class="provider-card-btn provider-card-btn-ghost gateway-configure-btn" onclick="switchSettingsSection('connectors')">${esc(t('connectors_configure_link'))}</button>`;
+    const configureBtn=`<button type="button" class="provider-card-btn provider-card-btn-ghost gateway-configure-btn" onclick="switchSettingsSection('messagingChannels')">${esc(t('messaging_channels_configure_link'))}</button>`;
     if(!r.configured){
       card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>${esc(t('gateway_not_configured'))}</div><div class="gateway-status-actions">${configureBtn}</div>`;
       return;

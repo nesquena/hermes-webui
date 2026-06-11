@@ -1,25 +1,25 @@
-# Connectors Panel
+# Gateway Surfaces Settings
 
-The Connectors panel lives in **Settings → Connectors** and is linked from the
-existing **Settings → System → Gateway Status** card. Gateway Status remains the
-read-only runtime view; Connectors is the guided configuration surface.
+WebUI exposes Hermes Agent gateway surfaces in separate Settings sections
+instead of a single generic section:
 
-Connectors discovers Hermes Agent gateway surfaces from Hermes runtime metadata
-and configures only the WebUI-verified subset through Hermes' native
-`config.yaml`:
+- **Settings → Messaging Channels** for chat-style channels such as Telegram,
+  Discord, Email, Matrix or runtime platform plugins.
+- **Settings → Webhooks** for inbound event surfaces such as Webhook and
+  Microsoft Graph Webhook.
+- **Settings → Developer API** for API surfaces such as the OpenAI-compatible
+  Hermes API Server.
 
-```yaml
-platforms:
-  telegram:
-    enabled: true
-    token: "..."
-```
+The existing **Settings → System → Gateway Status** card remains the read-only
+runtime liveness view. Its configure link opens **Messaging Channels**, because
+gateway status primarily reports messaging platform connectivity.
 
-It does not create a WebUI-specific connector store.
+The backend still uses `/api/connectors` as a shared technical API, but the UI
+does not present these different Hermes surfaces as one product category.
 
 ## Discovery Model
 
-Hermes runtime metadata is the source of truth for supported surfaces:
+Hermes runtime metadata is the source of truth for supported gateway surfaces:
 
 - `gateway.config.Platform` provides built-in gateway platforms.
 - `hermes_cli.plugins.discover_plugins()` is called before reading
@@ -29,32 +29,56 @@ Hermes runtime metadata is the source of truth for supported surfaces:
   runtime metadata is temporarily unavailable.
 
 Static WebUI metadata is only an enrichment layer for labels, documentation
-links and categories. It must not be used as a source list of supported
-platforms.
+links, descriptions and categories. It must not be used as a source list of
+supported platforms.
 
-## Categories
+## Surface Categories
 
-The panel separates Hermes surfaces by responsibility:
+### Messaging Channels
 
-- **Messaging channels**: chat-style channels such as Telegram, Discord, Email,
-  Matrix or plugin platforms discovered from the runtime.
-- **Event webhooks**: inbound event surfaces such as Webhook and Microsoft Graph
-  Webhook. These are not simple chat channels because their value lives in
-  route/subscription configuration.
-- **Developer API**: API surfaces such as the OpenAI-compatible API Server.
+Messaging channels are conversational Hermes gateway adapters. Email belongs in
+this section because Hermes uses it as a channel for talking to the agent
+through IMAP/SMTP credentials such as `EMAIL_ADDRESS`, `EMAIL_PASSWORD`,
+`EMAIL_IMAP_HOST` and `EMAIL_SMTP_HOST`.
 
-Only fields verified against Hermes Agent gateway configuration and adapters are
-editable from WebUI:
+Only verified fields are editable from WebUI:
 
 - Telegram: bot token, reply mode, mention/group/topic filters.
 - Discord: bot token, reply mode, mention/free-response channel filters.
-- API Server: API key, host, port, model name and CORS origins.
 
-The other surfaces are listed as runtime-managed/read-only. This is deliberate:
-they are real Hermes Agent gateway capabilities, but their current setup relies
-on environment variables, OAuth/device setup, bridge state, route definitions,
-or platform-specific gateway tooling. WebUI should not present those as editable
-until the corresponding Hermes config shape has been verified.
+Other runtime-discovered messaging channels are read-only until their Hermes
+configuration shape has been verified.
+
+### Webhooks
+
+Webhooks are event ingress surfaces, not chat connectors. Their useful
+configuration lives in route/subscription data such as:
+
+```yaml
+platforms:
+  webhook:
+    extra:
+      routes:
+        github-pr: {}
+```
+
+WebUI lists webhook surfaces when Hermes runtime metadata or `config.yaml`
+reports them, but keeps them read-only until route, secret, delivery and test
+endpoint semantics are implemented against the verified Hermes schema.
+
+### Developer API
+
+Developer API surfaces are external API access paths. `api_server` is the
+OpenAI-compatible Hermes API Server, protected by `API_SERVER_KEY`; it is not a
+messaging connector and not a webhook feature.
+
+The verified editable API Server fields are:
+
+- API key
+- host
+- port
+- model name
+- CORS origins
 
 ## Secrets
 
@@ -65,33 +89,34 @@ the browser UI receive masked values such as:
 ••••••abcd
 ```
 
-Submitting an existing masked value preserves the stored secret. The Connectors
-backend reads and writes raw YAML so environment placeholders such as
+Submitting an existing masked value preserves the stored secret. The backend
+reads and writes raw YAML so environment placeholders such as
 `${TELEGRAM_BOT_TOKEN}` are not expanded into real secret values during save.
 
 ## Testing Locally
 
 1. Start WebUI.
-2. Open **Settings → Connectors**.
-3. Select Telegram, Discord or API Server.
+2. Open **Settings → Messaging Channels**.
+3. Select Telegram or Discord.
 4. Enter the required bot token.
 5. Click **Save**.
-6. Click **Test**.
-7. Enable the connector when the selected surface supports toggling.
+6. Click **Validate**.
+7. Enable the channel when the selected surface supports toggling.
 8. Restart or reload the Hermes gateway so runtime changes take effect.
 
-The **Test** action performs configuration validation only. It does not start a
-gateway process, contact Telegram/Discord, or probe external services.
+For **Settings → Developer API**, select API Server and validate the configured
+API Server fields.
 
-The runtime note shown in Connectors reuses the same Gateway Status backend
-payload as **Settings → System**, so the two panels do not maintain separate
-gateway liveness logic.
+The **Validate** action performs configuration validation only. It does not
+start a gateway process, contact Telegram/Discord, probe external services or
+validate webhook delivery.
 
 ## Source References
 
 - Hermes gateway configuration: `gateway/config.py`
 - Hermes platform registry: `gateway/platform_registry.py`
 - Hermes platform plugins: `plugins/platforms/*/plugin.yaml`
+- Email docs: `website/docs/user-guide/messaging/email.md`
 - Telegram docs: `website/docs/user-guide/messaging/telegram.md`
 - Discord docs: `website/docs/user-guide/messaging/discord.md`
 - Webhook docs: `website/docs/user-guide/messaging/webhooks.md`

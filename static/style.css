@@ -3766,9 +3766,6 @@ main.main > #mainPlugin{display:none;}
 .connectors-runtime-note{font-size:12px;color:var(--muted);margin:12px 0 10px;}
 .connectors-layout{display:grid;grid-template-columns:minmax(220px,300px) minmax(0,1fr);gap:12px;align-items:start;}
 .connectors-list{display:flex;flex-direction:column;gap:8px;min-width:0;}
-.connector-category-group{display:flex;flex-direction:column;gap:8px;min-width:0;}
-.connector-category-group+.connector-category-group{margin-top:8px;padding-top:10px;border-top:1px solid var(--border);}
-.connector-category-title{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:0 2px;}
 .connector-card{display:flex;flex-direction:column;gap:5px;text-align:left;width:100%;border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:8px;padding:10px;cursor:pointer;transition:border-color .15s,background .15s,box-shadow .15s;}
 .connector-card:hover{background:var(--code-bg);border-color:var(--border2);}
 .connector-card.active{border-color:var(--accent);box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent);}
