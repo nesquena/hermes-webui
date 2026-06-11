@@ -6649,6 +6649,7 @@ function _renderWorklogReasonInto(row, text){
   row.innerHTML=html;
 }
 function _worklogReasonNodeFromText(text, attrs){
+  if(window._showThinking===false) return null;
   const html=_worklogReasonHtmlFromText(text);
   if(!html) return null;
   const row=document.createElement('div');
@@ -10633,9 +10634,10 @@ function removeThinking(){
   const turn=$('liveAssistantTurn');
   const blocks=_assistantTurnBlocks(turn);
   if(blocks) blocks.querySelectorAll('.agent-activity-thinking').forEach(el=>el.remove());
-  if(blocks) blocks.querySelectorAll('.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
+  if(blocks) blocks.querySelectorAll('.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+  if(blocks) blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
     _syncToolCallGroupSummary(group);
-    if(!group.querySelector('.tool-card-row,.agent-activity-thinking')){
+    if(!group.querySelector('.tool-card-row,.agent-activity-thinking,.wl-reason')){
       if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
       group.remove();
     }
