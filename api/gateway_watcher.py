@@ -425,14 +425,13 @@ def restart_watcher_for_profile(name: str):
 
     hermes_home = Path(get_hermes_home_for_profile(name)).expanduser().resolve()
     key = _watcher_registry_key(name, hermes_home)
-    with _watcher_lock:
-        existing = _watchers.pop(key, None)
-    if existing is not None:
-        existing.stop()
     watcher = GatewayWatcher(profile_name=name, hermes_home=hermes_home)
     watcher.start()
     with _watcher_lock:
+        existing = _watchers.pop(key, None)
         _watchers[key] = watcher
+    if existing is not None:
+        existing.stop()
     return watcher
 
 

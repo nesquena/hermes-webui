@@ -113,6 +113,50 @@ def test_restart_watcher_for_profile_replaces_singleton_with_profile_home(tmp_pa
     assert gw.get_watcher() is watcher
 
 
+def test_restart_watcher_for_profile_swaps_atomically(tmp_path, monkeypatch):
+    from api import gateway_watcher as gw
+    from api import profiles
+
+    target_home = (tmp_path / "target").resolve()
+    created = []
+    seen = []
+
+    class FakeWatcher:
+        def __init__(self, *, profile_name="", hermes_home=None, state_db_path=None):
+            self.profile_name = profile_name
+            self.hermes_home = hermes_home
+            self.state_db_path = state_db_path
+            self.started = False
+            self.stopped = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+            if len(seen) == 0:
+                seen.append(gw.get_watcher(profile_name="target", hermes_home=target_home))
+
+        def is_alive(self):
+            return self.started
+
+        def stop(self):
+            self.stopped = True
+            self.started = False
+
+    existing = FakeWatcher(profile_name="target", hermes_home=target_home)
+    existing.started = True
+    monkeypatch.setattr(gw, "_watchers", {str(target_home): existing})
+    monkeypatch.setattr(gw, "GatewayWatcher", FakeWatcher)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda name: target_home)
+
+    watcher = gw.restart_watcher_for_profile("target")
+
+    assert len(created) == 2
+    assert seen == [existing]
+    assert existing.stopped is True
+    assert watcher is created[-1]
+    assert gw.get_watcher(profile_name="target", hermes_home=target_home) is watcher
+
+
 def test_start_watcher_pins_active_profile_home(tmp_path, monkeypatch):
     from api import gateway_watcher as gw
     from api import profiles
