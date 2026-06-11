@@ -9,6 +9,7 @@ import http.cookies
 import json
 import logging
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -56,6 +57,33 @@ PUBLIC_PATHS = frozenset({
 
 COOKIE_NAME = 'hermes_session'
 CSRF_HEADER_NAME = 'X-Hermes-CSRF-Token'
+
+
+# RFC 6265 cookie-name token: a non-empty run of token chars
+# (no controls, whitespace, or separators such as ';', '=', ',').
+_COOKIE_NAME_RE = re.compile(r"^[-!#$%&'*+.^_`|~0-9A-Za-z]+$")
+
+
+def _resolve_cookie_name() -> str:
+    """Resolve the auth session cookie name from env > default.
+
+    Honours ``HERMES_WEBUI_COOKIE_NAME`` so multiple WebUI instances sharing a
+    hostname (different ports) can use distinct cookie names instead of
+    trampling each other's session — browsers scope cookies by host, not
+    host+port (RFC 6265). Falls back to ``COOKIE_NAME`` when the env var is
+    unset, empty, or not a valid RFC 6265 token.
+    """
+    name = os.getenv('HERMES_WEBUI_COOKIE_NAME', '').strip()
+    if not name:
+        return COOKIE_NAME
+    if _COOKIE_NAME_RE.match(name):
+        return name
+    logger.warning(
+        'Ignoring invalid HERMES_WEBUI_COOKIE_NAME=%r; falling back to %r '
+        '(name must be a valid RFC 6265 token)', name, COOKIE_NAME,
+    )
+    return COOKIE_NAME
+
 
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
 
@@ -482,7 +510,7 @@ def parse_cookie(handler) -> str | None:
         cookie.load(cookie_header)
     except http.cookies.CookieError:
         return None
-    morsel = cookie.get(COOKIE_NAME)
+    morsel = cookie.get(_resolve_cookie_name())
     return morsel.value if morsel else None
 
 
@@ -589,21 +617,23 @@ def _is_secure_context(handler=None) -> bool:
 def set_auth_cookie(handler, cookie_value) -> None:
     """Set the auth cookie on the response."""
     cookie = http.cookies.SimpleCookie()
-    cookie[COOKIE_NAME] = cookie_value
-    cookie[COOKIE_NAME]['httponly'] = True
-    cookie[COOKIE_NAME]['samesite'] = 'Lax'
-    cookie[COOKIE_NAME]['path'] = '/'
-    cookie[COOKIE_NAME]['max-age'] = str(_resolve_session_ttl())
+    name = _resolve_cookie_name()
+    cookie[name] = cookie_value
+    cookie[name]['httponly'] = True
+    cookie[name]['samesite'] = 'Lax'
+    cookie[name]['path'] = '/'
+    cookie[name]['max-age'] = str(_resolve_session_ttl())
     if _is_secure_context(handler):
-        cookie[COOKIE_NAME]['secure'] = True
-    handler.send_header('Set-Cookie', cookie[COOKIE_NAME].OutputString())
+        cookie[name]['secure'] = True
+    handler.send_header('Set-Cookie', cookie[name].OutputString())
 
 
 def clear_auth_cookie(handler) -> None:
     """Clear the auth cookie on the response."""
     cookie = http.cookies.SimpleCookie()
-    cookie[COOKIE_NAME] = ''
-    cookie[COOKIE_NAME]['httponly'] = True
-    cookie[COOKIE_NAME]['path'] = '/'
-    cookie[COOKIE_NAME]['max-age'] = '0'
-    handler.send_header('Set-Cookie', cookie[COOKIE_NAME].OutputString())
+    name = _resolve_cookie_name()
+    cookie[name] = ''
+    cookie[name]['httponly'] = True
+    cookie[name]['path'] = '/'
+    cookie[name]['max-age'] = '0'
+    handler.send_header('Set-Cookie', cookie[name].OutputString())
