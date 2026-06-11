@@ -4166,7 +4166,8 @@ function updateSendBtn(){
 function _updateBusyHintBar(){
   const bar=$('busyHintBar');
   if(!bar) return;
-  const isBusy=!!S.busy;
+  const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  const isBusy=!!S.busy||compressionRunning;
   bar.hidden=!isBusy;
   if(!isBusy) return;
   const canInterrupt=!!(S.activeStreamId&&typeof cancelStream==='function');
