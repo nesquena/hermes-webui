@@ -9020,7 +9020,6 @@ function renderMessages(options){
     if(_preservedLen>0){
       const _rebuiltLen=_rebuilt?_liveAssistantSegmentTextLength(_rebuiltSeg||_rebuilt):-1;
       if(_rebuiltLen<=_preservedLen){
-        if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
         // Decide segment-level vs whole-turn restore. Segment-level keeps the
         // rebuilt turn's structure (good when the rebuild is the structural
         // superset). But the whole premise here is that the live DOM can be
@@ -9041,13 +9040,17 @@ function renderMessages(options){
         if(_rebuilt&&_rebuiltSeg&&_preservedSeg&&_rebuiltStructure>=_preservedStructure){
           // Rebuild is the structural superset — swap only the parser-owned
           // (tail) live segment, keeping rebuilt-only segments / tool groups.
+          // (No dataset.sessionId stamp here: only the segment enters the DOM;
+          // the rebuilt turn was already stamped at build time, see above.)
           _rebuiltSeg.replaceWith(_preservedSeg);
         }else if(_rebuilt){
           // Rebuilt turn lacks structure the live turn already has (live-only
           // tool card not yet persisted), or has no live segment to target —
           // restore the whole preserved turn so nothing the user saw vanishes.
+          if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           _rebuilt.replaceWith(_preservedLiveTurn);
         }else{
+          if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           inner.appendChild(_preservedLiveTurn);
         }
       }
