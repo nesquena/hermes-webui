@@ -751,6 +751,12 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
             origin_uri = f"capy-memory://{source_id}"
         else:
             origin_uri = codeowners_errors_origin
+    if _github_actions_oidc_subject_claim_route_path_matches(raw_origin_text):
+        oidc_subject_claim_origin = _github_actions_oidc_subject_claim_safe_origin(raw_origin_text)
+        if not oidc_subject_claim_origin:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = oidc_subject_claim_origin
     if _github_actions_selected_actions_route_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_actions_selected_actions_path_repo(origin_uri)
@@ -6696,6 +6702,129 @@ def _github_actions_workflow_access_repo_from_public_origin(origin_text: str) ->
         return ""
     repo_path = text[len(prefix):]
     return repo_path if _github_repo_path_is_safe(repo_path) else ""
+
+
+def _github_actions_oidc_subject_claim_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 8
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "actions"
+            and lowered[5] == "oidc"
+            and lowered[6] == "customization"
+            and lowered[7].startswith("sub")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return False
+
+
+def _github_actions_oidc_subject_claim_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 8
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "actions"
+        or path[5] != "oidc"
+        or path[6] != "customization"
+        or path[7] != "sub"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_actions_oidc_subject_claim_safe_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    safe_origin = urlunsplit(("https", "api.github.com", parts.path, "", ""))
+    if not _github_actions_oidc_subject_claim_path_repo(safe_origin):
+        return ""
+    return safe_origin
+
+
+def _github_actions_oidc_subject_claim_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_actions_oidc_subject_claim_route_path_matches(origin_uri)
+
+
+def _github_actions_oidc_claim_key_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    claim_key = value.strip()
+    if not claim_key or claim_key != value or len(claim_key) > 80:
+        return False
+    if _refresh_value_is_blocked(claim_key) or _UNSAFE_KEY_RE.search(claim_key):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_:-]{0,79}", claim_key))
+
+
+def _json_payload_is_github_actions_oidc_subject_claim_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_actions_oidc_subject_claim_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if any(key in payload for key in ("version", "items", "content_text", "content_html")):
+        return False
+    use_default = payload.get("use_default")
+    include_claim_keys = payload.get("include_claim_keys")
+    if not isinstance(use_default, bool) or not isinstance(include_claim_keys, list):
+        return False
+    if len(include_claim_keys) > 50:
+        return False
+    safe_claim_keys: list[str] = []
+    for claim_key in include_claim_keys:
+        if not _github_actions_oidc_claim_key_is_safe(claim_key):
+            return False
+        if claim_key in safe_claim_keys:
+            return False
+        safe_claim_keys.append(claim_key)
+    return True
+
+
+def _github_actions_oidc_subject_claim_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_actions_oidc_subject_claim_path_repo(origin_uri) or "repository"
+    use_default = str(bool(payload.get("use_default"))).lower()
+    raw_claim_keys = payload.get("include_claim_keys")
+    claim_keys = raw_claim_keys if isinstance(raw_claim_keys, list) else []
+    safe_claim_keys = [
+        claim_key for claim_key in claim_keys if _github_actions_oidc_claim_key_is_safe(claim_key)
+    ]
+    claim_key_summary = ", ".join(safe_claim_keys[:10]) if safe_claim_keys else "none"
+    return _bounded_refresh_summary(
+        "GitHub Actions OIDC subject claim for "
+        f"{repo}; use default: {use_default}; "
+        f"claim key count: {len(claim_keys)}; claim keys: {claim_key_summary}"
+    )
 
 
 def _github_actions_selected_actions_route_path_matches(origin_uri: str) -> bool:
@@ -14108,6 +14237,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_codeowners_errors_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    oidc_subject_claim_repo = _github_actions_oidc_subject_claim_path_repo(origin_uri)
+    if oidc_subject_claim_repo:
+        if not _json_payload_is_github_actions_oidc_subject_claim_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub Actions OIDC subject claim {oidc_subject_claim_repo}",
+            "summary": _github_actions_oidc_subject_claim_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_actions_oidc_subject_claim_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     selected_actions_repo = _github_actions_selected_actions_path_repo(origin_uri)
     if selected_actions_repo:
         if not _json_payload_is_github_actions_selected_actions_metadata(origin_uri, payload):
@@ -14712,6 +14853,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_codeowners_errors_route_path_matches(raw_origin_uri):
         if not _github_codeowners_errors_safe_origin(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_actions_oidc_subject_claim_route_path_matches(raw_origin_uri):
+        if not _github_actions_oidc_subject_claim_safe_origin(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_actions_selected_actions_route_path_matches(raw_origin_uri):
         selected_actions_origin = _safe_origin_uri(raw_origin_uri, source_id=_safe_public_id(source_id, fallback="source"))
         if (
@@ -14834,6 +14978,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     repository_webhooks_safe_origin = _github_repository_webhooks_safe_origin(raw_origin_uri)
     if repository_webhooks_safe_origin:
         safe_origin_uri = repository_webhooks_safe_origin
+    oidc_subject_claim_safe_origin = _github_actions_oidc_subject_claim_safe_origin(raw_origin_uri)
+    if oidc_subject_claim_safe_origin:
+        safe_origin_uri = oidc_subject_claim_safe_origin
     actions_cache_usage_repo = _github_actions_cache_usage_path_repo(raw_origin_uri)
     if actions_cache_usage_repo:
         actions_cache_usage_parts = urlsplit(raw_origin_uri)
@@ -15019,6 +15166,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_codeowners_errors_path_matches(safe_origin_uri):
         if not _github_codeowners_errors_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_actions_oidc_subject_claim_path_matches(safe_origin_uri):
+        if not _github_actions_oidc_subject_claim_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_actions_selected_actions_path_matches(safe_origin_uri):
@@ -15334,6 +15485,14 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or final_url != safe_origin_uri
             or not _github_codeowners_errors_path_repo(final_url)
             or _github_codeowners_errors_path_repo(final_url) != _github_codeowners_errors_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_oidc_subject_claim_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or final_url != safe_final_url
+            or final_url != safe_origin_uri
+            or not _github_actions_oidc_subject_claim_path_repo(final_url)
+            or _github_actions_oidc_subject_claim_path_repo(final_url) != _github_actions_oidc_subject_claim_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_selected_actions_path_matches(safe_origin_uri) and (
@@ -15734,6 +15893,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_codeowners_errors_path_matches(safe_origin_uri) and (
             not _github_codeowners_errors_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_oidc_subject_claim_path_matches(safe_origin_uri) and (
+            not _github_actions_oidc_subject_claim_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
