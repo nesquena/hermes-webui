@@ -9,11 +9,15 @@ import api.oauth as oauth
 def setup_function():
     with oauth._OAUTH_FLOWS_LOCK:
         oauth._OAUTH_FLOWS.clear()
+    with oauth._OAUTH_START_LOCKS_LOCK:
+        oauth._OAUTH_START_LOCKS.clear()
 
 
 def teardown_function():
     with oauth._OAUTH_FLOWS_LOCK:
         oauth._OAUTH_FLOWS.clear()
+    with oauth._OAUTH_START_LOCKS_LOCK:
+        oauth._OAUTH_START_LOCKS.clear()
 
 
 def _run_two_concurrent(fn):
@@ -98,6 +102,29 @@ def test_codex_onboarding_oauth_start_reuses_pending_flow_before_requesting_code
     with oauth._OAUTH_FLOWS_LOCK:
         pending = [flow for flow in oauth._OAUTH_FLOWS.values() if flow.get("status") == "pending"]
     assert len(pending) == 1
+
+
+def test_codex_onboarding_oauth_start_does_not_hold_lock_while_requesting_code(monkeypatch, tmp_path):
+    """The slow Codex device-code request must not block unrelated flow operations."""
+    lock_available_during_request = []
+    hermes_home = tmp_path / "hermes-home"
+
+    monkeypatch.setattr(oauth, "_get_active_hermes_home", lambda: Path(hermes_home))
+    monkeypatch.setattr(oauth, "_spawn_codex_oauth_worker", lambda flow_id: None)
+
+    def fake_request_code():
+        acquired = oauth._OAUTH_FLOWS_LOCK.acquire(blocking=False)
+        lock_available_during_request.append(acquired)
+        if acquired:
+            oauth._OAUTH_FLOWS_LOCK.release()
+        return {"user_code": "ABCD-EFGH", "device_auth_id": "device-1", "interval": 5, "expires_in": 900}
+
+    monkeypatch.setattr(oauth, "_request_codex_user_code", fake_request_code)
+
+    result = oauth.start_onboarding_oauth_flow({"provider": "openai-codex"})
+
+    assert result["status"] == "pending"
+    assert lock_available_during_request == [True]
 
 
 def test_codex_onboarding_oauth_start_single_flight_is_thread_safe(monkeypatch, tmp_path):

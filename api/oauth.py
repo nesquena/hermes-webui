@@ -56,7 +56,25 @@ ANTHROPIC_PUBLIC_LINK_ERROR = "Claude Code credential linking failed. Check serv
 
 _OAUTH_FLOWS: dict[str, dict[str, Any]] = {}
 _OAUTH_FLOWS_LOCK = threading.Lock()
+_OAUTH_START_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_OAUTH_START_LOCKS_LOCK = threading.Lock()
 _ANTHROPIC_ENV_KEYS = ("ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY")
+
+
+def _oauth_start_key(provider: str, hermes_home: Path) -> tuple[str, str]:
+    """Return the canonical single-flight key for onboarding OAuth starts."""
+    return (_normalize_onboarding_oauth_provider(provider), str(Path(hermes_home)))
+
+
+def _oauth_start_lock(provider: str, hermes_home: Path) -> threading.Lock:
+    """Return the per provider/profile lock that serializes OAuth flow creation."""
+    key = _oauth_start_key(provider, hermes_home)
+    with _OAUTH_START_LOCKS_LOCK:
+        lock = _OAUTH_START_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _OAUTH_START_LOCKS[key] = lock
+        return lock
 
 
 def _pending_oauth_flow_for_locked(provider: str, hermes_home: Path) -> tuple[str, dict[str, Any]] | None:
@@ -753,11 +771,16 @@ def start_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
 
     # Codex flow
     hermes_home = _get_active_hermes_home()
-    with _OAUTH_FLOWS_LOCK:
-        existing = _pending_oauth_flow_for_locked("openai-codex", hermes_home)
-        if existing is not None:
-            flow_id, flow = existing
-            return _public_start_payload(flow_id, flow)
+    # Serialize check -> device-code request -> flow insertion -> worker spawn
+    # for this provider/profile. The global flow lock is still held only for
+    # short in-memory checks/inserts, so unrelated polling/status/cleanup paths
+    # are not blocked by the slow provider request.
+    with _oauth_start_lock("openai-codex", hermes_home):
+        with _OAUTH_FLOWS_LOCK:
+            existing = _pending_oauth_flow_for_locked("openai-codex", hermes_home)
+            if existing is not None:
+                flow_id, flow = existing
+                return _public_start_payload(flow_id, flow)
 
         try:
             device = _request_codex_user_code()
@@ -784,9 +807,15 @@ def start_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
             "created_at": time.time(),
             "updated_at": time.time(),
         }
-        _OAUTH_FLOWS[flow_id] = flow
-    _spawn_codex_oauth_worker(flow_id)
-    return _public_start_payload(flow_id, flow)
+        with _OAUTH_FLOWS_LOCK:
+            existing = _pending_oauth_flow_for_locked("openai-codex", hermes_home)
+            if existing is not None:
+                flow_id, flow = existing
+                return _public_start_payload(flow_id, flow)
+            _OAUTH_FLOWS[flow_id] = flow
+
+        _spawn_codex_oauth_worker(flow_id)
+        return _public_start_payload(flow_id, flow)
 
 
 def poll_onboarding_oauth_flow(flow_id: str) -> dict[str, Any]:
