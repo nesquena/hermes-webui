@@ -18,8 +18,10 @@ def test_sidebar_has_multi_select_origin_filter():
 
 def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    assert "const webuiSessionCount = withMessages.filter(s=>!_isCliSession(s)).length" in src
-    assert "const cliSessionCount = withMessages.filter(s=>_isCliSession(s)).length" in src
+    assert "let webuiSessionCount=0;" in src
+    assert "let cliSessionCount=0;" in src
+    assert "if(_isCliSession(s)) cliSessionCount++;" in src
+    assert "else webuiSessionCount++;" in src
     assert "_activeOriginFilters.has(origin)" in src
 
 
