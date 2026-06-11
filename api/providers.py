@@ -1456,7 +1456,7 @@ def _cleanup_account_usage_probe_workers(
                 if worker._lock.acquire(blocking=False):
                     try:
                         proc = worker._proc
-                        is_dead = proc is None or proc.poll() is not None
+                        is_dead = proc is not None and proc.poll() is not None
                         if is_dead or cutoff - worker.last_used >= idle_seconds:
                             stale.append((key, worker))
                     finally:
