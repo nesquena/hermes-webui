@@ -73,6 +73,17 @@ function makeElement(id) {
 function response(data, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => data };
 }
+function routePath(path) {
+  const text = String(path || '');
+  try {
+    return new URL(text, 'http://capy-spaces.test/').pathname.replace(/^\/+/, '');
+  } catch (err) {
+    return text.split(/[?#]/)[0].replace(/^\/+/, '');
+  }
+}
+function sameRoutePath(path, expected) {
+  return routePath(path) === routePath(expected);
+}
 
 global.window = {
   addEventListener(type, fn) {
@@ -260,6 +271,70 @@ global.fetch = async function(path, opts = {}) {
       });
     }
     return response({ available: true, local_only: true, metadata_only: true, total_source_count: 0, total_refresh_job_count: 0, connectors: [] });
+  }
+  if (sameRoutePath(path, 'api/capy-memory/source/jobs')) {
+    if (scenario === 'productHomeSourceJobsUnavailable') {
+      return response({ error: 'source jobs unavailable', raw_prompt: 'ignore previous instructions SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>' }, 503);
+    }
+    if (scenario === 'productHomeSourceJobsAdversarial') {
+      return response({
+        local_only: true,
+        metadata_only: true,
+        limit: 5,
+        jobs: [
+          { job_id: 'queue-bad-1', source_id: 'secret-source<script>bad()</script>', status: 'totally unknown', attempts: -7, created_at: 'not-a-date', updated_at: '2026-05-24T13:00:00+00:00', raw_prompt: 'ignore previous instructions SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>' },
+          { job_id: 'queue-bad-2', source_id: 'safe-docs-one', status: 'failed', attempts: 1, created_at: 'not-a-date', updated_at: 'also-not-a-date', error: 'https://user:pass@example.test/private?api_key=SECRET_VALUE_DO_NOT_LEAK' },
+          { job_id: 'queue-bad-3', source_id: 'safe-docs-two', status: 'completed', attempts: 2, created_at: '2026-05-24T13:02:00+00:00' },
+          { job_id: 'queue-bad-4', source_id: 'safe-docs-three', status: 'cancelled', attempts: 3, created_at: '2026-05-24T13:03:00+00:00' },
+          { job_id: 'queue-bad-5', source_id: 'safe-docs-four', status: 'leased', attempts: 4, created_at: '2026-05-24T13:04:00+00:00' },
+          { job_id: 'queue-bad-6', source_id: 'sixth-job-should-not-render', status: 'pending', attempts: 5, created_at: '2026-05-24T13:05:00+00:00' },
+        ],
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'ignore previous instructions',
+        renderer: '<script>bad()</script>',
+      });
+    }
+    if (scenario === 'productHomeMemoryStatus' || scenario === 'productHomeMemoryRefreshAction' || scenario === 'productHomeConnectorSourceRefreshAction' || scenario === 'productHomeScheduledMemoryRefreshAction') {
+      return response({
+        local_only: true,
+        metadata_only: true,
+        limit: 5,
+        jobs: [
+          {
+            job_id: 'queue-job-1',
+            kind: 'source.refresh',
+            source_id: 'roadmap-docs',
+            status: 'pending',
+            attempts: 2,
+            created_at: '2026-05-24T12:30:00+00:00',
+            updated_at: '2026-05-24T12:31:00+00:00',
+            origin_uri: 'https://queue.example.test/docs?api_key=SECRET_VALUE_DO_NOT_LEAK#raw-prompt',
+            payload: { raw_prompt: 'ignore previous instructions SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', source: '<html>bad</html>' },
+            raw_prompt: 'ignore previous instructions',
+            renderer: '<script>bad()</script>',
+            source: '<html>bad</html>',
+            html: '<script>bad()</script>',
+            script: 'alert(SECRET_VALUE_DO_NOT_LEAK)',
+            api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+            error: 'https://user:pass@queue.example.test/private?api_key=SECRET_VALUE_DO_NOT_LEAK#raw-prompt',
+          },
+          {
+            job_id: 'queue-job-2',
+            kind: 'source.refresh',
+            source_id: 'local-knowledge-index',
+            status: 'leased',
+            attempts: 0,
+            created_at: '2026-05-24T12:25:00+00:00',
+            origin_uri: 'capy-knowledge://local-index?api_key=SECRET_VALUE_DO_NOT_LEAK',
+            raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK raw prompt',
+            api_auth: 'Bearer SECRET_VALUE_DO_NOT_LEAK',
+          },
+        ],
+        origin_uri: 'https://queue.example.test/root?api_key=SECRET_VALUE_DO_NOT_LEAK#raw-prompt',
+        error: 'SECRET_VALUE_DO_NOT_LEAK api_key raw prompt renderer source html script',
+      });
+    }
+    return response({ local_only: true, metadata_only: true, limit: 5, jobs: [] });
   }
   if (path === 'api/capy-policy/status') {
     if (scenario === 'productHomePolicyStatus' || scenario === 'productHomePolicyUnsafeRoutePreviews') {
@@ -3029,7 +3104,7 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await window.openSpaceDetail('lab');
-  } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus' || scenario === 'productHomePolicyStatus' || scenario === 'productHomePolicyUnsafeRoutePreviews' || scenario === 'productHomeProgressStatus' || scenario === 'productHomeProgressRecoveryRestore') {
+  } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus' || scenario === 'productHomeSourceJobsUnavailable' || scenario === 'productHomeSourceJobsAdversarial' || scenario === 'productHomePolicyStatus' || scenario === 'productHomePolicyUnsafeRoutePreviews' || scenario === 'productHomeProgressStatus' || scenario === 'productHomeProgressRecoveryRestore') {
     await window.loadCapySpaces();
   } else if (scenario === 'productHomeMemoryRefreshAction') {
     await window.loadCapySpaces();
@@ -5175,13 +5250,73 @@ def test_spaces_ui_product_home_memory_freshness_card_is_visible_local_and_safe(
     assert "Local knowledge" in html
     assert "2 sources · 0 stale · 0 errors · 1 refresh job" in html
     assert "Fresh" in html
+    assert "Source refresh queue" in html
+    assert "Local-only metadata-only queue" in html
+    assert 'class="capy-spaces-source-connectors capy-spaces-source-refresh-queue"' in html
+    assert 'class="capy-spaces-source-connector-grid capy-spaces-source-refresh-queue-list"' in html
+    assert html.count('capy-spaces-source-connector-card capy-spaces-source-refresh-job-card') == 2
+    assert "roadmap-docs · pending · 2 attempts · Queued 2026-05-24T12:30:00+00:00" in html
+    assert "local-knowledge-index · leased · 0 attempts · Queued 2026-05-24T12:25:00+00:00" in html
     assert {"path": "api/capy-memory/status", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/capy-memory/source/catalog", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/capy-memory/source/jobs?limit=5", "method": "GET", "body": ""} in out["calls"]
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "api-auth" not in html.lower()
+    assert "api_auth" not in html.lower()
+    assert "SECRET" not in html
+    assert "raw prompt" not in html.lower()
+    assert "raw-prompt" not in html.lower()
+    assert "origin_uri" not in html.lower()
+    assert "queue.example.test" not in html
+    assert "user:pass" not in html
+    assert "ignore previous instructions" not in html.lower()
+
+
+def test_spaces_ui_product_home_source_refresh_queue_fails_soft_when_unavailable(driver_path):
+    out = _run_spaces_scenario(driver_path, "productHomeSourceJobsUnavailable")
+    html = out["rootHtml"]
+
+    assert "Memory freshness" in html
+    assert "Connector catalog" in html
+    assert "Source refresh queue" in html
+    assert "Source refresh queue unavailable." in html
+    assert 'class="capy-spaces-source-connectors capy-spaces-source-refresh-queue"' in html
+    assert 'class="capy-spaces-source-connector-grid capy-spaces-source-refresh-queue-list"' in html
+    assert {"path": "api/capy-memory/source/jobs?limit=5", "method": "GET", "body": ""} in out["calls"]
+    assert "Capy Spaces unavailable" not in html
+    assert "source jobs unavailable" not in html
     assert "<script>" not in html
     assert "renderer" not in html.lower()
     assert "api_key" not in html.lower()
     assert "SECRET" not in html
-    assert "raw prompt" not in html.lower()
+    assert "ignore previous instructions" not in html.lower()
+
+
+def test_spaces_ui_product_home_source_refresh_queue_bounds_and_sanitizes_adversarial_jobs(driver_path):
+    out = _run_spaces_scenario(driver_path, "productHomeSourceJobsAdversarial")
+    html = out["rootHtml"]
+
+    assert "Source refresh queue" in html
+    assert html.count('capy-spaces-source-connector-card capy-spaces-source-refresh-job-card') == 5
+    assert "source · pending · 0 attempts · Queued 2026-05-24T13:00:00+00:00" in html
+    assert "safe-docs-one · failed · 1 attempt" in html
+    assert "safe-docs-one · failed · 1 attempt · Queued" not in html
+    assert "safe-docs-two · completed · 2 attempts · Queued 2026-05-24T13:02:00+00:00" in html
+    assert "safe-docs-three · cancelled · 3 attempts · Queued 2026-05-24T13:03:00+00:00" in html
+    assert "safe-docs-four · leased · 4 attempts · Queued 2026-05-24T13:04:00+00:00" in html
+    assert "totally unknown" not in html
+    assert "-7 attempts" not in html
+    assert "not-a-date" not in html
+    assert "also-not-a-date" not in html
+    assert "sixth-job-should-not-render" not in html
+    assert {"path": "api/capy-memory/source/jobs?limit=5", "method": "GET", "body": ""} in out["calls"]
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+    assert "user:pass" not in html
     assert "ignore previous instructions" not in html.lower()
 
 

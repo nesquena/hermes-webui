@@ -43,6 +43,12 @@
       } catch (catalogErr) {
         sourceCatalog = {unavailable: true, local_only: true, metadata_only: true, connectors: []};
       }
+      let sourceJobs = {unavailable: true, local_only: true, metadata_only: true, jobs: []};
+      try {
+        sourceJobs = await fetchSpacesJson('api/capy-memory/source/jobs?limit=5');
+      } catch (jobsErr) {
+        sourceJobs = {unavailable: true, local_only: true, metadata_only: true, jobs: []};
+      }
       let policyStatus = {unavailable: true, local_only: true};
       try {
         policyStatus = await fetchSpacesJson('api/capy-policy/status');
@@ -62,7 +68,7 @@
       }
       root.dataset.editingSpaceId = '';
       const spaces = data.spaces || [];
-      root.innerHTML = renderSpacesList(spaces, demoData || {demos: []}, memoryStatus, sourceCatalog, policyStatus, progressStatus);
+      root.innerHTML = renderSpacesList(spaces, demoData || {demos: []}, memoryStatus, sourceCatalog, sourceJobs, policyStatus, progressStatus);
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div></div>';
     }
@@ -145,15 +151,15 @@
       renderCompactionEvidence(result && (result.output_compaction || result.compaction)) + '</div>';
   }
 
-  function renderSpacesList(spaces, demoCatalog, memoryStatus, sourceCatalog, policyStatus, progressStatus){
+  function renderSpacesList(spaces, demoCatalog, memoryStatus, sourceCatalog, sourceJobs, policyStatus, progressStatus){
     const activeSpaceId = safePathIdText(currentActiveSpaceId());
     const safeSpaces = Array.isArray(spaces) ? spaces : [];
     const catalog = demoCatalog && typeof demoCatalog === 'object' && !Array.isArray(demoCatalog) ? demoCatalog : {demos: (Array.isArray(demoCatalog) ? demoCatalog : [])};
-    return renderSpaceAgentHomeShell(safeSpaces, catalog.demos || [], activeSpaceId, memoryStatus || {}, sourceCatalog || {}, policyStatus || {}, progressStatus || {}) +
+    return renderSpaceAgentHomeShell(safeSpaces, catalog.demos || [], activeSpaceId, memoryStatus || {}, sourceCatalog || {}, sourceJobs || {}, policyStatus || {}, progressStatus || {}) +
       renderCapySpacesControlPlane(safeSpaces, catalog, activeSpaceId);
   }
 
-  function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId, memoryStatus, sourceCatalog, policyStatus, progressStatus){
+  function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId, memoryStatus, sourceCatalog, sourceJobs, policyStatus, progressStatus){
     return '<section class="capy-spaces-product-home" aria-label="Capy Spaces product home">' +
       '<div class="capy-spaces-product-starfield" aria-hidden="true"></div>' +
       '<div class="capy-spaces-product-topbar">' +
@@ -190,6 +196,7 @@
       '<div class="capy-spaces-section-heading"><span></span><strong>SPACES</strong><span></span></div>' +
       '<div class="capy-spaces-product-card-grid '+(spaces.length ? '' : 'capy-spaces-product-card-grid-empty')+'">' + renderSpaceAgentProductSpaceCards(spaces, activeSpaceId) + '</div>' +
       renderMemoryFreshnessCard(memoryStatus || {}) +
+      renderSourceRefreshQueueCard(sourceJobs || {}) +
       renderSourceConnectorCatalog(sourceCatalog || {}) +
       renderAutonomyPolicyCard(policyStatus || {}) +
       renderProgressEventsCard(progressStatus || {}) +
@@ -224,6 +231,43 @@
       '<div class="capy-spaces-memory-freshness-state">'+escapeHtml(state)+'</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="refreshMemorySources">Refresh sources</button><button type="button" class="capy-spaces-btn secondary" data-capy-action="runScheduledMemoryRefresh">Run scheduled refresh</button></div>' +
       '</section>';
+  }
+
+  function renderSourceRefreshQueueCard(queue){
+    const unavailable = queue && queue.unavailable === true;
+    const jobs = Array.isArray(queue && queue.jobs) ? queue.jobs.slice(0, 5) : [];
+    const subtitle = unavailable
+      ? 'Local-only metadata-only queue unavailable; source refresh jobs will appear when Memory Tree is reachable.'
+      : 'Local-only metadata-only queue for bounded source refresh jobs.';
+    const rows = jobs.map(renderSourceRefreshQueueRow).filter(Boolean).join('');
+    const emptyText = unavailable ? 'Source refresh queue unavailable.' : 'No source refresh jobs queued.';
+    return '<section class="capy-spaces-source-connectors capy-spaces-source-refresh-queue" aria-label="Source refresh queue">' +
+      '<div class="capy-spaces-source-connectors-head"><div><div class="capy-spaces-product-eyebrow">QUEUE</div><h3>Source refresh queue</h3><p>'+escapeHtml(subtitle)+'</p></div></div>' +
+      '<div class="capy-spaces-source-connector-grid capy-spaces-source-refresh-queue-list">' + (rows || '<div class="capy-spaces-muted">'+escapeHtml(emptyText)+'</div>') + '</div>' +
+      '</section>';
+  }
+
+  function renderSourceRefreshQueueRow(job){
+    if (!job || typeof job !== 'object' || Array.isArray(job)) return '';
+    const sourceId = safePathIdText(job.source_id) || 'source';
+    const status = safeSourceRefreshJobStatus(job.status);
+    const attempts = safeNonNegativeCount(job.attempts);
+    const queuedAt = safeSourceRefreshTimestamp(job.created_at) || safeSourceRefreshTimestamp(job.updated_at);
+    const parts = [sourceId, status, String(attempts)+' '+(attempts === 1 ? 'attempt' : 'attempts')];
+    if (queuedAt) parts.push('Queued '+queuedAt);
+    return '<article class="capy-spaces-source-connector-card capy-spaces-source-refresh-job-card"><p>'+parts.map(function(part){ return escapeHtml(part); }).join(' · ')+'</p></article>';
+  }
+
+  function safeSourceRefreshJobStatus(value){
+    const normalized = String(value == null ? '' : value).trim().toLowerCase().replace(/[\s_]+/g, '-');
+    const allowed = {'pending': 'pending', 'leased': 'leased', 'completing': 'completing', 'completed': 'completed', 'failed': 'failed', 'cancelled': 'cancelled'};
+    return allowed[normalized] || 'pending';
+  }
+
+  function safeSourceRefreshTimestamp(value){
+    const text = safeDisplayMetadataText(value, '');
+    if (!text || text === '[REDACTED]') return '';
+    return /^\d{4}-\d{2}-\d{2}T[0-9:.+-]+(?:Z|[+-]\d{2}:?\d{2})?$/.test(text) ? text : '';
   }
 
   function renderSourceConnectorCatalog(catalog){
