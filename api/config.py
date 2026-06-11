@@ -2756,7 +2756,13 @@ def set_reasoning_display(show: bool) -> dict:
     return get_reasoning_status()
 
 
-def set_reasoning_effort(effort: str) -> dict:
+def set_reasoning_effort(
+    effort: str,
+    *,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> dict:
     """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
 
     Mirrors CLI ``/reasoning <level>``: same key, same valid values
@@ -2781,7 +2787,11 @@ def set_reasoning_effort(effort: str) -> dict:
         config_data["agent"] = agent_cfg
         _save_yaml_config_file(config_path, config_data)
     reload_config()
-    return get_reasoning_status()
+    return get_reasoning_status(
+        model_id=model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
 
 
 def set_hermes_default_model(model_id: str) -> dict:
