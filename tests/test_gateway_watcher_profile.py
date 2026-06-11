@@ -131,6 +131,9 @@ def test_start_watcher_pins_active_profile_home(tmp_path, monkeypatch):
         def start(self):
             self.started = True
 
+        def is_alive(self):
+            return self.started
+
     monkeypatch.setattr(gw, "_watchers", {})
     monkeypatch.setattr(gw, "GatewayWatcher", FakeWatcher)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "work")
