@@ -9215,6 +9215,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             raise ValueError("Widget define prompt preflight blocked")
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.blueprint.define")
         autonomy_policy = _space_widget_mutation_action_policy_receipt("space.widget.blueprint", prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -9229,12 +9230,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=1,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name == "space.spaces.createwidgetsource":
@@ -9250,6 +9254,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             raise ValueError("Widget source prompt preflight blocked")
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.blueprint.create")
         autonomy_policy = _space_widget_mutation_action_policy_receipt("space.widget.blueprint", prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -9264,12 +9269,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=1,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name == "space.spaces.previewwidgetrecord":
@@ -9289,6 +9297,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if preview_metadata:
             widget_detail.setdefault("metadata", {})["preview_metadata"] = preview_metadata
         autonomy_policy = _space_widget_mutation_action_policy_receipt("space.widget.blueprint", prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -9303,12 +9312,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=1,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name == "space.spaces.renderwidget":
@@ -9326,6 +9338,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = upsert_widget(space_id, widget_payload)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.render")
         autonomy_policy = _space_widget_mutation_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         widget_id = result["widget"]["id"]
         return {
             "ok": True,
@@ -9337,6 +9350,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -9344,6 +9358,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_id=result.get("revision_event_id"),
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name in {"space.spaces.patchwidget", "space.current.patchwidget"}:

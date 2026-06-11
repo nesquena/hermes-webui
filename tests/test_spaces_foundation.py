@@ -10741,6 +10741,7 @@ def test_space_tool_adapter_widget_blueprint_and_render_receipts_include_output_
         assert "model_route_hint: hint:fast" in text
         assert f"progress_run_id: {expected_run_id}" in text
         assert "progress_status: completed" in text
+        _assert_server_memory_advisory_receipt(result)
         assert {"kind": "space", "handle": "space:widget-blueprint-compaction-lab", "label": "Space action metadata"} in compaction[
             "retained_artifact_handles"
         ]
