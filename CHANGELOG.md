@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.361] — 2026-06-11 — Release LZ (configurable session cookie name)
+
+### Added
+
+- **The auth session cookie name is now configurable via `HERMES_WEBUI_COOKIE_NAME`.** Browsers scope cookies by host, not host+port (RFC 6265), so two WebUI instances on the same hostname but different ports previously trampled each other's `hermes_session` cookie. Set `HERMES_WEBUI_COOKIE_NAME` to give each instance a distinct cookie name. The value is validated as an RFC 6265 token (falling back to the default `hermes_session` when unset, empty, or invalid), and existing deployments are unaffected. (#3981)
+
 ## [v0.51.360] — 2026-06-11 — Release LY (close idle SSE on hidden tabs)
 
 ### Fixed
