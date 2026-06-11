@@ -6074,7 +6074,7 @@ function switchSettingsSection(name){
     _settingsSection = name;
     return;
   }
-  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system'||name==='help')?name:'conversation';
+  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='connectors'||name==='plugins'||name==='system'||name==='help')?name:'conversation';
   // Deep-linking to the Plugins pane when the tab is hidden (no plugins
   // installed, #3457) falls back to Conversation. Resolve this BEFORE toggling
   // panes/sidebar/dropdown below so every downstream selection uses the
@@ -6086,13 +6086,13 @@ function switchSettingsSection(name){
   }
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System',help:'Help'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',connectors:'Connectors',plugins:'Plugins',system:'System',help:'Help'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','system','help'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','connectors','plugins','system','help'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -6101,6 +6101,7 @@ function switchSettingsSection(name){
   if(dd && dd.value!==section) dd.value=section;
   // Lazy-load integration panels when their tabs are opened
   if(section==='providers') loadProvidersPanel();
+  if(section==='connectors') loadConnectorsPanel();
   if(section==='plugins') loadPluginsPanel();
 }
 
@@ -8325,6 +8326,242 @@ function dismissErrorBanner(){
 
 
 // ── MCP Server Management ──
+// ── Connectors / Gateway channels ───────────────────────────────────────────
+let _connectorsCache=[];
+let _connectorsRuntime={};
+let _activeConnectorId=null;
+
+function _connectorById(id){
+  return (_connectorsCache||[]).find(c=>c&&c.id===id)||null;
+}
+
+function _connectorStatusLabel(status){
+  const key={
+    not_configured:'connectors_status_not_configured',
+    configured:'connectors_status_configured',
+    enabled:'connectors_status_enabled',
+    error:'connectors_status_error',
+    unknown:'connectors_status_unknown',
+  }[status]||'connectors_status_unknown';
+  return t(key);
+}
+
+function _connectorStatusClass(status){
+  return String(status||'unknown').replace(/[^a-z0-9_-]/gi,'').toLowerCase()||'unknown';
+}
+
+function _connectorRuntimeMessage(runtime){
+  if(!runtime||!runtime.available) return t('connectors_runtime_unknown');
+  if(runtime.alive===true) return t('connectors_runtime_running');
+  if(runtime.alive===false) return t('connectors_runtime_error');
+  return t('connectors_runtime_unknown');
+}
+
+function _renderConnectorsPanel(){
+  const list=$('connectorsList');
+  const detail=$('connectorDetail');
+  const runtimeEl=$('connectorsRuntime');
+  if(!list||!detail) return;
+  if(runtimeEl) runtimeEl.textContent=_connectorRuntimeMessage(_connectorsRuntime);
+  if(!_connectorsCache.length){
+    list.innerHTML=`<div class="connector-empty">${esc(t('connectors_empty'))}</div>`;
+    detail.innerHTML='';
+    return;
+  }
+  if(!_activeConnectorId||!_connectorById(_activeConnectorId)){
+    _activeConnectorId=_connectorsCache[0].id;
+  }
+  list.innerHTML=_connectorsCache.map(c=>{
+    const statusClass=_connectorStatusClass(c.status);
+    const active=c.id===_activeConnectorId?' active':'';
+    const unsupported=!c.configuration_supported?' connector-card-readonly':'';
+    return `<button type="button" class="connector-card${active}${unsupported}" data-connector-id="${esc(c.id)}" onclick="selectConnector('${esc(c.id)}')">
+      <div class="connector-card-head">
+        <span class="connector-name">${esc(c.label||c.id)}</span>
+        <span class="connector-status connector-status-${statusClass}">${esc(_connectorStatusLabel(c.status))}</span>
+      </div>
+      <div class="connector-kind">${esc(c.kind||'connector')}</div>
+      <div class="connector-description">${esc(c.description||'')}</div>
+    </button>`;
+  }).join('');
+  const connector=_connectorById(_activeConnectorId);
+  detail.innerHTML=connector?_connectorDetailHtml(connector):'';
+}
+
+function selectConnector(id){
+  _activeConnectorId=id;
+  _renderConnectorsPanel();
+}
+
+async function loadConnectorsPanel(force=false){
+  const list=$('connectorsList');
+  const detail=$('connectorDetail');
+  if(list&&!force) list.innerHTML=`<div class="connector-empty">${esc(t('loading'))}</div>`;
+  if(detail&&!force) detail.innerHTML='';
+  try{
+    const data=await api('/api/connectors',{cache:'no-store'});
+    _connectorsCache=Array.isArray(data&&data.connectors)?data.connectors:[];
+    _connectorsRuntime=(data&&data.runtime)||{};
+    _renderConnectorsPanel();
+  }catch(e){
+    if(list) list.innerHTML=`<div class="connector-error">${esc(t('connectors_load_failed'))}</div>`;
+    if(detail) detail.innerHTML='';
+  }
+}
+
+function _connectorFieldValue(field){
+  const value=field&&field.value;
+  if(field&&field.type==='list'){
+    return Array.isArray(value)?value.join('\n'):(value||'');
+  }
+  if(value===null||typeof value==='undefined') return '';
+  return String(value);
+}
+
+function _connectorFieldHtml(field, disabled){
+  const id='connectorField_'+String(field.name||'').replace(/[^a-z0-9_-]/gi,'_');
+  const required=field.required?` <span class="connector-required">${esc(t('connectors_required_marker'))}</span>`:'';
+  const value=_connectorFieldValue(field);
+  const placeholder=field.placeholder?` placeholder="${esc(field.placeholder)}"`:'';
+  const disabledAttr=disabled?' disabled':'';
+  let control='';
+  if(field.type==='boolean'){
+    control=`<label class="connector-checkbox"><input type="checkbox" data-connector-field="${esc(field.name)}"${value==='true'||field.value===true?' checked':''}${disabledAttr}> <span>${esc(t('connectors_enabled_yes'))}</span></label>`;
+  }else if(field.type==='select'){
+    const options=(Array.isArray(field.options)?field.options:[]).map(opt=>{
+      const optValue=String(opt.value||'');
+      return `<option value="${esc(optValue)}" ${optValue===value?'selected':''}>${esc(opt.label||optValue)}</option>`;
+    }).join('');
+    control=`<select id="${esc(id)}" class="connector-input" data-connector-field="${esc(field.name)}"${disabledAttr}>${options}</select>`;
+  }else if(field.type==='list'){
+    control=`<textarea id="${esc(id)}" class="connector-input connector-textarea" rows="3" data-connector-field="${esc(field.name)}"${placeholder}${disabledAttr}>${esc(value)}</textarea>`;
+  }else{
+    const inputType=field.type==='secret'?'password':'text';
+    const numberAttrs=field.type==='number'?` inputmode="numeric" pattern="[0-9]*"`:'';
+    control=`<input id="${esc(id)}" class="connector-input" type="${inputType}" value="${esc(value)}" data-connector-field="${esc(field.name)}"${placeholder}${numberAttrs} autocomplete="off" spellcheck="false"${disabledAttr}>`;
+  }
+  return `<label class="connector-field" for="${esc(id)}">
+    <span class="connector-field-label">${esc(field.label||field.name)}${required}</span>
+    ${control}
+  </label>`;
+}
+
+function _connectorDetailHtml(connector){
+  const statusClass=_connectorStatusClass(connector.status);
+  const fields=Array.isArray(connector.fields)?connector.fields:[];
+  const disabled=!connector.configuration_supported;
+  const docs=connector.docs_url?`<a class="connector-docs-link" href="${esc(connector.docs_url)}" target="_blank" rel="noopener">${esc(t('connectors_docs'))}</a>`:'';
+  const missing=Array.isArray(connector.missing_required)&&connector.missing_required.length
+    ? `<div class="connector-warning">${esc(t('connectors_missing_required',connector.missing_required.join(', ')))}</div>`
+    : '';
+  const notes=Array.isArray(connector.notes)&&connector.notes.length
+    ? `<div class="connector-note">${connector.notes.map(note=>`<div>${esc(note)}</div>`).join('')}</div>`
+    : '';
+  const requiredEnv=Array.isArray(connector.required_env)&&connector.required_env.length
+    ? `<div class="connector-note">${esc(t('connectors_required_env',connector.required_env.join(', ')))}</div>`
+    : '';
+  const routeCount=Number.isFinite(connector.route_count)
+    ? `<div class="connector-note">${esc(t('connectors_webhook_routes',connector.route_count))}</div>`
+    : '';
+  const form=fields.length
+    ? `<div class="connector-form">${fields.map(field=>_connectorFieldHtml(field,disabled)).join('')}</div>`
+    : `<div class="connector-empty-detail">${esc(disabled?t('connectors_configure_runtime_env'):t('connectors_no_fields'))}</div>`;
+  const toggleLabel=connector.enabled?t('connectors_disable'):t('connectors_enable');
+  const toggleDisabled=(!connector.toggle_supported||disabled)?' disabled':'';
+  const saveDisabled=disabled?' disabled':'';
+  const testDisabled=(!connector.test_supported)?' disabled':'';
+  return `<div class="connector-detail-card" data-active-connector="${esc(connector.id)}">
+    <div class="connector-detail-head">
+      <div>
+        <div class="connector-detail-title">${esc(connector.label||connector.id)}</div>
+        <div class="connector-detail-meta">${esc(connector.description||'')}</div>
+      </div>
+      <span class="connector-status connector-status-${statusClass}">${esc(_connectorStatusLabel(connector.status))}</span>
+    </div>
+    ${docs}
+    ${missing}
+    ${notes}
+    ${requiredEnv}
+    ${routeCount}
+    ${form}
+    <div class="connector-actions">
+      <button type="button" class="provider-card-btn" onclick="saveConnectorConfig('${esc(connector.id)}')"${saveDisabled}>${esc(t('connectors_save'))}</button>
+      <button type="button" class="provider-card-btn provider-card-btn-ghost" onclick="testConnector('${esc(connector.id)}')"${testDisabled}>${esc(t('connectors_test'))}</button>
+      <button type="button" class="provider-card-btn provider-card-btn-ghost" onclick="toggleConnector('${esc(connector.id)}',${connector.enabled?'false':'true'})"${toggleDisabled}>${esc(toggleLabel)}</button>
+    </div>
+    <div class="connector-action-result" id="connectorActionResult" aria-live="polite"></div>
+  </div>`;
+}
+
+function _connectorFormFields(container){
+  const fields={};
+  container.querySelectorAll('[data-connector-field]').forEach(el=>{
+    const name=el.getAttribute('data-connector-field');
+    if(!name) return;
+    if(el.type==='checkbox') fields[name]=!!el.checked;
+    else fields[name]=el.value;
+  });
+  return fields;
+}
+
+function _setConnectorActionResult(message,isError=false){
+  const el=$('connectorActionResult');
+  if(!el) return;
+  el.textContent=message||'';
+  el.classList.toggle('connector-action-error',!!isError);
+}
+
+async function saveConnectorConfig(id){
+  const card=document.querySelector('.connector-detail-card[data-active-connector="'+CSS.escape(id)+'"]');
+  if(!card) return;
+  _setConnectorActionResult(t('connectors_saving'));
+  try{
+    const data=await api('/api/connectors/'+encodeURIComponent(id),{
+      method:'PUT',
+      body:JSON.stringify({fields:_connectorFormFields(card)}),
+    });
+    if(data&&data.connector){
+      const idx=_connectorsCache.findIndex(c=>c.id===id);
+      if(idx!==-1) _connectorsCache[idx]=data.connector;
+      _renderConnectorsPanel();
+    }
+    showToast(t('connectors_saved'));
+  }catch(e){
+    _setConnectorActionResult(e.message||t('connectors_save_failed'),true);
+    showToast(t('connectors_save_failed'),'error');
+  }
+}
+
+async function toggleConnector(id,enabled){
+  _setConnectorActionResult(t('connectors_updating'));
+  try{
+    const data=await api('/api/connectors/'+encodeURIComponent(id),{
+      method:'PATCH',
+      body:JSON.stringify({enabled:!!enabled}),
+    });
+    if(data&&data.connector){
+      const idx=_connectorsCache.findIndex(c=>c.id===id);
+      if(idx!==-1) _connectorsCache[idx]=data.connector;
+      _renderConnectorsPanel();
+    }
+    showToast(enabled?t('connectors_enabled_toast'):t('connectors_disabled_toast'));
+  }catch(e){
+    _setConnectorActionResult(e.message||t('connectors_toggle_failed'),true);
+    showToast(t('connectors_toggle_failed'),'error');
+  }
+}
+
+async function testConnector(id){
+  _setConnectorActionResult(t('connectors_testing'));
+  try{
+    const data=await api('/api/connectors/'+encodeURIComponent(id)+'/test',{method:'POST',body:'{}'});
+    const ok=data&&data.ok;
+    _setConnectorActionResult((data&&data.message)||t(ok?'connectors_test_ok':'connectors_test_failed'),!ok);
+  }catch(e){
+    _setConnectorActionResult(e.message||t('connectors_test_failed'),true);
+  }
+}
+
 function _mcpStatusLabel(status){
   const key={
     active:'mcp_status_active',
@@ -8513,8 +8750,9 @@ function loadGatewayStatus(){
   if(!card) return;
   api('/api/gateway/status').then(r=>{
     if(!r) return;
+    const configureBtn=`<button type="button" class="provider-card-btn provider-card-btn-ghost gateway-configure-btn" onclick="switchSettingsSection('connectors')">${esc(t('connectors_configure_link'))}</button>`;
     if(!r.configured){
-      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>${esc(t('gateway_not_configured'))}</div>`;
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>${esc(t('gateway_not_configured'))}</div><div class="gateway-status-actions">${configureBtn}</div>`;
       return;
     }
     if(!r.running){
@@ -8524,7 +8762,7 @@ function loadGatewayStatus(){
         : reason === 'remote_gateway_unreachable'
           ? t('gateway_endpoint_unreachable')
           : t('gateway_not_running');
-      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>${esc(statusLabel)}</div>`;
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>${esc(statusLabel)}</div><div class="gateway-status-actions">${configureBtn}</div>`;
       return;
     }
     const platformIcons={telegram:'💬',discord:'🎮',slack:'📝',web:'🌐',api:'🔌'};
@@ -8537,7 +8775,7 @@ function loadGatewayStatus(){
     }
     const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_last_active'))}${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
     const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_session_count',r.session_count))}</span>`:'';
-    card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running_label'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
+    card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running_label'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div><div class="gateway-status-actions">${configureBtn}</div>`;
   }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('gateway_load_failed'))}</div>`});
 }
 // Load MCP servers when system settings tab opens

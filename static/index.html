@@ -364,6 +364,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
           <span data-i18n="providers_tab_title">Providers</span>
         </button>
+        <button type="button" class="side-menu-item" data-settings-section="connectors" onclick="switchSettingsSection('connectors')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7h10v10H7z"/><path d="M7 2v3M12 2v3M17 2v3M7 19v3M12 19v3M17 19v3M2 7h3M2 12h3M2 17h3M19 7h3M19 12h3M19 17h3"/></svg>
+          <span data-i18n="connectors_tab_title">Connectors</span>
+        </button>
         <button type="button" class="side-menu-item" data-settings-section="plugins" onclick="switchSettingsSection('plugins')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l3 7h7l-5.5 4.3 2.1 7L12 16.2 5.4 20.3l2.1-7L2 9h7z"/></svg>
           <span data-i18n="settings_tab_plugins">Plugins</span>
@@ -1280,8 +1284,22 @@
             <div id="providersList" style="display:flex;flex-direction:column;margin-top:4px">
               <!-- Populated dynamically by loadProvidersPanel() -->
             </div>
-            <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
+          <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
               No configurable providers found.
+            </div>
+          </div>
+          <div class="settings-pane" id="settingsPaneConnectors">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title" data-i18n="connectors_section_title">Connectors</div>
+                <div class="settings-section-meta" data-i18n="connectors_section_meta">Configure verified Hermes gateway channels. Secrets are masked after saving.</div>
+              </div>
+              <button type="button" class="provider-card-btn provider-card-btn-ghost" onclick="loadConnectorsPanel(true)" data-i18n="connectors_refresh">Refresh</button>
+            </div>
+            <div id="connectorsRuntime" class="connectors-runtime-note" aria-live="polite"></div>
+            <div class="connectors-layout">
+              <div id="connectorsList" class="connectors-list" aria-live="polite"></div>
+              <div id="connectorDetail" class="connector-detail" aria-live="polite"></div>
             </div>
           </div>
           <div class="settings-pane" id="settingsPanePlugins">
