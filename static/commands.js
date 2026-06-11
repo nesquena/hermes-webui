@@ -297,7 +297,9 @@ function _parseSlashAutocomplete(text){
 
 async function getSlashAutocompleteMatches(text){
   const parsed=_parseSlashAutocomplete(text);
-  if(!parsed) return [];
+  if(!parsed){_currentAutocompleteBeforeSlash='';_currentAutocompletePrefix='';return [];}
+  _currentAutocompleteBeforeSlash=parsed.beforeSlash||'';
+  _currentAutocompletePrefix=parsed.prefix||'';
   if(parsed.kind==='commands') return getMatchingCommands(parsed.query);
   const options=await _getSlashSubArgOptions(parsed.command.subArgs);
   return options

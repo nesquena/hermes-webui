@@ -1304,7 +1304,7 @@ $('msg').addEventListener('input',()=>{
         if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
       });
     }else{
-      const prefix=text.slice(1);
+      const prefix=text.slice(slashIdx+1);
       const matches=getMatchingCommands(prefix);
       if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
     }
