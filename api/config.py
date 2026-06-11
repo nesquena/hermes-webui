@@ -1918,7 +1918,7 @@ def _get_provider_base_url(provider_id):
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = cfg.get("providers", {}).get(provider_id, {}) or {}
+    prov_cfg = _get_provider_cfg(provider_id)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
@@ -1930,6 +1930,16 @@ def _get_provider_base_url(provider_id):
             if model_base:
                 return model_base
     return None
+
+
+def _get_providers_cfg() -> dict:
+    providers_cfg = cfg.get("providers")
+    return providers_cfg if isinstance(providers_cfg, dict) else {}
+
+
+def _get_provider_cfg(provider_id) -> dict:
+    provider_cfg = _get_providers_cfg().get(provider_id, {})
+    return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
 def resolve_model_provider(model_id: str) -> tuple:
@@ -4181,7 +4191,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
         # and a phantom ``Opencode_Go`` group for the config-key form (#1568).
         # The same applies to mixed-case ids like ``OpenCode-Go`` and to
         # legitimate aliases like ``z-ai`` → ``zai``.
-        _cfg_providers = cfg.get("providers", {})
+        _cfg_providers = _get_providers_cfg()
         # Map canonical provider IDs back to raw config keys so the
         # generic-provider branch can preserve mixed-case/underscore
         # provider_cfg values (#2245).
@@ -4927,9 +4937,9 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         # `cfg["providers"]["lmstudio"]["base_url"]` or
                         # `cfg["model"]["base_url"]` (via _get_provider_base_url),
                         # so the historical model-block config shape still works.
-                        lm_cfg = cfg.get("providers", {}).get("lmstudio", {}) or {}
+                        lm_cfg = _get_provider_cfg("lmstudio")
                         lm_base_url = _get_provider_base_url("lmstudio") or ""
-                        lm_api_key = str(lm_cfg.get("api_key") or "").strip() if isinstance(lm_cfg, dict) else ""
+                        lm_api_key = str(lm_cfg.get("api_key") or "").strip()
                         if lm_base_url:
                             headers = {"User-Agent": "OpenAI/Python 1.0"}
                             if lm_api_key:
@@ -4968,7 +4978,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     # (#2245).  Fall back to the canonical pid for providers
                     # that appear in _PROVIDER_MODELS but not in cfg.
                     _raw_key = _canonical_to_raw_provider_key.get(pid, pid)
-                    provider_cfg = cfg.get("providers", {}).get(_raw_key, {})
+                    provider_cfg = _get_provider_cfg(_raw_key)
                     raw_models = []
 
                     # User-configured model allowlists are explicit local
