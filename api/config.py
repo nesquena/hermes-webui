@@ -896,6 +896,7 @@ _PROVIDER_DISPLAY = {
     "nvidia": "NVIDIA NIM",
     "xiaomi": "Xiaomi",
     "bedrock": "AWS Bedrock",
+    "tencent": "Tencent Cloud",
 }
 
 # Provider alias → canonical slug.  Users configure providers using the
@@ -954,6 +955,14 @@ _PROVIDER_ALIASES = {
     # lets the agent's auxiliary client take the ``no-key-required``
     # OpenAI-compat path. See #1384.
     "local": "custom",
+    # Tencent Cloud TokenHub. The Hermes agent registers this provider under
+    # the slug ``tencent-tokenhub``; map it (and the user-facing variants) onto
+    # the WebUI catalog key ``tencent`` so the picker and Settings card resolve.
+    "tencent-tokenhub": "tencent",
+    "tencent-cloud": "tencent",
+    "tencentcloud": "tencent",
+    "hunyuan": "tencent",
+    "tencent-hunyuan": "tencent",
 }
 
 
@@ -1467,6 +1476,22 @@ _PROVIDER_MODELS = {
         {"id": "global.anthropic.claude-opus-4-5-20251101-v1:0",   "label": "GLOBAL Anthropic Claude Opus 4.5"},
         {"id": "global.anthropic.claude-sonnet-4-5-20250929-v1:0", "label": "Global Claude Sonnet 4.5"},
         {"id": "global.anthropic.claude-haiku-4-5-20251001-v1:0",  "label": "Global Anthropic Claude Haiku 4.5"},
+    ],
+    # Tencent Cloud TokenHub — OpenAI-compatible gateway exposing Hunyuan plus
+    # proxied third-party models (DeepSeek / GLM / Kimi / MiniMax). The Hermes
+    # agent's live catalog for this provider is sparse, so this static list is
+    # the practical fallback the picker shows.
+    "tencent": [
+        {"id": "deepseek-v4-flash",  "label": "DeepSeek V4 Flash"},
+        {"id": "deepseek-v4-pro",    "label": "DeepSeek V4 Pro"},
+        {"id": "deepseek-v3.2",      "label": "DeepSeek V3.2"},
+        {"id": "glm-5",             "label": "GLM-5"},
+        {"id": "glm-5-turbo",       "label": "GLM-5 Turbo"},
+        {"id": "glm-5.1",           "label": "GLM-5.1"},
+        {"id": "kimi-k2.6",         "label": "Kimi K2.6"},
+        {"id": "kimi-k2.5",         "label": "Kimi K2.5"},
+        {"id": "minimax-m2.5",      "label": "MiniMax M2.5"},
+        {"id": "minimax-m2.7",      "label": "MiniMax M2.7"},
     ],
 }
 
@@ -4110,6 +4135,8 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                 "MINIMAX_CN_API_KEY",
                 "XAI_API_KEY",
                 "MISTRAL_API_KEY",
+                "TENCENT_API_KEY",
+                "TOKENHUB_API_KEY",
                 "AWS_ACCESS_KEY_ID",
                 "AWS_SECRET_ACCESS_KEY",
             ):
@@ -4148,6 +4175,10 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                 detected_providers.add("deepseek")
             if all_env.get("XIAOMI_API_KEY"):
                 detected_providers.add("xiaomi")
+            # Tencent Cloud TokenHub accepts either the WebUI-friendly
+            # TENCENT_API_KEY or the agent's canonical TOKENHUB_API_KEY.
+            if all_env.get("TENCENT_API_KEY") or all_env.get("TOKENHUB_API_KEY"):
+                detected_providers.add("tencent")
             if all_env.get("XAI_API_KEY"):
                 detected_providers.add("x-ai")
             if all_env.get("MISTRAL_API_KEY"):

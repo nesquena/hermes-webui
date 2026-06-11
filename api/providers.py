@@ -717,6 +717,7 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     # flip to "no key" after upgrading.
     "lmstudio": "LM_API_KEY",
     "nvidia": "NVIDIA_API_KEY",
+    "tencent": "TENCENT_API_KEY",
 }
 
 # Read-only legacy env-var aliases.  When `_provider_has_key(pid)` looks up its
@@ -735,6 +736,10 @@ _PROVIDER_ENV_VAR_ALIASES: dict[str, tuple[str, ...]] = {
     # show the groups as configured while chat fails the no-key path.
     "opencode-zen": ("OPENCODE_API_KEY",),
     "opencode-go": ("OPENCODE_API_KEY",),
+    # Tencent Cloud TokenHub — the Hermes agent runtime reads TOKENHUB_API_KEY
+    # (canonical). The WebUI exposes the friendlier TENCENT_API_KEY as the
+    # primary name, so read both for detection and runtime key lookup.
+    "tencent": ("TOKENHUB_API_KEY",),
 }
 
 # Providers that use OAuth or token flows — their credentials are managed
@@ -2397,6 +2402,11 @@ def remove_provider_key(provider_id: str) -> dict[str, Any]:
     (``providers.<id>.api_key`` or top-level ``model.api_key`` when this
     provider is the active one).
 
+    Also clears any aliased env vars registered in
+    ``_PROVIDER_ENV_VAR_ALIASES`` (e.g. a provider whose runtime key name
+    differs from the WebUI-facing one) so detection does not resurrect the
+    provider card after removal.
+
     Returns a status dict with the operation result.
     """
     result = set_provider_key(provider_id, None)
@@ -2406,6 +2416,16 @@ def remove_provider_key(provider_id: str) -> dict[str, Any]:
     # Clean those up so _provider_has_key() returns False after removal.
     if result.get("ok"):
         _clean_provider_key_from_config(provider_id)
+
+        # Also clear alias env vars so the provider doesn't reappear as
+        # "configured" via the alias detection path.
+        aliases = _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ())
+        if aliases:
+            env_path = _get_hermes_home() / ".env"
+            try:
+                _write_env_file(env_path, {alias: None for alias in aliases})
+            except Exception:
+                logger.debug("Failed to remove alias env vars for %s", provider_id)
 
     return result
 
