@@ -1579,6 +1579,11 @@ def _get_or_materialize_session(sid: str):
     try:
         s = get_session(sid)
         s = _ensure_full_session_before_mutation(sid, s)
+        # Read-only guard on the happy path too: an already-stored read-only /
+        # imported session (messaging or Claude Code) must not be mutated via
+        # rename/update/move. Session.save() does not enforce this itself.
+        if getattr(s, "read_only", False) or _is_messaging_session_record(s):
+            raise PermissionError("read-only imported session")
         return s
     except KeyError:
         pass
@@ -1588,8 +1593,12 @@ def _get_or_materialize_session(sid: str):
     if not cli_meta:
         raise KeyError(sid)
 
-    # Read-only guard: messaging sessions and Claude Code imports cannot be mutated
-    if cli_meta.get("read_only"):
+    # Read-only guard: messaging sessions and Claude Code imports cannot be
+    # mutated. Reject BOTH an explicit read_only flag AND any messaging-source
+    # record — agent rows normalize messaging sources without setting read_only,
+    # and state.db (not a WebUI sidecar) is the source of truth for them, so
+    # materializing a writable sidecar would fork the title/state.
+    if cli_meta.get("read_only") or _is_messaging_session_record(cli_meta):
         raise PermissionError("read-only imported session")
 
     # Preserve source metadata fields

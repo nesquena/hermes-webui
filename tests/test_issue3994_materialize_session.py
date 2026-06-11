@@ -71,26 +71,44 @@ def test_materialize_cli_session_imports_full_history():
     assert getattr(out, "is_cli_session", None) is True
 
 
-def test_materialize_messaging_session_builds_lightweight_stub():
-    """A messaging session is materialized as a lightweight Session (state.db is the
-    source of truth) rather than importing a full message history."""
+def test_materialize_rejects_stored_readonly_session():
+    """An already-STORED read-only session must be refused on the happy path too —
+    get_session() succeeding doesn't make it mutable (Codex CORE #1)."""
     import api.routes as routes
 
-    cli_meta = {
-        "read_only": False,
-        "title": "tg chat",
-        "model": "gpt-test",
-        "source_tag": "telegram",
-    }
+    ro = SimpleNamespace(session_id="ro_stored", profile="default", messages=[], read_only=True)
+    with patch("api.routes.get_session", return_value=ro), \
+         patch("api.routes._ensure_full_session_before_mutation", return_value=ro):
+        with pytest.raises(PermissionError):
+            routes._get_or_materialize_session("ro_stored")
+
+
+def test_materialize_rejects_stored_messaging_session():
+    """A stored messaging session (state.db-owned) must be refused even with no
+    read_only flag (Codex CORE #1)."""
+    import api.routes as routes
+
+    msg = SimpleNamespace(session_id="msg_stored", profile="default", messages=[],
+                          session_source="messaging", source_tag="telegram")
+    with patch("api.routes.get_session", return_value=msg), \
+         patch("api.routes._ensure_full_session_before_mutation", return_value=msg):
+        with pytest.raises(PermissionError):
+            routes._get_or_materialize_session("msg_stored")
+
+
+def test_materialize_rejects_messaging_cli_meta_without_readonly_flag():
+    """Messaging cli_meta lacking an explicit read_only flag must still be refused
+    — agent rows normalize messaging sources without setting read_only, and
+    state.db is the source of truth, so a writable sidecar would fork it (Codex CORE #2)."""
+    import api.routes as routes
+
+    cli_meta = {"title": "tg chat", "model": "gpt-test", "source_tag": "telegram", "session_source": "messaging"}
     with patch("api.routes.get_session", side_effect=KeyError("msg1")), \
          patch("api.routes._lookup_cli_session_metadata", return_value=cli_meta), \
-         patch("api.routes._is_messaging_session_record", return_value=True), \
-         patch("api.routes.get_cli_session_messages", return_value=[]), \
-         patch("api.routes.title_from", return_value="tg chat"), \
-         patch("api.routes.get_last_workspace", return_value="/tmp/ws"), \
+         patch("api.routes.import_cli_session") as mock_import, \
          patch("api.routes.Session") as MockSession:
-        stub = MockSession.return_value
-        stub.save = lambda **_kw: None
-        out = routes._get_or_materialize_session("msg1")
-    assert out is MockSession.return_value
-    assert MockSession.called
+        with pytest.raises(PermissionError):
+            routes._get_or_materialize_session("msg1")
+    assert not mock_import.called, "must not import a messaging session"
+    assert not MockSession.called, "must not build a writable messaging stub"
+
