@@ -89,6 +89,30 @@ const directParsedPayload = api.normalizeAssistantTurnAnchorSourceEvent({{
   event_id:'run-1:14',
   seq:14,
 }}, context);
+const eventTypePayload = api.normalizeAssistantTurnAnchorSourceEvent({{
+  event_type:'tool',
+  event_id:'run-1:15',
+  tool_call_id:'tool-1',
+  someField:'x',
+}}, context);
+const nonPlainPayload = api.normalizeAssistantTurnAnchorSourceEvent({{
+  type:'token',
+  payload:{{text:'date payload', meta:new Date('2026-06-11T00:00:00Z')}},
+  event_id:'run-1:16',
+}}, context);
+const promotedIdentityPayload = api.normalizeAssistantTurnAnchorSourceEvent({{
+  type:'token',
+  payload:{{
+    text:'identity fields should be promoted only',
+    session_id:'payload-session',
+    turn_id:'payload-turn',
+    run_id:'payload-run',
+    stream_id:'payload-stream',
+    event_id:'payload-event',
+    seq:99,
+  }},
+  event_id:'run-1:17',
+}}, context);
 console.log(JSON.stringify({{
   version: api.version,
   liveToken,
@@ -101,6 +125,9 @@ console.log(JSON.stringify({{
   deduped,
   invalidPayload,
   directParsedPayload,
+  eventTypePayload,
+  nonPlainPayload,
+  promotedIdentityPayload,
 }}));
 """
     result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
@@ -124,7 +151,7 @@ def test_normalizer_maps_live_and_replay_to_same_anchor_event_identity():
     assert live["anchor_event"]["run_id"] == "run-1"
     assert live["anchor_event"]["stream_id"] == "stream-1"
     assert live["anchor_event"]["seq"] == 7
-    assert live["anchor_event"]["payload"] == {"session_id": "sid-1", "text": "hello"}
+    assert live["anchor_event"]["payload"] == {"text": "hello"}
 
 
 def test_normalizer_keeps_artifact_side_effect_metadata_and_transport_distinct():
@@ -166,6 +193,37 @@ def test_normalizer_excludes_unknown_sources_and_sanitizes_non_json_data():
     assert data["invalidPayload"]["dedupe_key"] == "event_id:run-1:13"
     assert data["directParsedPayload"]["anchor_event"]["payload"] == {"text": "direct parsed payload"}
     assert data["directParsedPayload"]["anchor_event"]["seq"] == 14
+
+
+def test_normalizer_strips_discriminators_and_promoted_identity_fields_from_payload():
+    data = _normalizer_snapshot()
+
+    event_type_payload = data["eventTypePayload"]
+    assert event_type_payload["anchor_event"]["source_event_type"] == "tool"
+    assert event_type_payload["anchor_event"]["payload"] == {
+        "someField": "x",
+        "tool_call_id": "tool-1",
+    }
+
+    promoted = data["promotedIdentityPayload"]
+    assert promoted["anchor_event"]["event_id"] == "run-1:17"
+    assert promoted["anchor_event"]["session_id"] == "payload-session"
+    assert promoted["anchor_event"]["turn_id"] == "payload-turn"
+    assert promoted["anchor_event"]["run_id"] == "payload-run"
+    assert promoted["anchor_event"]["stream_id"] == "payload-stream"
+    assert promoted["anchor_event"]["seq"] == 99
+    assert promoted["anchor_event"]["payload"] == {
+        "text": "identity fields should be promoted only"
+    }
+
+
+def test_normalizer_marks_non_plain_payload_objects_explicitly():
+    data = _normalizer_snapshot()
+
+    assert data["nonPlainPayload"]["anchor_event"]["payload"] == {
+        "meta": "[Object]",
+        "text": "date payload",
+    }
 
 
 def test_batch_normalizer_dedupes_live_plus_replay_by_event_envelope():

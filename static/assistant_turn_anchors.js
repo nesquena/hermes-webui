@@ -143,6 +143,8 @@
     if(Array.isArray(value)){
       return value.map((item)=>_sanitizePayload(item,depth+1)).filter((item)=>item!==undefined);
     }
+    const proto=Object.getPrototypeOf(value);
+    if(proto!==null&&Object.prototype.toString.call(value)!=='[object Object]') return '[Object]';
     const out={};
     Object.keys(value).sort().forEach((key)=>{
       const safe=_sanitizePayload(value[key],depth+1);
@@ -190,6 +192,7 @@
       'source_event_type',
       'sourceType',
       'source_type',
+      'event_type',
       'type',
       'event',
       'event_id',
@@ -266,7 +269,17 @@
   function normalizeAssistantTurnAnchorSourceEvent(input, context){
     const event=(input&&typeof input==='object')?input:{};
     const ctx=(context&&typeof context==='object')?context:{};
-    const payload=_sanitizePayload(_sourceEventPayload(event))||{};
+    const sanitizedPayload=_sanitizePayload(_sourceEventPayload(event));
+    const rawPayload=(sanitizedPayload&&typeof sanitizedPayload==='object'&&!Array.isArray(sanitizedPayload))?sanitizedPayload:{};
+    const {
+      session_id:_payloadSessionId,
+      turn_id:_payloadTurnId,
+      run_id:_payloadRunId,
+      stream_id:_payloadStreamId,
+      event_id:_payloadEventId,
+      seq:_payloadSeq,
+      ...payload
+    }=rawPayload;
     const sourceType=_sourceEventType(event,payload);
     const meta=classifyAssistantTurnAnchorSourceEvent(sourceType);
     const classification=meta.classification;
@@ -278,17 +291,17 @@
         dedupe_key:'',
       });
     }
-    const eventId=_cleanString(event.event_id||event.lastEventId||event.last_event_id||payload.event_id);
+    const eventId=_cleanString(event.event_id||event.lastEventId||event.last_event_id||rawPayload.event_id);
     const seq=_coerceSeq(
       event.seq!==undefined?event.seq:
-        payload.seq!==undefined?payload.seq:
+        rawPayload.seq!==undefined?rawPayload.seq:
           ctx.seq!==undefined?ctx.seq:
             _eventIdSeq(eventId)
     );
-    const runId=_cleanString(event.run_id||payload.run_id||ctx.run_id)||_eventIdRunId(eventId)||null;
-    const sessionId=_cleanString(event.session_id||payload.session_id||ctx.session_id);
-    const turnId=_cleanString(event.turn_id||payload.turn_id||ctx.turn_id);
-    const streamId=_cleanString(event.stream_id||payload.stream_id||ctx.stream_id)||null;
+    const runId=_cleanString(event.run_id||rawPayload.run_id||ctx.run_id)||_eventIdRunId(eventId)||null;
+    const sessionId=_cleanString(event.session_id||rawPayload.session_id||ctx.session_id);
+    const turnId=_cleanString(event.turn_id||rawPayload.turn_id||ctx.turn_id);
+    const streamId=_cleanString(event.stream_id||rawPayload.stream_id||ctx.stream_id)||null;
     const localId=_localIdForSourceEvent(sourceType, {...ctx,seq}, payload);
     const anchorEvent={
       event_id:eventId||null,
