@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.364] — 2026-06-11 — Release MC (self-heal stuck session loads)
+
+### Fixed
+
+- **A failed session load no longer wedges the WebUI so that no chat can be opened (#3993).** When a session load failed with a non-404 error (400/403/500/network) during boot, the stale session id stayed in `localStorage` and the URL, so every refresh retried the same dead session and the transcript pane stayed stuck. Boot-time load failures now self-heal by clearing the stale id (mirroring the existing 404 self-heal). The clear is strictly scoped: it only runs when no session is on screen (a boot restore), never when you're already viewing a healthy session (the error may be transient), and a stale in-flight load that's been superseded by a newer session selection bails before touching anything — so it can't wipe the session you just navigated to.
+
 ## [v0.51.363] — 2026-06-11 — Release MB (rename/move/update CLI sessions without 404)
 
 ### Fixed
