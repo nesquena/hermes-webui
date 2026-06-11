@@ -1797,6 +1797,7 @@ def test_space_checkpoint_tool_creates_metadata_only_revision_anchor(monkeypatch
     assert result["progress_event"]["run_id"] == f"checkpoint:{created['space_id']}"
     assert result["progress_event"]["space_id"] == created["space_id"]
     assert result["progress_event"]["redaction_status"] == "metadata_only"
+    _assert_server_memory_advisory_receipt(result)
     compaction = result["output_compaction"]
     assert compaction["tool"] == "capy-spaces-tool-action"
     assert compaction["command"] == "space.checkpoint"

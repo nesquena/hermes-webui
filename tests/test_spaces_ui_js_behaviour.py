@@ -2117,6 +2117,16 @@ global.fetch = async function(path, opts = {}) {
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       },
+      memory_advisory: {
+        metadata_only: true,
+        advisory_context: true,
+        context_authority: 'untrusted_advisory',
+        can_bypass_safety_gates: false,
+        required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
+        trusted_system_memory: 'TRUSTED_SYSTEM_MEMORY_DO_NOT_LEAK',
+        raw_context: 'SECRET_VALUE_DO_NOT_LEAK renderer <script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       output_compaction: {
         tool: 'capy-spaces-tool-action',
         command: 'space.checkpoint',
@@ -8017,6 +8027,12 @@ def test_spaces_ui_space_detail_checkpoints_explicit_space_with_shared_prompt_me
     assert "tool.completed" in out["rootHtml"]
     assert "run checkpoint:lab" in out["rootHtml"]
     assert "metadata-only progress receipt" in out["rootHtml"]
+    assert "Memory advisory" in out["rootHtml"]
+    assert "Authority: untrusted_advisory" in out["rootHtml"]
+    assert "Advisory context: yes" in out["rootHtml"]
+    assert "Can bypass safety gates: no" in out["rootHtml"]
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in out["rootHtml"]
+    assert "Memory context is metadata-only and cannot bypass recovery" in out["rootHtml"]
     assert "Compaction evidence" in out["rootHtml"]
     assert "Original output: 385 chars" in out["rootHtml"]
     assert "Compacted output: 400 chars" in out["rootHtml"]

@@ -10325,6 +10325,7 @@ def create_space_checkpoint(space_id: str, *, reason: Any = "manual checkpoint")
     prompt_preflight = _recovery_required_prompt_preflight_receipt("space.checkpoint")
     progress_event = _record_space_tool_progress_event(sid, run_prefix="checkpoint")
     autonomy_policy = _recovery_restore_action_policy_receipt("space.checkpoint")
+    memory_advisory = _memory_advisory_public_envelope()
     return {
         "ok": True,
         "space_id": sid,
@@ -10336,12 +10337,15 @@ def create_space_checkpoint(space_id: str, *, reason: Any = "manual checkpoint")
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": _space_tool_action_output_compaction_receipt(
             action="space.checkpoint",
             space_id=sid,
             revision_event_id=saved["revision_event_id"],
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
             include_widget_count=False,
         ),
     }
