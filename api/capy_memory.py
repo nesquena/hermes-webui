@@ -565,7 +565,14 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         else:
             origin_uri = f"github repository invitations {repository_invitations_repo}"
             fetch_origin_uri = repository_invitations_origin
-    if _github_dependabot_secrets_route_path_matches(raw_origin_text):
+    if _github_dependabot_secrets_public_key_route_path_matches(raw_origin_text):
+        dependabot_public_key_origin = _github_dependabot_secrets_public_key_safe_origin(raw_origin_text)
+        dependabot_public_key_repo = _github_dependabot_secrets_public_key_path_repo(dependabot_public_key_origin or "")
+        if not dependabot_public_key_origin or not dependabot_public_key_repo:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = f"github dependabot public key {dependabot_public_key_repo}"
+    if _github_dependabot_secrets_route_path_matches(raw_origin_text) and not _github_dependabot_secrets_public_key_route_path_matches(raw_origin_text):
         dependabot_secrets_origin = _github_dependabot_secrets_safe_origin(raw_origin_text)
         dependabot_secrets_repo = _github_dependabot_secrets_path_repo(dependabot_secrets_origin or "")
         if not dependabot_secrets_origin or not dependabot_secrets_repo:
@@ -841,6 +848,9 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         record.get("title") or record.get("display_name") or record.get("name"),
         limit=200,
     ) or source_id
+    dependabot_public_key_alias_prefix = "github dependabot public key "
+    if origin_uri.lower().startswith(dependabot_public_key_alias_prefix):
+        display_name = "GitHub Dependabot public key " + origin_uri[len(dependabot_public_key_alias_prefix):]
     refresh_interval = _safe_refresh_interval(record.get("refresh_interval_seconds"))
     now = _now_iso()
     job_id = "cmt-job-" + _sha256(f"source.refresh:{source_id}")[:24]
@@ -11329,6 +11339,101 @@ def _github_dependabot_secrets_route_path_matches(origin_uri: str) -> bool:
     return False
 
 
+def _github_dependabot_secrets_public_key_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 7
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "dependabot"
+            and lowered[5] == "secrets"
+            and lowered[6].startswith("public-key")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return False
+
+
+def _github_dependabot_secrets_public_key_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "dependabot"
+        or path[5] != "secrets"
+        or path[6] != "public-key"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_dependabot_secrets_public_key_safe_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+        explicit_port = parts.port is not None
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or explicit_port or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    if not _github_dependabot_secrets_public_key_path_repo(origin_uri):
+        return ""
+    return urlunsplit(("https", "api.github.com", parts.path, "", ""))
+
+
+def _github_dependabot_secrets_public_key_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    return (parts.hostname or "").strip().lower() == "api.github.com" and _github_dependabot_secrets_public_key_route_path_matches(origin_uri)
+
+
+def _json_payload_is_github_dependabot_secrets_public_key_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_dependabot_secrets_public_key_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return _github_actions_public_key_id_is_safe(payload.get("key_id"))
+
+
+def _github_dependabot_secrets_public_key_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_dependabot_secrets_public_key_path_repo(origin_uri) or "repository"
+    key_id = _safe_public_text(payload.get("key_id"), limit=120)
+    return _bounded_refresh_summary(f"GitHub Dependabot public key for {repo}; key id: {key_id}")
+
+
+def _github_dependabot_secrets_public_key_fetch_origin_from_origin_text(origin_text: str) -> str:
+    prefix = "github dependabot public key "
+    text = str(origin_text or "").strip()
+    if not text.lower().startswith(prefix):
+        return ""
+    repo = text[len(prefix):].strip()
+    parts = repo.split("/")
+    if len(parts) != 2 or not all(_github_repo_path_segment_is_safe(part) for part in parts):
+        return ""
+    return f"https://api.github.com/repos/{parts[0]}/{parts[1]}/dependabot/secrets/public-key"
+
+
 def _github_dependabot_secrets_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -13447,6 +13552,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_repository_invitations_route_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    dependabot_public_key_repo = _github_dependabot_secrets_public_key_path_repo(origin_uri)
+    if dependabot_public_key_repo:
+        if not _json_payload_is_github_dependabot_secrets_public_key_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub Dependabot public key {dependabot_public_key_repo}",
+            "summary": _github_dependabot_secrets_public_key_refresh_summary(origin_uri, payload),
+            "origin_uri": f"github dependabot public key {dependabot_public_key_repo}",
+        }
+    if _github_dependabot_secrets_public_key_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     dependabot_secrets_repo = _github_dependabot_secrets_path_repo(origin_uri)
     if dependabot_secrets_repo:
         if not _json_payload_is_github_dependabot_secrets_metadata(origin_uri, payload):
@@ -13457,7 +13574,7 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": _github_dependabot_secrets_refresh_summary(origin_uri, payload),
             "origin_uri": f"github dependabot private names {dependabot_secrets_repo}",
         }
-    if _github_dependabot_secrets_path_matches(origin_uri):
+    if _github_dependabot_secrets_path_matches(origin_uri) and not _github_dependabot_secrets_public_key_path_matches(origin_uri):
         raise ValueError("refresh failed")
     dependabot_alerts_repo = _github_dependabot_alerts_path_repo(origin_uri)
     if dependabot_alerts_repo:
@@ -14208,7 +14325,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_repository_invitations_route_path_matches(raw_origin_uri):
         if not _github_repository_invitations_safe_origin(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
-    if _github_dependabot_secrets_route_path_matches(raw_origin_uri):
+    if _github_dependabot_secrets_public_key_route_path_matches(raw_origin_uri):
+        if not _github_dependabot_secrets_public_key_safe_origin(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
+    if _github_dependabot_secrets_route_path_matches(raw_origin_uri) and not _github_dependabot_secrets_public_key_route_path_matches(raw_origin_uri):
         if not _github_dependabot_secrets_safe_origin(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
     if _github_dependabot_alerts_path_matches(raw_origin_uri):
@@ -14423,6 +14543,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     repository_invitations_safe_origin = _github_repository_invitations_safe_origin(raw_origin_uri)
     if repository_invitations_safe_origin:
         safe_origin_uri = repository_invitations_safe_origin
+    dependabot_public_key_safe_origin = _github_dependabot_secrets_public_key_safe_origin(raw_origin_uri)
+    if dependabot_public_key_safe_origin:
+        safe_origin_uri = dependabot_public_key_safe_origin
     dependabot_secrets_safe_origin = _github_dependabot_secrets_safe_origin(raw_origin_uri)
     if dependabot_secrets_safe_origin:
         safe_origin_uri = dependabot_secrets_safe_origin
@@ -14717,7 +14840,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_repository_invitations_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
-    if _github_dependabot_secrets_path_matches(safe_origin_uri):
+    if _github_dependabot_secrets_public_key_path_matches(safe_origin_uri):
+        if not _github_dependabot_secrets_public_key_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_dependabot_secrets_path_matches(safe_origin_uri) and not _github_dependabot_secrets_public_key_path_matches(safe_origin_uri):
         if not _github_dependabot_secrets_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
@@ -14987,7 +15114,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_repository_invitations_path_repo(final_url) != _github_repository_invitations_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
-        if _github_dependabot_secrets_path_matches(safe_origin_uri) and (
+        if _github_dependabot_secrets_public_key_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or not _github_dependabot_secrets_public_key_path_repo(final_url)
+            or _github_dependabot_secrets_public_key_path_repo(final_url) != _github_dependabot_secrets_public_key_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_dependabot_secrets_path_matches(safe_origin_uri) and not _github_dependabot_secrets_public_key_path_matches(safe_origin_uri) and (
             not _github_raw_authority_is_exact(final_url, "api.github.com")
             or not _github_dependabot_secrets_path_repo(final_url)
             or _github_dependabot_secrets_path_repo(final_url) != _github_dependabot_secrets_path_repo(safe_origin_uri)
@@ -15426,7 +15559,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
-        if _github_dependabot_secrets_path_matches(safe_origin_uri) and (
+        if _github_dependabot_secrets_public_key_path_matches(safe_origin_uri) and (
+            not _github_dependabot_secrets_public_key_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_dependabot_secrets_path_matches(safe_origin_uri) and not _github_dependabot_secrets_public_key_path_matches(safe_origin_uri) and (
             not _github_dependabot_secrets_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
@@ -16256,6 +16394,9 @@ def run_source_refresh_jobs(
         interaction_limits_fetch_origin = _github_interaction_limits_fetch_origin_from_origin_text(raw_origin_uri)
         if interaction_limits_fetch_origin:
             raw_origin_uri = interaction_limits_fetch_origin
+        dependabot_public_key_fetch_origin = _github_dependabot_secrets_public_key_fetch_origin_from_origin_text(raw_origin_uri)
+        if dependabot_public_key_fetch_origin:
+            raw_origin_uri = dependabot_public_key_fetch_origin
         fetch_origin_uri = raw_origin_uri
         if _github_repository_custom_properties_route_path_matches(raw_origin_uri):
             custom_properties_origin = _github_repository_custom_properties_safe_origin(raw_origin_uri)
@@ -16368,6 +16509,14 @@ def run_source_refresh_jobs(
                 origin_uri = f"capy-memory://{source_id}"
             else:
                 origin_uri = repository_invitations_origin
+        elif _github_dependabot_secrets_public_key_route_path_matches(raw_origin_uri):
+            dependabot_public_key_origin = _github_dependabot_secrets_public_key_safe_origin(raw_origin_uri)
+            dependabot_public_key_repo = _github_dependabot_secrets_public_key_path_repo(dependabot_public_key_origin or "")
+            if not dependabot_public_key_origin or not dependabot_public_key_repo:
+                origin_uri = f"capy-memory://{source_id}"
+            else:
+                origin_uri = f"github dependabot public key {dependabot_public_key_repo}"
+                fetch_origin_uri = dependabot_public_key_origin
         elif _github_dependabot_secrets_route_path_matches(raw_origin_uri):
             dependabot_secrets_origin = _github_dependabot_secrets_safe_origin(raw_origin_uri)
             dependabot_secrets_repo = _github_dependabot_secrets_path_repo(dependabot_secrets_origin or "")

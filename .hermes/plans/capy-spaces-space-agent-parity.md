@@ -296,6 +296,11 @@ Recent completed slices:
   - The parser reconstructs summaries from safe repository path and key id while omitting raw public-key material, row/global URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
   - Text fallback responses and lookalike-host route-shaped URLs fail closed without creating vault records or performing unsafe fetches.
 
+- `feat(capy-memory): ingest GitHub Dependabot public-key metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub Dependabot secrets public-key API payloads (`/repos/{owner}/{repo}/dependabot/secrets/public-key`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries and catalog display names from safe repository path and key id while omitting raw public-key material, raw fetch URLs in persisted job payloads, API-auth/query/fragment fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault/catalog output.
+  - Malformed suffixes, lookalike hosts, explicit ports, unrelated encoded public-key paths, legacy requeue payloads, and non-JSON content fail closed without unsafe fetch or persistence; execution reconstructs the exact safe fetch URL transiently from the public alias.
+
 - `feat(capy-memory): ingest GitHub Pages metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub Pages API payloads (`/repos/{owner}/{repo}/pages`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, Pages status/build type, public/custom-404/HTTPS booleans, safe CNAME, and protected-domain state while omitting raw URLs, source branch/path payloads, certificate descriptions/domains, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
