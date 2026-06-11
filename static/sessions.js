@@ -798,13 +798,19 @@ async function newSession(flash, options={}){
  * non-404 error (400, 403, 500, network). The 404 path has its own
  * inline self-heal; this helper consolidates the non-404 cases.
  *
+ * Only clears when !currentSid — no session is active on screen, so
+ * the stored ID is definitely stale. When currentSid is set (already
+ * viewing a session), a non-404 failure could be a transient server error
+ * and the session may still exist on the server; wiping localStorage in
+ * that case is unnecessarily destructive (#4028 follow-up).
+ *
  * A click into a *different* dead session (currentSid && currentSid!==sid)
  * must not run it: localStorage and the URL still point at the live session
  * (both are only updated on a successful load), so wiping them would log
  * the user out of a healthy session (#2782).
  */
 function _clearStuckSessionOnBoot(sid, currentSid){
-  if(!currentSid || currentSid===sid){
+  if(!currentSid){
     try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
     try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
   }
@@ -938,9 +944,10 @@ async function loadSession(sid){
           }
         }
       } else {
-        // Non-404 failure: clear the stuck session ID so the next boot doesn't
-        // retry the same dead session (#3903 follow-up — 404 already self-heals,
-        // but 401/network/500 errors left the localStorage/URL corrupted).
+        // Non-404 failure: clear the stuck session ID only during boot
+        // (!currentSid) so the next boot doesn't retry the same dead session.
+        // When currentSid is set, a 500/network error may be transient — the
+        // session might still exist on the server (#4028 follow-up).
         _clearStuckSessionOnBoot(sid, currentSid);
         if(e.status===401){
           _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Authentication required. Redirecting…</div>';
@@ -984,7 +991,7 @@ async function loadSession(sid){
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
   // the browser is already navigating away, so abort the rest of this flow.
-  // Self-heal: clear the stuck session ID so the next boot doesn't retry it.
+  // Self-heal: clear the stuck session ID during boot only (!currentSid).
   if (!data) {
     _clearStuckSessionOnBoot(sid, currentSid);
     _clearSameSessionForceReloadHint(sid);
