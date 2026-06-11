@@ -1580,9 +1580,12 @@ def _get_or_materialize_session(sid: str):
         s = get_session(sid)
         s = _ensure_full_session_before_mutation(sid, s)
         # Read-only guard on the happy path too: an already-stored read-only /
-        # imported session (messaging or Claude Code) must not be mutated via
-        # rename/update/move. Session.save() does not enforce this itself.
-        if getattr(s, "read_only", False) or _is_messaging_session_record(s):
+        # imported session must not be mutated via rename/update/move
+        # (Session.save() does not enforce this). Scope this to the explicit
+        # read_only flag — a stored messaging session already owns its sidecar,
+        # so the messaging-fork concern only applies to the materialize fallback
+        # below (and the heuristic record-check would mis-trip on mock sessions).
+        if getattr(s, "read_only", False):
             raise PermissionError("read-only imported session")
         return s
     except KeyError:

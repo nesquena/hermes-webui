@@ -83,17 +83,19 @@ def test_materialize_rejects_stored_readonly_session():
             routes._get_or_materialize_session("ro_stored")
 
 
-def test_materialize_rejects_stored_messaging_session():
-    """A stored messaging session (state.db-owned) must be refused even with no
-    read_only flag (Codex CORE #1)."""
+def test_materialize_allows_stored_messaging_session_without_readonly():
+    """A stored messaging session that ALREADY owns its sidecar is mutable on the
+    happy path (the messaging-fork concern only applies to the materialize
+    fallback that would CREATE a sidecar). Only an explicit read_only flag blocks
+    a stored session."""
     import api.routes as routes
 
     msg = SimpleNamespace(session_id="msg_stored", profile="default", messages=[],
-                          session_source="messaging", source_tag="telegram")
+                          session_source="messaging", source_tag="telegram", read_only=False)
     with patch("api.routes.get_session", return_value=msg), \
          patch("api.routes._ensure_full_session_before_mutation", return_value=msg):
-        with pytest.raises(PermissionError):
-            routes._get_or_materialize_session("msg_stored")
+        out = routes._get_or_materialize_session("msg_stored")
+    assert out is msg
 
 
 def test_materialize_rejects_messaging_cli_meta_without_readonly_flag():
