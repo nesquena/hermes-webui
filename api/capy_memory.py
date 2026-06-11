@@ -299,6 +299,7 @@ def _safe_origin_uri(value: Any, *, source_id: str) -> str:
         release_reactions_matcher = globals().get("_github_release_reactions_path_matches")
         pull_comment_reactions_matcher = globals().get("_github_pull_comment_reactions_path_matches")
         check_suites_matcher = globals().get("_github_check_suites_route_path_matches")
+        workflow_run_approvals_matcher = globals().get("_github_workflow_run_approvals_route_path_matches")
         authority_checker = globals().get("_github_https_authority_is_exact")
         if callable(authority_checker):
             strict_authority_route = False
@@ -311,6 +312,8 @@ def _safe_origin_uri(value: Any, *, source_id: str) -> str:
             if callable(pull_comment_reactions_matcher) and pull_comment_reactions_matcher(raw):
                 strict_authority_route = True
             if callable(check_suites_matcher) and check_suites_matcher(raw):
+                strict_authority_route = True
+            if callable(workflow_run_approvals_matcher) and workflow_run_approvals_matcher(raw):
                 strict_authority_route = True
             if strict_authority_route and not authority_checker(raw, "api.github.com"):
                 return f"capy-memory://{source_id}"
@@ -757,6 +760,12 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
             origin_uri = f"capy-memory://{source_id}"
         else:
             origin_uri = oidc_subject_claim_origin
+    if _github_workflow_run_approvals_route_path_matches(raw_origin_text):
+        workflow_run_approvals_origin = _github_workflow_run_approvals_safe_origin(raw_origin_text)
+        if not workflow_run_approvals_origin:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = workflow_run_approvals_origin
     if _github_actions_selected_actions_route_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_actions_selected_actions_path_repo(origin_uri)
@@ -6825,6 +6834,165 @@ def _github_actions_oidc_subject_claim_refresh_summary(origin_uri: str, payload:
         f"{repo}; use default: {use_default}; "
         f"claim key count: {len(claim_keys)}; claim keys: {claim_key_summary}"
     )
+
+
+def _github_workflow_run_approvals_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 8
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "actions"
+            and lowered[5] == "runs"
+            and lowered[7].startswith("approvals")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return False
+
+
+def _github_workflow_run_approvals_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 8
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "actions"
+        or path[5] != "runs"
+        or not re.fullmatch(r"[1-9][0-9]*", path[6])
+        or path[7] != "approvals"
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", int(path[6])
+
+
+def _github_workflow_run_approvals_path_repo(origin_uri: str) -> str:
+    path_info = _github_workflow_run_approvals_path_info(origin_uri)
+    return path_info[0] if path_info else ""
+
+
+def _github_workflow_run_approvals_safe_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    safe_origin = urlunsplit(("https", "api.github.com", parts.path, "", ""))
+    if _github_workflow_run_approvals_path_info(safe_origin) is None:
+        return ""
+    return safe_origin
+
+
+def _github_workflow_run_approvals_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_workflow_run_approvals_route_path_matches(origin_uri)
+
+
+def _github_workflow_run_approval_environment_name_is_safe(value: Any) -> bool:
+    name = _safe_public_text(value, limit=80)
+    if not name or name != str(value).strip() or _refresh_value_is_blocked(name):
+        return False
+    if _REFRESH_TITLE_BLOCKED_VALUE_RE.search(name):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._/-]{0,79}", name))
+
+
+def _github_workflow_run_approval_environment_is_safe(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return _github_workflow_run_approval_environment_name_is_safe(value.get("name"))
+
+
+def _github_workflow_run_approval_state_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    return value in {"approved", "rejected"}
+
+
+def _github_workflow_run_approval_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if not _github_workflow_run_approval_state_is_safe(row.get("state")):
+        return False
+    user = row.get("user")
+    if not isinstance(user, dict) or not _github_comment_login_is_safe(user.get("login")):
+        return False
+    environments = row.get("environments")
+    if not isinstance(environments, list) or len(environments) > 20:
+        return False
+    if not environments:
+        return False
+    if not all(_github_workflow_run_approval_environment_is_safe(environment) for environment in environments):
+        return False
+    raw_created = row.get("created_at")
+    if _is_present_public_value(raw_created) and not _safe_iso_timestamp(raw_created):
+        return False
+    return True
+
+
+def _json_payload_is_github_workflow_run_approvals_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_workflow_run_approvals_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, list) or len(payload) > 100:
+        return False
+    return all(_github_workflow_run_approval_row_is_safe(row) for row in payload)
+
+
+def _github_workflow_run_approvals_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    path_info = _github_workflow_run_approvals_path_info(origin_uri)
+    repo, run_id = path_info if path_info else ("repository", 0)
+    parts = [
+        f"GitHub workflow run approvals for {repo}",
+        f"run id: {run_id}",
+        f"approval count: {len(payload)}",
+    ]
+    for row in payload[:5]:
+        if not _github_workflow_run_approval_row_is_safe(row):
+            continue
+        user = row.get("user") if isinstance(row.get("user"), dict) else {}
+        raw_environments = row.get("environments")
+        environments = raw_environments if isinstance(raw_environments, list) else []
+        environment_names = [
+            _safe_public_text(environment.get("name"), limit=80)
+            for environment in environments
+            if isinstance(environment, dict) and _github_workflow_run_approval_environment_is_safe(environment)
+        ]
+        row_parts = [
+            f"state: {row.get('state')}",
+            f"actor: {_safe_public_text(user.get('login'), limit=80)}",
+        ]
+        if environment_names:
+            row_parts.append(f"environment: {', '.join(environment_names[:5])}")
+        created_at = _safe_iso_timestamp(row.get("created_at"))
+        if created_at:
+            row_parts.append(f"created: {created_at}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
 
 
 def _github_actions_selected_actions_route_path_matches(origin_uri: str) -> bool:
@@ -14249,6 +14417,19 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_actions_oidc_subject_claim_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    workflow_run_approvals_path_info = _github_workflow_run_approvals_path_info(origin_uri)
+    if workflow_run_approvals_path_info:
+        if not _json_payload_is_github_workflow_run_approvals_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        workflow_run_approvals_repo, _workflow_run_approvals_run_id = workflow_run_approvals_path_info
+        return {
+            "metadata_only": True,
+            "title": f"GitHub workflow run approvals {workflow_run_approvals_repo}",
+            "summary": _github_workflow_run_approvals_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_workflow_run_approvals_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     selected_actions_repo = _github_actions_selected_actions_path_repo(origin_uri)
     if selected_actions_repo:
         if not _json_payload_is_github_actions_selected_actions_metadata(origin_uri, payload):
@@ -14856,6 +15037,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_actions_oidc_subject_claim_route_path_matches(raw_origin_uri):
         if not _github_actions_oidc_subject_claim_safe_origin(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_workflow_run_approvals_route_path_matches(raw_origin_uri):
+        if not _github_workflow_run_approvals_safe_origin(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_actions_selected_actions_route_path_matches(raw_origin_uri):
         selected_actions_origin = _safe_origin_uri(raw_origin_uri, source_id=_safe_public_id(source_id, fallback="source"))
         if (
@@ -14981,6 +15165,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     oidc_subject_claim_safe_origin = _github_actions_oidc_subject_claim_safe_origin(raw_origin_uri)
     if oidc_subject_claim_safe_origin:
         safe_origin_uri = oidc_subject_claim_safe_origin
+    workflow_run_approvals_safe_origin = _github_workflow_run_approvals_safe_origin(raw_origin_uri)
+    if workflow_run_approvals_safe_origin:
+        safe_origin_uri = workflow_run_approvals_safe_origin
     actions_cache_usage_repo = _github_actions_cache_usage_path_repo(raw_origin_uri)
     if actions_cache_usage_repo:
         actions_cache_usage_parts = urlsplit(raw_origin_uri)
@@ -15170,6 +15357,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_actions_oidc_subject_claim_path_matches(safe_origin_uri):
         if not _github_actions_oidc_subject_claim_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_workflow_run_approvals_path_matches(safe_origin_uri):
+        if _github_workflow_run_approvals_path_info(safe_origin_uri) is None or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_actions_selected_actions_path_matches(safe_origin_uri):
@@ -15493,6 +15684,14 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or final_url != safe_origin_uri
             or not _github_actions_oidc_subject_claim_path_repo(final_url)
             or _github_actions_oidc_subject_claim_path_repo(final_url) != _github_actions_oidc_subject_claim_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_workflow_run_approvals_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or final_url != safe_final_url
+            or final_url != safe_origin_uri
+            or _github_workflow_run_approvals_path_info(final_url) is None
+            or _github_workflow_run_approvals_path_info(final_url) != _github_workflow_run_approvals_path_info(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_selected_actions_path_matches(safe_origin_uri) and (
@@ -15898,6 +16097,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_oidc_subject_claim_path_matches(safe_origin_uri) and (
             not _github_actions_oidc_subject_claim_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_workflow_run_approvals_path_matches(safe_origin_uri) and (
+            _github_workflow_run_approvals_path_info(safe_origin_uri) is None
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
