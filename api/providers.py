@@ -1231,11 +1231,13 @@ class _AccountUsageProbeWorker:
         self.last_used = time.monotonic()
         self._lock = threading.RLock()
         self._proc: subprocess.Popen[str] | None = None
+        self._closed = False
 
     def close(self) -> None:
         with self._lock:
             proc = self._proc
             self._proc = None
+            self._closed = True
         self._close_process(proc)
 
     @staticmethod
@@ -1456,7 +1458,7 @@ def _cleanup_account_usage_probe_workers(
                 if worker._lock.acquire(blocking=False):
                     try:
                         proc = worker._proc
-                        is_dead = proc is not None and proc.poll() is not None
+                        is_dead = worker._closed or (proc is not None and proc.poll() is not None)
                         if is_dead or cutoff - worker.last_used >= idle_seconds:
                             stale.append((key, worker))
                     finally:
