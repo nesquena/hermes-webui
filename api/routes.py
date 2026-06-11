@@ -7446,7 +7446,18 @@ def handle_post(handler, parsed) -> bool:
                     return j(handler, set_reasoning_display(False))
                 return bad(handler, f"display must be show|hide|on|off (got '{display}')")
             if effort is not None:
-                return j(handler, set_reasoning_effort(effort))
+                model_id = str(body.get("model") or "").strip() or None
+                provider_id = str(body.get("provider") or "").strip() or None
+                base_url = str(body.get("base_url") or "").strip() or None
+                return j(
+                    handler,
+                    set_reasoning_effort(
+                        effort,
+                        model_id=model_id,
+                        provider_id=provider_id,
+                        base_url=base_url,
+                    ),
+                )
             return bad(handler, "reasoning: must supply 'display' or 'effort'")
         except ValueError as e:
             return bad(handler, str(e))
