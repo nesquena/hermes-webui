@@ -58,9 +58,13 @@ def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
 
 def test_edge_audio_branch_stays_separate():
     src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    edge_idx = src.find("if(engine===\"edge\"){")
-    assert edge_idx != -1
-    edge_body = src[edge_idx : edge_idx + 1300]
+    edge_match = re.search(
+        r'if\(engine==="edge"\)\{(.*?)\n\s+return;\n\s+\}',
+        src,
+        re.DOTALL,
+    )
+    assert edge_match, "Edge audio branch must exist"
+    edge_body = edge_match.group(1)
     assert "const audio = new Audio(url);" in edge_body
     assert "audio.onended = () => {" in edge_body
     assert "_armBrowserTtsRecovery" not in edge_body, (
