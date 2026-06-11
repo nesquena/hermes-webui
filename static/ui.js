@@ -8997,17 +8997,33 @@ function renderMessages(options){
   // streaming.
   if(_preservedLiveTurn){
     const _rebuilt=document.getElementById('liveAssistantTurn');
-    const _preservedSeg=_preservedLiveTurn.querySelector('[data-live-assistant="1"]');
+    // Pick the PARSER-OWNED live segment, not just the first one. On reconnect /
+    // post-tool activity boundaries a live turn can carry MULTIPLE
+    // [data-live-assistant="1"] segments, and the smd parser writes into the
+    // LAST (tail) one (see ensureAssistantRow in messages.js — it re-attaches to
+    // the last live segment). Prefer the preserved segment whose
+    // data-live-segment-seq matches the rebuilt tail (same logical segment), then
+    // fall back to the last preserved live segment. Using querySelector() (first)
+    // here would move the wrong segment and leave the parser-owned tail detached
+    // in a multi-segment turn.
+    const _rebuiltSegs=_rebuilt?_rebuilt.querySelectorAll('[data-live-assistant="1"]'):null;
+    const _rebuiltSeg=(_rebuiltSegs&&_rebuiltSegs.length)?_rebuiltSegs[_rebuiltSegs.length-1]:null;
+    const _preservedSegs=_preservedLiveTurn.querySelectorAll('[data-live-assistant="1"]');
+    let _preservedSeg=_preservedSegs.length?_preservedSegs[_preservedSegs.length-1]:null;
+    const _rebuiltSeq=_rebuiltSeg?_rebuiltSeg.getAttribute('data-live-segment-seq'):null;
+    if(_rebuiltSeq){
+      for(const _seg of _preservedSegs){
+        if(_seg.getAttribute('data-live-segment-seq')===_rebuiltSeq){_preservedSeg=_seg;break;}
+      }
+    }
     const _preservedLen=_liveAssistantSegmentTextLength(_preservedSeg||_preservedLiveTurn);
     if(_preservedLen>0){
-      const _rebuiltSegs=_rebuilt?_rebuilt.querySelectorAll('[data-live-assistant="1"]'):null;
-      const _rebuiltSeg=(_rebuiltSegs&&_rebuiltSegs.length)?_rebuiltSegs[_rebuiltSegs.length-1]:null;
       const _rebuiltLen=_rebuilt?_liveAssistantSegmentTextLength(_rebuiltSeg||_rebuilt):-1;
       if(_rebuiltLen<=_preservedLen){
         if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
         if(_rebuilt&&_rebuiltSeg&&_preservedSeg){
           // Segment-level swap: keep the rebuilt turn (and its other segments /
-          // tool groups) but restore the parser-referenced live segment.
+          // tool groups) but restore the parser-referenced (tail) live segment.
           _rebuiltSeg.replaceWith(_preservedSeg);
         }else if(_rebuilt){
           // Rebuilt turn has no live segment to target — replace the whole turn.

@@ -135,6 +135,29 @@ def test_reattach_swaps_at_segment_level_to_preserve_rebuilt_structure():
     assert "_preservedSeg" in reattach and "_rebuiltSeg" in reattach
 
 
+def test_reattach_targets_the_parser_owned_tail_segment_not_the_first():
+    """Multi-live-segment turns (reconnect / post-tool activity boundaries) can have
+    several [data-live-assistant="1"] segments; the smd parser writes into the LAST
+    (tail) one. The re-attach must select the preserved TAIL segment — preferring the
+    one whose data-live-segment-seq matches the rebuilt tail — not the first via a bare
+    querySelector(). Picking the first would move the wrong segment and leave the
+    parser-owned tail detached (Codex CORE finding on the #3877-reopen fix)."""
+    body = _function_body(UI_JS, "renderMessages")
+    reattach = body[body.find("Re-attach the preserved live turn (#3877)") :]
+    # Preserved segment is chosen from querySelectorAll (tail), not querySelector (first).
+    assert "_preservedSegs=_preservedLiveTurn.querySelectorAll('[data-live-assistant=\"1\"]')" in reattach
+    assert "_preservedSegs[_preservedSegs.length-1]" in reattach, (
+        "must default to the LAST preserved live segment (the parser-owned tail)"
+    )
+    # And prefer the segment whose live-segment-seq matches the rebuilt tail.
+    assert "data-live-segment-seq" in reattach and "_rebuiltSeq" in reattach, (
+        "must prefer the preserved segment matching the rebuilt tail's "
+        "data-live-segment-seq before falling back to the last segment"
+    )
+    # The first-only querySelector form must NOT be how _preservedSeg is derived.
+    assert "_preservedSeg=_preservedLiveTurn.querySelector(" not in reattach
+
+
 def test_reattach_runs_after_rebuild_loop():
     """The re-attach must run AFTER the rebuild (so a freshly-rebuilt live turn exists to
     compare against / replace) but is still inside renderMessages."""
