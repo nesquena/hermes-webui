@@ -91,20 +91,48 @@ def test_capture_is_gated_on_streaming_session():
     assert "dataset.sessionId" in failsafe
 
 
-def test_reattach_keeps_longer_live_segment_via_length_gated_swap():
-    """After the rebuild, the preserved node is swapped back only when it carries MORE
-    streamed text than the rebuilt live turn. The length guard establishes the preserved
-    (parser) node strictly wins, so a plain replaceWith is sufficient — no segment merge
-    is needed (a merge would be a no-op under this guard), and the in-progress reply is
-    never blanked."""
+def test_reattach_swaps_when_preserved_ties_or_beats_rebuilt():
+    """After the rebuild, the preserved (parser-referenced) node is swapped back in
+    when it carries AT LEAST AS MUCH streamed text as the rebuilt live turn
+    (`_rebuiltLen <= _preservedLen`).
+
+    The `<=` (not `<`) is the #3877-reopen fix: at the throttled-persist boundary the
+    rebuilt turn's live content can EQUAL the preserved length, and the old strict-`<`
+    guard then skipped the swap — leaving the smd parser writing into the detached
+    original node (the residual "disappears, then reappears" frame). On a tie the
+    preserved node wins because it holds the live parser reference and nothing is lost.
+    """
     body = _function_body(UI_JS, "renderMessages")
     reattach = body[body.find("Re-attach the preserved live turn (#3877)") :]
     assert reattach, "the #3877 re-attach block is missing"
-    # Length comparison gates the swap (only restore when preserved has more text).
+    # Length comparison still gates the swap...
     assert "_liveAssistantSegmentTextLength" in reattach
-    assert "_rebuiltLen<_preservedLen" in reattach
-    # The swap replaces the rebuilt node with the preserved (parser-referenced) node.
+    # ...but now with `<=` so the equal-length tie also restores the parser node.
+    assert "_rebuiltLen<=_preservedLen" in reattach, (
+        "the swap must fire on a tie (<=), not only when preserved strictly wins (<) "
+        "— the strict-< guard left the parser node orphaned on the equal-length frame"
+    )
+    # The old strict-< form must be gone (it is the bug).
+    assert "_rebuiltLen<_preservedLen" not in reattach.replace("_rebuiltLen<=_preservedLen", "")
+
+
+def test_reattach_swaps_at_segment_level_to_preserve_rebuilt_structure():
+    """The swap replaces only the rebuilt LIVE SEGMENT with the preserved one, so a
+    multi-segment turn (earlier settled segments + tool/worklog groups built by the
+    rebuild) keeps that rebuilt-only structure. A whole-turn replaceWith would discard
+    it when the preserved snapshot predates those segments. Whole-turn replace is only
+    the fallback when the rebuilt turn has no live segment to target."""
+    body = _function_body(UI_JS, "renderMessages")
+    reattach = body[body.find("Re-attach the preserved live turn (#3877)") :]
+    # Segment-level swap is the primary path.
+    assert "_rebuiltSeg.replaceWith(_preservedSeg)" in reattach, (
+        "the swap must be segment-level (replace the rebuilt live segment with the "
+        "preserved one) so rebuilt-only structure in a multi-segment turn is kept"
+    )
+    # Whole-turn replace remains as the no-live-segment fallback.
     assert "replaceWith(_preservedLiveTurn)" in reattach
+    # The preserved live segment is resolved for the swap.
+    assert "_preservedSeg" in reattach and "_rebuiltSeg" in reattach
 
 
 def test_reattach_runs_after_rebuild_loop():
