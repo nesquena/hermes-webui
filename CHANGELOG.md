@@ -3,6 +3,13 @@
 
 ## [Unreleased]
 
+## [v0.51.365] — 2026-06-11 — Release MD (lineage-segment open + reasoning chip fixes)
+
+### Fixed
+
+- **Clicking an expanded session-lineage segment now opens that exact session instead of resolving back to the collapsed parent (#4003).** The explicit lineage-segment and child-row click handlers now skip the collapsed-id lineage resolution (which is only meant for stale collapsed rows), so the session you click is the session that loads.
+- **The reasoning-effort chip no longer disappears after you pick an effort (#3958).** Selecting an effort posted to `/api/reasoning`, which re-resolved the supported efforts for the config-default model rather than the active session's model — so a session whose model differs from the default lost its chip until a refresh. The effort POST now carries the active session's model/provider context, matching the GET path, so the chip stays correct. (#3958)
+
 ## [v0.51.364] — 2026-06-11 — Release MC (self-heal stuck session loads)
 
 ### Fixed
