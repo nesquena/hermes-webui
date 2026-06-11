@@ -4230,8 +4230,13 @@ function startSessionStream(sid) {
     });
     document._hermesSessionStreamVisibilityHook = true;
   }
-  // Don't open when tab is hidden — saves connection pool slots
-  if (typeof document !== 'undefined' && document.hidden) return;
+  // Don't open when tab is hidden — saves connection pool slots. Preserve the
+  // pending session id so the visibility handler reopens it on re-show (a session
+  // loaded/restored while the tab is already hidden must still reattach).
+  if (typeof document !== 'undefined' && document.hidden) {
+    _sessionStreamHiddenSid = sid;
+    return;
+  }
   try {
     const es = new EventSource(_apiUrl('api/session/stream?session_id=' + encodeURIComponent(sid)));
     _sessionEventSource = es;

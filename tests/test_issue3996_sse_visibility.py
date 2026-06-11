@@ -45,7 +45,7 @@ def test_session_stream_has_visibility_hook():
     assert "visibilitychange" in block
     assert "document.hidden" in block
     # Must skip opening a new EventSource while the tab is hidden.
-    assert "if (typeof document !== 'undefined' && document.hidden) return;" in block
+    assert "if (typeof document !== 'undefined' && document.hidden) {" in block
 
 
 def test_session_stream_reopens_from_dedicated_var_not_nulled_id():
@@ -82,3 +82,26 @@ def test_stop_session_stream_still_nulls_session_id():
     assert stop_idx != -1
     block = MESSAGES_JS[stop_idx:stop_idx + 400]
     assert "_sessionStreamSessionId = null" in block
+
+
+def test_session_stream_hidden_open_preserves_id_for_reopen():
+    """A session opened while the tab is ALREADY hidden must still reopen on re-show.
+
+    Codex CORE: startSessionStream(sid) sets _sessionStreamSessionId and then
+    returns early when document.hidden. If it doesn't also record the id in the
+    dedicated holder, the visibility handler (which reopens only from the holder)
+    never reattaches — silently dropping bg_task_complete / server_turn_started
+    for a session loaded in a background tab. The hidden-skip path must set
+    _sessionStreamHiddenSid = sid before returning.
+    """
+    start_idx = MESSAGES_JS.find("function startSessionStream(sid)")
+    block = MESSAGES_JS[start_idx:start_idx + 1700]
+    # Find the hidden-tab early-return skip path (distinct from the in-hook
+    # `if (document.hidden)` branch) and assert it preserves the id.
+    hidden_idx = block.find("!== 'undefined' && document.hidden) {")
+    assert hidden_idx != -1, "expected a braced hidden-tab skip block (not a bare return)"
+    hidden_block = block[hidden_idx:hidden_idx + 160]
+    assert "_sessionStreamHiddenSid = sid" in hidden_block, (
+        "hidden-tab skip must record the pending session id for reopen on re-show"
+    )
+
