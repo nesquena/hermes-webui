@@ -1228,7 +1228,7 @@ def list_source_refresh_jobs(*, limit: int = 10) -> dict[str, Any]:
             "created_at": _safe_text(row["created_at"], limit=80),
             "updated_at": _safe_text(row["updated_at"], limit=80),
         })
-    return {"local_only": True, "limit": limit, "jobs": jobs}
+    return {"local_only": True, "metadata_only": True, "limit": limit, "jobs": jobs}
 
 
 def _refresh_content_type(headers: Any) -> str:

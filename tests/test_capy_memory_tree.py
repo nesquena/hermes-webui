@@ -505,6 +505,7 @@ def test_register_source_reference_queues_metadata_only_refresh_job(tmp_path, mo
     assert status["chunk_count"] == 0
     assert status["stale_source_count"] == 1
     assert status["refresh_job_count"] == 1
+    assert jobs["metadata_only"] is True
     assert len(jobs["jobs"]) == 1
     assert jobs["jobs"][0]["kind"] == "source.refresh"
     assert jobs["jobs"][0]["source_id"] == "openhuman-memory-tree"
@@ -515,6 +516,70 @@ def test_register_source_reference_queues_metadata_only_refresh_job(tmp_path, mo
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "raw-prompt" not in serialized
+
+
+def test_capy_memory_source_jobs_route_returns_bounded_metadata_only_jobs(tmp_path, monkeypatch):
+    from api import routes
+
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "queue-roadmap-docs",
+        "title": "Queue Roadmap Docs <script>bad()</script>",
+        "origin_uri": "https://example.test/docs/roadmap?api_key=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+        "refresh_interval_seconds": 3600,
+        "renderer": "<script>do_not_store()</script>",
+    })
+    handler = _FakeJsonHandler()
+
+    assert routes.handle_get(handler, urlparse("http://example.test/api/capy-memory/source/jobs?limit=999")) is True
+    payload = handler.json_body()
+    serialized = json.dumps(payload, sort_keys=True).lower()
+
+    assert handler.status == 200
+    assert payload["local_only"] is True
+    assert payload["metadata_only"] is True
+    assert payload["limit"] == 25
+    assert len(payload["jobs"]) == 1
+    assert payload["jobs"][0]["kind"] == "source.refresh"
+    assert payload["jobs"][0]["source_id"] == "queue-roadmap-docs"
+    assert payload["jobs"][0]["status"] == "pending"
+    assert payload["jobs"][0]["origin_uri"] == "https://example.test/docs/roadmap"
+    for unsafe in (
+        "secret_value_do_not_leak",
+        "api_key",
+        "access_token",
+        "raw-prompt",
+        "<script",
+        "renderer",
+        "do_not_store",
+    ):
+        assert unsafe not in serialized
+
+
+def test_capy_memory_source_jobs_route_rejects_invalid_limit_without_leaking_query_secret(tmp_path, monkeypatch):
+    from api import routes
+
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    handler = _FakeJsonHandler()
+
+    assert routes.handle_get(
+        handler,
+        urlparse(
+            "http://example.test/api/capy-memory/source/jobs?limit=SECRET_VALUE_DO_NOT_LEAK&api_key=SECRET_VALUE_DO_NOT_LEAK"
+        ),
+    ) is True
+    payload = handler.json_body()
+    serialized = json.dumps(payload, sort_keys=True).lower()
+
+    assert handler.status == 400
+    assert payload["error"] == "invalid source job limit"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+
 
 
 def test_capy_memory_source_refresh_route_runs_bounded_metadata_only_jobs(monkeypatch):

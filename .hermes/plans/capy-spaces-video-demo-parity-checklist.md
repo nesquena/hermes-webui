@@ -3,13 +3,15 @@
 Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y
 Transcript duration: 46:51
 Created: 2026-04-27
-Last implementation-status update: 2026-06-07
+Last implementation-status update: 2026-06-11
 
 ## Current parity implementation notes
 
 Capy Spaces now has implemented foundation slices, so this checklist is no longer purely architectural. Keep status conservative: metadata-only demo smokes and UI affordances are useful progress, but they are not full Space Agent video parity until the acceptance criteria below pass end-to-end on Brendan's Mac Studio.
 
 Recent safe adapter progress:
+
+- Source-refresh job listings are now exposed through `GET /api/capy-memory/source/jobs` as bounded metadata-only receipts with explicit `metadata_only: true`, sanitized public `origin_uri`, and safe job status/attempt/timestamp fields only. Raw queued payloads, query/fragment auth markers, raw prompts, renderer/source/html/script fields, and secret-looking fixture values stay omitted so refresh work can become UI-visible without leaking source content or credentials.
 
 - GitHub Pages source-refresh metadata now fails closed on JSON Feed-shaped `version` / `items` payload keys even when the response also contains a valid Pages `status`, keeping exact Pages freshness records metadata-only and preventing feed summaries, API-auth fields, raw prompts, renderer/source/data/html fields, scripts, or secret-looking fixtures from reaching receipts/search/vault output.
 

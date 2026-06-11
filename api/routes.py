@@ -3189,6 +3189,20 @@ def handle_get(handler, parsed) -> bool:
             logger.exception("capy memory source catalog failed")
             return bad(handler, _sanitize_error(exc), status=500)
 
+    if parsed.path == "/api/capy-memory/source/jobs":
+        try:
+            from api.capy_memory import list_source_refresh_jobs
+
+            qs = parse_qs(parsed.query)
+            limit = int((qs.get("limit") or [10])[0] or 10)
+            j(handler, list_source_refresh_jobs(limit=limit))
+        except ValueError:
+            bad(handler, "invalid source job limit", status=400)
+        except Exception as exc:
+            logger.exception("capy memory source jobs failed")
+            bad(handler, _sanitize_error(exc), status=500)
+        return True
+
     if parsed.path == "/api/capy-memory/search":
         try:
             from api.capy_memory import search_memory
