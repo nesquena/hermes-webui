@@ -354,6 +354,23 @@ class TestSendBusyBranchDispatch:
             "otherwise a reflexive Enter press during the await re-fires the command"
         )
 
+    def test_busy_hint_bar_uses_same_busy_definition_as_primary_action(self):
+        """The busy hint bar must stay visible during compression-only busy states."""
+        start = MESSAGES_JS.find("function getComposerPrimaryAction()")
+        end = MESSAGES_JS.find("function _setComposerPrimaryButtonIcon", start)
+        primary = MESSAGES_JS[start:end]
+        hint_start = MESSAGES_JS.find("function _updateBusyHintBar()")
+        hint_end = MESSAGES_JS.find("function _handleBusyHintPill", hint_start)
+        hint = MESSAGES_JS[hint_start:hint_end]
+
+        assert "const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();" in primary
+        assert "const isBusy=!!S.busy||compressionRunning;" in primary
+        assert "const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();" in hint
+        assert "const isBusy=!!S.busy||compressionRunning;" in hint, (
+            "_updateBusyHintBar must mirror getComposerPrimaryAction's busy "
+            "definition so the queue hint stays visible during compression-only busy states"
+        )
+
 
 # ── Boot init + settings panel wiring ───────────────────────────────────
 
