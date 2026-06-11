@@ -292,7 +292,7 @@ function _parseSlashAutocomplete(text){
     return {kind:'commands', query:raw, beforeSlash:beforeSlash, prefix:''};
   }
   const argText=raw.slice(cmdName.length).replace(/^\s+/,'');
-  return {kind:'subargs', command:{name:cmdName, desc:subArgSource.desc, subArgs:subArgSource.subArgs}, query:argText.toLowerCase(), rawQuery:argText};
+  return {kind:'subargs', command:{name:cmdName, desc:subArgSource.desc, subArgs:subArgSource.subArgs}, query:argText.toLowerCase(), rawQuery:argText, beforeSlash:beforeSlash, prefix:''};
 }
 
 async function getSlashAutocompleteMatches(text){
@@ -1601,7 +1601,9 @@ function showCmdDropdown(matches){
       const _p=_currentAutocompletePrefix||'';
       const _trail=c.arg?' ':'';
       if(_b||_p){
-        $('msg').value=_b+'/'+(_p?_p+'/':'')+c.name+_trail;
+        $('msg').value=isSubArg
+          ?_b+'/'+c.parent+' '+c.value
+          :_b+'/'+(_p?_p+'/':'')+c.name+_trail;
       }else{
         $('msg').value=nextValue;
       }
