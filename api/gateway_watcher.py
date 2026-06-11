@@ -378,13 +378,28 @@ def _resolve_watcher_target(
 
 def _watcher_registry_key(profile_name: str | None = None, hermes_home: Path | None = None) -> str:
     """Return the stable registry key for a watcher target."""
-    resolved_profile, resolved_home = _resolve_watcher_target(
-        profile_name=profile_name,
-        hermes_home=hermes_home,
-    )
-    if resolved_home is not None:
-        return str(resolved_home)
-    return resolved_profile or "__default__"
+    if hermes_home is not None:
+        return str(Path(hermes_home).expanduser().resolve())
+    return str(profile_name or "").strip() or "__default__"
+
+
+def _watcher_has_subscribers(watcher: GatewayWatcher) -> bool:
+    subscribers = getattr(watcher, "_subscribers", None)
+    sub_lock = getattr(watcher, "_sub_lock", None)
+    if subscribers is None or sub_lock is None:
+        return False
+    with sub_lock:
+        return bool(subscribers)
+
+
+def _pop_idle_watchers_locked(*, exclude_key: str) -> list[GatewayWatcher]:
+    stale: list[GatewayWatcher] = []
+    for key, watcher in list(_watchers.items()):
+        if key == exclude_key or _watcher_has_subscribers(watcher):
+            continue
+        if _watchers.get(key) is watcher:
+            stale.append(_watchers.pop(key))
+    return stale
 
 
 def start_watcher(*, profile_name: str | None = None, hermes_home: Path | None = None):
@@ -412,7 +427,11 @@ def stop_watcher(*, profile_name: str | None = None, hermes_home: Path | None = 
             watchers = list(_watchers.values())
             _watchers.clear()
         else:
-            key = _watcher_registry_key(profile_name, hermes_home)
+            resolved_profile, resolved_home = _resolve_watcher_target(
+                profile_name=profile_name,
+                hermes_home=hermes_home,
+            )
+            key = _watcher_registry_key(resolved_profile, resolved_home)
             watcher = _watchers.pop(key, None)
             watchers = [watcher] if watcher is not None else []
     for watcher in watchers:
@@ -429,17 +448,22 @@ def restart_watcher_for_profile(name: str):
     watcher.start()
     with _watcher_lock:
         existing = _watchers.pop(key, None)
+        stale_watchers = [] if existing is not None else _pop_idle_watchers_locked(exclude_key=key)
         _watchers[key] = watcher
-    if existing is not None:
-        existing.stop()
+    for old_watcher in ([existing] if existing is not None else stale_watchers):
+        old_watcher.stop()
     return watcher
 
 
 def get_watcher(*, profile_name: str | None = None, hermes_home: Path | None = None) -> GatewayWatcher | None:
     """Get or lazily start the watcher for the resolved request profile."""
-    key = _watcher_registry_key(profile_name, hermes_home)
+    resolved_profile, resolved_home = _resolve_watcher_target(
+        profile_name=profile_name,
+        hermes_home=hermes_home,
+    )
+    key = _watcher_registry_key(resolved_profile, resolved_home)
     with _watcher_lock:
         watcher = _watchers.get(key)
     if watcher is None or not watcher.is_alive():
-        watcher = start_watcher(profile_name=profile_name, hermes_home=hermes_home)
+        watcher = start_watcher(profile_name=resolved_profile, hermes_home=resolved_home)
     return watcher

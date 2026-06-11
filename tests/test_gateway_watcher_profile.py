@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from urllib.parse import urlparse
 
 
@@ -105,12 +106,56 @@ def test_restart_watcher_for_profile_replaces_singleton_with_profile_home(tmp_pa
 
     watcher = gw.restart_watcher_for_profile("target")
 
-    assert old.stopped is False
+    assert old.stopped is True
     assert watcher is created[-1]
     assert watcher.profile_name == "target"
     assert watcher.hermes_home == tmp_path / "target"
     assert watcher.started is True
     assert gw.get_watcher() is watcher
+
+
+def test_restart_watcher_for_profile_keeps_subscribed_other_profile(tmp_path, monkeypatch):
+    from api import gateway_watcher as gw
+    from api import profiles
+
+    default_home = (tmp_path / "default").resolve()
+    work_home = (tmp_path / "work").resolve()
+    created = []
+
+    class FakeWatcher:
+        def __init__(self, *, profile_name="", hermes_home=None, state_db_path=None):
+            self.profile_name = profile_name
+            self.hermes_home = hermes_home
+            self.state_db_path = state_db_path
+            self.started = False
+            self.stopped = False
+            self._subscribers = []
+            self._sub_lock = threading.Lock()
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+        def is_alive(self):
+            return self.started
+
+        def stop(self):
+            self.stopped = True
+            self.started = False
+
+    default_watcher = FakeWatcher(profile_name="default", hermes_home=default_home)
+    default_watcher.started = True
+    default_watcher._subscribers.append(object())
+    monkeypatch.setattr(gw, "_watchers", {str(default_home): default_watcher})
+    monkeypatch.setattr(gw, "GatewayWatcher", FakeWatcher)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda name: work_home)
+
+    watcher = gw.restart_watcher_for_profile("work")
+
+    assert default_watcher.stopped is False
+    assert gw._watchers[str(default_home)] is default_watcher
+    assert gw._watchers[str(work_home)] is watcher
+    assert watcher.profile_name == "work"
 
 
 def test_restart_watcher_for_profile_swaps_atomically(tmp_path, monkeypatch):
@@ -155,6 +200,18 @@ def test_restart_watcher_for_profile_swaps_atomically(tmp_path, monkeypatch):
     assert existing.stopped is True
     assert watcher is created[-1]
     assert gw.get_watcher(profile_name="target", hermes_home=target_home) is watcher
+
+
+def test_watcher_registry_key_uses_concrete_values(tmp_path, monkeypatch):
+    from api import gateway_watcher as gw
+
+    def fail_resolve(**kwargs):
+        raise AssertionError("_watcher_registry_key should not resolve profile state")
+
+    monkeypatch.setattr(gw, "_resolve_watcher_target", fail_resolve)
+
+    assert gw._watcher_registry_key("work", tmp_path / "work") == str((tmp_path / "work").resolve())
+    assert gw._watcher_registry_key("default", None) == "default"
 
 
 def test_start_watcher_pins_active_profile_home(tmp_path, monkeypatch):
