@@ -16622,6 +16622,7 @@ const LOCALES = {
     fork_from_here: 'Rozgałęź stąd',
     forked_from: 'Rozgałęzione z',
     subagent_children: 'Sesje subagentów',
+    model_show_all_models: 'Pokaż wszystkie {0} modele',
     btw_asking: 'Zadawanie pytania pobocznego…',
     btw_label: 'Pytanie poboczne — poza historią',
     btw_done: 'Odpowiedziano na pytanie poboczne',
