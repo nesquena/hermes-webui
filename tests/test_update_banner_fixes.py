@@ -493,7 +493,40 @@ class TestScheduleRestart:
 class TestApplyUpdateRestartSafety:
     """Self-update must not re-exec while chat streams are active."""
 
-    def test_apply_update_refuses_when_stream_active(self, tmp_path, monkeypatch):
+    @staticmethod
+    def _successful_git(calls):
+        def fake_run(args, cwd, timeout=10):
+            calls.append(args)
+            if args[0] == 'fetch':
+                return '', True
+            if args[0] == 'tag':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[:2] == ['status', '--porcelain']:
+                return '', True
+            if args[0] == 'pull':
+                return 'Already up to date.', True
+            if args[:2] == ['merge-base', '--is-ancestor']:
+                # A non-zero exit is Git's normal "not an ancestor" result;
+                # exercise update instead of the safe refusal to rewind.
+                return '', False
+            if args[0] == 'checkout':
+                return '', True
+            if args[0] == 'reset':
+                return '', True
+            return '', True
+
+        return fake_run
+
+    def test_apply_update_defers_restart_when_stream_active(self, tmp_path, monkeypatch):
+        """Apply must proceed during the caller's own stream.
+
+        The old restart_blocked assertion encoded a catch-22: clicking Update
+        Now from a streaming chat made that same stream block the update. The
+        apply step now completes and _schedule_restart performs the bounded
+        wait before re-exec.
+        """
         import queue
         import api.updates as upd
         from api.config import STREAMS, STREAMS_LOCK
@@ -501,9 +534,11 @@ class TestApplyUpdateRestartSafety:
         (tmp_path / '.git').mkdir()
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
-        called = []
-        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (called.append(a) or ('', True)))
-        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+        git_calls = []
+        restart_calls = []
+        monkeypatch.setattr(upd, '_run_git', self._successful_git(git_calls))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: restart_calls.append(delay))
+        monkeypatch.setattr(upd, '_ensure_gateway_restart_for_agent_update', lambda: (True, {'status': 'skipped'}))
 
         with STREAMS_LOCK:
             old = dict(STREAMS)
@@ -516,13 +551,14 @@ class TestApplyUpdateRestartSafety:
                 STREAMS.clear()
                 STREAMS.update(old)
 
-        assert result['ok'] is False
-        assert result.get('active_streams') == 1
-        assert result.get('restart_blocked') is True
-        assert 'active chat stream' in result['message']
-        assert called == []
+        assert result['ok'] is True
+        assert result.get('restart_deferred') is True
+        assert result.get('restart_blocked') in (None, False)
+        assert ['pull', '--ff-only', 'origin', 'master'] in git_calls
+        assert restart_calls == [2.0]
 
-    def test_force_update_refuses_when_stream_active(self, tmp_path, monkeypatch):
+    def test_force_update_defers_restart_when_stream_active(self, tmp_path, monkeypatch):
+        """Force apply also queues restart instead of refusing active streams."""
         import queue
         import api.updates as upd
         from api.config import STREAMS, STREAMS_LOCK
@@ -530,8 +566,11 @@ class TestApplyUpdateRestartSafety:
         (tmp_path / '.git').mkdir()
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
-        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (_ for _ in ()).throw(AssertionError('must not run git')))
-        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+        git_calls = []
+        restart_calls = []
+        monkeypatch.setattr(upd, '_run_git', self._successful_git(git_calls))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: restart_calls.append(delay))
+        monkeypatch.setattr(upd, '_ensure_gateway_restart_for_agent_update', lambda: (True, {'status': 'skipped'}))
 
         with STREAMS_LOCK:
             old = dict(STREAMS)
@@ -544,21 +583,25 @@ class TestApplyUpdateRestartSafety:
                 STREAMS.clear()
                 STREAMS.update(old)
 
-        assert result['ok'] is False
-        assert result.get('active_streams') == 1
-        assert result.get('restart_blocked') is True
-        assert 'active chat stream' in result['message']
+        assert result['ok'] is True
+        assert result.get('restart_deferred') is True
+        assert result.get('restart_blocked') in (None, False)
+        assert ['reset', '--hard', 'origin/master'] in git_calls
+        assert restart_calls == [2.0]
 
-    def test_apply_update_refuses_when_active_run_without_stream(self, tmp_path, monkeypatch):
+    def test_apply_update_defers_restart_when_active_run_without_stream(self, tmp_path, monkeypatch):
+        """Detached active runs are reported as deferred restarts, not apply failures."""
         import api.updates as upd
         from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
 
         (tmp_path / '.git').mkdir()
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
-        called = []
-        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (called.append(a) or ('', True)))
-        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+        git_calls = []
+        restart_calls = []
+        monkeypatch.setattr(upd, '_run_git', self._successful_git(git_calls))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: restart_calls.append(delay))
+        monkeypatch.setattr(upd, '_ensure_gateway_restart_for_agent_update', lambda: (True, {'status': 'skipped'}))
 
         with STREAMS_LOCK:
             old_streams = dict(STREAMS)
@@ -577,22 +620,25 @@ class TestApplyUpdateRestartSafety:
                 STREAMS.clear()
                 STREAMS.update(old_streams)
 
-        assert result['ok'] is False
-        assert result.get('active_streams') == 0
-        assert result.get('active_runs') == 1
-        assert result.get('restart_blocked') is True
-        assert 'active agent run' in result['message']
-        assert called == []
+        assert result['ok'] is True
+        assert result.get('restart_deferred') is True
+        assert result.get('restart_blocked') in (None, False)
+        assert ['pull', '--ff-only', 'origin', 'master'] in git_calls
+        assert restart_calls == [2.0]
 
-    def test_force_update_refuses_when_active_run_without_stream(self, tmp_path, monkeypatch):
+    def test_force_update_defers_restart_when_active_run_without_stream(self, tmp_path, monkeypatch):
+        """Force update keeps the restart wait in _schedule_restart for active runs."""
         import api.updates as upd
         from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
 
         (tmp_path / '.git').mkdir()
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
-        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (_ for _ in ()).throw(AssertionError('must not run git')))
-        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+        git_calls = []
+        restart_calls = []
+        monkeypatch.setattr(upd, '_run_git', self._successful_git(git_calls))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: restart_calls.append(delay))
+        monkeypatch.setattr(upd, '_ensure_gateway_restart_for_agent_update', lambda: (True, {'status': 'skipped'}))
 
         with STREAMS_LOCK:
             old_streams = dict(STREAMS)
@@ -611,11 +657,47 @@ class TestApplyUpdateRestartSafety:
                 STREAMS.clear()
                 STREAMS.update(old_streams)
 
-        assert result['ok'] is False
-        assert result.get('active_streams') == 0
-        assert result.get('active_runs') == 1
-        assert result.get('restart_blocked') is True
-        assert 'active agent run' in result['message']
+        assert result['ok'] is True
+        assert result.get('restart_deferred') is True
+        assert result.get('restart_blocked') in (None, False)
+        assert ['reset', '--hard', 'origin/master'] in git_calls
+        assert restart_calls == [2.0]
+
+    def test_apply_update_reports_restart_not_deferred_without_active_work(self, tmp_path, monkeypatch):
+        """No active streams/runs means the success response says restart now."""
+        import api.updates as upd
+        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
+
+        (tmp_path / '.git').mkdir()
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        git_calls = []
+        restart_calls = []
+        monkeypatch.setattr(upd, '_run_git', self._successful_git(git_calls))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: restart_calls.append(delay))
+        monkeypatch.setattr(upd, '_ensure_gateway_restart_for_agent_update', lambda: (True, {'status': 'skipped'}))
+
+        with STREAMS_LOCK:
+            old_streams = dict(STREAMS)
+            STREAMS.clear()
+        with ACTIVE_RUNS_LOCK:
+            old_runs = dict(ACTIVE_RUNS)
+            ACTIVE_RUNS.clear()
+        try:
+            result = upd.apply_update('webui')
+        finally:
+            with ACTIVE_RUNS_LOCK:
+                ACTIVE_RUNS.clear()
+                ACTIVE_RUNS.update(old_runs)
+            with STREAMS_LOCK:
+                STREAMS.clear()
+                STREAMS.update(old_streams)
+
+        assert result['ok'] is True
+        assert result.get('restart_deferred') is False
+        assert result.get('restart_blocked') in (None, False)
+        assert ['pull', '--ff-only', 'origin', 'master'] in git_calls
+        assert restart_calls == [2.0]
 
     def test_wait_until_restart_safe_waits_for_active_run_to_clear(self, monkeypatch):
         import api.updates as upd
@@ -1829,13 +1911,19 @@ class TestUiJsUpdateBanner:
             "forceUpdate() must POST to /api/updates/force"
         )
 
-    def test_success_toast_says_restarting(self):
+    def test_success_toast_distinguishes_immediate_and_deferred_restart(self):
         src = read('static/ui.js')
         m = re.search(r'function applyUpdates\b.*?\n\}', src, re.DOTALL)
         assert m, "applyUpdates() not found"
         fn = m.group(0)
-        assert 'restarting' in fn.lower(), (
-            "success toast must mention 'restarting' (server self-restarts after update)"
+        assert 'restart_deferred' in src, (
+            "applyUpdates must read restart_deferred so active chats are not shown as update failures"
+        )
+        assert 'Update applied — restarting now…' in src, (
+            "success copy must mention restarting when restart is immediate"
+        )
+        assert 'Update applied — WebUI will restart once your chat finishes.' in src, (
+            "deferred-restart copy must tell the user the update applied and will restart after chat finishes"
         )
         assert 'Reloading' not in fn, (
             "success toast must not say 'Reloading' — server restarts, page reloads after"
@@ -2229,13 +2317,13 @@ global.fetch = async () => {{
         assert '_readHealthServerIdentity()' in force_body, (
             "forceUpdate() must call _readHealthServerIdentity() before reload wait"
         )
-        assert '_waitForServerThenReload({baselineServerIdentity})' in apply_body, (
-            "applyUpdates() must pass baselineServerIdentity to _waitForServerThenReload()"
+        assert '_waitForServerThenReload(_updateRestartWaitOptions(baselineServerIdentity,restartDeferred))' in apply_body, (
+            "applyUpdates() must pass baselineServerIdentity and restartDeferred to _waitForServerThenReload()"
         )
-        assert '_waitForServerThenReload({baselineServerIdentity})' in force_body, (
-            "forceUpdate() must pass baselineServerIdentity to _waitForServerThenReload()"
+        assert '_waitForServerThenReload(_updateRestartWaitOptions(baselineServerIdentity,restartDeferred))' in force_body, (
+            "forceUpdate() must pass baselineServerIdentity and restartDeferred to _waitForServerThenReload()"
         )
-        assert apply_body.index('_readHealthServerIdentity()') < apply_body.index('_waitForServerThenReload({baselineServerIdentity})'), (
+        assert apply_body.index('_readHealthServerIdentity()') < apply_body.index('_waitForServerThenReload(_updateRestartWaitOptions'), (
             "applyUpdates() must capture baseline before reload scheduling"
         )
         assert force_body.index('_readHealthServerIdentity()') < force_body.index("const res=await api('/api/updates/force'"), (
