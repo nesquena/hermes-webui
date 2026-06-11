@@ -37,6 +37,36 @@ same event-envelope key. This is still inert: `send()`, `attachLiveStream()`,
 `renderMessages()`, settlement restore, `S.messages`, `INFLIGHT`, and the DOM do
 not consume the helper yet.
 
+## Slice 3 Registry / Owner Skeleton
+
+`HermesAssistantTurnAnchors.createAssistantTurnAnchorRegistry()` creates a local
+owner object for one assistant turn. The registry contains the anchor seed, a
+dedupe index, and application stats. It is not a global store and is not wired
+into current runtime, session, or renderer code.
+
+`HermesAssistantTurnAnchors.applyAssistantTurnAnchorSourceEvent()` and
+`applyAssistantTurnAnchorSourceEvents()` normalize incoming source events, apply
+the same event-envelope dedupe rule, and route events into one owner:
+
+- `activity_events` for visible assistant activity such as prose, reasoning,
+  tools, control boundaries, and terminal status
+- `artifacts` for workspace/file references
+- `side_effects` for persisted state side effects
+- `metadata_events` for settlement/session metadata such as `settled_message`
+- `transport_events` for transport-only signals such as `stream_end`
+
+The registry may fill missing `run_id` / `stream_id` identity from the first
+matching normalized event, update lifecycle on terminal status, and copy the
+settled assistant message into `content.final_answer`. It rejects mismatched
+session or turn identity and skips duplicate live + replay observations by the
+same dedupe key.
+
+This slice deliberately keeps the ownership boundary inert: `send()`,
+`attachLiveStream()`, replay hydration, `renderMessages()`, `S.messages`,
+`INFLIGHT`, and DOM continuity still do not consume the registry. Later slices
+can replace local renderer-owned state with this owner instead of adding another
+parallel source of truth.
+
 ## Source Event Classification
 
 Phase 0 classifies current sources before changing render behavior:

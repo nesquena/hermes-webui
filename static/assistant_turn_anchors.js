@@ -1,8 +1,8 @@
 // Stable Assistant Turn Anchors scaffold (#3926).
 //
 // This file is intentionally inert: it defines the current ownership inventory,
-// event classifications, and small pure helpers, but it does not register
-// anchors or change any renderer. Later phases can wire these helpers into
+// event classifications, and small owner helpers, but it does not register
+// anchors globally or change any renderer. Later phases can wire these helpers into
 // send(), attachLiveStream(), replay hydration, and renderMessages().
 (function(){
   const ROOT=(typeof window!=='undefined')?window:globalThis;
@@ -374,6 +374,163 @@
     return out;
   }
 
+  function _copyObject(value){
+    if(!value||typeof value!=='object'||Array.isArray(value)) return {};
+    return {...value};
+  }
+
+  function _registryAnchor(registry){
+    return registry&&typeof registry==='object'&&registry.anchor&&typeof registry.anchor==='object'
+      ?registry.anchor
+      :null;
+  }
+
+  function _registryContext(registry, context){
+    const anchor=_registryAnchor(registry);
+    const identity=anchor&&anchor.identity?anchor.identity:{};
+    return {
+      ..._copyObject(context),
+      session_id:identity.session_id||_cleanString(context&&context.session_id),
+      turn_id:identity.turn_id||_cleanString(context&&context.turn_id),
+      run_id:identity.run_id||_cleanString(context&&context.run_id),
+      stream_id:identity.stream_id||_cleanString(context&&context.stream_id),
+    };
+  }
+
+  function _eventBelongsToAnchor(anchor, event){
+    const identity=anchor.identity||{};
+    const sessionId=_cleanString(event.session_id);
+    if(sessionId&&identity.session_id&&sessionId!==identity.session_id) return false;
+    const turnId=_cleanString(event.turn_id);
+    if(turnId&&identity.turn_id&&turnId!==identity.turn_id) return false;
+    return true;
+  }
+
+  function _ensureRegistryShape(registry){
+    const anchor=_registryAnchor(registry);
+    if(!anchor) throw new Error('assistant turn anchor registry requires anchor');
+    registry.event_index=registry.event_index&&typeof registry.event_index==='object'
+      ?registry.event_index
+      :{};
+    if(!Array.isArray(registry.event_index.dedupe_keys)) registry.event_index.dedupe_keys=[];
+    registry.stats=registry.stats&&typeof registry.stats==='object'?registry.stats:{};
+    registry.stats.applied=Number(registry.stats.applied)||0;
+    registry.stats.skipped_duplicate=Number(registry.stats.skipped_duplicate)||0;
+    registry.stats.skipped_excluded=Number(registry.stats.skipped_excluded)||0;
+    registry.stats.skipped_mismatched=Number(registry.stats.skipped_mismatched)||0;
+    if(!Array.isArray(anchor.metadata_events)) anchor.metadata_events=[];
+    if(!Array.isArray(anchor.transport_events)) anchor.transport_events=[];
+    return anchor;
+  }
+
+  function _syncAnchorIdentity(anchor, event){
+    const identity=anchor.identity||{};
+    if(!identity.run_id&&_cleanString(event.run_id)) identity.run_id=_cleanString(event.run_id);
+    if(!identity.stream_id&&_cleanString(event.stream_id)) identity.stream_id=_cleanString(event.stream_id);
+  }
+
+  function _firstTextValue(){
+    for(let i=0;i<arguments.length;i+=1){
+      const value=arguments[i];
+      if(typeof value==='string'&&value.length>0) return value;
+    }
+    return '';
+  }
+
+  function _messageRefFromPayload(payload, event){
+    return _firstTextValue(
+      payload&&payload.message_id,
+      payload&&payload.id,
+      payload&&payload.local_id,
+      event&&event.local_id,
+      event&&event.event_id
+    )||null;
+  }
+
+  function _updateLifecycleFromEvent(anchor, event){
+    const lifecycle=anchor.lifecycle||{};
+    if(!lifecycle.started_at&&event.created_at) lifecycle.started_at=event.created_at;
+    if((!lifecycle.status||lifecycle.status==='created')&&event.status==='running'){
+      lifecycle.status='running';
+    }
+    if(event.kind==='terminal_status'){
+      const terminal=_cleanString(event.status)||'completed';
+      lifecycle.status=terminal;
+      lifecycle.terminal_state=terminal;
+      lifecycle.completed_at=event.created_at||lifecycle.completed_at||null;
+    }
+    anchor.lifecycle=lifecycle;
+  }
+
+  function _updateContentFromMetadata(anchor, event){
+    const payload=event.payload||{};
+    if(event.source_event_type==='usage'){
+      anchor.usage=_copyObject(payload);
+      return;
+    }
+    if(event.source_event_type!=='settled_message') return;
+    if(payload.role&&payload.role!=='assistant') return;
+    const finalAnswer=_firstTextValue(payload.content,payload.text,payload.final_answer,payload.answer);
+    if(finalAnswer){
+      anchor.content=anchor.content||{};
+      anchor.content.final_answer=finalAnswer;
+      anchor.content.final_message_ref=_messageRefFromPayload(payload,event);
+    }
+    if(payload._turnUsage&&typeof payload._turnUsage==='object') anchor.usage=_copyObject(payload._turnUsage);
+    if(payload.usage&&typeof payload.usage==='object') anchor.usage=_copyObject(payload.usage);
+  }
+
+  function _routeAnchorEvent(anchor, normalized){
+    const event=normalized.anchor_event;
+    if(normalized.classification==='activity'){
+      anchor.activity_events.push(event);
+      _updateLifecycleFromEvent(anchor,event);
+    }else if(normalized.classification==='artifact'){
+      anchor.artifacts.push(event);
+    }else if(normalized.classification==='side_effect'){
+      anchor.side_effects.push(event);
+    }else if(normalized.classification==='metadata'){
+      anchor.metadata_events.push(event);
+      _updateContentFromMetadata(anchor,event);
+    }else if(normalized.classification==='transport'){
+      anchor.transport_events.push(event);
+    }
+  }
+
+  function applyAssistantTurnAnchorNormalizedEvent(registry, normalized){
+    const anchor=_ensureRegistryShape(registry);
+    const item=(normalized&&typeof normalized==='object')?normalized:{};
+    const event=item.anchor_event;
+    if(!event){
+      registry.stats.skipped_excluded+=1;
+      return Object.freeze({applied:false,reason:'excluded',normalized:item});
+    }
+    if(!_eventBelongsToAnchor(anchor,event)){
+      registry.stats.skipped_mismatched+=1;
+      return Object.freeze({applied:false,reason:'mismatched_anchor',normalized:item});
+    }
+    const dedupeKey=_cleanString(item.dedupe_key)||assistantTurnAnchorEventDedupeKey(event);
+    if(dedupeKey&&registry.event_index.dedupe_keys.indexOf(dedupeKey)!==-1){
+      registry.stats.skipped_duplicate+=1;
+      return Object.freeze({applied:false,reason:'duplicate',normalized:item});
+    }
+    if(dedupeKey) registry.event_index.dedupe_keys.push(dedupeKey);
+    _syncAnchorIdentity(anchor,event);
+    _routeAnchorEvent(anchor,item);
+    registry.stats.applied+=1;
+    return Object.freeze({applied:true,reason:null,normalized:item});
+  }
+
+  function applyAssistantTurnAnchorSourceEvent(registry, input, context){
+    const normalized=normalizeAssistantTurnAnchorSourceEvent(input,_registryContext(registry,context));
+    return applyAssistantTurnAnchorNormalizedEvent(registry,normalized);
+  }
+
+  function applyAssistantTurnAnchorSourceEvents(registry, events, context){
+    const list=Array.isArray(events)?events:[];
+    return list.map((event)=>applyAssistantTurnAnchorSourceEvent(registry,event,context));
+  }
+
   function createAssistantTurnAnchorSeed(input){
     const opts=(input&&typeof input==='object')?input:{};
     const sessionId=_cleanString(opts.session_id);
@@ -407,6 +564,8 @@
       activity_events:[],
       artifacts:[],
       side_effects:[],
+      metadata_events:[],
+      transport_events:[],
       usage:null,
       presentation_state:{
         compact_worklog:{expanded:false},
@@ -416,8 +575,25 @@
     };
   }
 
+  function createAssistantTurnAnchorRegistry(input){
+    const anchor=createAssistantTurnAnchorSeed(input);
+    return {
+      identity:anchor.identity,
+      anchor,
+      event_index:{
+        dedupe_keys:[],
+      },
+      stats:{
+        applied:0,
+        skipped_duplicate:0,
+        skipped_excluded:0,
+        skipped_mismatched:0,
+      },
+    };
+  }
+
   ROOT.HermesAssistantTurnAnchors=Object.freeze({
-    version:'slice2-normalizer',
+    version:'slice3-registry',
     activityEventKinds:ACTIVITY_EVENT_KINDS,
     stateLayers:STATE_LAYERS,
     sourceEventClassification:SOURCE_EVENT_CLASSIFICATION,
@@ -427,6 +603,10 @@
     classifyAssistantTurnAnchorSourceEvent,
     normalizeAssistantTurnAnchorSourceEvent,
     normalizeAssistantTurnAnchorSourceEvents,
+    createAssistantTurnAnchorRegistry,
+    applyAssistantTurnAnchorNormalizedEvent,
+    applyAssistantTurnAnchorSourceEvent,
+    applyAssistantTurnAnchorSourceEvents,
     isAssistantTurnAnchorActivityKind,
   });
 })();

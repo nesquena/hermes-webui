@@ -1,4 +1,4 @@
-"""Slice 2 normalizer tests for Stable Assistant Turn Anchors (#3926)."""
+"""Normalizer tests for Stable Assistant Turn Anchors (#3926)."""
 from __future__ import annotations
 
 import json
@@ -180,7 +180,7 @@ def test_normalizer_maps_live_and_replay_to_same_anchor_event_identity():
     live = data["liveToken"]
     replay = data["replayToken"]
 
-    assert data["version"] == "slice2-normalizer"
+    assert data["version"] == "slice3-registry"
     assert live["classification"] == "activity"
     assert live["dedupe_key"] == 'event_id:"run-1:7"'
     assert replay["dedupe_key"] == live["dedupe_key"]
@@ -321,10 +321,13 @@ def test_structured_fallback_dedupe_keys_do_not_collide_on_delimiters():
     assert data["localCollisionA"] != data["localCollisionB"]
 
 
-def test_slice2_normalizer_is_still_unwired_from_rendering_hot_paths():
+def test_normalizer_and_registry_helpers_are_still_unwired_from_rendering_hot_paths():
     helper_names = [
         "normalizeAssistantTurnAnchorSourceEvent",
         "normalizeAssistantTurnAnchorSourceEvents",
+        "createAssistantTurnAnchorRegistry",
+        "applyAssistantTurnAnchorSourceEvent",
+        "applyAssistantTurnAnchorSourceEvents",
     ]
     for helper in helper_names:
         assert helper not in _read(UI_JS)
