@@ -944,20 +944,15 @@ async function loadSession(sid){
           }
         }
       } else {
-        // Non-404 failure: clear the stuck session ID only during boot
+        // Non-404, non-401 failure (400, 403, 500, network): 401 is handled
+        // via the if(!data) guard below since api() returns undefined on 401
+        // rather than throwing. Clear the stuck session ID only during boot
         // (!currentSid) so the next boot doesn't retry the same dead session.
         // When currentSid is set, a 500/network error may be transient — the
         // session might still exist on the server (#4028 follow-up).
         _clearStuckSessionOnBoot(sid, currentSid);
-        if(e.status===401){
-          _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Authentication required. Redirecting…</div>';
-        } else {
-          _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
-        }
-        if(typeof showToast==='function'){
-          if(e.status===401) showToast('Authentication required',3000,'error');
-          else showToast('Failed to load session',3000,'error');
-        }
+        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
+        if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }
     }
     _clearSameSessionForceReloadHint(sid);
