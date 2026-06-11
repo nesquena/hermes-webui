@@ -75,3 +75,27 @@ def test_does_not_clear_when_viewing_a_healthy_session():
     data = _run_helper("'live-session-123'")
     assert data["removed"] is False
     assert data["replaced"] is False
+
+
+def test_stale_load_guard_present_before_self_heal():
+    """A superseded in-flight load (a newer loadSession started during the await)
+    must bail BEFORE any self-heal/DOM mutation, so a failed boot restore can't
+    wipe localStorage/URL for the session the user navigated to mid-flight (Codex
+    race finding). The guard re-arms the active stream and returns."""
+    js = _read(SESSIONS_JS)
+    # Anchor on the self-heal CALL (unique; the bare name also appears in the
+    # helper's docstring), then look at the preceding window of the same
+    # loadSession catch block for the stale-load guard.
+    heal_idx = js.index("_clearStuckSessionOnBoot(sid, currentSid);")
+    block = js[heal_idx - 2400: heal_idx + 60]
+    guard = "if (_loadingSessionId !== sid) {"
+    assert guard in block, "stale-load guard missing from the loadSession catch block"
+    # The guard must come BEFORE the self-heal call (so a superseded load can't clear).
+    assert block.index(guard) < block.index("_clearStuckSessionOnBoot(sid, currentSid);"), \
+        "stale-load guard must precede _clearStuckSessionOnBoot"
+    # And before the 404 inline clear too.
+    assert block.index(guard) < block.index("localStorage.removeItem('hermes-webui-session')"), \
+        "stale-load guard must precede the 404 inline self-heal"
+    # It re-arms the active stream rather than leaving it torn down.
+    guard_tail = block[block.index(guard): block.index(guard) + 120]
+    assert "_rearmActiveSessionStream()" in guard_tail

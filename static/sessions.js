@@ -921,6 +921,17 @@ async function loadSession(sid){
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const _msgInner = $('msgInner');
+    // Stale-load guard (Codex): a newer loadSession() may have started while this
+    // request was awaiting (e.g. the user clicked a healthy session during a
+    // boot-time restore). currentSid was snapshotted before the await, so without
+    // this guard a failed superseded load could self-heal (wipe localStorage/URL)
+    // for the session the user actually navigated to. If we no longer own the
+    // load, re-arm the active session's stream and bail before any DOM mutation
+    // or self-heal.
+    if (_loadingSessionId !== sid) {
+      _rearmActiveSessionStream();
+      return;
+    }
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
