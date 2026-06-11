@@ -1517,7 +1517,7 @@ function applyEmptyStateSuggestionPref(){
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
-  _forceMobileViewportReflow();
+  if(!window.visualViewport) _forceMobileViewportReflow();
 });
 
 if(window.visualViewport){
