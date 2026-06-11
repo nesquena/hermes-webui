@@ -31,6 +31,10 @@ does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
   proposed product model for long-running assistant replies, live process text,
   tool activity, recovery, terminal outcomes, and final-answer boundaries. Start
   here for UI/UX changes to running-session assistant reply rendering.
+- [`docs/architecture/stable-assistant-turn-anchor-phase0.md`](architecture/stable-assistant-turn-anchor-phase0.md):
+  current Phase 0 inventory for the Stable Assistant Turn Anchors work under
+  #3926. Use this before wiring anchor helpers into live SSE, replay,
+  settlement, `INFLIGHT`, or `renderMessages()` paths.
 - [`docs/rfcs/canonical-session-resolution.md`](rfcs/canonical-session-resolution.md):
   proposed contract for resolving URL routes, query parameters, localStorage,
   sidebar rows, and compression-lineage IDs to one canonical visible session
