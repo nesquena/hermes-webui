@@ -855,6 +855,7 @@ window._micPendingSend=window._micPendingSend||false;
   let _voiceModeThinkingSid=null;
   let _browserTtsKeepAlive=null;
   let _browserTtsWatchdog=null;
+  let _browserTtsSuppressNextErrorRearm=false;
   const SILENCE_MS=1800; // auto-send after 1.8s silence
 
   function _clearBrowserTtsRecovery(){
@@ -870,11 +871,13 @@ window._micPendingSend=window._micPendingSend||false;
 
   function _armBrowserTtsRecovery(clean, rate){
     _clearBrowserTtsRecovery();
+    _browserTtsSuppressNextErrorRearm=false;
     const safeRate=(Number.isFinite(rate)&&rate>0)?rate:1;
     // Chromium can drop utter.onend on later turns, so force a recovery path.
     const watchdogMs=Math.max(4000,Math.round((String(clean||'').length/(12*safeRate))*1000)+10000);
     _browserTtsWatchdog=setTimeout(()=>{
       if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      _browserTtsSuppressNextErrorRearm=true;
       try{ speechSynthesis.cancel(); }catch(_){}
       _clearBrowserTtsRecovery();
       _startListening();
@@ -1095,12 +1098,17 @@ window._micPendingSend=window._micPendingSend||false;
     if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
 
     utter.onend=()=>{
+      _browserTtsSuppressNextErrorRearm=false;
       _clearBrowserTtsRecovery();
       // After speaking, go back to listening
       if(_voiceModeActive) setTimeout(()=>_startListening(),500);
     };
     utter.onerror=()=>{
       _clearBrowserTtsRecovery();
+      if(_browserTtsSuppressNextErrorRearm){
+        _browserTtsSuppressNextErrorRearm=false;
+        return;
+      }
       if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
     };
 
@@ -1167,6 +1175,7 @@ window._micPendingSend=window._micPendingSend||false;
     _voiceModeActive=false;
     _voiceModeState='idle';
     _voiceModeThinkingSid=null;
+    _browserTtsSuppressNextErrorRearm=false;
     modeBtn.classList.remove('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
     bar.style.display='none';

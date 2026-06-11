@@ -9,6 +9,7 @@ def test_boot_js_declares_browser_tts_recovery_helpers():
     src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
     assert "let _browserTtsKeepAlive=null;" in src
     assert "let _browserTtsWatchdog=null;" in src
+    assert "let _browserTtsSuppressNextErrorRearm=false;" in src
     assert "function _clearBrowserTtsRecovery()" in src
     assert "function _armBrowserTtsRecovery(clean, rate)" in src
 
@@ -20,6 +21,7 @@ def test_browser_tts_watchdog_rearms_listening_if_onend_drops():
     arm_body = src[arm_idx : arm_idx + 1400]
     assert "_browserTtsWatchdog=setTimeout" in arm_body
     assert "_voiceModeState!=='speaking'" in arm_body
+    assert "_browserTtsSuppressNextErrorRearm=true;" in arm_body
     assert "speechSynthesis.cancel()" in arm_body
     assert "_startListening();" in arm_body
     assert "_browserTtsKeepAlive=setInterval" in arm_body
@@ -37,6 +39,8 @@ def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
     assert speak_body.count("_clearBrowserTtsRecovery();") >= 2, (
         "Both browser TTS completion callbacks must clear watchdog/keep-alive handles."
     )
+    assert "_browserTtsSuppressNextErrorRearm=false;" in speak_body
+    assert "if(_browserTtsSuppressNextErrorRearm){" in speak_body
     assert "_armBrowserTtsRecovery(clean, utter.rate);" in speak_body
 
     deactivate_match = re.search(
@@ -49,6 +53,7 @@ def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
     assert "_clearBrowserTtsRecovery();" in deactivate_body, (
         "_deactivate() must clear browser TTS watchdog/keep-alive handles."
     )
+    assert "_browserTtsSuppressNextErrorRearm=false;" in deactivate_body
 
 
 def test_edge_audio_branch_stays_separate():
