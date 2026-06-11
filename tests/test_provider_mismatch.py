@@ -1,0 +1,1794 @@
+"""
+Tests for issue #266 — provider/model mismatch warning.
+
+Covers:
+  1. streaming.py: auth errors detected and classified as 'auth_mismatch'
+  2. static/ui.js: _checkProviderMismatch() helper exists and logic is correct
+  3. static/messages.js: apperror handler has auth_mismatch branch
+  4. static/i18n.js: provider_mismatch_warning and provider_mismatch_label keys
+     present in all locales (en, es, de, ru, zh, zh-Hant)
+  5. static/boot.js: modelSelect.onchange calls _checkProviderMismatch
+  6. /api/models: response includes active_provider field
+"""
+import json
+import pathlib
+import re
+import urllib.request
+from tests.conftest import TEST_STATE_DIR
+
+REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
+from tests._pytest_port import BASE
+
+
+def _read(rel_path: str) -> str:
+    return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+
+
+def _post(path, body=None):
+    data = json.dumps(body or {}).encode()
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read()), r.status
+
+
+# ── 1. streaming.py: auth error detection ───────────────────────────────────
+
+class TestStreamingAuthErrorDetection:
+    """streaming.py must classify auth/401 errors as auth_mismatch."""
+
+    def test_auth_mismatch_type_defined_in_streaming(self):
+        """'auth_mismatch' type must be emitted for auth errors."""
+        src = _read("api/streaming.py")
+        assert "auth_mismatch" in src, (
+            "auth_mismatch type not found in streaming.py — "
+            "401/auth errors will not be surfaced with a helpful message"
+        )
+
+    def test_is_auth_error_flag_defined(self):
+        """auth error variable must exist in the error handler (exception path and silent-failure path)."""
+        src = _read("api/streaming.py")
+        # Variable renamed to _exc_is_auth in exception path, _is_auth in silent-failure path
+        assert "_exc_is_auth" in src or "_is_auth" in src, (
+            "auth error flag not found in streaming.py"
+        )
+
+    def test_auth_error_detects_401(self):
+        """'401' must be part of the auth error detection logic."""
+        src = _read("api/streaming.py")
+        # Find the is_auth_error block
+        # Variable renamed to _exc_is_auth in exception path, _is_auth in silent-failure path
+        idx = src.find("_exc_is_auth")
+        assert idx != -1
+        block = src[idx:idx + 500]
+        assert "'401'" in block or '"401"' in block, (
+            "'401' not in auth error detection block"
+        )
+
+    def test_auth_error_detects_unauthorized(self):
+        """'unauthorized' must be part of the auth error detection logic."""
+        src = _read("api/streaming.py")
+        # Variable renamed to _exc_is_auth in exception path
+        idx = src.find("_exc_is_auth")
+        block = src[idx:idx + 500]
+        assert "unauthorized" in block.lower(), (
+            "'unauthorized' not in auth error detection block"
+        )
+
+    def test_auth_error_hint_mentions_hermes_model(self):
+        """The auth_mismatch hint must mention 'hermes model' command."""
+        src = _read("api/streaming.py")
+        # Find the auth_mismatch apperror block
+        idx = src.find("auth_mismatch")
+        block = src[idx:idx + 500]
+        assert "hermes model" in block, (
+            "auth_mismatch hint must mention 'hermes model' command "
+            "so users know how to fix provider mismatch"
+        )
+
+    def test_auth_error_does_not_catch_rate_limit(self):
+        """Rate limit errors must not be reclassified as auth_mismatch."""
+        src = _read("api/streaming.py")
+        # Variables renamed: _exc_is_rate_limit / _exc_is_auth in exception path
+        # Quota check comes first (before rate limit), then rate limit, then auth
+        rl_idx = src.find("_exc_is_rate_limit")
+        ae_idx = src.find("_exc_is_auth")
+        assert rl_idx != -1, "_exc_is_rate_limit not found in streaming.py exception path"
+        assert ae_idx != -1, "_exc_is_auth not found in streaming.py exception path"
+        assert rl_idx < ae_idx, (
+            "_exc_is_rate_limit check should precede _exc_is_auth — "
+            "rate limit errors must not be mistaken for auth errors"
+        )
+
+
+# ── 2. static/ui.js: _checkProviderMismatch() ───────────────────────────────
+
+class TestCheckProviderMismatch:
+    """ui.js must expose _checkProviderMismatch() helper."""
+
+    def test_function_defined(self):
+        """_checkProviderMismatch function must be defined in ui.js."""
+        src = _read("static/ui.js")
+        assert "function _checkProviderMismatch" in src, (
+            "_checkProviderMismatch not defined in ui.js"
+        )
+
+    def test_uses_window_active_provider(self):
+        """Function must read window._activeProvider."""
+        src = _read("static/ui.js")
+        idx = src.find("function _checkProviderMismatch")
+        block = src[idx:idx + 800]
+        assert "_activeProvider" in block, (
+            "_checkProviderMismatch must read window._activeProvider"
+        )
+
+    def test_skips_check_for_openrouter(self):
+        """OpenRouter can route to any provider — skip the warning."""
+        src = _read("static/ui.js")
+        idx = src.find("function _checkProviderMismatch")
+        block = src[idx:idx + 800]
+        assert "_providerSkipsModelMismatchWarning(ap)" in block, (
+            "_checkProviderMismatch must skip the check for openrouter"
+        )
+        helper_idx = src.find("function _providerSkipsModelMismatchWarning")
+        helper = src[helper_idx:helper_idx + 350]
+        assert "openrouter" in helper.lower(), (
+            "_providerSkipsModelMismatchWarning must skip OpenRouter"
+        )
+
+    def test_skips_check_for_custom(self):
+        """Custom endpoints can serve any model — skip the warning."""
+        src = _read("static/ui.js")
+        idx = src.find("function _checkProviderMismatch")
+        block = src[idx:idx + 800]
+        assert "_providerSkipsModelMismatchWarning(ap)" in block, (
+            "_checkProviderMismatch must skip the check for custom provider"
+        )
+        helper_idx = src.find("function _providerSkipsModelMismatchWarning")
+        helper = src[helper_idx:helper_idx + 350]
+        assert "p==='custom'" in helper, (
+            "_providerSkipsModelMismatchWarning must skip bare custom providers"
+        )
+
+    def test_skips_check_for_named_custom_provider(self):
+        """Named custom providers are aggregators too — skip the warning."""
+        src = _read("static/ui.js")
+        idx = src.find("function _checkProviderMismatch")
+        block = src[idx:idx + 800]
+        assert "_providerSkipsModelMismatchWarning(ap)" in block, (
+            "_checkProviderMismatch must skip named custom providers like custom:zenmux"
+        )
+        helper_idx = src.find("function _providerSkipsModelMismatchWarning")
+        assert helper_idx != -1, "named custom provider skip helper must exist"
+        helper = src[helper_idx:helper_idx + 350]
+        assert "p.startsWith('custom:')" in helper, (
+            "named custom providers must be treated like custom aggregators"
+        )
+
+    def test_active_provider_stored_on_model_load(self):
+        """populateModelDropdown must store active_provider from /api/models."""
+        src = _read("static/ui.js")
+        # Find the function definition (skip the comment that also mentions the name)
+        idx = src.find("async function populateModelDropdown")
+        assert idx != -1, "async function populateModelDropdown not found"
+        block = src[idx:idx + 800]
+        assert "_activeProvider" in block, (
+            "populateModelDropdown must set window._activeProvider "
+            "from the /api/models response"
+        )
+
+
+# ── 3. static/messages.js: apperror handler ─────────────────────────────────
+
+class TestApperrorHandler:
+    """messages.js apperror handler must handle auth_mismatch type."""
+
+    def test_auth_mismatch_type_handled(self):
+        """apperror handler must check for type='auth_mismatch'."""
+        src = _read("static/messages.js")
+        assert "auth_mismatch" in src, (
+            "auth_mismatch type not handled in messages.js apperror handler"
+        )
+
+    def test_provider_mismatch_label(self):
+        """'Provider mismatch' label must appear in the error handling."""
+        src = _read("static/messages.js")
+        assert "Provider mismatch" in src, (
+            "'Provider mismatch' label not found in messages.js"
+        )
+
+    def test_is_auth_mismatch_variable(self):
+        """isAuthMismatch variable must be defined."""
+        src = _read("static/messages.js")
+        assert "isAuthMismatch" in src, (
+            "isAuthMismatch variable not found in messages.js apperror handler"
+        )
+
+
+# ── 4. static/i18n.js: all locales ───────────────────────────────────────────
+
+class TestI18nProviderMismatch:
+    """All locales must have provider_mismatch_warning and provider_mismatch_label."""
+
+    REQUIRED_KEYS = ["provider_mismatch_warning", "provider_mismatch_label"]
+
+    def _locale_names(self, src: str) -> list[str]:
+        pattern = re.compile(
+            r"^\s{2}(?:'(?P<quoted>[A-Za-z0-9-]+)'|(?P<plain>[A-Za-z0-9-]+))\s*:\s*\{",
+            re.MULTILINE,
+        )
+        names = []
+        for match in pattern.finditer(src):
+            names.append(match.group("quoted") or match.group("plain"))
+        return names
+
+    def _count_key(self, src: str, key: str) -> int:
+        return len(re.findall(r'\b' + re.escape(key) + r'\b', src))
+
+    def test_all_locales_have_warning_key(self):
+        """provider_mismatch_warning must appear in all locales."""
+        src = _read("static/i18n.js")
+        locale_count = len(self._locale_names(src))
+        count = self._count_key(src, "provider_mismatch_warning")
+        assert count >= locale_count, (
+            f"provider_mismatch_warning found {count} times, expected >= {locale_count} "
+            f"(one per locale)"
+        )
+
+    def test_all_locales_have_label_key(self):
+        """provider_mismatch_label must appear in all locales."""
+        src = _read("static/i18n.js")
+        locale_count = len(self._locale_names(src))
+        count = self._count_key(src, "provider_mismatch_label")
+        assert count >= locale_count, (
+            f"provider_mismatch_label found {count} times, expected >= {locale_count}"
+        )
+
+    def test_warning_is_function_in_en(self):
+        """English provider_mismatch_warning must be a function (m, p) => ..."""
+        src = _read("static/i18n.js")
+        # Find the en block
+        en_start = src.find("\n  en: {")
+        es_start = src.find("\n  es: {")
+        en_block = src[en_start:es_start]
+        assert "provider_mismatch_warning" in en_block, "Key not in en block"
+        idx = en_block.find("provider_mismatch_warning")
+        line = en_block[idx:idx + 200]
+        # Must be a function, not a plain string
+        assert "=>" in line, (
+            "provider_mismatch_warning in en locale must be an arrow function "
+            "that takes (m, p) parameters for model and provider interpolation"
+        )
+
+    def test_spanish_locale_key_coverage(self):
+        """Spanish locale must have the new keys (parity with English)."""
+        src = _read("static/i18n.js")
+        es_start = src.find("\n  es: {")
+        de_start = src.find("\n  de: {")
+        es_block = src[es_start:de_start]
+        for key in self.REQUIRED_KEYS:
+            assert key in es_block, f"Key '{key}' missing from Spanish locale"
+
+
+# ── 5. static/boot.js: dropdown change handler ──────────────────────────────
+
+class TestBootModelSelectChange:
+    """boot.js modelSelect.onchange must call _checkProviderMismatch."""
+
+    def test_onchange_calls_check_function(self):
+        """modelSelect.onchange must invoke _checkProviderMismatch."""
+        src = _read("static/boot.js")
+        assert "_checkProviderMismatch" in src, (
+            "boot.js modelSelect.onchange must call _checkProviderMismatch "
+            "to warn users about provider/model mismatches"
+        )
+        # Verify it's called from the onchange handler (near modelSelect.onchange)
+        idx = src.find("'modelSelect').onchange") or src.find('"modelSelect").onchange')
+        if idx == -1:
+            # Try alternate patterns
+            idx = src.find("modelSelect")
+        block_start = src.rfind("\n", 0, src.find("_checkProviderMismatch")) or 0
+        surrounding = src[max(0, block_start - 200):block_start + 400]
+        assert "modelSelect" in surrounding or "selectedModel" in surrounding, (
+            "_checkProviderMismatch must be called in the context of model selection"
+        )
+
+    def test_onchange_shows_toast_on_mismatch(self):
+        """The warning must be shown via showToast, not alert()."""
+        src = _read("static/boot.js")
+        # Both _checkProviderMismatch call and showToast must be near each other
+        idx = src.find("_checkProviderMismatch")
+        assert idx != -1, "_checkProviderMismatch not found in boot.js"
+        block = src[idx:idx + 300]
+        assert "showToast" in block, (
+            "Provider mismatch warning must be shown via showToast(), not alert()"
+        )
+
+
+# ── 6. /api/models: active_provider in response ──────────────────────────────
+
+def test_api_models_includes_active_provider():
+    """/api/models must include 'active_provider' key in response."""
+    with urllib.request.urlopen(BASE + "/api/models", timeout=10) as r:
+        data = json.loads(r.read())
+    # active_provider can be None/null but the key must exist
+    assert "active_provider" in data, (
+        "/api/models response missing 'active_provider' field — "
+        "frontend needs this to detect provider mismatches"
+    )
+
+
+def test_codex_provider_qualified_model_routes_to_codex_not_openrouter():
+    """@openai-codex:gpt-5.5 must route through OpenAI Codex, not OpenRouter."""
+    import api.config as config
+
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "openrouter",
+        "base_url": "https://openrouter.ai/api/v1",
+    }
+    try:
+        model, provider, base_url = config.resolve_model_provider(
+            "@openai-codex:gpt-5.5"
+        )
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert model == "gpt-5.5"
+    assert provider == "openai-codex"
+    assert provider != "openrouter"
+    assert base_url is None
+
+
+def test_default_model_save_persists_codex_provider_for_qualified_model(tmp_path, monkeypatch):
+    """Saving @openai-codex:gpt-5.5 must persist model.provider=openai-codex."""
+    import yaml
+    import api.config as config
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "model:\n"
+        "  provider: openrouter\n"
+        "  default: openai/gpt-5.4\n"
+        "  base_url: https://openrouter.ai/api/v1\n",
+        encoding="utf-8",
+    )
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_file)
+    config.cfg["model"] = {
+        "provider": "openrouter",
+        "default": "openai/gpt-5.4",
+        "base_url": "https://openrouter.ai/api/v1",
+    }
+    config._cfg_mtime = config_file.stat().st_mtime
+    try:
+        result = config.set_hermes_default_model("@openai-codex:gpt-5.5")
+        saved = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
+        config.invalidate_models_cache()
+
+    assert result["ok"] is True
+    assert result["model"] == "gpt-5.5"
+    assert saved["model"]["default"] == "gpt-5.5"
+    assert saved["model"]["provider"] == "openai-codex"
+    assert saved["model"].get("base_url") != "https://openrouter.ai/api/v1"
+
+
+def test_active_codex_at_provider_session_model_preserved(monkeypatch):
+    """@openai-codex:gpt-5.5 session selections must keep their provider hint."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+                {
+                    "provider": "OpenRouter",
+                    "provider_id": "openrouter",
+                    "models": [{"id": "openai/gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@openai-codex:gpt-5.5"
+    )
+
+    assert changed is False
+    assert effective == "@openai-codex:gpt-5.5"
+
+
+def test_bare_codex_gpt_session_model_gets_separate_provider_context(monkeypatch):
+    """A bare GPT model under active Codex stays bare and carries model_provider."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+                {
+                    "provider": "OpenRouter",
+                    "provider_id": "openrouter",
+                    "models": [{"id": "openai/gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state("gpt-5.5")
+
+    assert changed is False
+    assert effective == "gpt-5.5"
+    assert provider == "openai-codex"
+
+
+def test_session_model_normalizer_keeps_bare_codex_model_and_saves_provider(monkeypatch):
+    """Write-path normalization must persist model_provider without adding @."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        def __init__(self):
+            self.model = "gpt-5.5"
+            self.model_provider = None
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(touch_updated_at)
+
+    session = DummySession()
+    effective = routes._normalize_session_model_in_place(session)
+
+    assert effective == "gpt-5.5"
+    assert session.model == "gpt-5.5"
+    assert session.model_provider == "openai-codex"
+    assert save_calls == [False]
+
+
+def test_bare_codex_gpt_runtime_bridge_routes_to_codex(monkeypatch):
+    """Bare model + model_provider=openai-codex must route Codex at runtime."""
+    import api.config as config
+
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "openrouter",
+        "default": "openai/gpt-5.4",
+        "base_url": "https://openrouter.ai/api/v1",
+    }
+    try:
+        runtime_model = config.model_with_provider_context(
+            "gpt-5.5",
+            "openai-codex",
+        )
+        model, provider, base_url = config.resolve_model_provider(runtime_model)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert runtime_model == "@openai-codex:gpt-5.5"
+    assert model == "gpt-5.5"
+    assert provider == "openai-codex"
+    assert base_url is None
+
+
+def test_non_openrouter_slash_model_provider_context_stays_unqualified():
+    """Portal/custom slash IDs must not be blindly wrapped as @provider:model."""
+    import api.config as config
+
+    runtime_model = config.model_with_provider_context(
+        "anthropic/claude-sonnet-4.6",
+        "nous",
+    )
+
+    assert runtime_model == "anthropic/claude-sonnet-4.6"
+
+
+def test_cursor_acp_slash_model_always_gets_provider_hint():
+    """ACP subprocess models with '/' must not fall through to config default."""
+    import api.config as config
+
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "openai-codex",
+        "default": "gpt-5.5",
+    }
+    try:
+        runtime_model = config.model_with_provider_context(
+            "cursor/composer-2.5",
+            "cursor-acp",
+        )
+        model, provider, base_url = config.resolve_model_provider(runtime_model)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert runtime_model == "@cursor-acp:cursor/composer-2.5"
+    assert model == "cursor/composer-2.5"
+    assert provider == "cursor-acp"
+    assert base_url is None
+
+
+def test_api_session_new_persists_model_provider_context():
+    """POST /api/session/new returns compact session model_provider metadata."""
+    created, status = _post(
+        "/api/session/new",
+        {"model": "gpt-5.5", "model_provider": "openai-codex"},
+    )
+
+    assert status == 200
+    assert created["session"]["model"] == "gpt-5.5"
+    assert created["session"]["model_provider"] == "openai-codex"
+
+
+def test_explicit_openrouter_selection_supported_with_codex_base_url():
+    """OpenRouter slash and @openrouter selections must remain routable."""
+    import api.config as config
+
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "openai-codex",
+        "default": "gpt-5.5",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+    }
+    try:
+        slash_model, slash_provider, slash_base_url = config.resolve_model_provider(
+            "openai/gpt-5.5"
+        )
+        at_model, at_provider, at_base_url = config.resolve_model_provider(
+            "@openrouter:openai/gpt-5.5"
+        )
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert slash_model == "openai/gpt-5.5"
+    assert slash_provider == "openrouter"
+    assert slash_base_url is None
+    assert at_model == "openai/gpt-5.5"
+    assert at_provider == "openrouter"
+    assert at_base_url is None
+
+
+def test_real_provider_custom_base_url_slash_model_stays_on_configured_endpoint():
+    """A real-provider proxy base_url must not be silently rerouted to OpenRouter."""
+    import api.config as config
+
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "openai",
+        "default": "google/gemma-4-26b-a4b",
+        "base_url": "http://proxy.local/v1",
+    }
+    try:
+        model, provider, base_url = config.resolve_model_provider(
+            "google/gemma-4-26b-a4b"
+        )
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert model == "gemma-4-26b-a4b"
+    assert provider == "openai"
+    assert provider != "openrouter"
+    assert base_url == "http://proxy.local/v1"
+
+
+def test_bare_gemini_session_model_normalizes_to_active_provider_default(monkeypatch):
+    """Persisted bare Gemini IDs must not survive a provider switch."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "gemini-3.1-pro-preview"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.4-mini"
+
+
+def test_prefixed_google_session_model_normalizes_to_active_provider_default(monkeypatch):
+    """Persisted provider-prefixed Gemini IDs must normalize too."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "google/gemini-3.1-pro-preview"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.4-mini"
+
+
+def test_legacy_at_provider_session_model_normalizes_when_provider_hidden(monkeypatch):
+    """Old @provider:model session values must not bypass stale-model recovery."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@copilot:gpt-5.5"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.5"
+
+
+def test_active_at_provider_session_model_preserved_with_hint(monkeypatch):
+    """@active-provider:model must be preserved — stripping the prefix breaks duplicate-ID routing.
+
+    Before #1253 was fixed, this path stripped the @provider: prefix and returned
+    the bare model ID. That caused the picker to snap to the first matching provider
+    (not the explicitly selected one) on the next send, and the agent to run on the
+    wrong provider. The fix returns the full @provider:model unchanged so
+    resolve_model_provider() can route through the correct provider.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@openai-codex:gpt-5.4-mini"
+    )
+
+    # Must preserve the full @provider:model so resolve_model_provider() routes
+    # through openai-codex, not through whatever provider happens to be first.
+    assert changed is False
+    assert effective == "@openai-codex:gpt-5.4-mini"
+
+
+def test_routable_non_active_at_provider_session_model_is_preserved(monkeypatch):
+    """Visible cross-provider dropdown selections must keep their provider hint."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+                {
+                    "provider": "GitHub Copilot",
+                    "provider_id": "copilot",
+                    "models": [{"id": "@copilot:gpt-5.4", "label": "GPT-5.4"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@copilot:gpt-5.4"
+    )
+
+    assert changed is False
+    assert effective == "@copilot:gpt-5.4"
+
+
+def test_issue1253_duplicate_model_id_active_provider_hint_preserved(monkeypatch):
+    """@provider:model where hint matches active provider must survive _resolve_compatible_session_model.
+
+    Regression test for #1253: when two providers both expose the same bare model ID
+    (e.g. both custom:edith and openai both expose 'gpt-5.4'), the picker stores the
+    selection as @custom:gpt-5.4. On chat/start that value must be returned unchanged
+    so resolve_model_provider() routes to 'custom', not to the default provider.
+
+    Before the fix, hint_matches_active=True caused the prefix to be stripped:
+      '@custom:gpt-5.4' → ('gpt-5.4', True)
+    which then got written back to disk and sent as effective_model, snapping the
+    picker to the first (wrong) provider.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "custom",
+            "default_model": "gpt-5.4",
+            "groups": [
+                {
+                    "provider": "Custom",
+                    "provider_id": "custom",
+                    "models": [{"id": "@custom:edith", "label": "Edith"}],
+                },
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.4", "label": "GPT-5.4"}],
+                },
+            ],
+        },
+    )
+
+    # User selected the custom:edith model — explicit @provider:model form.
+    effective, changed = routes._resolve_compatible_session_model("@custom:edith")
+
+    # Must NOT be stripped to 'edith' — that would route to the default provider.
+    assert changed is False, (
+        f"_resolve_compatible_session_model must not strip @custom:edith "
+        f"(got effective='{effective}', changed={changed})"
+    )
+    assert effective == "@custom:edith", (
+        f"expected '@custom:edith', got '{effective}'"
+    )
+
+
+def test_named_custom_provider_hint_with_colon_is_preserved(monkeypatch):
+    """@custom:name:model must survive chat/start normalization for WebUI routing."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "deepseek",
+            "default_model": "deepseek-v4-pro",
+            "groups": [
+                {
+                    "provider": "sub2api",
+                    "provider_id": "custom:sub2api",
+                    "models": [
+                        {
+                            "id": "@custom:sub2api:gpt-5.4-mini",
+                            "label": "GPT 5.4 Mini",
+                        }
+                    ],
+                },
+                {
+                    "provider": "DeepSeek",
+                    "provider_id": "deepseek",
+                    "models": [
+                        {
+                            "id": "deepseek-v4-pro",
+                            "label": "DeepSeek V4 Pro",
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@custom:sub2api:gpt-5.4-mini"
+    )
+
+    assert changed is False
+    assert effective == "@custom:sub2api:gpt-5.4-mini"
+
+
+def test_issue1734_stale_openai_slash_session_model_repairs_to_codex(monkeypatch):
+    """Legacy openai/... session IDs must not route to OpenRouter when Codex is active."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+                {
+                    "provider": "OpenRouter",
+                    "provider_id": "openrouter",
+                    "models": [{"id": "openai/gpt-5.4-mini", "label": "GPT-5.4 Mini"}],
+                },
+            ],
+        },
+    )
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "openai/gpt-5.4-mini",
+        None,
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.5"
+    assert provider == "openai-codex"
+
+
+def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
+    """/api/chat/start should save repaired Codex model state before spawning."""
+    import contextlib
+    import io
+    import json
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        session_id = "issue1734_session"
+        workspace = "/tmp/hermes-webui-test"
+        model = "openai/gpt-5.4-mini"
+        model_provider = None
+        active_stream_id = None
+        pending_user_message = None
+        pending_attachments = []
+        pending_started_at = None
+        messages = [{"role": "user", "content": "old"}]
+        context_messages = []
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(
+                {
+                    "touch_updated_at": touch_updated_at,
+                    "model": self.model,
+                    "model_provider": self.model_provider,
+                    "pending_user_message": self.pending_user_message,
+                }
+            )
+
+    captured_thread = {}
+
+    class FakeThread:
+        def __init__(self, target, args=(), kwargs=None, daemon=None):
+            captured_thread.update(
+                {"target": target, "args": args, "kwargs": kwargs or {}, "daemon": daemon}
+            )
+
+        def start(self):
+            captured_thread["started"] = True
+
+    class FakeHandler:
+        def __init__(self):
+            self.wfile = io.BytesIO()
+            self.status = None
+            self.sent_headers = {}
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.sent_headers[key] = value
+
+        def end_headers(self):
+            pass
+
+    session = DummySession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
+    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+
+    handler = FakeHandler()
+    routes._handle_chat_start(
+        handler,
+        {"session_id": session.session_id, "message": "new turn"},
+    )
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+    assert handler.status == 200
+    assert payload["effective_model"] == "gpt-5.5"
+    assert payload["effective_model_provider"] == "openai-codex"
+    assert session.model == "gpt-5.5"
+    assert session.model_provider == "openai-codex"
+    assert captured_thread["args"][2] == "gpt-5.5"
+    assert captured_thread["kwargs"]["model_provider"] == "openai-codex"
+    assert save_calls[-1]["model_provider"] == "openai-codex"
+
+
+def test_stale_at_provider_model_falls_back_when_family_mismatches(monkeypatch):
+    """Unroutable @provider:model should not invent a bare model for another family."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@copilot:claude-opus-4.6"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.5"
+
+
+def test_at_provider_third_party_model_survives_cold_catalog(monkeypatch):
+    """A non-first-party @provider:model selection must NOT revert to the default
+    just because the provider's group is missing from the current catalog snapshot.
+
+    Providers like ollama-cloud / deepseek / xai normalize to "" and discover their
+    models live, so a cold/minimal catalog can momentarily lack the group even
+    though the provider is configured. The @provider:model branch of
+    _resolve_compatible_session_model_state used to fall through to ``default_model``
+    in that case, silently swapping the user's chosen model on any non-explicit
+    resolve (2nd+ turn, chat switch — explicit_model_pick is False there). Because
+    the bare id (minimax-m3) is not a first-party family id (gpt/claude/gemini), the
+    selection must instead be preserved.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            # Active provider is something else and the ollama-cloud group is
+            # absent from THIS snapshot (live discovery not yet folded in).
+            "active_provider": "anthropic",
+            "default_model": "claude-opus-4.8",
+            "groups": [
+                {
+                    "provider": "Anthropic",
+                    "provider_id": "anthropic",
+                    "models": [{"id": "claude-opus-4.8", "label": "Opus"}],
+                },
+            ],
+        },
+    )
+
+    # Both the explicit-pick (1st turn) and the non-explicit (2nd+ turn / chat
+    # switch) paths must keep the selection.
+    for explicit in (True, False):
+        model, provider, changed = routes._resolve_compatible_session_model_state(
+            "@ollama-cloud:minimax-m3",
+            "ollama-cloud",
+            explicit_model_pick=explicit,
+        )
+        assert model == "@ollama-cloud:minimax-m3", (
+            f"explicit_model_pick={explicit}: third-party @provider model must "
+            f"survive a cold catalog snapshot, got {model!r}"
+        )
+        assert provider == "ollama-cloud"
+        assert changed is False
+
+
+def test_at_provider_removed_provider_still_reverts_to_default(monkeypatch):
+    """The catalog-absence preservation must NOT extend to a genuinely
+    removed/unconfigured provider.
+
+    Catalog-absence has two causes and only one is a cold-discovery artifact:
+      * ollama-cloud is configured, its group is just missing from this snapshot
+        -> preserve (covered by the sibling test).
+      * @removed:mistral-large names a provider that is no longer configured
+        anywhere -> preserving it would route chat/start to an unreachable
+        provider, so it must still fall through to the default-repair.
+
+    The guard tells the two apart via _provider_is_known_or_configured() (static
+    registry + config state), never via the cold catalog. "removed" is neither a
+    known built-in provider nor a configured custom provider, so a non-explicit
+    resolve reverts to the active default. An explicit pick is still honored,
+    leaving the user a deliberate escape hatch.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "anthropic",
+            "default_model": "claude-opus-4.8",
+            "groups": [
+                {
+                    "provider": "Anthropic",
+                    "provider_id": "anthropic",
+                    "models": [{"id": "claude-opus-4.8", "label": "Opus"}],
+                },
+            ],
+        },
+    )
+
+    # Non-explicit (2nd+ turn / chat switch): unknown provider -> repair to default.
+    model, _provider, changed = routes._resolve_compatible_session_model_state(
+        "@removed:mistral-large",
+        "removed",
+        explicit_model_pick=False,
+    )
+    assert model == "claude-opus-4.8", (
+        f"a removed/unconfigured @provider model must revert to the default on a "
+        f"non-explicit resolve, got {model!r}"
+    )
+    assert changed is True
+
+    # Explicit pick is still honored even for an unknown provider.
+    model2, provider2, changed2 = routes._resolve_compatible_session_model_state(
+        "@removed:mistral-large",
+        "removed",
+        explicit_model_pick=True,
+    )
+    assert model2 == "@removed:mistral-large"
+    assert provider2 == "removed"
+    assert changed2 is False
+
+
+def test_at_provider_known_unconfigured_builtin_is_intentionally_preserved(monkeypatch):
+    """Pin the DELIBERATE choice: a KNOWN built-in provider is preserved on a cold
+    catalog even when the user has no key configured for it.
+
+    _provider_is_known_or_configured() counts static-registry membership as "known"
+    and does NOT require authenticated-credential evidence. This is on purpose: the
+    only fully-reliable "is this provider authenticated" signal is the live auth
+    store / catalog rebuild — exactly the cost the hot path avoids — and a cheap
+    env/config-only credential check would mis-classify OAuth/auth-store providers
+    (ollama-cloud among them) and re-introduce the original silent-revert bug. So a
+    known-but-unconfigured pick like "@deepseek:deepseek-v4-pro" under an
+    Anthropic-only setup is kept; the user gets a clear run-time auth error rather
+    than a silent swap to the default.
+
+    If a future change adds reliable cheap credential evidence and flips this to
+    revert-when-unconfigured, update this expectation (and the helper docstring).
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "anthropic",
+            "default_model": "claude-opus-4.8",
+            "groups": [
+                {
+                    "provider": "Anthropic",
+                    "provider_id": "anthropic",
+                    "models": [{"id": "claude-opus-4.8", "label": "Opus"}],
+                },
+            ],
+        },
+    )
+
+    model, provider, changed = routes._resolve_compatible_session_model_state(
+        "@deepseek:deepseek-v4-pro",
+        "deepseek",
+        explicit_model_pick=False,
+    )
+    assert model == "@deepseek:deepseek-v4-pro", (
+        "a known built-in provider is intentionally preserved on a cold catalog "
+        f"even without configured credentials, got {model!r}"
+    )
+    assert provider == "deepseek"
+    assert changed is False
+
+
+def test_at_provider_explicit_pick_not_rerouted_by_family_match(monkeypatch):
+    """An explicit pick must NOT be rerouted by the active-provider family-match
+    repair, even when the bare id looks like the active family and the catalog is
+    cold.
+
+    Regression for the branch-order bug: the explicit-pick guard sits at the top of
+    the @provider:model branch, above the _model_matches_active_provider_family
+    repair. Without that ordering, an explicit "@ollama-cloud:gpt-oss-120b" under an
+    OpenAI-active agent would be stripped to bare "gpt-oss-120b" and routed to
+    OpenAI (the family match fires on the "gpt" prefix) — silently swapping the
+    user's deliberately-chosen ollama-cloud provider.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI",
+                    "provider_id": "openai",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    model, provider, changed = routes._resolve_compatible_session_model_state(
+        "@ollama-cloud:gpt-oss-120b",
+        "ollama-cloud",
+        explicit_model_pick=True,
+    )
+    assert model == "@ollama-cloud:gpt-oss-120b", (
+        "explicit @provider:model pick must survive the family-match repair, "
+        f"got {model!r}"
+    )
+    assert provider == "ollama-cloud"
+    assert changed is False
+
+
+def test_at_provider_explicit_pick_is_honored_even_when_unroutable(monkeypatch):
+    """A fresh, explicit @provider:model pick is honored verbatim even when its
+    bare id is a first-party family name and the provider is absent from the
+    catalog. explicit_model_pick is only set on a deliberate user pick, so it must
+    win over the stale-cross-provider repair. Only the *non-explicit* path (2nd+
+    turn / chat switch) repairs such a model to the default (see the test below)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    model, provider, changed = routes._resolve_compatible_session_model_state(
+        "@copilot:claude-opus-4.6",
+        None,
+        explicit_model_pick=True,
+    )
+    assert model == "@copilot:claude-opus-4.6"
+    # The explicit pick is returned with its own @-qualified provider hint intact,
+    # not rewritten to the active provider or the default's provider.
+    assert provider == "copilot"
+    assert changed is False
+
+
+def test_at_provider_first_party_named_third_party_model_known_limitation(monkeypatch):
+    """Pin (not endorse) the known false-positive of the bare-name prefix heuristic.
+
+    The first-party-family guard classifies a bare id purely by its name prefix
+    (gpt/claude/gemini), the same approximation _model_matches_active_provider_family
+    uses. A genuine third-party model whose name merely starts with one of those
+    prefixes — e.g. "@ollama:gpt4all-mini" (GPT4All is a third-party family) — is
+    therefore mis-classified as first-party and still reverts to the default on a
+    non-explicit resolve, the very behavior the sibling test prevents for
+    non-first-party-named ids. A name-only check cannot distinguish this case;
+    disambiguating it would require consulting the user's configured providers.
+
+    This test documents the boundary so the limitation is tracked, not silent. If a
+    future change makes the classifier provider-aware, update this expectation to
+    assert preservation instead.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "anthropic",
+            "default_model": "claude-opus-4.8",
+            "groups": [
+                {
+                    "provider": "Anthropic",
+                    "provider_id": "anthropic",
+                    "models": [{"id": "claude-opus-4.8", "label": "Opus"}],
+                },
+            ],
+        },
+    )
+
+    # Non-explicit path: the gpt-prefixed third-party id is (imperfectly) treated
+    # as a stale first-party model and repaired to the default.
+    model, _provider, changed = routes._resolve_compatible_session_model_state(
+        "@ollama:gpt4all-mini",
+        "ollama",
+        explicit_model_pick=False,
+    )
+    assert model == "claude-opus-4.8"
+    assert changed is True
+
+    # An explicit pick still escapes the heuristic and is preserved, so the user
+    # always has a reliable way to select such a model.
+    model2, provider2, changed2 = routes._resolve_compatible_session_model_state(
+        "@ollama:gpt4all-mini",
+        "ollama",
+        explicit_model_pick=True,
+    )
+    assert model2 == "@ollama:gpt4all-mini"
+    assert provider2 == "ollama"
+    assert changed2 is False
+
+
+def test_google_active_provider_keeps_valid_gemini_session_model(monkeypatch):
+    """A Google-configured session must keep its Gemini model."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "google",
+            "default_model": "gemini-3.1-pro-preview",
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "gemini-3.1-pro-preview"
+    )
+
+    assert changed is False
+    assert effective == "gemini-3.1-pro-preview"
+
+
+def test_session_model_normalizer_persists_corrected_model(monkeypatch):
+    """Write-path normalization should still persist corrected models."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        def __init__(self):
+            self.model = "gemini-3.1-pro-preview"
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(touch_updated_at)
+
+    session = DummySession()
+    effective = routes._normalize_session_model_in_place(session)
+
+    assert effective == "gpt-5.4-mini"
+    assert session.model == "gpt-5.4-mini"
+    assert save_calls == [False]
+
+
+def test_session_model_display_resolver_is_read_only(monkeypatch):
+    """Read-path model resolution must not mutate or save the session."""
+    import api.routes as routes
+
+    # Accept **kwargs: the read-only display resolver now opts into the
+    # cache-only catalog via get_available_models(prefer_cache=True) so the
+    # hot GET /api/session path never triggers the cold live provider rebuild
+    # (multi-tab streaming interlock RCA). The stub must mirror the real
+    # signature; the contract under test here is read-only-ness, not arity.
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda **_kw: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        def __init__(self):
+            self.model = "gemini-3.1-pro-preview"
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(touch_updated_at)
+
+    session = DummySession()
+    effective = routes._resolve_effective_session_model_for_display(session)
+
+    assert effective == "gpt-5.4-mini"
+    assert session.model == "gemini-3.1-pro-preview"
+    assert save_calls == []
+
+
+def test_api_session_is_side_effect_free_for_stale_models():
+    """GET /api/session must not rewrite the session file on first open (#845)."""
+    created, status = _post("/api/session/new", {})
+    assert status == 200
+    sid = created["session"]["session_id"]
+
+    session_path = TEST_STATE_DIR / "sessions" / f"{sid}.json"
+    # POST /api/session/new no longer eagerly writes empty sessions to disk
+    # (#1171 follow-up). Materialise the file from the API response so the
+    # rest of this test, which checks that GET is side-effect-free against
+    # an on-disk session with a stale model, has a file to work with.
+    if not session_path.exists():
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+        session_path.write_text(
+            json.dumps(created["session"], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    session_data = json.loads(session_path.read_text(encoding="utf-8"))
+    stale_model = "google/gemini-3.1-pro-preview"
+    session_data["model"] = stale_model
+    before = json.dumps(session_data, ensure_ascii=False, indent=2)
+    session_path.write_text(before, encoding="utf-8")
+
+    with urllib.request.urlopen(
+        BASE + f"/api/session?session_id={sid}", timeout=10
+    ) as r:
+        payload = json.loads(r.read())
+
+    after = session_path.read_text(encoding="utf-8")
+    assert payload["session"]["model"], "response should still expose an effective display model"
+    assert payload["session"]["model"] != stale_model, (
+        "response model should be compatibility-normalized on the read path"
+    )
+    assert after == before, (
+        "GET /api/session must return an effective model for display without "
+        "rewriting the session file on disk"
+    )
+
+
+# ── Model switch toast (#419) ─────────────────────────────────────────────────
+
+class TestModelSwitchToast:
+    """Toast appears when user switches the current conversation model."""
+
+    def test_toast_in_model_select_onchange(self):
+        """modelSelect.onchange must show a scope toast after selecting a model."""
+        src = _read("static/boot.js")
+        # Find the onchange block
+        idx = src.find("modelSelect').onchange")
+        assert idx != -1, "modelSelect.onchange not found in boot.js"
+        end = src.find("$('msg').addEventListener", idx)
+        assert end != -1, "modelSelect.onchange block terminator not found in boot.js"
+        block = src[idx:end]
+        assert "model_scope_toast" in block, (
+            "modelSelect.onchange must show that the selected model applies to this conversation"
+        )
+
+    def test_toast_is_not_gated_on_messages_length(self):
+        """Toast must fire for every model selection, not only sessions with messages."""
+        src = _read("static/boot.js")
+        idx = src.find("model_scope_toast")
+        assert idx != -1
+        surrounding = src[max(0, idx - 220):idx + 80]
+        assert not ("S.messages" in surrounding and ".length" in surrounding), (
+            "Model scope toast should not be gated on S.messages.length"
+        )
+
+    def test_toast_uses_show_toast_not_alert(self):
+        """Toast must use showToast(), not alert()."""
+        src = _read("static/boot.js")
+        idx = src.find("model_scope_toast")
+        assert idx != -1
+        surrounding = src[max(0, idx - 50):idx + 100]
+        assert "showToast" in surrounding, "Must use showToast() not alert()"
+        assert "alert(" not in surrounding, "Must not use alert()"
+
+    def test_toast_has_typeof_showtoast_guard(self):
+        """Toast call must guard typeof showToast to be safe during boot."""
+        src = _read("static/boot.js")
+        idx = src.find("model_scope_toast")
+        assert idx != -1
+        surrounding = src[max(0, idx - 100):idx + 50]
+        assert "typeof showToast" in surrounding, (
+            "showToast call must be guarded with typeof check"
+        )
+
+
+class TestChatStartEffectiveModelRecovery:
+    """messages.js must accept an effective_model correction from the backend."""
+
+    def test_send_applies_effective_model_from_chat_start(self):
+        src = _read("static/messages.js")
+        assert "startData.effective_model" in src, (
+            "send() must read effective_model from /api/chat/start so the UI can "
+            "recover from stale persisted session models"
+        )
+        assert "localStorage.setItem('hermes-webui-model', startData.effective_model)" in src, (
+            "effective_model correction must update the saved model preference"
+        )
+        assert "startData.effective_model_provider" in src, (
+            "send() must preserve provider context returned by /api/chat/start"
+        )
+
+
+class TestFrontendModelProviderState:
+    """Frontend model persistence should store provider separately."""
+
+    def test_boot_session_update_sends_model_provider(self):
+        src = _read("static/boot.js")
+        assert "_modelStateForSelect" in src
+        assert "model_provider:modelState.model_provider||null" in src
+
+    def test_new_session_carries_visible_picker_model_into_create_request(self):
+        src = _read("static/sessions.js")
+        start = src.index("async function newSession(")
+        body = src[start:src.index("const data=await api('/api/session/new'", start)]
+        assert "profile:S.activeProfile||'default'" in body
+        assert "reqBody.model=newModelState.model" in body
+        # Behavior contract (replaces the old literal-string pin
+        # `reqBody.model_provider=newModelState.model_provider||null`,
+        # which became a change-detector once the #2518 follow-up added
+        # a fallback chain — see AGENTS.md "Don't write change-detector
+        # tests"): reqBody.model_provider must source from
+        # newModelState.model_provider first, with the active provider
+        # and prev-session fallbacks wired in after. The block may
+        # gate the fallbacks behind a guard (e.g. the slash-slug
+        # _bareModel ternary from PR #3410) but the ordering and
+        # source names are part of the contract.
+        provider_assignment = body[body.index("reqBody.model_provider="):].split(";", 1)[0]
+        assert "newModelState.model_provider" in provider_assignment
+        assert "_fallbackProvider" in provider_assignment
+        assert "window._activeProvider" in body
+        assert "S.session&&S.session.model_provider" in body
+        pos_explicit = body.index("newModelState.model_provider")
+        pos_active = body.index("window._activeProvider")
+        pos_prev = body.index("S.session&&S.session.model_provider")
+        assert pos_explicit < pos_active < pos_prev, (
+            "Fallback chain order broken: explicit > _activeProvider > "
+            "prev-session must hold so /api/session/new hits the fast "
+            "path whenever a usable default exists (#2518 follow-up)."
+        )
+
+    def test_ui_has_json_model_state_storage(self):
+        src = _read("static/ui.js")
+        assert "hermes-webui-model-state" in src
+        assert "function _writePersistedModelState" in src
+        assert "_providerQualifiedModelValueForSelect(sel, modelId)" in src
+        assert "return _modelStateForSelect(sel,modelId).model" in src
+
+    def test_named_custom_live_models_keep_provider_prefix(self):
+        """Live models from custom:* providers should keep explicit provider context."""
+        src = _read("static/ui.js")
+        idx = src.find("function _addLiveModelsToSelect")
+        assert idx != -1, "_addLiveModelsToSelect must exist"
+        block = src[idx:idx + 2200]
+        assert "_isNamedCustomActiveProvider=_ap.startsWith('custom:')" in block, (
+            "named custom providers must be recognized during live model hydration"
+        )
+        assert "_providerLower=String(provider||'').toLowerCase()" in block
+        assert "_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap" in block, (
+            "custom:* live model fetches must qualify added model IDs with @custom:name:"
+        )
+
+    def test_named_custom_missing_dropdown_model_does_not_persist_fallback(self):
+        """syncTopbar must not overwrite custom:* selections just because the static picker lacks them."""
+        src = _read("static/ui.js")
+        helper_idx = src.find("function _providerDefersMissingModelFallback")
+        assert helper_idx != -1, "custom-provider missing-model fallback helper must exist"
+        helper = src[helper_idx:helper_idx + 500]
+        assert "p.startsWith('custom:')" in helper, (
+            "named custom providers can route vendor-prefixed models outside the static catalog"
+        )
+        idx = src.find("function syncTopbar")
+        assert idx != -1, "syncTopbar must exist"
+        block = src[idx:idx + 5200]
+        assert "missingModelIsRoutable=_providerDefersMissingModelFallback" in block
+        assert "liveStillPending||missingModelIsRoutable" in block, (
+            "syncTopbar must preserve routable custom:* selections instead of forcing fallback persistence"
+        )
+
+
+def test_unknown_prefix_model_passes_through_unchanged(monkeypatch):
+    """Models with unknown/custom prefixes must never be stripped — regression test for #751."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    for custom_model in (
+        "custom-provider/test-model-999",
+        "test/import-model",
+        "my-local-llm/variant-1",
+        "lmstudio-community/Qwen2.5-Coder-7B-Instruct-GGUF",
+    ):
+        effective, changed = routes._resolve_compatible_session_model(custom_model)
+        assert changed is False, (
+            f"Model '{custom_model}' has an unknown prefix and must pass through unchanged, "
+            f"but _resolve_compatible_session_model returned changed=True (effective='{effective}')"
+        )
+        assert effective == custom_model, (
+            f"Expected '{custom_model}', got '{effective}'"
+        )
+
+
+def test_empty_model_session_does_not_trigger_save(monkeypatch):
+    """Sessions with no model stored must not trigger session.save() — index rebuild is expensive."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        def __init__(self):
+            self.model = None  # no model stored
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(touch_updated_at)
+
+    session = DummySession()
+    effective = routes._normalize_session_model_in_place(session)
+
+    # Must return the default, but must NOT write to disk
+    assert effective == "gpt-5.4-mini"
+    assert save_calls == [], (
+        "_normalize_session_model_in_place must not call session.save() when "
+        "the session has no stored model — no correction needed, just a fallback."
+    )
+
+
+# ── Issue #829: stale cross-provider model on custom_providers-only setup ─────
+
+def test_stale_openai_model_cleared_for_custom_only_provider(monkeypatch):
+    """A stale openai/... session model must be cleared when active provider is
+    'custom' and no catalog group can route the openai prefix (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "custom",
+            "default_model": "",
+            "groups": [
+                {"provider": "Agent37", "provider_id": "custom:agent37",
+                 "models": [{"id": "agent37/default", "label": "default"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "openai/gpt-5.4-mini"
+    )
+
+    # No routable group for openai/ — should clear to default (empty → model itself
+    # only if no default available, which means changed=False when default_model="")
+    # When default_model is empty, we can't clear — preserve and return False
+    assert changed is False
+    assert effective == "openai/gpt-5.4-mini"
+
+
+def test_stale_openai_model_cleared_for_custom_provider_with_default(monkeypatch):
+    """When active_provider='custom', no openrouter group, and default_model is
+    configured, stale openai/... model should be cleared to default (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "custom",
+            "default_model": "agent37/default",
+            "groups": [
+                {"provider": "Agent37", "provider_id": "custom:agent37",
+                 "models": [{"id": "agent37/default", "label": "default"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "openai/gpt-5.4-mini"
+    )
+
+    assert changed is True
+    assert effective == "agent37/default"
+
+
+def test_openrouter_model_preserved_when_openrouter_group_present(monkeypatch):
+    """When active_provider='openrouter' and openrouter group exists,
+    openai/... model IDs must pass through unchanged — they are routable (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openrouter",
+            "default_model": "openai/gpt-5.4-mini",
+            "groups": [
+                {"provider": "OpenRouter", "provider_id": "openrouter",
+                 "models": [{"id": "openai/gpt-5.4-mini", "label": "GPT-5.4 Mini"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "openai/gpt-5.4-mini"
+    )
+
+    assert changed is False
+    assert effective == "openai/gpt-5.4-mini"
+
+
+def test_custom_namespace_model_always_preserved_on_custom_provider(monkeypatch):
+    """Model IDs with 'custom/' prefix must always pass through unchanged even
+    when active_provider='custom' (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "custom",
+            "default_model": "agent37/default",
+            "groups": [
+                {"provider": "Agent37", "provider_id": "custom:agent37",
+                 "models": [{"id": "agent37/default", "label": "default"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "custom/my-local-llm"
+    )
+
+    assert changed is False
+    assert effective == "custom/my-local-llm"
+
+
+def test_explicit_pick_survives_profile_family_mismatch():
+    """When explicit_model_pick=True, a cross-family bare model survives
+    the profile-aware normalization instead of being rewritten to the
+    profile default (#3737)."""
+    import api.routes as routes
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "gpt-5.4-mini",
+        None,
+        profile_provider="anthropic",
+        profile_default_model="claude-sonnet-4",
+        explicit_model_pick=True,
+    )
+
+    assert changed is False, "explicit pick must not be normalized"
+    assert effective == "gpt-5.4-mini", "user's model must survive"
+    assert provider == "anthropic", "profile provider context preserved"
+
+
+def test_explicit_pick_false_allows_profile_family_normalization():
+    """Without explicit_model_pick, the same cross-family model IS rewritten
+    to the profile default (existing behavior, must not regress)."""
+    import api.routes as routes
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "gpt-5.4-mini",
+        None,
+        profile_provider="anthropic",
+        profile_default_model="claude-sonnet-4",
+        explicit_model_pick=False,
+    )
+
+    assert changed is True, "stale model must be normalized"
+    assert effective == "claude-sonnet-4", "rewritten to profile default"
+    assert provider == "anthropic", "profile provider context preserved"
+
+
+def test_stale_ui_js_does_not_inject_unavailable_option():
+    """renderSession() must no longer inject a bare (unavailable) option into
+    modelSelect when the session model is not in the provider list (#829).
+    It should silently reset to the first available model instead."""
+    import os
+    src = open(os.path.join(os.path.dirname(__file__), "..", "static", "ui.js"),
+               encoding="utf-8").read()
+
+    # The old pattern must be gone — both keys removed from ui.js
+    assert "model_unavailable" not in src and "model_unavailable_title" not in src, (
+        "renderSession() must not inject '(unavailable)' options — "
+        "stale models should be silently reset to the first available model (#829)"
+    )
+
+    # The reset path remains, but #1771 now prefers the configured default
+    # before using the first HTML option as a last-resort fallback.
+    assert "_applySessionModelFallback" in src and "configuredDefault" in src, (
+        "stale session models should be reset through the safe fallback helper"
+    )
+    assert "const first=sel.querySelector('optgroup > option, option');" in src, (
+        "the first available option should remain only as a fallback when no configured default applies"
+    )

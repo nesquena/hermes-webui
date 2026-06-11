@@ -1,0 +1,67 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Backup and temporary files
+*.bak
+*.swp
+*.swo
+
+# Archive directory (pre-git backups, kept on disk but not tracked)
+archive/
+
+# Local environment and secrets (but keep the example templates)
+.env
+.env.*
+!.env.example
+!.env.docker.example
+.claude/
+CLAUDE.md
+AGENTS.local.md
+.cursorrules
+.windsurfrules
+.aider*
+copilot-instructions.md
+
+# Generated screenshots and transient artifacts
+screenshot-*.png
+full-UI.png
+
+# Version file written by Docker/CI build — generated, never committed
+api/_version.py
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local reference clones/artifacts — never committed by default.
+# Markdown docs at docs/*.md are intentionally trackable for contributor docs.
+docs/*
+!docs/*.md
+!docs/ui-ux/
+!docs/ui-ux/**
+!docs/rfcs/
+!docs/rfcs/**
+!docs/architecture/
+!docs/architecture/**
+
+# Local-only AI assistant context — never committed even under docs/.
+docs/AGENTS.md
+docs/CLAUDE.md
+docs/.cursorrules
+docs/.windsurfrules
+
+# Local-only PR review harness: rendering drivers, sample bank, fixtures.
+# Used by Claude during deep reviews; never shared in the repo.
+.local-review/
+graphify-out/
+.graphify_cached.json
+.graphify_uncached.txt
+
+.venv/
+
+# Dev-only lint tooling (ESLint runtime-error guard) — see TESTING.md
+node_modules/
+package-lock.json

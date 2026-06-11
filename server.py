@@ -1,0 +1,673 @@
+"""
+Hermes Web UI -- Main server entry point.
+Thin routing shell: imports Handler, delegates to api/routes.py, runs server.
+All business logic lives in api/*.
+"""
+import logging
+import os
+import re
+import signal
+import socket
+import sys
+import threading
+import time
+import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# ── SIGPIPE handling ────────────────────────────────────────────────────────
+# Ignore SIGPIPE so a client closing the connection mid-response (browser tab
+# close, network drop, mobile backgrounding, a dropped long-poll, an
+# `/api/updates/check` timeout, etc.) does not terminate the whole server
+# process. Python's default action for SIGPIPE is `Term`, so a single dropped
+# `socket.send()` in any request thread could kill the entire WebUI silently —
+# no exception, no log, no `/health` response. With SIG_IGN the kernel still
+# returns EPIPE to the offending write (surfaced as `BrokenPipeError`); the
+# per-request handler unwinds and the connection just closes, while the server
+# keeps serving. Set at import time so it is in effect before any
+# ThreadingHTTPServer worker thread writes its first response. (Salvaged from
+# #3407 @PatrickNoFilter — reproduced in production 2026-06-02.)
+#
+# SIGPIPE is POSIX-only; it does not exist on Windows (where there is no
+# broken-pipe signal and writes to a dead socket raise an OSError directly), so
+# guard with getattr to keep native-Windows support (#1952) working.
+_SIGPIPE = getattr(signal, "SIGPIPE", None)
+if _SIGPIPE is not None:
+    signal.signal(_SIGPIPE, signal.SIG_IGN)
+
+# ── Test-mode network isolation ─────────────────────────────────────────────
+# When `HERMES_WEBUI_TEST_NETWORK_BLOCK=1` is set in the environment, refuse
+# outbound socket connections to anything that is not loopback / RFC1918 /
+# link-local / reserved-TLD. This catches accidental real outbound (forgotten
+# mocks, leaked credentials triggering SDK init, new code paths bypassing an
+# existing mock) so the test suite stays hermetic and fast.
+#
+# tests/conftest.py sets this env var on every test_server subprocess so the
+# server.py-side network isolation matches the pytest-process-side isolation
+# already installed there.
+#
+# A test that legitimately needs real outbound spawns the server with the env
+# var unset (no current callers — every test_server-using test should be
+# mockable).
+if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true", "yes"):
+    _REAL_CREATE_CONN = socket.create_connection
+    _REAL_SOCK_CONNECT = socket.socket.connect
+
+    import re as _re
+
+    def _re_match_unique_local_ipv6(h):
+        """Match IPv6 fc00::/7 (canonical syntax). Tighter than startswith('fc')
+        so we don't mistakenly classify hostnames like 'food.example.com' as local."""
+        return bool(_re.match(r"^f[cd][0-9a-f]{0,2}:", h))
+
+    def _addr_is_local(host):
+        if not isinstance(host, str):
+            return False
+        h = host.strip().lower()
+        if not h:
+            return False
+        # IPv6 unique-local fc00::/7: require hex pair + colon to avoid
+        # matching hostnames like "food.example.com" or "fdsa.test".
+        if h in ("::1", "0:0:0:0:0:0:0:1") or h.startswith("fe80:") or _re_match_unique_local_ipv6(h):
+            return True
+        if h == "localhost" or h.endswith(".localhost"):
+            return True
+        if h.endswith(".local") or h.endswith(".test") or h.endswith(".invalid"):
+            return True
+        if h == "example.com" or h.endswith(".example.com"):
+            return True
+        if h == "example.net" or h.endswith(".example.net"):
+            return True
+        if h == "example.org" or h.endswith(".example.org"):
+            return True
+        if h.endswith(".example"):
+            return True
+        if h and h[0].isdigit() and h.count(".") == 3:
+            try:
+                o1, o2, o3, o4 = [int(p) for p in h.split(".")]
+            except ValueError:
+                return False
+            if o1 == 127:
+                return True
+            if o1 == 10:
+                return True
+            if o1 == 192 and o2 == 168:
+                return True
+            if o1 == 172 and 16 <= o2 <= 31:
+                return True
+            if o1 == 169 and o2 == 254:
+                return True
+            if o1 == 203 and o2 == 0 and o3 == 113:
+                return True
+        return False
+
+    def _blocked_create_connection(address, *a, **kw):
+        try:
+            host = address[0]
+        except (TypeError, IndexError):
+            host = ""
+        if _addr_is_local(host):
+            return _REAL_CREATE_CONN(address, *a, **kw)
+        raise OSError(
+            f"hermes test network isolation (server.py): outbound to {address!r} blocked"
+        )
+
+    def _blocked_socket_connect(self, address):
+        try:
+            host = address[0]
+        except (TypeError, IndexError):
+            host = ""
+        if _addr_is_local(host):
+            return _REAL_SOCK_CONNECT(self, address)
+        raise OSError(
+            f"hermes test network isolation (server.py): socket.connect to {address!r} blocked"
+        )
+
+    socket.create_connection = _blocked_create_connection
+    socket.socket.connect = _blocked_socket_connect
+
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - resource is Unix-only
+    resource = None
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
+
+from api.auth import check_auth
+from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
+from api.helpers import (
+    j,
+    get_profile_cookie,
+    _build_csp_report_only_policy,
+    _CLIENT_DISCONNECT_ERRORS,
+)
+from api.profiles import set_request_profile, clear_request_profile
+from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
+from api.startup import auto_install_agent_deps, fix_credential_permissions
+from api.updates import WEBUI_VERSION
+
+
+class QuietHTTPServer(ThreadingHTTPServer):
+    """Custom HTTP server that silently handles common network errors."""
+    daemon_threads = True
+    request_queue_size = 64
+
+    def __init__(self, *args, **kwargs):
+        server_address = args[0] if args else kwargs.get('server_address', None)
+        if server_address and ':' in server_address[0]:
+            self.address_family = socket.AF_INET6
+        super().__init__(*args, **kwargs)
+        self.accept_loop_requests_total = 0
+        self.accept_loop_last_request_at = 0.0
+
+    def server_bind(self):
+        if sys.platform == 'win32':
+            self.allow_reuse_address = False
+            SO_EXCLUSIVEADDRUSE = getattr(socket, 'SO_EXCLUSIVEADDRUSE', -5)
+            self.socket.setsockopt(socket.SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
+            # Retry bind on Windows to handle the case where a previous
+            # process (e.g. during self-update) is still releasing the port.
+            # The old process calls os._exit(0) which starts tearing down
+            # its socket, but with SO_EXCLUSIVEADDRUSE the OS blocks new
+            # binds until the teardown completes.  Retry for up to 10 s.
+            max_retries = 20
+            retry_delay = 0.5
+            for attempt in range(max_retries):
+                try:
+                    super().server_bind()
+                    return
+                except OSError as e:
+                    if e.winerror == 10048 and attempt < max_retries - 1:  # WSAEADDRINUSE
+                        time.sleep(retry_delay)
+                    else:
+                        raise
+        else:
+            super().server_bind()
+
+    def _handle_request_noblock(self):
+        """Record accept-loop progress before dispatching a request handler.
+
+        A process can be alive and still stop accepting/dispatching requests.
+        Exposing this heartbeat on /health gives supervisors and watchdogs a
+        cheap signal that the accept loop is still moving.
+
+        Note: this method is called only from the single ``serve_forever()``
+        thread in CPython socketserver, so the un-locked ``+=`` increment is
+        safe — there is no other thread mutating these counters. The /health
+        readers may see a stale value momentarily but never an inconsistent
+        one (Python int reads are atomic). Per Opus advisor on stage-297.
+        """
+        self.accept_loop_requests_total += 1
+        self.accept_loop_last_request_at = time.time()
+        return super()._handle_request_noblock()
+    
+    def handle_error(self, request, client_address):
+        """Override to suppress logging for common client disconnect errors."""
+        exc_type, exc_value, _ = sys.exc_info()
+        
+        # Silently ignore common connection errors caused by client disconnects
+        if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError):
+            return
+        
+        # Also handle socket errors that indicate client disconnect
+        if issubclass(exc_type, OSError):
+            # errno 54 is Connection reset by peer on macOS/BSD
+            # errno 104 is Connection reset by peer on Linux
+            if getattr(exc_value, 'errno', None) in (32, 54, 104, 110):  # EPIPE, ECONNRESET, ETIMEDOUT
+                return
+        
+        # For other errors, use default logging
+        super().handle_error(request, client_address)
+
+
+class Handler(BaseHTTPRequestHandler):
+    # HTTP/1.1 enables keep-alive connection reuse — major latency win on
+    # high-RTT links where every saved TCP handshake is 2×RTT. Each response
+    # MUST declare framing (Content-Length, Transfer-Encoding: chunked, or
+    # Connection: close) so the client knows where the message ends. Helpers
+    # j()/t() emit Content-Length; SSE/streaming endpoints emit
+    # Connection: close because the body has no terminator. See PR notes.
+    protocol_version = "HTTP/1.1"
+    timeout = 30  # seconds — kills idle/incomplete connections to prevent thread exhaustion
+    
+    def setup(self):
+        """Set socket options for each accepted connection."""
+        super().setup()
+        # TCP_NODELAY — universal, disables Nagle for HTTP latency
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        # SO_KEEPALIVE — universal master switch (must be set before timing params)
+        try:
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            pass
+        # Per-platform timing parameters
+        if hasattr(socket, 'TCP_KEEPIDLE'):  # Linux
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+            except OSError:
+                pass
+        elif hasattr(socket, 'TCP_KEEPALIVE'):  # macOS
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 10)
+            except OSError:
+                pass
+    _ver_suffix = WEBUI_VERSION.removeprefix('v')
+    server_version = ('HermesWebUI/' + _ver_suffix) if _ver_suffix != 'unknown' else 'HermesWebUI'
+    _CSP_REPORT_TO = '{"group":"csp-endpoint","max_age":10886400,"endpoints":[{"url":"/api/csp-report"}]}'
+
+    @classmethod
+    def csp_report_only_policy(cls, extra_connect_src=None) -> str:
+        return _build_csp_report_only_policy(extra_connect_src)
+
+    def end_headers(self) -> None:
+        extra_connect_src = getattr(self, "_csp_extra_connect_src", None)
+        self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src))
+        self.send_header("Report-To", self._CSP_REPORT_TO)
+        super().end_headers()
+
+    def log_message(self, fmt, *args): pass  # suppress default Apache-style log
+
+    def log_request(self, code: str='-', size: str='-') -> None:
+        """Structured JSON logs for each request."""
+        import json as _json
+        duration_ms = round((time.time() - getattr(self, '_req_t0', time.time())) * 1000, 1)
+        remote = '-'
+        try:
+            if getattr(self, 'client_address', None):
+                remote = str(self.client_address[0])
+        except Exception:
+            remote = '-'
+        forwarded_for = None
+        try:
+            forwarded_for = (self.headers.get('X-Forwarded-For') or '').split(',')[0].strip() or None
+        except Exception:
+            forwarded_for = None
+        record_data = {
+            'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'remote': remote,
+            'method': getattr(self, 'command', None) or '-',
+            'path': getattr(self, 'path', None) or '-',
+            'status': int(code) if str(code).isdigit() else code,
+            'ms': duration_ms,
+        }
+        if forwarded_for:
+            record_data['forwarded_for'] = forwarded_for
+        record = _json.dumps(record_data)
+        print(f'[webui] {record}', flush=True)
+
+    def do_GET(self) -> None:
+        self._req_t0 = time.time()
+        # Per-request profile context from cookie (issue #798)
+        cookie_profile = get_profile_cookie(self)
+        if cookie_profile:
+            set_request_profile(cookie_profile)
+        try:
+            parsed = urlparse(self.path)
+            if not check_auth(self, parsed): return
+            result = handle_get(self, parsed)
+            if result is False:
+                return j(self, {'error': 'not found'}, status=404)
+        except _CLIENT_DISCONNECT_ERRORS:
+            # The browser/client closed the socket while we were writing the
+            # response. This is expected for probes, tab closes, and SSE
+            # reconnect races; do not convert it into a misleading server 500.
+            return
+        except Exception:
+            print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
+            try:
+                j(self, {'error': 'Internal server error'}, status=500)
+            except _CLIENT_DISCONNECT_ERRORS:
+                # Client disconnected while we were sending the 500 — nothing to do.
+                pass
+            except Exception:
+                # Unexpected failure while sending the error response itself.
+                # Log it so we know something is wrong with our error handler.
+                traceback.print_exc()
+        finally:
+            clear_request_profile()
+
+    def _handle_write(self, route_func) -> None:
+        self._req_t0 = time.time()
+        # Per-request profile context from cookie (issue #798)
+        cookie_profile = get_profile_cookie(self)
+        if cookie_profile:
+            set_request_profile(cookie_profile)
+        try:
+            parsed = urlparse(self.path)
+            # Stage-346 Opus SHOULD-FIX defense-in-depth: scope the CSP-report
+            # auth carve-out to POST only. The endpoint is intentionally
+            # unauthenticated (browsers omit cookies on CSP reports), but the
+            # carve-out should not extend to PATCH/DELETE on that path even
+            # though they currently fail through CSRF/routing fallthrough.
+            _is_csp_report_post = (
+                parsed.path == "/api/csp-report" and self.command == "POST"
+            )
+            if not _is_csp_report_post and not check_auth(self, parsed): return
+            result = route_func(self, parsed)
+            if result is False:
+                return j(self, {'error': 'not found'}, status=404)
+        except _CLIENT_DISCONNECT_ERRORS:
+            # The browser/client closed the socket while we were writing the
+            # response. This is expected for probes, tab closes, and SSE
+            # reconnect races; do not convert it into a misleading server 500.
+            return
+        except Exception:
+            print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
+            try:
+                j(self, {'error': 'Internal server error'}, status=500)
+            except _CLIENT_DISCONNECT_ERRORS:
+                # Client disconnected while we were sending the 500 — nothing to do.
+                pass
+            except Exception:
+                # Unexpected failure while sending the error response itself.
+                # Log it so we know something is wrong with our error handler.
+                traceback.print_exc()
+        finally:
+            clear_request_profile()
+
+    def do_POST(self) -> None:
+        self._handle_write(handle_post)
+
+    def do_PUT(self) -> None:
+        self._handle_write(handle_put)
+
+    def do_PATCH(self) -> None:
+        self._handle_write(handle_patch)
+
+    def do_OPTIONS(self) -> None:
+        """Handle CORS preflight requests."""
+        self._req_t0 = time.time()
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def do_DELETE(self) -> None:
+        self._handle_write(handle_delete)
+
+
+def _raise_fd_soft_limit(target: int = 4096) -> dict:
+    """Best-effort raise of RLIMIT_NOFILE for persistent WebUI hosts.
+
+    macOS launchd jobs often start with a 256 soft limit. If a future FD leak
+    regresses, that low ceiling turns a leak into a hard HTTP wedge quickly.
+    Raising the soft limit does not hide leaks; it buys enough headroom for
+    diagnostics and watchdog recovery.
+    """
+    if resource is None:
+        return {"status": "unsupported"}
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+    # On Unix, RLIM_INFINITY is commonly a large int; keep the logic explicit
+    # so tests can use ordinary integers without depending on platform values.
+    desired = int(target)
+    if hard not in (-1, getattr(resource, "RLIM_INFINITY", object())):
+        desired = min(desired, int(hard))
+    if soft >= desired:
+        return {"status": "unchanged", "soft": soft, "hard": hard}
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+    except Exception as exc:
+        return {"status": "error", "soft": soft, "hard": hard, "error": str(exc)}
+    return {"status": "raised", "soft": desired, "hard": hard, "previous_soft": soft}
+
+
+_SHUTDOWN_AUDIT_LOGGED = False
+_SHUTDOWN_LOG_VALUE_RE = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _shutdown_log_value(value, *, default: str = "unknown", max_len: int = 160) -> str:
+    """Return a bounded single-line value safe for shutdown diagnostics."""
+    if value is None:
+        return default
+    try:
+        text = str(value)
+    except Exception:
+        return default
+    text = _SHUTDOWN_LOG_VALUE_RE.sub("?", text).strip()
+    if not text:
+        return default
+    if len(text) > max_len:
+        text = f"{text[:max_len]}…"
+    return text
+
+
+def _log_shutdown_audit(reason: str = "serve_forever_exit") -> None:
+    """Log runtime context when the WebUI server is exiting."""
+    global _SHUTDOWN_AUDIT_LOGGED
+    if _SHUTDOWN_AUDIT_LOGGED:
+        return
+
+    active_sessions = []
+    try:
+        from api.models import LOCK, SESSIONS
+        with LOCK:
+            session_items = list(SESSIONS.items())
+        for sid, session in session_items:
+            stream_id = getattr(session, "active_stream_id", None)
+            if stream_id:
+                pending = bool(getattr(session, "pending_user_message", None))
+                active_sessions.append(
+                    "sid=%s stream=%s pending=%s"
+                    % (
+                        _shutdown_log_value(sid),
+                        _shutdown_log_value(stream_id),
+                        pending,
+                    )
+                )
+    except Exception:
+        logger.debug("Failed to collect active-session shutdown audit state", exc_info=True)
+
+    _SHUTDOWN_AUDIT_LOGGED = True
+    logger.info(
+        "[shutdown-audit] reason=%s pid=%s thread=%s(%s) active_sessions=[%s]",
+        _shutdown_log_value(reason),
+        os.getpid(),
+        _shutdown_log_value(threading.current_thread().name),
+        threading.current_thread().ident,
+        "; ".join(active_sessions) if active_sessions else "none",
+    )
+
+
+def _abort_if_already_serving(host: str, port: int) -> None:
+    """Refuse to start if a live HTTP server is already responding on this port."""
+    probe_host = '127.0.0.1' if host in ('0.0.0.0', '', '::') else host
+    try:
+        with socket.create_connection((probe_host, port), timeout=2) as s:
+            s.sendall(b'GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n')
+            s.settimeout(2)
+            data = s.recv(512)
+            if data:
+                print(
+                    f'[!!] FATAL: Another server is already responding on'
+                    f' {probe_host}:{port}. Stop the existing instance first.',
+                    flush=True,
+                )
+                sys.exit(1)
+    except (ConnectionRefusedError, ConnectionResetError, OSError, socket.timeout):
+        pass
+
+
+def main() -> None:
+    from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
+
+    print_startup_config()
+
+    fd_limit = _raise_fd_soft_limit()
+    if fd_limit.get("status") == "raised":
+        print(
+            f"[ok] Raised file descriptor soft limit "
+            f"{fd_limit.get('previous_soft')} -> {fd_limit.get('soft')}",
+            flush=True,
+        )
+    elif fd_limit.get("status") == "error":
+        print(f"[!!] WARNING: Could not raise file descriptor limit: {fd_limit.get('error')}", flush=True)
+
+    # Fix sensitive file permissions before doing anything else
+    fix_credential_permissions()
+
+    # ── #1558 startup self-heal ─────────────────────────────────────────
+    # If a previous process wrote a session JSON with fewer messages than
+    # its .bak (the data-loss shape #1558 produced), restore from the .bak.
+    # Safe to run unconditionally — a clean install is a no-op.
+    try:
+        from api.models import _active_state_db_path
+        from api.session_recovery import recover_all_sessions_on_startup
+        result = recover_all_sessions_on_startup(
+            SESSION_DIR,
+            rebuild_index=True,
+            state_db_path=_active_state_db_path(),
+        )
+        if result.get("restored"):
+            print(f"[recovery] Restored {result['restored']}/{result['scanned']} sessions from .bak (see #1558).", flush=True)
+    except Exception as exc:
+        # Recovery is best-effort; never block server startup.
+        print(f"[recovery] startup recovery failed: {exc}", flush=True)
+
+    within_container = False
+    # Check for the "/.within_container" file to determine if we're running inside a container; this file is created in the Dockerfile
+    try:
+        with open('/.within_container', 'r') as f:
+            within_container = True
+    except FileNotFoundError:
+        pass
+
+    if within_container:
+        print('[ok] Running within container.', flush=True)
+
+    # Security: warn if binding non-loopback without authentication
+    from api.auth import is_auth_enabled
+    if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
+        print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
+        print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
+        print(f'     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
+        print(f'     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
+        if within_container:
+            print(f'     Note: You are running within a container, must bind to 0.0.0.0 (IPv4) or :: (IPv6) to publish the port.', flush=True)
+    elif not is_auth_enabled():
+        print(f'  [tip] No password set. Any process on this machine can read sessions', flush=True)
+        print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
+        print(f'        enable authentication.', flush=True)
+
+    ok, missing, errors = verify_hermes_imports()
+    if not ok and _HERMES_FOUND:
+        print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
+        for mod, err in errors.items():
+            print(f'     {mod}: {err}', flush=True)
+        print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
+        auto_install_agent_deps()
+        ok, missing, errors = verify_hermes_imports()
+        if not ok:
+            print(f'[!!] Still missing after install attempt: {missing}', flush=True)
+            for mod, err in errors.items():
+                print(f'     {mod}: {err}', flush=True)
+            print('     Agent features may not work correctly.', flush=True)
+        else:
+            print('[ok] Agent dependencies installed successfully.', flush=True)
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
+
+    # Start the gateway session watcher for real-time SSE updates
+    try:
+        from api.gateway_watcher import start_watcher
+        start_watcher()
+    except Exception as e:
+        print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+
+    # Start the bg_task_complete drain thread for terminal(notify_on_complete=true)
+    # agent wakeup. Reads tools.process_registry.completion_queue and emits SSE
+    # bg_task_complete events (canonical name; legacy process_complete alias is
+    # still emitted for back-compat) to the matching session's stream.
+    try:
+        from api.background_process import start_drain_thread
+        if start_drain_thread():
+            print('[ok] bg_task_complete drain thread started', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
+
+    # Start the SessionChannel reaper for the persistent per-session SSE
+    # endpoint (/api/session/stream). Runs every 60s, collects channels with
+    # no subscribers past the grace period or past the idle TTL cap.
+    try:
+        from api.background_process import start_session_channel_reaper
+        if start_session_channel_reaper():
+            print('[ok] SessionChannel reaper thread started', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
+
+    # Load WebUI dashboard plugins
+    try:
+        from api.plugins import load_plugins
+        load_plugins()
+    except Exception as e:
+        print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
+
+    _abort_if_already_serving(HOST, PORT)
+    httpd = QuietHTTPServer((HOST, PORT), Handler)
+
+    # ── TLS/HTTPS setup (optional) ─────────────────────────────────────────
+    from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
+    scheme = 'https' if TLS_ENABLED else 'http'
+    if TLS_ENABLED:
+        try:
+            import ssl
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            print(f'  TLS enabled: cert={TLS_CERT}, key={TLS_KEY}', flush=True)
+        except Exception as e:
+            print(f'[!!] WARNING: TLS setup failed ({e}), falling back to HTTP', flush=True)
+            scheme = 'http'
+
+    print(f'  Hermes Web UI listening on {scheme}://{HOST}:{PORT}', flush=True)
+    if HOST in ('127.0.0.1', '::1') or within_container:
+        print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
+    print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
+    print('', flush=True)
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()
+        _log_shutdown_audit()
+        # Stop the gateway watcher on shutdown
+        try:
+            from api.gateway_watcher import stop_watcher
+            stop_watcher()
+        except Exception:
+            logger.debug("Failed to stop gateway watcher during shutdown")
+        # Drain pending memory-provider lifecycle commits before exit
+        try:
+            from api.session_lifecycle import drain_all_on_shutdown
+            drain_all_on_shutdown()
+        except Exception:
+            logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
+        # Stop bg_task_complete drain + SessionChannel reaper (ours-original).
+        # The drain thread emits the canonical ``bg_task_complete`` event
+        # (with ``process_complete`` kept as a temporary backward-compat
+        # alias for older clients — see start_drain_thread comment above).
+        try:
+            from api.background_process import stop_drain_thread
+            stop_drain_thread()
+        except Exception:
+            logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
+        try:
+            from api.background_process import stop_session_channel_reaper
+            stop_session_channel_reaper()
+        except Exception:
+            logger.debug("Failed to stop SessionChannel reaper during shutdown", exc_info=True)
+
+if __name__ == '__main__':
+    main()

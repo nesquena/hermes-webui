@@ -1,0 +1,103 @@
+"""Frontend regression coverage for Update Now apply failures (#1321)."""
+from pathlib import Path
+import re
+
+ROOT = Path(__file__).resolve().parents[1]
+UI_JS = ROOT / "static" / "ui.js"
+
+
+def _ui_js() -> str:
+    return UI_JS.read_text(encoding="utf-8")
+
+
+def test_update_apply_network_error_has_recovery_message_not_raw_failed_to_fetch():
+    """Network/interrupted update apply failures should not surface raw fetch text alone."""
+    src = _ui_js()
+    assert "function _formatUpdateApplyExceptionMessage" in src
+    assert "could not reach the WebUI server" in src
+    assert "restarted or the connection was interrupted" in src
+    assert "wait a few seconds, reload the page, then check the server" in src
+    assert "Update failed: '+e.message" not in src
+    assert 'Update failed: "+e.message' not in src
+
+
+def test_update_apply_structured_server_errors_still_use_json_message_path():
+    """Server-reachable JSON errors must keep the existing targeted message path."""
+    src = _ui_js()
+    apply_start = src.index("async function applyUpdates()")
+    show_error_call = src.index("_showUpdateError(target,res);", apply_start)
+    reset_button = src.index("resetApplyButton(0);", show_error_call)
+    assert show_error_call < reset_button
+    assert "const msg='Update failed ('+target+'): '+(res.message||'unknown error');" in src
+
+
+def test_update_apply_successful_stash_conflict_displays_recovery_message():
+    """ok=True stash conflicts must show the server recovery message before restarting."""
+    src = _ui_js()
+    apply_start = src.index("async function applyUpdates()")
+    next_fn = src.index("function _showUpdateError", apply_start)
+    body = src[apply_start:next_fn]
+
+    messages_decl = body.index("const stashConflictMessages=[];")
+    stash_branch = body.index("if(res.stash_conflict)")
+    message_push = body.index("stashConflictMessages.push('Update applied ('+target+'):", stash_branch)
+    persistent_display = body.index("errEl.textContent=stashConflictMessages.join('\\n\\n')", message_push)
+    message_join = body.index("const stashConflictMessage=stashConflictMessages.join('\\n\\n');", persistent_display)
+    restart_wait = body.index("_waitForServerThenReload", message_join)
+
+    assert messages_decl < stash_branch < message_push < persistent_display < message_join < restart_wait
+    assert "showToast(stashConflictMessage||'Update applied" in body
+    assert "stashConflictMessages.length?10000" in body
+
+
+def test_update_apply_multiple_stash_conflicts_are_aggregated_not_overwritten():
+    """Multiple ok=True stash conflicts must preserve every target recovery message."""
+    src = _ui_js()
+    apply_start = src.index("async function applyUpdates()")
+    next_fn = src.index("function _showUpdateError", apply_start)
+    body = src[apply_start:next_fn]
+
+    assert "let stashConflictMessage='';" not in body
+    assert "stashConflictMessage='Update applied ('+target+'):" not in body
+    assert "const stashConflictMessages=[];" in body
+    assert "stashConflictMessages.push('Update applied ('+target+'): " in body
+    assert "errEl.textContent=stashConflictMessages.join('\\n\\n')" in body
+    assert "const stashConflictMessage=stashConflictMessages.join('\\n\\n');" in body
+    assert "showToast(stashConflictMessage||'Update applied" in body
+
+
+def test_update_apply_network_error_classifier_ignores_http_status_errors():
+    """HTTP response errors should not be classified as interrupted transport failures."""
+    src = _ui_js()
+    fn_start = src.index("function _isUpdateApplyNetworkError(error)")
+    fn_end = src.index("function _formatUpdateApplyExceptionMessage", fn_start)
+    body = src[fn_start:fn_end]
+    compact = re.sub(r"\s+", "", body)
+    assert "if(error&&error.status)returnfalse;" in compact
+    assert body.index("error.status") < body.index("/Failed to fetch|NetworkError|Load failed/i")
+    assert "Failed to fetch|NetworkError|Load failed" in body
+
+
+def test_update_apply_prevents_duplicate_apply_requests_while_in_flight():
+    """Double-clicks should not send a second update apply request during restart race windows."""
+    src = _ui_js()
+    apply_start = src.index("async function applyUpdates()")
+    next_fn = src.index("function _showUpdateError", apply_start)
+    body = src[apply_start:next_fn]
+    assert "window._updateApplyInFlight" in body
+    assert "if(window._updateApplyInFlight) return;" in body
+    assert "window._updateApplyInFlight=true;" in body
+    assert "window._updateApplyInFlight=false;" in body
+
+
+def test_update_apply_rejects_zero_target_success_path():
+    """Update Now must not claim success when no webui/agent target is selected."""
+    src = _ui_js()
+    apply_start = src.index("async function applyUpdates()")
+    target_agent = src.index("if(window._updateData?.agent?.behind>0) targets.push('agent');", apply_start)
+    try_start = src.index("try{", target_agent)
+    zero_target_guard = src.find("if(!targets.length)", target_agent, try_start)
+
+    assert zero_target_guard >= 0, (
+        "applyUpdates must return before the success/restart flow when targets is empty"
+    )
