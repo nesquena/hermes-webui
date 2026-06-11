@@ -17440,6 +17440,7 @@ const LOCALES = {
     fork_from_here: 'Rozgałęź stąd',
     forked_from: 'Rozgałęzione z',
     subagent_children: 'Sesje subagentów',
+    model_show_all_models: 'Pokaż wszystkie {0} modele',
     insights_model_health_title: 'Porównanie kondycji modeli',
     insights_model_health_provider: 'Dostawca',
     insights_model_health_replacement: 'Przewodnik zastąpienia',
