@@ -745,6 +745,12 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_actions_variables_path_repo(origin_uri)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_codeowners_errors_route_path_matches(raw_origin_text):
+        codeowners_errors_origin = _github_codeowners_errors_safe_origin(raw_origin_text)
+        if not codeowners_errors_origin:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = codeowners_errors_origin
     if _github_actions_selected_actions_route_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_actions_selected_actions_path_repo(origin_uri)
@@ -6477,6 +6483,117 @@ def _github_actions_variables_refresh_summary(origin_uri: str, payload: dict[str
         if updated:
             row_parts.append(f"updated: {updated}")
         parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_codeowners_errors_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 6
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "codeowners"
+            and lowered[5].startswith("errors")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return False
+
+
+def _github_codeowners_errors_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "codeowners"
+        or path[5] != "errors"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_codeowners_errors_safe_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or parts.netloc.strip() != "api.github.com":
+        return ""
+    safe_origin = urlunsplit(("https", "api.github.com", parts.path, "", ""))
+    if not _github_codeowners_errors_path_repo(safe_origin):
+        return ""
+    return safe_origin
+
+
+def _github_codeowners_errors_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_codeowners_errors_route_path_matches(origin_uri)
+
+
+def _github_codeowners_error_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    line = _safe_optional_nonnegative_int(row.get("line"))
+    column = _safe_optional_nonnegative_int(row.get("column"))
+    if line is None or line <= 0:
+        return False
+    if column is not None and column <= 0:
+        return False
+    kind = _safe_public_text(row.get("kind"), limit=80)
+    if not kind or kind != str(row.get("kind") or "").strip() or _refresh_value_is_blocked(kind):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_.: -]{1,80}", kind))
+
+
+def _json_payload_is_github_codeowners_errors_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_codeowners_errors_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict) or "version" in payload or "items" in payload:
+        return False
+    errors = payload.get("errors")
+    if not isinstance(errors, list) or len(errors) > 100:
+        return False
+    return all(_github_codeowners_error_row_is_safe(row) for row in errors)
+
+
+def _github_codeowners_errors_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_codeowners_errors_path_repo(origin_uri) or "repository"
+    raw_errors = payload.get("errors")
+    errors = raw_errors if isinstance(raw_errors, list) else []
+    parts = [f"GitHub CODEOWNERS errors for {repo}", f"CODEOWNERS error count: {len(errors)}"]
+    for row in errors[:5]:
+        if not _github_codeowners_error_row_is_safe(row):
+            continue
+        line = int(row.get("line"))
+        column = _safe_optional_nonnegative_int(row.get("column"))
+        kind = _safe_public_text(row.get("kind"), limit=80)
+        location = f"line {line}" + (f" column {column}" if column is not None else "")
+        parts.append(f"error at {location}: {kind}")
     return _bounded_refresh_summary("; ".join(parts))
 
 
@@ -13979,6 +14096,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_actions_variables_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    codeowners_errors_repo = _github_codeowners_errors_path_repo(origin_uri)
+    if codeowners_errors_repo:
+        if not _json_payload_is_github_codeowners_errors_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub CODEOWNERS errors {codeowners_errors_repo}",
+            "summary": _github_codeowners_errors_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_codeowners_errors_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     selected_actions_repo = _github_actions_selected_actions_path_repo(origin_uri)
     if selected_actions_repo:
         if not _json_payload_is_github_actions_selected_actions_metadata(origin_uri, payload):
@@ -14580,6 +14709,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_actions_variables_route_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_variables_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_codeowners_errors_route_path_matches(raw_origin_uri):
+        if not _github_codeowners_errors_safe_origin(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_actions_selected_actions_route_path_matches(raw_origin_uri):
         selected_actions_origin = _safe_origin_uri(raw_origin_uri, source_id=_safe_public_id(source_id, fallback="source"))
         if (
@@ -14883,6 +15015,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_actions_variables_path_matches(safe_origin_uri):
         if not _github_actions_variables_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_codeowners_errors_path_matches(safe_origin_uri):
+        if not _github_codeowners_errors_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_actions_selected_actions_path_matches(safe_origin_uri):
@@ -15190,6 +15326,14 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_actions_variables_path_repo(final_url)
             or _github_actions_variables_path_repo(final_url) != _github_actions_variables_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_codeowners_errors_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or final_url != safe_final_url
+            or final_url != safe_origin_uri
+            or not _github_codeowners_errors_path_repo(final_url)
+            or _github_codeowners_errors_path_repo(final_url) != _github_codeowners_errors_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_selected_actions_path_matches(safe_origin_uri) and (
@@ -15585,6 +15729,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_variables_path_matches(safe_origin_uri) and (
             not _github_actions_variables_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_codeowners_errors_path_matches(safe_origin_uri) and (
+            not _github_codeowners_errors_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -16645,6 +16794,12 @@ def run_source_refresh_jobs(
             or not _github_actions_variables_path_repo(raw_origin_uri)
         ):
             origin_uri = f"capy-memory://{source_id}"
+        elif _github_codeowners_errors_route_path_matches(raw_origin_uri):
+            codeowners_errors_origin = _github_codeowners_errors_safe_origin(raw_origin_uri)
+            if codeowners_errors_origin:
+                origin_uri = codeowners_errors_origin
+            else:
+                origin_uri = f"capy-memory://{source_id}"
         elif _github_actions_workflow_access_route_path_matches(raw_origin_uri):
             workflow_access_origin = _github_actions_workflow_access_safe_origin(raw_origin_uri)
             workflow_access_repo = _github_actions_workflow_access_path_repo(workflow_access_origin or "")
