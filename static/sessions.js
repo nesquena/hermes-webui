@@ -729,6 +729,27 @@ async function newSession(flash, options={}){
   }
 }
 
+/**
+ * Self-heal: clear the stuck session ID from localStorage and URL when a
+ * loadSession() call failed during boot (no currentSid). This prevents the
+ * browser from retrying the same dead session on every refresh.
+ *
+ * Called from loadSession() after 401 redirect (undefined data) or any
+ * non-404 error (400, 403, 500, network). The 404 path has its own
+ * inline self-heal; this helper consolidates the non-404 cases.
+ *
+ * A click into a *different* dead session (currentSid && currentSid!==sid)
+ * must not run it: localStorage and the URL still point at the live session
+ * (both are only updated on a successful load), so wiping them would log
+ * the user out of a healthy session (#2782).
+ */
+function _clearStuckSessionOnBoot(sid, currentSid){
+  if(!currentSid || currentSid===sid){
+    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
+  }
+}
+
 async function loadSession(sid){
   const opts = arguments[1] || {};
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
@@ -834,8 +855,19 @@ async function loadSession(sid){
           }
         }
       } else {
-        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';
-        if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
+        // Non-404 failure: clear the stuck session ID so the next boot doesn't
+        // retry the same dead session (#3903 follow-up — 404 already self-heals,
+        // but 401/network/500 errors left the localStorage/URL corrupted).
+        _clearStuckSessionOnBoot(sid, currentSid);
+        if(e.status===401){
+          _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Authentication required. Redirecting…</div>';
+        } else {
+          _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
+        }
+        if(typeof showToast==='function'){
+          if(e.status===401) showToast('Authentication required',3000,'error');
+          else showToast('Failed to load session',3000,'error');
+        }
       }
     }
     _clearSameSessionForceReloadHint(sid);
@@ -844,7 +876,9 @@ async function loadSession(sid){
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
   // the browser is already navigating away, so abort the rest of this flow.
+  // Self-heal: clear the stuck session ID so the next boot doesn't retry it.
   if (!data) {
+    _clearStuckSessionOnBoot(sid, currentSid);
     _clearSameSessionForceReloadHint(sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
     return;
