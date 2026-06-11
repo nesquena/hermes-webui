@@ -124,6 +124,19 @@ def test_synthetic_max_iteration_summary_request_is_dropped_from_agent_result():
     assert "here is the summary" in cleaned[-1]["content"]
 
 
+def test_historical_synthetic_summary_prompt_does_not_mark_normal_result_as_tool_limit():
+    result = {
+        "messages": [
+            {"role": "user", "content": "Earlier task."},
+            {"role": "user", "content": streaming._MAX_ITERATION_SUMMARY_REQUEST},
+            {"role": "user", "content": "Current normal task."},
+            {"role": "assistant", "content": "Current task completed normally."},
+        ],
+    }
+
+    assert streaming._agent_result_tool_limit_reached(result) is False
+
+
 def test_tool_limit_with_final_answer_marks_latest_assistant_status_card():
     messages = [
         {"role": "user", "content": "Do the long task."},
@@ -252,3 +265,23 @@ def test_streaming_tool_limit_without_final_answer_emits_no_final_apperror(tmp_p
         message.get("content") != streaming._MAX_ITERATION_SUMMARY_REQUEST
         for message in payload["messages"]
     )
+
+
+def test_streaming_historical_synthetic_prompt_normal_result_does_not_emit_tool_limit(tmp_path, monkeypatch):
+    result = {
+        "messages": [
+            {"role": "user", "content": "Earlier task."},
+            {"role": "user", "content": streaming._MAX_ITERATION_SUMMARY_REQUEST},
+            {"role": "user", "content": "Do the long task."},
+            {"role": "assistant", "content": "Current task completed normally."},
+        ],
+    }
+
+    events, payload = _run_streaming_with_fake_agent(tmp_path, monkeypatch, result)
+
+    assert not [payload for event, payload in events if event == "apperror"]
+    done_payloads = [payload for event, payload in events if event == "done"]
+    assert done_payloads, "expected normal done SSE payload"
+    assert "terminal_state" not in done_payloads[-1]
+    assert payload["messages"][-1]["role"] == "assistant"
+    assert payload["messages"][-1]["content"] == "Current task completed normally."

@@ -980,7 +980,7 @@ def _drop_synthetic_max_iteration_summary_requests(messages, *, enabled: bool = 
 
 
 def _agent_result_tool_limit_reached(result) -> bool:
-    """Return True when Hermes Agent stopped because the tool iteration cap fired."""
+    """Return True when current-turn metadata says the tool iteration cap fired."""
     if not isinstance(result, dict):
         return False
     fields = [
@@ -997,10 +997,7 @@ def _agent_result_tool_limit_reached(result) -> bool:
         or 'tool-calling iterations' in haystack and 'maximum' in haystack
     ):
         return True
-    return any(
-        _is_synthetic_max_iteration_summary_request(msg)
-        for msg in result.get('messages') or []
-    )
+    return False
 
 
 def _mark_latest_assistant_tool_limit_status(messages) -> bool:
