@@ -2225,6 +2225,11 @@ function _loadToolsetsCatalog() {
     });
 }
 
+function invalidateToolsetsCatalog(payload) {
+  _toolsetsCatalog = payload && Array.isArray(payload.servers) ? _normalizeToolsetsCatalog(payload) : null;
+}
+if (typeof window !== 'undefined') window.invalidateToolsetsCatalog = invalidateToolsetsCatalog;
+
 function _toolsetsInputList(input) {
   if (!input) return [];
   return input.value.split(',').map(s => s.trim()).filter(Boolean);

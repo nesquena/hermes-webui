@@ -3,6 +3,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 
@@ -93,3 +94,16 @@ def test_toolsets_dropdown_distinguishes_failed_catalog_loads_from_loading():
     assert "_toolsetsCatalog === false" in render_sections
     assert "session_toolsets_loading_servers" in render_sections
     assert "mcp_load_failed" in render_sections
+
+
+def test_mcp_server_panel_refreshes_cached_toolsets_catalog():
+    invalidate = _function_body(UI_JS, "function invalidateToolsetsCatalog")
+    load_servers = _function_body(PANELS_JS, "function loadMcpServers")
+    toggle_server = _function_body(PANELS_JS, "function toggleMcpServer")
+
+    assert "_toolsetsCatalog = payload && Array.isArray(payload.servers)" in invalidate
+    assert "_normalizeToolsetsCatalog(payload)" in invalidate
+    assert ": null" in invalidate
+    assert "window.invalidateToolsetsCatalog = invalidateToolsetsCatalog" in UI_JS
+    assert "_refreshMcpToolsetsCatalog(r);" in load_servers
+    assert "_refreshMcpToolsetsCatalog();" in toggle_server
