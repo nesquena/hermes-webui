@@ -90,6 +90,9 @@ def test_restart_watcher_for_profile_replaces_singleton_with_profile_home(tmp_pa
         def start(self):
             self.started = True
 
+        def is_alive(self):
+            return self.started
+
         def stop(self):
             self.stopped = True
 
