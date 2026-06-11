@@ -145,6 +145,39 @@ class TestSettingsSearch:
             "_buildSettingsIndex must handle Plugins pane"
         )
 
+    def test_settings_index_includes_provider_cards(self):
+        """Providers pane entries must index provider cards and API key fields."""
+        idx = PANELS_JS.find("function _buildSettingsIndex()")
+        assert idx >= 0, "_buildSettingsIndex not found"
+        body = PANELS_JS[idx:idx + 3500]
+        assert "pane.querySelectorAll('.provider-card')" in body, (
+            "_buildSettingsIndex must scan provider cards so Providers search is not empty"
+        )
+        assert "card.querySelectorAll('.provider-card-field')" in body, (
+            "_buildSettingsIndex must index provider card fields like API key controls"
+        )
+
+    def test_settings_index_includes_plugin_cards(self):
+        """Plugins pane entries must index plugin cards by plugin name."""
+        idx = PANELS_JS.find("function _buildSettingsIndex()")
+        assert idx >= 0, "_buildSettingsIndex not found"
+        body = PANELS_JS[idx:idx + 3500]
+        assert "pane.querySelectorAll('.plugin-card')" in body, (
+            "_buildSettingsIndex must scan plugin cards so Plugins search is not empty"
+        )
+
+    def test_resolve_settings_field_rehydrates_provider_plugin_cards(self):
+        """Provider and plugin search entries must survive pane re-renders."""
+        idx = PANELS_JS.find("function _resolveSettingsField(entry)")
+        assert idx >= 0, "_resolveSettingsField not found"
+        body = PANELS_JS[idx:idx + 2200]
+        assert "entry.cardName && (entry.sectionKey === 'providers' || entry.sectionKey === 'plugins')" in body, (
+            "_resolveSettingsField must re-find provider/plugin cards by name after lazy pane re-renders"
+        )
+        assert "card.querySelectorAll('.provider-card-field')" in body, (
+            "_resolveSettingsField must be able to re-find provider card fields by label"
+        )
+
     def test_filter_settings_caps_results(self):
         """filterSettings must cap results at 12 items."""
         idx = PANELS_JS.find("function filterSettings(query)")

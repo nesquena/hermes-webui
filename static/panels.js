@@ -6154,6 +6154,23 @@ async function _buildSettingsIndex() {
         const label = t(i18nKey) || labelEl.textContent.trim();
         if (label) index.push({ label, sectionKey, i18nKey, el: field });
       });
+      if (sectionKey === 'providers') {
+        pane.querySelectorAll('.provider-card').forEach(card => {
+          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+          card.querySelectorAll('.provider-card-field').forEach(field => {
+            const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
+            const label = [cardName, fieldLabel].filter(Boolean).join(' ');
+            if (label) index.push({ label, sectionKey, el: field, cardName, fieldLabel });
+          });
+        });
+      }
+      if (sectionKey === 'plugins') {
+        pane.querySelectorAll('.plugin-card').forEach(card => {
+          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+        });
+      }
     }
     // A panel-session reset while building clears the memo; drop this result
     // instead of resurrecting a stale index for the new session.
@@ -6235,6 +6252,22 @@ function _resolveSettingsField(entry) {
     help: 'settingsPaneHelp',
   };
   const pane = $(paneIds[entry.sectionKey]);
+  if (pane && entry.cardName && (entry.sectionKey === 'providers' || entry.sectionKey === 'plugins')) {
+    const cards = entry.sectionKey === 'providers'
+      ? pane.querySelectorAll('.provider-card')
+      : pane.querySelectorAll('.plugin-card');
+    for (const card of cards) {
+      const name = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+      if (name !== entry.cardName) continue;
+      if (entry.fieldLabel && entry.sectionKey === 'providers') {
+        for (const field of card.querySelectorAll('.provider-card-field')) {
+          const label = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
+          if (label === entry.fieldLabel) return field;
+        }
+      }
+      return card;
+    }
+  }
   const labelEl = pane && entry.i18nKey
     ? pane.querySelector(`label[data-i18n="${CSS.escape(entry.i18nKey)}"]`)
     : null;
