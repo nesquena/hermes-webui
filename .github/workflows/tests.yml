@@ -37,6 +37,27 @@ jobs:
         if: always()
         run: python3 scripts/ruff_lint.py --all
 
+      # Static-JS runtime-error guards. These catch brick-class bugs that throw only
+      # when the browser executes the code — node --check, source-presence tests, and
+      # the mocked pytest suite all miss them. Two complementary ESLint passes:
+      #   * runtime-guard config: no-const-assign / no-import-assign (#3162 class)
+      #   * scope_undef_gate.py: no-undef across the shared classic-<script> global
+      #     scope, catching a function defined nested but called from a sibling
+      #     scope (#3696 — ReferenceError: _sessionAttentionState is not defined).
+      - name: Set up Node for ESLint runtime guards
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install ESLint
+        run: npm install --no-save eslint@^10
+
+      - name: ESLint runtime-error gate (no-const-assign / no-import-assign, #3162)
+        run: npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
+
+      - name: Scope / undefined-reference gate (#3696)
+        run: python3 scripts/scope_undef_gate.py
+
   test:
     runs-on: ubuntu-latest
     strategy:

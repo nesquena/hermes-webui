@@ -87,6 +87,18 @@ def _make_zip(members: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
+def _make_tar(members: dict[str, bytes], mode: str = "w") -> bytes:
+    """Create a tar archive in memory (mode 'w' = uncompressed .tar)."""
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode=mode) as tf:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
 # ── Health check ──────────────────────────────────────────────────────────
 
 def test_health():
@@ -427,3 +439,88 @@ class TestWorkspaceUploadArchive:
         assert "extract_error" in result
         assert not (ws / "many.zip").exists()
         assert not (ws / "many").exists()
+
+
+# ── Hardening regression tests (v0.51.208 hotfix) ──────────────────────────
+
+def test_parse_multipart_rejects_negative_content_length():
+    """Negative Content-Length must not reach rfile.read(<0) (unbounded read).
+
+    The per-handler `content_length > MAX_UPLOAD_BYTES` gate is False for a
+    negative value, so the guard has to live in parse_multipart itself (the
+    shared chokepoint for every upload handler).
+    """
+    from api.upload import parse_multipart
+    big = b"x" * (2 * 1024 * 1024)
+    rfile = io.BytesIO(
+        b"--b\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n" + big + b"\r\n--b--\r\n"
+    )
+    try:
+        parse_multipart(rfile, "multipart/form-data; boundary=b", -1)
+        assert False, "negative Content-Length should have been rejected"
+    except ValueError as e:
+        assert "Content-Length" in str(e)
+    # The stream must not have been drained by an unbounded read.
+    assert rfile.tell() == 0
+
+
+def test_parse_multipart_rejects_oversize_content_length():
+    from api.config import MAX_UPLOAD_BYTES
+    from api.upload import parse_multipart
+    rfile = io.BytesIO(b"ignored")
+    try:
+        parse_multipart(rfile, "multipart/form-data; boundary=b", MAX_UPLOAD_BYTES + 1)
+        assert False, "oversize Content-Length should have been rejected"
+    except ValueError as e:
+        assert "too large" in str(e).lower()
+
+
+class TestWorkspaceUploadArchiveSuffixes:
+    def test_plain_tar_is_extracted(self, cleanup_test_sessions):
+        """A `.tar` (and .tbz2/.txz) upload must extract, matching extract_archive's
+        supported set — previously `is_archive` omitted them so they landed raw."""
+        sid, ws = make_session_tracked(cleanup_test_sessions)
+        tar_data = _make_tar({"docs/readme.txt": b"hello from tar"})
+        result, status = post_multipart(
+            "/api/workspace/upload",
+            {"session_id": sid, "path": ""},
+            {"file": ("bundle.tar", tar_data)},
+        )
+        assert status == 200, f"Upload failed {status}: {result}"
+        assert result["extracted"] is True
+        assert result.get("extracted_count", 0) >= 1
+        # The raw .tar should have been removed after successful extraction.
+        assert not (ws / "bundle.tar").exists()
+
+
+class TestWorkspaceUploadSymlinkTarget:
+    def test_symlink_subpath_target_is_rejected(self, cleanup_test_sessions):
+        """An in-workspace symlink subdir pointing outside the workspace must not
+        let the upload target (mkdir + writes) escape the workspace root."""
+        import os
+        sid, ws = make_session_tracked(cleanup_test_sessions)
+        escape = ws.parent / f"escape-{uuid.uuid4().hex[:8]}"
+        escape.mkdir(parents=True, exist_ok=True)
+        link = ws / "outlink"
+        try:
+            try:
+                os.symlink(str(escape), str(link))
+            except (OSError, NotImplementedError):
+                import pytest
+                pytest.skip("symlinks not supported in this environment")
+            result, status = post_multipart(
+                "/api/workspace/upload",
+                {"session_id": sid, "path": "outlink"},
+                {"file": ("pwned.txt", b"should not land outside")},
+            )
+            # The escaping target must be rejected outright, and nothing may land
+            # outside the workspace. Either a 403 (upload-handler symlink-target
+            # rejection) or a 400 ("Path traversal blocked" from safe_resolve_ws,
+            # which #3398 made the workspace boundary enforce consistently for all
+            # symlink escapes) is an acceptable rejection — the invariant is that
+            # the upload does NOT land outside the workspace.
+            assert status in (400, 403), f"expected 400/403, got status={status} result={result}"
+            assert not (escape / "pwned.txt").exists()
+        finally:
+            import shutil
+            shutil.rmtree(escape, ignore_errors=True)

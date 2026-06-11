@@ -48,7 +48,7 @@ class _FakeHandler:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _call_gateway_status(monkeypatch, agent_health_alive, identity_map=None):
+def _call_gateway_status(monkeypatch, agent_health_alive, identity_map=None, details=None):
     """Invoke handle_get for /api/gateway/status and return the parsed JSON.
 
     monkeypatches build_agent_health_payload to return the given `alive` value
@@ -62,7 +62,7 @@ def _call_gateway_status(monkeypatch, agent_health_alive, identity_map=None):
         lambda: {
             "alive": agent_health_alive,
             "checked_at": "2026-05-06T12:00:00+00:00",
-            "details": {},
+            "details": details or {},
         },
     )
 
@@ -234,6 +234,25 @@ def test_gateway_status_missing_r_field_handled_by_frontend(monkeypatch):
     result = _call_gateway_status(monkeypatch, agent_health_alive=True, identity_map={})
     assert "running" in result
     assert "configured" in result
+
+
+def test_gateway_status_includes_gateway_health_metadata(monkeypatch):
+    """Expose gateway health reason/state metadata so the UI can render better diagnostics."""
+    result = _call_gateway_status(
+        monkeypatch,
+        agent_health_alive=None,
+        identity_map={},
+        details={
+            "state": "unknown",
+            "reason": "gateway_stale_running_state",
+            "gateway_state": "running",
+        },
+    )
+    assert result["health"] == {
+        "state": "unknown",
+        "reason": "gateway_stale_running_state",
+        "gateway_state": "running",
+    }
 
 
 def test_gateway_status_last_active_empty_when_alive_and_no_sessions_path(monkeypatch):

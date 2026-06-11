@@ -1307,37 +1307,252 @@ def test_provider_quota_styles_exist():
 
 # ── Regression tests for #1912 ────────────────────────────────────────────────
 
-def test_account_usage_subprocess_uses_devnull_stdin(monkeypatch):
-    """Account-usage probe subprocess must receive stdin=DEVNULL.
 
-    DEVNULL prevents the child from inheriting any pipe that could block or
-    leak data.  This is a defence-in-depth measure beyond the parent-death
-    signal; it is tested separately to make the invariant explicit.
-    """
+class _FakeAccountUsageWorkerProcess:
+    def __init__(self, payloads=None):
+        self.payloads = list(payloads or [])
+        self.requests = []
+        self.returncode = None
+        self.terminated = False
+        self.killed = False
+        self.stdin = self._Stdin(self)
+        self.stdout = self._Stdout(self)
+
+    class _Stdin:
+        def __init__(self, proc):
+            self.proc = proc
+            self.closed = False
+
+        def write(self, value):
+            self.proc.requests.append(json.loads(value))
+
+        def flush(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    class _Stdout:
+        def __init__(self, proc):
+            self.proc = proc
+            self.closed = False
+
+        def readline(self):
+            request = self.proc.requests[-1]
+            if self.proc.payloads:
+                payload = self.proc.payloads.pop(0)
+            else:
+                payload = {
+                    "provider": request["provider"],
+                    "source": "usage_api",
+                    "title": "Account limits",
+                    "windows": [],
+                    "details": [],
+                    "available": True,
+                    "unavailable_reason": None,
+                    "fetched_at": "2030-03-17T12:30:00Z",
+                }
+            return json.dumps(payload) + "\n"
+
+        def close(self):
+            self.closed = True
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
+def test_account_usage_worker_reuses_process_for_same_home(monkeypatch, tmp_path):
+    import api.providers as providers
+    import subprocess
+
+    launched = []
+
+    def fake_popen(*args, **kwargs):
+        proc = _FakeAccountUsageWorkerProcess()
+        launched.append((args, kwargs, proc))
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    providers._close_account_usage_probe_workers()
+    try:
+        first = providers._agent_fetch_account_usage_for_home("openai-codex", tmp_path)
+        second = providers._agent_fetch_account_usage_for_home("anthropic", tmp_path, api_key="sk-test")
+    finally:
+        providers._close_account_usage_probe_workers()
+
+    assert len(launched) == 1
+    assert first.provider == "openai-codex"
+    assert second.provider == "anthropic"
+    assert launched[0][2].requests == [
+        {"provider": "openai-codex", "api_key": "", "env_var": None},
+        {"provider": "anthropic", "api_key": "sk-test", "env_var": "ANTHROPIC_API_KEY"},
+    ]
+
+
+def test_account_usage_worker_pool_is_keyed_by_home(monkeypatch, tmp_path):
+    import api.providers as providers
+    import subprocess
+
+    launched = []
+
+    def fake_popen(*args, **kwargs):
+        proc = _FakeAccountUsageWorkerProcess()
+        launched.append((args, kwargs, proc))
+        return proc
+
+    home_a = tmp_path / "a"
+    home_b = tmp_path / "b"
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    providers._close_account_usage_probe_workers()
+    try:
+        providers._agent_fetch_account_usage_for_home("openai-codex", home_a)
+        providers._agent_fetch_account_usage_for_home("openai-codex", home_b)
+    finally:
+        providers._close_account_usage_probe_workers()
+
+    assert len(launched) == 2
+
+
+def test_account_usage_worker_idle_cleanup_closes_stale_process(monkeypatch, tmp_path):
+    import api.providers as providers
+    import subprocess
+
+    launched = []
+
+    def fake_popen(*args, **kwargs):
+        proc = _FakeAccountUsageWorkerProcess()
+        launched.append((args, kwargs, proc))
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    providers._close_account_usage_probe_workers()
+    try:
+        providers._agent_fetch_account_usage_for_home("openai-codex", tmp_path)
+        worker = providers._account_usage_worker_pool[str(tmp_path)]
+        providers._cleanup_account_usage_probe_workers(
+            now=worker.last_used + providers._ACCOUNT_USAGE_WORKER_IDLE_SECONDS + 1
+        )
+        providers._agent_fetch_account_usage_for_home("openai-codex", tmp_path)
+    finally:
+        providers._close_account_usage_probe_workers()
+
+    assert len(launched) == 2
+    assert launched[0][2].terminated is True
+
+
+def test_busy_account_usage_worker_uses_one_shot_fallback(monkeypatch, tmp_path):
+    import api.providers as providers
+
+    worker = providers._AccountUsageProbeWorker(tmp_path)
+    calls = []
+
+    def fake_one_shot(provider, home, *, api_key=None):
+        calls.append((provider, Path(home), api_key))
+        return SimpleNamespace(provider=provider, source="usage_api", windows=(), details=(), available=True)
+
+    monkeypatch.setattr(providers, "_fetch_account_usage_once_for_home", fake_one_shot)
+    locked = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with worker._lock:
+            locked.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert locked.wait(timeout=5)
+    try:
+        snapshot = worker.fetch("anthropic", api_key="sk-test")
+    finally:
+        release.set()
+        holder.join(timeout=5)
+        worker.close()
+
+    assert snapshot.provider == "anthropic"
+    assert calls == [("anthropic", tmp_path, "sk-test")]
+
+
+def test_account_usage_cleanup_removes_null_proc_worker(monkeypatch, tmp_path):
+    import api.providers as providers
+    import subprocess
+
+    launched = []
+
+    def fake_popen(*args, **kwargs):
+        proc = _FakeAccountUsageWorkerProcess()
+        launched.append(proc)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    providers._close_account_usage_probe_workers()
+    try:
+        providers._agent_fetch_account_usage_for_home("openai-codex", tmp_path)
+        worker = providers._account_usage_worker_pool[str(tmp_path)]
+        worker.close()
+        providers._cleanup_account_usage_probe_workers()
+        assert str(tmp_path) not in providers._account_usage_worker_pool
+    finally:
+        providers._close_account_usage_probe_workers()
+
+    assert len(launched) == 1
+
+
+def test_provider_key_mutation_invalidates_warm_account_usage_workers(monkeypatch, tmp_path):
+    import api.providers as providers
+
+    invalidated = []
+
+    monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(providers, "invalidate_models_cache", lambda: None)
+    monkeypatch.setattr(
+        providers,
+        "invalidate_account_usage_status_cache",
+        lambda provider_id=None: invalidated.append(provider_id),
+    )
+
+    updated = providers.set_provider_key("anthropic", "sk-test-quota-worker")
+    removed = providers.set_provider_key("anthropic", None)
+
+    assert updated["ok"] is True
+    assert removed["ok"] is True
+    assert invalidated == ["anthropic", "anthropic"]
+
+
+def test_account_usage_worker_uses_controlled_pipe_stdin(monkeypatch):
+    """Account-usage probe workers must not inherit process stdin."""
     import api.providers as providers
     import subprocess
 
     seen_stdin = None
 
-    def capturing_run(*args, **kwargs):
+    def capturing_popen(*args, **kwargs):
         nonlocal seen_stdin
         seen_stdin = kwargs.get('stdin')
-        class FakeProc:
-            returncode = 0
-            stdout = '{}'
-            stderr = ''
-        return FakeProc()
+        return _FakeAccountUsageWorkerProcess()
 
-    monkeypatch.setattr(subprocess, 'run', capturing_run)
+    monkeypatch.setattr(subprocess, 'Popen', capturing_popen)
+    providers._close_account_usage_probe_workers()
     try:
         providers._agent_fetch_account_usage_for_home(
             'openai-codex', Path('/nonexistent'), api_key=None
         )
-    except Exception:
-        pass  # errors are expected on a fake env; we only care about stdin
+    finally:
+        providers._close_account_usage_probe_workers()
 
-    assert seen_stdin is subprocess.DEVNULL, (
-        f'expected stdin=subprocess.DEVNULL, got {seen_stdin!r}'
+    assert seen_stdin is subprocess.PIPE, (
+        f'expected stdin=subprocess.PIPE, got {seen_stdin!r}'
     )
 
 
@@ -1387,24 +1602,21 @@ def test_account_usage_preexec_fn_is_wired_on_posix(monkeypatch):
 
         captured_kwargs = {}
 
-        def capture_run(*args, **kwargs):
+        def capture_popen(*args, **kwargs):
             captured_kwargs.update(kwargs)
-            class FakeProc:
-                returncode = 0
-                stdout = '{}'
-                stderr = ''
-            return FakeProc()
+            return _FakeAccountUsageWorkerProcess()
 
-        monkeypatch.setattr(subprocess, 'run', capture_run)
+        monkeypatch.setattr(subprocess, 'Popen', capture_popen)
+        providers._close_account_usage_probe_workers()
         try:
             providers._agent_fetch_account_usage_for_home(
                 'openai-codex', Path('/nonexistent'), api_key=None
             )
-        except Exception:
-            pass
+        finally:
+            providers._close_account_usage_probe_workers()
 
         assert 'preexec_fn' in captured_kwargs, (
-            'preexec_fn should be in subprocess.run kwargs on POSIX'
+            'preexec_fn should be in subprocess.Popen kwargs on POSIX'
         )
         assert captured_kwargs['preexec_fn'] is providers._account_usage_preexec_fn
 
@@ -1421,12 +1633,27 @@ def test_account_usage_semaphore_caps_concurrency(monkeypatch, tmp_path):
     monkeypatch.setattr(profiles, 'get_active_hermes_home', lambda: tmp_path)
     old_cfg, old_mtime = _with_config(model={'provider': 'openai-codex'})
 
-    barrier = threading.Barrier(2, timeout=2)
+    active = 0
+    max_active = 0
+    entered = 0
+    first_two_entered = threading.Event()
+    third_entered = threading.Event()
+    lock = threading.Lock()
     unblock = threading.Event()
 
     def slow_fetch(provider, home, api_key=None):
-        barrier.wait()
+        nonlocal active, max_active, entered
+        with lock:
+            active += 1
+            entered += 1
+            max_active = max(max_active, active)
+            if entered == providers._MAX_CONCURRENT_ACCOUNT_USAGE_PROBES:
+                first_two_entered.set()
+            if entered > providers._MAX_CONCURRENT_ACCOUNT_USAGE_PROBES:
+                third_entered.set()
         unblock.wait(timeout=5)
+        with lock:
+            active -= 1
         return None
 
     monkeypatch.setattr(providers, '_agent_fetch_account_usage_for_home', slow_fetch)
@@ -1442,16 +1669,22 @@ def test_account_usage_semaphore_caps_concurrency(monkeypatch, tmp_path):
         except Exception as exc:
             errors.append(exc)
 
-    threads = [threading.Thread(target=worker) for _ in range(2)]
+    threads = [
+        threading.Thread(target=worker)
+        for _ in range(providers._MAX_CONCURRENT_ACCOUNT_USAGE_PROBES + 1)
+    ]
     for t in threads:
         t.start()
-    for t in threads:
-        t.join(timeout=10)
-
-    unblock.set()
 
     try:
+        assert first_two_entered.wait(timeout=2), 'first probe batch did not start'
+        assert not third_entered.wait(timeout=0.2), 'third probe bypassed semaphore'
+        unblock.set()
+        for t in threads:
+            t.join(timeout=10)
         assert not errors, f'workers raised: {errors}'
-        assert len(results) == 2, f'expected 2 results, got {len(results)}'
+        assert len(results) == len(threads), f'expected {len(threads)} results, got {len(results)}'
+        assert max_active <= providers._MAX_CONCURRENT_ACCOUNT_USAGE_PROBES
     finally:
+        unblock.set()
         _restore_config(old_cfg, old_mtime)

@@ -363,7 +363,7 @@ def test_switching_away_counts_as_background_completion():
 
 
 def test_restore_settled_background_stream_marks_completion_unread():
-    restore_idx = MESSAGES_JS.find("async function _restoreSettledSession(source)")
+    restore_idx = MESSAGES_JS.find("async function _restoreSettledSession(source")
     assert restore_idx != -1, "_restoreSettledSession(source) not found"
     restore_block = MESSAGES_JS[restore_idx:MESSAGES_JS.find("function _handleStreamError", restore_idx)]
 

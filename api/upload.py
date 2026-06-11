@@ -11,7 +11,14 @@ from pathlib import Path
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
 from api.helpers import j, bad
 from api.models import get_session
-from api.workspace import safe_resolve_ws, resolve_trusted_workspace
+from api.workspace import (
+    safe_resolve_ws,
+    resolve_trusted_workspace,
+    open_anchored_create_fd,
+    make_anchored_dir,
+    rmtree_anchored,
+    unlink_anchored,
+)
 
 
 def _max_extracted_bytes() -> int:
@@ -40,11 +47,30 @@ _MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
 
 def parse_multipart(rfile, content_type, content_length) -> tuple:
     import re as _re, email.parser as _ep
+    # Imported locally (not just module-level) so the function stays
+    # self-contained — some tests exec() this function's source in an isolated
+    # namespace, and a bare module global would NameError there.
+    try:
+        from api.config import MAX_UPLOAD_BYTES as _MAX_UPLOAD_BYTES
+    except Exception:
+        _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
     m = _re.search(r'boundary=([^;\s]+)', content_type)
     if not m:
         raise ValueError('No boundary in Content-Type')
     boundary = m.group(1).strip('"').encode()
-    raw = rfile.read(content_length)
+    # Centralized length guard for ALL upload callers: a missing/garbage or
+    # NEGATIVE Content-Length must never reach rfile.read(<0), which reads the
+    # stream unbounded (read(-1) == read-to-EOF) and bypasses the per-handler
+    # size cap. Reject anything not in [0, MAX_UPLOAD_BYTES].
+    try:
+        length = int(content_length)
+    except (TypeError, ValueError):
+        raise ValueError('Invalid Content-Length') from None
+    if length < 0:
+        raise ValueError('Invalid Content-Length (negative)')
+    if length > _MAX_UPLOAD_BYTES:
+        raise ValueError(f'Upload too large (max {_MAX_UPLOAD_BYTES} bytes)')
+    raw = rfile.read(length)
     fields = {}
     files = {}
     delimiter = b'--' + boundary
@@ -192,7 +218,8 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
             dest_dir = safe_resolve_ws(workspace, stem).with_name(stem + '_' + suffix)
         else:
             raise ValueError('Could not allocate a unique extraction directory')
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    # #3398: create the extraction root race-safely under the true workspace root.
+    make_anchored_dir(workspace, dest_dir)
 
     # Member-count cap: a tiny archive with millions of (possibly empty) members
     # slips under the byte cap but can exhaust inodes / file descriptors. Bound it.
@@ -224,8 +251,12 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                             f'{cap // (1024*1024)} MB limit). '
                             f'Possible zip bomb.'
                         )
-                    member_path.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(member) as src, open(member_path, 'wb') as dst:
+                    # #3398: open_anchored_create_fd creates intermediate dirs
+                    # race-safely under the true workspace root (anchored mkdirat),
+                    # so no pathname member_path.parent.mkdir() before it (which
+                    # could be redirected outside by a raced symlink component).
+                    _mfd = open_anchored_create_fd(workspace, member_path)
+                    with zf.open(member) as src, os.fdopen(_mfd, 'wb', closefd=True) as dst:
                         _chunk_size = 65536
                         while True:
                             chunk = src.read(_chunk_size)
@@ -262,10 +293,13 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                             f'{cap // (1024*1024)} MB limit). '
                             f'Possible zip bomb.'
                         )
-                    member_path.parent.mkdir(parents=True, exist_ok=True)
+                    # #3398: anchored member create makes intermediate dirs
+                    # race-safely; no pathname member_path.parent.mkdir() first.
                     src_obj = tf.extractfile(member)
                     if src_obj:
-                        with src_obj as src, open(member_path, 'wb') as dst:
+                        # #3398: fd-anchored member create under the TRUE workspace root.
+                        _mfd = open_anchored_create_fd(workspace, member_path)
+                        with src_obj as src, os.fdopen(_mfd, 'wb', closefd=True) as dst:
                             _chunk_size = 65536
                             while True:
                                 chunk = src.read(_chunk_size)
@@ -283,7 +317,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     except Exception:
         # Clean up partially-extracted directory to avoid orphaned folders
         try:
-            shutil.rmtree(dest_dir, ignore_errors=True)
+            rmtree_anchored(workspace, dest_dir)
         except Exception:
             pass
         raise
@@ -364,6 +398,125 @@ def handle_transcribe(handler):
                 pass
 
 
+def _stt_provider_capability_from_module(stt):
+    """Return (available, provider) for a loaded transcription_tools module."""
+    try:
+        load_cfg = getattr(stt, "_load_stt_config", None)
+        stt_config = load_cfg() if callable(load_cfg) else {}
+        cfg_dict = stt_config if isinstance(stt_config, dict) else {}
+        is_enabled = getattr(stt, "is_stt_enabled", None)
+        if callable(is_enabled) and not is_enabled(stt_config):
+            return False, "none"
+
+        # Some tests and future agent releases expose the provider decision as a
+        # single helper. Use it when the lower-level capability flags are not
+        # available. The current agent module exposes the flags below, so the
+        # normal path mirrors _get_provider() without triggering its lazy local
+        # STT install side effect during a passive web page probe.
+        has_internal_flags = any(
+            hasattr(stt, name)
+            for name in ("_HAS_FASTER_WHISPER", "_HAS_OPENAI", "_HAS_MISTRAL")
+        )
+        get_provider = getattr(stt, "_get_provider", None)
+        if callable(get_provider) and not has_internal_flags:
+            provider = str(get_provider(stt_config) or "none")
+            return provider not in ("", "none"), provider or "none"
+
+        def env(name):
+            getter = getattr(stt, "get_env_value", None)
+            try:
+                if callable(getter):
+                    return str(getter(name) or "").strip()
+            except Exception:
+                return ""
+            return os.getenv(name, "").strip()
+
+        def has_local_command():
+            helper = getattr(stt, "_has_local_command", None)
+            try:
+                return bool(helper()) if callable(helper) else False
+            except Exception:
+                return False
+
+        def has_browser_audio_converter():
+            helper = getattr(stt, "_find_ffmpeg_binary", None)
+            try:
+                return bool(helper()) if callable(helper) else False
+            except Exception:
+                return False
+
+        def has_openai_audio():
+            helper = getattr(stt, "_has_openai_audio_backend", None)
+            try:
+                return bool(helper()) if callable(helper) else False
+            except Exception:
+                return False
+
+        def local_command_available():
+            # The browser sends WebM/Ogg blobs; the local-command path converts
+            # non-WAV input through ffmpeg before invoking the command.
+            return has_local_command() and has_browser_audio_converter()
+
+        def resolve_provider(provider):
+            if provider == "local":
+                if bool(getattr(stt, "_HAS_FASTER_WHISPER", False)):
+                    return "local"
+                if local_command_available():
+                    return "local_command"
+                return "none"
+            if provider == "local_command":
+                if local_command_available():
+                    return "local_command"
+                if bool(getattr(stt, "_HAS_FASTER_WHISPER", False)):
+                    return "local"
+                return "none"
+            if provider == "groq":
+                return "groq" if bool(getattr(stt, "_HAS_OPENAI", False)) and bool(env("GROQ_API_KEY")) else "none"
+            if provider == "openai":
+                return "openai" if bool(getattr(stt, "_HAS_OPENAI", False)) and has_openai_audio() else "none"
+            if provider == "mistral":
+                return "mistral" if bool(getattr(stt, "_HAS_MISTRAL", False)) and bool(env("MISTRAL_API_KEY")) else "none"
+            if provider == "xai":
+                try:
+                    from tools.xai_http import resolve_xai_http_credentials
+
+                    return "xai" if resolve_xai_http_credentials().get("api_key") else "none"
+                except Exception:
+                    return "none"
+            if provider == "elevenlabs":
+                return "elevenlabs" if bool(env("ELEVENLABS_API_KEY")) else "none"
+            return "none"
+
+        explicit = "provider" in cfg_dict
+        if explicit:
+            configured = str(cfg_dict.get("provider") or "local")
+            provider = resolve_provider(configured)
+            return provider != "none", provider if provider != "none" else configured
+
+        for candidate in ("local", "local_command", "groq", "openai", "mistral", "xai", "elevenlabs"):
+            provider = resolve_provider(candidate)
+            if provider != "none":
+                return True, provider
+        return False, "none"
+    except Exception:
+        return False, "none"
+
+
+
+def _stt_provider_capability():
+    """Return (available, provider) for a cheap server-side STT capability probe."""
+    try:
+        import tools.transcription_tools as stt
+    except ImportError:
+        return False, "none"
+    return _stt_provider_capability_from_module(stt)
+
+
+def handle_transcribe_capability(handler):
+    available, provider = _stt_provider_capability()
+    return j(handler, {"ok": True, "available": bool(available), "provider": provider})
+
+
 def handle_workspace_upload(handler):
     """Upload a file into a session's workspace directory.
 
@@ -401,7 +554,20 @@ def handle_workspace_upload(handler):
 
         # Resolve target subdirectory within workspace
         target_dir = safe_resolve_ws(workspace, subpath) if subpath else workspace
-        target_dir.mkdir(parents=True, exist_ok=True)
+        # safe_resolve_ws intentionally permits in-workspace symlinks pointing
+        # outside the root (read trust model). For an UPLOAD target that's not
+        # acceptable: a planted symlink subpath would let mkdir() + writes create
+        # files OUTSIDE the workspace. Require the resolved target to be inside
+        # the workspace before creating anything. (is_relative_to is True for the
+        # workspace==target equality case, so the normal subpath='' path passes.)
+        if not target_dir.resolve().is_relative_to(workspace.resolve()):
+            return j(handler, {'error': 'Upload target escapes workspace'}, status=403)
+        # #3398: create the upload target dir race-safely under the workspace root
+        # (anchored mkdirat) so a raced symlink subpath can't mkdir outside.
+        try:
+            make_anchored_dir(workspace, target_dir)
+        except (ValueError, OSError):
+            return j(handler, {'error': 'Upload target escapes workspace'}, status=403)
 
         results = []
         for _field_name, (filename, file_bytes) in files.items():
@@ -431,17 +597,35 @@ def handle_workspace_upload(handler):
                 else:
                     return j(handler, {'error': 'Too many uploads with the same filename'}, status=400)
 
-            dest.write_bytes(file_bytes)
+            # #3398 TOCTOU hardening: create the destination via an anchored
+            # openat-walk from the true workspace root with O_CREAT|O_EXCL|
+            # O_NOFOLLOW, so a symlink raced into any path component after the
+            # containment checks above cannot redirect the write outside the
+            # workspace. The dedup loop guarantees `dest` does not exist.
+            try:
+                _wfd = open_anchored_create_fd(workspace, dest.resolve())
+            except FileExistsError:
+                return j(handler, {'error': f'Upload destination already exists: {safe_name}'}, status=409)
+            except (ValueError, OSError):
+                return j(handler, {'error': f'Path traversal blocked: {safe_name}'}, status=403)
+            with os.fdopen(_wfd, 'wb', closefd=True) as _wfh:
+                _wfh.write(file_bytes)
             mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
 
-            # For archives, optionally extract into the target directory
-            is_archive = safe_name.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar.bz2', '.tar.xz'))
+            # For archives, optionally extract into the target directory.
+            # Suffix set MUST match extract_archive()'s supported formats, else
+            # accepted-but-unlisted archives (.tar/.tbz2/.txz) silently land as
+            # raw files instead of extracting.
+            is_archive = safe_name.lower().endswith(('.zip', '.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz'))
             if is_archive:
                 import zipfile, tarfile, traceback as _extract_tb
                 try:
                     extraction = extract_archive(file_bytes, safe_name, target_dir)
                     # Remove the archive file after successful extraction
-                    dest.unlink(missing_ok=True)
+                    try:
+                        unlink_anchored(workspace, dest.resolve())
+                    except FileNotFoundError:
+                        pass
                     results.append({
                         'filename': safe_name,
                         'path': str(extraction.get('dest', target_dir)),
@@ -455,7 +639,10 @@ def handle_workspace_upload(handler):
                 except (zipfile.BadZipFile, tarfile.TarError, ValueError) as e:
                     # Extraction failed — remove the archive file (no partial
                     # content left behind) and surface the error to the user.
-                    dest.unlink(missing_ok=True)
+                    try:
+                        unlink_anchored(workspace, dest.resolve())
+                    except FileNotFoundError:
+                        pass
                     print(f'[webui] workspace upload extract error: {e}', flush=True)
                     results.append({
                         'filename': safe_name,
@@ -469,7 +656,10 @@ def handle_workspace_upload(handler):
                     continue
                 except Exception:
                     print('[webui] workspace upload extract error: ' + _extract_tb.format_exc(), flush=True)
-                    dest.unlink(missing_ok=True)
+                    try:
+                        unlink_anchored(workspace, dest.resolve())
+                    except FileNotFoundError:
+                        pass
                     results.append({
                         'filename': safe_name,
                         'path': str(target_dir),

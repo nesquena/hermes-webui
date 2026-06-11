@@ -33,6 +33,25 @@ def test_prism_language_map_covers_common_extensions():
     assert "txt:''" in WORKSPACE_JS
 
 
+def test_prism_language_path_fallback_covers_extensionless_code_filenames():
+    """Common code/config filenames without useful extensions should still
+    activate Prism grammar selection in workspace previews (#3365).
+    """
+    assert "_PRISM_BASENAME_LANG_MAP" in WORKSPACE_JS
+    expected = {
+        "Dockerfile": "docker",
+        "Makefile": "makefile",
+        "makefile": "makefile",
+        "GNUmakefile": "makefile",
+        "CMakeLists.txt": "cmake",
+        ".gitignore": "ignore",
+        ".dockerignore": "ignore",
+    }
+    for filename, language in expected.items():
+        assert f"{filename.lower()!r}:{language!r}" in WORKSPACE_JS
+    assert "base.startsWith('dockerfile.')" in WORKSPACE_JS
+
+
 def test_plain_text_files_do_not_inherit_prior_file_highlighting():
     """Cross-file leak fix: a plain-text preview after a code preview must not
     inherit the previous file's language. Two guards make this hold:

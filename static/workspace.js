@@ -368,12 +368,13 @@ async function openArtifactPath(path){
 
 async function loadDir(path, opts={}){
   const preservePreview=!!(opts&&opts.preservePreview);
+  const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
   const sessionId=S.session.session_id;
   try{
-    if(!path||path==='.'){
+    if(!path||path==='.'||refreshExpanded){
       S._dirCache={};
-      _restoreExpandedDirs();  // restore per-workspace expanded state on root load
+      _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
     S.currentDir=path||'.';
     const data=await api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}`);
@@ -383,7 +384,7 @@ async function loadDir(path, opts={}){
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
-    if(!path||path==='.'){
+    if(!path||path==='.'||refreshExpanded){
       const expanded=S._expandedDirs||new Set();
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
       if(pending.length){
@@ -409,6 +410,12 @@ async function loadDir(path, opts={}){
     // Fetch git info for workspace root (non-blocking)
     if(!path||path==='.') _refreshGitBadge();
   }catch(e){console.warn('loadDir',e);}
+}
+
+function refreshWorkspacePanel(){
+  if(!S.session)return;
+  const targetDir = S.currentDir || '.';
+  loadDir(targetDir,{refreshExpanded:true});
 }
 
 async function _refreshGitBadge(){
@@ -451,8 +458,8 @@ const HTML_EXTS   = new Set(['.html','.htm']);
 const PDF_EXTS    = new Set(['.pdf']);
 const AUDIO_EXTS  = new Set(['.mp3','.wav','.m4a','.aac','.ogg','.oga','.opus','.flac']);
 const VIDEO_EXTS  = new Set(['.mp4','.mov','.m4v','.webm','.ogv','.avi','.mkv']);
-const MD_PREVIEW_RICH_RENDER_MAX_BYTES = 64 * 1024;
-const MD_PREVIEW_RICH_RENDER_MAX_LINES = 1500;
+const MD_PREVIEW_RICH_RENDER_MAX_BYTES = 256 * 1024;
+const MD_PREVIEW_RICH_RENDER_MAX_LINES = 5000;
 // Binary formats that should download rather than preview
 const DOWNLOAD_EXTS = new Set([
   '.docx','.doc','.xlsx','.xls','.pptx','.ppt','.odt','.ods','.odp',
@@ -486,7 +493,28 @@ function largeMarkdownPlainTextStatus(content){
   const bytes=markdownPreviewByteLength(content);
   const lines=markdownPreviewLineCount(content);
   const sizeLabel=bytes>=1024?`${Math.round(bytes/1024)} KB`:`${bytes} B`;
-  return `Large markdown file (${sizeLabel}, ${lines} lines) shown as plain text. Click Edit to view raw.`;
+  return `Large markdown file (${sizeLabel}, ${lines} lines) shown as plain text. Click "Render as markdown anyway" to force rich rendering, or Edit to view raw.`;
+}
+
+function setLargeMarkdownForceRenderVisible(visible){
+  const btn=$('btnRenderMarkdownAnyway');
+  if(btn) btn.style.display=visible?'inline-flex':'none';
+}
+
+function renderMarkdownPreviewContent(data){
+  showPreview('md');
+  $('previewMd').innerHTML=renderMd(data.content);
+  requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
+}
+
+function forceRenderMarkdownPreview(){
+  // #3378 review (Codex): don't force-render from a dirty/open editor — the
+  // cached raw content would not reflect the unsaved edit. Require a saved,
+  // non-dirty state and cached content that belongs to the current file.
+  if(_previewDirty || $('previewEditArea').style.display!=='none') return;
+  if(!_previewRawContent || _previewRawContentPath!==_previewCurrentPath) return;
+  openFile(_previewCurrentPath,{forceRichMarkdown:true});
+  setStatus('Markdown rendered for this file.');
 }
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
@@ -511,6 +539,7 @@ function showPreview(mode){
   // Show "Open in browser" button for iframe-backed document previews
   const openBtn=$('btnOpenInBrowser');
   if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf')?'inline-flex':'none';
+  setLargeMarkdownForceRenderVisible(false);
 }
 
 function updateEditBtn(){
@@ -536,9 +565,13 @@ async function toggleEditMode(){
         session_id:S.session.session_id, path:_previewCurrentPath, content
       })});
       _previewDirty=false;
-      // Update read-only views
+      // Update read-only views AND the cached raw content so a later
+      // "Render as markdown anyway" force-render reflects the just-saved text
+      // (not the stale pre-edit fetch). #3378 review (Codex).
+      _previewRawContent = content;
+      _previewRawContentPath = _previewCurrentPath;
       if(_previewCurrentMode==='code') $('previewCode').textContent=content;
-      else { $('previewMd').innerHTML=renderMd(content); requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();}); }
+      else renderMarkdownPreviewContent({content});
       $('previewEditArea').style.display='none';
       if(_previewCurrentMode==='code') $('previewCode').style.display='';
       else $('previewMd').style.display='';
@@ -562,6 +595,7 @@ async function toggleEditMode(){
 }
 
 let _previewRawContent = '';  // raw text for md files (to populate editor)
+let _previewRawContentPath = '';  // path that _previewRawContent belongs to (#3378 force-render cache guard)
 
 function cancelEditMode(){
   // Discard changes and return to read-only view
@@ -594,7 +628,15 @@ const _PRISM_LANG_MAP={
   diff:'diff',patch:'diff',
   txt:'',log:'',csv:'',tsv:'',
 };
+const _PRISM_BASENAME_LANG_MAP={
+  'dockerfile':'docker','makefile':'makefile','gnumakefile':'makefile',
+  'cmakelists.txt':'cmake',
+  '.gitignore':'ignore','.dockerignore':'ignore',
+};
 function _prismLanguageForPath(path){
+  const base=String(path||'').split(/[\\/]/).pop().toLowerCase();
+  if(base.startsWith('dockerfile.')) return 'docker';
+  if(_PRISM_BASENAME_LANG_MAP[base]!==undefined) return _PRISM_BASENAME_LANG_MAP[base];
   const ext=fileExt(path).replace(/^\./,'');
   return _PRISM_LANG_MAP[ext]!==undefined?_PRISM_LANG_MAP[ext]:'plaintext';
 }
@@ -603,6 +645,7 @@ async function openFile(path, opts={}){
   if(!S.session)return;
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
+  const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
   const cacheBust=bustCache?`&_=${Date.now()}`:'';
 
   // Binary/download-only formats: trigger browser download, don't preview
@@ -647,17 +690,24 @@ async function openFile(path, opts={}){
   } else if(MD_EXTS.has(ext)){
     // Markdown: fetch text, render with renderMd, display as formatted HTML
     try{
-      const data=await api(`/api/file?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
+      // #3378 review (Codex): only reuse cached raw content when it actually
+      // belongs to the requested path. `path===_previewCurrentPath` is tautological
+      // here (_previewCurrentPath was just assigned above), so guard on the
+      // dedicated _previewRawContentPath instead — otherwise a force-render after a
+      // file switch could re-render the previous file's cached content.
+      const data=forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent
+        ? {content:_previewRawContent}
+        : await api(`/api/file?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
       _previewRawContent = data.content;
-      if(shouldRenderMarkdownPreviewAsPlainText(data.content)){
+      _previewRawContentPath = path;
+      if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
         showPreview('code');
         $('previewCode').textContent=data.content;
+        setLargeMarkdownForceRenderVisible(true);
         setStatus(largeMarkdownPlainTextStatus(data.content));
         return;
       }
-      showPreview('md');
-      $('previewMd').innerHTML=renderMd(data.content);
-      requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
+      renderMarkdownPreviewContent(data);
     }catch(e){setStatus(t('file_open_failed'));}
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
@@ -801,6 +851,14 @@ async function uploadToWorkspace(file, dir) {
     });
     if (data && data.error) {
       showToast(data.error, 5000, 'error');
+    } else if (data && (data.extract_error || (Array.isArray(data.files) && data.files.some(function(f){return f && f.extract_error;})))) {
+      // Archive was rejected (zip-slip / zip-bomb / corrupt / too-many-members):
+      // the file uploaded but extraction failed. Surface it as an error instead
+      // of a misleading "Uploaded" success toast.
+      var msg = data.extract_error
+        || (data.files.find(function(f){return f && f.extract_error;}) || {}).extract_error
+        || 'Archive extraction failed';
+      showToast(msg, 5000, 'error');
     } else {
       showToast(t('uploaded') || ('Uploaded ' + (data.filename || file.name)), 2000);
     }
@@ -809,29 +867,152 @@ async function uploadToWorkspace(file, dir) {
   }
 }
 
+function _isOsFilesDrag(e) {
+  return !!(e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files'));
+}
+
+function _joinWorkspacePath(base, rel) {
+  const b = base || '.';
+  const r = (rel || '').replace(/^\/+|\/+$/g, '');
+  if (!r) return b;
+  return b === '.' ? r : `${b}/${r}`;
+}
+
+function _targetDirForRelDir(destDir, relDir) {
+  const dirPart = (relDir || '').replace(/\/+$/, '');
+  if (!dirPart) return destDir || '.';
+  return _joinWorkspacePath(destDir, dirPart);
+}
+
+async function _readAllDirectoryEntries(reader) {
+  const entries = [];
+  while (true) {
+    const batch = await new Promise((resolve, reject) => {
+      reader.readEntries(resolve, reject);
+    });
+    if (!batch.length) break;
+    entries.push(...batch);
+  }
+  return entries;
+}
+
+async function _collectFilesFromEntry(entry, relPrefix) {
+  if (entry.isFile) {
+    const file = await new Promise((resolve, reject) => {
+      entry.file(resolve, reject);
+    });
+    return [{ file, relDir: relPrefix || '' }];
+  }
+  if (!entry.isDirectory) return [];
+  const reader = entry.createReader();
+  const children = await _readAllDirectoryEntries(reader);
+  const dirPrefix = `${relPrefix || ''}${entry.name}/`;
+  let out = [];
+  for (const child of children) {
+    out = out.concat(await _collectFilesFromEntry(child, dirPrefix));
+  }
+  return out;
+}
+
+async function _collectOsDropUploads(dataTransfer) {
+  const out = [];
+  const items = dataTransfer.items ? [...dataTransfer.items] : [];
+  if (items.length && typeof items[0].webkitGetAsEntry === 'function') {
+    for (const item of items) {
+      if (item.kind !== 'file') continue;
+      const entry = item.webkitGetAsEntry();
+      if (!entry) continue;
+      out.push(...await _collectFilesFromEntry(entry, ''));
+    }
+    if (out.length) return out;
+  }
+  for (const file of dataTransfer.files) {
+    out.push({ file, relDir: '' });
+  }
+  return out;
+}
+
+async function uploadOsDropToWorkspace(dataTransfer, destDir) {
+  if (!S.session || !dataTransfer) return;
+  const uploads = await _collectOsDropUploads(dataTransfer);
+  for (const { file, relDir } of uploads) {
+    await uploadToWorkspace(file, _targetDirForRelDir(destDir, relDir));
+  }
+  if (S.session) await loadDir(S.currentDir);
+}
+
+function _clearWorkspaceOsUploadDragOver() {
+  document.querySelectorAll('.file-item.drag-over-upload,.breadcrumb-seg.drag-over-upload').forEach((el) => {
+    el.classList.remove('drag-over-upload');
+  });
+}
+
+function _bindWorkspaceOsUploadDropTarget(el, destDir) {
+  // Use addEventListener (not on-property assignment) so these OS-upload
+  // handlers COMPOSE with the workspace tree-MOVE handlers bound by
+  // _bindWorkspaceMoveDropTarget() on the same element. A property assignment
+  // for the drop handler here would overwrite the move handler, and a
+  // workspace-file drag would fall through to the document drop (inserting
+  // @path into the composer) instead of moving the file. Each handler gates on
+  // its own drag type (_isOsFilesDrag vs _isWorkspaceTreeMoveDrag), so only the
+  // matching one acts.
+  el.addEventListener('dragenter', (e) => {
+    if (!_isOsFilesDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    el.classList.add('drag-over-upload');
+  });
+  el.addEventListener('dragover', (e) => {
+    if (!_isOsFilesDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+    el.classList.add('drag-over-upload');
+  });
+  el.addEventListener('dragleave', (e) => {
+    if (el.contains(e.relatedTarget)) return;
+    el.classList.remove('drag-over-upload');
+  });
+  el.addEventListener('drop', async (e) => {
+    if (!_isOsFilesDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    el.classList.remove('drag-over-upload');
+    await uploadOsDropToWorkspace(e.dataTransfer, destDir);
+  });
+}
+
 // Drag-and-drop files onto workspace file tree
 if (typeof document !== 'undefined') {
   const _wsUploadInit = () => {
     const tree = $('fileTree');
     if (!tree) return;
+    tree.addEventListener('dragenter', (e) => {
+      if (e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files')) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
     tree.addEventListener('dragover', (e) => {
       if (e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files')) {
         e.preventDefault();
+        e.stopPropagation();
+        if (e.target.closest('.file-item[data-ws-type="dir"],.breadcrumb-seg')) return;
         e.dataTransfer.dropEffect = 'copy';
         tree.classList.add('drag-over-upload');
       }
     });
-    tree.addEventListener('dragleave', () => {
+    tree.addEventListener('dragleave', (e) => {
+      if (tree.contains(e.relatedTarget)) return;
       tree.classList.remove('drag-over-upload');
     });
     tree.addEventListener('drop', async (e) => {
       tree.classList.remove('drag-over-upload');
       if (!e.dataTransfer || !e.dataTransfer.types || !e.dataTransfer.types.includes('Files')) return;
+      if (e.target.closest('.file-item[data-ws-type="dir"],.breadcrumb-seg')) return;
       e.preventDefault();
-      for (const file of e.dataTransfer.files) {
-        await uploadToWorkspace(file, S.currentDir || '.');
-      }
-      if (S.session) loadDir(S.currentDir);
+      e.stopPropagation();
+      await uploadOsDropToWorkspace(e.dataTransfer, S.currentDir || '.');
     });
   };
   if (document.readyState === 'loading') {

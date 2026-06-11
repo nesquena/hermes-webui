@@ -7,6 +7,8 @@ edge_tts import / Communicate call.
 """
 import io
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -65,6 +67,7 @@ def _fresh_tts_limiter(monkeypatch):
     import api.auth as _auth
     monkeypatch.setattr(_auth, "is_auth_enabled", lambda: False)
     monkeypatch.setattr(routes, "is_auth_enabled", lambda: False, raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", raising=False)
     _reset_limiter()
     yield
     _reset_limiter()
@@ -97,6 +100,51 @@ def test_tts_rejects_unknown_voice():
     assert "invalid voice" in (h.payload() or {}).get("error", "")
 
 
+def test_tts_rejects_invalid_rate_before_engine():
+    h = _post({"text": "hello", "voice": "en-US-AriaNeural", "rate": "<break/>"}, client="10.0.0.6")
+    routes._handle_tts(h, None)
+    assert h.status == 400
+    assert "invalid rate" in (h.payload() or {}).get("error", "")
+
+
+def test_tts_rejects_invalid_pitch_before_engine():
+    h = _post({"text": "hello", "voice": "en-US-AriaNeural", "pitch": "+500Hz"}, client="10.0.0.7")
+    routes._handle_tts(h, None)
+    assert h.status == 400
+    assert "invalid pitch" in (h.payload() or {}).get("error", "")
+
+
+def test_tts_accepts_ui_prosody_shape(monkeypatch):
+    captured = {}
+
+    class FakeCommunicate:
+        def __init__(self, text, voice, **kwargs):
+            captured["text"] = text
+            captured["voice"] = voice
+            captured["kwargs"] = kwargs
+
+        def stream_sync(self):
+            yield {"type": "audio", "data": b"abc"}
+
+    monkeypatch.setitem(sys.modules, "edge_tts", SimpleNamespace(Communicate=FakeCommunicate))
+
+    h = _post(
+        {
+            "text": "hello",
+            "voice": "en-US-AriaNeural",
+            "rate": "+10%",
+            "pitch": "-5Hz",
+        },
+        client="10.0.0.8",
+    )
+    routes._handle_tts(h, None)
+
+    assert h.status == 200
+    assert captured["text"] == "hello"
+    assert captured["voice"] == "en-US-AriaNeural"
+    assert captured["kwargs"] == {"rate": "+10%", "pitch": "-5Hz"}
+
+
 def test_tts_rate_limits_second_immediate_request():
     # The limiter runs (and records the client) BEFORE the voice allowlist and
     # before any edge-tts synthesis. Use an invalid voice so the first request
@@ -110,3 +158,41 @@ def test_tts_rate_limits_second_immediate_request():
     h2 = _post({"text": "hello", "voice": "not-a-real-voice"}, client="10.0.0.3")
     routes._handle_tts(h2, None)
     assert h2.status == 429
+
+
+def test_tts_rate_limit_ignores_spoofed_forwarded_for_by_default():
+    h1 = _post(
+        {"text": "hello", "voice": "not-a-real-voice"},
+        headers={"X-Forwarded-For": "203.0.113.10"},
+        client="10.0.0.4",
+    )
+    routes._handle_tts(h1, None)
+    assert h1.status == 400
+
+    h2 = _post(
+        {"text": "hello", "voice": "not-a-real-voice"},
+        headers={"X-Forwarded-For": "203.0.113.11"},
+        client="10.0.0.4",
+    )
+    routes._handle_tts(h2, None)
+    assert h2.status == 429
+
+
+def test_tts_rate_limit_can_trust_forwarded_for_when_opted_in(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+
+    h1 = _post(
+        {"text": "hello", "voice": "not-a-real-voice"},
+        headers={"X-Forwarded-For": "203.0.113.12"},
+        client="10.0.0.5",
+    )
+    routes._handle_tts(h1, None)
+    assert h1.status == 400
+
+    h2 = _post(
+        {"text": "hello", "voice": "not-a-real-voice"},
+        headers={"X-Forwarded-For": "203.0.113.13"},
+        client="10.0.0.5",
+    )
+    routes._handle_tts(h2, None)
+    assert h2.status == 400

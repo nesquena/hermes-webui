@@ -299,45 +299,77 @@ def _runtime_detail_subset(runtime_status: dict[str, Any] | None) -> dict[str, A
 # reachable remote gateway. The Tasks/Cron banner then shows a spurious amber
 # "Gateway not configured" warning.
 #
-# When ``HERMES_API_URL`` is set we treat that as an explicit declaration that
-# the gateway lives elsewhere, and probe it over HTTP before touching any local
-# filesystem / module signal. The probe result is cached briefly so a dashboard
-# rerender that fans out to multiple panels does not hammer the gateway.
+# When a gateway base URL is set in any supported env var, we treat that as an
+# explicit declaration that the gateway lives elsewhere, and probe it over HTTP
+# before touching any local filesystem / module signal. The probe result is
+# cached briefly so a dashboard rerender that fans out to multiple panels does
+# not hammer the gateway.
 
 _REMOTE_PROBE_TIMEOUT_S: float = 2.0
 _REMOTE_PROBE_CACHE_TTL_S: float = 5.0
-_REMOTE_PROBE_PATHS: tuple[str, ...] = ("/health", "/status", "/api/gateway/status")
+_REMOTE_PROBE_PATHS: tuple[str, ...] = ("/health/detailed", "/health", "/v1/health")
+# A gateway health payload is small JSON; cap the 2xx body read so a large or
+# slow-trickled remote response can't hang /api/health/agent or balloon memory.
+_REMOTE_PROBE_BODY_LIMIT_BYTES: int = 64 * 1024
 
 _remote_probe_lock = threading.Lock()
 _remote_probe_cache: dict[str, Any] = {"url": None, "expires_at": 0.0, "result": None}
 
 
 def _remote_gateway_base_url() -> str | None:
-    raw = os.environ.get("HERMES_API_URL")
-    if not isinstance(raw, str):
-        return None
-    url = raw.strip()
-    if not url:
-        return None
-    return url.rstrip("/")
+    """Return an explicit remote gateway base URL, or None for local-only setups.
+
+    Priority: GATEWAY_HEALTH_URL > HERMES_GATEWAY_HEALTH_URL > HERMES_API_URL
+    > HERMES_WEBUI_GATEWAY_BASE_URL.
+    Returns ``None`` when no env var is set so the caller falls through to
+    local PID/state checks.
+
+    Any of these env vars may legitimately point AT a health endpoint
+    (e.g. ``GATEWAY_HEALTH_URL=http://host:8642/health``). Since the probe
+    appends ``/health/detailed`` etc. to the returned base, strip a trailing
+    health-path suffix first so we don't build ``/health/health/detailed``
+    (mirrors the normalization in api/updates.py).
+    """
+    for var in (
+        "GATEWAY_HEALTH_URL",
+        "HERMES_GATEWAY_HEALTH_URL",
+        "HERMES_API_URL",
+        "HERMES_WEBUI_GATEWAY_BASE_URL",
+    ):
+        val = os.environ.get(var, "").strip()
+        if val:
+            base = val.rstrip("/")
+            for suffix in ("/health/detailed", "/health", "/v1/health", "/status"):
+                if base.endswith(suffix):
+                    base = base[: -len(suffix)].rstrip("/")
+                    break
+            return base
+    return None
 
 
-def _http_probe(url: str, timeout_s: float) -> tuple[bool, int | None, str | None]:
-    """GET ``url`` and return (ok, status_code, error_name).
+def _http_probe(url: str, timeout_s: float) -> tuple[bool, int | None, str | None, bytes | None]:
+    """GET ``url`` and return (ok, status_code, error_name, body).
 
     ``ok`` is True only for a 2xx response. 5xx and network errors are not OK.
     4xx is also treated as "responded" (the gateway is up, just answering 404
     on this particular path) so the caller can move on to the next path.
+    ``body`` is the raw response bytes for 2xx responses, None otherwise.
     """
     req = urllib_request.Request(url, method="GET")
     try:
         with urllib_request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - trusted env var URL
             status = getattr(resp, "status", None) or resp.getcode()
-            return (200 <= int(status) < 300, int(status), None)
+            ok = 200 <= int(status) < 300
+            # Cap the body read: we only need a small JSON health payload, and an
+            # unbounded resp.read() on a large/trickled 2xx body could hang the
+            # /api/health/agent handler or balloon memory. Read one byte over the
+            # cap so the caller can detect (and skip) an oversized body.
+            body = resp.read(_REMOTE_PROBE_BODY_LIMIT_BYTES + 1) if ok else None
+            return (ok, int(status), None, body)
     except urllib_error.HTTPError as exc:
-        return (False, int(exc.code), "HTTPError")
+        return (False, int(exc.code), "HTTPError", None)
     except Exception as exc:  # urllib_error.URLError, socket.timeout, ssl, etc.
-        return (False, None, type(exc).__name__)
+        return (False, None, type(exc).__name__, None)
 
 
 def _probe_remote_gateway(base_url: str, *, now: float | None = None) -> dict[str, Any]:
@@ -360,17 +392,28 @@ def _probe_remote_gateway(base_url: str, *, now: float | None = None) -> dict[st
     last_status: int | None = None
     last_error: str | None = None
     for path in _REMOTE_PROBE_PATHS:
-        ok, status, err = _http_probe(base_url + path, _REMOTE_PROBE_TIMEOUT_S)
+        ok, status, err, body = _http_probe(base_url + path, _REMOTE_PROBE_TIMEOUT_S)
         if ok:
+            details: dict[str, Any] = {
+                "state": "alive",
+                "reason": "remote_gateway",
+                "endpoint": base_url + path,
+                "status_code": status,
+            }
+            if body and len(body) <= _REMOTE_PROBE_BODY_LIMIT_BYTES:
+                try:
+                    data = json.loads(body)
+                    if isinstance(data, dict) and "gateway_state" in data:
+                        details["gateway_state"] = data["gateway_state"]
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+            # An over-cap body (len > limit, i.e. the +1 sentinel byte was read)
+            # is treated as "alive but no parseable gateway_state" — we still
+            # report the gateway as up, just without the detailed state.
             payload = {
                 "alive": True,
                 "checked_at": _checked_at(),
-                "details": {
-                    "state": "alive",
-                    "reason": "remote_gateway",
-                    "endpoint": base_url + path,
-                    "status_code": status,
-                },
+                "details": details,
             }
             break
         # Remember the most informative failure signal we saw.

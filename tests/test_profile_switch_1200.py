@@ -482,7 +482,7 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
-        lambda model, provider: (model, provider, False),
+        lambda model, provider, **_: (model, provider, False),
     )
     monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
@@ -554,7 +554,7 @@ def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
-        lambda model, provider: (model, provider, False),
+        lambda model, provider, **_: (model, provider, False),
     )
     monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())

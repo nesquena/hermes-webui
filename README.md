@@ -135,6 +135,16 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 
 `ctl.sh start` runs the bootstrap in foreground/no-browser mode behind the daemon wrapper, writes logs to `~/.hermes/webui.log`, and respects `.env` plus inline overrides such as `HERMES_WEBUI_HOST=0.0.0.0 ./ctl.sh start`.
 
+> **Stopping the server.** Each launch method has its own stop path because only `ctl.sh start` writes a PID file (`~/.hermes/webui.pid`):
+>
+> | Launch method | How to stop |
+> |---|---|
+> | `python3 bootstrap.py` or `./start.sh` | **Ctrl-C** in the terminal (both run in the foreground) |
+> | `./ctl.sh start` | `./ctl.sh stop` (sends SIGTERM, waits, then SIGKILL) |
+> | Detached `bootstrap.py` (no `--foreground`) | Find the PID via `lsof -i :8787` (or `ss -tlnp`) and `kill` it |
+>
+> `./ctl.sh stop` cannot stop a server launched by `bootstrap.py` or `start.sh` directly — it only manages processes it started itself.
+
 ### Advanced: dynamic recall prefill & Gateway-backed chat
 
 Two optional, self-hosted-deployment features — attaching dynamic **session-recall prefill** to browser turns (Joplin/Obsidian/Notion/llm-wiki routers), and routing browser chat through a running **Hermes Gateway** — are documented in [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md). Most users need neither.
@@ -337,6 +347,8 @@ Full list of environment variables:
 | `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` | *(unset)* | Optional comma-separated same-origin stylesheet URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_HOME` | Windows: `%LOCALAPPDATA%\hermes`; POSIX: `~/.hermes` | Base directory for Hermes state (affects all paths) |
 | `HERMES_CONFIG_PATH` | `$HERMES_HOME/config.yaml` | Path to Hermes config file |
+| `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
+| `HERMES_WEBUI_SESSIONS_MAX` | `100` | Max compact `Session` objects held in the in-memory LRU. Lighter than the agent cache; lower it on installs with hundreds of sessions |
 
 ---
 
@@ -532,6 +544,22 @@ docker-compose.yml  Compose with named volume and optional auth
 State lives outside the repo at `~/.hermes/webui/` by default
 (sessions, workspaces, settings, projects, last_workspace). Override with `HERMES_WEBUI_STATE_DIR`.
 Full design notes and the endpoint catalog are in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+---
+
+## Compatibility
+
+The version shown in the WebUI runtime status is the **WebUI version only** (build/image/tag currently running). It is not a full compatibility map.
+
+The WebUI is still coupled to Hermes Agent internals for runtime execution, provider/model access, and state/schema usage until the stable agent boundary work in [#1925](https://github.com/nesquena/hermes-webui/issues/1925) and [#2491](https://github.com/nesquena/hermes-webui/issues/2491) land. In practice, the WebUI imports Agent modules directly (`api/config.py`, `api/providers.py`, `api/streaming.py`) and reads Agent state layout directly, so version skew can cause import or behavior drift.
+
+**Compatibility policy**
+- WebUI release branches are tested against the matching Hermes Agent release available at that WebUI release time.
+- **Upgrade both together**: upgrade or pin WebUI and hermes-agent together (same release train/version/date), especially before enabling production traffic.
+- Running pinned older/newer combinations is **untested and unsupported** until the stable API boundary work in [#1925](https://github.com/nesquena/hermes-webui/issues/1925) / [#2491](https://github.com/nesquena/hermes-webui/issues/2491) is in place.
+- Record the full `hermes-agent` + `hermes-webui` versions in issue reports when upgrade mismatches are suspected.
+
+**Docker users**: pin both image tags (or corresponding pinned source revisions) rather than using `latest` on one side and a fixed tag on the other. When upgrading the multi-container setup, follow the agent-image upgrade procedure in [`docs/docker.md`](docs/docker.md) (which requires dropping the `hermes-agent-src` volume before recreating). The current source-boundary status is tracked in [`docs/rfcs/agent-source-boundary.md`](docs/rfcs/agent-source-boundary.md).
 
 ---
 

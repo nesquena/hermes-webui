@@ -13,12 +13,16 @@ def test_workspace_heading_is_interactive_root_control():
     assert "loadDir('.')" in UI_JS
 
 
-def test_workspace_heading_context_menu_exposes_root_reveal_and_copy_path():
-    """Right-clicking the heading should expose root-scoped Reveal and Copy path actions."""
+def test_workspace_heading_context_menu_exposes_root_actions():
+    """Right-clicking the heading should expose root-scoped create and utility actions."""
     assert "_showWorkspaceRootContextMenu" in UI_JS
+    assert "promptNewFile('.')" in UI_JS
+    assert "promptNewFolder('.')" in UI_JS
     assert "'/api/file/reveal'" in UI_JS
     assert "'/api/file/path'" in UI_JS
     assert "path:'.'" in UI_JS.replace(" ", "")
+    assert "new_file_prompt" in UI_JS
+    assert "new_folder_prompt" in UI_JS
     assert "copy_file_path" in UI_JS
     assert "reveal_in_finder" in UI_JS
 
@@ -41,3 +45,11 @@ def test_workspace_heading_affordance_requires_workspace():
     guard_idx = UI_JS.find("if(!(S.session&&S.session.workspace)) return;", context_idx)
     prevent_idx = UI_JS.find("e.preventDefault()", context_idx)
     assert context_idx < guard_idx < prevent_idx
+
+
+def test_new_folder_add_as_workspace_prompt_uses_no_for_cancel_label():
+    """The post-create-folder workspace prompt should offer an explicit 'No' option."""
+    assert "title:t('folder_add_as_space_title')" in UI_JS
+    assert "message:t('folder_add_as_space_msg')" in UI_JS
+    assert "confirmLabel:t('folder_add_as_space_btn')" in UI_JS
+    assert "cancelLabel:t('status_no')" in UI_JS
