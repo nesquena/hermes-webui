@@ -495,6 +495,7 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
     source_refresh_kind = ""
     terminal_refresh_failure = False
     fetch_origin_uri = ""
+    payload_repo_path = ""
     if _github_issue_timeline_route_path_matches(raw_origin_text):
         issue_timeline_safe_origin = _github_issue_timeline_safe_origin(raw_origin_text)
         if issue_timeline_safe_origin:
@@ -749,6 +750,15 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_actions_selected_actions_path_repo(origin_uri)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_actions_workflow_access_route_path_matches(raw_origin_text):
+        actions_workflow_access_origin = _github_actions_workflow_access_safe_origin(raw_origin_text)
+        actions_workflow_access_repo = _github_actions_workflow_access_path_repo(actions_workflow_access_origin or "")
+        if not actions_workflow_access_origin or not actions_workflow_access_repo:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = f"github actions workflow access {actions_workflow_access_repo}"
+            source_refresh_kind = "github_actions_workflow_access"
+            payload_repo_path = actions_workflow_access_repo
     if _github_actions_repository_permissions_route_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_actions_repository_permissions_path_repo(origin_uri)
@@ -861,6 +871,8 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
     }
     if source_refresh_kind:
         payload["source_refresh_kind"] = source_refresh_kind
+    if payload_repo_path:
+        payload["repo_path"] = payload_repo_path
     if fetch_origin_uri:
         payload["fetch_origin_uri"] = fetch_origin_uri
     if terminal_refresh_failure:
@@ -6512,6 +6524,63 @@ def _github_actions_selected_actions_path_repo(origin_uri: str) -> str:
     return f"{path[2]}/{path[3]}"
 
 
+def _github_actions_workflow_access_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com" or parts.scheme != "https":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "actions"
+        or path[5] != "permissions"
+        or path[6] != "access"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_actions_workflow_access_safe_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or parts.netloc.strip() != "api.github.com":
+        return ""
+    repo = _github_actions_workflow_access_path_repo(origin_uri)
+    if not repo:
+        return ""
+    return urlunsplit(("https", "api.github.com", parts.path, "", ""))
+
+
+def _github_repo_path_is_safe(repo_path: str) -> bool:
+    parts = str(repo_path or "").split("/")
+    return len(parts) == 2 and all(_github_repo_path_segment_is_safe(part) for part in parts)
+
+
+def _github_actions_workflow_access_origin_from_repo_path(repo_path: str) -> str:
+    repo_path = str(repo_path or "")
+    if not _github_repo_path_is_safe(repo_path):
+        return ""
+    owner, repo = repo_path.split("/", 1)
+    return f"https://api.github.com/repos/{owner}/{repo}/actions/permissions/access"
+
+
+def _github_actions_workflow_access_repo_from_public_origin(origin_text: str) -> str:
+    prefix = "github actions workflow access "
+    text = str(origin_text or "").strip()
+    if not text.lower().startswith(prefix):
+        return ""
+    repo_path = text[len(prefix):]
+    return repo_path if _github_repo_path_is_safe(repo_path) else ""
+
+
 def _github_actions_selected_actions_route_path_matches(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -6543,6 +6612,42 @@ def _github_actions_selected_actions_path_matches(origin_uri: str) -> bool:
     if (parts.hostname or "").strip().lower() != "api.github.com":
         return False
     return _github_actions_selected_actions_route_path_matches(origin_uri)
+
+
+def _github_actions_workflow_access_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 7
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "actions"
+            and lowered[5] == "permissions"
+            and lowered[6].startswith("access")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return False
+
+
+def _github_actions_workflow_access_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_actions_workflow_access_route_path_matches(origin_uri)
 
 
 def _github_actions_repository_permissions_path_repo(origin_uri: str) -> str:
@@ -6583,7 +6688,7 @@ def _github_actions_repository_permissions_route_path_matches(origin_uri: str) -
             return False
         permissions_segment = lowered[5]
         if permissions_segment == "permissions":
-            return len(path_segments) == 6 or lowered[6] not in {"workflow", "selected-actions"}
+            return len(path_segments) == 6 or lowered[6] not in {"access", "workflow", "selected-actions"}
         return permissions_segment.startswith("permissions")
 
     raw_path = parts.path.split("/")
@@ -6642,6 +6747,7 @@ def _github_actions_workflow_permissions_path_matches(origin_uri: str) -> bool:
 
 
 _GITHUB_ACTIONS_WORKFLOW_PERMISSION_LEVELS = {"read", "write"}
+_GITHUB_ACTIONS_WORKFLOW_ACCESS_LEVELS = {"none", "user", "organization"}
 _GITHUB_ACTIONS_REPOSITORY_ALLOWED_ACTIONS = {"all", "local_only", "selected"}
 
 
@@ -6733,6 +6839,26 @@ def _github_actions_repository_permissions_refresh_summary(origin_uri: str, payl
     return _bounded_refresh_summary(
         "GitHub Actions repository permissions for "
         f"{repo}; actions enabled: {enabled}; allowed actions: {allowed_actions}"
+    )
+
+
+def _json_payload_is_github_actions_workflow_access_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_actions_workflow_access_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if "version" in payload or "items" in payload:
+        return False
+    access_level = payload.get("access_level")
+    return access_level in _GITHUB_ACTIONS_WORKFLOW_ACCESS_LEVELS
+
+
+def _github_actions_workflow_access_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_actions_workflow_access_path_repo(origin_uri) or "repository"
+    access_level = _safe_public_text(payload.get("access_level"), limit=40)
+    return _bounded_refresh_summary(
+        "GitHub Actions workflow access for "
+        f"{repo}; access level: {access_level}"
     )
 
 
@@ -13865,6 +13991,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_actions_selected_actions_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    actions_workflow_access_repo = _github_actions_workflow_access_path_repo(origin_uri)
+    if actions_workflow_access_repo:
+        if not _json_payload_is_github_actions_workflow_access_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub Actions workflow access {actions_workflow_access_repo}",
+            "summary": _github_actions_workflow_access_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_actions_workflow_access_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     actions_repository_permissions_repo = _github_actions_repository_permissions_path_repo(origin_uri)
     if actions_repository_permissions_repo:
         if not _json_payload_is_github_actions_repository_permissions_metadata(origin_uri, payload):
@@ -14449,6 +14587,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or not _github_actions_selected_actions_path_repo(selected_actions_origin)
         ):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_actions_workflow_access_route_path_matches(raw_origin_uri):
+        if not _github_actions_workflow_access_safe_origin(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_actions_repository_permissions_route_path_matches(raw_origin_uri):
         repository_permissions_origin = _safe_origin_uri(raw_origin_uri, source_id=_safe_public_id(source_id, fallback="source"))
         if (
@@ -14746,6 +14887,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_actions_selected_actions_path_matches(safe_origin_uri):
         if not _github_actions_selected_actions_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_actions_workflow_access_path_matches(safe_origin_uri):
+        if not _github_actions_workflow_access_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_actions_repository_permissions_path_matches(safe_origin_uri):
@@ -15051,6 +15196,14 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_actions_selected_actions_path_repo(final_url)
             or _github_actions_selected_actions_path_repo(final_url) != _github_actions_selected_actions_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_workflow_access_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or final_url != safe_final_url
+            or final_url != safe_origin_uri
+            or not _github_actions_workflow_access_path_repo(final_url)
+            or _github_actions_workflow_access_path_repo(final_url) != _github_actions_workflow_access_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_repository_permissions_path_matches(safe_origin_uri) and (
@@ -15437,6 +15590,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_selected_actions_path_matches(safe_origin_uri) and (
             not _github_actions_selected_actions_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_workflow_access_path_matches(safe_origin_uri) and (
+            not _github_actions_workflow_access_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -16116,6 +16274,16 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
             workflow_timing_fetch_origin = _github_workflow_timing_fetch_origin(
                 str(payload.get("fetch_origin_uri") or "")
             ) or _github_workflow_timing_fetch_origin(str(payload.get("origin_uri") or ""))
+            workflow_access_repo_path = ""
+            if payload.get("source_refresh_kind") == "github_actions_workflow_access":
+                candidate_repo = str(payload.get("repo_path") or "")
+                workflow_access_repo_path = candidate_repo if _github_repo_path_is_safe(candidate_repo) else ""
+            if not workflow_access_repo_path:
+                workflow_access_repo_path = _github_actions_workflow_access_path_repo(
+                    _github_actions_workflow_access_safe_origin(str(payload.get("fetch_origin_uri") or ""))
+                )
+            if not workflow_access_repo_path:
+                workflow_access_repo_path = _github_actions_workflow_access_repo_from_public_origin(raw_source_origin_uri)
             commit_activity_fetch_origin = (
                 _github_commit_activity_fetch_origin(str(payload.get("fetch_origin_uri") or ""))
                 or _github_commit_activity_fetch_origin(str(payload.get("origin_uri") or ""))
@@ -16144,6 +16312,8 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
                 origin_uri = _github_contributor_stats_public_origin(contributor_stats_fetch_origin) or f"capy-memory://{source_id}"
             elif workflow_timing_fetch_origin:
                 origin_uri = _github_workflow_timing_public_origin(workflow_timing_fetch_origin)
+            elif workflow_access_repo_path:
+                origin_uri = f"github actions workflow access {workflow_access_repo_path}"
             elif _github_repository_custom_properties_route_path_matches(raw_source_origin_uri):
                 custom_properties_origin = _github_repository_custom_properties_safe_origin(raw_source_origin_uri)
                 custom_properties_repo = _github_repository_custom_properties_path_repo(custom_properties_origin or "")
@@ -16210,6 +16380,9 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
                 updated_payload["fetch_origin_uri"] = contributor_stats_fetch_origin
             if workflow_timing_fetch_origin and _github_workflow_timing_path_info(workflow_timing_fetch_origin) is not None:
                 updated_payload["fetch_origin_uri"] = workflow_timing_fetch_origin
+            if workflow_access_repo_path:
+                updated_payload["source_refresh_kind"] = "github_actions_workflow_access"
+                updated_payload["repo_path"] = workflow_access_repo_path
             cursor = conn.execute(
                 """
                 UPDATE jobs
@@ -16379,6 +16552,10 @@ def run_source_refresh_jobs(
             payload = {}
         source_id = _safe_public_id(payload.get("source_id"), fallback="source")
         raw_origin_uri = str(payload.get("fetch_origin_uri") or payload.get("origin_uri") or "").strip()
+        if payload.get("source_refresh_kind") == "github_actions_workflow_access":
+            workflow_access_origin = _github_actions_workflow_access_origin_from_repo_path(str(payload.get("repo_path") or ""))
+            if workflow_access_origin:
+                raw_origin_uri = workflow_access_origin
         actions_runners_fetch_origin = _github_actions_runners_fetch_origin_from_origin_text(raw_origin_uri)
         if actions_runners_fetch_origin:
             raw_origin_uri = actions_runners_fetch_origin
@@ -16397,6 +16574,9 @@ def run_source_refresh_jobs(
         dependabot_public_key_fetch_origin = _github_dependabot_secrets_public_key_fetch_origin_from_origin_text(raw_origin_uri)
         if dependabot_public_key_fetch_origin:
             raw_origin_uri = dependabot_public_key_fetch_origin
+        workflow_access_fetch_origin = _github_actions_workflow_access_safe_origin(raw_origin_uri)
+        if workflow_access_fetch_origin:
+            raw_origin_uri = workflow_access_fetch_origin
         fetch_origin_uri = raw_origin_uri
         if _github_repository_custom_properties_route_path_matches(raw_origin_uri):
             custom_properties_origin = _github_repository_custom_properties_safe_origin(raw_origin_uri)
@@ -16465,6 +16645,14 @@ def run_source_refresh_jobs(
             or not _github_actions_variables_path_repo(raw_origin_uri)
         ):
             origin_uri = f"capy-memory://{source_id}"
+        elif _github_actions_workflow_access_route_path_matches(raw_origin_uri):
+            workflow_access_origin = _github_actions_workflow_access_safe_origin(raw_origin_uri)
+            workflow_access_repo = _github_actions_workflow_access_path_repo(workflow_access_origin or "")
+            if not workflow_access_origin or not workflow_access_repo:
+                origin_uri = f"capy-memory://{source_id}"
+            else:
+                origin_uri = f"github actions workflow access {workflow_access_repo}"
+                fetch_origin_uri = workflow_access_origin
         elif _github_actions_runners_route_path_matches(raw_origin_uri) and (
             not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com")
             or not _github_actions_runners_path_repo(raw_origin_uri)
@@ -16610,7 +16798,7 @@ def run_source_refresh_jobs(
                 raise ValueError("refresh failed")
             fetched = fetch(source_id=source_id, origin_uri=fetch_origin_uri)
             fetched_for_record = fetched
-            if record_origin_uri != origin_uri and isinstance(fetched, dict):
+            if isinstance(fetched, dict) and (record_origin_uri != origin_uri or fetch_origin_uri != origin_uri):
                 fetched_for_record = dict(fetched)
                 fetched_for_record["origin_uri"] = record_origin_uri
             record = _source_refresh_record(source_id, origin_uri, fetched_for_record)

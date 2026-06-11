@@ -221,6 +221,11 @@ Recent completed slices:
   - The parser reconstructs summaries from safe repository path, GitHub-owned/verified booleans, allowed pattern count, and bounded safe pattern samples while omitting raw URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
   - Query/fragment origins sanitize to the exact safe GitHub API URL, while unsafe traversal-like or URL/domain-like patterns, lookalike hosts, suffixed selected-actions routes, encoded suffixes, and explicit-port authorities fail closed before persistence or unsafe fetches.
 
+- `feat(capy-memory): ingest GitHub Actions workflow access metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub Actions workflow-access API payloads (`/repos/{owner}/{repo}/actions/permissions/access`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from safe repository path and the allow-listed external workflow access level (`none`, `user`, or `organization`) while omitting raw URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, userinfo, and secret-like fixture values from receipts/search/vault output.
+  - Jobs persist only `source_refresh_kind` plus `repo_path` and reconstruct the fetch URL at run time; JSON Feed bypass payloads, text fallbacks, redirect drift, malformed access tails, userinfo origins, explicit ports, and lookalike-host route-shaped URLs fail closed before persistence or unsafe fetches.
+
 - `feat(capy-memory): ingest GitHub repository custom properties metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub repository custom-properties API payloads (`/repos/{owner}/{repo}/properties/values`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, property count, bounded property names, value type, and multi-value counts while omitting raw property values, row/global URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
