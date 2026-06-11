@@ -3530,6 +3530,21 @@ function renderMd(raw){
   // Inline backtick spans: restore <code> tags produced in the stash callback above.
   // Must happen BEFORE bold/italic so **`code`** → <strong><code>code</code></strong>.
   s=s.replace(/\x00F(\d+)\x00/g,(_,i)=>fence_stash[+i]);
+  const SAFE_LABEL_INLINE=/^<\/?(strong|em|del|code)([\s>]|$)/i;
+  function _markdownLabelHtml(label){
+    const _label_stash=[];
+    const tokenized=String(label||'').replace(/<\/?[a-z][^>]*>/gi,tag=>{
+      if(!SAFE_LABEL_INLINE.test(tag)) return tag;
+      _label_stash.push(tag);
+      return `\x00H${_label_stash.length-1}\x00`;
+    });
+    return esc(tokenized).replace(/\x00H(\d+)\x00/g,(_,i)=>_label_stash[+i]);
+  }
+  function _markdownAnchor(label,rawUrl){
+    const href=_markdownHref(rawUrl);
+    const internal=/^session:\/\//i.test(String(rawUrl||'')) || _isInternalSessionHref(href);
+    return `<a${internal?' class="session-link"':''} href="${href}"${internal?'':' target="_blank" rel="noopener"'}>${_markdownLabelHtml(label)}</a>`;
+  }
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -3756,21 +3771,6 @@ function renderMd(raw){
     }catch(_){
       return false;
     }
-  }
-  const SAFE_LABEL_INLINE=/^<\/?(strong|em|del|code)([\s>]|$)/i;
-  function _markdownLabelHtml(label){
-    const _label_stash=[];
-    const tokenized=String(label||'').replace(/<\/?[a-z][^>]*>/gi,tag=>{
-      if(!SAFE_LABEL_INLINE.test(tag)) return tag;
-      _label_stash.push(tag);
-      return `\x00H${_label_stash.length-1}\x00`;
-    });
-    return esc(tokenized).replace(/\x00H(\d+)\x00/g,(_,i)=>_label_stash[+i]);
-  }
-  function _markdownAnchor(label,rawUrl){
-    const href=_markdownHref(rawUrl);
-    const internal=/^session:\/\//i.test(String(rawUrl||'')) || _isInternalSessionHref(href);
-    return `<a${internal?' class="session-link"':''} href="${href}"${internal?'':' target="_blank" rel="noopener"'}>${_markdownLabelHtml(label)}</a>`;
   }
   function _isSafeUrl(v, img){
     const raw=_safeAttrValue(v);
