@@ -23,6 +23,7 @@ def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
     assert "if(_isCliSession(s)) cliSessionCount++;" in src
     assert "else webuiSessionCount++;" in src
     assert "_activeOriginFilters.has(origin)" in src
+    assert "if(_activeOriginFilters.has('cli')&&cliSessionCount===0&&(webuiSessionCount===0||!_activeOriginFilters.has('webui'))){" in src
 
 
 def test_session_origin_filter_has_dedicated_sidebar_styles():

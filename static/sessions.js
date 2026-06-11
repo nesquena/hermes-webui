@@ -6028,7 +6028,7 @@ function renderSessionListFromCache(){
     list.appendChild(toggle);
   }
   // Empty state for active project filter
-  if(_activeOriginFilters.has('cli')&&cliSessionCount===0&&sourceFiltered.length===0){
+  if(_activeOriginFilters.has('cli')&&cliSessionCount===0&&(webuiSessionCount===0||!_activeOriginFilters.has('webui'))){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
     empty.textContent=window._showCliSessions?'No CLI sessions found.':'Enable Show agent sessions in Settings to list CLI sessions here.';
