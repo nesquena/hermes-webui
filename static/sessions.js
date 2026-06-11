@@ -5332,7 +5332,7 @@ function renderSessionListFromCache(){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:seg.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
-          await loadSession(seg.session_id);
+          await loadSession(seg.session_id, {skipLineageResolve:true});
           renderSessionListFromCache();
         };
         lineageList.appendChild(row);
@@ -5359,7 +5359,7 @@ function renderSessionListFromCache(){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:child.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
-          await loadSession(child.session_id);
+          await loadSession(child.session_id, {skipLineageResolve:true});
           renderSessionListFromCache();
         };
         childList.appendChild(row);
