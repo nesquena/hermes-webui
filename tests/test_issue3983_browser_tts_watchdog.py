@@ -40,6 +40,7 @@ def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
         "Both browser TTS completion callbacks must clear watchdog/keep-alive handles."
     )
     assert "_browserTtsSuppressNextErrorRearm=false;" in speak_body
+    assert "_voiceModeActive&&_voiceModeState==='speaking'" in speak_body
     assert "if(_browserTtsSuppressNextErrorRearm){" in speak_body
     assert "_armBrowserTtsRecovery(clean, utter.rate);" in speak_body
 

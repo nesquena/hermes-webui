@@ -1101,7 +1101,7 @@ window._micPendingSend=window._micPendingSend||false;
       _browserTtsSuppressNextErrorRearm=false;
       _clearBrowserTtsRecovery();
       // After speaking, go back to listening
-      if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+      if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
     };
     utter.onerror=()=>{
       _clearBrowserTtsRecovery();
