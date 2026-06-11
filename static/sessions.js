@@ -986,9 +986,10 @@ async function loadSession(sid){
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
   // the browser is already navigating away, so abort the rest of this flow.
-  // Self-heal: clear the stuck session ID during boot only (!currentSid).
+  // No self-heal: 401 is transient auth expiry — the session still exists
+  // server-side. Clearing localStorage would wipe the saved session id and
+  // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
-    _clearStuckSessionOnBoot(sid, currentSid);
     _clearSameSessionForceReloadHint(sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
     // #2971: re-arm the still-displayed session's stream (defensive — harmless
