@@ -1849,10 +1849,11 @@ def _onboarding_request_is_local(handler) -> bool:
     return bool(addr.is_loopback or addr.is_private)
 
 
-def _onboarding_gate_allows(handler) -> bool:
+def _onboarding_gate_allows(handler, auth_enabled: bool | None = None) -> bool:
     from api.auth import is_auth_enabled
 
-    if is_auth_enabled() or _truthy_env("HERMES_WEBUI_ONBOARDING_OPEN"):
+    auth_enabled = is_auth_enabled() if auth_enabled is None else auth_enabled
+    if auth_enabled or _truthy_env("HERMES_WEBUI_ONBOARDING_OPEN"):
         return True
     return _onboarding_request_is_local(handler)
 
@@ -8322,6 +8323,21 @@ def handle_post(handler, parsed) -> bool:
                     "Unset the env var and restart the server before changing the password here.",
                     409,
                 )
+
+        # First password creation decides who owns a previously passwordless
+        # WebUI. While auth is disabled, the generic /api/settings route is also
+        # unauthenticated, so gate bootstrap password setup the same way as
+        # onboarding setup: local/private networks only, unless the operator
+        # explicitly opts into remote bootstrap with HERMES_WEBUI_ONBOARDING_OPEN.
+        if requested_password and not auth_enabled_before:
+            if not _onboarding_gate_allows(handler, auth_enabled_before):
+                return bad(
+                    handler,
+                    "First password setup is only available from local networks when auth is not enabled. "
+                    "To bootstrap this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.",
+                    403,
+                )
+
         if requested_passwordless:
             from api.auth import _passkey_feature_flag_enabled
             from api.passkeys import registered_credentials
