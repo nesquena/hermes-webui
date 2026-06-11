@@ -17369,6 +17369,8 @@ const LOCALES = {
     settings_desc_token_usage: 'Wyświetla liczbę tokenów wejściowych/wyjściowych pod każdą odpowiedzią asystenta. Można też przełączyć za pomocą /usage.',
     settings_label_api_redact: 'Ukrywaj poufne dane w odpowiedziach API',
     settings_desc_api_redact: 'Użytkownicy korzystający z hostingu własnego mogą wyłączyć to dla przejrzystości (niezalecane dla współdzielonych instancji).',
+    settings_label_workspace_todos_tab: 'Pokaż kartę Todos w panelu obszaru roboczego',
+    settings_desc_workspace_todos_tab: 'Po włączeniu w panelu obszaru roboczego pojawi się karta Todos. Panel Todos na pasku bocznym pozostaje dostępny.',
     outline_title: 'Zarys',
     outline_empty: 'Nie ma jeszcze pytań.',
     outline_loading: 'Ładowanie…',
