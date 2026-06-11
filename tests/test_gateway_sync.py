@@ -60,6 +60,11 @@ def _get_state_db_path():
     return _get_test_state_dir() / 'state.db'
 
 
+def _get_settings_file_path():
+    """Return path to the test settings.json."""
+    return _get_test_state_dir() / 'settings.json'
+
+
 def _ensure_state_db():
     """Create state.db with sessions and messages tables if it doesn't exist.
     Returns a connection. Does NOT delete existing data (safe for parallel tests).
@@ -278,6 +283,70 @@ def test_webui_state_db_session_without_sidecar_appears_when_agent_sessions_enab
         except Exception:
             pass
         post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_webui_state_db_session_without_sidecar_appears_when_show_cli_sessions_unset():
+    """Default settings should surface CLI-backed state.db rows without requiring an opt-in toggle."""
+    conn = _ensure_state_db()
+    sid = 'cli_state_default_on_001'
+    settings_path = _get_settings_file_path()
+    original_settings = None
+    try:
+        if settings_path.exists():
+            original_settings = settings_path.read_text(encoding='utf-8')
+            persisted = json.loads(original_settings or '{}')
+            if not isinstance(persisted, dict):
+                persisted = {}
+        # API writes deep-merge into the current settings, so removing the key
+        # from the persisted file is the only way to exercise the clean-default path.
+        else:
+            persisted = {}
+        persisted.pop('show_cli_sessions', None)
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+        _insert_agent_session_row(
+            conn,
+            session_id=sid,
+            source='cli',
+            title='Default-On CLI Session',
+            model='openai/gpt-5',
+            messages=2,
+        )
+
+        settings_data, settings_status = get('/api/settings')
+        assert settings_status == 200, settings_data
+        assert settings_data.get('show_cli_sessions') is True
+
+        data, status = get('/api/sessions')
+        assert status == 200
+        recovered = [s for s in data.get('sessions', []) if s.get('session_id') == sid]
+        assert len(recovered) == 1, (
+            "Unset show_cli_sessions should fall back to the clean default and "
+            "surface CLI-backed state.db sessions."
+        )
+        assert recovered[0].get('source_tag') == 'cli'
+        assert recovered[0].get('is_cli_session') is True
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+        if original_settings is None:
+            settings_path.unlink(missing_ok=True)
+        else:
+            settings_path.write_text(original_settings, encoding='utf-8')
+
+
+def test_show_cli_sessions_default_on_boot_and_gateway_probe_fallbacks_stay_aligned():
+    boot_src = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+    sessions_src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+
+    assert "window._showCliSessions=true;" in boot_src
+    assert "const hasGatewaySessions = (Array.isArray(_allSessions)?_allSessions:[]).some(_isGatewaySessionForSnapshot);" in sessions_src
+    assert "if(!hasGatewaySessions){" in sessions_src
+    assert "stopGatewayPollFallback();" in sessions_src
 
 
 def test_gateway_sessions_without_messages_are_hidden_from_sidebar():

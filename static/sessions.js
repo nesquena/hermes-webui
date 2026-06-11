@@ -3683,6 +3683,11 @@ async function probeGatewaySSEStatus(){
       return;
     }
     if(resp.status === 503 || data.watcher_running === false){
+      const hasGatewaySessions = (Array.isArray(_allSessions)?_allSessions:[]).some(_isGatewaySessionForSnapshot);
+      if(!hasGatewaySessions){
+        stopGatewayPollFallback();
+        return;
+      }
       startGatewayPollFallback(data.fallback_poll_ms || _gatewayFallbackPollMs);
       renderSessionList({deferWhileInteracting:true});
       if(!_gatewaySSEWarningShown && typeof showToast === 'function'){
