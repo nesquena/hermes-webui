@@ -345,54 +345,102 @@ class GatewayWatcher:
                 time.sleep(0.1)
 
 
-# ── Module-level singleton ─────────────────────────────────────────────────
+# ── Module-level watcher registry ──────────────────────────────────────────
 
-_watcher: GatewayWatcher | None = None
+_watchers: dict[str, GatewayWatcher] = {}
 _watcher_lock = threading.Lock()
 
+def _resolve_watcher_target(
+    *,
+    profile_name: str | None = None,
+    hermes_home: Path | None = None,
+) -> tuple[str, Path | None]:
+    """Resolve the watcher profile/home pair for the current request context."""
+    resolved_profile = str(profile_name or "").strip()
+    resolved_home = Path(hermes_home).expanduser().resolve() if hermes_home is not None else None
 
-def start_watcher():
-    """Start the global gateway watcher (idempotent)."""
-    global _watcher
-    with _watcher_lock:
-        if _watcher is None:
-            hermes_home = None
+    try:
+        from api.profiles import get_active_profile_name, get_hermes_home_for_profile
+
+        if not resolved_profile:
+            resolved_profile = get_active_profile_name() or "default"
+        if resolved_home is None and resolved_profile:
+            resolved_home = Path(get_hermes_home_for_profile(resolved_profile)).expanduser().resolve()
+    except Exception:
+        if resolved_home is None:
             try:
-                from api.profiles import get_active_profile_name, get_hermes_home_for_profile
-                profile_name = get_active_profile_name()
-                if profile_name:
-                    hermes_home = get_hermes_home_for_profile(profile_name)
+                resolved_home = _get_state_db_path().parent.resolve()
             except Exception:
-                profile_name = ""
-                hermes_home = None
-            _watcher = GatewayWatcher(profile_name=profile_name, hermes_home=hermes_home)
-            _watcher.start()
+                resolved_home = None
+
+    return resolved_profile, resolved_home
 
 
-def stop_watcher():
-    """Stop the global gateway watcher."""
-    global _watcher
+def _watcher_registry_key(profile_name: str | None = None, hermes_home: Path | None = None) -> str:
+    """Return the stable registry key for a watcher target."""
+    resolved_profile, resolved_home = _resolve_watcher_target(
+        profile_name=profile_name,
+        hermes_home=hermes_home,
+    )
+    if resolved_home is not None:
+        return str(resolved_home)
+    return resolved_profile or "__default__"
+
+
+def start_watcher(*, profile_name: str | None = None, hermes_home: Path | None = None):
+    """Start the watcher for the resolved profile home (idempotent)."""
+    resolved_profile, resolved_home = _resolve_watcher_target(
+        profile_name=profile_name,
+        hermes_home=hermes_home,
+    )
+    key = _watcher_registry_key(resolved_profile, resolved_home)
     with _watcher_lock:
-        if _watcher is not None:
-            _watcher.stop()
-            _watcher = None
+        watcher = _watchers.get(key)
+        if watcher is None or not watcher.is_alive():
+            if watcher is not None:
+                watcher.stop()
+            watcher = GatewayWatcher(profile_name=resolved_profile, hermes_home=resolved_home)
+            watcher.start()
+            _watchers[key] = watcher
+        return watcher
+
+
+def stop_watcher(*, profile_name: str | None = None, hermes_home: Path | None = None):
+    """Stop either one profile watcher or the entire registry."""
+    with _watcher_lock:
+        if profile_name is None and hermes_home is None:
+            watchers = list(_watchers.values())
+            _watchers.clear()
+        else:
+            key = _watcher_registry_key(profile_name, hermes_home)
+            watcher = _watchers.pop(key, None)
+            watchers = [watcher] if watcher is not None else []
+    for watcher in watchers:
+        watcher.stop()
 
 
 def restart_watcher_for_profile(name: str):
-    """Restart the global watcher pinned to the target profile home."""
-    global _watcher
+    """Restart only the watcher pinned to the target profile home."""
     from api.profiles import get_hermes_home_for_profile
 
-    hermes_home = get_hermes_home_for_profile(name)
+    hermes_home = Path(get_hermes_home_for_profile(name)).expanduser().resolve()
+    key = _watcher_registry_key(name, hermes_home)
     with _watcher_lock:
-        if _watcher is not None:
-            _watcher.stop()
-        _watcher = GatewayWatcher(profile_name=name, hermes_home=hermes_home)
-        _watcher.start()
-        return _watcher
+        existing = _watchers.pop(key, None)
+    if existing is not None:
+        existing.stop()
+    watcher = GatewayWatcher(profile_name=name, hermes_home=hermes_home)
+    watcher.start()
+    with _watcher_lock:
+        _watchers[key] = watcher
+    return watcher
 
 
-def get_watcher() -> GatewayWatcher | None:
-    """Get the global watcher instance (or None if not started)."""
+def get_watcher(*, profile_name: str | None = None, hermes_home: Path | None = None) -> GatewayWatcher | None:
+    """Get or lazily start the watcher for the resolved request profile."""
+    key = _watcher_registry_key(profile_name, hermes_home)
     with _watcher_lock:
-        return _watcher
+        watcher = _watchers.get(key)
+    if watcher is None or not watcher.is_alive():
+        watcher = start_watcher(profile_name=profile_name, hermes_home=hermes_home)
+    return watcher

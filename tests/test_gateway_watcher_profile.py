@@ -93,14 +93,16 @@ def test_restart_watcher_for_profile_replaces_singleton_with_profile_home(tmp_pa
         def stop(self):
             self.stopped = True
 
-    old = FakeWatcher(profile_name="old", hermes_home=tmp_path / "old")
-    monkeypatch.setattr(gw, "_watcher", old)
+    old_home = (tmp_path / "old").resolve()
+    old = FakeWatcher(profile_name="old", hermes_home=old_home)
+    monkeypatch.setattr(gw, "_watchers", {str(old_home): old})
     monkeypatch.setattr(gw, "GatewayWatcher", FakeWatcher)
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda name: tmp_path / name)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "target")
 
     watcher = gw.restart_watcher_for_profile("target")
 
-    assert old.stopped is True
+    assert old.stopped is False
     assert watcher is created[-1]
     assert watcher.profile_name == "target"
     assert watcher.hermes_home == tmp_path / "target"
@@ -126,7 +128,7 @@ def test_start_watcher_pins_active_profile_home(tmp_path, monkeypatch):
         def start(self):
             self.started = True
 
-    monkeypatch.setattr(gw, "_watcher", None)
+    monkeypatch.setattr(gw, "_watchers", {})
     monkeypatch.setattr(gw, "GatewayWatcher", FakeWatcher)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "work")
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda name: profile_home)
@@ -138,6 +140,42 @@ def test_start_watcher_pins_active_profile_home(tmp_path, monkeypatch):
     assert created[0].hermes_home == profile_home
     assert created[0].started is True
     assert gw.get_watcher() is created[0]
+
+
+def test_get_watcher_scopes_lookup_to_active_profile(tmp_path, monkeypatch):
+    from api import gateway_watcher as gw
+    from api import profiles
+
+    default_home = (tmp_path / "default").resolve()
+    work_home = (tmp_path / "work").resolve()
+
+    class FakeWatcher:
+        def __init__(self, *, profile_name="", hermes_home=None, state_db_path=None):
+            self.profile_name = profile_name
+            self.hermes_home = hermes_home
+            self.started = True
+
+        def is_alive(self):
+            return True
+
+    default_watcher = FakeWatcher(profile_name="default", hermes_home=default_home)
+    work_watcher = FakeWatcher(profile_name="work", hermes_home=work_home)
+    monkeypatch.setattr(
+        gw,
+        "_watchers",
+        {
+            str(default_home): default_watcher,
+            str(work_home): work_watcher,
+        },
+    )
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "work")
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: work_home if name == "work" else default_home,
+    )
+
+    assert gw.get_watcher() is work_watcher
 
 
 def test_profile_switch_restarts_watcher_best_effort(monkeypatch):
