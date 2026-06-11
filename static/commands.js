@@ -263,16 +263,30 @@ async function _runAgentCommandTransport(text,_meta){
   return String(data&&data.output||'(no output)');
 }
 
+let _currentAutocompleteBeforeSlash='';
+let _currentAutocompletePrefix='';
+
 function _parseSlashAutocomplete(text){
-  if(!text.startsWith('/')||text.indexOf('\n')!==-1) return null;
-  const raw=text.slice(1);
+  if(text.indexOf('\n')!==-1) return null;
+  const firstSlash=text.indexOf('/');
+  if(firstSlash<0) return null;
+  const beforeSlash=text.slice(0,firstSlash);
+  const raw=text.slice(firstSlash+1);
   const hasSpace=/\s/.test(raw);
   const parts=raw.split(/\s+/);
   const cmdName=(parts[0]||'').toLowerCase();
   const command=COMMANDS.find(c=>c.name===cmdName);
   const subArgSource=(command&&command.subArgs)?command:SLASH_SUBARG_SOURCES[cmdName];
   if(!hasSpace||!subArgSource){
-    return {kind:'commands', query:raw};
+    if(hasSpace&&!subArgSource){
+      const lastSlash=raw.lastIndexOf('/');
+      if(lastSlash>=0){
+        const betweenPrefix=raw.slice(0,lastSlash);
+        const afterLastSlash=raw.slice(lastSlash+1);
+        return {kind:'commands', query:afterLastSlash, beforeSlash:beforeSlash, prefix:betweenPrefix};
+      }
+    }
+    return {kind:'commands', query:raw, beforeSlash:beforeSlash, prefix:''};
   }
   const argText=raw.slice(cmdName.length).replace(/^\s+/,'');
   return {kind:'subargs', command:{name:cmdName, desc:subArgSource.desc, subArgs:subArgSource.subArgs}, query:argText.toLowerCase(), rawQuery:argText};
@@ -1515,7 +1529,7 @@ async function loadSkillCommands(force=false){
 function refreshSlashCommandDropdown(){
   const ta=$('msg');if(!ta)return;
   const text=ta.value||'';
-  if(!text.startsWith('/')||text.indexOf('\n')!==-1){hideCmdDropdown();return;}
+  if(text.indexOf('/')<0||text.indexOf('\n')!==-1){hideCmdDropdown();return;}
   getSlashAutocompleteMatches(text).then(matches=>{
     if(($('msg').value||'')!==text) return;
     if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
@@ -1578,11 +1592,19 @@ function showCmdDropdown(matches){
         return;
       }
       const nextValue=isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':''));
-      $('msg').value=nextValue;
+      const _b=_currentAutocompleteBeforeSlash||'';
+      const _p=_currentAutocompletePrefix||'';
+      const _trail=c.arg?' ':'';
+      if(_b||_p){
+        $('msg').value=_b+'/'+(_p?_p+'/':'')+c.name+_trail;
+      }else{
+        $('msg').value=nextValue;
+      }
       $('msg').focus();
       if(!isSubArg&&c.source!=='skill'&&nextValue.endsWith(' ')&&typeof getSlashAutocompleteMatches==='function'){
-        getSlashAutocompleteMatches(nextValue).then(matches=>{
-          if(($('msg').value||'')!==nextValue) return;
+        const _fullValue=$('msg').value;
+        getSlashAutocompleteMatches(_fullValue).then(matches=>{
+          if(($('msg').value||'')!==_fullValue) return;
           if(matches.length) showCmdDropdown(matches);
           else hideCmdDropdown();
         });
