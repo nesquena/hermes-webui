@@ -5,6 +5,7 @@
 
 ### Added
 
+- **Tencent Cloud (TokenHub) provider support in Settings and the model picker.** The Hermes agent already ships a `tencent-tokenhub` provider (OpenAI-compatible gateway at `https://tokenhub.tencentmaas.com/v1`), but the WebUI had no catalog entry for it, so it never appeared in Settings → Providers or the model dropdown. This registers it under the WebUI catalog key `tencent` ("Tencent Cloud"): a curated model list (DeepSeek / GLM / Kimi / MiniMax families), aliases mapping the agent's `tencent-tokenhub` slug (and `tencent-cloud` / `hunyuan` variants) onto `tencent`, env-var detection that accepts the WebUI-friendly `TENCENT_API_KEY` or the agent's canonical `TOKENHUB_API_KEY`, and an onboarding wizard entry. Removing the key now also clears aliased env vars so the provider card doesn't linger as "configured".
 - **New RFC: Stable Assistant Turn Anchors for Live-to-Final rendering.** Defines a frontend presentation/reconciliation model for anchoring one assistant turn across live streaming, settlement, replay/reload/recovery, Compact Worklog, Transparent Stream, terminal states, artifacts, and side effects. (#3926)
 
 ## [v0.51.358] — 2026-06-11 — Release LV (first-run password bootstrap hardening)

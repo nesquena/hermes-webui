@@ -187,6 +187,17 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": list(_PROVIDER_MODELS.get("xai", []) or _PROVIDER_MODELS.get("x-ai", [])),
         "category": "specialized",
     },
+    "tencent": {
+        "label": "Tencent Cloud (TokenHub)",
+        # WebUI-friendly primary name; the agent runtime also accepts
+        # TOKENHUB_API_KEY (see _PROVIDER_ENV_VAR_ALIASES in api/providers.py).
+        "env_var": "TENCENT_API_KEY",
+        "default_model": "deepseek-v4-flash",
+        "default_base_url": "https://tokenhub.tencentmaas.com/v1",
+        "requires_base_url": False,
+        "models": list(_PROVIDER_MODELS.get("tencent", [])),
+        "category": "specialized",
+    },
 }
 
 _PROVIDER_CATEGORIES = [
