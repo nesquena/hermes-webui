@@ -478,6 +478,9 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
 
     fake = FakeSession()
     monkeypatch.setattr(routes, "get_session", lambda sid: fake)
+    # Real request semantics: the hermes_profile cookie moves with the switch, so
+    # the active (per-request) profile equals the profile being sent under ("work").
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: tmp_path)
     monkeypatch.setattr(
         routes,
@@ -550,6 +553,9 @@ def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
 
     fake = FakeSession()
     monkeypatch.setattr(routes, "get_session", lambda sid: fake)
+    # Non-empty session is NOT retagged, so it stays under "default"; the active
+    # request profile is "default" (the session's own profile) for this scenario.
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: tmp_path)
     monkeypatch.setattr(
         routes,

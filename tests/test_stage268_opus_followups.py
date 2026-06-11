@@ -53,7 +53,7 @@ def test_sf2_duplicate_carries_personality():
     """The duplicate must propagate `personality` from source to copy."""
     duplicate_start = ROUTES_PY.find('if parsed.path == "/api/session/duplicate":')
     assert duplicate_start != -1
-    block = ROUTES_PY[duplicate_start:duplicate_start + 3000]
+    block = ROUTES_PY[duplicate_start:duplicate_start + 3400]
     assert 'personality=session.personality' in block, (
         "duplicate must carry over personality — without it, customized "
         "personalities silently revert to default in the copy"
@@ -63,7 +63,7 @@ def test_sf2_duplicate_carries_personality():
 def test_sf2_duplicate_carries_enabled_toolsets():
     """The duplicate must propagate `enabled_toolsets` (per-session toolset overrides)."""
     duplicate_start = ROUTES_PY.find('if parsed.path == "/api/session/duplicate":')
-    block = ROUTES_PY[duplicate_start:duplicate_start + 3000]
+    block = ROUTES_PY[duplicate_start:duplicate_start + 3400]
     assert 'enabled_toolsets=getattr(session, "enabled_toolsets", None)' in block, (
         "duplicate must carry enabled_toolsets — without it, per-session "
         "toolset overrides silently revert to defaults in the copy"
@@ -73,7 +73,7 @@ def test_sf2_duplicate_carries_enabled_toolsets():
 def test_sf2_duplicate_carries_context_settings():
     """The duplicate must propagate context_length + threshold_tokens."""
     duplicate_start = ROUTES_PY.find('if parsed.path == "/api/session/duplicate":')
-    block = ROUTES_PY[duplicate_start:duplicate_start + 3000]
+    block = ROUTES_PY[duplicate_start:duplicate_start + 3400]
     assert 'context_length=getattr(session, "context_length", None)' in block
     assert 'threshold_tokens=getattr(session, "threshold_tokens", None)' in block
 
@@ -86,7 +86,7 @@ def test_sf3_duplicate_handles_none_title():
     on legacy sessions with title=null."""
     duplicate_start = ROUTES_PY.find('if parsed.path == "/api/session/duplicate":')
     assert duplicate_start != -1
-    block = ROUTES_PY[duplicate_start:duplicate_start + 3000]
+    block = ROUTES_PY[duplicate_start:duplicate_start + 3400]
     # Must use the (session.title or "Untitled") form, not raw session.title
     assert '(session.title or "Untitled") + " (copy)"' in block, (
         "duplicate must guard against None title — `session.title + ' (copy)'` "

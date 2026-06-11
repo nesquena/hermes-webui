@@ -168,6 +168,9 @@ def handle_upload(handler):
             s = get_session(session_id)
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
+        from api.routes import _session_visible_to_active_profile
+        if not _session_visible_to_active_profile(getattr(s, 'profile', None), handler):
+            return j(handler, {'error': 'Session not found'}, status=404)
         safe_name = _sanitize_upload_name(filename)
         dest = _upload_destination(session_id, safe_name)
         dest.write_bytes(file_bytes)
@@ -343,6 +346,9 @@ def handle_upload_extract(handler):
         try:
             s = get_session(session_id)
         except KeyError:
+            return j(handler, {'error': 'Session not found'}, status=404)
+        from api.routes import _session_visible_to_active_profile
+        if not _session_visible_to_active_profile(getattr(s, 'profile', None), handler):
             return j(handler, {'error': 'Session not found'}, status=404)
         session_dir = _session_attachment_dir(session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -547,6 +553,9 @@ def handle_workspace_upload(handler):
         try:
             session = get_session(session_id)
         except KeyError:
+            return j(handler, {'error': 'Session not found'}, status=404)
+        from api.routes import _session_visible_to_active_profile
+        if not _session_visible_to_active_profile(getattr(session, 'profile', None), handler):
             return j(handler, {'error': 'Session not found'}, status=404)
 
         # Resolve workspace root from session

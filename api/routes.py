@@ -182,7 +182,14 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
 # (mcp_server.py) can import it without duplicating the visibility model.
 # Re-exported here so existing `_profiles_match(...)` call sites in this
 # module keep resolving without per-call-site refactors.
-from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
+from api.profiles import (  # noqa: F401, E402  (re-export)
+    _profiles_match,
+    get_active_profile_name,
+)
+
+# Backward-compatible alias: the session-detail guard (#3982) references the
+# underscore-prefixed name, while the export guard (#3991) uses the bare name.
+_get_active_profile_name = get_active_profile_name
 
 
 def _all_profiles_query_flag(parsed_url) -> bool:
@@ -194,6 +201,45 @@ def _all_profiles_query_flag(parsed_url) -> bool:
     qs = parse_qs(parsed_url.query)
     raw = qs.get('all_profiles', [''])[0].strip().lower()
     return raw in ('1', 'true', 'yes', 'on')
+
+
+def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
+    """Return whether a detail-load session belongs to the active profile.
+
+    Real request handlers must enforce the same profile boundary as
+    /api/sessions, even when the request has no hermes_profile cookie and the
+    process-level active profile is the default/root profile. Direct unit-callers
+    without a request handler keep the historical metadata-load behavior.
+
+    Internal callers that re-dispatch a handler under an already-validated and
+    profile-scoped context (e.g. the manual-compression worker, which guards the
+    external /compress/start entry point and then applies the session's own
+    profile env before re-invoking _handle_session_compress) may set
+    ``handler._hermes_internal_trusted = True`` to bypass the re-check.
+    """
+    if handler is None:
+        return True
+    if getattr(handler, "_hermes_internal_trusted", False):
+        return True
+    active_profile = _get_active_profile_name()
+    if not isinstance(session_profile, str):
+        session_profile = None
+    return _profiles_match(session_profile, active_profile)
+
+
+def _visible_session_for_file_ops(sid, handler):
+    """get_session_for_file_ops + active-profile boundary.
+
+    Workspace/file routes resolve a session by id then operate on its workspace
+    tree. They must enforce the same active-profile boundary as /api/sessions.
+    Raises KeyError when the session is not visible to the active profile so the
+    callers' existing ``except KeyError -> 404`` path returns a uniform 404
+    (mirroring the not-found response, never disclosing existence).
+    """
+    s = get_session_for_file_ops(sid)
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+        raise KeyError(sid)
+    return s
 
 
 def _active_skills_dir() -> Path:
@@ -5743,6 +5789,8 @@ def handle_get(handler, parsed) -> bool:
             s = get_session(sid, metadata_only=True)
         except KeyError:
             return bad(handler, "Session not found", status=404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+            return bad(handler, "Session not found", status=404)
         try:
             from api.worktrees import worktree_status_for_session
 
@@ -5801,6 +5849,9 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+            _session_profile = getattr(s, 'profile', None) or None
+            if not _session_visible_to_active_profile(_session_profile, handler):
+                return bad(handler, "Session not found", 404)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
@@ -5808,7 +5859,6 @@ def handle_get(handler, parsed) -> bool:
             cli_messages = []
             state_db_messages = []
             metadata_summary = None
-            _session_profile = getattr(s, 'profile', None) or None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
@@ -6098,6 +6148,9 @@ def handle_get(handler, parsed) -> bool:
             if _was_webui_session:
                 return bad(handler, "Session not found", 404)
             cli_meta = _lookup_cli_session_metadata(sid)
+            _session_profile = (cli_meta or {}).get("profile") or None
+            if not _session_visible_to_active_profile(_session_profile, handler):
+                return bad(handler, "Session not found", 404)
             msgs = get_cli_session_messages(sid)
             if msgs:
                 sess = {
@@ -6148,7 +6201,10 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Missing session_id")
         try:
             from api.session_ops import session_status
-            _clear_stale_stream_state(get_session(sid, metadata_only=True))
+            _status_meta = get_session(sid, metadata_only=True)
+            if not _session_visible_to_active_profile(getattr(_status_meta, "profile", None), handler):
+                return bad(handler, "Session not found", 404)
+            _clear_stale_stream_state(_status_meta)
             return j(handler, session_status(sid))
         except KeyError:
             return bad(handler, "Session not found", 404)
@@ -6165,6 +6221,9 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Missing session_id")
         try:
             from api.session_ops import session_usage
+            _usage_meta = get_session(sid, metadata_only=True)
+            if not _session_visible_to_active_profile(getattr(_usage_meta, "profile", None), handler):
+                return bad(handler, "Session not found", 404)
             return j(handler, session_usage(sid))
         except KeyError:
             return bad(handler, "Session not found", 404)
@@ -7215,7 +7274,12 @@ def handle_post(handler, parsed) -> bool:
                 # 404, not 400 — missing resource, not a malformed request.
                 return bad(handler, "Session not found", status=404)
 
-            # Deep-copy mutable lists so the duplicate is *actually* independent.
+            # Same active-profile boundary as /api/session: a foreign-profile
+            # session must not be duplicated (which would otherwise copy and
+            # return its transcript to a caller scoped to a different profile).
+            if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+                return bad(handler, "Session not found", status=404)
+
             # `Session.__init__` does `self.messages = messages or []` — plain
             # assignment, no copy. Without deepcopy, both sessions share the same
             # list object in memory; appending to one mutates the other.
@@ -7422,6 +7486,8 @@ def handle_post(handler, parsed) -> bool:
             s = _ensure_full_session_before_mutation(body["session_id"], s)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+            return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(body["session_id"]):
             from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, body["title"])
@@ -7442,6 +7508,8 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(sid)
             s = _ensure_full_session_before_mutation(sid, s)
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
             return bad(handler, "Session not found", 404)
         if getattr(s, "read_only", False) or getattr(s, "is_imported", False):
             return bad(handler, "Read-only imported sessions cannot be renamed", 403)
@@ -7476,6 +7544,8 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(sid)
             s = _ensure_full_session_before_mutation(sid, s)
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
             return bad(handler, "Session not found", 404)
         # Resolve personality from config.yaml agent.personalities section
         # (matches hermes-agent CLI behavior)
@@ -7531,6 +7601,8 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+            return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(sid):
             s.enabled_toolsets = toolsets
             s.save()
@@ -7548,6 +7620,8 @@ def handle_post(handler, parsed) -> bool:
             try:
                 s = get_session(sid)
             except KeyError:
+                return bad(handler, "Session not found", 404)
+            if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
                 return bad(handler, "Session not found", 404)
             draft = getattr(s, "composer_draft", {}) or {}
             return j(handler, {"draft": draft})
@@ -7576,6 +7650,8 @@ def handle_post(handler, parsed) -> bool:
         try:
             s = get_session(sid)
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
             return bad(handler, "Session not found", 404)
         unchanged = False
         with _get_session_agent_lock(sid):
@@ -7610,6 +7686,8 @@ def handle_post(handler, parsed) -> bool:
         try:
             s = get_session(body["session_id"])
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
             return bad(handler, "Session not found", 404)
         old_ws = getattr(s, "workspace", "")
         old_model = getattr(s, "model", None)
@@ -7662,6 +7740,8 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(sid, metadata_only=True)
         except KeyError:
             return bad(handler, "Session not found", status=404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+            return bad(handler, "Session not found", status=404)
         force = bool(body.get("force", False))
         try:
             from api.worktrees import remove_worktree_for_session
@@ -7692,6 +7772,11 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
+        # Active-profile boundary: a caller scoped to one profile must not be able
+        # to delete another profile's session (sidecar, journals, attachments, CLI
+        # rows). Resolve+check the profile before any destructive work below.
+        if not _session_visible_to_active_profile(event_profile, handler):
+            return bad(handler, "Session not found", status=404)
         # Delete from WebUI session store
         with LOCK:
             SESSIONS.pop(sid, None)
@@ -7765,6 +7850,8 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+            return bad(handler, "Session not found", 404)
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
             s.messages = []
@@ -7793,6 +7880,8 @@ def handle_post(handler, parsed) -> bool:
         try:
             s = get_session(body["session_id"])
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
             return bad(handler, "Session not found", 404)
         # Validate keep_count before it reaches the destructive `messages[:keep]`
         # slice. A non-numeric value would raise ValueError and surface as a
@@ -7851,6 +7940,8 @@ def handle_post(handler, parsed) -> bool:
         try:
             source = get_session(body["session_id"])
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(source, "profile", None), handler):
             return bad(handler, "Session not found", 404)
 
         keep_count = body.get("keep_count")
@@ -7956,6 +8047,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         try:
             from api.session_ops import retry_last
+            _meta = get_session(body["session_id"], metadata_only=True)
+            if not _session_visible_to_active_profile(getattr(_meta, "profile", None), handler):
+                return bad(handler, "Session not found", 404)
             result = retry_last(body["session_id"])
             return j(handler, {"ok": True, **result})
         except KeyError:
@@ -7970,6 +8064,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         try:
             from api.session_ops import undo_last
+            _meta = get_session(body["session_id"], metadata_only=True)
+            if not _session_visible_to_active_profile(getattr(_meta, "profile", None), handler):
+                return bad(handler, "Session not found", 404)
             result = undo_last(body["session_id"])
             return j(handler, {"ok": True, **result})
         except KeyError:
@@ -8453,6 +8550,8 @@ def handle_post(handler, parsed) -> bool:
             s = _ensure_full_session_before_mutation(body["session_id"], s)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+            return bad(handler, "Session not found", 404)
         pin_requested = bool(body.get("pinned", True))
         # TOCTOU guard (Opus stage-389): the count check and the pin write
         # must happen under the same lock, otherwise two parallel pin
@@ -8527,9 +8626,13 @@ def handle_post(handler, parsed) -> bool:
                     raise KeyError(sid)
                 with LOCK:
                     SESSIONS[sid] = s
+            if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+                return bad(handler, "Session not found", 404)
         except KeyError:
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
+                return bad(handler, "Session not found", 404)
+            if not _session_visible_to_active_profile(cli_meta.get("profile") or None, handler):
                 return bad(handler, "Session not found", 404)
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
@@ -8594,6 +8697,8 @@ def handle_post(handler, parsed) -> bool:
         try:
             s = get_session(body["session_id"])
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
             return bad(handler, "Session not found", 404)
         # #1614: refuse moves into a project owned by another profile.
         target_pid = body.get("project_id") or None
@@ -9230,6 +9335,9 @@ def _handle_session_export(handler, parsed):
         s = get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
+    active_profile = get_active_profile_name()
+    if not _profiles_match(getattr(s, "profile", None), active_profile):
+        return bad(handler, "Session not found", 404)
     safe = redact_session_data(s.__dict__)
     payload = json.dumps(safe, ensure_ascii=False, indent=2)
     handler.send_response(200)
@@ -9365,6 +9473,8 @@ def _handle_list_dir(handler, parsed):
         return bad(handler, "session_id is required")
     try:
         s = get_session(sid)
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+            return bad(handler, "Session not found", 404)
         workspace = s.workspace
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory
@@ -9375,6 +9485,8 @@ def _handle_list_dir(handler, parsed):
                     cli_meta = cs
                     break
             if not cli_meta:
+                return bad(handler, "Session not found", 404)
+            if not _session_visible_to_active_profile(cli_meta.get("profile") or None, handler):
                 return bad(handler, "Session not found", 404)
             workspace = cli_meta.get("workspace", "")
         except Exception:
@@ -9659,13 +9771,15 @@ def _handle_sse_stream(handler, parsed):
     return True
 
 
-def _terminal_session_lookup(body_or_query):
+def _terminal_session_lookup(body_or_query, handler=None):
     sid = str(body_or_query.get("session_id", "")).strip()
     if not sid:
         raise ValueError("session_id required")
     try:
         s = get_session(sid)
     except KeyError:
+        raise KeyError("Session not found")
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
         raise KeyError("Session not found")
     return sid, s
 
@@ -9683,7 +9797,7 @@ def _terminal_remote_backend_enabled() -> bool:
 
 def _handle_terminal_start(handler, body):
     try:
-        sid, session = _terminal_session_lookup(body)
+        sid, session = _terminal_session_lookup(body, handler)
         if _terminal_remote_backend_enabled():
             return j(
                 handler,
@@ -10303,7 +10417,7 @@ def _message_content_text(content) -> str:
     return str(content or "")
 
 
-def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: set[str]) -> bool:
+def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: set[str], handler=None) -> bool:
     """Allow exact MEDIA:image paths already present in the requested session."""
     sid = str(sid or "").strip()
     if not sid:
@@ -10318,6 +10432,11 @@ def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: 
     try:
         session = get_session(sid)
     except Exception:
+        return False
+
+    # Active-profile boundary: don't authorize a media path from another
+    # profile's session transcript.
+    if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
         return False
 
     for message in getattr(session, "messages", []) or []:
@@ -10436,6 +10555,7 @@ def _handle_media(handler, parsed):
         qs.get("session_id", [""])[0],
         target,
         _INLINE_IMAGE_TYPES,
+        handler,
     )
 
     # ── #3234: hard-deny Hermes's own state + secret/config files ────────────
@@ -10749,7 +10869,7 @@ def _handle_folder_download(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
     try:
-        s = get_session_for_file_ops(sid)
+        s = _visible_session_for_file_ops(sid, handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
 
@@ -10835,7 +10955,7 @@ def _handle_file_raw(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
     try:
-        s = get_session_for_file_ops(sid)
+        s = _visible_session_for_file_ops(sid, handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]
@@ -10875,7 +10995,7 @@ def _handle_file_read(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
     try:
-        s = get_session_for_file_ops(sid)
+        s = _visible_session_for_file_ops(sid, handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]
@@ -11844,6 +11964,8 @@ def _handle_btw(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+        return bad(handler, "Session not found", 404)
     question = str(body["question"]).strip()
     if not question:
         return bad(handler, "question is required")
@@ -11899,6 +12021,8 @@ def _handle_background(handler, body):
     try:
         s = get_session(body["session_id"])
     except KeyError:
+        return bad(handler, "Session not found", 404)
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
         return bad(handler, "Session not found", 404)
     prompt = str(body["prompt"]).strip()
     if not prompt:
@@ -12643,6 +12767,12 @@ def _handle_goal_command(handler, body):
         if not has_persisted_turns:
             s.profile = requested_profile
 
+    # Active-profile boundary (after the empty-placeholder retag): a caller scoped
+    # to one profile must not read/control goal state or start a turn for another
+    # profile's session.
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+        return bad(handler, "Session not found", 404)
+
     current_stream_id = getattr(s, "active_stream_id", None)
     stream_running = False
     if current_stream_id:
@@ -12792,6 +12922,11 @@ def _handle_chat_start(handler, body, diag=None):
                 # currently-selected profile instead of the stale one stamped at
                 # creation time.
                 s.profile = requested_profile
+        # Active-profile boundary: after the empty-placeholder retag, a caller
+        # scoped to one profile must not be able to start a turn on (and thus
+        # read/append to) another profile's session by id.
+        if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+            return bad(handler, "Session not found", 404)
         diag.stage("normalize_message") if diag else None
         msg = str(body.get("message", "")).strip()
         if not msg:
@@ -12899,7 +13034,12 @@ def _normalize_chat_attachments(raw_attachments):
 
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
-    s = get_session(body["session_id"])
+    try:
+        s = get_session(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+        return bad(handler, "Session not found", 404)
     msg = str(body.get("message", "")).strip()
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
@@ -13239,10 +13379,14 @@ def _git_session(handler, session_id: str):
         bad(handler, "session_id required")
         return None
     try:
-        return get_session(session_id)
+        session = get_session(session_id)
     except KeyError:
         bad(handler, "Session not found", 404)
         return None
+    if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+        bad(handler, "Session not found", 404)
+        return None
+    return session
 
 
 def _git_session_workspace(handler, session_id: str):
@@ -13534,7 +13678,9 @@ def _handle_git_commit_message(handler, body):
 
     try:
         require(body, "session_id")
-        session = get_session(body["session_id"])
+        session = _git_session(handler, body["session_id"])
+        if session is None:
+            return True
         workspace = Path(session.workspace)
 
         prompt = staged_commit_message_prompt(workspace)
@@ -13565,7 +13711,9 @@ def _handle_git_commit_message_selected(handler, body):
     try:
         require(body, "session_id")
         paths = _git_paths_from_body(body)
-        session = get_session(body["session_id"])
+        session = _git_session(handler, body["session_id"])
+        if session is None:
+            return True
         workspace = Path(session.workspace)
 
         prompt = selected_commit_message_prompt(workspace, paths)
@@ -13722,7 +13870,7 @@ def _handle_file_delete(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session_for_file_ops(body["session_id"])
+        s = _visible_session_for_file_ops(body["session_id"], handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -13747,7 +13895,7 @@ def _handle_file_save(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session_for_file_ops(body["session_id"])
+        s = _visible_session_for_file_ops(body["session_id"], handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -13774,7 +13922,7 @@ def _handle_file_create(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session_for_file_ops(body["session_id"])
+        s = _visible_session_for_file_ops(body["session_id"], handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -13801,7 +13949,7 @@ def _handle_file_rename(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session_for_file_ops(body["session_id"])
+        s = _visible_session_for_file_ops(body["session_id"], handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -13831,7 +13979,7 @@ def _handle_file_move(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session_for_file_ops(body["session_id"])
+        s = _visible_session_for_file_ops(body["session_id"], handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -13926,7 +14074,7 @@ def _handle_create_dir(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session_for_file_ops(body["session_id"])
+        s = _visible_session_for_file_ops(body["session_id"], handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -13948,7 +14096,7 @@ def _handle_file_reveal(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session_for_file_ops(body["session_id"])
+        s = _visible_session_for_file_ops(body["session_id"], handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -14009,7 +14157,7 @@ def _handle_file_path(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session_for_file_ops(body["session_id"])
+        s = _visible_session_for_file_ops(body["session_id"], handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -14039,7 +14187,7 @@ def _handle_file_open_vscode(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session_for_file_ops(body["session_id"])
+        s = _visible_session_for_file_ops(body["session_id"], handler)
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -14367,6 +14515,11 @@ class _ManualCompressionMemoryHandler:
         self.wfile = io.BytesIO()
         self.status = None
         self.sent_headers = {}
+        # The external /compress/start route already enforced the active-profile
+        # boundary, and the worker applies the session's own profile env before
+        # re-invoking _handle_session_compress. Mark this synthetic handler trusted
+        # so the in-handler guard doesn't re-reject under the worker's scoped env.
+        self._hermes_internal_trusted = True
 
     def send_response(self, status):
         self.status = status
@@ -14484,6 +14637,8 @@ def _handle_session_compress_start(handler, body):
     try:
         s = get_session(sid)
     except KeyError:
+        return bad(handler, "Session not found", 404)
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
         return bad(handler, "Session not found", 404)
     if getattr(s, "active_stream_id", None):
         return bad(handler, "Session is still streaming; wait for the current turn to finish.", 409)
@@ -14621,6 +14776,9 @@ def _handle_session_compress(handler, body):
     try:
         s = get_session(sid)
     except KeyError:
+        return bad(handler, "Session not found", 404)
+
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
         return bad(handler, "Session not found", 404)
 
     if getattr(s, "active_stream_id", None):
@@ -14856,6 +15014,12 @@ def _handle_conversation_rounds(handler, body):
     if not sid:
         return bad(handler, "session_id is required")
 
+    # Active-profile boundary: resolve the CLI session's profile and reject before
+    # counting rounds over a foreign-profile transcript.
+    _rounds_meta = _lookup_cli_session_metadata(sid)
+    if not _session_visible_to_active_profile((_rounds_meta or {}).get("profile") or None, handler):
+        return bad(handler, "Session not found", 404)
+
     since = body.get("since")
     if since is not None:
         try:
@@ -15090,6 +15254,14 @@ def _handle_handoff_summary(handler, body):
     sid = str(body.get("session_id") or "").strip()
     if not sid:
         return bad(handler, "session_id is required")
+
+    # Active-profile boundary: resolve the CLI session's profile and reject before
+    # counting rounds, reading the transcript, summarizing, or persisting a marker,
+    # so a caller scoped to one profile can't derive a summary from another
+    # profile's CLI transcript.
+    _handoff_meta = _lookup_cli_session_metadata(sid)
+    if not _session_visible_to_active_profile((_handoff_meta or {}).get("profile") or None, handler):
+        return bad(handler, "Session not found", 404)
 
     since = body.get("since")
     if since is not None:
@@ -15738,6 +15910,10 @@ def _handle_session_import_cli(handler, body):
     # Check if already imported — refresh messages from CLI store if new ones arrived
     existing = Session.load(sid)
     if existing:
+        # Same active-profile boundary as /api/session: don't refresh or return a
+        # foreign-profile sidecar's transcript to a caller scoped elsewhere.
+        if not _session_visible_to_active_profile(getattr(existing, "profile", None), handler):
+            return bad(handler, "Session not found", 404)
         fresh_msgs = get_cli_session_messages(sid)
         changed = False
         cli_meta = None
@@ -15788,6 +15964,14 @@ def _handle_session_import_cli(handler, body):
                 "imported": False,
             },
         )
+
+    # Active-profile boundary: resolve the CLI session's profile and reject before
+    # reading the transcript, deriving a title, returning a read-only payload, or
+    # importing it — a caller scoped to one profile must not import/return another
+    # profile's CLI transcript.
+    _import_meta = _lookup_cli_session_metadata(sid)
+    if not _session_visible_to_active_profile((_import_meta or {}).get("profile") or None, handler):
+        return bad(handler, "Session not found", 404)
 
     # Fetch messages from CLI store
     msgs = get_cli_session_messages(sid)
