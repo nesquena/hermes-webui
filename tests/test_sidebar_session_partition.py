@@ -28,10 +28,11 @@ def test_partition_helper_applies_message_source_project_and_archive_gates():
 
     assert "function _sidebarRowHasVisibleMessages(s, activeSidForSidebar)" in SESSIONS_JS
     assert "_sidebarRowHasVisibleMessages(s, activeSidForSidebar)" in block
-    assert "if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0)" in block
-    assert "const showCliOnly=_sessionSourceFilter==='cli';" in block
+    assert "const origin=_isCliSession(s)?'cli':'webui';" in block
+    assert "if(!_activeOriginFilters.has(origin)) continue;" in block
     assert "if(!_showArchived&&s.archived) continue;" in block
     assert "if(s.archived) archivedCount++;" in block
     assert "return {" in block
+    assert "sourceFiltered," in block
     assert "profileFiltered," in block
     assert "sessionsRaw," in block
