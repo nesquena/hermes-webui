@@ -7,6 +7,12 @@
 
 - **New RFC: Stable Assistant Turn Anchors for Live-to-Final rendering.** Defines a frontend presentation/reconciliation model for anchoring one assistant turn across live streaming, settlement, replay/reload/recovery, Compact Worklog, Transparent Stream, terminal states, artifacts, and side effects. (#3926)
 
+## [v0.51.357] — 2026-06-11 — Release LU (mid-stream flicker tie fix)
+
+### Fixed
+
+- **Eliminated the residual mid-stream flicker where streamed text could briefly disappear and reappear (#3877 reopen).** The #3877 fix preserves the live assistant turn's DOM node across a mid-stream `renderMessages()` rebuild, but only re-attached it when the rebuilt turn had *strictly less* streamed text than the preserved (parser-referenced) node (`_rebuiltLen < _preservedLen`). At the throttled session write-back boundary the rebuilt turn's live content can *equal* the preserved length, so the strict guard skipped the swap and left the streaming parser writing into the now-detached node — the leftover blank frame. The guard now restores the preserved node on a tie as well (`<=`), and the swap is done at the segment level (replacing only the rebuilt live segment) so a multi-segment turn keeps the rebuilt structure (earlier segments, tool/worklog groups) intact. (#3877)
+
 ## [v0.51.356] — 2026-06-11 — Release LT (per-profile providers & models)
 
 ### Fixed
