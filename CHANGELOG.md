@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.360] — 2026-06-11 — Release LY (close idle SSE on hidden tabs)
+
+### Fixed
+
+- **Idle background tabs no longer exhaust the browser's connection pool and cause "Request timed out" toasts (#3992).** Each WebUI window opened three persistent SSE connections (session-events, gateway stream, per-session stream); with two windows open that reached the browser's six-connection per-origin HTTP/1.1 limit, so any subsequent request queued behind the saturated pool and timed out. The gateway and per-session streams now follow the same Page Visibility pattern the session-events stream already used: they close while the tab is hidden (freeing pool slots) and reopen when it becomes visible again. The per-session stream correctly reattaches on re-show — including for a session that was loaded or restored while the tab was already hidden — so live `bg_task_complete` / `server_turn_started` events are not missed. (#3996)
+
 ## [v0.51.359] — 2026-06-11 — Release LW (assistant turn anchor phase 0 scaffold)
 
 ### Added
