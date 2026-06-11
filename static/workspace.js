@@ -175,7 +175,9 @@ function _loadWorkspacePanelTodos(){
   if(!panel) return;
   let todos = [];
   try{
-    if(S && S.session && S.session.todo_state && Array.isArray(S.session.todo_state.todos)){
+    if(S && Array.isArray(S.todos)){
+      todos = S.todos;
+    } else if(S && S.session && S.session.todo_state && Array.isArray(S.session.todo_state.todos)){
       todos = S.session.todo_state.todos;
     } else if(typeof _legacyTodosFromMessages === 'function'){
       todos = _legacyTodosFromMessages() || [];
