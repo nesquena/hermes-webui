@@ -26,6 +26,8 @@ def test_connectors_panel_loads_and_calls_connector_api():
     assert "api('/api/connectors'" in js
     assert "'/api/connectors/'+encodeURIComponent(id)" in js
     assert "connectors_status_not_configured" in js
+    assert "connector-category-group" in js
+    assert "connectors_category_messaging" in js
 
 
 def test_gateway_status_links_to_connectors_configuration():
@@ -41,6 +43,9 @@ def test_connectors_i18n_keys_are_present():
         "connectors_tab_title",
         "connectors_section_title",
         "connectors_configure_link",
+        "connectors_category_messaging",
+        "connectors_category_event_webhook",
+        "connectors_category_developer_api",
         "connectors_status_not_configured",
         "connectors_status_configured",
         "connectors_status_enabled",

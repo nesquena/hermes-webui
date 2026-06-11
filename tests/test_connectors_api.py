@@ -10,78 +10,84 @@ def _config_path(tmp_path: Path) -> Path:
     return tmp_path / "config.yaml"
 
 
-def test_list_connectors_exposes_only_safe_manifest_payload(tmp_path, monkeypatch):
+def test_list_connectors_exposes_verified_fallback_when_runtime_metadata_is_unavailable(tmp_path, monkeypatch):
     from api import connectors
 
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(_config_path(tmp_path)))
+    monkeypatch.setattr(connectors, "_discover_runtime_platform_specs", lambda: {})
+
     payload = connectors.list_connectors()
     ids = {connector["id"] for connector in payload["connectors"]}
-    assert {
-        "telegram",
-        "discord",
-        "slack",
-        "google_chat",
-        "whatsapp",
-        "signal",
-        "sms",
-        "email",
-        "homeassistant",
-        "mattermost",
-        "matrix",
-        "dingtalk",
-        "feishu",
-        "wecom",
-        "wecom_callback",
-        "weixin",
-        "bluebubbles",
-        "qqbot",
-        "yuanbao",
-        "teams",
-        "line",
-        "ntfy",
-        "browser",
-        "webhook",
-        "api_server",
-    } <= ids
+    assert ids == {"telegram", "discord", "api_server"}
 
     telegram = next(connector for connector in payload["connectors"] if connector["id"] == "telegram")
     assert telegram["configuration_supported"] is True
+    assert telegram["category"] == "messaging"
     assert telegram["status"] == "not_configured"
 
-    slack = next(connector for connector in payload["connectors"] if connector["id"] == "slack")
-    assert slack["configuration_supported"] is False
-    assert "SLACK_APP_TOKEN" in slack["required_env"]
-
-    google_chat = next(connector for connector in payload["connectors"] if connector["id"] == "google_chat")
-    assert google_chat["configuration_supported"] is False
-    assert google_chat["toggle_supported"] is False
-    assert "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON" in google_chat["required_env"]
+    api_server = next(connector for connector in payload["connectors"] if connector["id"] == "api_server")
+    assert api_server["configuration_supported"] is True
+    assert api_server["category"] == "developer_api"
 
 
-def test_dynamic_runtime_managed_platforms_are_listed(tmp_path, monkeypatch):
+def test_runtime_metadata_is_source_of_truth_for_supported_platforms(tmp_path, monkeypatch):
     from api import connectors
 
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(_config_path(tmp_path)))
     monkeypatch.setattr(
         connectors,
-        "_discover_runtime_managed_platforms",
+        "_discover_runtime_platform_specs",
         lambda: {
-            "future_chat": connectors._runtime_managed_manifest(
-                "future_chat",
-                {
-                    "label": "Future Chat",
-                    "required_env": ["FUTURE_CHAT_TOKEN"],
-                    "source": "test",
-                },
-            )
+            "email": {"source": "gateway.config.Platform"},
+            "webhook": {"source": "gateway.config.Platform"},
+            "api_server": {"source": "gateway.config.Platform"},
+            "future_chat": {
+                "label": "Future Chat",
+                "required_env": ["FUTURE_CHAT_TOKEN"],
+                "source": "gateway.platform_registry",
+            },
         },
     )
 
     payload = connectors.list_connectors()
+    ids = {connector["id"] for connector in payload["connectors"]}
+    assert {"email", "webhook", "api_server", "future_chat"} <= ids
+    assert "google_chat" not in ids
+
+    email = next(connector for connector in payload["connectors"] if connector["id"] == "email")
+    assert email["category"] == "messaging"
+    assert email["configuration_supported"] is False
+
+    webhook = next(connector for connector in payload["connectors"] if connector["id"] == "webhook")
+    assert webhook["category"] == "event_webhook"
+    assert webhook["configuration_supported"] is False
+
+    api_server = next(connector for connector in payload["connectors"] if connector["id"] == "api_server")
+    assert api_server["category"] == "developer_api"
+    assert api_server["configuration_supported"] is True
+
     future = next(connector for connector in payload["connectors"] if connector["id"] == "future_chat")
     assert future["label"] == "Future Chat"
     assert future["configuration_supported"] is False
     assert future["required_env"] == ["FUTURE_CHAT_TOKEN"]
+
+
+def test_config_yaml_platforms_are_listed_when_runtime_metadata_is_missing(tmp_path, monkeypatch):
+    from api import connectors
+
+    path = _config_path(tmp_path)
+    path.write_text(
+        "platforms:\n  webhook:\n    enabled: true\n    extra:\n      routes:\n        github-pr: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(_config_path(tmp_path)))
+    monkeypatch.setattr(connectors, "_discover_runtime_platform_specs", lambda: {})
+
+    payload = connectors.list_connectors()
+    webhook = next(connector for connector in payload["connectors"] if connector["id"] == "webhook")
+    assert webhook["category"] == "event_webhook"
+    assert webhook["configuration_supported"] is False
+    assert webhook["route_count"] == 1
 
 
 def test_connectors_runtime_reuses_gateway_status_payload(tmp_path, monkeypatch):

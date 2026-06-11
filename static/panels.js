@@ -8357,6 +8357,24 @@ function _connectorRuntimeMessage(runtime){
   return t('connectors_runtime_unknown');
 }
 
+function _connectorCategory(connector){
+  return String((connector&&connector.category)||'other').replace(/[^a-z0-9_-]/gi,'').toLowerCase()||'other';
+}
+
+function _connectorCategoryLabel(category){
+  const key={
+    messaging:'connectors_category_messaging',
+    event_webhook:'connectors_category_event_webhook',
+    developer_api:'connectors_category_developer_api',
+    other:'connectors_category_other',
+  }[category]||'connectors_category_other';
+  return t(key);
+}
+
+function _connectorCategoryOrder(category){
+  return {messaging:0,event_webhook:1,developer_api:2,other:3}[category] ?? 99;
+}
+
 function _renderConnectorsPanel(){
   const list=$('connectorsList');
   const detail=$('connectorDetail');
@@ -8371,18 +8389,31 @@ function _renderConnectorsPanel(){
   if(!_activeConnectorId||!_connectorById(_activeConnectorId)){
     _activeConnectorId=_connectorsCache[0].id;
   }
-  list.innerHTML=_connectorsCache.map(c=>{
-    const statusClass=_connectorStatusClass(c.status);
-    const active=c.id===_activeConnectorId?' active':'';
-    const unsupported=!c.configuration_supported?' connector-card-readonly':'';
-    return `<button type="button" class="connector-card${active}${unsupported}" data-connector-id="${esc(c.id)}" onclick="selectConnector('${esc(c.id)}')">
-      <div class="connector-card-head">
-        <span class="connector-name">${esc(c.label||c.id)}</span>
-        <span class="connector-status connector-status-${statusClass}">${esc(_connectorStatusLabel(c.status))}</span>
-      </div>
-      <div class="connector-kind">${esc(c.kind||'connector')}</div>
-      <div class="connector-description">${esc(c.description||'')}</div>
-    </button>`;
+  const groups=new Map();
+  (_connectorsCache||[]).forEach(c=>{
+    const category=_connectorCategory(c);
+    if(!groups.has(category)) groups.set(category,[]);
+    groups.get(category).push(c);
+  });
+  const sortedGroups=[...groups.entries()].sort((a,b)=>_connectorCategoryOrder(a[0])-_connectorCategoryOrder(b[0])||a[0].localeCompare(b[0]));
+  list.innerHTML=sortedGroups.map(([category,connectors])=>{
+    const cards=connectors.map(c=>{
+      const statusClass=_connectorStatusClass(c.status);
+      const active=c.id===_activeConnectorId?' active':'';
+      const unsupported=!c.configuration_supported?' connector-card-readonly':'';
+      return `<button type="button" class="connector-card${active}${unsupported}" data-connector-id="${esc(c.id)}" onclick="selectConnector('${esc(c.id)}')">
+        <div class="connector-card-head">
+          <span class="connector-name">${esc(c.label||c.id)}</span>
+          <span class="connector-status connector-status-${statusClass}">${esc(_connectorStatusLabel(c.status))}</span>
+        </div>
+        <div class="connector-kind">${esc(c.kind||'connector')}</div>
+        <div class="connector-description">${esc(c.description||'')}</div>
+      </button>`;
+    }).join('');
+    return `<section class="connector-category-group" data-connector-category="${esc(category)}">
+      <div class="connector-category-title">${esc(_connectorCategoryLabel(category))}</div>
+      ${cards}
+    </section>`;
   }).join('');
   const connector=_connectorById(_activeConnectorId);
   detail.innerHTML=connector?_connectorDetailHtml(connector):'';

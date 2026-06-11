@@ -1,11 +1,9 @@
 """Hermes gateway connector configuration helpers.
 
 This module intentionally writes to Hermes' native ``config.yaml`` instead of
-creating a WebUI-specific connector store.  The manifest below is conservative:
-each configurable field maps to an upstream Hermes ``platforms`` entry that was
-verified in Hermes Agent gateway configuration/adapters.  Connectors that need
-runtime environment variables are shown as read-only until Hermes exposes a
-safe WebUI-editable mechanism for them.
+creating a WebUI-specific connector store.  Hermes runtime metadata is the
+source of truth for which gateway platforms exist.  The verified manifests below
+only describe the small subset whose WebUI-editable YAML shape is known.
 """
 
 from __future__ import annotations
@@ -32,11 +30,12 @@ class ConnectorError(ValueError):
         self.status = status
 
 
-CONNECTOR_MANIFESTS: dict[str, dict[str, Any]] = {
+VERIFIED_CONFIG_MANIFESTS: dict[str, dict[str, Any]] = {
     "telegram": {
         "id": "telegram",
         "label": "Telegram",
         "kind": "messaging",
+        "category": "messaging",
         "description": "Telegram bot channel handled by the Hermes gateway.",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram",
         "configuration_supported": True,
@@ -103,6 +102,7 @@ CONNECTOR_MANIFESTS: dict[str, dict[str, Any]] = {
         "id": "discord",
         "label": "Discord",
         "kind": "messaging",
+        "category": "messaging",
         "description": "Discord bot channel handled by the Hermes gateway.",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/discord",
         "configuration_supported": True,
@@ -145,49 +145,11 @@ CONNECTOR_MANIFESTS: dict[str, dict[str, Any]] = {
             },
         ],
     },
-    "webhook": {
-        "id": "webhook",
-        "label": "Webhook",
-        "kind": "http",
-        "description": "Inbound webhook gateway surface. Route definitions remain in config.yaml.",
-        "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/webhooks",
-        "configuration_supported": True,
-        "toggle_supported": True,
-        "test_supported": True,
-        "required": ["secret"],
-        "fields": [
-            {
-                "name": "host",
-                "label": "Host",
-                "type": "text",
-                "path": ["extra", "host"],
-                "default": "127.0.0.1",
-            },
-            {
-                "name": "port",
-                "label": "Port",
-                "type": "number",
-                "path": ["extra", "port"],
-                "default": 8765,
-                "min": 1,
-                "max": 65535,
-            },
-            {
-                "name": "secret",
-                "label": "Default secret",
-                "type": "secret",
-                "path": ["extra", "secret"],
-                "required": True,
-            },
-        ],
-        "notes": [
-            "Webhook route definitions are still edited in config.yaml or with Hermes gateway tooling.",
-        ],
-    },
     "api_server": {
         "id": "api_server",
         "label": "API Server",
         "kind": "http",
+        "category": "developer_api",
         "description": "OpenAI-compatible Hermes API server exposed by the gateway.",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server",
         "configuration_supported": True,
@@ -237,181 +199,124 @@ CONNECTOR_MANIFESTS: dict[str, dict[str, Any]] = {
     },
 }
 
-DOCUMENTED_CONNECTOR_ORDER = [
-    "telegram",
-    "discord",
-    "slack",
-    "google_chat",
-    "whatsapp",
-    "signal",
-    "sms",
-    "email",
-    "homeassistant",
-    "mattermost",
-    "matrix",
-    "dingtalk",
-    "feishu",
-    "wecom",
-    "wecom_callback",
-    "weixin",
-    "bluebubbles",
-    "photon",
-    "qqbot",
-    "yuanbao",
-    "teams",
-    "line",
-    "ntfy",
-    "browser",
-    "api_server",
-    "webhook",
-    "msgraph_webhook",
-    "simplex",
-    "irc",
-]
-
 _MESSAGING_DOC_BASE = "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/"
 
-DOCUMENTED_RUNTIME_CONNECTORS: dict[str, dict[str, Any]] = {
+CATEGORY_ORDER = ["messaging", "event_webhook", "developer_api", "other"]
+
+CONNECTOR_UI_METADATA: dict[str, dict[str, Any]] = {
     "slack": {
         "label": "Slack",
         "docs_slug": "slack",
-        "required_env": ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"],
     },
     "google_chat": {
         "label": "Google Chat",
         "docs_slug": "google_chat",
-        "required_env": [
-            "GOOGLE_CHAT_PROJECT_ID",
-            "GOOGLE_CHAT_SUBSCRIPTION_NAME",
-            "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON",
-        ],
     },
     "whatsapp": {
         "label": "WhatsApp",
         "docs_slug": "whatsapp",
-        "required_env": ["WHATSAPP_ENABLED"],
-        "notes": ["WhatsApp setup is currently handled by Hermes gateway tooling and bridge state."],
     },
     "signal": {
         "label": "Signal",
         "docs_slug": "signal",
-        "required_env": ["SIGNAL_HTTP_URL", "SIGNAL_ACCOUNT"],
     },
     "sms": {
         "label": "SMS",
         "docs_slug": "sms",
-        "required_env": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"],
     },
     "email": {
         "label": "Email",
         "docs_slug": "email",
-        "required_env": ["EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_IMAP_HOST", "EMAIL_SMTP_HOST"],
     },
     "homeassistant": {
         "label": "Home Assistant",
         "docs_slug": "homeassistant",
-        "required_env": ["HASS_TOKEN"],
     },
     "mattermost": {
         "label": "Mattermost",
         "docs_slug": "mattermost",
-        "required_env": ["MATTERMOST_URL", "MATTERMOST_TOKEN"],
     },
     "matrix": {
         "label": "Matrix",
         "docs_slug": "matrix",
-        "required_env": ["MATRIX_HOMESERVER"],
-        "notes": ["Matrix also requires MATRIX_ACCESS_TOKEN or MATRIX_PASSWORD depending on the auth mode."],
     },
     "dingtalk": {
         "label": "DingTalk",
         "docs_slug": "dingtalk",
-        "required_env": ["DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET"],
     },
     "feishu": {
         "label": "Feishu / Lark",
         "docs_slug": "feishu",
-        "required_env": ["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
     },
     "wecom": {
         "label": "WeCom",
         "docs_slug": "wecom",
-        "required_env": ["WECOM_BOT_ID", "WECOM_SECRET"],
     },
     "wecom_callback": {
         "label": "WeCom Callback",
         "docs_slug": "wecom-callback",
-        "required_env": [
-            "WECOM_CALLBACK_CORP_ID",
-            "WECOM_CALLBACK_CORP_SECRET",
-            "WECOM_CALLBACK_AGENT_ID",
-            "WECOM_CALLBACK_TOKEN",
-            "WECOM_CALLBACK_ENCODING_AES_KEY",
-        ],
     },
     "weixin": {
         "label": "Weixin",
         "docs_slug": "weixin",
-        "required_env": ["WEIXIN_TOKEN", "WEIXIN_ACCOUNT_ID"],
     },
     "bluebubbles": {
         "label": "BlueBubbles / iMessage",
         "docs_slug": "bluebubbles",
-        "required_env": ["BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD"],
     },
     "photon": {
         "label": "iMessage via Photon",
         "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/photon",
-        "required_env": ["PHOTON_PROJECT_ID", "PHOTON_PROJECT_SECRET"],
     },
     "qqbot": {
         "label": "QQ",
         "docs_slug": "qqbot",
-        "required_env": ["QQ_APP_ID", "QQ_CLIENT_SECRET"],
     },
     "yuanbao": {
         "label": "Yuanbao",
         "docs_slug": "yuanbao",
-        "required_env": ["YUANBAO_APP_SECRET"],
-        "notes": ["Yuanbao also requires YUANBAO_APP_ID or YUANBAO_APP_KEY."],
     },
     "teams": {
         "label": "Microsoft Teams",
         "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/teams",
-        "required_env": ["TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_TENANT_ID"],
     },
     "line": {
         "label": "LINE",
         "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/line",
-        "required_env": ["LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET"],
     },
     "ntfy": {
         "label": "ntfy",
         "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/ntfy",
-        "required_env": ["NTFY_TOPIC"],
     },
     "browser": {
         "label": "Browser / Open WebUI",
-        "kind": "http",
+        "category": "developer_api",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/open-webui",
-        "required_env": ["API_SERVER_KEY"],
         "description": "Browser messaging is supported through Hermes' Open WebUI/API Server path and is not a separate gateway adapter.",
+    },
+    "api_server": {
+        "label": "API Server",
+        "category": "developer_api",
+        "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server",
+    },
+    "webhook": {
+        "label": "Webhook",
+        "category": "event_webhook",
+        "docs_slug": "webhooks",
+        "description": "Inbound event webhooks for GitHub, GitLab, Jira, Stripe and similar external event sources.",
     },
     "msgraph_webhook": {
         "label": "Microsoft Graph Webhook",
-        "kind": "http",
-        "docs_slug": "webhooks",
-        "required_env": ["MSGRAPH_WEBHOOK_CLIENT_STATE"],
+        "category": "event_webhook",
+        "docs_slug": "msgraph-webhook",
     },
     "simplex": {
         "label": "SimpleX Chat",
         "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/simplex",
-        "required_env": ["SIMPLEX_WS_URL"],
     },
     "irc": {
         "label": "IRC",
         "docs_url": "https://github.com/NousResearch/hermes-agent/tree/main/plugins/platforms/irc",
-        "required_env": ["IRC_SERVER", "IRC_CHANNEL", "IRC_NICKNAME"],
     },
 }
 
@@ -431,22 +336,55 @@ def _humanize_connector_id(connector_id: str) -> str:
     return connector_id.replace("_", " ").replace("-", " ").title()
 
 
+def _metadata(connector_id: str) -> dict[str, Any]:
+    return CONNECTOR_UI_METADATA.get(connector_id, {})
+
+
+def _docs_url(connector_id: str, spec: dict[str, Any]) -> str:
+    docs_url = spec.get("docs_url") or _metadata(connector_id).get("docs_url")
+    if docs_url:
+        return str(docs_url)
+    docs_slug = spec.get("docs_slug") or _metadata(connector_id).get("docs_slug")
+    if docs_slug:
+        return _MESSAGING_DOC_BASE + str(docs_slug)
+    return ""
+
+
+def _connector_category(connector_id: str, spec: dict[str, Any]) -> str:
+    category = spec.get("category") or _metadata(connector_id).get("category")
+    if category:
+        return str(category)
+    if connector_id in {"webhook", "msgraph_webhook"} or connector_id.endswith("_webhook"):
+        return "event_webhook"
+    if connector_id in {"api_server", "browser"}:
+        return "developer_api"
+    return "messaging"
+
+
+def _connector_kind(connector_id: str, spec: dict[str, Any]) -> str:
+    if spec.get("kind"):
+        return str(spec["kind"])
+    category = _connector_category(connector_id, spec)
+    if category in {"event_webhook", "developer_api"}:
+        return "http"
+    return "messaging"
+
+
 def _runtime_managed_manifest(connector_id: str, spec: dict[str, Any]) -> dict[str, Any]:
-    label = spec.get("label") or _humanize_connector_id(connector_id)
-    docs_url = spec.get("docs_url")
-    if not docs_url and spec.get("docs_slug"):
-        docs_url = _MESSAGING_DOC_BASE + str(spec["docs_slug"])
-    description = spec.get("description") or (
+    metadata = _metadata(connector_id)
+    label = spec.get("label") or metadata.get("label") or _humanize_connector_id(connector_id)
+    description = spec.get("description") or metadata.get("description") or (
         f"{label} is supported by Hermes Agent and is configured from the Hermes gateway runtime."
     )
     notes = list(spec.get("notes") or [])
-    notes.append("This connector is listed from Hermes Agent support metadata; WebUI editing is enabled only after its config shape is verified.")
+    notes.append("This surface comes from Hermes runtime metadata; WebUI editing is enabled only after its config shape is verified.")
     return {
         "id": connector_id,
         "label": label,
-        "kind": spec.get("kind") or "messaging",
+        "kind": _connector_kind(connector_id, spec),
+        "category": _connector_category(connector_id, spec),
         "description": description,
-        "docs_url": docs_url or "",
+        "docs_url": _docs_url(connector_id, spec),
         "configuration_supported": False,
         "toggle_supported": False,
         "test_supported": False,
@@ -457,7 +395,7 @@ def _runtime_managed_manifest(connector_id: str, spec: dict[str, Any]) -> dict[s
     }
 
 
-def _discover_runtime_managed_platforms() -> dict[str, dict[str, Any]]:
+def _discover_runtime_platform_specs() -> dict[str, dict[str, Any]]:
     discovered: dict[str, dict[str, Any]] = {}
     try:
         from gateway.config import Platform
@@ -478,6 +416,13 @@ def _discover_runtime_managed_platforms() -> dict[str, dict[str, Any]]:
         pass
 
     try:
+        from hermes_cli.plugins import discover_plugins
+
+        discover_plugins()
+    except Exception:
+        pass
+
+    try:
         from gateway.platform_registry import platform_registry
 
         for entry in platform_registry.all_entries():
@@ -493,28 +438,64 @@ def _discover_runtime_managed_platforms() -> dict[str, dict[str, Any]]:
     except Exception:
         pass
 
-    return {
-        connector_id: _runtime_managed_manifest(connector_id, spec)
-        for connector_id, spec in discovered.items()
-        if connector_id not in CONNECTOR_MANIFESTS
-    }
+    return discovered
 
 
-def _connector_manifests() -> dict[str, dict[str, Any]]:
-    manifests = copy.deepcopy(CONNECTOR_MANIFESTS)
-    for connector_id, spec in DOCUMENTED_RUNTIME_CONNECTORS.items():
-        if connector_id not in manifests:
+def _verified_manifest(connector_id: str, spec: dict[str, Any]) -> dict[str, Any]:
+    manifest = copy.deepcopy(VERIFIED_CONFIG_MANIFESTS[connector_id])
+    manifest["category"] = _connector_category(connector_id, {**manifest, **spec})
+    manifest["kind"] = _connector_kind(connector_id, manifest)
+    manifest["docs_url"] = manifest.get("docs_url") or _docs_url(connector_id, spec)
+    manifest["source"] = spec.get("source") or "webui_verified_config"
+    if spec.get("label") and not manifest.get("label"):
+        manifest["label"] = spec["label"]
+    if spec.get("required_env"):
+        manifest["required_env"] = list(spec["required_env"])
+    if spec.get("notes"):
+        manifest["notes"] = list(manifest.get("notes") or []) + list(spec["notes"])
+    return manifest
+
+
+def _config_platform_specs(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    specs: dict[str, dict[str, Any]] = {}
+    for connector_id in _platforms(config):
+        if _CONNECTOR_ID_RE.fullmatch(str(connector_id)):
+            specs[str(connector_id)] = {"source": "config.yaml"}
+    return specs
+
+
+def _connector_manifests(config: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+    runtime_specs = _discover_runtime_platform_specs()
+    discovered_specs = dict(runtime_specs)
+    if config is not None:
+        for connector_id, spec in _config_platform_specs(config).items():
+            discovered_specs.setdefault(connector_id, spec)
+
+    manifests: dict[str, dict[str, Any]] = {}
+    for connector_id, spec in discovered_specs.items():
+        if connector_id in VERIFIED_CONFIG_MANIFESTS:
+            manifests[connector_id] = _verified_manifest(connector_id, spec)
+        else:
             manifests[connector_id] = _runtime_managed_manifest(connector_id, spec)
-    for connector_id, manifest in _discover_runtime_managed_platforms().items():
-        manifests.setdefault(connector_id, manifest)
 
-    ordered: dict[str, dict[str, Any]] = {}
-    for connector_id in DOCUMENTED_CONNECTOR_ORDER:
-        if connector_id in manifests:
-            ordered[connector_id] = manifests.pop(connector_id)
-    for connector_id in sorted(manifests):
-        ordered[connector_id] = manifests[connector_id]
-    return ordered
+    if not runtime_specs and not manifests:
+        for connector_id in VERIFIED_CONFIG_MANIFESTS:
+            manifest = _verified_manifest(connector_id, {"source": "webui_verified_config_fallback"})
+            manifest["notes"] = list(manifest.get("notes") or []) + [
+                "Hermes runtime platform metadata is unavailable; only WebUI-verified editable config surfaces are listed.",
+            ]
+            manifests[connector_id] = manifest
+
+    def sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
+        _, manifest = item
+        category = str(manifest.get("category") or "other")
+        try:
+            category_index = CATEGORY_ORDER.index(category)
+        except ValueError:
+            category_index = len(CATEGORY_ORDER)
+        return category_index, str(manifest.get("label") or item[0]).lower()
+
+    return dict(sorted(manifests.items(), key=sort_key))
 
 
 def _load_yaml_config_raw() -> dict[str, Any]:
@@ -555,10 +536,10 @@ def _save_yaml_config_raw(config: dict[str, Any]) -> None:
     reload_config()
 
 
-def _manifest(connector_id: str) -> dict[str, Any]:
+def _manifest(connector_id: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
     if not _CONNECTOR_ID_RE.fullmatch(connector_id or ""):
         raise ConnectorError("Invalid connector id.", 400)
-    manifest = _connector_manifests().get(connector_id)
+    manifest = _connector_manifests(config).get(connector_id)
     if not manifest:
         raise ConnectorError("Connector not found.", 404)
     return manifest
@@ -731,10 +712,14 @@ def _connector_summary(manifest: dict[str, Any], config: dict[str, Any], runtime
         safe_field["configured"] = _has_value(_get_path(platform_cfg, field.get("path") or [])) or _env_available(field)
         fields.append(safe_field)
     extra = platform_cfg.get("extra") if isinstance(platform_cfg.get("extra"), dict) else {}
+    routes = extra.get("routes")
+    route_count = len(routes) if isinstance(routes, (dict, list)) else None
     return {
         "id": cid,
         "label": manifest.get("label") or cid,
         "kind": manifest.get("kind") or "connector",
+        "category": manifest.get("category") or "other",
+        "source": manifest.get("source") or "",
         "description": manifest.get("description") or "",
         "docs_url": manifest.get("docs_url") or "",
         "configuration_supported": bool(manifest.get("configuration_supported")),
@@ -746,7 +731,7 @@ def _connector_summary(manifest: dict[str, Any], config: dict[str, Any], runtime
         "fields": fields,
         "notes": list(manifest.get("notes") or []),
         "required_env": list(manifest.get("required_env") or []),
-        "route_count": len(extra.get("routes") or []) if isinstance(extra.get("routes"), list) else None,
+        "route_count": route_count,
         "raw": redact_secrets(platform_cfg),
     }
 
@@ -756,7 +741,7 @@ def list_connectors() -> dict[str, Any]:
     runtime = _gateway_runtime_status()
     connectors = [
         _connector_summary(manifest, config, runtime)
-        for manifest in _connector_manifests().values()
+        for manifest in _connector_manifests(config).values()
     ]
     return {
         "connectors": connectors,
@@ -766,8 +751,8 @@ def list_connectors() -> dict[str, Any]:
 
 
 def get_connector(connector_id: str) -> dict[str, Any]:
-    manifest = _manifest(connector_id)
     config = _load_yaml_config_raw()
+    manifest = _manifest(connector_id, config)
     return {
         "connector": _connector_summary(manifest, config, _gateway_runtime_status()),
         "config_path": str(_get_config_path()),
