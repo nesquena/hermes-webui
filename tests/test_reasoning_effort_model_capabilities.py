@@ -140,6 +140,14 @@ def test_get_reasoning_status_unrecognized_model_still_offers_efforts(monkeypatc
         "resolve_model_reasoning_efforts",
         lambda *a, **k: [],
     )
+    # Hermetic guard: with resolve_model_reasoning_efforts -> [], the gate's
+    # `elif` branch fires and calls _models_dev_reasoning_efforts. Mock it to
+    # None so the test is independent of live models.dev catalog state.
+    monkeypatch.setattr(
+        cfg,
+        "_models_dev_reasoning_efforts",
+        lambda *a, **k: None,
+    )
     status = cfg.get_reasoning_status(
         model_id="some-unknown-model",
         provider_id="custom:myproxy",
