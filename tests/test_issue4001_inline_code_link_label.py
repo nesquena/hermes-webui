@@ -1,4 +1,6 @@
-from tests.test_renderer_js_behaviour import _render, driver_path  # noqa: F401
+pytest_plugins = ("tests.test_renderer_js_behaviour",)
+
+from tests.test_renderer_js_behaviour import _render
 
 
 def test_inline_code_inside_link_label_renders_as_code(driver_path):
