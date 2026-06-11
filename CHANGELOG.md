@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.363] — 2026-06-11 — Release MB (rename/move/update CLI sessions without 404)
+
+### Fixed
+
+- **Renaming, moving, or updating a CLI/agent session that isn't yet in the WebUI store no longer 404s (#3985).** These actions previously only looked in the WebUI session store, so a session originating from the TUI/CLI/agent (not yet materialized into the store) couldn't be renamed/moved/updated. They now fall back to materializing the session from its CLI metadata (mirroring the existing `/api/session/archive` behavior). Read-only imported sessions (messaging channels, Claude Code) remain protected: they're refused with 403 on both the already-stored and the materialize paths, and a state.db-owned messaging session is never materialized into a writable WebUI sidecar. (#3985)
+
 ## [v0.51.362] — 2026-06-11 — Release MA (malformed providers config no longer crashes)
 
 ### Fixed
