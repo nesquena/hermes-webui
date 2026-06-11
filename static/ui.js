@@ -9032,7 +9032,9 @@ function renderMessages(options){
         // Otherwise (rebuild has >= the preserved turn's structural blocks) do
         // the precise segment swap so rebuilt-only structure is kept.
         const _structuralCount=(turn)=> turn?turn.querySelectorAll(
-          '[data-live-assistant="1"],.tool-call-group,.tool-card-row,.tool-worklog-group,.agent-activity-thinking,.thinking-card-row'
+          '[data-live-assistant="1"],.tool-call-group,.tool-card-row,'+
+          '.tool-worklog-group,.live-worklog[data-live-worklog-shell="1"],'+
+          '.wl-reason,.agent-activity-thinking,.thinking-card-row'
         ).length:0;
         const _preservedStructure=_structuralCount(_preservedLiveTurn);
         const _rebuiltStructure=_structuralCount(_rebuilt);

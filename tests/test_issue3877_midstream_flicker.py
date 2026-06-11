@@ -133,6 +133,15 @@ def test_reattach_swaps_at_segment_level_to_preserve_rebuilt_structure():
         "segment-level swap only when the rebuild is the structural superset; "
         "otherwise restore the whole preserved turn so live-only tool cards are kept"
     )
+    # The structural count must include the LIVE WORKLOG shell + reason content, not
+    # just .tool-call-group — a live worklog (data-live-worklog-shell) landing before
+    # the throttled persist is exactly the live-ahead structure a segment-only swap
+    # would detach (Codex round-2 CORE finding).
+    assert '.live-worklog[data-live-worklog-shell="1"]' in reattach, (
+        "structural count must include the live worklog shell so a worklog-only "
+        "live-ahead turn takes the whole-turn restore path"
+    )
+    assert ".wl-reason" in reattach
     # Segment-level swap is the superset path.
     assert "_rebuiltSeg.replaceWith(_preservedSeg)" in reattach, (
         "the swap must be segment-level (replace the rebuilt live segment with the "
