@@ -389,6 +389,15 @@ function _scheduleActiveSessionIdleReload(sid) {
     if(!S||!S.session||S.session.session_id !== sid) return;
     if(S.busy || S.activeStreamId) return;
     try{
+      // Avoid an unconditional same-session force reload the moment streaming
+      // settles. On mobile PWA this produces a visible end-of-turn flash and can
+      // briefly restore the pane with stale layout geometry. Reuse the lighter
+      // external-refresh gate so we only reload when the authoritative session
+      // on disk is actually newer than the just-finished in-memory turn.
+      if(typeof refreshActiveSessionIfExternallyUpdated==='function'){
+        await refreshActiveSessionIfExternallyUpdated('idle-reconcile');
+        return;
+      }
       await loadSession(sid, {force:true, externalRefreshReason:'idle-reconcile'});
     }catch(_){}
   },0);
