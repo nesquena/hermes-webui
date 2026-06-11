@@ -6188,10 +6188,11 @@ def handle_get(handler, parsed) -> bool:
             diag.stage("load_settings")
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
+            agent_session_source_filter = settings.get("agent_session_source_filter")
             webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
             if show_cli_sessions:
                 diag.stage("get_cli_sessions")
-                cli = get_cli_sessions()
+                cli = get_cli_sessions(source_filter=agent_session_source_filter)
                 diag.stage("merge_cli_sessions")
                 cli_by_id = {s["session_id"]: s for s in cli}
                 # #3238: reconcile orphaned imported-CLI sidecars. When a CLI
