@@ -4728,7 +4728,6 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
 }
 
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
-  let webuiSessionCount=0;
   let cliSessionCount=0;
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
@@ -4740,7 +4739,6 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
     const isCli=_isCliSession(s);
     if(isCli) cliSessionCount++;
-    else webuiSessionCount++;
     if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
     const profileFiltered=isCli ? cliProfileFiltered : webuiProfileFiltered;
     const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;
@@ -4762,7 +4760,6 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   }
   const showCliOnly=_sessionSourceFilter==='cli';
   return {
-    webuiSessionCount,
     cliSessionCount,
     profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered,
     sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw,

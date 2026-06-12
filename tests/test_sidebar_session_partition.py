@@ -58,7 +58,7 @@ def test_partition_helper_applies_message_source_project_and_archive_gates():
 def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_counts():
     render_body = _function_block("renderSessionListFromCache")
 
-    assert "webuiSessionCount," in _partition_block()
+    assert "webuiSessionCount," not in _partition_block()
     assert "cliSessionCount," in _partition_block()
     assert "webuiSessionsRaw," in _partition_block()
     assert "cliSessionsRaw," in _partition_block()
