@@ -3094,7 +3094,7 @@ def _configured_model_badges_from_static_catalog(
         if m.get("id")
     }
 
-    def _norm_model_id(model_id: str) -> str:
+    def _norm_static_model_id(model_id: str) -> str:
         s = str(model_id or "").strip().lower()
         if s.startswith("@") and ":" in s:
             parts = s.split(":")
@@ -3106,7 +3106,7 @@ def _configured_model_badges_from_static_catalog(
 
     norm_lookup: dict[str, list[str]] = {}
     for opt_id in option_ids:
-        norm_lookup.setdefault(_norm_model_id(opt_id), []).append(opt_id)
+        norm_lookup.setdefault(_norm_static_model_id(opt_id), []).append(opt_id)
 
     badges: dict[str, dict[str, str]] = {}
     for entry in configured_entries:
@@ -3127,7 +3127,7 @@ def _configured_model_badges_from_static_catalog(
                 break
         if match_id is None:
             for candidate in raw_candidates:
-                normalized = _norm_model_id(candidate)
+                normalized = _norm_static_model_id(candidate)
                 matches = norm_lookup.get(normalized, [])
                 if not matches:
                     continue
