@@ -561,6 +561,17 @@ def build_profile_cookie(name: str, handler=None) -> str:
     cookie = _hc.SimpleCookie()
     cookie_name = get_profile_cookie_name()
     value = name
+    # Guard against a future call site silently emitting an UNSIGNED profile
+    # cookie while auth is enabled (which a client could then... not forge, but
+    # it would weaken the binding). If auth is on we require a handler so the
+    # cookie is bound to the session. (#4023 Opus hardening.)
+    try:
+        from api.auth import is_auth_enabled
+        _auth_on = is_auth_enabled()
+    except Exception:
+        _auth_on = False
+    if _auth_on and handler is None:
+        raise RuntimeError("build_profile_cookie requires a request handler when auth is enabled (to bind the profile cookie to the session)")
     if handler is not None:
         try:
             from api.auth import is_auth_enabled, parse_cookie, sign_profile_cookie_value

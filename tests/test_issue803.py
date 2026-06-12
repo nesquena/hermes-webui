@@ -184,6 +184,41 @@ class TestProfileCookieHelpers:
         )
         assert get_profile_cookie(handler) == 'writer'
 
+    def test_verify_profile_cookie_rejects_invalid_name_pattern(self, monkeypatch):
+        """Defense-in-depth (#4023 Opus hardening): even a correctly-HMAC-signed
+        cookie whose profile name fails _PROFILE_ID_RE must be rejected by the
+        verifier itself, so a future caller can't skip the pattern gate."""
+        from api.auth import sign_profile_cookie_value, verify_profile_cookie_value
+
+        session_cookie = 'session-token.session-sig'
+        monkeypatch.setattr('api.auth.verify_session', lambda cookie: cookie == session_cookie)
+        # Sign a hostile name (would never come from a real switch, but proves the
+        # verifier validates the name even when the signature is valid).
+        signed = sign_profile_cookie_value('../etc', session_cookie)
+        assert verify_profile_cookie_value(signed, session_cookie) is None
+        # And a normal name still round-trips.
+        ok = sign_profile_cookie_value('alice', session_cookie)
+        assert verify_profile_cookie_value(ok, session_cookie) == 'alice'
+
+    def test_build_profile_cookie_requires_handler_when_auth_enabled(self, monkeypatch):
+        """Defense-in-depth (#4023 Opus hardening): a future call site that forgets
+        to pass the handler while auth is enabled must NOT silently emit an
+        unsigned profile cookie — it raises instead."""
+        from api.helpers import build_profile_cookie
+
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        with pytest.raises(RuntimeError):
+            build_profile_cookie('alice')  # no handler
+
+    def test_build_profile_cookie_allows_no_handler_when_auth_disabled(self, monkeypatch):
+        """No-auth mode keeps the legacy plain-name cookie with no handler."""
+        from api.helpers import build_profile_cookie
+
+        monkeypatch.delenv('WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
+        s = build_profile_cookie('alice')
+        assert 'hermes_profile=alice' in s
+
     def test_configured_profile_cookie_ignores_default_cookie_name(self, monkeypatch):
         from api.helpers import get_profile_cookie
 

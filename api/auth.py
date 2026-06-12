@@ -498,6 +498,12 @@ def verify_profile_cookie_value(cookie_value: str, session_cookie_value: str | N
     token = _session_token_from_cookie_value(session_cookie_value)
     if not profile_name or not token or not sig:
         return None
+    # Defense-in-depth: validate the profile-name pattern here too, not only in
+    # get_profile_cookie(), so any future caller of this verifier can't return an
+    # unvalidated name. (#4023 Opus hardening.)
+    from api.profiles import _PROFILE_ID_RE
+    if profile_name != 'default' and not _PROFILE_ID_RE.fullmatch(profile_name):
+        return None
     expected = hmac.new(
         _signing_key(),
         f"profile:{token}:{profile_name}".encode(),
