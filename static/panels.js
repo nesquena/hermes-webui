@@ -6204,10 +6204,12 @@ function _applyTtsEnabled(enabled){
 
 function _appearancePayloadFromUi(){
   const worklogDetailsExpanded=!!($('settingsWorklogDetailsExpandedDefault')||{}).checked;
+  const chatActivityModeSel=$('settingsChatActivityDisplayMode');
   return {
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
+    chat_activity_display_mode: chatActivityModeSel&&chatActivityModeSel.value==='transparent_stream'?'transparent_stream':'compact_worklog',
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     worklog_details_expanded_default: worklogDetailsExpanded,
@@ -6216,6 +6218,27 @@ function _appearancePayloadFromUi(){
     tab_order: _getTabOrder(),
   };
 }
+
+function _syncChatActivityDisplayModeControl(mode){
+  const next=mode==='transparent_stream'?'transparent_stream':'compact_worklog';
+  const select=$('settingsChatActivityDisplayMode');
+  if(select) select.value=next;
+  document.querySelectorAll('[data-chat-activity-mode]').forEach(btn=>{
+    const active=btn.getAttribute('data-chat-activity-mode')===next;
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-pressed',active?'true':'false');
+  });
+  window._chatActivityDisplayMode=next;
+  window._transparentStream=next==='transparent_stream';
+}
+
+function _pickChatActivityDisplayMode(mode){
+  _syncChatActivityDisplayModeControl(mode);
+  if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+  if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  _scheduleAppearanceAutosave();
+}
+if(typeof window!=='undefined') window._pickChatActivityDisplayMode=_pickChatActivityDisplayMode;
 
 function _setAppearanceAutosaveStatus(state){
   const el=$('settingsAppearanceAutosaveStatus');
@@ -6263,6 +6286,11 @@ async function _autosaveAppearanceSettings(payload){
     }
     if(saved){
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
+      if(Object.prototype.hasOwnProperty.call(saved,'chat_activity_display_mode')){
+        _syncChatActivityDisplayModeControl(saved.chat_activity_display_mode);
+        if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+        if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+      }
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
@@ -6501,6 +6529,13 @@ async function loadSettingsPanel(){
       };
     }
     const worklogDetailsExpandedCb=$('settingsWorklogDetailsExpandedDefault');
+    const chatActivityModeSel=$('settingsChatActivityDisplayMode');
+    if(chatActivityModeSel){
+      _syncChatActivityDisplayModeControl(settings.chat_activity_display_mode);
+      chatActivityModeSel.addEventListener('change',()=>{
+        _pickChatActivityDisplayMode(chatActivityModeSel.value);
+      },{once:false});
+    }
     if(worklogDetailsExpandedCb){
       const worklogDetailsExpanded=Object.prototype.hasOwnProperty.call(settings,'worklog_details_expanded_default')
         ? settings.worklog_details_expanded_default
@@ -6648,7 +6683,14 @@ async function loadSettingsPanel(){
       pinnedLimitField.addEventListener('input',()=>{window._pinnedSessionsLimit=parseInt(pinnedLimitField.value,10)||3;_schedulePreferencesAutosave();},{once:false});
     }
     const fadeTextCb=$('settingsFadeTextEffect');
-    if(fadeTextCb){fadeTextCb.checked=!!settings.fade_text_effect;window._fadeTextEffect=fadeTextCb.checked;fadeTextCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    if(fadeTextCb){
+      fadeTextCb.checked=!!settings.fade_text_effect;
+      window._fadeTextEffect=fadeTextCb.checked;
+      fadeTextCb.addEventListener('change',()=>{
+        window._fadeTextEffect=fadeTextCb.checked;
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
     const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
     if(terminalAutoExpandCb){terminalAutoExpandCb.checked=!!settings.terminal_auto_expand_on_output;window._terminalAutoExpandOnOutput=terminalAutoExpandCb.checked;terminalAutoExpandCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const apiRedactCb=$('settingsApiRedact');
@@ -7763,6 +7805,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._whatsNewSummaryEnabled=!!body.whats_new_summary_enabled;
   window._showThinking=body.show_thinking!==false;
   window._simplifiedToolCalling=true;
+  _syncChatActivityDisplayModeControl(body.chat_activity_display_mode);
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
@@ -8100,6 +8143,7 @@ async function saveSettings(andClose){
   body.font_size=fontSize;
   body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
+  body.chat_activity_display_mode=(($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')?'transparent_stream':'compact_worklog';
   body.language=language;
   body.show_token_usage=showTokenUsage;
   body.show_quota_chip=showQuotaChip===true;

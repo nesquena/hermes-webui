@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Transparent Stream activity display mode.** Settings → Appearance now includes an opt-in chat activity display mode that renders each Thinking/tool event as its own chronological expandable row, with live tool completion updating the same row and settled/reloaded transcripts preserving the same event shape. Compact Worklog remains the default. (#3820)
+- **Transparent Stream turn-level collapse + old-event fading + per-turn footer.** In Transparent Stream, clicking the assistant role label (the Hermes chat name tag) collapses the entire event stack underneath into a compact "output only" view with an animated chevron. Older event rows fade progressively from medium to low opacity (steps of ~0.18, floor at 0.32) so the eye lands on the most recent activity; hover restores full opacity. A bottom-of-turn footer mirrors the live run-status line for settled turns, showing elapsed time, first-token time (TTFT), token usage, and final status. (#3820)
+
 ## [v0.51.359] — 2026-06-11 — Release LW (assistant turn anchor phase 0 scaffold)
 
 ### Added

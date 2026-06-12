@@ -1005,6 +1005,22 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_session_endless_scroll">When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.</div>
             </div>
             <div class="settings-field" style="margin-top:8px">
+              <label id="settingsChatActivityDisplayModeLabel" for="settingsChatActivityDisplayMode" data-i18n="settings_label_chat_activity_display_mode">Activity display</label>
+              <div class="chat-activity-mode-toggle" role="group" aria-labelledby="settingsChatActivityDisplayModeLabel">
+                <button type="button" class="chat-activity-mode-btn active" data-chat-activity-mode="compact_worklog" onclick="_pickChatActivityDisplayMode('compact_worklog')">
+                  <span data-i18n="settings_option_compact_worklog">Compact Worklog</span>
+                </button>
+                <button type="button" class="chat-activity-mode-btn" data-chat-activity-mode="transparent_stream" onclick="_pickChatActivityDisplayMode('transparent_stream')">
+                  <span data-i18n="settings_option_transparent_stream">Transparent Stream</span>
+                </button>
+              </div>
+              <select id="settingsChatActivityDisplayMode" style="display:none">
+                <option value="compact_worklog" data-i18n="settings_option_compact_worklog">Compact Worklog</option>
+                <option value="transparent_stream" data-i18n="settings_option_transparent_stream">Transparent Stream</option>
+              </select>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_chat_activity_display_mode">Compact Worklog groups supporting activity into a quiet summary. Transparent Stream keeps each thinking/tool event as its own chronological expandable row.</div>
+            </div>
+            <div class="settings-field" style="margin-top:8px">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsWorklogDetailsExpandedDefault" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_worklog_details_expanded_default">Open Worklog details automatically</span>

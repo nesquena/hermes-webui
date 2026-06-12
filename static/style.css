@@ -3136,6 +3136,297 @@ body.resizing .sidebar{transition:none!important;}
 .tool-arg-val{color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;font-size:var(--message-code-font-size);white-space:pre-wrap;word-break:break-word;display:block;overflow-x:auto;}
 .tool-card-result pre{font-size:var(--message-code-font-size);color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;margin:0;line-height:1.55;}
 
+/* ── Transparent Stream event rows ── */
+/* Box rhythm: each event is a compact rounded card with a thin, transparent
+   border, a 2px type rail, and tight spacing. Keep the newest activity easy
+   to scan without letting the execution trace overpower the final answer. */
+.transparent-event-controls{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  margin:1px 0 3px var(--msg-rail);
+  max-width:var(--msg-max);
+  color:var(--muted);
+  font-size:11px;
+  line-height:1.3;
+}
+.transparent-event-controls-label{font-weight:600;color:var(--muted);}
+.transparent-event-action,
+.transparent-event-control{
+  cursor:pointer;
+  color:var(--muted);
+  opacity:.78;
+  text-decoration:underline;
+  text-decoration-color:transparent;
+  text-underline-offset:3px;
+}
+.transparent-event-action:hover,
+.transparent-event-control:hover{color:var(--text);opacity:1;text-decoration-color:currentColor;}
+.transparent-event-row{
+  margin:1px 0 1px var(--msg-rail);
+  max-width:var(--msg-max);
+  width:calc(100% - var(--msg-rail));
+  border:1px solid color-mix(in srgb,var(--accent) 12%,var(--border-subtle));
+  border-left:2px solid color-mix(in srgb,var(--accent) 42%,transparent);
+  border-radius:12px;
+  background:linear-gradient(90deg,color-mix(in srgb,var(--accent-bg) 22%,transparent),color-mix(in srgb,var(--surface) 88%,transparent) 34%);
+  overflow:hidden;
+  box-shadow:0 1px 0 rgba(0,0,0,.03);
+  animation:transparent-event-enter .18s ease-out both;
+  transition:border-color .22s ease,box-shadow .22s ease,opacity .22s ease;
+}
+.transparent-event-row[data-event-type="thinking"]{
+  background:linear-gradient(90deg,color-mix(in srgb,var(--accent-bg-strong) 30%,transparent),color-mix(in srgb,var(--accent-bg) 28%,color-mix(in srgb,var(--surface) 88%,transparent)) 42%);
+  border-color:color-mix(in srgb,var(--accent) 18%,var(--border-subtle));
+  border-left-color:color-mix(in srgb,var(--accent) 58%,transparent);
+}
+.transparent-event-row[data-expanded="1"]{
+  border-color:color-mix(in srgb,var(--accent) 28%,var(--border-subtle));
+  box-shadow:0 4px 14px rgba(0,0,0,.06);
+}
+.transparent-event-row:hover{border-color:color-mix(in srgb,var(--accent) 38%,var(--border-subtle));}
+.transparent-event-row .tool-card{
+  border:0;
+  border-radius:0;
+  background:transparent;
+  overflow:visible;
+}
+.transparent-event-row .tool-card-header,
+.transparent-event-row .thinking-card-header{
+  display:flex;
+  align-items:center;
+  gap:5px;
+  min-height:20px;
+  padding:2px 4px 2px 8px;
+  margin-left:0;
+  border-radius:0;
+  color:var(--muted);
+  transition:background .18s ease,color .18s ease;
+}
+.transparent-event-row .tool-card-header:hover,
+.transparent-event-row .thinking-card-header:hover{background:var(--hover-bg);color:var(--text);}
+.transparent-event-row .tool-card-icon,
+.transparent-event-row .thinking-card-icon{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:14px;height:14px;
+  flex-shrink:0;
+  order:1;
+  opacity:.85;
+}
+.transparent-event-row .tool-card-icon svg,
+.transparent-event-row .thinking-card-icon svg{width:11px;height:11px;}
+.transparent-event-row .tool-card-name{
+  font-weight:600;
+  color:var(--text);
+  opacity:.78;
+  font-size:11.5px;
+  order:2;
+  flex-shrink:0;
+  max-width:40%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.transparent-event-row .tool-card-title,
+.transparent-event-row .tool-card-preview,
+.transparent-event-row .thinking-card-label,
+.transparent-event-thinking-preview{
+  display:inline;
+  min-width:0;
+  flex:1 1 auto;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:var(--muted);
+  opacity:.74;
+  font-size:11.5px;
+  order:3;
+}
+.transparent-event-status{
+  flex-shrink:0;
+  order:4;
+  color:var(--muted);
+  opacity:.7;
+  font-size:10px;
+  font-weight:500;
+  letter-spacing:.02em;
+  padding:1px 5px;
+  border-radius:6px;
+  background:color-mix(in srgb,var(--accent) 8%,transparent);
+}
+.transparent-event-copy{
+  border:0;
+  background:transparent;
+  color:var(--muted);
+  opacity:.5;
+  padding:1px 2px;
+  cursor:pointer;
+  flex-shrink:0;
+  order:9;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:4px;
+  transition:opacity .18s ease,color .18s ease,background .18s ease;
+}
+.transparent-event-copy:hover{opacity:1;color:var(--text);background:color-mix(in srgb,var(--hover-bg) 60%,transparent);}
+.transparent-event-row .tool-card-toggle,
+.transparent-event-row .thinking-card-toggle{
+  order:10;
+  flex-shrink:0;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:14px;height:14px;
+  opacity:.55;
+  transition:opacity .18s ease,transform .22s ease;
+}
+.transparent-event-row .tool-card:hover .tool-card-toggle,
+.transparent-event-row .thinking-card:hover .thinking-card-toggle{opacity:1;}
+.transparent-event-row .tool-card.open .tool-card-toggle,
+.transparent-event-row .thinking-card.open .thinking-card-toggle{transform:rotate(90deg);opacity:.9;}
+.transparent-event-progress{
+  position:relative;
+  height:3px;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--border-subtle) 100%,transparent) 0,color-mix(in srgb,var(--border-subtle) 40%,transparent) 100%);
+  border-radius:0 0 12px 12px;
+  overflow:hidden;
+  margin:0 -1px -1px -1px;
+}
+.transparent-event-progress::before{
+  content:"";
+  position:absolute;left:0;top:0;bottom:0;
+  width:0%;
+  background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 70%,transparent),color-mix(in srgb,var(--accent) 95%,transparent) 50%,color-mix(in srgb,var(--accent) 70%,transparent) 100%);
+  box-shadow:0 0 4px color-mix(in srgb,var(--accent) 60%,transparent);
+  border-radius:inherit;
+  transition:width .35s cubic-bezier(.4,0,.2,1);
+}
+.transparent-event-progress[data-progress-running="1"]::before{animation:transparent-progress-shimmer 1.6s ease-in-out infinite;}
+.transparent-event-progress[data-progress-percent]::before{width:var(--transparent-progress-percent,0%);}
+.transparent-event-progress::after{
+  content:"";
+  position:absolute;left:0;right:0;top:0;height:1px;
+  background:linear-gradient(90deg,transparent 0,color-mix(in srgb,var(--surface) 70%,transparent) 20%,color-mix(in srgb,var(--surface) 90%,transparent) 50%,color-mix(in srgb,var(--surface) 70%,transparent) 80%,transparent 100%);
+  pointer-events:none;
+}
+@keyframes transparent-progress-shimmer{
+  0%{left:0;right:100%;}
+  100%{left:100%;right:0;}
+}
+.transparent-event-row + .transparent-event-row::before{
+  content:"";
+  display:block;
+  height:1px;
+  margin:0 12px;
+  background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--accent) 18%,transparent) 20%,color-mix(in srgb,var(--accent) 28%,transparent) 50%,color-mix(in srgb,var(--accent) 18%,transparent) 80%,transparent);
+  border-radius:1px;
+}
+.transparent-detail-modes{
+  display:flex;
+  gap:10px;
+  padding:4px 8px 0;
+  color:var(--muted);
+  font-size:10.5px;
+}
+.transparent-detail-mode{cursor:pointer;opacity:.72;transition:opacity .18s ease,color .18s ease;}
+.transparent-detail-mode.active{color:var(--text);opacity:1;font-weight:600;}
+.transparent-event-row .tool-card-detail,
+.transparent-event-row .thinking-card-body{
+  display:block;
+  max-height:0;
+  opacity:0;
+  overflow:hidden;
+  padding:0;
+  margin:0;
+  border-top:1px solid transparent;
+  background:transparent;
+  transform:translateY(-1px);
+  transition:max-height .28s cubic-bezier(.4,0,.2,1),opacity .2s ease,transform .24s ease,border-top-color .2s ease,padding .22s ease;
+}
+.transparent-event-row .tool-card.open .tool-card-detail,
+.transparent-event-row .thinking-card.open .thinking-card-body{
+  max-height:520px;
+  opacity:1;
+  transform:translateY(0);
+  border-top-color:var(--border-subtle);
+  padding:2px 0 4px;
+  overflow:auto;
+}
+.transparent-event-row .tool-card-detail > *,
+.transparent-event-row .thinking-card-body > *{min-height:0;}
+.transparent-event-row .tool-card-args,
+.transparent-event-row .tool-card-result,
+.transparent-event-row .thinking-card-body pre{padding:6px 8px;}
+.transparent-event-row .tool-card-detail[data-transparent-detail-mode="output"] .tool-card-args{display:none;}
+.transparent-event-row .tool-card-args{margin-bottom:0;}
+.transparent-event-row .tool-arg-pair{display:flex;flex-direction:column;gap:1px;padding:3px 0;border-bottom:1px solid color-mix(in srgb,var(--border-subtle) 72%,transparent);}
+.transparent-event-row .tool-arg-pair:last-child{border-bottom:0;}
+.transparent-event-row .tool-arg-key{color:var(--muted);font-size:10px;font-family:var(--font-mono);display:block;margin-bottom:0;letter-spacing:.01em;}
+.transparent-event-row .tool-arg-val{font-family:var(--font-mono);font-size:var(--message-code-font-size);color:var(--text);line-height:1.5;}
+.transparent-event-row .tool-card-result pre,
+.transparent-event-row .thinking-card-body pre{
+  background:var(--code-bg);
+  border:1px solid var(--border-subtle);
+  border-radius:8px;
+  padding:6px 8px;
+  color:var(--muted);
+  line-height:1.5;
+}
+@media(max-width:600px){
+  .transparent-event-controls,
+  .transparent-event-row{margin-left:0;width:100%;max-width:none;}
+}
+@keyframes transparent-event-enter{
+  from{opacity:0;transform:translateY(2px);}
+  to{opacity:1;transform:translateY(0);}
+}
+
+/* ── Old-event fading (transparent mode: medium → low) ─────────────── */
+.transparent-event-row[data-transparent-fade="1"]{opacity:.82;}
+.transparent-event-row[data-transparent-fade="2"]{opacity:.66;}
+.transparent-event-row[data-transparent-fade="3"]{opacity:.52;}
+.transparent-event-row[data-transparent-fade="4"]{opacity:.4;}
+.transparent-event-row[data-transparent-fade="5"]{opacity:.32;}
+.transparent-event-row[data-transparent-fade]{transition:opacity .22s ease;}
+.transparent-event-row[data-transparent-fade]:hover{opacity:1;}
+
+/* ── Collapsible Hermes chat name tag ───────── */
+.assistant-turn[data-transparent-turn-collapsed="1"] .transparent-event-row,
+.assistant-turn[data-transparent-turn-collapsed="1"] .transparent-event-controls{
+  display:none;
+}
+.assistant-turn .msg-role.assistant{cursor:pointer;user-select:none;}
+.assistant-turn .msg-role.assistant .transparent-turn-chevron{
+  display:inline-block;margin-left:6px;opacity:.6;
+  transition:transform .2s ease;
+}
+.assistant-turn[data-transparent-turn-collapsed="1"] .msg-role.assistant .transparent-turn-chevron{
+  transform:rotate(-90deg);
+}
+
+/* ── Turn footer (transparent mode: elapsed · tokens · TTFT · status) ─ */
+/* Mirrors the live run-status line for settled turns in transparent
+   mode. Shows duration, first-token time, token usage, and final
+   status. Lives OUTSIDE assistant-turn-blocks so it stays visible even
+   when the event rows are collapsed. Tight offset and small font to
+   keep the visual rhythm with the event cards above it. */
+.transparent-turn-footer{
+  display:flex;align-items:center;flex-wrap:wrap;gap:6px;
+  margin:2px 0 2px var(--msg-rail);
+  max-width:var(--msg-max);
+  font-size:11.5px;color:var(--muted);line-height:1.3;
+  font-variant-numeric:tabular-nums;
+  padding:2px 4px;
+}
+.transparent-turn-footer .lf-time{color:var(--text);}
+.transparent-turn-footer .lf-sep{opacity:.4;}
+.transparent-turn-footer .lf-status{color:var(--muted);opacity:.85;}
+.transparent-turn-footer .lf-ttft{color:var(--accent);opacity:.9;}
+.transparent-turn-footer .lf-tokens{font-variant-numeric:tabular-nums;}
+
 /* ── Manual compression cards (transient transcript-local feedback) ── */
 .live-compression-cards{
   display:none;
@@ -3799,6 +4090,10 @@ main.main > #mainPlugin{display:none;}
 #mainSettings .theme-pick-btn.active,
 #mainSettings .skin-pick-btn.active,
 #mainSettings .font-size-pick-btn.active{border-color:var(--accent)!important;box-shadow:0 0 0 1px var(--accent-bg-strong)!important;background:var(--surface)!important;}
+#mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:4px;}
+#mainSettings .chat-activity-mode-btn{min-height:34px;padding:7px 10px;border:1px solid var(--border2);border-radius:8px;background:var(--surface);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;}
+#mainSettings .chat-activity-mode-btn:hover{border-color:var(--accent-bg-strong);color:var(--text);background:var(--hover-bg);}
+#mainSettings .chat-activity-mode-btn.active{border-color:var(--accent);color:var(--accent-text);background:var(--accent-bg);box-shadow:0 0 0 1px var(--accent-bg-strong);}
 
 /* Responsive: tighten canvas on small screens. */
 @media (max-width: 768px){
@@ -3809,6 +4104,7 @@ main.main > #mainPlugin{display:none;}
   .settings-version-badge{white-space:nowrap;}
   .hermes-action-grid{grid-template-columns:1fr;}
   #mainSettings .settings-field{padding:14px;}
+  #mainSettings .chat-activity-mode-toggle{grid-template-columns:1fr;}
 }
 
 /* ── Provider cards (Settings → Providers) ──
