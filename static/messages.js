@@ -3868,7 +3868,17 @@ function transcript(){
   return lines.join('\n');
 }
 
+let _composerAutoResizeRaf=0;
 function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();}
+function scheduleComposerAutoResize(){
+  updateSendBtn();
+  if(typeof requestAnimationFrame!=='function'){autoResize();return;}
+  if(_composerAutoResizeRaf) return;
+  _composerAutoResizeRaf=requestAnimationFrame(()=>{
+    _composerAutoResizeRaf=0;
+    autoResize();
+  });
+}
 
 
 // ── YOLO mode state ──
