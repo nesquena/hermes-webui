@@ -4804,7 +4804,6 @@ function renderSessionListFromCache(){
   const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
   const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
   const {
-    webuiSessionCount,
     cliSessionCount,
     profileFiltered,
     sessionsRaw,

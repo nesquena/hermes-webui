@@ -32,6 +32,11 @@ def test_render_uses_single_pass_partition_helper():
 
     assert "_partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in render_body
     assert "_renderSidebarRowsFromRawSessions(sessionsRaw)" in render_body
+    assert "? sessions.length" in render_body
+    assert ": _countRenderedSidebarRowsFromRawSessions(webuiSessionsRaw);" in render_body
+    assert ": _countRenderedSidebarRowsFromRawSessions(cliSessionsRaw);" in render_body
+    assert "const count=filter==='cli'?renderedCliSessionCount:renderedWebuiSessionCount;" in render_body
+    assert "const count=filter==='cli'?cliSessionCount:webuiSessionCount;" not in render_body
     assert "withMessages.filter(" not in render_body
 
 
@@ -59,3 +64,7 @@ def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_coun
     assert "cliSessionsRaw," in _partition_block()
     assert "const renderedWebuiSessionCount=" in render_body
     assert "const renderedCliSessionCount=" in render_body
+    helper_body = _function_block("_countRenderedSidebarRowsFromRawSessions")
+    assert "_collapseSessionLineageForSidebar(sessionsRaw).length;" in helper_body
+    assert "function _renderSidebarRowsFromRawSessions(sessionsRaw){" in SESSIONS_JS
+    assert "_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw)" in SESSIONS_JS
