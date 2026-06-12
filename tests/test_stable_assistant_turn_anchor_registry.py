@@ -71,8 +71,8 @@ def test_registry_owns_one_anchor_and_dedupes_live_plus_replay_events():
     assert data["version"] == "slice3-registry"
     assert [item["reason"] for item in data["results"][:2]] == [None, "duplicate"]
     assert registry["event_index"]["dedupe_keys"][:2] == [
-        "event_id:run-1:1",
-        "event_id:run-1:2",
+        'event_id:"run-1:1"',
+        'event_id:"run-1:2"',
     ]
     assert registry["stats"]["applied"] == 7
     assert registry["stats"]["skipped_duplicate"] == 1
