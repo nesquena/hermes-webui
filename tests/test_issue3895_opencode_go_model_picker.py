@@ -4,9 +4,11 @@ import pathlib
 import queue
 import re
 import sys
+import threading
 import types
 from unittest import mock
 
+import api.config
 import api.oauth
 import api.streaming as streaming
 
@@ -178,6 +180,7 @@ def test_streaming_passes_target_model_and_prefers_runtime_base_url(monkeypatch)
         )
     finally:
         streaming.STREAMS.pop(fake_stream_id, None)
+        streaming.AGENT_INSTANCES.pop(fake_stream_id, None)
 
     resolve_runtime_provider.assert_called_once_with(
         requested="opencode-go",
@@ -212,3 +215,64 @@ def test_streaming_reuses_runtime_base_url_helper_in_self_heal_paths():
         r"resolve_runtime_provider_with_anthropic_env_lock\(\s*resolve_runtime_provider,\s*requested=provider_id,\s*target_model=target_model,\s*\)",
         source,
     )
+
+
+def test_attempt_credential_self_heal_passes_target_model(monkeypatch):
+    calls = {}
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+
+    def fake_resolve_runtime_provider(**kwargs):
+        calls["resolver_kwargs"] = kwargs
+        return {
+            "provider": kwargs.get("requested"),
+            "base_url": "https://opencode.example.com/api",
+            "api_key": "rt-key",
+        }
+
+    fake_runtime_module.resolve_runtime_provider = fake_resolve_runtime_provider
+
+    def fake_runtime_lock(resolver, **kwargs):
+        calls["lock_kwargs"] = kwargs
+        return resolver(**kwargs)
+
+    closed = []
+    monkeypatch.setattr(api.oauth, "read_auth_json", lambda: {"providers": {"opencode-go": {}}})
+    monkeypatch.setattr(
+        api.oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        fake_runtime_lock,
+    )
+    monkeypatch.setattr(
+        api.config,
+        "SESSION_AGENT_CACHE",
+        {"sess-3895": object()},
+    )
+    monkeypatch.setattr(api.config, "SESSION_AGENT_CACHE_LOCK", threading.Lock())
+    monkeypatch.setattr(api.config, "invalidate_credential_pool_cache", lambda provider_id: calls.setdefault("invalidated", []).append(provider_id))
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry: closed.append((session_id, entry)),
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+
+    result = streaming._attempt_credential_self_heal(
+        "opencode-go",
+        "sess-3895",
+        None,
+        target_model="glm-5.1",
+    )
+
+    assert result["base_url"] == "https://opencode.example.com/api"
+    assert calls["lock_kwargs"] == {
+        "requested": "opencode-go",
+        "target_model": "glm-5.1",
+    }
+    assert calls["resolver_kwargs"] == {
+        "requested": "opencode-go",
+        "target_model": "glm-5.1",
+    }
+    assert calls["invalidated"] == ["opencode-go"]
+    assert len(closed) == 1
+    assert closed[0][0] == "sess-3895"
+    assert api.config.SESSION_AGENT_CACHE == {}
