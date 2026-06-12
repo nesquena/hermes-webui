@@ -6210,6 +6210,7 @@ function _appearancePayloadFromUi(){
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
+    render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
     worklog_details_expanded_default: worklogDetailsExpanded,
     activity_feed_expanded_default: worklogDetailsExpanded,
     hidden_tabs: _getHiddenTabs(),
@@ -6510,6 +6511,17 @@ async function loadSettingsPanel(){
       worklogDetailsExpandedCb.onchange=function(){
         window._worklogDetailsExpandedByDefault=this.checked;
         if(typeof _applyWorklogDetailsExpandedDefault==='function') _applyWorklogDetailsExpandedDefault();
+        _scheduleAppearanceAutosave();
+      };
+    }
+    const renderUserMarkdownCb=$('settingsRenderUserMarkdown');
+    if(renderUserMarkdownCb){
+      renderUserMarkdownCb.checked=!!settings.render_user_markdown;
+      window._renderUserMarkdown=renderUserMarkdownCb.checked;
+      renderUserMarkdownCb.onchange=function(){
+        window._renderUserMarkdown=this.checked;
+        _clearRenderCache();
+        if(typeof renderMessages==='function') renderMessages();
         _scheduleAppearanceAutosave();
       };
     }
@@ -8100,6 +8112,7 @@ async function saveSettings(andClose){
   body.font_size=fontSize;
   body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
+  body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
   body.language=language;
   body.show_token_usage=showTokenUsage;
   body.show_quota_chip=showQuotaChip===true;

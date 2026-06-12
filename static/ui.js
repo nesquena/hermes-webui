@@ -379,7 +379,9 @@ const _renderCache = new Map();
 const _renderCacheMax = 300;
 function _clearRenderCache(){ _renderCache.clear(); }
 function _renderCacheKey(text, isUser){
-  const p = isUser ? 'u' : 'a';
+  // Fold render_user_markdown state into user-message keys so toggling the
+  // setting invalidates cached plain-text renders (#3870).
+  const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
   // Short content: use the full string as key (cheap Map lookup).
   // Long content: length + prefix + suffix is good enough — collisions on
   // 20-char prefix+suffix are vanishingly rare for chat messages.
@@ -391,7 +393,7 @@ function _getCachedRender(text, isUser){
   const hit = _renderCache.get(key);
   if(hit !== undefined) return hit;
   const rendered = isUser
-    ? _renderUserFencedBlocks(text)
+    ? (window._renderUserMarkdown ? renderMd(text) : _renderUserFencedBlocks(text))
     : renderMd(_stripXmlToolCallsDisplay(String(text)));
   if(_renderCache.size > _renderCacheMax) _renderCache.clear();
   _renderCache.set(key, rendered);
