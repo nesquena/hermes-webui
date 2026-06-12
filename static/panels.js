@@ -72,6 +72,10 @@ function syncAppTitlebar() {
   if (_renamingAppTitlebar) return;
 
   titleEl.textContent = mainText;
+  if (panel !== 'chat') {
+    const bot = typeof assistantDisplayName === 'function' ? assistantDisplayName() : '';
+    document.title = bot ? mainText + ' \u2014 ' + bot : mainText;
+  }
   if (subEl) {
     if (subText) {
       subEl.textContent = subText;
@@ -272,7 +276,8 @@ async function switchPanel(name, opts = {}) {
     if (overlay) overlay.classList.add('visible');
   }
   _resyncChatSidebarAfterPanelSwitch();
-  syncAppTitlebar();
+  if (nextPanel === 'chat' && typeof syncTopbar === 'function') syncTopbar();
+  else syncAppTitlebar();
   return true;
 }
 
