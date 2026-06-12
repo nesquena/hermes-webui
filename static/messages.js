@@ -3994,6 +3994,10 @@ function _hideApprovalCardIfOwner(sid, force=false) {
   if (!sid || _approvalSessionId === sid) hideApprovalCard(force);
 }
 
+function _approvalPollingSessionMissingOrMismatched(sid) {
+  return !sid || !S.session || S.session.session_id !== sid;
+}
+
 function _renderPendingApprovalForActiveSession() {
   const sid = _promptActiveSessionId();
   if (!sid) return;
@@ -4160,7 +4164,7 @@ function _startApprovalFallbackPoll(sid) {
   // shows its card instantly (the removed SSE 'initial' event used to do this);
   // then poll on the 1500ms cadence. (#3913 SHOULD-FIX)
   const _tick = async () => {
-    if (!S.busy || !S.session || S.session.session_id !== sid) {
+    if (_approvalPollingSessionMissingOrMismatched(sid)) {
       stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true); return;
     }
     if (_approvalFallbackPollInFlight) return;
@@ -4168,7 +4172,13 @@ function _startApprovalFallbackPoll(sid) {
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
-      else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
+      else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
+        _clearApprovalPendingForSession(sid);
+        _hideApprovalCardIfOwner(sid);
+        if (!S.busy) {
+          stopApprovalPollingForSession(sid);
+        }
+      }
     } catch(e) { /* ignore poll errors */ }
     finally { _approvalFallbackPollInFlight = false; }
   };
