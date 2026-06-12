@@ -227,6 +227,11 @@ def _skill_path_within(base_dir: Path, candidate: Path) -> bool:
 
 
 def _skill_category_from_path(skill_md: Path, skills_dirs: list[Path]) -> str | None:
+    """Return the UI category for a discovered skill path.
+
+    ``skills_dirs[0]`` must be the active local skills root so flat local skills
+    stay uncategorized while flat external roots can use their directory name.
+    """
     local_skills_dir = skills_dirs[0] if skills_dirs else None
     for skills_dir in skills_dirs:
         try:
