@@ -144,8 +144,9 @@ const inheritedContextIdentity = api.normalizeAssistantTurnAnchorSourceEvent({{
 }}, inheritedContext);
 const runSeqCollisionA = api.assistantTurnAnchorEventDedupeKey({{run_id:'a:b', seq:'c'}});
 const runSeqCollisionB = api.assistantTurnAnchorEventDedupeKey({{run_id:'a', seq:'b:c'}});
-const localCollisionA = api.assistantTurnAnchorEventDedupeKey({{session_id:'a:b', local_id:'c'}});
-const localCollisionB = api.assistantTurnAnchorEventDedupeKey({{session_id:'a', local_id:'b:c'}});
+const localCollisionA = api.assistantTurnAnchorEventDedupeKey({{session_id:'a:b', source_event_type:'tool', local_id:'c', seq:'d'}});
+const localCollisionB = api.assistantTurnAnchorEventDedupeKey({{session_id:'a', source_event_type:'b:tool', local_id:'c', seq:'d'}});
+const localNoSeqKey = api.assistantTurnAnchorEventDedupeKey({{session_id:'a', source_event_type:'token', local_id:'b'}});
 console.log(JSON.stringify({{
   version: api.version,
   liveToken,
@@ -168,6 +169,7 @@ console.log(JSON.stringify({{
   runSeqCollisionB,
   localCollisionA,
   localCollisionB,
+  localNoSeqKey,
 }}));
 """
     result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
@@ -316,9 +318,10 @@ def test_structured_fallback_dedupe_keys_do_not_collide_on_delimiters():
     assert data["runSeqCollisionA"] == 'run_seq:["a:b","c"]'
     assert data["runSeqCollisionB"] == 'run_seq:["a","b:c"]'
     assert data["runSeqCollisionA"] != data["runSeqCollisionB"]
-    assert data["localCollisionA"] == 'local:["a:b","c"]'
-    assert data["localCollisionB"] == 'local:["a","b:c"]'
+    assert data["localCollisionA"] == 'local:["a:b","tool","c","d"]'
+    assert data["localCollisionB"] == 'local:["a","b:tool","c","d"]'
     assert data["localCollisionA"] != data["localCollisionB"]
+    assert data["localNoSeqKey"] == ""
 
 
 def test_normalizer_and_registry_helpers_are_still_unwired_from_rendering_hot_paths():

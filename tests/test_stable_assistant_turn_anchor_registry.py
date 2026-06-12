@@ -112,6 +112,113 @@ console.log(JSON.stringify({{
     return json.loads(result.stdout)
 
 
+def _hardening_snapshot() -> dict:
+    assert NODE, "node is required for assistant_turn_anchors.js registry tests"
+    script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync({json.dumps(str(ANCHORS_JS))}, 'utf8');
+const sandbox = {{window:{{}}}};
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, {{filename:'assistant_turn_anchors.js'}});
+const api = sandbox.window.HermesAssistantTurnAnchors;
+
+const toolRegistry = api.createAssistantTurnAnchorRegistry({{
+  session_id:'sid-tool',
+  turn_id:'turn-tool',
+}});
+const toolResults = api.applyAssistantTurnAnchorSourceEvents(toolRegistry, [
+  {{event:'tool', payload:{{tool_call_id:'call-1', name:'shell'}}}},
+  {{event:'tool_update', payload:{{tool_call_id:'call-1', text:'running'}}}},
+  {{event:'tool_complete', payload:{{tool_call_id:'call-1', result:'ok'}}}},
+  {{event:'token', payload:{{text:'first token'}}}},
+  {{event:'token', payload:{{text:'second token'}}}},
+]);
+
+const runRegistry = api.createAssistantTurnAnchorRegistry({{
+  session_id:'sid-run',
+  turn_id:'turn-run',
+  run_id:'run-a',
+  stream_id:'stream-a',
+}});
+const runMismatch = api.applyAssistantTurnAnchorSourceEvent(runRegistry, {{
+  event:'token',
+  payload:{{text:'wrong run'}},
+  event_id:'run-b:1',
+  run_id:'run-b',
+  seq:1,
+}});
+const streamAccepted = api.applyAssistantTurnAnchorSourceEvent(runRegistry, {{
+  event:'reasoning',
+  payload:{{text:'same run new stream'}},
+  event_id:'run-a:2',
+  run_id:'run-a',
+  stream_id:'stream-b',
+  seq:2,
+}});
+
+const identityRegistry = api.createAssistantTurnAnchorRegistry({{
+  session_id:'sid-freeze',
+  turn_id:'turn-freeze',
+}});
+identityRegistry.identity.session_id = 'mutated';
+
+const metadataRegistry = api.createAssistantTurnAnchorRegistry({{
+  session_id:'sid-meta',
+  turn_id:'turn-meta',
+}});
+const inheritedPayload = Object.create({{
+  role:'assistant',
+  content:'inherited final should be ignored',
+  id:'inherited-message',
+  _turnUsage:{{input_tokens:99, output_tokens:99}},
+}});
+api.applyAssistantTurnAnchorNormalizedEvent(metadataRegistry, {{
+  classification:'metadata',
+  anchor_event:{{
+    session_id:'sid-meta',
+    turn_id:'turn-meta',
+    source_event_type:'settled_message',
+    local_id:'meta-1',
+    payload:inheritedPayload,
+  }},
+}});
+api.applyAssistantTurnAnchorNormalizedEvent(metadataRegistry, {{
+  classification:'metadata',
+  anchor_event:{{
+    session_id:'sid-meta',
+    turn_id:'turn-meta',
+    source_event_type:'settled_message',
+    local_id:'meta-2',
+    payload:{{
+      role:'assistant',
+      id:'message-structured',
+      content:[
+        {{type:'text', text:'structured '}},
+        {{type:'text', text:'answer'}},
+      ],
+      usage:{{input_tokens:1, output_tokens:1}},
+      _turnUsage:{{input_tokens:8, output_tokens:13}},
+    }},
+  }},
+}});
+
+console.log(JSON.stringify({{
+  version:api.version,
+  toolRegistry,
+  toolResults:toolResults.map((item)=>({{applied:item.applied, reason:item.reason}})),
+  runRegistry,
+  runMismatch:{{applied:runMismatch.applied, reason:runMismatch.reason}},
+  streamAccepted:{{applied:streamAccepted.applied, reason:streamAccepted.reason}},
+  identityRegistry,
+  metadataRegistry,
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 def test_registry_owns_one_anchor_and_dedupes_live_plus_replay_events():
     data = _registry_snapshot()
     registry = data["registry"]
@@ -168,6 +275,56 @@ def test_registry_updates_lifecycle_and_settled_final_projection():
     assert anchor["content"]["final_answer"] == "final answer"
     assert anchor["content"]["final_message_ref"] == "message-final"
     assert anchor["usage"] == {"input_tokens": 8, "output_tokens": 13}
+
+
+def test_registry_does_not_destructively_dedupe_seqless_local_tool_lifecycle():
+    data = _hardening_snapshot()
+    registry = data["toolRegistry"]
+    anchor = registry["anchor"]
+
+    assert data["version"] == "slice3-registry-shadow"
+    assert data["toolResults"] == [
+        {"applied": True, "reason": None},
+        {"applied": True, "reason": None},
+        {"applied": True, "reason": None},
+        {"applied": True, "reason": None},
+        {"applied": True, "reason": None},
+    ]
+    assert registry["event_index"]["dedupe_keys"] == []
+    assert registry["stats"]["applied"] == 5
+    assert [event["kind"] for event in anchor["activity_events"]] == [
+        "tool_started",
+        "tool_updated",
+        "tool_completed",
+        "process_prose",
+        "process_prose",
+    ]
+
+
+def test_registry_rejects_cross_run_events_but_allows_stream_reconnects():
+    data = _hardening_snapshot()
+    registry = data["runRegistry"]
+
+    assert data["runMismatch"] == {"applied": False, "reason": "mismatched_anchor"}
+    assert data["streamAccepted"] == {"applied": True, "reason": None}
+    assert registry["stats"]["skipped_mismatched"] == 1
+    assert registry["stats"]["applied"] == 1
+    assert registry["anchor"]["identity"]["run_id"] == "run-a"
+    assert registry["anchor"]["identity"]["stream_id"] == "stream-a"
+    assert registry["anchor"]["activity_events"][0]["stream_id"] == "stream-b"
+
+
+def test_registry_identity_copy_and_metadata_reads_are_hardened():
+    data = _hardening_snapshot()
+    identity_registry = data["identityRegistry"]
+    metadata_anchor = data["metadataRegistry"]["anchor"]
+
+    assert identity_registry["identity"]["session_id"] == "sid-freeze"
+    assert identity_registry["anchor"]["identity"]["session_id"] == "sid-freeze"
+    assert metadata_anchor["content"]["final_answer"] == "structured answer"
+    assert metadata_anchor["content"]["final_message_ref"] == "message-structured"
+    assert metadata_anchor["usage"] == {"input_tokens": 8, "output_tokens": 13}
+    assert len(metadata_anchor["metadata_events"]) == 2
 
 
 def test_shadow_snapshot_feeds_current_source_families_into_one_registry_owner():

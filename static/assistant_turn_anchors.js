@@ -242,10 +242,10 @@
   }
 
   function _statusForSourceEvent(sourceType, kind, payload){
-    const explicit=_cleanString(payload&&(payload.status||payload.state||payload.phase));
+    const explicit=_cleanString(_firstOwn(payload,['status','state','phase']));
     if(explicit) return explicit;
     if(kind==='tool_started') return 'running';
-    if(kind==='tool_completed') return payload&&payload.is_error?'error':'completed';
+    if(kind==='tool_completed') return _own(payload,'is_error')?'error':'completed';
     if(kind==='terminal_status'){
       if(sourceType==='done') return 'completed';
       if(sourceType==='cancel') return 'cancelled';
@@ -280,7 +280,8 @@
     if(runId&&seq) return 'run_seq:'+JSON.stringify([runId,seq]);
     const sid=_cleanString(_own(event,'session_id'));
     const localId=_cleanString(_own(event,'local_id'));
-    if(sid&&localId) return 'local:'+JSON.stringify([sid,localId]);
+    const sourceType=_cleanString(_own(event,'source_event_type'))||'event';
+    if(sid&&localId&&seq&&seq!=='pending') return 'local:'+JSON.stringify([sid,sourceType,localId,seq]);
     return '';
   }
 
@@ -379,6 +380,16 @@
     return {...value};
   }
 
+  function _frozenIdentityCopy(identity){
+    const refs=Array.isArray(identity&&identity.source_message_refs)
+      ?identity.source_message_refs.slice()
+      :[];
+    return Object.freeze({
+      ..._copyObject(identity),
+      source_message_refs:Object.freeze(refs),
+    });
+  }
+
   function _registryAnchor(registry){
     return registry&&typeof registry==='object'&&registry.anchor&&typeof registry.anchor==='object'
       ?registry.anchor
@@ -390,20 +401,38 @@
     const identity=anchor&&anchor.identity?anchor.identity:{};
     return {
       ..._copyObject(context),
-      session_id:identity.session_id||_cleanString(context&&context.session_id),
-      turn_id:identity.turn_id||_cleanString(context&&context.turn_id),
-      run_id:identity.run_id||_cleanString(context&&context.run_id),
-      stream_id:identity.stream_id||_cleanString(context&&context.stream_id),
+      session_id:_cleanString(_own(identity,'session_id'))||_cleanString(_own(context,'session_id')),
+      turn_id:_cleanString(_own(identity,'turn_id'))||_cleanString(_own(context,'turn_id')),
+      run_id:_cleanString(_own(identity,'run_id'))||_cleanString(_own(context,'run_id')),
+      stream_id:_cleanString(_own(identity,'stream_id'))||_cleanString(_own(context,'stream_id')),
     };
   }
 
   function _eventBelongsToAnchor(anchor, event){
     const identity=anchor.identity||{};
-    const sessionId=_cleanString(event.session_id);
-    if(sessionId&&identity.session_id&&sessionId!==identity.session_id) return false;
-    const turnId=_cleanString(event.turn_id);
-    if(turnId&&identity.turn_id&&turnId!==identity.turn_id) return false;
+    const sessionId=_cleanString(_own(event,'session_id'));
+    const identitySessionId=_cleanString(_own(identity,'session_id'));
+    if(sessionId&&identitySessionId&&sessionId!==identitySessionId) return false;
+    const turnId=_cleanString(_own(event,'turn_id'));
+    const identityTurnId=_cleanString(_own(identity,'turn_id'));
+    if(turnId&&identityTurnId&&turnId!==identityTurnId) return false;
+    const runId=_cleanString(_own(event,'run_id'));
+    const identityRunId=_cleanString(_own(identity,'run_id'));
+    if(runId&&identityRunId&&runId!==identityRunId) return false;
     return true;
+  }
+
+  function _ensureDedupeKeySet(eventIndex){
+    const existing=eventIndex.dedupe_key_set;
+    if(existing instanceof Set) return existing;
+    const set=new Set(Array.isArray(eventIndex.dedupe_keys)?eventIndex.dedupe_keys:[]);
+    Object.defineProperty(eventIndex,'dedupe_key_set',{
+      value:set,
+      enumerable:false,
+      configurable:true,
+      writable:true,
+    });
+    return set;
   }
 
   function _ensureRegistryShape(registry){
@@ -420,79 +449,109 @@
     registry.stats.skipped_mismatched=Number(registry.stats.skipped_mismatched)||0;
     if(!Array.isArray(anchor.metadata_events)) anchor.metadata_events=[];
     if(!Array.isArray(anchor.transport_events)) anchor.transport_events=[];
+    _ensureDedupeKeySet(registry.event_index);
     return anchor;
   }
 
   function _syncAnchorIdentity(anchor, event){
     const identity=anchor.identity||{};
-    if(!identity.run_id&&_cleanString(event.run_id)) identity.run_id=_cleanString(event.run_id);
-    if(!identity.stream_id&&_cleanString(event.stream_id)) identity.stream_id=_cleanString(event.stream_id);
+    const runId=_cleanString(_own(event,'run_id'));
+    const streamId=_cleanString(_own(event,'stream_id'));
+    if(!_cleanString(_own(identity,'run_id'))&&runId) identity.run_id=runId;
+    if(!_cleanString(_own(identity,'stream_id'))&&streamId) identity.stream_id=streamId;
   }
 
-  function _firstTextValue(){
-    for(let i=0;i<arguments.length;i+=1){
-      const value=arguments[i];
-      if(typeof value==='string'&&value.length>0) return value;
+  function _textFromContentValue(value){
+    if(typeof value==='string') return value;
+    if(Array.isArray(value)){
+      return value.map((item)=>{
+        if(typeof item==='string') return item;
+        if(!item||typeof item!=='object') return '';
+        const text=_firstOwn(item,['text','content']);
+        return typeof text==='string'?text:'';
+      }).join('');
+    }
+    if(value&&typeof value==='object'){
+      const text=_firstOwn(value,['text','content']);
+      return typeof text==='string'?text:'';
+    }
+    return '';
+  }
+
+  function _firstTextValue(...values){
+    for(let i=0;i<values.length;i+=1){
+      const value=_textFromContentValue(values[i]);
+      if(value.length>0) return value;
     }
     return '';
   }
 
   function _messageRefFromPayload(payload, event){
     return _firstTextValue(
-      payload&&payload.message_id,
-      payload&&payload.id,
-      payload&&payload.local_id,
-      event&&event.local_id,
-      event&&event.event_id
+      _firstOwn(payload,['message_id','id','local_id']),
+      _firstOwn(event,['local_id','event_id'])
     )||null;
   }
 
   function _updateLifecycleFromEvent(anchor, event){
     const lifecycle=anchor.lifecycle||{};
-    if(!lifecycle.started_at&&event.created_at) lifecycle.started_at=event.created_at;
-    if((!lifecycle.status||lifecycle.status==='created')&&event.status==='running'){
+    const createdAt=_own(event,'created_at');
+    const status=_cleanString(_own(event,'status'));
+    const kind=_cleanString(_own(event,'kind'));
+    if(!lifecycle.started_at&&createdAt) lifecycle.started_at=createdAt;
+    if((!lifecycle.status||lifecycle.status==='created')&&status==='running'){
       lifecycle.status='running';
     }
-    if(event.kind==='terminal_status'){
-      const terminal=_cleanString(event.status)||'completed';
+    if(kind==='terminal_status'){
+      const terminal=status||'completed';
       lifecycle.status=terminal;
       lifecycle.terminal_state=terminal;
-      lifecycle.completed_at=event.created_at||lifecycle.completed_at||null;
+      lifecycle.completed_at=createdAt||lifecycle.completed_at||null;
     }
     anchor.lifecycle=lifecycle;
   }
 
   function _updateContentFromMetadata(anchor, event){
-    const payload=event.payload||{};
-    if(event.source_event_type==='usage'){
+    const payload=_own(event,'payload')||{};
+    const sourceType=_cleanString(_own(event,'source_event_type'));
+    if(sourceType==='usage'){
       anchor.usage=_copyObject(payload);
       return;
     }
-    if(event.source_event_type!=='settled_message') return;
-    if(payload.role&&payload.role!=='assistant') return;
-    const finalAnswer=_firstTextValue(payload.content,payload.text,payload.final_answer,payload.answer);
+    if(sourceType!=='settled_message') return;
+    const role=_cleanString(_own(payload,'role'));
+    if(role&&role!=='assistant') return;
+    const finalAnswer=_firstTextValue(
+      _own(payload,'content'),
+      _own(payload,'text'),
+      _own(payload,'final_answer'),
+      _own(payload,'answer')
+    );
     if(finalAnswer){
       anchor.content=anchor.content||{};
       anchor.content.final_answer=finalAnswer;
       anchor.content.final_message_ref=_messageRefFromPayload(payload,event);
     }
-    if(payload._turnUsage&&typeof payload._turnUsage==='object') anchor.usage=_copyObject(payload._turnUsage);
-    if(payload.usage&&typeof payload.usage==='object') anchor.usage=_copyObject(payload.usage);
+    const usage=_own(payload,'usage');
+    const turnUsage=_own(payload,'_turnUsage');
+    if(usage&&typeof usage==='object') anchor.usage=_copyObject(usage);
+    if(turnUsage&&typeof turnUsage==='object') anchor.usage=_copyObject(turnUsage);
   }
 
   function _routeAnchorEvent(anchor, normalized){
-    const event=normalized.anchor_event;
-    if(normalized.classification==='activity'){
+    const event=_own(normalized,'anchor_event');
+    const classification=_cleanString(_own(normalized,'classification'));
+    if(classification==='activity'){
       anchor.activity_events.push(event);
       _updateLifecycleFromEvent(anchor,event);
-    }else if(normalized.classification==='artifact'){
+    }else if(classification==='artifact'){
       anchor.artifacts.push(event);
-    }else if(normalized.classification==='side_effect'){
+    }else if(classification==='side_effect'){
       anchor.side_effects.push(event);
-    }else if(normalized.classification==='metadata'){
+    }else if(classification==='metadata'){
       anchor.metadata_events.push(event);
       _updateContentFromMetadata(anchor,event);
-    }else if(normalized.classification==='transport'){
+    }else if(classification==='transport'){
       anchor.transport_events.push(event);
     }
   }
@@ -500,7 +559,7 @@
   function applyAssistantTurnAnchorNormalizedEvent(registry, normalized){
     const anchor=_ensureRegistryShape(registry);
     const item=(normalized&&typeof normalized==='object')?normalized:{};
-    const event=item.anchor_event;
+    const event=_own(item,'anchor_event');
     if(!event){
       registry.stats.skipped_excluded+=1;
       return Object.freeze({applied:false,reason:'excluded',normalized:item});
@@ -509,12 +568,16 @@
       registry.stats.skipped_mismatched+=1;
       return Object.freeze({applied:false,reason:'mismatched_anchor',normalized:item});
     }
-    const dedupeKey=_cleanString(item.dedupe_key)||assistantTurnAnchorEventDedupeKey(event);
-    if(dedupeKey&&registry.event_index.dedupe_keys.indexOf(dedupeKey)!==-1){
+    const dedupeKey=_cleanString(_own(item,'dedupe_key'))||assistantTurnAnchorEventDedupeKey(event);
+    const dedupeKeySet=_ensureDedupeKeySet(registry.event_index);
+    if(dedupeKey&&dedupeKeySet.has(dedupeKey)){
       registry.stats.skipped_duplicate+=1;
       return Object.freeze({applied:false,reason:'duplicate',normalized:item});
     }
-    if(dedupeKey) registry.event_index.dedupe_keys.push(dedupeKey);
+    if(dedupeKey){
+      dedupeKeySet.add(dedupeKey);
+      registry.event_index.dedupe_keys.push(dedupeKey);
+    }
     _syncAnchorIdentity(anchor,event);
     _routeAnchorEvent(anchor,item);
     registry.stats.applied+=1;
@@ -626,8 +689,8 @@
 
   function createAssistantTurnAnchorRegistry(input){
     const anchor=createAssistantTurnAnchorSeed(input);
-    return {
-      identity:anchor.identity,
+    const registry={
+      identity:_frozenIdentityCopy(anchor.identity),
       anchor,
       event_index:{
         dedupe_keys:[],
@@ -639,6 +702,8 @@
         skipped_mismatched:0,
       },
     };
+    _ensureDedupeKeySet(registry.event_index);
+    return registry;
   }
 
   ROOT.HermesAssistantTurnAnchors=Object.freeze({

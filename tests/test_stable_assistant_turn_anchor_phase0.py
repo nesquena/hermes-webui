@@ -53,7 +53,8 @@ const out = {{
   unknownClass: api.classifyAssistantTurnAnchorSourceEvent('unknown_future').classification,
   eventIdKey: api.assistantTurnAnchorEventDedupeKey({{event_id:'run-1:2', text:'same'}}),
   runSeqKey: api.assistantTurnAnchorEventDedupeKey({{run_id:'run-1', seq:2, timestamp:123}}),
-  localKey: api.assistantTurnAnchorEventDedupeKey({{session_id:'sid-1', local_id:'local-1', content:'ignored'}}),
+  localKey: api.assistantTurnAnchorEventDedupeKey({{session_id:'sid-1', source_event_type:'token', local_id:'local-1', seq:2, content:'ignored'}}),
+  localNoSeqKey: api.assistantTurnAnchorEventDedupeKey({{session_id:'sid-1', source_event_type:'token', local_id:'local-1', content:'ignored'}}),
   zeroSeqKey: api.assistantTurnAnchorEventDedupeKey({{run_id:'run-1', seq:0, session_id:'sid-1', local_id:'local-1'}}),
   nanSeqKey: api.assistantTurnAnchorEventDedupeKey({{run_id:'run-1', seq:NaN, session_id:'sid-1', local_id:'local-1'}}),
   emptySeqKey: api.assistantTurnAnchorEventDedupeKey({{run_id:'run-1', seq:'', session_id:'sid-1', local_id:'local-1'}}),
@@ -146,10 +147,11 @@ def test_phase0_dedupe_prefers_event_envelope_not_visible_text_or_timestamps():
     data = _anchor_api_snapshot()
     assert data["eventIdKey"] == 'event_id:"run-1:2"'
     assert data["runSeqKey"] == 'run_seq:["run-1","2"]'
-    assert data["localKey"] == 'local:["sid-1","local-1"]'
+    assert data["localKey"] == 'local:["sid-1","token","local-1","2"]'
+    assert data["localNoSeqKey"] == ""
     assert data["zeroSeqKey"] == 'run_seq:["run-1","0"]'
     assert data["nanSeqKey"] == 'run_seq:["run-1","NaN"]'
-    assert data["emptySeqKey"] == 'local:["sid-1","local-1"]'
+    assert data["emptySeqKey"] == ""
     assert data["emptyKey"] == ""
 
     helper_src = _read(ANCHORS_JS).split("function assistantTurnAnchorEventDedupeKey", 1)[1]
@@ -191,6 +193,6 @@ def test_phase0_inventory_doc_matches_scaffold_contract():
         "Dedupe Invariant",
         "`event_id`",
         "`run_id + seq`",
-        "`session_id + local_id`",
+        "`session_id + source_event_type + local_id + seq`",
     ]:
         assert marker in doc

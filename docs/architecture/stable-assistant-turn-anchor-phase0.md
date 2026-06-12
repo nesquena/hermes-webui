@@ -113,7 +113,8 @@ The Phase 0 helper uses this order:
 
 1. `event_id`
 2. `run_id + seq`
-3. `session_id + local_id` as a browser fallback
+3. `session_id + source_event_type + local_id + seq` as a browser fallback only
+   when a concrete local `seq` is present
 
 This mirrors the RuntimeAdapter Event Envelope and keeps the browser aligned
 with run-journal replay while the anchor registry is still unwired.
