@@ -2834,8 +2834,9 @@ body.resizing .sidebar{transition:none!important;}
   margin:4px 0 14px;
 }
 .tool-worklog-summary{
-  width:auto;
   display:inline-flex;
+  max-width:100%;
+  min-width:0;
   align-items:center;
   gap:9px;
   padding:5px 8px;
@@ -2856,6 +2857,8 @@ body.resizing .sidebar{transition:none!important;}
   font-weight:500;
   line-height:var(--message-body-line-height);
   letter-spacing:0;
+  flex:1 1 auto;
+  min-width:0;
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;

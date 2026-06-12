@@ -3865,6 +3865,7 @@ async function toggleSkill(name, currentlyEnabled) {
         const skill = _skillsData.find(s => s.name === name);
         if (skill) skill.disabled = !newEnabled;
       }
+      if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
       renderSkills(_skillsData || []);
     } else {
       setStatus((result && result.error) || t('skill_toggle_failed'));
@@ -4119,6 +4120,7 @@ async function saveSkillForm() {
     showToast(_editingSkillName ? t('skill_updated') : t('skill_created'));
     _skillsData = null;
     _cronSkillsCache = null;
+    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     _editingSkillName = null;
     _skillPreFormDetail = null;
     await loadSkills();
@@ -4158,6 +4160,7 @@ async function deleteCurrentSkill() {
     _skillPreFormDetail = null;
     _skillsData = null;
     _cronSkillsCache = null;
+    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     _skillMode = 'empty';
     const body = $('skillDetailBody');
     const empty = $('skillDetailEmpty');
