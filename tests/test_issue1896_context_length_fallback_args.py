@@ -233,3 +233,133 @@ def test_routes_session_load_fallback_passes_config_overrides():
         "session-load fallback must catch TypeError to support older "
         "hermes-agent builds without the new kwargs."
     )
+
+
+def test_context_lookup_returns_custom_provider_api_key_from_entry():
+    """#4059: static session hydration must carry custom-provider API keys.
+
+    A named ``custom_providers`` entry can require auth for its ``/v1/models``
+    endpoint. The route-side lookup helper already identifies the matching
+    provider/base/model; it must also return that entry's API key so
+    ``get_model_context_length`` does not probe anonymously and fall back to
+    256K.
+    """
+    from api.routes import _context_length_lookup_inputs_for_model
+
+    lookup = _context_length_lookup_inputs_for_model(
+        "custom-model-id",
+        "custom:llm-proxy",
+        cfg={
+            "custom_providers": [
+                {
+                    "name": "llm-proxy",
+                    "base_url": "https://llm.example.test/v1",
+                    "api_key": "sk-test-entry",
+                    "model": "custom-model-id",
+                }
+            ]
+        },
+    )
+
+    assert lookup.provider == "custom:llm-proxy"
+    assert lookup.base_url == "https://llm.example.test/v1"
+    assert lookup.api_key == "sk-test-entry"
+
+
+def test_context_lookup_resolves_custom_provider_api_key_env_template(monkeypatch):
+    """#4059: ``${ENV_VAR}`` custom-provider keys resolve before metadata probes."""
+    from api.routes import _context_length_lookup_inputs_for_model
+
+    monkeypatch.setenv("ISSUE_4059_CONTEXT_KEY", "env-template-key")
+
+    lookup = _context_length_lookup_inputs_for_model(
+        "custom-model-id",
+        "custom:llm-proxy",
+        cfg={
+            "custom_providers": [
+                {
+                    "name": "llm-proxy",
+                    "base_url": "https://llm.example.test/v1",
+                    "api_key": "${ISSUE_4059_CONTEXT_KEY}",
+                    "model": "custom-model-id",
+                }
+            ]
+        },
+    )
+
+    assert lookup.api_key == "env-template-key"
+
+
+def test_context_lookup_resolves_custom_provider_key_env(monkeypatch):
+    """#4059: ``key_env`` custom-provider keys resolve before metadata probes."""
+    from api.routes import _context_length_lookup_inputs_for_model
+
+    monkeypatch.setenv("ISSUE_4059_KEY_ENV", "key-env-value")
+
+    lookup = _context_length_lookup_inputs_for_model(
+        "custom-model-id",
+        "custom:llm-proxy",
+        cfg={
+            "custom_providers": [
+                {
+                    "name": "llm-proxy",
+                    "base_url": "https://llm.example.test/v1",
+                    "key_env": "ISSUE_4059_KEY_ENV",
+                    "model": "custom-model-id",
+                }
+            ]
+        },
+    )
+
+    assert lookup.api_key == "key-env-value"
+
+
+def test_routes_session_model_resolver_passes_custom_provider_api_key(monkeypatch):
+    """#4059: ``_resolve_context_length_for_session_model`` passes api_key.
+
+    This is the session-load/static-update path that was clobbering persisted
+    500K context metadata back to the unauthenticated 256K fallback.
+    """
+    from api import config as cfg_mod
+    from api import routes
+    import agent.model_metadata as metadata
+
+    seen = {}
+
+    monkeypatch.setattr(
+        cfg_mod,
+        "get_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "llm-proxy",
+                    "base_url": "https://llm.example.test/v1",
+                    "api_key": "sk-test-route",
+                    "model": "custom-model-id",
+                }
+            ]
+        },
+    )
+
+    def fake_get_model_context_length(model, base_url, **kwargs):
+        seen.update(model=model, base_url=base_url, kwargs=kwargs)
+        return 500_000 if kwargs.get("api_key") == "sk-test-route" else 256_000
+
+    monkeypatch.setattr(metadata, "get_model_context_length", fake_get_model_context_length)
+
+    assert routes._resolve_context_length_for_session_model(
+        "custom-model-id",
+        "custom:llm-proxy",
+    ) == 500_000
+    assert seen["kwargs"]["api_key"] == "sk-test-route"
+
+
+def test_streaming_context_length_fallbacks_pass_api_key():
+    """#4059: both streaming fallback probes must pass the resolved api_key."""
+    blocks = _both_callsites()
+    for i, block in enumerate(blocks):
+        assert "api_key=" in block, (
+            f"Callsite #{i+1} is missing api_key=. Authenticated custom "
+            f"provider /v1/models probes then fail and fall back to 256K. "
+            f"See #4059.\n\nBlock:\n{block}"
+        )

@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Custom provider context-length probes now include the provider API key during session hydration and streaming fallbacks (#4059).** Static session loads and fallback usage/session-save paths now reuse the matched custom provider credentials when querying `/v1/models`, so authenticated custom endpoints do not fall back to the default 256K window and clobber a larger persisted context length / compression threshold.
+
 ## [v0.51.369] — 2026-06-12 — Release MH (WebUI streaming honors runtime target model/base_url)
 
 ### Fixed
