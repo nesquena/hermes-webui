@@ -4774,8 +4774,8 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw){
 }
 
 function _countRenderedSidebarRowsFromRawSessions(sessionsRaw){
-  // Child attachment does not change the top-level row count shown in the chip label.
-  return _collapseSessionLineageForSidebar(sessionsRaw).length;
+  // Keep inactive-tab chip counts on the exact same top-level row path as render.
+  return _renderSidebarRowsFromRawSessions(sessionsRaw).length;
 }
 
 function renderSessionListFromCache(){

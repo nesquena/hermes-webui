@@ -65,6 +65,6 @@ def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_coun
     assert "const renderedWebuiSessionCount=" in render_body
     assert "const renderedCliSessionCount=" in render_body
     helper_body = _function_block("_countRenderedSidebarRowsFromRawSessions")
-    assert "_collapseSessionLineageForSidebar(sessionsRaw).length;" in helper_body
+    assert "_renderSidebarRowsFromRawSessions(sessionsRaw).length;" in helper_body
     assert "function _renderSidebarRowsFromRawSessions(sessionsRaw){" in SESSIONS_JS
     assert "_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw)" in SESSIONS_JS
