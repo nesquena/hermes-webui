@@ -503,7 +503,14 @@ def get_profile_cookie_name() -> str:
 
 
 def get_profile_cookie(handler) -> str | None:
-    """Extract the active-profile cookie value from the request, or None."""
+    """Extract and authenticate the active-profile cookie value.
+
+    When WebUI auth is enabled, the profile cookie is treated as an
+    authorization input for profile-scoped routes. Require it to be signed for
+    the current auth session so clients cannot forge ``hermes_profile`` to
+    impersonate another profile. In no-auth deployments, keep the historical
+    plain profile-name cookie behavior.
+    """
     cookie_header = handler.headers.get('Cookie', '')
     if not cookie_header:
         return None
@@ -515,16 +522,30 @@ def get_profile_cookie(handler) -> str | None:
         return None
     cookie_name = get_profile_cookie_name()
     morsel = cookie.get(cookie_name)
-    if morsel and morsel.value:
-        # Validate against profile-name pattern before trusting
-        from api.profiles import _PROFILE_ID_RE
-        val = morsel.value
-        if val == 'default' or _PROFILE_ID_RE.fullmatch(val):
-            return val
-    return None
+    if not (morsel and morsel.value):
+        return None
+
+    from api.profiles import _PROFILE_ID_RE
+
+    def _valid_profile_name(val: str) -> bool:
+        return val == 'default' or bool(_PROFILE_ID_RE.fullmatch(val))
+
+    raw_val = morsel.value
+    try:
+        from api.auth import is_auth_enabled, parse_cookie, verify_profile_cookie_value
+        if is_auth_enabled():
+            val = verify_profile_cookie_value(raw_val, parse_cookie(handler))
+            return val if val and _valid_profile_name(val) else None
+    except Exception:
+        logger.warning("Failed to verify active profile cookie", exc_info=True)
+        return None
+
+    # No-auth mode: the cookie is a per-browser UI preference, not an authz
+    # boundary, so retain the legacy plain profile-name format.
+    return raw_val if _valid_profile_name(raw_val) else None
 
 
-def build_profile_cookie(name: str) -> str:
+def build_profile_cookie(name: str, handler=None) -> str:
     """Build a Set-Cookie header value for the active-profile cookie.
 
     Always persist the selected profile in the cookie, including 'default'.
@@ -539,7 +560,16 @@ def build_profile_cookie(name: str) -> str:
     import http.cookies as _hc
     cookie = _hc.SimpleCookie()
     cookie_name = get_profile_cookie_name()
-    cookie[cookie_name] = name
+    value = name
+    if handler is not None:
+        try:
+            from api.auth import is_auth_enabled, parse_cookie, sign_profile_cookie_value
+            if is_auth_enabled():
+                value = sign_profile_cookie_value(name, parse_cookie(handler))
+        except Exception as exc:
+            logger.warning("Failed to sign active profile cookie", exc_info=True)
+            raise RuntimeError("could not sign active profile cookie") from exc
+    cookie[cookie_name] = value
     cookie[cookie_name]['path'] = '/'
     cookie[cookie_name]['httponly'] = True
     cookie[cookie_name]['samesite'] = 'Lax'
