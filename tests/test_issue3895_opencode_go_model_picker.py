@@ -1,6 +1,5 @@
 """Regression tests for OpenCode-Go model-picker runtime routing (#3895)."""
 
-import pathlib
 import queue
 import sys
 import threading
