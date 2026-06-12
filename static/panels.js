@@ -8388,6 +8388,7 @@ let _mcpToolsCache=[];
 let _mcpToolsMeta={};
 let _mcpToolsPage=1;
 let _mcpToolsPageSize=5;
+const MCP_TOOL_SHORTCUTS_STORAGE_KEY='hermes-webui-mcp-tool-shortcuts';
 const MCP_TOOLS_PAGE_SIZE_OPTIONS=[5,10,20,40];
 function _filterMcpToolsForSearch(tools, query){
   const q=(query||'').trim().toLowerCase();
@@ -8404,6 +8405,70 @@ function _mcpToolSchemaText(schemaSummary){
     const desc=p.description?` — ${p.description}`:'';
     return `${p.name}${req}: ${p.type||'unknown'}${desc}`;
   }).join('\n');
+}
+function _mcpToolShortcutKey(tool){
+  return `${String(tool&&tool.server||'unknown')}::${String(tool&&tool.name||'')}`;
+}
+function _mcpToolShortcutHtmlJsArg(value){
+  return JSON.stringify(String(value||''))
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'\\u003c')
+    .replace(/"/g,'&quot;');
+}
+function _loadMcpToolShortcutKeys(){
+  try{
+    const raw=localStorage.getItem(MCP_TOOL_SHORTCUTS_STORAGE_KEY);
+    const parsed=raw?JSON.parse(raw):[];
+    return new Set(Array.isArray(parsed)?parsed.map(String).filter(Boolean):[]);
+  }catch(_err){return new Set();}
+}
+function _saveMcpToolShortcutKeys(keys){
+  try{localStorage.setItem(MCP_TOOL_SHORTCUTS_STORAGE_KEY,JSON.stringify([...keys]));}
+  catch(_err){}
+}
+function _mcpToolPrompt(tool){
+  const name=String(tool&&tool.name||'').trim();
+  const server=String(tool&&tool.server||'unknown').trim();
+  const required=(Array.isArray(tool&&tool.schema_summary)?tool.schema_summary:[])
+    .filter(p=>p&&p.required&&p.name)
+    .map(p=>p.name);
+  const params=required.length?` Required parameters: ${required.join(', ')}.`:'';
+  return `Use MCP tool ${name} from server ${server}.${params} Ask me for any missing values before calling it.`;
+}
+function insertMcpToolShortcut(toolKey){
+  const tool=(_mcpToolsCache||[]).find(item=>_mcpToolShortcutKey(item)===toolKey);
+  if(!tool) return;
+  const input=$('msg');
+  if(!input) return;
+  const prompt=_mcpToolPrompt(tool);
+  const current=String(input.value||'').trimEnd();
+  input.value=current?`${current}\n\n${prompt}`:prompt;
+  input.focus();
+  try{input.setSelectionRange(input.value.length,input.value.length);}catch(_err){}
+  input.dispatchEvent(new Event('input',{bubbles:true}));
+  if(typeof autoResize==='function') autoResize();
+  if(typeof showToast==='function') showToast(t('mcp_tool_shortcut_inserted',tool.name),1800);
+}
+function toggleMcpToolShortcut(toolKey){
+  const keys=_loadMcpToolShortcutKeys();
+  if(keys.has(toolKey)) keys.delete(toolKey); else keys.add(toolKey);
+  _saveMcpToolShortcutKeys(keys);
+  const input=$('mcpToolSearch');
+  _renderMcpTools(_mcpToolsCache,input?input.value:'');
+}
+function _renderMcpToolShortcuts(tools){
+  const mount=$('mcpToolShortcuts');
+  if(!mount) return;
+  const keys=_loadMcpToolShortcutKeys();
+  const pinned=(Array.isArray(tools)?tools:[]).filter(tool=>keys.has(_mcpToolShortcutKey(tool)));
+  if(!pinned.length){
+    mount.innerHTML=`<div class="mcp-tool-shortcuts-empty">${esc(t('mcp_tool_shortcuts_empty'))}</div>`;
+    return;
+  }
+  mount.innerHTML=`<div class="mcp-tool-shortcuts-label">${esc(t('mcp_tool_shortcuts_label'))}</div><div class="mcp-tool-shortcuts-list">${pinned.map(tool=>{
+    const key=_mcpToolShortcutKey(tool);
+    return `<button type="button" class="mcp-tool-shortcut-chip" onclick="insertMcpToolShortcut(${_mcpToolShortcutHtmlJsArg(key)})" title="${esc(t('mcp_tool_shortcut_insert_title',tool.name))}">${esc(tool.name)}<span>${esc(tool.server||'unknown')}</span></button>`;
+  }).join('')}</div>`;
 }
 function _mcpToolsSummary(total, filtered, page, pages, query){
   const trimmedQuery=(query||'').trim();
@@ -8443,6 +8508,7 @@ function _renderMcpTools(tools, query){
   const list=$('mcpToolList');
   const toolbar=$('mcpToolToolbar');
   if(!list) return;
+  _renderMcpToolShortcuts(tools);
   const filtered=_filterMcpToolsForSearch(tools, query);
   const total=Array.isArray(tools)?tools.length:0;
   const pages=Math.max(1,Math.ceil(filtered.length/_mcpToolsPageSize));
@@ -8458,11 +8524,16 @@ function _renderMcpTools(tools, query){
     const status=tool.status||'unknown';
     const statusBadge=`<span class="mcp-status-badge mcp-status-${esc(status)}">${esc(_mcpStatusLabel(status))}</span>`;
     const schemaText=_mcpToolSchemaText(tool.schema_summary);
+    const toolKey=_mcpToolShortcutKey(tool);
+    const pinned=_loadMcpToolShortcutKeys().has(toolKey);
+    const actionLabel=pinned?t('mcp_tool_shortcut_unpin'):t('mcp_tool_shortcut_pin');
     return `<div class="mcp-tool-row">
       <div class="mcp-server-row-head">
         <span class="mcp-tool-name">${esc(tool.name)}</span>
         <span class="mcp-tool-server">${esc(tool.server||'unknown')}</span>
         ${statusBadge}
+        <button type="button" class="mcp-tool-action-btn" onclick="insertMcpToolShortcut(${_mcpToolShortcutHtmlJsArg(toolKey)})">${esc(t('mcp_tool_shortcut_use'))}</button>
+        <button type="button" class="mcp-tool-action-btn" aria-pressed="${pinned?'true':'false'}" onclick="toggleMcpToolShortcut(${_mcpToolShortcutHtmlJsArg(toolKey)})">${esc(actionLabel)}</button>
       </div>
       <div class="mcp-server-detail">${esc(tool.description||'')}</div>
       <pre class="mcp-tool-schema">${esc(schemaText)}</pre>

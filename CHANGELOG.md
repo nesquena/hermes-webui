@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+
+### Added
+- MCP Tools now supports pinned tool shortcuts: users can pin common tools, then insert a ready-to-send tool request into the composer from the shortcut chip or each tool row (#3042).
 ## [v0.51.365] — 2026-06-11 — Release MD (lineage-segment open + reasoning chip fixes)
 
 ### Fixed
@@ -21,6 +24,7 @@
 ### Fixed
 
 - **Renaming, moving, or updating a CLI/agent session that isn't yet in the WebUI store no longer 404s (#3985).** These actions previously only looked in the WebUI session store, so a session originating from the TUI/CLI/agent (not yet materialized into the store) couldn't be renamed/moved/updated. They now fall back to materializing the session from its CLI metadata (mirroring the existing `/api/session/archive` behavior). Read-only imported sessions (messaging channels, Claude Code) remain protected: they're refused with 403 on both the already-stored and the materialize paths, and a state.db-owned messaging session is never materialized into a writable WebUI sidecar. (#3985)
+
 
 ## [v0.51.362] — 2026-06-11 — Release MA (malformed providers config no longer crashes)
 
@@ -1170,6 +1174,7 @@
 
 ### Fixed
 - Client disconnects during response writes (browser tab close, SSE reconnect races, mobile network switches, half-closed sockets) are now handled through a single `_CLIENT_DISCONNECT_ERRORS` set and a `_safe_write` helper instead of ad-hoc per-call-site `try/except`, so an expected disconnect no longer surfaces as a misleading server 500 in the logs. The error-response path is itself wrapped so a disconnect while sending a 500 is swallowed quietly rather than cascading. A bare `TimeoutError` from the Joplin notes integration's `urlopen` is now converted to a clean "not reachable" error at the route rather than escaping to the dispatch-level disconnect handler (#3210).
+
 
 ## [v0.51.181] — 2026-05-30 — Release FA (stage-batchA — agent-cache eviction teardown + streaming finalize race)
 
