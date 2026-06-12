@@ -703,6 +703,47 @@ def test_messages_touch_scrolling_hints_present():
         ".messages must contain vertical overscroll so the transcript keeps the gesture"
 
 
+def test_worklog_summary_headers_stay_width_bounded():
+    """Worklog summary/header rows must be shrinkable so mobile transcripts cannot pan sideways.
+
+    Regression for #4064: a long summary such as "Ran 9 commands, read 14 files, searched
+    workspace ..." must be clipped inside the available width instead of widening the transcript.
+    """
+    summary = _declarations(_rule_body(CSS, ".tool-worklog-summary"))
+    assert summary.get("width") == "100%", \
+        "worklog summary rows must size to the available transcript width"
+    assert summary.get("max-width") == "100%", \
+        "worklog summary rows must never exceed the transcript width"
+    assert summary.get("min-width") == "0", \
+        "worklog summary rows must allow flex shrink instead of preserving content width"
+    assert summary.get("box-sizing") == "border-box", \
+        "worklog summary width must include padding so it stays viewport-safe on phones"
+    assert summary.get("overflow") == "hidden", \
+        "worklog summary rows must clip their own contents rather than widen the transcript"
+
+    summary_label = _declarations(_rule_body(CSS, ".tool-worklog-summary .tool-worklog-label"))
+    assert summary_label.get("flex") == "1 1 auto", \
+        "worklog summary labels must take the remaining row width and shrink on phones"
+    assert summary_label.get("min-width") == "0", \
+        "worklog summary labels need min-width:0 for ellipsis inside flex rows"
+
+    grouped_head = _declarations(_rule_body(CSS, ".tool-group-head"))
+    assert grouped_head.get("max-width") == "100%", \
+        "grouped worklog headers must stay inside the transcript width"
+    assert grouped_head.get("min-width") == "0", \
+        "grouped worklog headers must allow their label to shrink"
+    assert grouped_head.get("box-sizing") == "border-box", \
+        "grouped worklog header width must include padding on narrow screens"
+    assert grouped_head.get("overflow") == "hidden", \
+        "grouped worklog headers must clip long summaries instead of enabling sideways pan"
+
+    grouped_label = _declarations(_rule_body(CSS, ".tg-sum"))
+    assert grouped_label.get("flex") == "1 1 auto", \
+        "grouped worklog summary labels must own the remaining width and ellipsize"
+    assert grouped_label.get("min-width") == "0", \
+        "grouped worklog summary labels need min-width:0 to prevent viewport overflow"
+
+
 def test_100dvh_viewport_height():
     """Layout must use 100dvh (dynamic viewport height) for correct mobile sizing.
 

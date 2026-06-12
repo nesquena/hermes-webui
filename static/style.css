@@ -2834,15 +2834,18 @@ body.resizing .sidebar{transition:none!important;}
   margin:4px 0 14px;
 }
 .tool-worklog-summary{
-  display:inline-flex;
+  width:100%;
   max-width:100%;
   min-width:0;
+  box-sizing:border-box;
+  display:flex;
   align-items:center;
   gap:9px;
   padding:5px 8px;
   border-radius:8px;
   margin:0 0 0 -8px;
   border:0;
+  overflow:hidden;
   color:var(--muted);
   font-size:var(--message-body-font-size);
   font-weight:500;
@@ -2851,14 +2854,14 @@ body.resizing .sidebar{transition:none!important;}
 }
 .as-dot{width:7px;height:7px;border-radius:50%;background:var(--muted);opacity:.45;flex-shrink:0;}
 .tool-worklog-summary .tool-worklog-label{
+  flex:1 1 auto;
+  min-width:0;
   color:var(--muted);
   font-family:inherit;
   font-size:var(--message-body-font-size);
   font-weight:500;
   line-height:var(--message-body-line-height);
   letter-spacing:0;
-  flex:1 1 auto;
-  min-width:0;
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
@@ -3041,6 +3044,7 @@ body.resizing .sidebar{transition:none!important;}
 .tool-worklog-tool-group,
 .tool-group{
   max-width:560px;
+  min-width:0;
   margin:0;
   padding:0;
   background:transparent;
@@ -3049,12 +3053,16 @@ body.resizing .sidebar{transition:none!important;}
 .tool-worklog-tool-group-head,
 .tool-group-head{
   width:100%;
+  max-width:100%;
+  min-width:0;
+  box-sizing:border-box;
   display:flex;
   align-items:center;
   gap:7px;
   padding:3px 8px;
   margin-left:-8px;
   border:0;
+  overflow:hidden;
   background:transparent;
   color:var(--muted);
   cursor:pointer;
@@ -3068,7 +3076,7 @@ body.resizing .sidebar{transition:none!important;}
 .tool-worklog-tool-group-head:hover,
 .tool-group-head:hover{background:var(--hover-bg);color:var(--muted);opacity:.86;}
 .tool-worklog-tool-group-label,
-.tg-sum{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.tg-sum{flex:1 1 auto;display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .tool-worklog-tool-group-running,
 .tg-run{display:none;color:var(--accent-text);font-family:'SF Mono',ui-monospace,monospace;font-size:12px;font-weight:600;line-height:1.4;white-space:nowrap;}
 .tool-worklog-tool-group-body,
