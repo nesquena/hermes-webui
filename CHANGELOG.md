@@ -16,6 +16,26 @@
 - Custom logo favicon updates now leave the default HTML favicon and apple-touch-icon links intact when custom logos are disabled.
 - Custom logo rendering now restores the default logo and favicon set when custom logos are disabled or a cached uploaded logo fails to load.
 
+## [v0.51.368] — 2026-06-12 — Release MG (bind active-profile cookie to auth session)
+
+### Security
+
+- **The active-profile cookie is now cryptographically bound to the auth session when auth is enabled (#803).** The `hermes_profile` cookie is client-controlled and is read by profile-scoped routes to decide which profile's data is visible. Previously, with auth enabled, a client could forge `hermes_profile=<other-profile>` to have requests treated under another profile. The cookie is now HMAC-signed over both the session token and the profile name, so it can't be forged, replayed across sessions, or altered to another profile; verification fails closed (an unsigned, tampered, or stale plain-name cookie is rejected and the request falls back to the default profile). No-auth deployments keep the legacy plain-name cookie, which was never an authorization boundary there. As a side benefit, an unauthenticated client can no longer influence the profile context that pre-login (public-path) handlers run under. (#803)
+
+## [v0.51.367] — 2026-06-12 — Release MF (autocomplete filter + lineage merge + shutdown i18n fixes)
+
+### Fixed
+
+- **CLI-only slash commands no longer clutter the WebUI autocomplete (#3969).** Commands that only work in the terminal (and skill-shortcut names that collide with them) are filtered out of the autocomplete list; if you type one anyway, you still get the WebUI-only explanation.
+- **Session-lineage display rows that were being dropped on full session loads are now merged back in.** A merge gap omitted some lineage rows from `GET /api/session`; they're now included (additive, deduped by merge key, leaving explicit forks/child rows alone).
+- **The "Stop the Hermes WebUI server" settings description renders correctly in every language (#4002).** The string embedded `<code>` HTML inside translatable text; it's now split into plain text fragments composed around statically-rendered code spans, applied across all 13 locales.
+
+## [v0.51.366] — 2026-06-12 — Release ME (assistant turn anchor source normalizer — Slice 2, inert)
+
+### Added
+
+- **Slice 2 of the Stable Assistant Turn Anchors foundation: a source-event normalizer (#3980, #3926).** Adds `normalizeAssistantTurnAnchorSourceEvent` / `normalizeAssistantTurnAnchorSourceEvents` to the frozen `HermesAssistantTurnAnchors` global, converting live SSE-style, replay/journal, and settled-message events into a single anchor-normalized shape with stable identity and dedupe keys. The helper is **inert** — no `send()` / `attachLiveStream()` / `renderMessages()` / settlement / `S.messages` / `INFLIGHT` / DOM path consumes it yet — so there is zero rendering change in this release; it lands the model that Compact Worklog and the in-progress Transparent Stream work will later consume from one normalizer. Identity reads are own-property-only and payload shaping uses `Object.create(null)` with unsafe-key skipping, so prototype-pollution and inherited-identity payloads can't leak through. (#3980)
+
 ## [v0.51.365] — 2026-06-11 — Release MD (lineage-segment open + reasoning chip fixes)
 
 ### Fixed

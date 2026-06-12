@@ -467,6 +467,53 @@ def _session_token_from_cookie_value(cookie_value: str) -> str | None:
     return token or None
 
 
+def sign_profile_cookie_value(profile_name: str, session_cookie_value: str | None) -> str:
+    """Return a profile cookie value authenticated for one WebUI session.
+
+    The active-profile cookie is client-controlled, so when auth is enabled it
+    must not be trusted as a bare profile name. Binding the selected profile to
+    the HttpOnly session token prevents a client from forging
+    ``hermes_profile=<other-profile>`` and bypassing profile visibility guards.
+    """
+    if not session_cookie_value or not verify_session(session_cookie_value):
+        raise ValueError("active auth session is required to sign profile cookie")
+    token = _session_token_from_cookie_value(session_cookie_value)
+    if not token:
+        raise ValueError("active auth session is required to sign profile cookie")
+    sig = hmac.new(
+        _signing_key(),
+        f"profile:{token}:{profile_name}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{profile_name}.{sig}"
+
+
+def verify_profile_cookie_value(cookie_value: str, session_cookie_value: str | None) -> str | None:
+    """Verify a session-bound profile cookie and return its profile name."""
+    if not cookie_value or '.' not in cookie_value:
+        return None
+    if not session_cookie_value or not verify_session(session_cookie_value):
+        return None
+    profile_name, sig = cookie_value.rsplit('.', 1)
+    token = _session_token_from_cookie_value(session_cookie_value)
+    if not profile_name or not token or not sig:
+        return None
+    # Defense-in-depth: validate the profile-name pattern here too, not only in
+    # get_profile_cookie(), so any future caller of this verifier can't return an
+    # unvalidated name. (#4023 Opus hardening.)
+    from api.profiles import _PROFILE_ID_RE
+    if profile_name != 'default' and not _PROFILE_ID_RE.fullmatch(profile_name):
+        return None
+    expected = hmac.new(
+        _signing_key(),
+        f"profile:{token}:{profile_name}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if hmac.compare_digest(str(sig), expected):
+        return profile_name
+    return None
+
+
 def csrf_token_for_session(cookie_value: str) -> str | None:
     """Return the CSRF token bound to an authenticated WebUI session.
 
