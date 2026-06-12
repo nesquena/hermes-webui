@@ -949,8 +949,11 @@ async function cmdUse(args){
       }
       return;
     }
+    const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}`);
+    const skillContent = detail&&typeof detail.content==='string' ? detail.content.trim() : '';
+    if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
     const directive = `[USER OVERRIDE] You MUST consult skill '${match.name}' via skill_view before responding to the next message.`;
-    resolve(directive);
+    resolve({name:match.name,directive,content:skillContent});
     if(isCurrentSession()){
       S.messages.push({role:'assistant', content:`Next turn: skill \`${match.name}\` will be forced.`});
       renderMessages();
