@@ -34,6 +34,8 @@ def test_forced_skill_directive_set_in_cmdUse():
     src = read("static/commands.js")
     assert "pending.promise = new Promise" in src, "cmdUse must create a pending Promise"
     assert "_forcedSkillDirectivePending = pending;" in src, "cmdUse must publish the pending directive before awaiting"
+    assert "resolve({name:match.name,directive,content:skillContent});" in src, \
+        "cmdUse must resolve the pending payload with skill name, directive, and fetched content"
 
 
 def test_use_entry_has_noEcho():
@@ -59,7 +61,7 @@ def test_directive_consumed_at_injection_site():
     finally_part = src.split("finally")[1] if "finally" in src else ""
     assert "_forcedSkillDirectivePending = null;" not in finally_part, \
         "_forcedSkillDirectivePending must NOT be cleared in the finally block"
-    assert "const _directive = await _pending.promise;" in src, \
+    assert "const _directivePayload = await _pending.promise;" in src, \
         "consume site must await the pending promise"
     assert "_forcedSkillDirectivePending = null;" in src, \
         "_forcedSkillDirectivePending must be cleared somewhere in messages.js"
@@ -75,7 +77,16 @@ def test_directive_injection_before_empty_guard():
 def test_directive_text_uses_match_name():
     src = read("static/commands.js")
     assert "match.name" in src, "directive must use match.name (canonical casing), not raw user input"
-    assert "[USER OVERRIDE] You MUST consult skill '" in src, "directive text must match the specified format"
+    assert "[USER OVERRIDE] You MUST follow the skill '" in src, "directive text must match the specified format"
+    assert "content provided below" in src, "directive must reference the injected skill content"
+
+
+def test_use_fetches_canonical_skill_content():
+    src = read("static/commands.js")
+    assert "api(`/api/skills/content?name=${encodeURIComponent(match.name)}`)" in src, \
+        "cmdUse must fetch the canonical skill content after resolving the canonical skill name"
+    assert "typeof detail.content==='string' ? detail.content.trim() : ''" in src, \
+        "cmdUse must reject missing or non-string skill content"
 
 
 def test_pending_promise_set_synchronously():
@@ -114,3 +125,5 @@ def test_directive_only_consumed_by_matching_session():
         "send() must only consume /use directives issued for the active session"
     assert "if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;" in src, \
         "send() must not clear a newer pending directive created while awaiting"
+    assert "[FORCED SKILL CONTEXT: ${_forcedSkillName}]" in src, \
+        "send() must prepend deterministic forced-skill content before the user message"

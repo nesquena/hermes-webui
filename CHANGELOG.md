@@ -3,6 +3,23 @@
 
 ## [Unreleased]
 
+## [v0.51.371] — 2026-06-12 — Release MJ (low-risk batch: approval polling, composer/titlebar polish, slash-command parity, skill categories, French TTS)
+
+### Fixed
+
+- **Tool-approval prompts no longer disappear during brief idle gaps (#4041).** The HTTP approval poll used to tear itself down — force-hiding the approval card past its visibility guard before the server had confirmed the approval was gone — on any transient busy=false dip. It now keeps polling across busy dips and stops only on a true session switch or a confirmed-idle state with no pending approvals. (#4041)
+- **Typing in the composer is smoother on long sessions (#4042).** The composer auto-resize ran a synchronous layout read on every keystroke; it's now coalesced into a single animation-frame update. (#4042)
+- **The desktop window title stays correct when switching to non-chat panels (#4039).** Switching to Settings/Tasks/etc. now stamps `document.title`, and returning to chat restores the chat title. (#4039)
+- **The Tauri desktop app's local IPC is no longer blocked by the Content-Security-Policy (#4040).** `http://ipc.localhost` is now part of the default `connect-src` allowlist. (#4040)
+- **`bootstrap.py` is tracked with its executable bit (#3914)** so direct POSIX execution keeps working after a fresh clone.
+- **`/reload-skills` now works from the WebUI (#4043).** It's routed through the same narrow WebUI agent-command allowlist as `/reload-mcp`, re-scans the installed skills and reports what changed. (#4043)
+- **`/use <skill>` now injects the actual skill content for the next turn (#4044).** Instead of only telling the agent to consult a skill, the selected skill's body is fetched and carried through to the next message as forced context. (#4044)
+- **Flat external skill directories are now categorized in the Skills tab (#4053).** Skills directly under an external skills root use that root's directory name as their category, while flat skills under the local skills root stay uncategorized. (#4053)
+
+### Added
+
+- **French Edge TTS voices (#4058).** Seven `fr-CA` / `fr-FR` neural voices are now in the Edge TTS allowlist, so French-speaking users who enable Edge TTS no longer get a 400 on every utterance.
+
 ## [v0.51.370] — 2026-06-12 — Release MI (model picker shows real providers when /api/models rebuild times out)
 
 ### Fixed
