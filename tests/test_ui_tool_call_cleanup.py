@@ -233,6 +233,122 @@ class TestToolCallGroupingStatic:
             "When tools are present, thinking is expected and should not be repeated in the label."
         )
 
+    def test_render_rebuild_preserves_worklog_detail_disclosure_click_state(self):
+        render_fn = _function_body(UI_JS, "renderMessages")
+        capture_fn = _function_body(UI_JS, "_captureWorklogDetailDisclosureState")
+        restore_fn = _function_body(UI_JS, "_restoreWorklogDetailDisclosureState")
+        apply_fn = _function_body(UI_JS, "_setWorklogDetailDisclosureOpen")
+        capture_pos = render_fn.index("const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);")
+        cache_pos = render_fn.index("if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi)")
+        cache_return_pos = render_fn.index("return;", cache_pos)
+        wipe_pos = render_fn.index("inner.innerHTML='';")
+        restore_pos = render_fn.index("_restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);")
+        fail_safe_pos = render_fn.find("Fail-safe invariant (#3875)")
+        assert cache_pos < cache_return_pos < capture_pos, (
+            "renderMessages() should not traverse the previous session DOM when "
+            "the HTML-cache fast path can return early."
+        )
+        assert capture_pos < wipe_pos, (
+            "renderMessages() must capture manual Worklog detail open/closed state "
+            "before wiping msgInner for a rebuild."
+        )
+        assert restore_pos > wipe_pos, (
+            "renderMessages() must restore manual Worklog detail state after the "
+            "new Thinking/Tool DOM has been rebuilt."
+        )
+        assert fail_safe_pos == -1 or restore_pos < fail_safe_pos, (
+            "The blank-turn fail-safe must still be allowed to expand otherwise "
+            "invisible Worklog content after manual detail state is restored."
+        )
+        assert "_worklogDetailDisclosureSelector" in capture_fn, (
+            "The rebuild-state capture should use the shared Worklog detail selector."
+        )
+        selector_match = re.search(r"const _worklogDetailDisclosureSelector='([^']+)'", UI_JS)
+        assert selector_match, "Shared Worklog detail selector is missing."
+        selector = selector_match.group(1)
+        assert ".thinking-card" in selector and ".tool-card" in selector, (
+            "The rebuild-state capture must cover both Thinking cards and Tool cards."
+        )
+        assert "data-tool-worklog-tool-group" in selector, (
+            "The rebuild-state capture must cover multi-tool Worklog detail groups."
+        )
+        assert "_setWorklogDetailDisclosureOpen" in restore_fn, (
+            "Restoration should use the shared disclosure-state applier."
+        )
+        assert "tool-worklog-tool-group-collapsed" in apply_fn and "aria-expanded" in apply_fn, (
+            "Restoring multi-tool groups must sync both CSS state and accessibility state."
+        )
+
+    def test_worklog_detail_keys_stay_stable_while_streaming_content_grows(self):
+        key_fn = _function_body(UI_JS, "_worklogDetailBaseKey")
+        append_thinking_fn = _function_body(UI_JS, "appendThinking")
+        append_step_fn = _function_body(UI_JS, "_appendWorklogStep")
+        build_tool_fn = _function_body(UI_JS, "buildToolCard")
+        sync_tools_fn = _function_body(UI_JS, "_syncToolRowsContainer")
+
+        thinking_branch = re.search(
+            r"if\(el\.classList\.contains\('thinking-card'\)\)\{(?P<body>.*?)\n  \}\n  if\(el\.classList\.contains\('tool-card'\)\)",
+            key_fn,
+            re.S,
+        )
+        assert thinking_branch, "Thinking-card disclosure-key branch is missing."
+        thinking_body = thinking_branch.group("body")
+        assert "data-thinking-key" in thinking_body and "data-live-thinking-key" in thinking_body, (
+            "Thinking-card disclosure keys must prefer render-time stable row keys."
+        )
+        assert ".thinking-card-body pre" not in thinking_body and "textContent" not in thinking_body, (
+            "Thinking-card disclosure keys must not depend on streaming body text."
+        )
+        assert "_thinkingActivityNode(clean, false, thinkingKey)" in append_thinking_fn, (
+            "Live streaming Thinking rows must stamp the stable thinking key at creation time."
+        )
+        assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey)" in append_step_fn, (
+            "Settled Worklog Thinking rows must stamp the stable thinking key at creation time."
+        )
+        assert "thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:''" in _function_body(UI_JS, "renderMessages"), (
+            "Settled Worklog Thinking keys should come from activity coordinates, not text."
+        )
+
+        tool_branch = re.search(
+            r"if\(el\.classList\.contains\('tool-card'\)\)\{(?P<body>.*?)\n  \}\n  if\(el\.matches&&el\.matches\('\.tool-group",
+            key_fn,
+            re.S,
+        )
+        assert tool_branch, "Tool-card disclosure-key branch is missing."
+        tool_body = tool_branch.group("body")
+        assert "data-tool-disclosure-key" in tool_body, (
+            "Tool-card disclosure keys must prefer a stable render-time tool key."
+        )
+        assert ".tool-card-preview" not in tool_body, (
+            "Tool-card disclosure keys must not depend on result preview text."
+        )
+        assert "_toolDisclosureIdentity(tc)" in build_tool_fn, (
+            "buildToolCard() must stamp a stable disclosure key on each tool row."
+        )
+        assert "tc.snippet" not in _function_body(UI_JS, "_toolDisclosureIdentity"), (
+            "Derived tool disclosure keys must not include changing result snippets."
+        )
+        assert "tc.args" not in _function_body(UI_JS, "_toolDisclosureIdentity"), (
+            "Derived tool disclosure keys must not include streaming tool arguments."
+        )
+
+        group_branch = re.search(
+            r"if\(el\.matches&&el\.matches\('\.tool-group\[data-tool-worklog-tool-group=\"1\"\],\.tool-worklog-tool-group'\)\)\{(?P<body>.*?)\n  \}\n  return '';",
+            key_fn,
+            re.S,
+        )
+        assert group_branch, "Multi-tool Worklog group disclosure-key branch is missing."
+        group_body = group_branch.group("body")
+        assert "data-tool-group-disclosure-key" in group_body, (
+            "Multi-tool Worklog groups must prefer a stable render-time group key."
+        )
+        assert "_worklogDetailTextKey" not in group_body and "textContent" not in group_body, (
+            "Multi-tool Worklog group disclosure keys must not depend on changing summary text."
+        )
+        assert "data-tool-group-disclosure-key" in sync_tools_fn and "stepIdx" in sync_tools_fn, (
+            "Grouped Worklog tool rows must stamp a stable per-step disclosure key."
+        )
+
     def test_live_tool_cards_use_grouping_only_when_simplified(self):
         live_fn = _function_body(UI_JS, "appendLiveToolCard")
         settled_fn = _function_body(UI_JS, "renderMessages")
@@ -455,8 +571,11 @@ class TestToolCallGroupingStatic:
         )
         render_min = re.sub(r"\s+", "", render_fn)
         assert "thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:''" in render_min, (
-            "Settled Worklog should key Thinking Cards by normalized content so exact duplicate "
-            "Thinking from sibling messages does not render twice."
+            "Settled Worklog should keep normalized-content Thinking dedupe so sibling messages do not duplicate cards."
+        )
+        assert "thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:''" in render_min, (
+            "Settled Worklog should separately key disclosure state by stable activity coordinates "
+            "so streaming text growth does not reset manual collapse state."
         )
         assert "_appendWorklogStep" in render_fn, (
             "Visible assistant anchors, Thinking Cards, and tools should still build the compact Worklog disclosure."
@@ -475,7 +594,7 @@ class TestToolCallGroupingStatic:
         assert "_worklogReasonNodeFromText(thinkingText" not in live_thinking_fn, (
             "Provider reasoning should not render as live Worklog process prose."
         )
-        assert "_thinkingActivityNode(clean, false)" in live_thinking_fn and "data-live-thinking" in live_thinking_fn, (
+        assert "_thinkingActivityNode(clean, false, thinkingKey)" in live_thinking_fn and "data-live-thinking" in live_thinking_fn, (
             "Live provider thinking should render as a collapsed Worklog Thinking Card."
         )
         assert "ensureLiveWorklogContainer" in live_thinking_fn, (

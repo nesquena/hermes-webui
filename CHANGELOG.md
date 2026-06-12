@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Manual Thinking and Tool detail collapse/expand choices now survive live transcript refreshes (#4062).** `renderMessages()` captures open/closed state for Worklog Thinking cards, Tool cards, and multi-tool detail groups before rebuilding the transcript, then restores it afterward, so new streaming results no longer reset every detail row back to the global Worklog-details default.
+
 ## [v0.51.372] — 2026-06-12 — Release MK (markdown link-label inline code, /use skill autocomplete, mobile Worklog overflow)
 
 ### Fixed

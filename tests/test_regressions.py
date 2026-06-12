@@ -917,7 +917,7 @@ def test_ui_js_does_not_hide_anchor_segments_that_contain_thinking(cleanup_test_
         "provider reasoning metadata should feed the Worklog Thinking Card after exact duplicate suppression"
     assert "data-worklog-thinking-card" in src, \
         "Thinking Cards should be explicit Worklog items, not tool cards"
-    assert "_thinkingActivityNode(thinkingText, false)" in src, \
+    assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey)" in src, \
         "settled reasoning should render as a collapsed Worklog Thinking Card"
 
 

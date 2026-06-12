@@ -24,7 +24,7 @@ def test_settlement_loop_does_not_inline_thinking_only_messages():
     assert "!cards.length&&assistantThinking.has(aIdx)" not in UI_JS, (
         "Thinking-only messages must not use the old inline early-continue path"
     )
-    assert "_thinkingActivityNode(thinkingText, false)" in UI_JS, (
+    assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey)" in UI_JS, (
         "settled reasoning should render as a collapsed Worklog Thinking Card"
     )
 
