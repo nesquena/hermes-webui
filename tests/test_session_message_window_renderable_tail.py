@@ -102,14 +102,8 @@ def test_cold_load_flag_expands_window_to_fill_renderable_rows():
     assert [m["content"] for m in window if m["role"] != "tool"] == ["a5", "u6", "a7", "u8", "a9"]
 
 
-def test_cumulative_load_earlier_does_not_expand_without_flag():
-    """The 'Load earlier' path (larger msg_limit, no flag, no msg_before) keeps the raw cap.
-
-    Codex CORE finding: _loadOlderMessages re-requests with a larger msg_limit
-    and NO msg_before, so a msg_before-based gate would still expand and pull the
-    whole tool-heavy transcript. With the explicit expand_renderable flag OFF
-    (which is how _loadOlderMessages calls it), the raw tail cap is preserved.
-    """
+def test_cumulative_load_earlier_counts_visible_rows_without_expand_flag():
+    """The 'Load earlier' path counts user/assistant rows, not raw tool rows."""
     messages = [
         ({"role": "user", "content": f"u{i}"} if i % 2 == 0 else {"role": "assistant", "content": f"a{i}"})
         for i in range(10)
@@ -121,9 +115,8 @@ def test_cumulative_load_earlier_does_not_expand_without_flag():
     # Same input as the cold-load test, but no expand flag (cumulative path).
     window, offset = _message_window_for_display(messages, msg_limit=5, expand_renderable=False)
 
-    # Raw tail cap honored: window is the last 5 raw rows (a9 + 4 tools), NOT expanded.
-    assert offset == 9
-    assert [m["content"] for m in window] == ["a9", "tool 10", "tool 11", "tool 12", "tool 13"]
+    assert offset == 5
+    assert [m["content"] for m in window] == ["a5", "u6", "a7", "u8", "a9"]
 
 
 def test_cold_load_expands_but_caps_at_total_renderable():
