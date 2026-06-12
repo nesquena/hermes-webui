@@ -14,6 +14,7 @@ Supported operations:
 from __future__ import annotations
 
 import json
+from api.sse_chunked import end_sse_headers
 import time
 from dataclasses import asdict, is_dataclass
 from urllib.parse import parse_qs, unquote
@@ -1065,7 +1066,7 @@ def _handle_events_sse_stream(handler, parsed):
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
-    handler.end_headers()
+    end_sse_headers(handler)
 
     # Send an initial frame so the client knows the connection is open
     # and learns the current cursor (in case the server already had a

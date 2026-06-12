@@ -8,6 +8,7 @@ import copy
 import io
 import gzip
 import json
+from api.sse_chunked import end_sse_headers
 import logging
 import os
 import queue
@@ -11133,7 +11134,7 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
-    handler.end_headers()
+    end_sse_headers(handler)
     cursor_value = cursor
     try:
         while True:
@@ -11193,7 +11194,7 @@ def _handle_sse_stream(handler, parsed):
         handler.send_header("Cache-Control", "no-cache")
         handler.send_header("X-Accel-Buffering", "no")
         handler.send_header("Connection", "close")
-        handler.end_headers()
+        end_sse_headers(handler)
         try:
             _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs, stream_id))
         except _CLIENT_DISCONNECT_ERRORS:
@@ -11209,7 +11210,7 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
-    handler.end_headers()
+    end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
     replay_cutoff_seq = None
     if qs.get("replay", [""])[0] or qs.get("after_seq", [None])[0] not in (None, "") or qs.get("after_event_id", [None])[0]:
@@ -11389,7 +11390,7 @@ def _handle_terminal_output(handler, parsed):
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
-    handler.end_headers()
+    end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
     try:
         while True:
@@ -11475,7 +11476,7 @@ def _handle_gateway_sse_stream(handler, parsed):
     # connect/sessions_changed snapshot/disconnect that thrashes the
     # session list every ~1s. Letting the server close the socket
     # naturally after the stream ends is sufficient.
-    handler.end_headers()
+    end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = watcher.subscribe()
@@ -11510,7 +11511,7 @@ def _handle_session_events_stream(handler):
     handler.send_header('X-Accel-Buffering', 'no')
     # #3103: see _handle_gateway_sse_stream — `Connection: close` causes
     # EventSource reconnect storms in browsers on long-lived SSE.
-    handler.end_headers()
+    end_sse_headers(handler)
 
     q = subscribe_session_events()
     try:
@@ -12651,7 +12652,7 @@ def _handle_approval_sse_stream(handler, parsed):
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
     handler.send_header('Connection', 'close')
-    handler.end_headers()
+    end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     from api.streaming import _sse
@@ -12753,7 +12754,7 @@ def _handle_clarify_sse_stream(handler, parsed):
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
     handler.send_header('Connection', 'close')
-    handler.end_headers()
+    end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     from api.streaming import _sse
@@ -12833,7 +12834,7 @@ def _handle_session_sse_stream(handler, parsed):
         # default, matching the other long-lived SSE handlers (gateway/session
         # events) that fixed the reconnect-storm. An explicit value here is a
         # third, inconsistent approach (greptile flag).
-        handler.end_headers()
+        end_sse_headers(handler)
         _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
         from api.streaming import _sse
