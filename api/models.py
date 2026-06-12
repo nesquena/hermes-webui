@@ -4622,7 +4622,18 @@ def reconciled_state_db_messages_for_session(
     if state_messages is None:
         state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
     if prefer_context and local_messages:
-        state_messages = state_db_delta_after_context(local_messages, state_messages)
+        # After compression, context_messages contains compressed summaries with
+        # different content fingerprints from the originals in state.db.
+        # state_db_delta_after_context() can't align them (best_len < 2) and
+        # returns ALL state.db rows, which get appended after the compressed
+        # context — defeating the compression entirely.
+        # Fix: when a compression anchor is set, skip state.db reconciliation
+        # for the model-facing context path. The display path (prefer_context=False)
+        # is unaffected and continues to show the full history.
+        if getattr(session, 'compression_anchor_message_key', None):
+            state_messages = []
+        else:
+            state_messages = state_db_delta_after_context(local_messages, state_messages)
     return merge_session_messages_append_only(
         local_messages,
         state_messages,
