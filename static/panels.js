@@ -469,6 +469,77 @@ async function loadCronGatewayNotice() {
   }
 }
 
+function _cronPausedSectionCollapsed(){
+  try {
+    return localStorage.getItem('hermes-webui-cron-paused-collapsed') !== '0';
+  } catch(_) {
+    return true;
+  }
+}
+
+function _setCronPausedSectionCollapsed(collapsed){
+  try {
+    localStorage.setItem('hermes-webui-cron-paused-collapsed', collapsed ? '1' : '0');
+  } catch(_) {}
+}
+
+function _buildCronListItem(job){
+  const item = document.createElement('div');
+  item.className = 'cron-item';
+  item.id = 'cron-' + job.id;
+  const status = _cronStatusMeta(job);
+  const isNewRun = _cronNewJobIds.has(String(job.id));
+  const isAgentMode = !job.no_agent;
+  const profileLabel = _cronProfileLabel(job.profile);
+  const profileTitle = _cronProfileTitle(job.profile);
+  item.innerHTML = `
+    <div class="cron-header">
+      ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
+      ${isAgentMode ? '<span class="cron-agent-badge" title="Agent mode">🤖</span>' : `<span class="cron-script-badge" title="${esc(t('cron_script_badge_title') || 'Script job (no agent)')}">📜</span>`}
+      <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
+      <span class="cron-profile-badge" title="${esc(profileTitle)}">${esc(profileLabel)}</span>
+      <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
+    </div>`;
+  item.onclick = () => openCronDetail(job.id, item);
+  if (_currentCronDetail && _currentCronDetail.id === job.id) item.classList.add('active');
+  return item;
+}
+
+function _appendCronPausedSection(box, pausedJobs){
+  if (!box || !Array.isArray(pausedJobs) || !pausedJobs.length) return;
+  const hasSelectedPausedJob = !!(_currentCronDetail && pausedJobs.some(job => String(job.id) === String(_currentCronDetail.id)));
+  const collapsed = hasSelectedPausedJob ? false : _cronPausedSectionCollapsed();
+  const toggleLabel = collapsed ? (t('cron_expand_section') || 'Expand section') : (t('cron_collapse_section') || 'Collapse section');
+  const sectionTitle = `${t('cron_paused_section') || 'Paused'} (${pausedJobs.length})`;
+
+  const section = document.createElement('div');
+  section.className = 'cron-group cron-group-paused';
+
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'cron-group-toggle';
+  header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  header.title = toggleLabel;
+  header.setAttribute('aria-label', `${toggleLabel}: ${sectionTitle}`);
+  header.innerHTML = `
+    <span class="cron-group-chevron">${collapsed ? '▸' : '▾'}</span>
+    <span class="cron-group-title">${esc(sectionTitle)}</span>`;
+  header.onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    _setCronPausedSectionCollapsed(!collapsed);
+    loadCrons(false);
+  };
+
+  const body = document.createElement('div');
+  body.className = `cron-group-body${collapsed ? ' collapsed' : ''}`;
+  for (const job of pausedJobs) body.appendChild(_buildCronListItem(job));
+
+  section.appendChild(header);
+  section.appendChild(body);
+  box.appendChild(section);
+}
+
 async function loadCrons(animate) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
@@ -487,27 +558,15 @@ async function loadCrons(animate) {
       return;
     }
     box.innerHTML = '';
+    const visibleJobs = [];
+    const pausedJobs = [];
     for (const job of _cronList) {
-      const item = document.createElement('div');
-      item.className = 'cron-item';
-      item.id = 'cron-' + job.id;
       const status = _cronStatusMeta(job);
-      const isNewRun = _cronNewJobIds.has(String(job.id));
-      const isAgentMode = !job.no_agent;
-      const profileLabel = _cronProfileLabel(job.profile);
-      const profileTitle = _cronProfileTitle(job.profile);
-      item.innerHTML = `
-        <div class="cron-header">
-          ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
-          ${isAgentMode ? '<span class="cron-agent-badge" title="Agent mode">🤖</span>' : ''}
-          <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
-          <span class="cron-profile-badge" title="${esc(profileTitle)}">${esc(profileLabel)}</span>
-          <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
-        </div>`;
-      item.onclick = () => openCronDetail(job.id, item);
-      if (_currentCronDetail && _currentCronDetail.id === job.id) item.classList.add('active');
-      box.appendChild(item);
+      if (status.state === 'paused') pausedJobs.push(job);
+      else visibleJobs.push(job);
     }
+    for (const job of visibleJobs) box.appendChild(_buildCronListItem(job));
+    _appendCronPausedSection(box, pausedJobs);
     // Re-render current detail with fresh data if we have one and we're not in a form
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
       const refreshed = _cronList.find(j => j.id === _currentCronDetail.id);
