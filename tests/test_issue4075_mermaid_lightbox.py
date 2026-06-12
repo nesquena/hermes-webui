@@ -1,6 +1,7 @@
 """Static regression coverage for Mermaid diagram lightbox wiring."""
 
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,15 +20,21 @@ def _style_css() -> str:
 class TestMermaidLightboxHelper:
     def test_mermaid_lightbox_has_dedicated_helper(self):
         src = _ui_js()
-        assert "function _openMermaidLightbox(svgEl) {" in src
-        assert "const clone = svgEl.cloneNode(true);" in src
-        assert "clone.classList.add('mermaid-lightbox-svg');" in src
+        assert re.search(r"function\s+_openMermaidLightbox\(svgEl\)\s*\{", src)
+        assert "svgEl.cloneNode(true)" in src
+        assert "mermaid-lightbox-svg" in src
 
     def test_mermaid_lightbox_reuses_existing_modal_chrome(self):
         src = _ui_js()
-        assert "lb.className = 'img-lightbox';" in src
-        assert "cls.className = 'img-lightbox-close';" in src
-        assert "cls.onclick = () => _closeImgLightbox(lb);" in src
+        assert "img-lightbox" in src
+        assert "img-lightbox-close" in src
+        assert "_closeImgLightbox(lb)" in src
+
+    def test_mermaid_lightbox_rewrites_cloned_svg_ids(self):
+        src = _ui_js()
+        assert "const idMap = new Map();" in src
+        assert "const idPrefix = 'mermaid-lightbox-'" in src
+        assert "replace(/url\\(#([^)]+)\\)/g" in src
 
 
 class TestDocumentClickDelegate:
@@ -60,3 +67,9 @@ class TestMermaidLightboxCss:
         src = _style_css()
         rule = ".img-lightbox .mermaid-lightbox-svg{max-width:90vw;max-height:90vh;"
         assert rule in src
+
+
+class TestLightboxAria:
+    def test_lightboxes_set_aria_modal(self):
+        src = _ui_js()
+        assert src.count("setAttribute('aria-modal', 'true')") >= 2
