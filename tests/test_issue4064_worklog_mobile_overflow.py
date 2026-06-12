@@ -10,9 +10,18 @@ STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 def _rule(selector: str) -> str:
     start = STYLE_CSS.find(selector)
     assert start >= 0, f"{selector} selector not found in style.css"
-    end = STYLE_CSS.find("}", start)
-    assert end >= 0, f"{selector} rule did not close"
-    return STYLE_CSS[start:end]
+    open_brace = STYLE_CSS.find("{", start + len(selector) - 1)
+    assert open_brace >= 0, f"{selector} rule did not open"
+    depth = 0
+    for idx in range(open_brace, len(STYLE_CSS)):
+        ch = STYLE_CSS[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return STYLE_CSS[start:idx]
+    raise AssertionError(f"{selector} rule did not close")
 
 
 def test_worklog_summary_no_longer_uses_auto_width_inline_flex():
