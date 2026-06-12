@@ -35,6 +35,40 @@ def test_runtime_preferred_base_url_uses_runtime_for_custom_provider_without_con
     ) == "https://runtime.example.com"
 
 
+def test_runtime_preferred_base_url_preserves_different_endpoint_config_override():
+    """Codex CORE regression guard: an explicit providers.<id>.base_url override
+    at a DIFFERENT host/port must NOT be clobbered by the runtime default. Only a
+    same-endpoint runtime URL (the #3895 /v1-dedup case) should win."""
+    # LM Studio pinned at a LAN IP — must be preserved over the runtime localhost default.
+    assert streaming._runtime_preferred_base_url(
+        {"provider": "lmstudio", "base_url": "http://localhost:1234/v1"},
+        "lmstudio",
+        "http://10.0.0.5:1234/v1",
+    ) == "http://10.0.0.5:1234/v1"
+    # OpenRouter mirror override preserved over the runtime canonical host.
+    assert streaming._runtime_preferred_base_url(
+        {"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
+        "openrouter",
+        "https://my-mirror.example.com/api/v1",
+    ) == "https://my-mirror.example.com/api/v1"
+
+
+def test_runtime_preferred_base_url_prefers_runtime_for_same_endpoint_path_normalization():
+    """The #3895 case: same scheme+host+port, runtime just strips a duplicated
+    path segment — runtime (corrected) form wins."""
+    assert streaming._runtime_preferred_base_url(
+        {"provider": "opencode-go", "base_url": "https://opencode.example.com/zen/go"},
+        "opencode-go",
+        "https://opencode.example.com/zen/go/v1",
+    ) == "https://opencode.example.com/zen/go"
+    # Same host different port = different endpoint → configured wins.
+    assert streaming._runtime_preferred_base_url(
+        {"provider": "someprov", "base_url": "https://host.example.com:8080/v1"},
+        "someprov",
+        "https://host.example.com:9090/v1",
+    ) == "https://host.example.com:9090/v1"
+
+
 def test_streaming_passes_target_model_and_prefers_runtime_base_url(monkeypatch):
     captured = {}
 
