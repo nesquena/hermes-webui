@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.368] — 2026-06-12 — Release MG (bind active-profile cookie to auth session)
+
+### Security
+
+- **The active-profile cookie is now cryptographically bound to the auth session when auth is enabled (#803).** The `hermes_profile` cookie is client-controlled and is read by profile-scoped routes to decide which profile's data is visible. Previously, with auth enabled, a client could forge `hermes_profile=<other-profile>` to have requests treated under another profile. The cookie is now HMAC-signed over both the session token and the profile name, so it can't be forged, replayed across sessions, or altered to another profile; verification fails closed (an unsigned, tampered, or stale plain-name cookie is rejected and the request falls back to the default profile). No-auth deployments keep the legacy plain-name cookie, which was never an authorization boundary there. As a side benefit, an unauthenticated client can no longer influence the profile context that pre-login (public-path) handlers run under. (#803)
+
 ## [v0.51.367] — 2026-06-12 — Release MF (autocomplete filter + lineage merge + shutdown i18n fixes)
 
 ### Fixed
