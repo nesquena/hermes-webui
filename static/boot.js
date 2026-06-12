@@ -1779,8 +1779,14 @@ function applyBotName(){
     const s=await api('/api/settings');
     _bootSettings=s;
     window._sendKey=s.send_key||'enter';
+    // Persist default workspace so the blank new-chat page can show it
+    // and workspace actions (New file/folder) work before the first session (#804).
+    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._showTokenUsage=!!s.show_token_usage;
     window._showQuotaChip=s.show_quota_chip===true;
+    window._showConversationOutline=s.show_conversation_outline===true;
+    document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
+    if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
     applyEmptyStateSuggestionPref();
     window._showTps=!!s.show_tps;
@@ -1789,9 +1795,6 @@ function applyBotName(){
     window._showPreviousMessagingSessions=!!s.show_previous_messaging_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
-    // Persist default workspace so the blank new-chat page can show it
-    // and workspace actions (New file/folder) work before the first session (#804).
-    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=true;
@@ -1887,6 +1890,9 @@ function applyBotName(){
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showQuotaChip=false;
+    window._showConversationOutline=false;
+    document.documentElement.dataset.conversationOutline='disabled';
+    if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
     window._showTps=false;

@@ -38,6 +38,7 @@ PREFERENCE_FIELDS_AUTOSAVE = [
     ("settingsSendKey", "send_key"),
     ("settingsLanguage", "language"),
     ("settingsShowTokenUsage", "show_token_usage"),
+    ("settingsShowConversationOutline", "show_conversation_outline"),
     ("settingsShowTps", "show_tps"),
     ("settingsShowCliSessions", "show_cli_sessions"),
     ("settingsShowPreviousMessagingSessions", "show_previous_messaging_sessions"),
@@ -53,8 +54,8 @@ PREFERENCE_FIELDS_AUTOSAVE = [
 ]
 
 
-def test_all_14_preference_fields_have_autosave_payload_entries():
-    """_preferencesPayloadFromUi must include all 14 preference fields."""
+def test_all_preference_fields_have_autosave_payload_entries():
+    """_preferencesPayloadFromUi must include every autosaved preference field."""
     block = _function_block(PANELS_JS, "_preferencesPayloadFromUi")
     for dom_id, field in PREFERENCE_FIELDS_AUTOSAVE:
         assert f"$('{dom_id}')" in block, \
@@ -64,7 +65,7 @@ def test_all_14_preference_fields_have_autosave_payload_entries():
 
 
 def test_preference_fields_use_schedule_autosave_not_mark_dirty():
-    """All 14 listener attachments (excluding bot_name's debounce wrapper) must
+    """All listener attachments (excluding bot_name's debounce wrapper) must
     use _schedulePreferencesAutosave. bot_name uses a wrapper but still
     eventually calls _schedulePreferencesAutosave."""
     panel = _load_settings_panel_block()

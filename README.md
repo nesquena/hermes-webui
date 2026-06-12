@@ -135,6 +135,16 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 
 `ctl.sh start` runs the bootstrap in foreground/no-browser mode behind the daemon wrapper, writes logs to `~/.hermes/webui.log`, and respects `.env` plus inline overrides such as `HERMES_WEBUI_HOST=0.0.0.0 ./ctl.sh start`.
 
+> **Stopping the server.** Each launch method has its own stop path because only `ctl.sh start` writes a PID file (`~/.hermes/webui.pid`):
+>
+> | Launch method | How to stop |
+> |---|---|
+> | `python3 bootstrap.py` or `./start.sh` | **Ctrl-C** in the terminal (both run in the foreground) |
+> | `./ctl.sh start` | `./ctl.sh stop` (sends SIGTERM, waits, then SIGKILL) |
+> | Detached `bootstrap.py` (no `--foreground`) | Find the PID via `lsof -i :8787` (or `ss -tlnp`) and `kill` it |
+>
+> `./ctl.sh stop` cannot stop a server launched by `bootstrap.py` or `start.sh` directly — it only manages processes it started itself.
+
 ### Advanced: dynamic recall prefill & Gateway-backed chat
 
 Two optional, self-hosted-deployment features — attaching dynamic **session-recall prefill** to browser turns (Joplin/Obsidian/Notion/llm-wiki routers), and routing browser chat through a running **Hermes Gateway** — are documented in [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md). Most users need neither.

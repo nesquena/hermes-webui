@@ -5376,3 +5376,65 @@ main.main.showing-logs > #mainLogs{display:flex;}
   display: block;
 }
 .interim-collapse-toggle:hover { text-decoration: underline; }
+
+/* ── Conversation Outline Panel (#2124) ─────────────────────────────────── */
+#outlineToggleBtn{
+  position:fixed;bottom:120px;right:calc(var(--outline-workspace-offset, 0px) + 20px);z-index:9999;
+  width:38px;height:38px;border-radius:50%;
+  background:var(--surface);border:1px solid var(--border2);
+  color:var(--text);cursor:pointer;
+  display:none;align-items:center;justify-content:center;
+  box-shadow:0 2px 8px rgba(0,0,0,.18);
+  font-size:16px;line-height:1;
+  transition:background .15s ease,border-color .15s ease,color .15s ease;
+}
+html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){display:flex;}
+#outlineToggleBtn:hover{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--accent-text);}
+#outlinePanelWrapper{
+  position:fixed;right:calc(var(--outline-workspace-offset, 0px) + 20px);bottom:170px;width:320px;
+  max-height:50vh;z-index:9998;
+  background:var(--surface);border:1px solid var(--border2);
+  border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.22);
+  display:flex;flex-direction:column;overflow:hidden;
+}
+/* The id selector's display:flex outranks the UA [hidden]{display:none}, so the
+   hidden attribute alone won't hide the panel — restore it explicitly. */
+#outlinePanelWrapper[hidden]{display:none;}
+.outline-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 12px 8px;border-bottom:1px solid var(--border2);
+  font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.04em;flex-shrink:0;
+}
+.outline-close-btn{
+  background:none;border:none;cursor:pointer;
+  color:var(--muted);font-size:16px;line-height:1;padding:0 2px;
+}
+.outline-close-btn:hover{color:var(--text);}
+#outlinePanel{overflow-y:auto;flex:1;}
+.outline-entry{
+  display:flex;align-items:baseline;gap:8px;
+  width:100%;padding:7px 12px;
+  background:none;border:none;border-bottom:1px solid var(--border-subtle);
+  cursor:pointer;text-align:left;color:var(--text);
+  transition:background .12s ease;
+}
+.outline-entry:last-child{border-bottom:none;}
+.outline-entry:hover{background:var(--accent-bg);}
+.outline-entry-num{
+  font-size:11px;font-weight:600;color:var(--muted);
+  min-width:18px;flex-shrink:0;
+}
+.outline-entry-text{font-size:13px;line-height:1.4;word-break:break-word;}
+.outline-empty{
+  padding:16px 12px;font-size:13px;color:var(--muted);text-align:center;
+}
+/* Flash animation when jumping to a message */
+@keyframes outline-flash{
+  0%{background:var(--accent-bg-strong);}
+  100%{background:transparent;}
+}
+.outline-jump-flash{animation:outline-flash 1.2s ease-out forwards;}
+@media(max-width:900px){
+  #outlineToggleBtn,#outlinePanelWrapper{display:none!important;}
+}

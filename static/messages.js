@@ -1898,13 +1898,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const byTid=new Map();
     liveCalls.forEach((tc,idx)=>{
       if(!tc||typeof tc!=='object') return;
-      const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+      const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
       if(tid&&!byTid.has(tid)) byTid.set(tid,{tc,idx});
     });
     const used=new Set();
     return (rawCalls||[]).map((raw,idx)=>{
       const next={...(raw||{}),done:true};
-      const tid=next.tid||next.id||next.tool_call_id||next.call_id||'';
+      const tid=next.tid||next.id||next.tool_call_id||next.tool_use_id||next.call_id||'';
       let matchEntry=tid?byTid.get(tid):null;
       if(!matchEntry){
         const name=next.name||((next.function||{}).name)||'';
@@ -2463,7 +2463,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _liveToolTid(d, activityBurstId, activitySegmentSeq){
-    const explicit=String(d&&d.tid||'').trim();
+    const explicit=String(d&&(d.tid||d.id||d.tool_call_id||d.tool_use_id||d.call_id)||'').trim();
     if(explicit) return explicit;
     return `live-${activeSid}-${_hashString(_toolCallSignature(d,activityBurstId,activitySegmentSeq))}`;
   }
@@ -2491,7 +2491,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const candidate=toolCalls[i];
         if(!candidate||typeof candidate!=='object') continue;
         if(!allowDone&&candidate.done===true) continue;
-        const candidateTid=String(candidate.tid||candidate.id||candidate.tool_call_id||candidate.call_id||'');
+        const candidateTid=String(candidate.tid||candidate.id||candidate.tool_call_id||candidate.tool_use_id||candidate.call_id||'');
         if(candidateTid&&candidateTid===wantedTid) return i;
       }
     }
@@ -2561,7 +2561,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];
     if(!Array.isArray(inflight.messages)) inflight.messages=[...(inflight.messages||[])];
 
-    const explicitTid=String(d&&d.tid||'').trim();
+    const explicitTid=String(d&&d.tid||d&&d.id||d&&d.tool_call_id||d&&d.tool_use_id||d&&d.call_id||'').trim();
     const isComplete=phase==='complete';
     let signature=_toolCallSignature(d,current.burstId,current.segmentSeq);
     let index=-1;
@@ -4202,6 +4202,9 @@ function stopApprovalPolling() {
 let _sessionEventSource = null;
 let _sessionStreamSessionId = null;
 let _sessionStreamReconnectTimer = null;
+// Holds the session id across a hidden-tab close so the visibility handler can
+// reopen the per-session SSE on re-show (stopSessionStream nulls _sessionStreamSessionId).
+let _sessionStreamHiddenSid = null;
 
 function startSessionStream(sid) {
   if (!sid) return;
@@ -4210,6 +4213,30 @@ function startSessionStream(sid) {
   if (_sessionStreamSessionId === sid && _sessionEventSource) return;
   stopSessionStream();
   _sessionStreamSessionId = sid;
+  // Visibility hook (install once) — mirror ensureSessionEventsSSE() pattern.
+  // Capture the active session id into a dedicated var BEFORE closing, because
+  // stopSessionStream() nulls _sessionStreamSessionId — so the reopen path can't
+  // rely on it (that was the bug: the stream never reopened on tab re-show).
+  if (typeof document !== 'undefined' && !document._hermesSessionStreamVisibilityHook) {
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        _sessionStreamHiddenSid = _sessionStreamSessionId;
+        stopSessionStream();
+      } else if (_sessionStreamHiddenSid) {
+        const resumeSid = _sessionStreamHiddenSid;
+        _sessionStreamHiddenSid = null;
+        void startSessionStream(resumeSid);
+      }
+    });
+    document._hermesSessionStreamVisibilityHook = true;
+  }
+  // Don't open when tab is hidden — saves connection pool slots. Preserve the
+  // pending session id so the visibility handler reopens it on re-show (a session
+  // loaded/restored while the tab is already hidden must still reattach).
+  if (typeof document !== 'undefined' && document.hidden) {
+    _sessionStreamHiddenSid = sid;
+    return;
+  }
   try {
     const es = new EventSource(_apiUrl('api/session/stream?session_id=' + encodeURIComponent(sid)));
     _sessionEventSource = es;

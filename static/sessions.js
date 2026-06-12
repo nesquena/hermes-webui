@@ -454,6 +454,63 @@ function _inflightHasVisibleLiveState(inflight) {
   return false;
 }
 
+function _serverLiveSnapshotToolId(tc){
+  return String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
+}
+
+function _serverLiveSnapshotInflight(snapshot, uploaded){
+  if(!snapshot||typeof snapshot!=='object') return null;
+  const rawMessages=Array.isArray(snapshot.messages)?snapshot.messages:[];
+  const messages=rawMessages
+    .filter(m=>m&&m.role)
+    .map(m=>({...m,_live:m._live!==false,_journal_snapshot:true}));
+  const rawToolCalls=Array.isArray(snapshot.tool_calls)?snapshot.tool_calls:[];
+  const toolCalls=rawToolCalls
+    .filter(tc=>tc&&tc.name)
+    .map(tc=>{
+      const next={...tc,_live:true,_journal_snapshot:true};
+      const tid=_serverLiveSnapshotToolId(next);
+      if(tid&&!next.tid) next.tid=tid;
+      return next;
+    });
+  let lastAssistantText=String(snapshot.last_assistant_text||snapshot.lastAssistantText||'');
+  let lastReasoningText=String(snapshot.last_reasoning_text||snapshot.lastReasoningText||'');
+  const lastLiveAssistant=[...messages].reverse().find(m=>m&&m.role==='assistant'&&m._live);
+  if(lastLiveAssistant){
+    if(!lastAssistantText&&typeof lastLiveAssistant.content==='string') lastAssistantText=lastLiveAssistant.content;
+    if(!lastReasoningText&&typeof lastLiveAssistant.reasoning==='string') lastReasoningText=lastLiveAssistant.reasoning;
+  }
+  if((lastAssistantText||lastReasoningText)&&!lastLiveAssistant){
+    messages.push({
+      role:'assistant',
+      content:lastAssistantText,
+      reasoning:lastReasoningText||undefined,
+      _live:true,
+      _journal_snapshot:true,
+    });
+  }
+  if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText) return null;
+  const replayAfterSeq=Number(snapshot.last_seq||0);
+  const activityBurstAnchors=Array.isArray(snapshot.activity_burst_anchors)
+    ? snapshot.activity_burst_anchors
+    : (Array.isArray(snapshot.activityBurstAnchors)?snapshot.activityBurstAnchors:[]);
+  return {
+    messages,
+    uploaded:Array.isArray(uploaded)?[...uploaded]:[],
+    toolCalls,
+    todos:null,
+    todoStateMeta:null,
+    reattach:true,
+    journalSnapshot:true,
+    lastAssistantText,
+    lastReasoningText,
+    lastRunJournalSeq:Number.isFinite(replayAfterSeq)?Math.max(0,replayAfterSeq):0,
+    currentActivityBurstId:Number(snapshot.current_activity_burst_id||snapshot.currentActivityBurstId||0)||0,
+    currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
+    activityBurstAnchors,
+  };
+}
+
 function _rememberRenderedSessionSnapshot(s) {
   if (!s || !s.session_id) return;
   const previous = _sessionListSnapshotById.get(s.session_id);
@@ -732,6 +789,33 @@ async function newSession(flash, options={}){
   }
 }
 
+/**
+ * Self-heal: clear the stuck session ID from localStorage and URL when a
+ * loadSession() call failed during boot (no currentSid). This prevents the
+ * browser from retrying the same dead session on every refresh.
+ *
+ * Called from loadSession() after 401 redirect (undefined data) or any
+ * non-404 error (400, 403, 500, network). The 404 path has its own
+ * inline self-heal; this helper consolidates the non-404 cases.
+ *
+ * Only clears when !currentSid — no session is active on screen, so
+ * the stored ID is definitely stale. When currentSid is set (already
+ * viewing a session), a non-404 failure could be a transient server error
+ * and the session may still exist on the server; wiping localStorage in
+ * that case is unnecessarily destructive (#4028 follow-up).
+ *
+ * A click into a *different* dead session (currentSid && currentSid!==sid)
+ * must not run it: localStorage and the URL still point at the live session
+ * (both are only updated on a successful load), so wiping them would log
+ * the user out of a healthy session (#2782).
+ */
+function _clearStuckSessionOnBoot(sid, currentSid){
+  if(!currentSid){
+    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
+  }
+}
+
 // #2971 (Greptile P1 r3377162160): loadSession() tears down the live
 // per-session SSE at the top via stopSessionStream() (line ~754), but only the
 // success path re-arms it via startSessionStream() (line ~875). Every
@@ -837,6 +921,17 @@ async function loadSession(sid){
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const _msgInner = $('msgInner');
+    // Stale-load guard (Codex): a newer loadSession() may have started while this
+    // request was awaiting (e.g. the user clicked a healthy session during a
+    // boot-time restore). currentSid was snapshotted before the await, so without
+    // this guard a failed superseded load could self-heal (wipe localStorage/URL)
+    // for the session the user actually navigated to. If we no longer own the
+    // load, re-arm the active session's stream and bail before any DOM mutation
+    // or self-heal.
+    if (_loadingSessionId !== sid) {
+      _rearmActiveSessionStream();
+      return;
+    }
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
@@ -860,7 +955,14 @@ async function loadSession(sid){
           }
         }
       } else {
-        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';
+        // Non-404, non-401 failure (400, 403, 500, network): 401 is handled
+        // via the if(!data) guard below since api() returns undefined on 401
+        // rather than throwing. Clear the stuck session ID only during boot
+        // (!currentSid) so the next boot doesn't retry the same dead session.
+        // When currentSid is set, a 500/network error may be transient — the
+        // session might still exist on the server (#4028 follow-up).
+        _clearStuckSessionOnBoot(sid, currentSid);
+        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }
     }
@@ -895,6 +997,9 @@ async function loadSession(sid){
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
   // the browser is already navigating away, so abort the rest of this flow.
+  // No self-heal: 401 is transient auth expiry — the session still exists
+  // server-side. Clearing localStorage would wipe the saved session id and
+  // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
@@ -997,6 +1102,13 @@ async function loadSession(sid){
     // preserve, making a session switch look like the live turn vanished.
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+
+  const serverLiveSnapshot=activeStreamId
+    ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
+    : null;
+  if(serverLiveSnapshot&&(!INFLIGHT[sid]||!_inflightHasVisibleLiveState(INFLIGHT[sid]))){
+    INFLIGHT[sid]=serverLiveSnapshot;
   }
 
   if(INFLIGHT[sid]){
@@ -3640,6 +3752,19 @@ async function probeGatewaySSEStatus(){
 function startGatewaySSE(){
   stopGatewaySSE();
   if(!window._showCliSessions) return;
+  // Visibility hook (install once) — mirror ensureSessionEventsSSE() pattern
+  if(typeof document !== 'undefined' && !document._hermesGatewaySSEVisibilityHook){
+    document.addEventListener('visibilitychange', () => {
+      if(document.hidden){
+        stopGatewaySSE();
+      }else{
+        void startGatewaySSE();
+      }
+    });
+    document._hermesGatewaySSEVisibilityHook = true;
+  }
+  // Don't open when tab is hidden — saves connection pool slots
+  if(typeof document !== 'undefined' && document.hidden) return;
   try{
     _gatewaySSE = new EventSource('api/sessions/gateway/stream');
     _gatewaySSE.addEventListener('sessions_changed', (ev) => {
@@ -5207,7 +5332,7 @@ function renderSessionListFromCache(){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:seg.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
-          await loadSession(seg.session_id);
+          await loadSession(seg.session_id, {skipLineageResolve:true});
           renderSessionListFromCache();
         };
         lineageList.appendChild(row);
@@ -5234,7 +5359,7 @@ function renderSessionListFromCache(){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:child.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
-          await loadSession(child.session_id);
+          await loadSession(child.session_id, {skipLineageResolve:true});
           renderSessionListFromCache();
         };
         childList.appendChild(row);
@@ -6168,4 +6293,23 @@ async function _confirmDeleteProject(proj){
 // Global Escape handler for batch select mode
 document.addEventListener('keydown',(e)=>{
   if(e.key==='Escape'&&_sessionSelectMode) exitSessionSelectMode();
+});
+
+// Keyboard session navigation — J/K bindings
+function navigateSession(dir){
+  const rows=[...document.querySelectorAll('.session-item[data-sid]')];
+  const sids=rows.map(r=>r.dataset.sid);
+  const cur=S.session&&S.session.session_id;
+  const i=sids.indexOf(cur);
+  if(i<0||!sids.length)return;
+  const next=sids[Math.min(Math.max(i+dir,0),sids.length-1)];
+  if(next&&next!==cur) loadSession(next);
+}
+
+document.addEventListener('keydown',(e)=>{
+  if(e.key!=='j'&&e.key!=='k') return;
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  if(typeof _isInteractiveSwipeTarget==='function'&&_isInteractiveSwipeTarget(e.target)) return;
+  e.preventDefault();
+  navigateSession(e.key==='j'?1:-1);
 });

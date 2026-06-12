@@ -91,20 +91,89 @@ def test_capture_is_gated_on_streaming_session():
     assert "dataset.sessionId" in failsafe
 
 
-def test_reattach_keeps_longer_live_segment_via_length_gated_swap():
-    """After the rebuild, the preserved node is swapped back only when it carries MORE
-    streamed text than the rebuilt live turn. The length guard establishes the preserved
-    (parser) node strictly wins, so a plain replaceWith is sufficient — no segment merge
-    is needed (a merge would be a no-op under this guard), and the in-progress reply is
-    never blanked."""
+def test_reattach_swaps_when_preserved_ties_or_beats_rebuilt():
+    """After the rebuild, the preserved (parser-referenced) node is swapped back in
+    when it carries AT LEAST AS MUCH streamed text as the rebuilt live turn
+    (`_rebuiltLen <= _preservedLen`).
+
+    The `<=` (not `<`) is the #3877-reopen fix: at the throttled-persist boundary the
+    rebuilt turn's live content can EQUAL the preserved length, and the old strict-`<`
+    guard then skipped the swap — leaving the smd parser writing into the detached
+    original node (the residual "disappears, then reappears" frame). On a tie the
+    preserved node wins because it holds the live parser reference and nothing is lost.
+    """
     body = _function_body(UI_JS, "renderMessages")
     reattach = body[body.find("Re-attach the preserved live turn (#3877)") :]
     assert reattach, "the #3877 re-attach block is missing"
-    # Length comparison gates the swap (only restore when preserved has more text).
+    # Length comparison still gates the swap...
     assert "_liveAssistantSegmentTextLength" in reattach
-    assert "_rebuiltLen<_preservedLen" in reattach
-    # The swap replaces the rebuilt node with the preserved (parser-referenced) node.
+    # ...but now with `<=` so the equal-length tie also restores the parser node.
+    assert "_rebuiltLen<=_preservedLen" in reattach, (
+        "the swap must fire on a tie (<=), not only when preserved strictly wins (<) "
+        "— the strict-< guard left the parser node orphaned on the equal-length frame"
+    )
+    # The old strict-< form must be gone (it is the bug).
+    assert "_rebuiltLen<_preservedLen" not in reattach.replace("_rebuiltLen<=_preservedLen", "")
+
+
+def test_reattach_swaps_at_segment_level_to_preserve_rebuilt_structure():
+    """When the rebuild is the structural superset, the swap replaces only the rebuilt
+    LIVE SEGMENT with the preserved one, so a multi-segment turn (earlier settled
+    segments + tool/worklog groups built by the rebuild) keeps that rebuilt-only
+    structure. When the preserved (live) turn has MORE structural blocks than the
+    rebuild — a live-only tool/worklog group landed before the throttled persist
+    caught up — the whole preserved turn is restored so nothing the user saw vanishes
+    for a frame. Whole-turn replace is also the fallback when there's no live segment
+    to target."""
+    body = _function_body(UI_JS, "renderMessages")
+    reattach = body[body.find("Re-attach the preserved live turn (#3877)") :]
+    # Structural-count comparison routes segment-swap vs whole-turn restore.
+    assert "_structuralCount" in reattach
+    assert "_rebuiltStructure>=_preservedStructure" in reattach, (
+        "segment-level swap only when the rebuild is the structural superset; "
+        "otherwise restore the whole preserved turn so live-only tool cards are kept"
+    )
+    # The structural count must include the LIVE WORKLOG shell + reason content, not
+    # just .tool-call-group — a live worklog (data-live-worklog-shell) landing before
+    # the throttled persist is exactly the live-ahead structure a segment-only swap
+    # would detach (Codex round-2 CORE finding).
+    assert '.live-worklog[data-live-worklog-shell="1"]' in reattach, (
+        "structural count must include the live worklog shell so a worklog-only "
+        "live-ahead turn takes the whole-turn restore path"
+    )
+    assert ".wl-reason" in reattach
+    # Segment-level swap is the superset path.
+    assert "_rebuiltSeg.replaceWith(_preservedSeg)" in reattach, (
+        "the swap must be segment-level (replace the rebuilt live segment with the "
+        "preserved one) so rebuilt-only structure in a multi-segment turn is kept"
+    )
+    # Whole-turn replace remains for the live-ahead / no-live-segment cases.
     assert "replaceWith(_preservedLiveTurn)" in reattach
+    # The preserved live segment is resolved for the swap.
+    assert "_preservedSeg" in reattach and "_rebuiltSeg" in reattach
+
+
+def test_reattach_targets_the_parser_owned_tail_segment_not_the_first():
+    """Multi-live-segment turns (reconnect / post-tool activity boundaries) can have
+    several [data-live-assistant="1"] segments; the smd parser writes into the LAST
+    (tail) one. The re-attach must select the preserved TAIL segment — preferring the
+    one whose data-live-segment-seq matches the rebuilt tail — not the first via a bare
+    querySelector(). Picking the first would move the wrong segment and leave the
+    parser-owned tail detached (Codex CORE finding on the #3877-reopen fix)."""
+    body = _function_body(UI_JS, "renderMessages")
+    reattach = body[body.find("Re-attach the preserved live turn (#3877)") :]
+    # Preserved segment is chosen from querySelectorAll (tail), not querySelector (first).
+    assert "_preservedSegs=_preservedLiveTurn.querySelectorAll('[data-live-assistant=\"1\"]')" in reattach
+    assert "_preservedSegs[_preservedSegs.length-1]" in reattach, (
+        "must default to the LAST preserved live segment (the parser-owned tail)"
+    )
+    # And prefer the segment whose live-segment-seq matches the rebuilt tail.
+    assert "data-live-segment-seq" in reattach and "_rebuiltSeq" in reattach, (
+        "must prefer the preserved segment matching the rebuilt tail's "
+        "data-live-segment-seq before falling back to the last segment"
+    )
+    # The first-only querySelector form must NOT be how _preservedSeg is derived.
+    assert "_preservedSeg=_preservedLiveTurn.querySelector(" not in reattach
 
 
 def test_reattach_runs_after_rebuild_loop():

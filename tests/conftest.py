@@ -85,6 +85,9 @@ def _isolate_hermes_config_path():
     os.environ['HERMES_CONFIG_PATH'] = isolated_config_path
 
 
+_MISSING = object()  # sentinel: api.profiles module not loaded pre-test
+
+
 @pytest.fixture(autouse=True)
 def _restore_profile_home_globals():
     """Restore HERMES_HOME / HERMES_BASE_HOME after every test.
@@ -102,6 +105,19 @@ def _restore_profile_home_globals():
     """
     saved_home = os.environ.get('HERMES_HOME')
     saved_base = os.environ.get('HERMES_BASE_HOME')
+    # Snapshot the process-global active-profile name too. Several tests call
+    # switch_profile() (process_wide=True), which mutates api.profiles._active_profile
+    # in place and never restores it. In a sequential run the next test usually
+    # re-establishes its own profile so the leak is masked, but a test that only
+    # patches a profile-scoped *path* (e.g. config._models_cache_path) without
+    # setting an active profile then resolves the LEAKED profile — e.g.
+    # _get_models_cache_path() returns models_cache.<leaked>.json instead of the
+    # patched default path. Restoring the name here fixes the whole class.
+    prof_mod_pre = sys.modules.get('api.profiles')
+    # Use a sentinel so we restore whenever the module was importable pre-test,
+    # independent of the value (covers a hypothetical None, though _active_profile
+    # defaults to 'default'). _MISSING means "module wasn't loaded" → skip restore.
+    saved_active_profile = getattr(prof_mod_pre, '_active_profile', _MISSING) if prof_mod_pre else _MISSING
     # Re-derive the cached base-home global BEFORE the test runs too: a prior
     # test's teardown ordering (monkeypatch restoring sys.modules['api.profiles']
     # after this fixture's teardown) can leave the live module's
@@ -114,6 +130,14 @@ def _restore_profile_home_globals():
             os.environ.pop(key, None)
         else:
             os.environ[key] = val
+    prof_mod_post = sys.modules.get('api.profiles')
+    if prof_mod_post is not None and saved_active_profile is not _MISSING:
+        prof_mod_post._active_profile = saved_active_profile
+        # Also clear any leaked per-request thread-local profile (issue #798).
+        try:
+            prof_mod_post.clear_request_profile()
+        except Exception:
+            pass
     _rederive_default_hermes_home()
 
 

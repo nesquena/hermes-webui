@@ -1079,6 +1079,7 @@ from api.config import (
     _resolve_cli_toolsets,
     _INDEX_HTML_PATH,
     get_available_models,
+    _provider_is_known_or_configured,
     IMAGE_EXTS,
     MD_EXTS,
     MIME_MAP,
@@ -1330,6 +1331,222 @@ def _run_journal_status_payload(summary: dict, *, active: bool = False) -> dict:
     }
 
 
+_RUN_JOURNAL_TOOL_ID_KEYS = ("tid", "id", "tool_call_id", "tool_use_id", "call_id")
+
+
+def _run_journal_snapshot_tool_id(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in _RUN_JOURNAL_TOOL_ID_KEYS:
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _truncate_journal_snapshot_value(value, *, limit: int = 120):
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + "..."
+    if isinstance(value, dict):
+        return {str(k): _truncate_journal_snapshot_value(v, limit=limit) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_truncate_journal_snapshot_value(v, limit=limit) for v in value[:20]]
+    return value
+
+
+def _run_journal_live_snapshot(stream_id: str | None) -> dict | None:
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return None
+    summary = find_run_summary(stream_id)
+    if not summary:
+        return None
+    session_id = str(summary.get("session_id") or "")
+    if not session_id:
+        return None
+    journal = read_run_events(session_id, stream_id)
+    events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
+    if not events:
+        return None
+
+    assistant_text = ""
+    reasoning_text = ""
+    messages: list[dict] = []
+    tool_calls: list[dict] = []
+    activity_burst_anchors: list[dict] = []
+    current_activity_burst_id = 0
+    fresh_segment = True
+    last_ts = None
+
+    def mark_boundary() -> int:
+        nonlocal current_activity_burst_id
+        text_end = len(assistant_text)
+        if text_end <= 0:
+            return current_activity_burst_id
+        last_end = max(
+            [int(anchor.get("textEnd") or 0) for anchor in activity_burst_anchors]
+            or [0]
+        )
+        if text_end > last_end:
+            current_activity_burst_id += 1
+            activity_burst_anchors.append(
+                {"id": current_activity_burst_id, "textEnd": text_end}
+            )
+        return current_activity_burst_id
+
+    def update_completed_tool(payload: dict) -> None:
+        tool_id = _run_journal_snapshot_tool_id(payload)
+        name = str(payload.get("name") or "").strip()
+        for call in reversed(tool_calls):
+            if call.get("done"):
+                continue
+            call_id = _run_journal_snapshot_tool_id(call)
+            if (tool_id and call_id == tool_id) or (not tool_id and name and call.get("name") == name):
+                call["done"] = True
+                if payload.get("preview") is not None:
+                    call["snippet"] = str(payload.get("preview") or "")
+                    call["preview"] = call.get("preview") or call["snippet"]
+                if payload.get("duration") is not None:
+                    call["duration"] = payload.get("duration")
+                if payload.get("is_error") is not None:
+                    call["is_error"] = bool(payload.get("is_error"))
+                return
+
+        if not name or name == "clarify":
+            return
+        call = {
+            "name": name,
+            "preview": str(payload.get("preview") or ""),
+            "snippet": str(payload.get("preview") or ""),
+            "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+            "done": True,
+            "_live": True,
+            "_journal_snapshot": True,
+            "_journal_stream_id": stream_id,
+        }
+        tool_id = _run_journal_snapshot_tool_id(payload)
+        if tool_id:
+            call["tid"] = tool_id
+        for key in _RUN_JOURNAL_TOOL_ID_KEYS:
+            if payload.get(key):
+                call[key] = str(payload.get(key))
+        if current_activity_burst_id:
+            call["activityBurstId"] = current_activity_burst_id
+            call["activitySegmentSeq"] = current_activity_burst_id
+        tool_calls.append(call)
+
+    for event in events:
+        event_name = str(event.get("event") or event.get("type") or "")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        last_ts = event.get("created_at", last_ts)
+        if event_name == "token":
+            text = str(payload.get("text") or "")
+            if text:
+                assistant_text += text
+                fresh_segment = False
+            continue
+        if event_name == "reasoning":
+            reasoning_text += str(payload.get("text") or "")
+            continue
+        if event_name == "interim_assistant":
+            visible = str(payload.get("text") or "").strip()
+            if visible:
+                if payload.get("already_streamed"):
+                    if not assistant_text:
+                        assistant_text = visible
+                else:
+                    assistant_text = f"{assistant_text}\n\n{visible}" if assistant_text else visible
+                mark_boundary()
+                fresh_segment = True
+            continue
+        if event_name == "tool":
+            name = str(payload.get("name") or "").strip()
+            if not name or name == "clarify":
+                continue
+            boundary_id = mark_boundary()
+            tool_id = _run_journal_snapshot_tool_id(payload)
+            call = {
+                "name": name,
+                "preview": str(payload.get("preview") or ""),
+                "args": _truncate_journal_snapshot_value(payload.get("args") or {}),
+                "done": False,
+                "_live": True,
+                "_journal_snapshot": True,
+                "_journal_stream_id": stream_id,
+            }
+            if tool_id:
+                call["tid"] = tool_id
+            for key in _RUN_JOURNAL_TOOL_ID_KEYS:
+                if payload.get(key):
+                    call[key] = str(payload.get(key))
+            if boundary_id:
+                call["activityBurstId"] = boundary_id
+                call["activitySegmentSeq"] = boundary_id
+            tool_calls.append(call)
+            fresh_segment = True
+            continue
+        if event_name == "tool_complete":
+            update_completed_tool(payload)
+            fresh_segment = True
+
+    if assistant_text or reasoning_text:
+        message = {
+            "role": "assistant",
+            "content": assistant_text,
+            "_live": True,
+            "_journal_snapshot": True,
+            "_journal_stream_id": stream_id,
+        }
+        if reasoning_text:
+            message["reasoning"] = reasoning_text
+        if last_ts is not None:
+            message["_ts"] = last_ts
+        messages.append(message)
+
+    if not messages and not tool_calls:
+        return None
+
+    visible_anchors = [
+        anchor
+        for anchor in activity_burst_anchors
+        if int(anchor.get("textEnd") or 0) < len(assistant_text)
+    ]
+    segment_count = len(visible_anchors) + (1 if assistant_text else 0)
+    current_live_segment_seq = max(segment_count, len(activity_burst_anchors), 0)
+    try:
+        summary_last_seq = max(0, int(summary.get("last_seq") or 0))
+    except (TypeError, ValueError):
+        summary_last_seq = 0
+    try:
+        event_last_seq = max(0, int(events[-1].get("seq") or 0))
+    except (TypeError, ValueError):
+        event_last_seq = 0
+    if event_last_seq >= summary_last_seq:
+        last_seq = event_last_seq
+        last_event_id = events[-1].get("event_id") or (
+            f"{stream_id}:{event_last_seq}" if event_last_seq else summary.get("last_event_id")
+        )
+    else:
+        last_seq = summary_last_seq
+        last_event_id = summary.get("last_event_id") or events[-1].get("event_id")
+
+    return {
+        "session_id": session_id,
+        "stream_id": stream_id,
+        "last_seq": last_seq,
+        "last_event_id": last_event_id,
+        "event_count": len(events),
+        "fresh_segment": fresh_segment,
+        "messages": messages,
+        "tool_calls": tool_calls,
+        "last_assistant_text": assistant_text,
+        "last_reasoning_text": reasoning_text,
+        "activity_burst_anchors": activity_burst_anchors,
+        "current_activity_burst_id": current_activity_burst_id,
+        "current_live_segment_seq": current_live_segment_seq,
+    }
+
+
 def _ensure_full_session_before_mutation(sid: str, session):
     """Reload cached metadata-only sessions before mutating persisted fields.
 
@@ -1349,6 +1566,87 @@ def _ensure_full_session_before_mutation(sid: str, session):
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
     return full_session
+
+
+def _get_or_materialize_session(sid: str):
+    """Get a session, materializing from CLI/agent metadata if not in WebUI store.
+
+    Mirrors the fallback logic in /api/session/archive (routes.py:~8530).
+    Raises:
+        KeyError: session not found in any store
+        PermissionError: session is read-only (messaging/Claude Code)
+    """
+    try:
+        s = get_session(sid)
+        s = _ensure_full_session_before_mutation(sid, s)
+        # Read-only guard on the happy path too: an already-stored read-only /
+        # imported session must not be mutated via rename/update/move
+        # (Session.save() does not enforce this). Scope this to the explicit
+        # read_only flag — a stored messaging session already owns its sidecar,
+        # so the messaging-fork concern only applies to the materialize fallback
+        # below (and the heuristic record-check would mis-trip on mock sessions).
+        if getattr(s, "read_only", False):
+            raise PermissionError("read-only imported session")
+        return s
+    except KeyError:
+        pass
+
+    # Fallback: try to materialize from CLI/agent session metadata
+    cli_meta = _lookup_cli_session_metadata(sid)
+    if not cli_meta:
+        raise KeyError(sid)
+
+    # Read-only guard: messaging sessions and Claude Code imports cannot be
+    # mutated. Reject BOTH an explicit read_only flag AND any messaging-source
+    # record — agent rows normalize messaging sources without setting read_only,
+    # and state.db (not a WebUI sidecar) is the source of truth for them, so
+    # materializing a writable sidecar would fork the title/state.
+    if cli_meta.get("read_only") or _is_messaging_session_record(cli_meta):
+        raise PermissionError("read-only imported session")
+
+    # Preserve source metadata fields
+    def _apply_source_meta(s):
+        s.is_cli_session = True
+        s.source_tag = cli_meta.get("source_tag")
+        s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+        s.session_source = cli_meta.get("session_source")
+        s.source_label = cli_meta.get("source_label")
+        s.user_id = cli_meta.get("user_id")
+        s.chat_id = cli_meta.get("chat_id")
+        s.chat_type = cli_meta.get("chat_type")
+        s.thread_id = cli_meta.get("thread_id")
+        s.session_key = cli_meta.get("session_key")
+        s.platform = cli_meta.get("platform")
+
+    if _is_messaging_session_record(cli_meta):
+        # Messaging sessions: lightweight Session with no messages (state.db is source of truth)
+        s = Session(
+            session_id=sid,
+            title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
+            workspace=get_last_workspace(),
+            model=cli_meta.get("model") or "unknown",
+            created_at=cli_meta.get("created_at"),
+            updated_at=cli_meta.get("updated_at"),
+        )
+        _apply_source_meta(s)
+        s.save(touch_updated_at=False)
+    else:
+        # Regular CLI/agent sessions: import full message history
+        msgs = get_cli_session_messages(sid)
+        if not msgs:
+            raise KeyError(sid)
+        s = import_cli_session(
+            sid,
+            cli_meta.get("title") or title_from(msgs, "CLI Session"),
+            msgs,
+            cli_meta.get("model") or "unknown",
+            profile=cli_meta.get("profile"),
+            created_at=cli_meta.get("created_at"),
+            updated_at=cli_meta.get("updated_at"),
+        )
+        _apply_source_meta(s)
+
+    return s
 
 
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
@@ -1632,10 +1930,11 @@ def _onboarding_request_is_local(handler) -> bool:
     return bool(addr.is_loopback or addr.is_private)
 
 
-def _onboarding_gate_allows(handler) -> bool:
+def _onboarding_gate_allows(handler, auth_enabled: bool | None = None) -> bool:
     from api.auth import is_auth_enabled
 
-    if is_auth_enabled() or _truthy_env("HERMES_WEBUI_ONBOARDING_OPEN"):
+    auth_enabled = is_auth_enabled() if auth_enabled is None else auth_enabled
+    if auth_enabled or _truthy_env("HERMES_WEBUI_ONBOARDING_OPEN"):
         return True
     return _onboarding_request_is_local(handler)
 
@@ -2416,6 +2715,16 @@ def _resolve_compatible_session_model_state(
         if not provider_raw or not bare_model:
             return model, requested_provider, False
 
+        # A fresh, explicit user pick is by definition not a stale artifact, so
+        # honor the @provider:model exactly as chosen — never reroute it via the
+        # active-provider family repair or the cold-catalog fallback below (a bare
+        # id like "gpt-oss-120b" under an OpenAI-active agent would otherwise get
+        # pulled to OpenAI by the family-match branch). If the named provider is
+        # unreachable the user sees a clear run-time error rather than a silent
+        # model swap. Must sit above the family-match repair (#3737 principle).
+        if explicit_model_pick:
+            return model, provider_raw, False
+
         raw_provider_ids, normalized_provider_ids = _catalog_provider_id_sets(catalog)
         hint_matches_active = (
             provider_raw == raw_active_provider
@@ -2447,6 +2756,55 @@ def _resolve_compatible_session_model_state(
                 else None
             )
             return bare_model, provider_context, True
+        # On NON-explicit resolves (2nd+ turn, chat switch — explicit picks already
+        # returned above), preserve the selection only when all three hold:
+        #
+        #   * provider_normalized == "" — a non-first-party provider hint
+        #     (ollama-cloud / deepseek / xai / a named custom proxy). First-party
+        #     families fall through to the stale-cross-provider repair below.
+        #
+        #   * the BARE model is not a first-party family id (does not start with
+        #     gpt/claude/gemini), i.e. not a misrouted first-party model that a
+        #     vanished provider used to host (e.g. "@copilot:claude-opus-4.6").
+        #
+        #   * the provider is KNOWN or CONFIGURED. This is the load-bearing
+        #     distinction: catalog-absence has two causes —
+        #       (a) a cold live-discovery provider (ollama-cloud is configured; its
+        #           group just isn't in this cached snapshot yet) → preserve, and
+        #       (b) a genuinely removed/unknown provider ("@removed:mistral-large"
+        #           configured nowhere) → fall through to the default so chat/start
+        #           doesn't route to an unreachable provider.
+        #     _provider_is_known_or_configured() decides this from the static
+        #     provider registry + config state, NOT from the cold catalog snapshot
+        #     (re-deriving that live would defeat the prefer_cached_catalog win).
+        #
+        # DELIBERATE: the registry test treats a KNOWN built-in (deepseek, minimax,
+        # ollama-cloud, …) as preservable even when the user has no key configured
+        # for it. We accept this on purpose. The only fully-reliable "is this
+        # provider authenticated" signal is the live auth store / catalog rebuild —
+        # exactly the cost this hot path avoids — and a cheap config/env-only check
+        # would mis-classify providers configured via OAuth/auth-store (ollama-cloud
+        # among them), re-introducing the original silent-revert bug for them. So a
+        # known-but-unconfigured pick is kept; the user gets a clear run-time auth
+        # error instead of a silent swap to the default. Pinned by
+        # test_at_provider_known_unconfigured_builtin_is_intentionally_preserved.
+        #
+        # KNOWN LIMITATION: the first-party-family test is a bare-name prefix match
+        # (the same approximation _model_matches_active_provider_family uses). A
+        # genuine third-party model whose name merely *starts* with gpt/claude/
+        # gemini (e.g. "@ollama:gpt4all-mini") is therefore still mis-classified as
+        # first-party and reverted on non-explicit paths. A name-based check cannot
+        # disambiguate that; the behavior is pinned by
+        # test_at_provider_first_party_named_third_party_model_known_limitation.
+        _bare_is_first_party_family = any(
+            bare_model.lower().startswith(_p) for _p in ("gpt", "claude", "gemini")
+        )
+        if (
+            not provider_normalized
+            and not _bare_is_first_party_family
+            and _provider_is_known_or_configured(provider_raw)
+        ):
+            return model, provider_raw, False
         if default_model:
             provider_context = (
                 raw_active_provider
@@ -3044,6 +3402,47 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
             return merged_messages
         return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
     return sidecar_messages
+
+
+
+def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
+    """Include immediate parent-only rows when a WebUI continuation sidecar is partial.
+
+    Compression/continuation sessions should render as one conversation. Most
+    child sidecars are cumulative, so this is usually a cheap no-op. If a child
+    sidecar accidentally omits rows that still exist in the immediate parent,
+    merge those parent-only rows into the display transcript. Explicit forks and
+    generic child-session rows remain isolated; they intentionally start from a
+    subset of their parent.
+    """
+    primary_messages = list(messages if messages is not None else (getattr(session, "messages", []) or []))
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id:
+        return primary_messages
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
+    if source == "fork" or relationship == "child_session":
+        return primary_messages
+    try:
+        parent = get_session(parent_id, metadata_only=False)
+    except Exception:
+        return primary_messages
+    parent_messages = list(getattr(parent, "messages", []) or [])
+    if not parent_messages:
+        return primary_messages
+    merged_messages = []
+    seen_message_keys = set()
+    for msg in sorted(list(parent_messages) + list(primary_messages), key=lambda m: (
+        float(m.get("timestamp") or 0),
+        str(m.get("role") or ""),
+        str(m.get("content") or ""),
+    )):
+        key = _session_message_merge_key(msg)
+        if key in seen_message_keys:
+            continue
+        seen_message_keys.add(key)
+        merged_messages.append(msg)
+    return merged_messages
 
 
 def _message_summary(messages) -> dict:
@@ -5547,6 +5946,11 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/models":
+        # Profile-scoping for non-default profiles (#3957) is handled INSIDE
+        # get_available_models() — it binds the active profile's env + TLS on
+        # the detached rebuild worker (and the legacy synchronous rebuild),
+        # which the request-thread wrapper could not reach. See
+        # api.config.get_available_models cold path + profile_scope_for_detached_worker.
         return j(handler, get_available_models())
 
     if parsed.path == "/api/models/live":
@@ -5574,7 +5978,14 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Providers (GET) ──
     if parsed.path == "/api/providers":
-        return j(handler, get_providers())
+        # Apply the active per-request profile's env so provider auth probes
+        # resolve against that profile's credentials, not the process-default
+        # profile's (#3957). Without this, get_auth_status() probes on a
+        # non-default profile resolve the wrong/empty creds and can stall past
+        # the 30s frontend timeout. No-op for the default profile.
+        from api.profiles import profile_env_for_active_request
+        with profile_env_for_active_request("/api/providers", logger_override=logger):
+            return j(handler, get_providers())
 
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
@@ -5762,6 +6173,7 @@ def handle_get(handler, parsed) -> bool:
                         state_db_messages,
                         truncation_watermark=getattr(s, "truncation_watermark", None),
                     )
+                _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
             else:
                 if is_messaging_session and cli_messages:
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
@@ -5894,6 +6306,19 @@ def handle_get(handler, parsed) -> bool:
                         journal,
                         active=journal_active,
                     )
+                    if journal_active:
+                        try:
+                            snapshot = _run_journal_live_snapshot(original_stream_id)
+                        except Exception:
+                            logger.debug(
+                                "Failed to build runtime journal snapshot for %s",
+                                original_stream_id,
+                                exc_info=True,
+                            )
+                            snapshot = None
+                        if snapshot:
+                            raw["runtime_journal_snapshot"] = snapshot
+                            raw["pending_attachments"] = getattr(s, "pending_attachments", []) or []
             # Cold-load: derive the latest settled todo snapshot from the full
             # merged transcript, not the truncated display window. This keeps
             # the Todos panel correct after refresh even when the latest todo
@@ -7269,7 +7694,18 @@ def handle_post(handler, parsed) -> bool:
                     return j(handler, set_reasoning_display(False))
                 return bad(handler, f"display must be show|hide|on|off (got '{display}')")
             if effort is not None:
-                return j(handler, set_reasoning_effort(effort))
+                model_id = str(body.get("model") or "").strip() or None
+                provider_id = str(body.get("provider") or "").strip() or None
+                base_url = str(body.get("base_url") or "").strip() or None
+                return j(
+                    handler,
+                    set_reasoning_effort(
+                        effort,
+                        model_id=model_id,
+                        provider_id=provider_id,
+                        base_url=base_url,
+                    ),
+                )
             return bad(handler, "reasoning: must supply 'display' or 'effort'")
         except ValueError as e:
             return bad(handler, str(e))
@@ -7322,10 +7758,11 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         try:
-            s = get_session(body["session_id"])
-            s = _ensure_full_session_before_mutation(body["session_id"], s)
+            s = _get_or_materialize_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
+        except PermissionError:
+            return bad(handler, "Read-only imported sessions cannot be renamed from WebUI", 403)
         with _get_session_agent_lock(body["session_id"]):
             from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, body["title"])
@@ -7512,9 +7949,11 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         try:
-            s = get_session(body["session_id"])
+            s = _get_or_materialize_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
+        except PermissionError:
+            return bad(handler, "Read-only imported sessions cannot be updated from WebUI", 403)
         old_ws = getattr(s, "workspace", "")
         old_model = getattr(s, "model", None)
         old_provider = getattr(s, "model_provider", None)
@@ -8129,7 +8568,7 @@ def handle_post(handler, parsed) -> bool:
             from api.config import invalidate_models_cache
             invalidate_models_cache()
             return j(handler, result, extra_headers={
-                'Set-Cookie': build_profile_cookie(name),
+                'Set-Cookie': build_profile_cookie(name, handler),
             })
         except (ValueError, FileNotFoundError) as e:
             return bad(handler, _sanitize_error(e), 404)
@@ -8227,6 +8666,21 @@ def handle_post(handler, parsed) -> bool:
                     "Unset the env var and restart the server before changing the password here.",
                     409,
                 )
+
+        # First password creation decides who owns a previously passwordless
+        # WebUI. While auth is disabled, the generic /api/settings route is also
+        # unauthenticated, so gate bootstrap password setup the same way as
+        # onboarding setup: local/private networks only, unless the operator
+        # explicitly opts into remote bootstrap with HERMES_WEBUI_ONBOARDING_OPEN.
+        if requested_password and not auth_enabled_before:
+            if not _onboarding_gate_allows(handler, auth_enabled_before):
+                return bad(
+                    handler,
+                    "First password setup is only available from local networks when auth is not enabled. "
+                    "To bootstrap this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.",
+                    403,
+                )
+
         if requested_passwordless:
             from api.auth import _passkey_feature_flag_enabled
             from api.passkeys import registered_credentials
@@ -8481,9 +8935,11 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         try:
-            s = get_session(body["session_id"])
+            s = _get_or_materialize_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
+        except PermissionError:
+            return bad(handler, "Read-only imported sessions cannot be moved from WebUI", 403)
         # #1614: refuse moves into a project owned by another profile.
         target_pid = body.get("project_id") or None
         if target_pid:
