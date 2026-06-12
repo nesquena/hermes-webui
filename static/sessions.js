@@ -326,6 +326,15 @@ function _hasUnreadForSession(s) {
   return s.message_count > Number(counts[s.session_id] || 0);
 }
 
+function _sessionHasUnreadForSidebar(s, viewedCounts=null) {
+  if (!s || !s.session_id) return false;
+  if (_hasSessionCompletionUnread(s.session_id)) return true;
+  const counts = viewedCounts || _getSessionViewedCounts();
+  if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) return false;
+  if (!Number.isFinite(s.message_count)) return false;
+  return s.message_count > Number(counts[s.session_id] || 0);
+}
+
 function _isSessionActivelyViewedForList(sid) {
   if (!sid || !S.session || S.session.session_id !== sid) return false;
   if (typeof _loadingSessionId !== 'undefined' && _loadingSessionId && _loadingSessionId !== sid) return false;
@@ -1453,6 +1462,7 @@ function _setSessionUnreadOnlyFilter(enabled) {
   const next = !!enabled;
   if (_sessionUnreadOnlyFilter === next) return;
   _sessionUnreadOnlyFilter = next;
+  _activeProject = null;
   _selectedSessions.clear();
   _sessionSelectMode = false;
   try { localStorage.setItem('hermes-session-unread-only-filter', next ? '1' : '0'); } catch (_e) {}
@@ -4927,6 +4937,7 @@ function renderSessionListFromCache(){
   const {
     cliSessionCount,
     unreadCount,
+    unreadById,
     profileFiltered,
     sessionsRaw,
     archivedCount,
@@ -5124,7 +5135,9 @@ function renderSessionListFromCache(){
   if(_sessionUnreadOnlyFilter&&sessions.length===0){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
-    empty.textContent='No unread sessions match the current filters.';
+    empty.textContent=_sessionSourceFilter==='cli'&&!window._showCliSessions
+      ? 'Enable Show agent sessions in Settings to list unread CLI sessions here.'
+      : 'No unread sessions match the current filters.';
     list.appendChild(empty);
   } else if(_sessionSourceFilter==='cli'&&sessions.length===0){
     const empty=document.createElement('div');
@@ -5280,7 +5293,7 @@ function renderSessionListFromCache(){
     const isStreaming=_isSessionEffectivelyStreaming(s);
     _rememberRenderedStreamingState(s, isStreaming);
     _rememberRenderedSessionSnapshot(s);
-    const hasUnread=_hasUnreadForSession(s)&&!isActive;
+    const hasUnread=Boolean(unreadById.get(s.session_id))&&!isActive;
     const attention=_sessionAttentionState(s);
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
