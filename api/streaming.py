@@ -255,7 +255,7 @@ def _runtime_preferred_base_url(
         or ""
     ).strip().lower()
     if provider_id.startswith("custom:"):
-        return configured_base_url
+        return configured_base_url or runtime_base_url
     return runtime_base_url
 
 
@@ -5901,6 +5901,7 @@ def _run_agent_streaming(
             resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
                 model_with_provider_context(model, provider_context)
             )
+            configured_base_url = resolved_base_url
 
             # Resolve API key via Hermes runtime provider (matches gateway behaviour).
             # Pass the resolved provider so non-default providers get their own credentials.
@@ -5917,7 +5918,7 @@ def _run_agent_streaming(
                 if not resolved_provider:
                     resolved_provider = _rt.get("provider")
                 resolved_base_url = _runtime_preferred_base_url(
-                    _rt, resolved_provider, resolved_base_url
+                    _rt, resolved_provider, configured_base_url
                 )
             except Exception as _e:
                 print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
@@ -6797,7 +6798,7 @@ def _run_agent_streaming(
                             if not resolved_provider:
                                 resolved_provider = _heal_rt.get('provider')
                             resolved_base_url = _runtime_preferred_base_url(
-                                _heal_rt, resolved_provider, resolved_base_url
+                                _heal_rt, resolved_provider, configured_base_url
                             )
                             resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
                                 resolved_provider, resolved_api_key, resolved_base_url
@@ -7751,7 +7752,7 @@ def _run_agent_streaming(
                     if not resolved_provider:
                         resolved_provider = _heal_rt.get('provider')
                     resolved_base_url = _runtime_preferred_base_url(
-                        _heal_rt, resolved_provider, resolved_base_url
+                        _heal_rt, resolved_provider, configured_base_url
                     )
                     resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
                         resolved_provider, resolved_api_key, resolved_base_url

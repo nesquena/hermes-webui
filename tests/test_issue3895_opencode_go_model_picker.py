@@ -26,6 +26,14 @@ def test_runtime_preferred_base_url_keeps_custom_config_base_url():
     ) == "https://config.example.com/v1"
 
 
+def test_runtime_preferred_base_url_uses_runtime_for_custom_provider_without_config():
+    assert streaming._runtime_preferred_base_url(
+        {"provider": "custom:opencode-proxy", "base_url": "https://runtime.example.com"},
+        "custom:opencode-proxy",
+        None,
+    ) == "https://runtime.example.com"
+
+
 def test_streaming_passes_target_model_and_prefers_runtime_base_url(monkeypatch):
     captured = {}
 
@@ -159,13 +167,16 @@ def test_streaming_passes_target_model_and_prefers_runtime_base_url(monkeypatch)
     monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
 
     streaming.STREAMS[fake_stream_id] = fake_queue
-    streaming._run_agent_streaming(
-        session_id=fake_session.session_id,
-        msg_text="hello from picker",
-        model="glm-5.1",
-        workspace="/tmp",
-        stream_id=fake_stream_id,
-    )
+    try:
+        streaming._run_agent_streaming(
+            session_id=fake_session.session_id,
+            msg_text="hello from picker",
+            model="glm-5.1",
+            workspace="/tmp",
+            stream_id=fake_stream_id,
+        )
+    finally:
+        streaming.STREAMS.pop(fake_stream_id, None)
 
     resolve_runtime_provider.assert_called_once_with(
         requested="opencode-go",
@@ -180,5 +191,6 @@ def test_streaming_reuses_runtime_base_url_helper_in_self_heal_paths():
     source = (pathlib.Path(__file__).parent.parent / "api" / "streaming.py").read_text(
         encoding="utf-8"
     )
-    assert source.count("_runtime_preferred_base_url(") == 4
-
+    assert "resolved_base_url = _runtime_preferred_base_url(\n                    _rt, resolved_provider, configured_base_url\n                )" in source
+    assert "resolved_base_url = _runtime_preferred_base_url(\n                                _heal_rt, resolved_provider, configured_base_url\n                            )" in source
+    assert "resolved_base_url = _runtime_preferred_base_url(\n                        _heal_rt, resolved_provider, configured_base_url\n                    )" in source
