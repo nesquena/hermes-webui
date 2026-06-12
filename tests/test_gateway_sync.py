@@ -1266,6 +1266,32 @@ def test_import_cli_falls_back_to_named_profile_state_db(cleanup_test_sessions):
             pass
 
 
+def test_all_profiles_cli_contexts_normalizes_default_profile_name(tmp_path, monkeypatch):
+    from api import models, profiles
+
+    profiles_root = tmp_path / "profiles"
+    profiles_root.mkdir()
+    (profiles_root / "research").mkdir()
+
+    monkeypatch.setattr(profiles, "_profiles_root", lambda: profiles_root)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: None)
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda profile_name: tmp_path / (profile_name or "default-home"),
+    )
+    monkeypatch.setattr(
+        profiles,
+        "list_profiles_api",
+        lambda: [{"name": None}, {"name": "research"}],
+    )
+
+    contexts, _cache_key = models._all_profiles_cli_contexts()
+
+    assert ("default" in [profile for _home, _db_path, profile in contexts])
+    assert ("research" in [profile for _home, _db_path, profile in contexts])
+
+
 def test_sessions_response_backfills_imported_messaging_source_metadata(cleanup_test_sessions):
     """Old imported messaging sessions should still expose source metadata in /api/sessions."""
     from api.models import Session

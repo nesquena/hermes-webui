@@ -3794,7 +3794,7 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
             return
         seen_homes.add(home_key)
         db_path = hermes_home / 'state.db'
-        profile_value = str(profile_name).strip() or 'default'
+        profile_value = str(profile_name or 'default').strip() or 'default'
         contexts.append((hermes_home, db_path, profile_value))
         cache_entries.append((home_key, profile_value, _sqlite_file_stat_cache_key(db_path)))
 
