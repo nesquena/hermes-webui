@@ -4730,39 +4730,45 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   let webuiSessionCount=0;
   let cliSessionCount=0;
-  for(const s of allMatched){
-    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
-    if(_isCliSession(s)) cliSessionCount++;
-    else webuiSessionCount++;
-  }
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
-    _sessionSourceFilter='webui';
-  }
-  const showCliOnly=_sessionSourceFilter==='cli';
-  const profileFiltered=[];
-  const sessionsRaw=[];
-  let archivedCount=0;
+  const webuiProfileFiltered=[];
+  const cliProfileFiltered=[];
+  const webuiSessionsRaw=[];
+  const cliSessionsRaw=[];
+  let webuiArchivedCount=0;
+  let cliArchivedCount=0;
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
     const isCli=_isCliSession(s);
-    if(showCliOnly ? !isCli : isCli) continue;
+    if(isCli) cliSessionCount++;
+    else webuiSessionCount++;
     if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
+    const profileFiltered=isCli ? cliProfileFiltered : webuiProfileFiltered;
+    const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;
     profileFiltered.push(s);
     if(_activeProject===NO_PROJECT_FILTER){
       if(s.project_id) continue;
     } else if(_activeProject){
       if(s.project_id!==_activeProject) continue;
     }
-    if(s.archived) archivedCount++;
+    if(s.archived){
+      if(isCli) cliArchivedCount++;
+      else webuiArchivedCount++;
+    }
     if(!_showArchived&&s.archived) continue;
     sessionsRaw.push(s);
   }
+  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
+    _sessionSourceFilter='webui';
+  }
+  const showCliOnly=_sessionSourceFilter==='cli';
   return {
     webuiSessionCount,
     cliSessionCount,
-    profileFiltered,
-    sessionsRaw,
-    archivedCount,
+    profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered,
+    sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw,
+    archivedCount: showCliOnly ? cliArchivedCount : webuiArchivedCount,
+    webuiSessionsRaw,
+    cliSessionsRaw,
   };
 }
 
@@ -4770,22 +4776,9 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw){
   return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
 }
 
-function _countRenderedSidebarRows(allMatched, activeSidForSidebar, showCliOnly){
-  const sessionsRaw=[];
-  for(const s of allMatched){
-    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
-    const isCli=_isCliSession(s);
-    if(showCliOnly ? !isCli : isCli) continue;
-    if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
-    if(_activeProject===NO_PROJECT_FILTER){
-      if(s.project_id) continue;
-    } else if(_activeProject){
-      if(s.project_id!==_activeProject) continue;
-    }
-    if(!_showArchived&&s.archived) continue;
-    sessionsRaw.push(s);
-  }
-  return _renderSidebarRowsFromRawSessions(sessionsRaw).length;
+function _countRenderedSidebarRowsFromRawSessions(sessionsRaw){
+  // Child attachment does not change the top-level row count shown in the chip label.
+  return _collapseSessionLineageForSidebar(sessionsRaw).length;
 }
 
 function renderSessionListFromCache(){
@@ -4816,14 +4809,16 @@ function renderSessionListFromCache(){
     profileFiltered,
     sessionsRaw,
     archivedCount,
+    webuiSessionsRaw,
+    cliSessionsRaw,
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
   const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw);
   const renderedWebuiSessionCount=_sessionSourceFilter==='webui'
     ? sessions.length
-    : _countRenderedSidebarRows(allMatched, activeSidForSidebar, false);
+    : _countRenderedSidebarRowsFromRawSessions(webuiSessionsRaw);
   const renderedCliSessionCount=_sessionSourceFilter==='cli'
     ? sessions.length
-    : _countRenderedSidebarRows(allMatched, activeSidForSidebar, true);
+    : _countRenderedSidebarRowsFromRawSessions(cliSessionsRaw);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
   const list=$('sessionList');
   const animateRefresh=_sessionListRefreshAnimationPending;
