@@ -3868,7 +3868,25 @@ function transcript(){
   return lines.join('\n');
 }
 
-function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();}
+let _composerAutoResizeRaf=0;
+function autoResize(){
+  if(_composerAutoResizeRaf && typeof cancelAnimationFrame==='function'){
+    cancelAnimationFrame(_composerAutoResizeRaf);
+    _composerAutoResizeRaf=0;
+  }
+  const el=$('msg');
+  el.style.height='auto';
+  el.style.height=Math.min(el.scrollHeight,200)+'px';
+  updateSendBtn();
+}
+function scheduleComposerAutoResize(){
+  if(typeof requestAnimationFrame!=='function'){autoResize();return;}
+  if(_composerAutoResizeRaf) return;
+  _composerAutoResizeRaf=requestAnimationFrame(()=>{
+    _composerAutoResizeRaf=0;
+    autoResize();
+  });
+}
 
 
 // ── YOLO mode state ──
