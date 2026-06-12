@@ -39,7 +39,7 @@ class TestCliSessionsErrorSurface:
     def test_exception_path_logs_warning(self):
         """The except clause must call logger.warning, not silently pass."""
         # Find the exception handler in get_cli_sessions
-        func_start = src.find("def get_cli_sessions()")
+        func_start = src.find("def get_cli_sessions(")
         func_end = src.find("\ndef ", func_start + 1)
         func_body = src[func_start:func_end] if func_end != -1 else src[func_start:]
         assert "warning(" in func_body, \
@@ -47,7 +47,7 @@ class TestCliSessionsErrorSurface:
 
     def test_exception_path_includes_db_path(self):
         """The warning must include the db_path for diagnosability."""
-        func_start = src.find("def get_cli_sessions()")
+        func_start = src.find("def get_cli_sessions(")
         func_end = src.find("\ndef ", func_start + 1)
         func_body = src[func_start:func_end] if func_end != -1 else src[func_start:]
         # db_path should appear in the warning call
@@ -59,7 +59,7 @@ class TestCliSessionsErrorSurface:
     def test_still_returns_empty_on_error(self):
         """Function must still return [] after logging (graceful degradation)."""
         # After the warning, it should return cli_sessions (the empty list) not raise
-        func_start = src.find("def get_cli_sessions()")
+        func_start = src.find("def get_cli_sessions(")
         func_end = src.find("\ndef ", func_start + 1)
         func_body = src[func_start:func_end] if func_end != -1 else src[func_start:]
         # Must have a 'return' after the warning call

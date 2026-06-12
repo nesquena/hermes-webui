@@ -3771,7 +3771,12 @@ def _resolve_cli_sessions_context():
 def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], tuple]:
     """Return per-profile CLI scan contexts plus a cache key fragment."""
     try:
-        from api.profiles import get_active_profile_name, get_hermes_home_for_profile, list_profiles_api
+        from api.profiles import (
+            _profiles_root,
+            get_active_profile_name,
+            get_hermes_home_for_profile,
+            list_profiles_api,
+        )
     except Exception:
         return [], ()
 
@@ -3804,6 +3809,13 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
             _add_context(row.get('name'))
     except Exception:
         logger.debug("All-profiles CLI context enumeration failed", exc_info=True)
+    try:
+        for entry in _profiles_root().iterdir():
+            if not entry.is_dir():
+                continue
+            _add_context(entry.name)
+    except Exception:
+        logger.debug("All-profiles CLI directory enumeration failed", exc_info=True)
 
     return contexts, tuple(cache_entries)
 
