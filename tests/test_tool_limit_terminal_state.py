@@ -280,6 +280,33 @@ def test_streaming_tool_limit_without_final_answer_emits_no_final_apperror(tmp_p
     )
 
 
+def test_streaming_tool_limit_terminal_failure_does_not_mark_final_answer(tmp_path, monkeypatch):
+    result = {
+        "status": "partial",
+        "turn_exit_reason": "max_iterations_reached(30/30)",
+        "messages": [
+            {"role": "user", "content": "Do the long task."},
+            {"role": "assistant", "content": "I reached the limit; here is the summary."},
+        ],
+    }
+
+    events, payload = _run_streaming_with_fake_agent(tmp_path, monkeypatch, result)
+
+    apperror_payloads = [payload for event, payload in events if event == "apperror"]
+    assert apperror_payloads, "expected terminal-failure apperror"
+    assert apperror_payloads[-1]["type"] == "tool_limit_reached"
+    assert not [payload for event, payload in events if event == "done"]
+    assistant = next(
+        message
+        for message in payload["messages"]
+        if message.get("role") == "assistant"
+        and message.get("content") == "I reached the limit; here is the summary."
+    )
+    assert "_terminal_state" not in assistant
+    assert "_statusCard" not in assistant
+    assert payload["messages"][-1]["_error"] is True
+
+
 def test_streaming_historical_synthetic_prompt_normal_result_does_not_emit_tool_limit(tmp_path, monkeypatch):
     result = {
         "messages": [

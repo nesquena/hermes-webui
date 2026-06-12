@@ -6660,9 +6660,6 @@ def _run_agent_streaming(
                             for _part in _raw_content:
                                 if isinstance(_part, dict) and isinstance(_part.get('text'), str):
                                     _part['text'] = _strip_xml_tool_calls(_part['text'])
-                if _tool_limit_reached and not _session_lacks_final_assistant_answer(s.messages):
-                    _mark_latest_assistant_tool_limit_status(s.messages)
-
                 # ── Handle context compression side effects ──
                 # If compression fired inside run_conversation, the agent may have
                 # rotated its session_id. Detect and fix the mismatch before any
@@ -6816,6 +6813,8 @@ def _run_agent_streaming(
                 )
                 if _terminal_failure:
                     _assistant_added = False
+                elif _tool_limit_reached and not _session_lacks_final_assistant_answer(s.messages):
+                    _mark_latest_assistant_tool_limit_status(s.messages)
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if _terminal_failure or (not _assistant_added and not _token_sent):
                     if cancel_event.is_set():
