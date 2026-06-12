@@ -5354,6 +5354,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
   .composer-box{max-width:1600px;margin:0 auto;}
 }
 
+.safe-config-viewer{max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;padding:10px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:8px;font-size:11px;line-height:1.45;}
+
 #composerMobileCtxBadge { display: none !important; }
 
 /* Interim progress note collapse (#2403) */

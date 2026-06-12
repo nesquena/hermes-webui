@@ -1349,6 +1349,16 @@
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_gateway_status">Status of the Hermes gateway (Telegram, Discord, Slack, etc.)</div>
               <div id="gatewayStatusCard"><span style="color:var(--muted);font-size:12px">Loading…</span></div>
             </div>
+            <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label data-i18n="safe_config_title">Safe config.yaml</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="safe_config_desc">View the active profile config with secrets redacted. This panel is read-only so hidden values are never overwritten.</div>
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+                <button class="sm-btn" onclick="loadSafeConfig(true)" style="padding:6px 10px;font-weight:600" data-i18n="safe_config_refresh">Refresh config</button>
+                <button class="sm-btn" onclick="copySafeConfig()" style="padding:6px 10px;font-weight:600" data-i18n="safe_config_copy">Copy redacted YAML</button>
+                <span id="safeConfigMeta" style="font-size:11px;color:var(--muted)"></span>
+              </div>
+              <pre id="safeConfigText" class="safe-config-viewer" aria-live="polite">Loading…</pre>
+            </div>
             <!-- MCP Servers Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="mcp_servers_title">MCP Servers</label>

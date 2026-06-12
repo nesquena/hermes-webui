@@ -8540,12 +8540,44 @@ function loadGatewayStatus(){
     card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running_label'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
   }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('gateway_load_failed'))}</div>`});
 }
+
+async function loadSafeConfig(force=false){
+  const box=$('safeConfigText');
+  const meta=$('safeConfigMeta');
+  if(!box) return;
+  if(box.dataset.loaded==='1'&&!force) return;
+  box.textContent=t('safe_config_loading')||'Loading…';
+  if(meta) meta.textContent='';
+  try{
+    const data=await api('/api/config/safe');
+    box.dataset.loaded='1';
+    box.textContent=data.text||'';
+    if(meta){
+      const count=Number(data.redacted_count||0);
+      const filename=data.filename||'config.yaml';
+      meta.textContent=t('safe_config_meta', filename, count);
+    }
+  }catch(err){
+    box.textContent=(t('safe_config_failed')||'Failed to load config: ')+(err&&err.message?err.message:String(err));
+  }
+}
+async function copySafeConfig(){
+  const box=$('safeConfigText');
+  if(!box) return;
+  try{
+    await navigator.clipboard.writeText(box.textContent||'');
+    if(typeof showToast==='function') showToast(t('safe_config_copied'),1800);
+  }catch(err){
+    if(typeof showToast==='function') showToast((t('safe_config_copy_failed')||'Copy failed: ')+(err&&err.message?err.message:String(err)),3000,'error');
+  }
+}
+
 // Load MCP servers when system settings tab opens
 const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name){
   _origSwitchSettings(name);
   if(name==='preferences') updateNotificationPermissionStatus();
-  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
+  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();loadSafeConfig();}
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────
