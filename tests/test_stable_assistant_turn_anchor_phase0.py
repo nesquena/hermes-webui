@@ -144,12 +144,12 @@ def test_phase0_classifies_all_current_live_to_final_sources():
 
 def test_phase0_dedupe_prefers_event_envelope_not_visible_text_or_timestamps():
     data = _anchor_api_snapshot()
-    assert data["eventIdKey"] == "event_id:run-1:2"
-    assert data["runSeqKey"] == "run_seq:run-1:2"
-    assert data["localKey"] == "local:sid-1:local-1"
-    assert data["zeroSeqKey"] == "run_seq:run-1:0"
-    assert data["nanSeqKey"] == "run_seq:run-1:NaN"
-    assert data["emptySeqKey"] == "local:sid-1:local-1"
+    assert data["eventIdKey"] == 'event_id:"run-1:2"'
+    assert data["runSeqKey"] == 'run_seq:["run-1","2"]'
+    assert data["localKey"] == 'local:["sid-1","local-1"]'
+    assert data["zeroSeqKey"] == 'run_seq:["run-1","0"]'
+    assert data["nanSeqKey"] == 'run_seq:["run-1","NaN"]'
+    assert data["emptySeqKey"] == 'local:["sid-1","local-1"]'
     assert data["emptyKey"] == ""
 
     helper_src = _read(ANCHORS_JS).split("function assistantTurnAnchorEventDedupeKey", 1)[1]
