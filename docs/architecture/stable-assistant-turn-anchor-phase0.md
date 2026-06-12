@@ -17,6 +17,10 @@ streaming or rendering yet.
 - This slice advances RFC Phase 1 and Phase 2 together: it adds a local registry
   owner plus a shadow source-feed harness that can combine live, replay,
   settled, and in-flight observations into one anchor snapshot.
+- It also covers the RFC Phase 2.5 contract-hardening boundary: the semantic
+  anchor seed excludes renderer presentation state, terminal states are exposed
+  as constants with alias normalization, and replay + settlement ordering is
+  pinned by tests before visible wiring begins.
 - The next independently reviewable boundary is Phase 3 settlement through the
   anchor owner. `S.messages`, `INFLIGHT`, stream-local state, and DOM nodes remain
   projection/cache layers until that wiring lands.
@@ -72,9 +76,10 @@ the same event-envelope dedupe rule, and route events into one owner:
 
 The registry may fill missing `run_id` / `stream_id` identity from the first
 matching normalized event, update lifecycle on terminal status, and copy the
-settled assistant message into `content.final_answer`. It rejects mismatched
-session or turn identity and skips duplicate live + replay observations by the
-same dedupe key.
+settled assistant message into `content.final_answer` as a derived render
+snapshot while keeping `content.final_message_ref` as the settled transcript
+reference. It rejects mismatched session or turn identity and skips duplicate
+live + replay observations by the same dedupe key.
 
 This slice deliberately keeps the ownership boundary inert: `send()`,
 `attachLiveStream()`, replay hydration, `renderMessages()`, `S.messages`,
@@ -88,6 +93,26 @@ shadow wiring harness for this slice. It accepts grouped `live_events`,
 feeds them through one local registry, and returns the resulting snapshot plus
 per-source apply results. This gives later slices an invariant target without
 making the current UI consume the owner yet.
+
+Renderer-only UI state such as Compact Worklog expansion, Transparent Stream
+expansion, copy-button visibility, and scroll-follow preference is intentionally
+not stored in the anchor seed. Those choices belong in renderer state or a
+separate per-session UI preference store so replay and settlement do not carry
+historic display preferences as semantic facts.
+
+`HermesAssistantTurnAnchors.terminalStates` exposes the RFC terminal-state enum:
+`completed`, `cancelled`, `interrupted`, `no_response`,
+`tool_limit_reached`, `compression_exhausted`, `connection_lost`, `degraded`,
+and `error`. `normalizeAssistantTurnAnchorTerminalState()` maps current source
+aliases such as `done`, `cancel`, `apperror`, `interrupted-by-user`,
+`max_iterations`, and `lost_worker_bookkeeping` into that enum.
+
+During the later `INFLIGHT` migration, the registry is the semantic owner for
+event identity, lifecycle, final answer reference, and activity events.
+`INFLIGHT.lastRunJournalSeq`, `activityBurstAnchors`, `currentLiveSegmentSeq`,
+`streamId`, and cached live text/tool state remain recovery or renderer caches
+until the matching field is explicitly moved. The fallback order is journal
+replay first, settled transcript second, `INFLIGHT` only for gaps.
 
 ## Source Event Classification
 
@@ -118,3 +143,8 @@ The Phase 0 helper uses this order:
 
 This mirrors the RuntimeAdapter Event Envelope and keeps the browser aligned
 with run-journal replay while the anchor registry is still unwired.
+
+The registry tests also pin the reconnect/settlement race shape: if one run is
+observed live, replayed, and settled in either order, duplicate event envelopes
+are skipped and the resulting anchor has the same activity list, terminal state,
+final message reference, final-answer snapshot, and usage metadata.

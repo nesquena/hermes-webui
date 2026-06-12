@@ -113,6 +113,40 @@
     'excluded',
   ]);
 
+  const TERMINAL_STATES=Object.freeze({
+    completed:'completed',
+    cancelled:'cancelled',
+    interrupted:'interrupted',
+    no_response:'no_response',
+    tool_limit_reached:'tool_limit_reached',
+    compression_exhausted:'compression_exhausted',
+    connection_lost:'connection_lost',
+    degraded:'degraded',
+    error:'error',
+  });
+
+  const TERMINAL_STATE_ALIASES=Object.freeze({
+    completed:TERMINAL_STATES.completed,
+    complete:TERMINAL_STATES.completed,
+    done:TERMINAL_STATES.completed,
+    cancelled:TERMINAL_STATES.cancelled,
+    canceled:TERMINAL_STATES.cancelled,
+    cancel:TERMINAL_STATES.cancelled,
+    interrupted:TERMINAL_STATES.interrupted,
+    interrupted_by_user:TERMINAL_STATES.interrupted,
+    no_response:TERMINAL_STATES.no_response,
+    no_response_generated:TERMINAL_STATES.no_response,
+    tool_limit_reached:TERMINAL_STATES.tool_limit_reached,
+    max_iterations:TERMINAL_STATES.tool_limit_reached,
+    compression_exhausted:TERMINAL_STATES.compression_exhausted,
+    connection_lost:TERMINAL_STATES.connection_lost,
+    lost_worker_bookkeeping:TERMINAL_STATES.connection_lost,
+    degraded:TERMINAL_STATES.degraded,
+    error:TERMINAL_STATES.error,
+    failed:TERMINAL_STATES.error,
+    apperror:TERMINAL_STATES.error,
+  });
+
   const UNSAFE_OBJECT_KEYS=Object.freeze([
     '__proto__',
     'constructor',
@@ -142,6 +176,20 @@
 
   function _cleanString(value){
     return typeof value==='string'?value.trim():'';
+  }
+
+  function _terminalStateKey(value){
+    return _cleanString(value).toLowerCase().replace(/[\s-]+/g,'_');
+  }
+
+  function normalizeAssistantTurnAnchorTerminalState(value, fallback){
+    const key=_terminalStateKey(value);
+    if(key&&_hasOwn(TERMINAL_STATE_ALIASES,key)) return TERMINAL_STATE_ALIASES[key];
+    const fallbackKey=_terminalStateKey(fallback);
+    if(fallbackKey&&_hasOwn(TERMINAL_STATE_ALIASES,fallbackKey)){
+      return TERMINAL_STATE_ALIASES[fallbackKey];
+    }
+    return null;
   }
 
   function _coercePayload(value){
@@ -243,13 +291,15 @@
 
   function _statusForSourceEvent(sourceType, kind, payload){
     const explicit=_cleanString(_firstOwn(payload,['status','state','phase']));
-    if(explicit) return explicit;
+    if(explicit){
+      return kind==='terminal_status'
+        ?normalizeAssistantTurnAnchorTerminalState(explicit,sourceType)||explicit
+        :explicit;
+    }
     if(kind==='tool_started') return 'running';
     if(kind==='tool_completed') return _own(payload,'is_error')?'error':'completed';
     if(kind==='terminal_status'){
-      if(sourceType==='done') return 'completed';
-      if(sourceType==='cancel') return 'cancelled';
-      return 'error';
+      return normalizeAssistantTurnAnchorTerminalState(sourceType)||TERMINAL_STATES.error;
     }
     if(kind==='lifecycle_status') return 'running';
     if(kind==='control_boundary') return 'pending';
@@ -503,7 +553,10 @@
       lifecycle.status='running';
     }
     if(kind==='terminal_status'){
-      const terminal=status||'completed';
+      const terminal=normalizeAssistantTurnAnchorTerminalState(
+        status,
+        _own(event,'source_event_type')
+      )||TERMINAL_STATES.completed;
       lifecycle.status=terminal;
       lifecycle.terminal_state=terminal;
       lifecycle.completed_at=createdAt||lifecycle.completed_at||null;
@@ -679,11 +732,6 @@
       metadata_events:[],
       transport_events:[],
       usage:null,
-      presentation_state:{
-        compact_worklog:{expanded:false},
-        transparent_stream:{expanded:false},
-        scroll:{follow:true},
-      },
     };
   }
 
@@ -712,7 +760,9 @@
     stateLayers:STATE_LAYERS,
     sourceEventClassification:SOURCE_EVENT_CLASSIFICATION,
     classificationOrder:CLASSIFICATION_ORDER,
+    terminalStates:TERMINAL_STATES,
     createAssistantTurnAnchorSeed,
+    normalizeAssistantTurnAnchorTerminalState,
     assistantTurnAnchorEventDedupeKey,
     classifyAssistantTurnAnchorSourceEvent,
     normalizeAssistantTurnAnchorSourceEvent,

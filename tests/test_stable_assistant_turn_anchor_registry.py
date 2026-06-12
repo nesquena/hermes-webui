@@ -219,6 +219,71 @@ console.log(JSON.stringify({{
     return json.loads(result.stdout)
 
 
+def _race_snapshot() -> dict:
+    assert NODE, "node is required for assistant_turn_anchors.js registry tests"
+    script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync({json.dumps(str(ANCHORS_JS))}, 'utf8');
+const sandbox = {{window:{{}}}};
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, {{filename:'assistant_turn_anchors.js'}});
+const api = sandbox.window.HermesAssistantTurnAnchors;
+
+function build(order) {{
+  const registry = api.createAssistantTurnAnchorRegistry({{
+    session_id:'sid-race',
+    turn_id:'turn-race',
+    run_id:'run-race',
+    stream_id:'stream-race',
+  }});
+  const live = [
+    {{event:'token', payload:{{text:'live token'}}, event_id:'run-race:1', run_id:'run-race', seq:1}},
+  ];
+  const replay = [
+    {{event:'token', payload:{{text:'replayed duplicate'}}, event_id:'run-race:1', run_id:'run-race', seq:1}},
+    {{event:'tool_complete', payload:{{tool_call_id:'tool-1', result:'ok'}}, event_id:'run-race:2', run_id:'run-race', seq:2}},
+    {{event:'done', payload:{{status:'done'}}, event_id:'run-race:3', run_id:'run-race', seq:3, created_at:'2026-06-11T00:00:03Z'}},
+  ];
+  const settled = [
+    {{source_type:'settled_message', payload:{{role:'assistant', id:'message-race', content:'race final', _turnUsage:{{input_tokens:5, output_tokens:8}}}}}},
+  ];
+  api.applyAssistantTurnAnchorSourceEvents(registry, live);
+  if (order === 'replay-first') {{
+    api.applyAssistantTurnAnchorSourceEvents(registry, replay);
+    api.applyAssistantTurnAnchorSourceEvents(registry, settled);
+  }} else {{
+    api.applyAssistantTurnAnchorSourceEvents(registry, settled);
+    api.applyAssistantTurnAnchorSourceEvents(registry, replay);
+  }}
+  const anchor = registry.anchor;
+  return {{
+    stats: registry.stats,
+    dedupe_keys: registry.event_index.dedupe_keys,
+    activity: anchor.activity_events.map((event) => ({{
+      event_id: event.event_id,
+      kind: event.kind,
+      status: event.status,
+      text: event.payload && event.payload.text || null,
+      tool_call_id: event.payload && event.payload.tool_call_id || null,
+    }})),
+    terminal_state: anchor.lifecycle.terminal_state,
+    final_answer: anchor.content.final_answer,
+    final_message_ref: anchor.content.final_message_ref,
+    usage: anchor.usage,
+  }};
+}}
+
+console.log(JSON.stringify({{
+  replayFirst: build('replay-first'),
+  settledFirst: build('settled-first'),
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 def test_registry_owns_one_anchor_and_dedupes_live_plus_replay_events():
     data = _registry_snapshot()
     registry = data["registry"]
@@ -275,6 +340,48 @@ def test_registry_updates_lifecycle_and_settled_final_projection():
     assert anchor["content"]["final_answer"] == "final answer"
     assert anchor["content"]["final_message_ref"] == "message-final"
     assert anchor["usage"] == {"input_tokens": 8, "output_tokens": 13}
+
+
+def test_registry_replay_and_settlement_order_converge_on_same_anchor_state():
+    data = _race_snapshot()
+    replay_first = data["replayFirst"]
+    settled_first = data["settledFirst"]
+
+    assert replay_first == settled_first
+    assert replay_first["stats"]["applied"] == 4
+    assert replay_first["stats"]["skipped_duplicate"] == 1
+    assert replay_first["dedupe_keys"] == [
+        'event_id:"run-race:1"',
+        'event_id:"run-race:2"',
+        'event_id:"run-race:3"',
+    ]
+    assert replay_first["activity"] == [
+        {
+            "event_id": "run-race:1",
+            "kind": "process_prose",
+            "status": None,
+            "text": "live token",
+            "tool_call_id": None,
+        },
+        {
+            "event_id": "run-race:2",
+            "kind": "tool_completed",
+            "status": "completed",
+            "text": None,
+            "tool_call_id": "tool-1",
+        },
+        {
+            "event_id": "run-race:3",
+            "kind": "terminal_status",
+            "status": "completed",
+            "text": None,
+            "tool_call_id": None,
+        },
+    ]
+    assert replay_first["terminal_state"] == "completed"
+    assert replay_first["final_answer"] == "race final"
+    assert replay_first["final_message_ref"] == "message-race"
+    assert replay_first["usage"] == {"input_tokens": 5, "output_tokens": 8}
 
 
 def test_registry_does_not_destructively_dedupe_seqless_local_tool_lifecycle():
