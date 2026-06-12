@@ -21,9 +21,12 @@ streaming or rendering yet.
   anchor seed excludes renderer presentation state, terminal states are exposed
   as constants with alias normalization, and replay + settlement ordering is
   pinned by tests before visible wiring begins.
-- The next independently reviewable boundary is Phase 3 settlement through the
-  anchor owner. `S.messages`, `INFLIGHT`, stream-local state, and DOM nodes remain
-  projection/cache layers until that wiring lands.
+- Slice 4 starts RFC Phase 3 by routing settled assistant final prose through the
+  anchor owner before `renderMessages()` renders the final assistant body.
+- The next independently reviewable boundary is activity/render-scene projection
+  for reasoning, tool rows, and transparent-stream/worklog metadata. `S.messages`,
+  `INFLIGHT`, stream-local state, and DOM nodes remain projection/cache layers
+  outside the settled final-prose path.
 
 ## State Layers
 
@@ -113,6 +116,25 @@ event identity, lifecycle, final answer reference, and activity events.
 `streamId`, and cached live text/tool state remain recovery or renderer caches
 until the matching field is explicitly moved. The fallback order is journal
 replay first, settled transcript second, `INFLIGHT` only for gaps.
+
+## Slice 4 Settled Final Projection
+
+`HermesAssistantTurnAnchors.projectAssistantTurnAnchorSettledMessageFinalAnswer()`
+projects one settled assistant transcript message through a local anchor
+registry. The settled transcript message reference remains the semantic
+authority (`content.final_message_ref`); `content.final_answer` is a derived
+render snapshot for the existing markdown pipeline.
+
+`renderMessages()` uses that projection only for settled assistant messages
+(`!isUser && !m._live`) and only after preserving the current content-array
+flattening behavior. It then continues through the existing inline-thinking and
+markdown rendering pipeline. If the anchor helper is unavailable or cannot
+produce a final answer, `renderMessages()` falls back to the existing message
+content path.
+
+This is intentionally narrower than render-scene ownership: live stream tokens,
+replay hydration, worklog rows, transparent-stream rows, tool cards, `INFLIGHT`,
+and DOM continuity are still not consumed by the anchor registry in this slice.
 
 ## Source Event Classification
 

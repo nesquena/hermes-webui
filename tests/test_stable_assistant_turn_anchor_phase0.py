@@ -88,8 +88,11 @@ def test_phase0_scaffold_is_loaded_before_current_rendering_modules():
     messages_pos = html.index('static/messages.js?v=__WEBUI_VERSION__')
 
     assert anchor_pos < ui_pos < sessions_pos < messages_pos
+    ui_src = _read(UI_JS)
     assert "'./static/assistant_turn_anchors.js' + VQ" in _read(SW_JS)
-    assert "HermesAssistantTurnAnchors" not in _read(UI_JS)
+    assert "projectAssistantTurnAnchorSettledMessageFinalAnswer" in ui_src
+    assert "createAssistantTurnAnchorRegistry" not in ui_src
+    assert "applyAssistantTurnAnchorSourceEvent" not in ui_src
     assert "HermesAssistantTurnAnchors" not in _read(SESSIONS_JS)
     assert "HermesAssistantTurnAnchors" not in _read(MESSAGES_JS)
 
