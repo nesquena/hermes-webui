@@ -132,6 +132,110 @@ def test_settings_ui_exposes_chat_activity_display_mode_selector():
     assert "settings_desc_chat_activity_display_mode" in I18N_JS
 
 
+def test_appearance_autosave_rerenders_only_when_activity_mode_changes():
+    """Appearance autosave receives the full settings object back from the
+    server, so the presence of chat_activity_display_mode alone is not a
+    reason to rebuild the message list. Only an effective mode change should
+    clear the render cache and re-render messages."""
+    start = PANELS_JS.index("async function _autosaveAppearanceSettings(payload)")
+    end = PANELS_JS.index("window._sessionEndlessScrollEnabled=", start)
+    autosave_block = PANELS_JS[start:end]
+
+    assert "const beforeMode=window._chatActivityDisplayMode;" in autosave_block
+    assert "_syncChatActivityDisplayModeControl(saved.chat_activity_display_mode);" in autosave_block
+    changed_guard = "if(window._chatActivityDisplayMode!==beforeMode){"
+    assert changed_guard in autosave_block
+    guarded = autosave_block[autosave_block.index(changed_guard):]
+    assert "clearMessageRenderCache()" in guarded
+    assert "renderMessages({preserveScroll:true})" in guarded
+
+
+def test_attach_copy_button_declares_local_button():
+    """_attachCopyButton must not leak an implicit window.btn global."""
+    start = UI_JS.index("function _attachCopyButton(header)")
+    end = UI_JS.index("\nfunction _transparentToolDetailHtml", start)
+    copy_block = UI_JS[start:end]
+
+    assert "const btn=document.createElement('span');" in copy_block
+    assert "\n  btn=document.createElement('span');" not in copy_block
+
+
+def test_transparent_settled_rows_preserve_same_anchor_order():
+    """When multiple transparent event groups resolve to the same anchor, each
+    inserted row must advance a per-anchor cursor instead of recomputing
+    anchor.nextElementSibling and reversing chronological order."""
+    transparent_branch = UI_JS[
+        UI_JS.index("// ── transparent_stream path: individual expandable event rows ──"):
+        UI_JS.index("// Render per-turn duration", UI_JS.index("// ── transparent_stream path: individual expandable event rows ──"))
+    ]
+
+    assert "const transparentInsertCursors=new Map();" in transparent_branch
+    assert "const cursor=transparentInsertCursors.get(anchorRow)||anchorRow;" in transparent_branch
+    assert "transparentInsertCursors.set(anchorRow,row);" in transparent_branch
+    assert "insertAfterCursor(toolRow);" in transparent_branch
+    assert "anchorRow.nextElementSibling" not in transparent_branch
+
+
+def test_transparent_settled_reasoning_thinking_stays_before_final_answer():
+    """Reasoning-only final assistant messages should keep their Thinking row
+    above the final answer, matching the live order and Compact Worklog's
+    beforeAnchor behavior."""
+    transparent_branch = UI_JS[
+        UI_JS.index("// ── transparent_stream path: individual expandable event rows ──"):
+        UI_JS.index("// Render per-turn duration", UI_JS.index("// ── transparent_stream path: individual expandable event rows ──"))
+    ]
+
+    assert "const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');" in transparent_branch
+    assert "const insertBeforeAnchor=(row)=>{" in transparent_branch
+    assert "if(!anchorIsWorklogSource) insertBeforeAnchor(thinkingRow);" in transparent_branch
+    assert "else insertAfterCursor(thinkingRow);" in transparent_branch
+
+
+def test_transparent_live_tool_rows_append_at_turn_end_before_status():
+    """Live Transparent Stream rows arrive chronologically, so new rows should
+    append at the end of the live turn before #liveRunStatus instead of jumping
+    after the previous transparent row."""
+    start = UI_JS.index("function appendLiveToolCard(tc){")
+    end = UI_JS.index("function clearLiveToolCards()", start)
+    live_block = UI_JS[start:end]
+    transparent_start = live_block.index("if(isTransparentStream()){")
+    transparent_end = live_block.index("if(anchor) _removeEmptyLiveWorklogShells(inner);", transparent_start)
+    transparent_live = live_block[transparent_start:transparent_end]
+
+    assert "const liveFooter=inner.querySelector('#liveRunStatus');" in transparent_live
+    assert "inner.insertBefore(row,liveFooter);" in transparent_live
+    assert "previousRows" not in transparent_live
+    assert "previous.insertAdjacentElement('afterend',row)" not in transparent_live
+
+
+def test_cached_transparent_html_is_rehydrated_after_restore():
+    """Cached HTML restores DOM shape but not property-assigned handlers. The
+    fast path must rehydrate Transparent Stream controls before returning."""
+    cache_start = UI_JS.index("if(cached&&cached.msgCount===msgCount")
+    cache_end = UI_JS.index("return;", cache_start)
+    cache_block = UI_JS[cache_start:cache_end]
+
+    assert "_rehydrateTransparentStreamDom(inner);" in cache_block
+    assert "function _rehydrateTransparentStreamDom(root)" in UI_JS
+    assert "_wireTransparentTurnToggle(turn);" in UI_JS
+    assert "_syncTransparentEventControls(turn);" in UI_JS
+    assert "_wireTransparentHeaderToggle(header);" in UI_JS
+    assert "_attachCopyButton(header);" in UI_JS
+
+
+def test_transparent_existing_copy_buttons_are_rebound_after_cache_restore():
+    """The serialized cached DOM keeps copy button elements but loses onclick
+    properties, so _attachCopyButton must bind existing buttons too."""
+    start = UI_JS.index("function _attachCopyButton(header)")
+    end = UI_JS.index("\nfunction _transparentToolDetailHtml", start)
+    copy_block = UI_JS[start:end]
+
+    assert "const bindCopyButton=(btn)=>{" in copy_block
+    assert "return bindCopyButton(existing);" in copy_block
+    assert "bindCopyButton(btn);" in copy_block
+    assert "const fallbackName=row.getAttribute('data-event-name')||row.getAttribute('data-tool-name')||'tool';" in UI_JS
+
+
 def test_transparent_event_row_pre_3820_visual_rhythm():
     """Restore the pre-#3820 visual rhythm: collapsed rows are flat
     list-items (no border) so the stack reads as a clean list, and tool
@@ -428,8 +532,10 @@ def test_copy_button_position_is_stable_and_dedup_handles_legacy_template():
     # Dedup: _attachCopyButton checks for both .transparent-event-copy
     # and .thinking-copy-btn.
     assert "'.transparent-event-copy,.thinking-copy-btn'" in UI_JS
-    # The function normalises the class so CSS treats them identically.
-    assert "existing.classList.add('transparent-event-copy')" in UI_JS
+    # The function normalises and rebinds existing buttons so cached HTML
+    # restores keep copy behavior.
+    assert "btn.classList.add('transparent-event-copy')" in UI_JS
+    assert "return bindCopyButton(existing);" in UI_JS
 
 
 def test_increased_transparency_and_softened_edges():

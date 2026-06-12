@@ -6287,9 +6287,12 @@ async function _autosaveAppearanceSettings(payload){
     if(saved){
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
       if(Object.prototype.hasOwnProperty.call(saved,'chat_activity_display_mode')){
+        const beforeMode=window._chatActivityDisplayMode;
         _syncChatActivityDisplayModeControl(saved.chat_activity_display_mode);
-        if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
-        if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+        if(window._chatActivityDisplayMode!==beforeMode){
+          if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+          if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+        }
       }
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     }

@@ -6619,10 +6619,20 @@ function _copyEventToClipboard(row){
   let label='event';
   if(type==='tool'){
     const tc=row._tcData||{};
-    label=`tool ${tc.name||row.getAttribute('data-event-name')||'tool'}`;
-    const parts=[`tool: ${tc.name||''}`];
+    const fallbackName=row.getAttribute('data-event-name')||row.getAttribute('data-tool-name')||'tool';
+    label=`tool ${tc.name||fallbackName}`;
+    const parts=[`tool: ${tc.name||fallbackName}`];
     if(tc.args&&Object.keys(tc.args).length) parts.push('args: '+JSON.stringify(tc.args,null,2));
     if(tc.snippet) parts.push('output:\n'+String(tc.snippet));
+    if(parts.length===1){
+      const argsText=Array.from(row.querySelectorAll('.tool-card-args .tool-arg-pair'))
+        .map(pair=>String(pair.textContent||'').trim())
+        .filter(Boolean)
+        .join('\n');
+      const outputText=String((row.querySelector('.tool-card-result pre')||{}).textContent||'').trim();
+      if(argsText) parts.push('args:\n'+argsText);
+      if(outputText) parts.push('output:\n'+outputText);
+    }
     text=parts.join('\n');
   }else if(type==='thinking'){
     const pre=row.querySelector('.thinking-card-body pre');
@@ -6657,6 +6667,25 @@ function _copyEventToClipboard(row){
 }
 function _attachCopyButton(header){
   if(!header) return null;
+  const bindCopyButton=(btn)=>{
+    if(!btn) return null;
+    btn.classList.add('transparent-event-copy');
+    btn.setAttribute('role','button');
+    btn.setAttribute('tabindex','0');
+    btn.setAttribute('aria-label',t('copy')||'Copy');
+    btn.setAttribute('data-transparent-copy','1');
+    btn.title=t('copy')||'Copy';
+    const handler=function(ev){
+      ev.stopPropagation();
+      ev.preventDefault();
+      _copyEventToClipboard(header.closest('.transparent-event-row'));
+    };
+    btn.onclick=handler;
+    btn.onkeydown=function(ev){
+      if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();handler(ev);}
+    };
+    return btn;
+  };
   // Reuse ANY existing copy button (handles both .transparent-event-copy
   // added by this function AND the legacy .thinking-copy-btn baked into the
   // thinking-card template). Returning the existing one prevents the
@@ -6664,28 +6693,12 @@ function _attachCopyButton(header){
   const existing=header.querySelector('.transparent-event-copy,.thinking-copy-btn');
   if(existing){
     // Normalise the class so CSS treats them identically.
-    if(!existing.classList.contains('transparent-event-copy')){
-      existing.classList.add('transparent-event-copy');
-    }
-    return existing;
+    return bindCopyButton(existing);
   }
-  btn=document.createElement('span');
+  const btn=document.createElement('span');
   btn.className='transparent-event-copy';
-  btn.setAttribute('role','button');
-  btn.setAttribute('tabindex','0');
-  btn.setAttribute('aria-label',t('copy')||'Copy');
-  btn.setAttribute('data-transparent-copy','1');
-  btn.title=t('copy')||'Copy';
   btn.innerHTML=`<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
-  const handler=function(ev){
-    ev.stopPropagation();
-    ev.preventDefault();
-    _copyEventToClipboard(header.closest('.transparent-event-row'));
-  };
-  btn.onclick=handler;
-  btn.onkeydown=function(ev){
-    if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();handler(ev);}
-  };
+  bindCopyButton(btn);
   // Place the copy button at a FIXED flexbox position regardless of
   // whether a toggle or status badge is present: always right before
   // the toggle. The CSS uses flexbox order to keep it visually stable
@@ -6718,7 +6731,7 @@ function _setTransparentCardOpen(card, open){
   if(header) header.setAttribute('aria-expanded',expanded?'true':'false');
 }
 function _wireTransparentHeaderToggle(header){
-  if(!header||header.getAttribute('data-transparent-toggle-bound')==='1') return;
+  if(!header) return;
   header.setAttribute('data-transparent-toggle-bound','1');
   header.onclick=function(ev){
     const target=ev&&ev.target;
@@ -6788,6 +6801,16 @@ function _syncTransparentEventControls(turn){
     if(blocks.firstChild&&blocks.firstChild.parentNode===blocks) blocks.insertBefore(bar, blocks.firstChild);
     else blocks.appendChild(bar);
   }
+  const expand=bar.querySelector('[data-transparent-expand-all]');
+  if(expand){
+    expand.onclick=function(ev){ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),true);};
+    expand.onkeydown=function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),true);}};
+  }
+  const collapse=bar.querySelector('[data-transparent-collapse-all]');
+  if(collapse){
+    collapse.onclick=function(ev){ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),false);};
+    collapse.onkeydown=function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),false);}};
+  }
   const label=bar.querySelector('.transparent-event-controls-label');
   if(label){
     label.textContent=_transparentEventCountLabel(toolCount);
@@ -6796,6 +6819,22 @@ function _syncTransparentEventControls(turn){
   bar.setAttribute('data-tool-count',String(toolCount));
   // Wire the Hermes chat name tag toggle for the live turn.
   _wireTransparentTurnToggle(turn);
+}
+function _rehydrateTransparentStreamDom(root){
+  if(!root||!isTransparentStream()) return;
+  root.querySelectorAll('.assistant-turn').forEach(turn=>{
+    _wireTransparentTurnToggle(turn);
+    _syncTransparentEventControls(turn);
+  });
+  root.querySelectorAll('.transparent-event-row').forEach(row=>{
+    const card=row.querySelector('.tool-card,.thinking-card');
+    const header=row.querySelector('.tool-card-header,.thinking-card-header');
+    if(header){
+      _wireTransparentHeaderToggle(header);
+      _attachCopyButton(header);
+    }
+    if(card) _setTransparentCardOpen(card,card.classList.contains('open'));
+  });
 }
 function _decorateTransparentEventRow(row, opts){
   if(!row) return row;
@@ -6969,7 +7008,7 @@ function _setTransparentRowsExpanded(root, expanded){
 // data-attribute only — the turn's render path reads it on rebuild.
 const _transparentTurnCollapsedStates={}; // key: `${sid}:${turnMsgIdx}` → boolean
 function _wireTransparentTurnToggle(turn){
-  if(!turn||turn.getAttribute('data-transparent-turn-toggle-bound')==='1') return;
+  if(!turn) return;
   if(!isTransparentStream()) return;
   const role=turn.querySelector('.msg-role.assistant');
   if(!role) return;
@@ -8518,6 +8557,7 @@ function renderMessages(options){
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
+      _rehydrateTransparentStreamDom(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
@@ -9343,6 +9383,7 @@ function renderMessages(options){
       });
     }else{
       // ── transparent_stream path: individual expandable event rows ──
+      const transparentInsertCursors=new Map();
       for(const entry of activityOrder){
         const event={
           ...entry,
@@ -9356,7 +9397,18 @@ function renderMessages(options){
         const turn=anchorTurn;
         const blocks=_assistantTurnBlocks(anchorTurn);
         if(!anchorTurn||!blocks) continue;
-        const insertBefore=anchorRow&&anchorRow.parentElement===blocks?anchorRow.nextElementSibling:null;
+        const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
+        const insertAfterCursor=(row)=>{
+          const cursor=transparentInsertCursors.get(anchorRow)||anchorRow;
+          const ref=cursor&&cursor.parentElement===blocks?cursor.nextElementSibling:null;
+          if(ref&&ref.parentElement===blocks) blocks.insertBefore(row,ref);
+          else blocks.appendChild(row);
+          transparentInsertCursors.set(anchorRow,row);
+        };
+        const insertBeforeAnchor=(row)=>{
+          if(anchorRow&&anchorRow.parentElement===blocks) blocks.insertBefore(row,anchorRow);
+          else blocks.appendChild(row);
+        };
         if(event.thinkingText){
           const thinkingRow=_decorateTransparentEventRow(_thinkingActivityNode(event.thinkingText,false),{
             type:'thinking',
@@ -9365,8 +9417,8 @@ function renderMessages(options){
             segmentSeq,
             burstId,
           });
-          if(insertBefore&&insertBefore.parentElement===blocks) blocks.insertBefore(thinkingRow,insertBefore);
-          else blocks.appendChild(thinkingRow);
+          if(!anchorIsWorklogSource) insertBeforeAnchor(thinkingRow);
+          else insertAfterCursor(thinkingRow);
         }
         for(const toolCall of cards){
           event.toolCall=toolCall;
@@ -9378,8 +9430,7 @@ function renderMessages(options){
             segmentSeq,
             burstId,
           });
-          if(insertBefore&&insertBefore.parentElement===blocks) blocks.insertBefore(toolRow,insertBefore);
-          else blocks.appendChild(toolRow);
+          insertAfterCursor(toolRow);
         }
         _syncTransparentEventControls(turn);
       }
@@ -10278,13 +10329,7 @@ function appendLiveToolCard(tc){
   if(isTransparentStream()){
     const insertTransparentRow=(row)=>{
       const liveFooter=inner.querySelector('#liveRunStatus');
-      const previousRows=Array.from(inner.querySelectorAll('.transparent-event-row'));
-      const previous=previousRows[previousRows.length-1]||null;
-      if(previous&&previous.parentElement===inner){
-        previous.insertAdjacentElement('afterend',row);
-      }else if(anchor&&anchor.parentElement===inner){
-        anchor.insertAdjacentElement('afterend',row);
-      }else if(liveFooter&&liveFooter.parentElement===inner){
+      if(liveFooter&&liveFooter.parentElement===inner){
         inner.insertBefore(row,liveFooter);
       }else{
         inner.appendChild(row);
