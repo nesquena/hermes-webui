@@ -292,6 +292,41 @@ def test_context_lookup_resolves_custom_provider_api_key_env_template(monkeypatc
     assert lookup.api_key == "env-template-key"
 
 
+def test_context_lookup_logs_unresolved_custom_provider_api_key_env_template(monkeypatch, caplog):
+    """#4059: unresolved ``${ENV_VAR}`` keys get a DEBUG diagnostic.
+
+    Behavior stays permissive: after logging the unresolved template, the helper
+    still falls through to ``key_env`` and sanitized provider env lookup.
+    """
+    import logging
+
+    from api.routes import _context_length_lookup_inputs_for_model
+
+    monkeypatch.delenv("ISSUE_4059_MISSING_CONTEXT_KEY", raising=False)
+    monkeypatch.setenv("ISSUE_4059_KEY_ENV_AFTER_TEMPLATE", "key-env-fallback")
+    caplog.set_level(logging.DEBUG, logger="api.routes")
+
+    lookup = _context_length_lookup_inputs_for_model(
+        "custom-model-id",
+        "custom:llm-proxy",
+        cfg={
+            "custom_providers": [
+                {
+                    "name": "llm-proxy",
+                    "base_url": "https://llm.example.test/v1",
+                    "api_key": "${ISSUE_4059_MISSING_CONTEXT_KEY}",
+                    "key_env": "ISSUE_4059_KEY_ENV_AFTER_TEMPLATE",
+                    "model": "custom-model-id",
+                }
+            ]
+        },
+    )
+
+    assert lookup.api_key == "key-env-fallback"
+    assert "${ISSUE_4059_MISSING_CONTEXT_KEY}" in caplog.text
+    assert "unset or empty" in caplog.text
+
+
 def test_context_lookup_resolves_custom_provider_key_env(monkeypatch):
     """#4059: ``key_env`` custom-provider keys resolve before metadata probes."""
     from api.routes import _context_length_lookup_inputs_for_model

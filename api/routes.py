@@ -2393,9 +2393,15 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
     if raw_api_key is not None:
         api_key_text = str(raw_api_key).strip()
         if api_key_text.startswith("${") and api_key_text.endswith("}") and len(api_key_text) > 3:
-            resolved = os.getenv(api_key_text[2:-1], "").strip()
+            env_name = api_key_text[2:-1]
+            resolved = os.getenv(env_name, "").strip()
             if resolved:
                 return resolved
+            logger.debug(
+                "Custom provider %s api_key references %s, but the environment variable is unset or empty",
+                provider,
+                api_key_text,
+            )
         elif api_key_text:
             return api_key_text
 
