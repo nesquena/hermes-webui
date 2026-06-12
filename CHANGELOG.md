@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+## [v0.51.367] — 2026-06-12 — Release MF (autocomplete filter + lineage merge + shutdown i18n fixes)
+
+### Fixed
+
+- **CLI-only slash commands no longer clutter the WebUI autocomplete (#3969).** Commands that only work in the terminal (and skill-shortcut names that collide with them) are filtered out of the autocomplete list; if you type one anyway, you still get the WebUI-only explanation.
+- **Session-lineage display rows that were being dropped on full session loads are now merged back in.** A merge gap omitted some lineage rows from `GET /api/session`; they're now included (additive, deduped by merge key, leaving explicit forks/child rows alone).
+- **The "Stop the Hermes WebUI server" settings description renders correctly in every language (#4002).** The string embedded `<code>` HTML inside translatable text; it's now split into plain text fragments composed around statically-rendered code spans, applied across all 13 locales.
+
 ## [v0.51.366] — 2026-06-12 — Release ME (assistant turn anchor source normalizer — Slice 2, inert)
 
 ### Added

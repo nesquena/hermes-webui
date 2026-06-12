@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import textwrap
 from types import SimpleNamespace
 
@@ -90,13 +91,19 @@ def _run_commands_js(script_body: str) -> dict:
           localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
           t: (key) => key,
           api: async (path) => {{
-            if (path !== '/api/commands') throw new Error('unexpected api path: ' + path);
-            return {{
+            if (path === '/api/commands') return {{
               commands: [
                 {{
                   name: 'browser',
                   description: 'Attach browser tools',
                   aliases: ['browse'],
+                  cli_only: true,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'handoff',
+                  description: 'Hand work to another agent',
+                  aliases: ['delegate_work'],
                   cli_only: true,
                   gateway_only: false
                 }},
@@ -116,6 +123,23 @@ def _run_commands_js(script_body: str) -> dict:
                 }}
               ]
             }};
+            if (path === '/api/skills') return {{
+              skills: [
+                {{
+                  name: 'handoff',
+                  description: 'Skill shortcut that should stay reachable via /use'
+                }},
+                {{
+                  name: 'delegate work',
+                  description: 'Alias collision should also be hidden from slash autocomplete'
+                }},
+                {{
+                  name: 'incident review',
+                  description: 'Non-colliding skills should still autocomplete'
+                }}
+              ]
+            }};
+            throw new Error('unexpected api path: ' + path);
           }}
         }};
         vm.createContext(ctx);
@@ -129,7 +153,13 @@ def _run_commands_js(script_body: str) -> dict:
         }});
         """
     )
-    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["node", str(script_path)], check=True, capture_output=True, text=True)
+    finally:
+        script_path.unlink(missing_ok=True)
     return json.loads(proc.stdout)
 
 
@@ -169,6 +199,33 @@ def test_cli_only_response_helper_uses_canonical_command_name():
     assert "`/browser` is a Hermes CLI-only command" in result["response"]
     assert "Attach browser tools" in result["response"]
     assert "configured server-side" in result["response"]
+
+
+def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
+    result = _run_commands_js(
+        """
+        await loadAgentCommandMetadata(true);
+        await loadSkillCommands(true);
+        const handoff = await getSlashAutocompleteMatches('/handoff');
+        const delegate = await getSlashAutocompleteMatches('/delegate');
+        const incident = await getSlashAutocompleteMatches('/incident');
+        const skills = await getSlashAutocompleteMatches('/skills');
+        const use = await getSlashAutocompleteMatches('/use');
+        return {
+          handoff_names: handoff.map(item => item.name),
+          delegate_names: delegate.map(item => item.name),
+          incident_names: incident.map(item => item.name),
+          skills_names: skills.map(item => item.name),
+          use_names: use.map(item => item.name)
+        };
+        """
+    )
+
+    assert result["handoff_names"] == []
+    assert result["delegate_names"] == []
+    assert result["incident_names"] == ["incident-review"]
+    assert "skills" in result["skills_names"]
+    assert "use" in result["use_names"]
 
 
 def test_send_intercepts_cli_only_commands_before_agent_round_trip():

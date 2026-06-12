@@ -3404,6 +3404,47 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     return sidecar_messages
 
 
+
+def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
+    """Include immediate parent-only rows when a WebUI continuation sidecar is partial.
+
+    Compression/continuation sessions should render as one conversation. Most
+    child sidecars are cumulative, so this is usually a cheap no-op. If a child
+    sidecar accidentally omits rows that still exist in the immediate parent,
+    merge those parent-only rows into the display transcript. Explicit forks and
+    generic child-session rows remain isolated; they intentionally start from a
+    subset of their parent.
+    """
+    primary_messages = list(messages if messages is not None else (getattr(session, "messages", []) or []))
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id:
+        return primary_messages
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
+    if source == "fork" or relationship == "child_session":
+        return primary_messages
+    try:
+        parent = get_session(parent_id, metadata_only=False)
+    except Exception:
+        return primary_messages
+    parent_messages = list(getattr(parent, "messages", []) or [])
+    if not parent_messages:
+        return primary_messages
+    merged_messages = []
+    seen_message_keys = set()
+    for msg in sorted(list(parent_messages) + list(primary_messages), key=lambda m: (
+        float(m.get("timestamp") or 0),
+        str(m.get("role") or ""),
+        str(m.get("content") or ""),
+    )):
+        key = _session_message_merge_key(msg)
+        if key in seen_message_keys:
+            continue
+        seen_message_keys.add(key)
+        merged_messages.append(msg)
+    return merged_messages
+
+
 def _message_summary(messages) -> dict:
     messages = list(messages or [])
     last_message_at = 0.0
@@ -5929,6 +5970,7 @@ def handle_get(handler, parsed) -> bool:
                         state_db_messages,
                         truncation_watermark=getattr(s, "truncation_watermark", None),
                     )
+                _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
             else:
                 if is_messaging_session and cli_messages:
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
