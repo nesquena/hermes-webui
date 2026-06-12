@@ -716,8 +716,6 @@ async function newSession(flash, options={}){
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=data.session;S.messages=data.session.messages||[];
-    if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
-    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
@@ -1393,26 +1391,29 @@ function _isCliSession(session) {
   return session.is_cli_session === true;
 }
 
-function _sessionSourceLabel(filter, count) {
-  const n = Number(count) || 0;
-  return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
-}
-
-function _setSessionSourceFilter(filter) {
-  const next = filter === 'cli' ? 'cli' : 'webui';
-  if (_sessionSourceFilter === next) return;
-  _sessionSourceFilter = next;
+function _toggleOriginFilter(origin) {
+  if (origin === 'webui') return;
+  if (_activeOriginFilters.has(origin)) {
+    _activeOriginFilters.delete(origin);
+  } else {
+    _activeOriginFilters.add(origin);
+  }
   _activeProject = null;
   _selectedSessions.clear();
   _sessionSelectMode = false;
-  try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
+  try { localStorage.setItem('hermes-origin-filters', JSON.stringify([..._activeOriginFilters])); } catch (_e) {}
   renderSessionListFromCache();
 }
 
-function _restoreSessionSourceFilter() {
+function _restoreOriginFilters() {
   try {
-    const raw = localStorage.getItem('hermes-session-source-filter');
-    if (raw === 'cli' || raw === 'webui') _sessionSourceFilter = raw;
+    const raw = localStorage.getItem('hermes-origin-filters');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        _activeOriginFilters = new Set(['webui', ...parsed.filter(v => typeof v === 'string')]);
+      }
+    }
   } catch (_e) {}
 }
 
@@ -2489,8 +2490,8 @@ const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
 let _showAllProfiles = false;  // false = filter to active profile only
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
-let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
-_restoreSessionSourceFilter();
+let _activeOriginFilters = new Set(['webui']);  // always includes 'webui'; user may add 'cli'
+_restoreOriginFilters();
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
@@ -4694,15 +4695,7 @@ function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtual
   });
 }
 
-// Top-level so BOTH the sidebar visibility predicate (_sidebarRowHasVisibleMessages,
-// reached via renderSessionListFromCache -> _partitionSidebarSessionRows) and the
-// per-row renderer (_renderOneSession, nested in renderSessionListFromCache) can call
-// it. It was previously declared INSIDE renderSessionListFromCache and relied on
-// function hoisting — but hoisting is scoped to the enclosing function, so the
-// top-level _sidebarRowHasVisibleMessages threw "ReferenceError: _sessionAttentionState
-// is not defined" on every cache render, crashing the sidebar (#3696, regressed in
-// #3672 when _sidebarRowHasVisibleMessages was extracted to top level). Pure function
-// (only its arg `s` plus the i18n global `t`), so hoisting it is safe.
+// Sidebar-attention helper used by render paths and row rendering.
 function _sessionAttentionState(s){
   const attention=s&&s.attention&&typeof s.attention==='object'?s.attention:null;
   if(!attention||!attention.kind||!Number.isFinite(Number(attention.count))||Number(attention.count)<=0)return null;
@@ -4730,22 +4723,21 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   let webuiSessionCount=0;
   let cliSessionCount=0;
+  const visibleRows=[];
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
+    visibleRows.push(s);
     if(_isCliSession(s)) cliSessionCount++;
     else webuiSessionCount++;
   }
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
-    _sessionSourceFilter='webui';
-  }
-  const showCliOnly=_sessionSourceFilter==='cli';
+  const sourceFiltered=[];
   const profileFiltered=[];
   const sessionsRaw=[];
   let archivedCount=0;
-  for(const s of allMatched){
-    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
-    const isCli=_isCliSession(s);
-    if(showCliOnly ? !isCli : isCli) continue;
+  for(const s of visibleRows){
+    const origin=_isCliSession(s)?'cli':'webui';
+    if(!_activeOriginFilters.has(origin)) continue;
+    sourceFiltered.push(s);
     if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
     profileFiltered.push(s);
     if(_activeProject===NO_PROJECT_FILTER){
@@ -4760,11 +4752,13 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   return {
     webuiSessionCount,
     cliSessionCount,
+    sourceFiltered,
     profileFiltered,
     sessionsRaw,
     archivedCount,
   };
 }
+
 
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
@@ -4791,6 +4785,7 @@ function renderSessionListFromCache(){
   const {
     webuiSessionCount,
     cliSessionCount,
+    sourceFiltered,
     profileFiltered,
     sessionsRaw,
     archivedCount,
@@ -4827,19 +4822,58 @@ function renderSessionListFromCache(){
   if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';_renderBatchActionBar();}
   else{batchBar.style.display='none';}
   if(window._showCliSessions || cliSessionCount>0){
-    const sourceTabs=document.createElement('div');
-    sourceTabs.className='session-source-tabs';
-    for(const filter of ['webui','cli']){
-      const count=filter==='cli'?cliSessionCount:webuiSessionCount;
-      const btn=document.createElement('button');
-      btn.type='button';
-      btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
-      btn.textContent=_sessionSourceLabel(filter,count);
-      btn.setAttribute('aria-pressed', _sessionSourceFilter===filter?'true':'false');
-      btn.onclick=()=>_setSessionSourceFilter(filter);
-      sourceTabs.appendChild(btn);
+    const filterBar=document.createElement('div');
+    filterBar.className='session-filter-bar';
+    const funnelBtn=document.createElement('button');
+    funnelBtn.type='button';
+    funnelBtn.className='session-filter-funnel';
+    funnelBtn.title='Filter by origin';
+    funnelBtn.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>';
+    const activeCount=_activeOriginFilters.size-((_activeOriginFilters.has('webui'))?1:0);
+    if(activeCount>0){
+      const badge=document.createElement('span');
+      badge.className='session-filter-badge';
+      badge.textContent=String(activeCount);
+      funnelBtn.appendChild(badge);
     }
-    list.appendChild(sourceTabs);
+    const popover=document.createElement('div');
+    popover.className='session-origin-popover';
+    popover.hidden=true;
+    const origins=[
+      {id:'webui',label:'WebUI',count:webuiSessionCount,locked:true},
+      {id:'cli',label:'CLI',count:cliSessionCount,locked:false},
+    ];
+    for(const o of origins){
+      const row=document.createElement('label');
+      row.className='session-origin-row';
+      const cb=document.createElement('input');
+      cb.type='checkbox';
+      cb.checked=_activeOriginFilters.has(o.id);
+      cb.disabled=!!o.locked;
+      cb.className='session-origin-checkbox';
+      cb.addEventListener('change',()=>_toggleOriginFilter(o.id));
+      const lbl=document.createElement('span');
+      lbl.className='session-origin-label';
+      lbl.textContent=o.label;
+      const cnt=document.createElement('span');
+      cnt.className='session-origin-count';
+      cnt.textContent=String(o.count);
+      row.appendChild(cb);
+      row.appendChild(lbl);
+      row.appendChild(cnt);
+      popover.appendChild(row);
+    }
+    popover.addEventListener('click',(e)=>{e.stopPropagation();});
+    funnelBtn.addEventListener('click',(e)=>{
+      e.stopPropagation();
+      popover.hidden=!popover.hidden;
+      if(!popover.hidden){
+        document.addEventListener('click',()=>{popover.hidden=true;},{once:true});
+      }
+    });
+    filterBar.appendChild(funnelBtn);
+    filterBar.appendChild(popover);
+    list.appendChild(filterBar);
   }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).
@@ -4967,7 +5001,7 @@ function renderSessionListFromCache(){
     list.appendChild(toggle);
   }
   // Empty state for active project filter
-  if(_sessionSourceFilter==='cli'&&sessions.length===0){
+  if(_activeOriginFilters.has('cli')&&cliSessionCount===0&&(webuiSessionCount===0||!_activeOriginFilters.has('webui'))){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
     empty.textContent=window._showCliSessions?'No CLI sessions found.':'Enable Show agent sessions in Settings to list CLI sessions here.';
