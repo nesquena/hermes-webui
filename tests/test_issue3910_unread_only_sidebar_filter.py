@@ -29,6 +29,7 @@ def test_unread_only_toggle_uses_sidebar_filter_chip_pattern():
     js = _js()
     css = _css()
     assert "sourceTabs.className='session-source-tabs';" in js
+    assert "if(window._showCliSessions || cliSessionCount>0){" in js
     assert "unreadBtn.className='session-source-tab session-source-toggle'+(_sessionUnreadOnlyFilter?' active':'');" in js
     assert "unreadBtn.textContent=_sessionUnreadOnlyLabel(unreadCount);" in js
     assert "unreadBtn.onclick=()=>_setSessionUnreadOnlyFilter(!_sessionUnreadOnlyFilter);" in js
@@ -44,7 +45,7 @@ def test_unread_only_filter_runs_inside_partition_pipeline():
     assert "const hasUnread=_sessionHasUnreadForSidebar(s, viewedCounts);" in js
     assert "unreadById.set(s.session_id, hasUnread);" in js
     assert "if(hasUnread) unreadCount++;" in js
-    assert "if(_sessionUnreadOnlyFilter&&!hasUnread) continue;" in js
+    assert "if(_sessionUnreadOnlyFilter&&!hasUnread&&s.session_id!==activeSidForSidebar) continue;" in js
     assert "unreadCount," in js
     assert "unreadById," in js
 
@@ -55,7 +56,7 @@ def test_unread_only_composes_with_source_filter_before_row_rendering():
     assert "if(showCliOnly ? !isCli : isCli) continue;" in js
     assert "if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0 && !_sessionUnreadOnlyFilter){" in js
     source_gate = js.index("if(showCliOnly ? !isCli : isCli) continue;")
-    unread_gate = js.index("if(_sessionUnreadOnlyFilter&&!hasUnread) continue;")
+    unread_gate = js.index("if(_sessionUnreadOnlyFilter&&!hasUnread&&s.session_id!==activeSidForSidebar) continue;")
     assert source_gate < unread_gate, (
         "The unread-only predicate must run after the source filter inside "
         "_partitionSidebarSessionRows so the filters compose in one pipeline."
@@ -68,3 +69,8 @@ def test_unread_only_empty_state_is_specific():
     assert "if(_sessionUnreadOnlyFilter&&sessions.length===0){" in js
     assert "? 'Enable Show agent sessions in Settings to list unread CLI sessions here.'" in js
     assert ": 'No unread sessions match the current filters.'" in js
+
+
+def test_unread_only_chip_does_not_force_cli_chips_for_webui_only_users():
+    js = _js()
+    assert "if(webuiSessionCount>0 || _sessionUnreadOnlyFilter || window._showCliSessions || cliSessionCount>0){" in js
