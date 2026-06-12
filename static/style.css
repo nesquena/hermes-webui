@@ -3137,14 +3137,14 @@ body.resizing .sidebar{transition:none!important;}
 .tool-card-result pre{font-size:var(--message-code-font-size);color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;margin:0;line-height:1.55;}
 
 /* ── Transparent Stream event rows ── */
-/* Box rhythm: each event is a compact rounded card with a thin, transparent
-   border, a 2px type rail, and tight spacing. Keep the newest activity easy
-   to scan without letting the execution trace overpower the final answer. */
+/* Inline rhythm: transparent stream events are transcript metadata inside an
+   assistant turn, not first-class cards. Keep them inspectable but visually
+   below assistant prose unless hovered, focused, or expanded. */
 .transparent-event-controls{
   display:flex;
   align-items:center;
   gap:6px;
-  margin:1px 0 3px var(--msg-rail);
+  margin:0 0 2px var(--msg-rail);
   max-width:var(--msg-max);
   color:var(--muted);
   font-size:11px;
@@ -3163,28 +3163,33 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-action:hover,
 .transparent-event-control:hover{color:var(--text);opacity:1;text-decoration-color:currentColor;}
 .transparent-event-row{
-  margin:1px 0 1px var(--msg-rail);
+  margin:0 0 1px var(--msg-rail);
   max-width:var(--msg-max);
   width:calc(100% - var(--msg-rail));
-  border:1px solid color-mix(in srgb,var(--accent) 12%,var(--border-subtle));
-  border-left:2px solid color-mix(in srgb,var(--accent) 42%,transparent);
-  border-radius:12px;
-  background:linear-gradient(90deg,color-mix(in srgb,var(--accent-bg) 22%,transparent),color-mix(in srgb,var(--surface) 88%,transparent) 34%);
+  border:1px solid transparent;
+  border-left:1px solid transparent;
+  border-radius:6px;
+  background:transparent;
   overflow:hidden;
-  box-shadow:0 1px 0 rgba(0,0,0,.03);
+  box-shadow:none;
   animation:transparent-event-enter .18s ease-out both;
-  transition:border-color .22s ease,box-shadow .22s ease,opacity .22s ease;
+  transition:background .18s ease,border-color .18s ease,opacity .22s ease;
 }
 .transparent-event-row[data-event-type="thinking"]{
-  background:linear-gradient(90deg,color-mix(in srgb,var(--accent-bg-strong) 30%,transparent),color-mix(in srgb,var(--accent-bg) 28%,color-mix(in srgb,var(--surface) 88%,transparent)) 42%);
-  border-color:color-mix(in srgb,var(--accent) 18%,var(--border-subtle));
-  border-left-color:color-mix(in srgb,var(--accent) 58%,transparent);
+  background:transparent;
+  border-color:transparent;
+  border-left-color:transparent;
 }
 .transparent-event-row[data-expanded="1"]{
-  border-color:color-mix(in srgb,var(--accent) 28%,var(--border-subtle));
-  box-shadow:0 4px 14px rgba(0,0,0,.06);
+  border-color:var(--border-subtle);
+  background:color-mix(in srgb,var(--surface-subtle) 62%,transparent);
+  box-shadow:none;
 }
-.transparent-event-row:hover{border-color:color-mix(in srgb,var(--accent) 38%,var(--border-subtle));}
+.transparent-event-row:hover,
+.transparent-event-row:focus-within{
+  border-color:var(--border-subtle);
+  background:color-mix(in srgb,var(--surface-subtle) 48%,transparent);
+}
 .transparent-event-row .tool-card{
   border:0;
   border-radius:0;
@@ -3197,8 +3202,8 @@ body.resizing .sidebar{transition:none!important;}
   flex-direction:row;
   align-items:center;
   gap:5px;
-  min-height:20px;
-  padding:2px 4px 2px 8px;
+  min-height:19px;
+  padding:1px 4px 1px 7px;
   margin-left:0;
   border-radius:0;
   color:var(--muted);
@@ -3213,15 +3218,15 @@ body.resizing .sidebar{transition:none!important;}
   justify-content:center;
   width:14px;height:14px;
   flex-shrink:0;
-  opacity:.85;
+  opacity:.7;
 }
 .transparent-event-row .tool-card-icon{order:1;}
 .transparent-event-row .tool-card-icon svg,
 .transparent-event-row .thinking-card-icon svg{width:11px;height:11px;}
 .transparent-event-row .tool-card-name{
   font-weight:600;
-  color:var(--text);
-  opacity:.78;
+  color:var(--muted);
+  opacity:.86;
   font-size:11.5px;
   order:2;
   flex-shrink:0;
@@ -3246,8 +3251,8 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-row .thinking-card-label{
   display:inline;
   flex:0 0 auto;
-  color:var(--accent);
-  opacity:.86;
+  color:var(--muted);
+  opacity:.88;
   font-size:11.5px;
   font-weight:600;
   overflow:hidden;
@@ -3269,19 +3274,19 @@ body.resizing .sidebar{transition:none!important;}
   flex-shrink:0;
   order:4;
   color:var(--muted);
-  opacity:.7;
+  opacity:.64;
   font-size:10px;
   font-weight:500;
   letter-spacing:.02em;
   padding:1px 5px;
   border-radius:6px;
-  background:color-mix(in srgb,var(--accent) 8%,transparent);
+  background:transparent;
 }
 .transparent-event-copy{
   border:0;
   background:transparent;
   color:var(--muted);
-  opacity:.4;
+  opacity:.28;
   padding:1px 2px;
   cursor:pointer;
   flex-shrink:0;
@@ -3292,7 +3297,8 @@ body.resizing .sidebar{transition:none!important;}
   border-radius:4px;
   transition:opacity .18s ease,color .18s ease;
 }
-.transparent-event-copy:hover{opacity:1;color:var(--text);background:transparent;}
+.transparent-event-copy:hover,
+.transparent-event-copy:focus-visible{opacity:1;color:var(--text);background:transparent;}
 .transparent-event-row .tool-card-toggle,
 .transparent-event-row .thinking-card-toggle{
   order:10;
@@ -3301,18 +3307,24 @@ body.resizing .sidebar{transition:none!important;}
   align-items:center;
   justify-content:center;
   width:14px;height:14px;
-  opacity:.55;
+  opacity:.34;
   transition:opacity .18s ease,transform .22s ease;
 }
+.transparent-event-row:hover .transparent-event-copy,
+.transparent-event-row:focus-within .transparent-event-copy,
+.transparent-event-row:hover .tool-card-toggle,
+.transparent-event-row:focus-within .tool-card-toggle,
+.transparent-event-row:hover .thinking-card-toggle,
+.transparent-event-row:focus-within .thinking-card-toggle{opacity:.76;}
 .transparent-event-row .tool-card:hover .tool-card-toggle,
 .transparent-event-row .thinking-card:hover .thinking-card-toggle{opacity:1;}
 .transparent-event-row .tool-card.open .tool-card-toggle,
 .transparent-event-row .thinking-card.open .thinking-card-toggle{transform:rotate(90deg);opacity:.9;}
 .transparent-event-progress{
   position:relative;
-  height:3px;
-  background:linear-gradient(180deg,color-mix(in srgb,var(--border-subtle) 100%,transparent) 0,color-mix(in srgb,var(--border-subtle) 40%,transparent) 100%);
-  border-radius:0 0 12px 12px;
+  height:1px;
+  background:transparent;
+  border-radius:0 0 6px 6px;
   overflow:hidden;
   margin:0 -1px -1px -1px;
 }
@@ -3320,30 +3332,23 @@ body.resizing .sidebar{transition:none!important;}
   content:"";
   position:absolute;left:0;top:0;bottom:0;
   width:0%;
-  background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 70%,transparent),color-mix(in srgb,var(--accent) 95%,transparent) 50%,color-mix(in srgb,var(--accent) 70%,transparent) 100%);
-  box-shadow:0 0 4px color-mix(in srgb,var(--accent) 60%,transparent);
+  background:color-mix(in srgb,var(--muted) 42%,transparent);
+  box-shadow:none;
+  opacity:0;
   border-radius:inherit;
   transition:width .35s cubic-bezier(.4,0,.2,1);
 }
-.transparent-event-progress[data-progress-running="1"]::before{animation:transparent-progress-shimmer 1.6s ease-in-out infinite;}
+.transparent-event-progress[data-progress-running="1"]::before{opacity:.55;animation:transparent-progress-shimmer 1.6s ease-in-out infinite;}
 .transparent-event-progress[data-progress-percent]::before{width:var(--transparent-progress-percent,0%);}
 .transparent-event-progress::after{
-  content:"";
-  position:absolute;left:0;right:0;top:0;height:1px;
-  background:linear-gradient(90deg,transparent 0,color-mix(in srgb,var(--surface) 70%,transparent) 20%,color-mix(in srgb,var(--surface) 90%,transparent) 50%,color-mix(in srgb,var(--surface) 70%,transparent) 80%,transparent 100%);
-  pointer-events:none;
+  content:none;
 }
 @keyframes transparent-progress-shimmer{
   0%{left:0;right:100%;}
   100%{left:100%;right:0;}
 }
 .transparent-event-row + .transparent-event-row::before{
-  content:"";
-  display:block;
-  height:1px;
-  margin:0 12px;
-  background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--accent) 18%,transparent) 20%,color-mix(in srgb,var(--accent) 28%,transparent) 50%,color-mix(in srgb,var(--accent) 18%,transparent) 80%,transparent);
-  border-radius:1px;
+  content:none;
 }
 .transparent-detail-modes{
   display:flex;
@@ -3373,17 +3378,17 @@ body.resizing .sidebar{transition:none!important;}
   opacity:1;
   transform:translateY(0);
   border-top-color:var(--border-subtle);
-  padding:2px 0 4px;
+  padding:1px 0 3px;
   overflow:auto;
 }
 .transparent-event-row .thinking-card.open .thinking-card-body{
   border-top-color:transparent;
-  padding:0 0 4px;
+  padding:0 0 3px;
 }
 .transparent-event-row .tool-card-detail > *,
 .transparent-event-row .thinking-card-body > *{min-height:0;}
 .transparent-event-row .tool-card-args,
-.transparent-event-row .tool-card-result{padding:6px 8px;}
+.transparent-event-row .tool-card-result{padding:5px 7px;}
 .transparent-event-row .tool-card-detail[data-transparent-detail-mode="output"] .tool-card-args{display:none;}
 .transparent-event-row .tool-card-args{margin-bottom:0;}
 .transparent-event-row .tool-arg-pair{display:flex;flex-direction:column;gap:1px;padding:3px 0;border-bottom:1px solid color-mix(in srgb,var(--border-subtle) 72%,transparent);}
@@ -3393,8 +3398,8 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-row .tool-card-result pre{
   background:var(--code-bg);
   border:1px solid var(--border-subtle);
-  border-radius:8px;
-  padding:6px 8px;
+  border-radius:6px;
+  padding:5px 7px;
   color:var(--muted);
   line-height:1.5;
 }

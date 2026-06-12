@@ -236,35 +236,36 @@ def test_transparent_existing_copy_buttons_are_rebound_after_cache_restore():
     assert "const fallbackName=row.getAttribute('data-event-name')||row.getAttribute('data-tool-name')||'tool';" in UI_JS
 
 
-def test_transparent_event_row_pre_3820_visual_rhythm():
-    """Restore the pre-#3820 visual rhythm: collapsed rows are flat
-    list-items (no border) so the stack reads as a clean list, and tool
-    rows are distinguished from thinking rows by a warm low-opacity
-    secondary tint. When the user clicks a row, it expands into a small
-    card with a smooth height animation.
+def test_transparent_event_row_quiet_metadata_visual_rhythm():
+    """Transparent stream rows are quiet transcript metadata, not highlighted
+    cards. Collapsed rows are transparent by default, with only neutral
+    hover/focus/expanded treatment. Thinking rows share the same quiet family
+    instead of using a special accent banner.
 
     Body itself stays flush with the card's border (no inner chrome), but
     contains a bordered code block for output. Status is rendered as a
     small text badge only when the tool isn't Completed.
     """
-    # Per-event card (when expanded): thin border, surface bg, radius, soft shadow.
-    assert "border:1px solid var(--border-subtle)" in STYLE_CSS
-    # Softened edges: 12px (was 10px, was 6px originally).
-    assert "border-radius:12px" in STYLE_CSS
-    assert "background:var(--surface)" in STYLE_CSS
+    # Collapsed rows are inline metadata: no gradient, no shadow, no accent rail.
+    assert "border:1px solid transparent" in STYLE_CSS
+    assert "border-left:1px solid transparent" in STYLE_CSS
+    assert "border-radius:6px" in STYLE_CSS
+    assert "background:transparent" in STYLE_CSS
+    assert "box-shadow:none" in STYLE_CSS
 
     # Header: single flex line, low height, hover subtle.
-    # Compact rhythm: 20px header (was 22px) for tighter box size.
-    assert "min-height:20px" in STYLE_CSS
+    # Compact rhythm: 19px header for tighter inline trace rows.
+    assert "min-height:19px" in STYLE_CSS
     assert "display:flex" in STYLE_CSS
 
-    # Thinking row uses the warm low-opacity secondary tint (per-theme) PLUS
-    # a thin transparent border so the box reads as a unit even when collapsed.
-    assert "background:linear-gradient(90deg,color-mix(in srgb,var(--accent-bg-strong)" in STYLE_CSS
-    # All transparent event boxes carry a very-low-opacity border so each box
-    # is visually anchored. The thinking row's border is slightly stronger.
-    assert "color-mix(in srgb,var(--accent) 58%,transparent)" in STYLE_CSS
-    assert "color-mix(in srgb,var(--accent) 38%,var(--border-subtle))" in STYLE_CSS
+    # Thinking rows no longer get a special accent gradient or bright border.
+    thinking_start = STYLE_CSS.index('.transparent-event-row[data-event-type="thinking"]')
+    thinking_end = STYLE_CSS.index('.transparent-event-row[data-expanded="1"]', thinking_start)
+    thinking_block = STYLE_CSS[thinking_start:thinking_end]
+    assert "background:transparent;" in thinking_block
+    assert "border-color:transparent;" in thinking_block
+    assert "border-left-color:transparent;" in thinking_block
+    assert "var(--accent)" not in thinking_block
 
     # Expanded body uses visible max-height / opacity animation for smooth height.
     assert "max-height:0" in STYLE_CSS
@@ -281,7 +282,7 @@ def test_transparent_event_row_pre_3820_visual_rhythm():
     assert "border-radius:0;" in STYLE_CSS
     assert "margin-top:0;" in STYLE_CSS
     assert "padding:0 8px 6px 27px;" in STYLE_CSS
-    assert ".transparent-event-row .thinking-card.open .thinking-card-body{\n  border-top-color:transparent;\n  padding:0 0 4px;\n}" in STYLE_CSS
+    assert ".transparent-event-row .thinking-card.open .thinking-card-body{\n  border-top-color:transparent;\n  padding:0 0 3px;\n}" in STYLE_CSS
 
     # Tabs: text-link style, font-weight indicates active, no pill background.
     assert ".transparent-detail-mode.active{color:var(--text);opacity:1;font-weight:600;}" in STYLE_CSS
@@ -299,7 +300,7 @@ def test_transparent_event_row_pre_3820_visual_rhythm():
     assert ".transparent-event-row .tool-card:not(.open) .tool-card-preview" not in STYLE_CSS
     assert "display:inline" in STYLE_CSS
     assert "flex-direction:row;" in STYLE_CSS
-    assert ".transparent-event-row .thinking-card-label{\n  display:inline;\n  flex:0 0 auto;\n  color:var(--accent);" in STYLE_CSS
+    assert ".transparent-event-row .thinking-card-label{\n  display:inline;\n  flex:0 0 auto;\n  color:var(--muted);" in STYLE_CSS
     assert ".transparent-event-thinking-preview{\n  display:inline;\n  flex:1 1 auto;\n  min-width:0;" in STYLE_CSS
     thinking_label_block = STYLE_CSS[
         STYLE_CSS.index(".transparent-event-row .thinking-card-label{"):
@@ -495,26 +496,27 @@ def test_transparent_turn_wiring_runs_after_per_turn_duration_block():
     )
 
 
-def test_three_d_progress_bar_attached_to_each_event_row():
-    """Each transparent event card has a 3D progress bar at its bottom
-    edge. The bar shimmers while the tool is running and fills to 100%
-    when it completes. Drawn as a 1px highlight + 1px shadow for the
-    3D ridge effect, and uses a step-break pseudo-element between
-    consecutive rows so the stream reads as discrete steps."""
+def test_muted_progress_bar_attached_to_each_event_row():
+    """Each transparent event row keeps a very quiet progress affordance.
+    The strip is neutral, 1px high, and only becomes visible while running so
+    completed internal traces do not compete with assistant prose."""
     assert "function _attachProgressBar" in UI_JS
     # The decorator wires the progress bar at the end of the function.
     assert "_attachProgressBar(row, opts)" in UI_JS
-    # CSS: bar has a 3D ridge (::after highlight) and a shimmer keyframe.
+    # CSS: bar is present and can shimmer while running, but has no accent glow.
     assert ".transparent-event-progress" in STYLE_CSS
     assert "transparent-progress-shimmer" in STYLE_CSS
     assert "@keyframes transparent-progress-shimmer" in STYLE_CSS
-    # The bar lives at the bottom of the card with a 12px radius to match
-    # the card's bottom-left and bottom-right corners.
-    assert "border-radius:0 0 12px 12px" in STYLE_CSS
-    # The 3D ridge highlight.
-    assert "transparent-event-progress::after" in STYLE_CSS
-    # Step break: between two consecutive event rows, a soft gradient line.
+    assert "height:1px" in STYLE_CSS
+    assert "border-radius:0 0 6px 6px" in STYLE_CSS
+    assert "background:color-mix(in srgb,var(--muted) 42%,transparent)" in STYLE_CSS
+    assert "box-shadow:none" in STYLE_CSS
+    assert "opacity:0" in STYLE_CSS
+    assert '.transparent-event-progress[data-progress-running="1"]::before{opacity:.55;' in STYLE_CSS
+    # No 3D ridge or accent separator between adjacent rows.
+    assert ".transparent-event-progress::after{\n  content:none;\n}" in STYLE_CSS
     assert ".transparent-event-row + .transparent-event-row::before" in STYLE_CSS
+    assert ".transparent-event-row + .transparent-event-row::before{\n  content:none;\n}" in STYLE_CSS
 
 
 def test_copy_button_position_is_stable_and_dedup_handles_legacy_template():
@@ -527,8 +529,8 @@ def test_copy_button_position_is_stable_and_dedup_handles_legacy_template():
     # Flex order pinning.
     assert "order:9" in STYLE_CSS
     assert "order:10" in STYLE_CSS
-    assert ".transparent-event-copy{\n  border:0;\n  background:transparent;\n  color:var(--muted);\n  opacity:.4;" in STYLE_CSS
-    assert ".transparent-event-copy:hover{opacity:1;color:var(--text);background:transparent;}" in STYLE_CSS
+    assert ".transparent-event-copy{\n  border:0;\n  background:transparent;\n  color:var(--muted);\n  opacity:.28;" in STYLE_CSS
+    assert ".transparent-event-copy:hover,\n.transparent-event-copy:focus-visible{opacity:1;color:var(--text);background:transparent;}" in STYLE_CSS
     # Dedup: _attachCopyButton checks for both .transparent-event-copy
     # and .thinking-copy-btn.
     assert "'.transparent-event-copy,.thinking-copy-btn'" in UI_JS
@@ -538,19 +540,16 @@ def test_copy_button_position_is_stable_and_dedup_handles_legacy_template():
     assert "return bindCopyButton(existing);" in UI_JS
 
 
-def test_increased_transparency_and_softened_edges():
-    """Background opacity is slightly lower (22% accent for tool, 30% for
-    thinking vs 28%/38% before) and the border is softer (12% accent
-    mix). Edges are softer: 12px border-radius, lower box-shadow
-    opacity, and the hover/expanded shadows are gentler."""
-    # Softer background.
-    assert "color-mix(in srgb,var(--accent-bg) 22%,transparent)" in STYLE_CSS
-    # Softer border.
-    assert "color-mix(in srgb,var(--accent) 12%,var(--border-subtle))" in STYLE_CSS
-    # Softer shadow.
-    assert "rgba(0,0,0,.03)" in STYLE_CSS
-    # 12px edges.
-    assert "border-radius:12px" in STYLE_CSS
+def test_transparent_rows_remove_card_chrome_by_default():
+    """Default transparent rows avoid card/banner styling. Neutral border and
+    low-tint background are reserved for hover, focus, or expanded states."""
+    assert "border:1px solid transparent" in STYLE_CSS
+    assert "border-left:1px solid transparent" in STYLE_CSS
+    assert "border-color:var(--border-subtle)" in STYLE_CSS
+    assert "background:color-mix(in srgb,var(--surface-subtle) 62%,transparent)" in STYLE_CSS
+    assert "background:color-mix(in srgb,var(--surface-subtle) 48%,transparent)" in STYLE_CSS
+    assert "box-shadow:none" in STYLE_CSS
+    assert "border-radius:6px" in STYLE_CSS
 
 
 def test_smaller_tool_icons_and_reduced_font_sizes():
