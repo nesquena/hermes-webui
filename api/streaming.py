@@ -237,6 +237,74 @@ def _resolve_custom_provider_runtime_overrides(
     return resolved_provider, resolved_api_key, resolved_base_url
 
 
+def _same_base_url_endpoint(url_a: str, url_b: str) -> bool:
+    """True if two base URLs point at the same scheme+host+port endpoint.
+
+    Used to decide whether a runtime base_url is just a normalized form of the
+    configured one (e.g. OpenCode-Go's ``/v1`` de-duplication on the same host)
+    versus a genuinely different endpoint (an explicit ``providers.<id>.base_url``
+    override at a different host/port that must be preserved). Path/query are
+    intentionally ignored — the normalization #3895 fixes is path-only.
+    """
+    from urllib.parse import urlsplit
+    try:
+        a = urlsplit((url_a or "").strip())
+        b = urlsplit((url_b or "").strip())
+    except Exception:
+        return False
+    _default_port = {"http": 80, "https": 443}
+    a_host = (a.hostname or "").lower()
+    b_host = (b.hostname or "").lower()
+    a_scheme = (a.scheme or "").lower()
+    b_scheme = (b.scheme or "").lower()
+    a_port = a.port or _default_port.get(a_scheme)
+    b_port = b.port or _default_port.get(b_scheme)
+    return bool(a_host) and a_host == b_host and a_scheme == b_scheme and a_port == b_port
+
+
+def _runtime_preferred_base_url(
+    runtime_provider: dict | None,
+    resolved_provider: str | None,
+    configured_base_url: str | None,
+) -> str | None:
+    """Prefer the runtime-normalized base_url, but never override an explicit
+    configured endpoint that points somewhere genuinely different.
+
+    The #3895 bug was that WebUI used the *configured* base_url (which can carry a
+    duplicated ``/v1``) instead of the runtime provider's per-model-normalized
+    base_url, 404ing OpenCode-Go. But blindly preferring the runtime URL would
+    clobber a legitimate ``providers.<id>.base_url`` override (e.g. LM Studio at a
+    LAN IP, an OpenRouter mirror). So:
+      - no runtime URL            -> keep configured
+      - no configured URL         -> use runtime (all we have)
+      - named ``custom:`` endpoint -> configured wins (then runtime as fallback)
+      - same scheme+host+port     -> runtime wins (it's the normalized/corrected
+                                      form of the same endpoint — the #3895 case)
+      - different endpoint        -> configured override wins (no regression)
+    """
+    runtime_base_url = None
+    if isinstance(runtime_provider, dict):
+        runtime_base_url = runtime_provider.get("base_url")
+    if not runtime_base_url:
+        return configured_base_url
+    if not configured_base_url:
+        return runtime_base_url
+
+    provider_id = str(
+        resolved_provider
+        or (runtime_provider or {}).get("provider")
+        or ""
+    ).strip().lower()
+    if provider_id.startswith("custom:"):
+        return configured_base_url or runtime_base_url
+
+    # An explicit configured override at a DIFFERENT endpoint must be preserved;
+    # only prefer the runtime URL when it's the same endpoint (path-normalized).
+    if _same_base_url_endpoint(configured_base_url, runtime_base_url):
+        return runtime_base_url
+    return configured_base_url
+
+
 def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
     """Return True if an agent lifecycle status should surface as a fallback warning."""
     k = str(kind or '').strip().lower()
@@ -4592,7 +4660,7 @@ def _replace_session_db_in_kwargs(agent_kwargs, state_db_path):
 
 
 def _attempt_credential_self_heal(
-    provider_id, session_id, _agent_lock_ref,
+    provider_id, session_id, _agent_lock_ref, *, target_model=None,
 ):
     """Try to silently refresh credentials after a 401/auth error (#1401).
 
@@ -4640,6 +4708,7 @@ def _attempt_credential_self_heal(
         _new_rt = resolve_runtime_provider_with_anthropic_env_lock(
             resolve_runtime_provider,
             requested=provider_id,
+            target_model=target_model,
         )
 
         logger.info(
@@ -5879,6 +5948,7 @@ def _run_agent_streaming(
             resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
                 model_with_provider_context(model, provider_context)
             )
+            configured_base_url = resolved_base_url
 
             # Resolve API key via Hermes runtime provider (matches gateway behaviour).
             # Pass the resolved provider so non-default providers get their own credentials.
@@ -5889,12 +5959,14 @@ def _run_agent_streaming(
                 _rt = resolve_runtime_provider_with_anthropic_env_lock(
                     resolve_runtime_provider,
                     requested=resolved_provider,
+                    target_model=resolved_model,
                 )
                 resolved_api_key = _rt.get("api_key")
                 if not resolved_provider:
                     resolved_provider = _rt.get("provider")
-                if not resolved_base_url:
-                    resolved_base_url = _rt.get("base_url")
+                resolved_base_url = _runtime_preferred_base_url(
+                    _rt, resolved_provider, configured_base_url
+                )
             except Exception as _e:
                 print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
 
@@ -6764,6 +6836,7 @@ def _run_agent_streaming(
                         _heal_result = None
                         _heal_rt = _attempt_credential_self_heal(
                             resolved_provider or '', session_id, _agent_lock,
+                            target_model=resolved_model,
                         )
                         if _heal_rt is not None:
                             logger.info('[webui] self-heal: retrying stream after credential refresh')
@@ -6772,8 +6845,9 @@ def _run_agent_streaming(
                             resolved_api_key = _heal_rt.get('api_key')
                             if not resolved_provider:
                                 resolved_provider = _heal_rt.get('provider')
-                            if not resolved_base_url:
-                                resolved_base_url = _heal_rt.get('base_url')
+                            resolved_base_url = _runtime_preferred_base_url(
+                                _heal_rt, resolved_provider, configured_base_url
+                            )
                             resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
                                 resolved_provider, resolved_api_key, resolved_base_url
                             )
@@ -7716,6 +7790,7 @@ def _run_agent_streaming(
                 # ── Credential self-heal on 401 (#1401) ──
                 _heal_rt = _attempt_credential_self_heal(
                     resolved_provider or '', session_id, _agent_lock,
+                    target_model=resolved_model,
                 )
                 if _heal_rt is not None:
                     logger.info('[webui] self-heal (except path): retrying stream after credential refresh')
@@ -7725,8 +7800,9 @@ def _run_agent_streaming(
                     resolved_api_key = _heal_rt.get('api_key')
                     if not resolved_provider:
                         resolved_provider = _heal_rt.get('provider')
-                    if not resolved_base_url:
-                        resolved_base_url = _heal_rt.get('base_url')
+                    resolved_base_url = _runtime_preferred_base_url(
+                        _heal_rt, resolved_provider, configured_base_url
+                    )
                     resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
                         resolved_provider, resolved_api_key, resolved_base_url
                     )
