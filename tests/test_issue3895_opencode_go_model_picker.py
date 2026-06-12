@@ -2,6 +2,7 @@
 
 import pathlib
 import queue
+import re
 import sys
 import types
 from unittest import mock
@@ -191,6 +192,23 @@ def test_streaming_reuses_runtime_base_url_helper_in_self_heal_paths():
     source = (pathlib.Path(__file__).parent.parent / "api" / "streaming.py").read_text(
         encoding="utf-8"
     )
-    assert "resolved_base_url = _runtime_preferred_base_url(\n                    _rt, resolved_provider, configured_base_url\n                )" in source
-    assert "resolved_base_url = _runtime_preferred_base_url(\n                                _heal_rt, resolved_provider, configured_base_url\n                            )" in source
-    assert "resolved_base_url = _runtime_preferred_base_url(\n                        _heal_rt, resolved_provider, configured_base_url\n                    )" in source
+    assert re.search(
+        r"resolved_base_url\s*=\s*_runtime_preferred_base_url\(\s*_rt,\s*resolved_provider,\s*configured_base_url\s*\)",
+        source,
+    )
+    assert len(
+        re.findall(
+            r"resolved_base_url\s*=\s*_runtime_preferred_base_url\(\s*_heal_rt,\s*resolved_provider,\s*configured_base_url\s*\)",
+            source,
+        )
+    ) == 2
+    assert len(
+        re.findall(
+            r"_attempt_credential_self_heal\(\s*resolved_provider\s+or\s+['\"]{2},\s*session_id,\s*_agent_lock,\s*target_model=resolved_model,\s*\)",
+            source,
+        )
+    ) == 2
+    assert re.search(
+        r"resolve_runtime_provider_with_anthropic_env_lock\(\s*resolve_runtime_provider,\s*requested=provider_id,\s*target_model=target_model,\s*\)",
+        source,
+    )
