@@ -113,6 +113,33 @@
     'excluded',
   ]);
 
+  const UNSAFE_OBJECT_KEYS=Object.freeze([
+    '__proto__',
+    'constructor',
+    'prototype',
+  ]);
+
+  function _isUnsafeObjectKey(key){
+    return UNSAFE_OBJECT_KEYS.indexOf(key)!==-1;
+  }
+
+  function _hasOwn(value, key){
+    return !!value&&typeof value==='object'&&Object.prototype.hasOwnProperty.call(value,key);
+  }
+
+  function _own(value, key){
+    return _hasOwn(value,key)?value[key]:undefined;
+  }
+
+  function _firstOwn(value, keys){
+    if(!value||typeof value!=='object') return undefined;
+    for(let i=0;i<keys.length;i+=1){
+      const item=_own(value,keys[i]);
+      if(item!==undefined&&item!==null&&item!=='') return item;
+    }
+    return undefined;
+  }
+
   function _cleanString(value){
     return typeof value==='string'?value.trim():'';
   }
@@ -145,8 +172,9 @@
     }
     const proto=Object.getPrototypeOf(value);
     if(proto!==null&&Object.prototype.toString.call(value)!=='[object Object]') return '[Object]';
-    const out={};
+    const out=Object.create(null);
     Object.keys(value).sort().forEach((key)=>{
+      if(_isUnsafeObjectKey(key)) return;
       const safe=_sanitizePayload(value[key],depth+1);
       if(safe!==undefined) out[key]=safe;
     });
@@ -173,21 +201,21 @@
   }
 
   function _sourceEventType(input, payload){
-    return _cleanString(input&&(
-      input.source_event_type||
-      input.sourceType||
-      input.source_type||
-      input.event_type||
-      input.type||
-      input.event
-    )) || _cleanString(payload&&(payload.source_event_type||payload.type||payload.event));
+    return _cleanString(_firstOwn(input,[
+      'source_event_type',
+      'sourceType',
+      'source_type',
+      'event_type',
+      'type',
+      'event',
+    ])) || _cleanString(_firstOwn(payload,['source_event_type','type','event']));
   }
 
   function _sourceEventPayload(input){
     if(!input||typeof input!=='object') return {};
-    if(Object.prototype.hasOwnProperty.call(input,'payload')) return _coercePayload(input.payload);
-    if(Object.prototype.hasOwnProperty.call(input,'data')) return _coercePayload(input.data);
-    const payload={};
+    if(_hasOwn(input,'payload')) return _coercePayload(_own(input,'payload'));
+    if(_hasOwn(input,'data')) return _coercePayload(_own(input,'data'));
+    const payload=Object.create(null);
     const reserved=new Set([
       'source_event_type',
       'sourceType',
@@ -207,6 +235,7 @@
       'timestamp',
     ]);
     Object.keys(input).forEach((key)=>{
+      if(_isUnsafeObjectKey(key)) return;
       if(!reserved.has(key)) payload[key]=input[key];
     });
     return payload;
@@ -230,26 +259,28 @@
 
   function _localIdForSourceEvent(sourceType, context, payload){
     const explicit=_cleanString(
-      (context&&context.local_id)||
-      (payload&&(payload.local_id||payload.id||payload.tid||payload.tool_call_id||payload.tool_use_id||payload.call_id))
+      _own(context,'local_id')||
+      _firstOwn(payload,['local_id','id','tid','tool_call_id','tool_use_id','call_id'])
     );
     if(explicit) return explicit;
-    const sessionId=_cleanString(context&&context.session_id)||'session';
-    const turnId=_cleanString(context&&context.turn_id)||'turn';
-    const seq=(context&&context.seq!=null&&context.seq!=='')?String(context.seq):'pending';
+    const sessionId=_cleanString(_own(context,'session_id'))||'session';
+    const turnId=_cleanString(_own(context,'turn_id'))||'turn';
+    const ctxSeq=_own(context,'seq');
+    const seq=(ctxSeq!=null&&ctxSeq!=='')?String(ctxSeq):'pending';
     return [sessionId,turnId,sourceType||'event',seq].join(':');
   }
 
   function assistantTurnAnchorEventDedupeKey(event){
     if(!event||typeof event!=='object') return '';
-    const eventId=_cleanString(event.event_id);
-    if(eventId) return 'event_id:'+eventId;
-    const runId=_cleanString(event.run_id);
-    const seq=(event.seq!=null&&event.seq!=='')?String(event.seq):'';
-    if(runId&&seq) return 'run_seq:'+runId+':'+seq;
-    const sid=_cleanString(event.session_id);
-    const localId=_cleanString(event.local_id);
-    if(sid&&localId) return 'local:'+sid+':'+localId;
+    const eventId=_cleanString(_own(event,'event_id'));
+    if(eventId) return 'event_id:'+JSON.stringify(eventId);
+    const runId=_cleanString(_own(event,'run_id'));
+    const eventSeq=_own(event,'seq');
+    const seq=(eventSeq!=null&&eventSeq!=='')?String(eventSeq):'';
+    if(runId&&seq) return 'run_seq:'+JSON.stringify([runId,seq]);
+    const sid=_cleanString(_own(event,'session_id'));
+    const localId=_cleanString(_own(event,'local_id'));
+    if(sid&&localId) return 'local:'+JSON.stringify([sid,localId]);
     return '';
   }
 
@@ -291,17 +322,19 @@
         dedupe_key:'',
       });
     }
-    const eventId=_cleanString(event.event_id||event.lastEventId||event.last_event_id||rawPayload.event_id);
+    const eventId=_cleanString(_firstOwn(event,['event_id','lastEventId','last_event_id'])||_payloadEventId);
+    const eventSeq=_own(event,'seq');
+    const ctxSeq=_own(ctx,'seq');
     const seq=_coerceSeq(
-      event.seq!==undefined?event.seq:
-        rawPayload.seq!==undefined?rawPayload.seq:
-          ctx.seq!==undefined?ctx.seq:
+      eventSeq!==undefined?eventSeq:
+        _payloadSeq!==undefined?_payloadSeq:
+          ctxSeq!==undefined?ctxSeq:
             _eventIdSeq(eventId)
     );
-    const runId=_cleanString(event.run_id||rawPayload.run_id||ctx.run_id)||_eventIdRunId(eventId)||null;
-    const sessionId=_cleanString(event.session_id||rawPayload.session_id||ctx.session_id);
-    const turnId=_cleanString(event.turn_id||rawPayload.turn_id||ctx.turn_id);
-    const streamId=_cleanString(event.stream_id||rawPayload.stream_id||ctx.stream_id)||null;
+    const runId=_cleanString(_own(event,'run_id')||_payloadRunId||_own(ctx,'run_id'))||_eventIdRunId(eventId)||null;
+    const sessionId=_cleanString(_own(event,'session_id')||_payloadSessionId||_own(ctx,'session_id'));
+    const turnId=_cleanString(_own(event,'turn_id')||_payloadTurnId||_own(ctx,'turn_id'));
+    const streamId=_cleanString(_own(event,'stream_id')||_payloadStreamId||_own(ctx,'stream_id'))||null;
     const localId=_localIdForSourceEvent(sourceType, {...ctx,seq}, payload);
     const anchorEvent={
       event_id:eventId||null,
@@ -313,7 +346,7 @@
       seq,
       kind:meta.kind,
       source_event_type:sourceType,
-      created_at:event.created_at||event.timestamp||payload.created_at||payload.ts||ctx.created_at||null,
+      created_at:_own(event,'created_at')||_own(event,'timestamp')||_own(payload,'created_at')||_own(payload,'ts')||_own(ctx,'created_at')||null,
       status:_statusForSourceEvent(sourceType,meta.kind,payload),
       payload,
     };

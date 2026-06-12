@@ -113,6 +113,39 @@ const promotedIdentityPayload = api.normalizeAssistantTurnAnchorSourceEvent({{
   }},
   event_id:'run-1:17',
 }}, context);
+const pollutionPayload = JSON.parse('{{"text":"clean","__proto__":{{"session_id":"polluted-session","run_id":"polluted-run"}},"constructor":{{"bad":true}},"prototype":{{"bad":true}}}}');
+const pollutionAttempt = api.normalizeAssistantTurnAnchorSourceEvent({{
+  type:'token',
+  payload:pollutionPayload,
+  event_id:'run-1:18',
+}}, context);
+const inheritedEvent = Object.create({{
+  event_id:'evil:1',
+  session_id:'evil-session',
+  run_id:'evil-run',
+  stream_id:'evil-stream',
+  seq:666,
+  created_at:'evil-time',
+}});
+inheritedEvent.type = 'token';
+inheritedEvent.payload = {{text:'own event only'}};
+const inheritedEnvelopeIdentity = api.normalizeAssistantTurnAnchorSourceEvent(inheritedEvent, context);
+const inheritedContext = Object.create({{
+  session_id:'evil-context-session',
+  turn_id:'evil-context-turn',
+  run_id:'evil-context-run',
+  stream_id:'evil-context-stream',
+  seq:777,
+  created_at:'evil-context-time',
+}});
+const inheritedContextIdentity = api.normalizeAssistantTurnAnchorSourceEvent({{
+  type:'token',
+  payload:{{text:'own context only'}},
+}}, inheritedContext);
+const runSeqCollisionA = api.assistantTurnAnchorEventDedupeKey({{run_id:'a:b', seq:'c'}});
+const runSeqCollisionB = api.assistantTurnAnchorEventDedupeKey({{run_id:'a', seq:'b:c'}});
+const localCollisionA = api.assistantTurnAnchorEventDedupeKey({{session_id:'a:b', local_id:'c'}});
+const localCollisionB = api.assistantTurnAnchorEventDedupeKey({{session_id:'a', local_id:'b:c'}});
 console.log(JSON.stringify({{
   version: api.version,
   liveToken,
@@ -128,6 +161,13 @@ console.log(JSON.stringify({{
   eventTypePayload,
   nonPlainPayload,
   promotedIdentityPayload,
+  pollutionAttempt,
+  inheritedEnvelopeIdentity,
+  inheritedContextIdentity,
+  runSeqCollisionA,
+  runSeqCollisionB,
+  localCollisionA,
+  localCollisionB,
 }}));
 """
     result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
@@ -142,7 +182,7 @@ def test_normalizer_maps_live_and_replay_to_same_anchor_event_identity():
 
     assert data["version"] == "slice2-normalizer"
     assert live["classification"] == "activity"
-    assert live["dedupe_key"] == "event_id:run-1:7"
+    assert live["dedupe_key"] == 'event_id:"run-1:7"'
     assert replay["dedupe_key"] == live["dedupe_key"]
     assert live["anchor_event"]["kind"] == "process_prose"
     assert live["anchor_event"]["source_event_type"] == "token"
@@ -190,7 +230,7 @@ def test_normalizer_excludes_unknown_sources_and_sanitizes_non_json_data():
         "dedupe_key": "",
     }
     assert data["invalidPayload"]["anchor_event"]["payload"] == {"text": "plain text chunk"}
-    assert data["invalidPayload"]["dedupe_key"] == "event_id:run-1:13"
+    assert data["invalidPayload"]["dedupe_key"] == 'event_id:"run-1:13"'
     assert data["directParsedPayload"]["anchor_event"]["payload"] == {"text": "direct parsed payload"}
     assert data["directParsedPayload"]["anchor_event"]["seq"] == 14
 
@@ -217,6 +257,35 @@ def test_normalizer_strips_discriminators_and_promoted_identity_fields_from_payl
     }
 
 
+def test_normalizer_rejects_pollution_keys_and_inherited_identity_fields():
+    data = _normalizer_snapshot()
+
+    pollution = data["pollutionAttempt"]
+    assert pollution["dedupe_key"] == 'event_id:"run-1:18"'
+    assert pollution["anchor_event"]["session_id"] == "sid-1"
+    assert pollution["anchor_event"]["run_id"] == "run-1"
+    assert pollution["anchor_event"]["payload"] == {"text": "clean"}
+
+    inherited_event = data["inheritedEnvelopeIdentity"]["anchor_event"]
+    assert inherited_event["event_id"] is None
+    assert inherited_event["session_id"] == "sid-1"
+    assert inherited_event["run_id"] == "run-1"
+    assert inherited_event["stream_id"] == "stream-1"
+    assert inherited_event["seq"] is None
+    assert inherited_event["created_at"] is None
+    assert inherited_event["payload"] == {"text": "own event only"}
+
+    inherited_context = data["inheritedContextIdentity"]["anchor_event"]
+    assert inherited_context["event_id"] is None
+    assert inherited_context["session_id"] is None
+    assert inherited_context["turn_id"] is None
+    assert inherited_context["run_id"] is None
+    assert inherited_context["stream_id"] is None
+    assert inherited_context["seq"] is None
+    assert inherited_context["created_at"] is None
+    assert inherited_context["payload"] == {"text": "own context only"}
+
+
 def test_normalizer_marks_non_plain_payload_objects_explicitly():
     data = _normalizer_snapshot()
 
@@ -231,14 +300,25 @@ def test_batch_normalizer_dedupes_live_plus_replay_by_event_envelope():
     deduped = data["deduped"]
 
     assert [item["dedupe_key"] for item in deduped] == [
-        "event_id:run-1:11",
-        "event_id:run-1:12",
+        'event_id:"run-1:11"',
+        'event_id:"run-1:12"',
     ]
     assert [item["anchor_event"]["kind"] for item in deduped] == [
         "process_prose",
         "reasoning",
     ]
     assert deduped[0]["anchor_event"]["payload"] == {"text": "live"}
+
+
+def test_structured_fallback_dedupe_keys_do_not_collide_on_delimiters():
+    data = _normalizer_snapshot()
+
+    assert data["runSeqCollisionA"] == 'run_seq:["a:b","c"]'
+    assert data["runSeqCollisionB"] == 'run_seq:["a","b:c"]'
+    assert data["runSeqCollisionA"] != data["runSeqCollisionB"]
+    assert data["localCollisionA"] == 'local:["a:b","c"]'
+    assert data["localCollisionB"] == 'local:["a","b:c"]'
+    assert data["localCollisionA"] != data["localCollisionB"]
 
 
 def test_slice2_normalizer_is_still_unwired_from_rendering_hot_paths():
