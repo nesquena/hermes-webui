@@ -53,7 +53,7 @@ def safe_resolve(root: Path, requested: str) -> Path:
 
 
 _CSP_CONNECT_BASE = (
-    "'self' http://127.0.0.1:* http://localhost:* "
+    "'self' http://127.0.0.1:* http://localhost:* http://ipc.localhost "
     "ws://127.0.0.1:* ws://localhost:*"
 )
 _CSP_EXTRA_CONNECT_RE = _re.compile(
