@@ -1495,6 +1495,13 @@
   .panel-view.active{display:flex;}
   /* Cron panel */
   .cron-list{flex:1;overflow-y:auto;padding:8px;}
+  .cron-group{margin-top:10px;}
+  .cron-group-toggle{width:100%;display:flex;align-items:center;gap:8px;padding:6px 8px;border:none;background:none;color:var(--muted);cursor:pointer;text-align:left;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;}
+  .cron-group-toggle:hover{color:var(--text);}
+  .cron-group-chevron{width:12px;flex-shrink:0;text-align:center;font-size:11px;}
+  .cron-group-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .cron-group-body{padding-top:4px;}
+  .cron-group-body.collapsed{display:none;}
   .cron-gateway-notice{margin:8px 8px 0;}
   .cron-item{width:100%;min-width:0;box-sizing:border-box;border-radius:10px;border:1px solid var(--border);margin-bottom:6px;overflow:hidden;transition:border-color .15s,background .15s;background:rgba(255,255,255,.02);cursor:pointer;}
   .cron-item:hover{border-color:var(--border2);}
