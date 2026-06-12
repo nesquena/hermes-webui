@@ -3194,6 +3194,7 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-row .tool-card-header,
 .transparent-event-row .thinking-card-header{
   display:flex;
+  flex-direction:row;
   align-items:center;
   gap:5px;
   min-height:20px;
@@ -3212,9 +3213,9 @@ body.resizing .sidebar{transition:none!important;}
   justify-content:center;
   width:14px;height:14px;
   flex-shrink:0;
-  order:1;
   opacity:.85;
 }
+.transparent-event-row .tool-card-icon{order:1;}
 .transparent-event-row .tool-card-icon svg,
 .transparent-event-row .thinking-card-icon svg{width:11px;height:11px;}
 .transparent-event-row .tool-card-name{
@@ -3230,9 +3231,7 @@ body.resizing .sidebar{transition:none!important;}
   white-space:nowrap;
 }
 .transparent-event-row .tool-card-title,
-.transparent-event-row .tool-card-preview,
-.transparent-event-row .thinking-card-label,
-.transparent-event-thinking-preview{
+.transparent-event-row .tool-card-preview{
   display:inline;
   min-width:0;
   flex:1 1 auto;
@@ -3243,6 +3242,28 @@ body.resizing .sidebar{transition:none!important;}
   opacity:.74;
   font-size:11.5px;
   order:3;
+}
+.transparent-event-row .thinking-card-label{
+  display:inline;
+  flex:0 0 auto;
+  color:var(--accent);
+  opacity:.86;
+  font-size:11.5px;
+  font-weight:600;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.transparent-event-thinking-preview{
+  display:inline;
+  flex:1 1 auto;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:var(--muted);
+  opacity:.6;
+  font-size:.85em;
 }
 .transparent-event-status{
   flex-shrink:0;
@@ -3260,7 +3281,7 @@ body.resizing .sidebar{transition:none!important;}
   border:0;
   background:transparent;
   color:var(--muted);
-  opacity:.5;
+  opacity:.4;
   padding:1px 2px;
   cursor:pointer;
   flex-shrink:0;
@@ -3269,9 +3290,9 @@ body.resizing .sidebar{transition:none!important;}
   align-items:center;
   justify-content:center;
   border-radius:4px;
-  transition:opacity .18s ease,color .18s ease,background .18s ease;
+  transition:opacity .18s ease,color .18s ease;
 }
-.transparent-event-copy:hover{opacity:1;color:var(--text);background:color-mix(in srgb,var(--hover-bg) 60%,transparent);}
+.transparent-event-copy:hover{opacity:1;color:var(--text);background:transparent;}
 .transparent-event-row .tool-card-toggle,
 .transparent-event-row .thinking-card-toggle{
   order:10;
@@ -3355,23 +3376,34 @@ body.resizing .sidebar{transition:none!important;}
   padding:2px 0 4px;
   overflow:auto;
 }
+.transparent-event-row .thinking-card.open .thinking-card-body{
+  border-top-color:transparent;
+  padding:0 0 4px;
+}
 .transparent-event-row .tool-card-detail > *,
 .transparent-event-row .thinking-card-body > *{min-height:0;}
 .transparent-event-row .tool-card-args,
-.transparent-event-row .tool-card-result,
-.transparent-event-row .thinking-card-body pre{padding:6px 8px;}
+.transparent-event-row .tool-card-result{padding:6px 8px;}
 .transparent-event-row .tool-card-detail[data-transparent-detail-mode="output"] .tool-card-args{display:none;}
 .transparent-event-row .tool-card-args{margin-bottom:0;}
 .transparent-event-row .tool-arg-pair{display:flex;flex-direction:column;gap:1px;padding:3px 0;border-bottom:1px solid color-mix(in srgb,var(--border-subtle) 72%,transparent);}
 .transparent-event-row .tool-arg-pair:last-child{border-bottom:0;}
 .transparent-event-row .tool-arg-key{color:var(--muted);font-size:10px;font-family:var(--font-mono);display:block;margin-bottom:0;letter-spacing:.01em;}
 .transparent-event-row .tool-arg-val{font-family:var(--font-mono);font-size:var(--message-code-font-size);color:var(--text);line-height:1.5;}
-.transparent-event-row .tool-card-result pre,
-.transparent-event-row .thinking-card-body pre{
+.transparent-event-row .tool-card-result pre{
   background:var(--code-bg);
   border:1px solid var(--border-subtle);
   border-radius:8px;
   padding:6px 8px;
+  color:var(--muted);
+  line-height:1.5;
+}
+.transparent-event-row .thinking-card-body pre{
+  background:transparent;
+  border:0;
+  border-radius:0;
+  margin-top:0;
+  padding:0 8px 6px 27px;
   color:var(--muted);
   line-height:1.5;
 }

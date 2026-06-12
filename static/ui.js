@@ -6888,22 +6888,26 @@ function _decorateTransparentEventRow(row, opts){
     const header=row.querySelector('.thinking-card-header');
     if(card) card.classList.add('transparent-event-card');
     if(header){
+      const btnRow=header.querySelector('.thinking-card-btn-row');
+      const copy=header.querySelector('.thinking-copy-btn,.transparent-event-copy');
+      const toggle=header.querySelector('.thinking-card-toggle');
+      if(copy&&copy.parentNode!==header) header.appendChild(copy);
+      if(toggle&&toggle.parentNode!==header) header.appendChild(toggle);
+      if(btnRow&&btnRow.parentNode===header&&!btnRow.children.length) btnRow.remove();
+      header.style.flexDirection='row';
       const label=header.querySelector('.thinking-card-label');
       if(label) label.textContent='Thinking';
-      let preview=header.querySelector('.transparent-event-preview');
+      let preview=header.querySelector('.transparent-event-preview,.transparent-event-thinking-preview');
       const previewText=_transparentEventPreview(opts.preview||opts.text||row.textContent||'');
       if(previewText){
         if(!preview){
           preview=document.createElement('span');
-          preview.className='transparent-event-preview';
-          const toggle=header.querySelector('.thinking-card-toggle');
-          // Guard: toggle may be orphaned from a prior DOM rebuild
-          // (renderMessages reuses row objects that have stale children).
-          // Only insertBefore when toggle is still a child of header;
-          // otherwise fall back to appendChild.
-          if(toggle&&toggle.parentNode===header) header.insertBefore(preview,toggle);
+          preview.className='transparent-event-preview transparent-event-thinking-preview';
+          if(label&&label.parentNode===header&&label.nextSibling) header.insertBefore(preview,label.nextSibling);
+          else if(label&&label.parentNode===header) header.appendChild(preview);
           else header.appendChild(preview);
         }
+        preview.classList.add('transparent-event-thinking-preview');
         preview.textContent=previewText;
       }else if(preview){
         preview.remove();

@@ -171,6 +171,13 @@ def test_transparent_event_row_pre_3820_visual_rhythm():
     # Output / JSON: bordered code block, low opacity, inside the row's body.
     assert "background:var(--code-bg)" in STYLE_CSS
     assert "border:1px solid var(--border-subtle)" in STYLE_CSS
+    assert ".transparent-event-row .thinking-card-body pre{" in STYLE_CSS
+    assert "background:transparent;" in STYLE_CSS
+    assert "border:0;" in STYLE_CSS
+    assert "border-radius:0;" in STYLE_CSS
+    assert "margin-top:0;" in STYLE_CSS
+    assert "padding:0 8px 6px 27px;" in STYLE_CSS
+    assert ".transparent-event-row .thinking-card.open .thinking-card-body{\n  border-top-color:transparent;\n  padding:0 0 4px;\n}" in STYLE_CSS
 
     # Tabs: text-link style, font-weight indicates active, no pill background.
     assert ".transparent-detail-mode.active{color:var(--text);opacity:1;font-weight:600;}" in STYLE_CSS
@@ -187,6 +194,21 @@ def test_transparent_event_row_pre_3820_visual_rhythm():
     assert ".transparent-event-row .tool-card-preview" in STYLE_CSS
     assert ".transparent-event-row .tool-card:not(.open) .tool-card-preview" not in STYLE_CSS
     assert "display:inline" in STYLE_CSS
+    assert "flex-direction:row;" in STYLE_CSS
+    assert ".transparent-event-row .thinking-card-label{\n  display:inline;\n  flex:0 0 auto;\n  color:var(--accent);" in STYLE_CSS
+    assert ".transparent-event-thinking-preview{\n  display:inline;\n  flex:1 1 auto;\n  min-width:0;" in STYLE_CSS
+    thinking_label_block = STYLE_CSS[
+        STYLE_CSS.index(".transparent-event-row .thinking-card-label{"):
+        STYLE_CSS.index(".transparent-event-thinking-preview{")
+    ]
+    thinking_preview_block = STYLE_CSS[
+        STYLE_CSS.index(".transparent-event-thinking-preview{"):
+        STYLE_CSS.index(".transparent-event-status{")
+    ]
+    assert "order:" not in thinking_label_block
+    assert "order:" not in thinking_preview_block
+    assert "opacity:.6;" in STYLE_CSS
+    assert "font-size:.85em;" in STYLE_CSS
 
     # Per-row copy button still attached for both tool and thinking rows.
     assert "function _attachCopyButton" in UI_JS
@@ -196,6 +218,10 @@ def test_transparent_event_row_pre_3820_visual_rhythm():
     assert decorator_block.count("_attachCopyButton(header)") >= 2
     assert "_transparentToolDetailHtml(tc,status)" in decorator_block
     assert "_wireTransparentHeaderToggle(header)" in decorator_block
+    assert "const btnRow=header.querySelector('.thinking-card-btn-row')" in decorator_block
+    assert "if(copy&&copy.parentNode!==header) header.appendChild(copy)" in decorator_block
+    assert "if(toggle&&toggle.parentNode!==header) header.appendChild(toggle)" in decorator_block
+    assert "preview.className='transparent-event-preview transparent-event-thinking-preview'" in decorator_block
 
     # Bug fix: thinking blocks persist after the stream stops. removeThinking()
     # and finalizeThinkingCard() must not delete the transparent thinking row;
@@ -397,6 +423,8 @@ def test_copy_button_position_is_stable_and_dedup_handles_legacy_template():
     # Flex order pinning.
     assert "order:9" in STYLE_CSS
     assert "order:10" in STYLE_CSS
+    assert ".transparent-event-copy{\n  border:0;\n  background:transparent;\n  color:var(--muted);\n  opacity:.4;" in STYLE_CSS
+    assert ".transparent-event-copy:hover{opacity:1;color:var(--text);background:transparent;}" in STYLE_CSS
     # Dedup: _attachCopyButton checks for both .transparent-event-copy
     # and .thinking-copy-btn.
     assert "'.transparent-event-copy,.thinking-copy-btn'" in UI_JS
