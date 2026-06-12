@@ -77,7 +77,8 @@ def test_directive_injection_before_empty_guard():
 def test_directive_text_uses_match_name():
     src = read("static/commands.js")
     assert "match.name" in src, "directive must use match.name (canonical casing), not raw user input"
-    assert "[USER OVERRIDE] You MUST consult skill '" in src, "directive text must match the specified format"
+    assert "[USER OVERRIDE] You MUST follow the skill '" in src, "directive text must match the specified format"
+    assert "content provided below" in src, "directive must reference the injected skill content"
 
 
 def test_use_fetches_canonical_skill_content():
