@@ -120,6 +120,13 @@ def _run_commands_js(script_body: str) -> dict:
                   aliases: ['codex_runtime'],
                   cli_only: false,
                   gateway_only: false
+                }},
+                {{
+                  name: 'reload-skills',
+                  description: 'Re-scan installed skills',
+                  aliases: ['reload_skills'],
+                  cli_only: false,
+                  gateway_only: false
                 }}
               ]
             }};
@@ -252,12 +259,34 @@ def test_send_intercepts_reload_mcp_agent_command_before_agent_round_trip():
     assert "executeAgentCommand(text,_agentCmd||{name:_agentCmdName})" in intercept
 
 
-def test_reload_mcp_and_codex_runtime_webui_intercept_aliases_are_defined_in_js_whitelist():
+def test_reload_mcp_reload_skills_and_codex_runtime_webui_intercept_aliases_are_defined_in_js_whitelist():
     assert "'reload-mcp'" in MESSAGES_JS
     assert "'reload_mcp'" in MESSAGES_JS
+    assert "'reload-skills'" in MESSAGES_JS
+    assert "'reload_skills'" in MESSAGES_JS
     assert "'codex-runtime'" in MESSAGES_JS
     assert "'codex_runtime'" in MESSAGES_JS
     assert "if(_agentCmd&&_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" not in MESSAGES_JS
+
+
+def test_reload_skills_agent_command_metadata_resolves_alias():
+    result = _run_commands_js(
+        """
+        const byName = await getAgentCommandMetadata('reload-skills');
+        const byAlias = await getAgentCommandMetadata('reload_skills');
+        return {
+          by_name: byName && byName.name,
+          by_alias: byAlias && byAlias.name,
+          cli_only: byAlias && byAlias.cli_only === true
+        };
+        """
+    )
+
+    assert result == {
+        "by_name": "reload-skills",
+        "by_alias": "reload-skills",
+        "cli_only": False,
+    }
 
 
 def test_codex_runtime_agent_command_metadata_resolves_alias():
