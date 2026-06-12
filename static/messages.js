@@ -3869,9 +3869,17 @@ function transcript(){
 }
 
 let _composerAutoResizeRaf=0;
-function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();}
-function scheduleComposerAutoResize(){
+function autoResize(){
+  if(_composerAutoResizeRaf && typeof cancelAnimationFrame==='function'){
+    cancelAnimationFrame(_composerAutoResizeRaf);
+    _composerAutoResizeRaf=0;
+  }
+  const el=$('msg');
+  el.style.height='auto';
+  el.style.height=Math.min(el.scrollHeight,200)+'px';
   updateSendBtn();
+}
+function scheduleComposerAutoResize(){
   if(typeof requestAnimationFrame!=='function'){autoResize();return;}
   if(_composerAutoResizeRaf) return;
   _composerAutoResizeRaf=requestAnimationFrame(()=>{

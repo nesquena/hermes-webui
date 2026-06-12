@@ -12,6 +12,7 @@ def test_composer_autoresize_is_single_flight_per_frame():
     assert "if(typeof requestAnimationFrame!=='function'){autoResize();return;}" in MESSAGES_JS
     assert "if(_composerAutoResizeRaf) return;" in MESSAGES_JS
     assert "_composerAutoResizeRaf=requestAnimationFrame(()=>{" in MESSAGES_JS
+    assert "cancelAnimationFrame(_composerAutoResizeRaf);" in MESSAGES_JS
     assert "_composerAutoResizeRaf=0;" in MESSAGES_JS
     assert "autoResize();" in MESSAGES_JS
 
@@ -23,4 +24,4 @@ def test_composer_input_listener_uses_scheduler_instead_of_direct_reflow():
 
     assert "scheduleComposerAutoResize();" in listener
     assert "autoResize();" not in listener
-    assert "updateSendBtn();" not in listener
+    assert "updateSendBtn();" in listener
