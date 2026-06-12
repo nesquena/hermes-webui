@@ -26,7 +26,9 @@ SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 def _load_session_clear_block() -> str:
     """The if(currentSid!==sid||forceReload){...} block in loadSession()."""
     start = SESSIONS_JS.index("async function loadSession(sid)")
-    return SESSIONS_JS[start: start + 4000]
+    clear_start = SESSIONS_JS.index("if (currentSid !== sid || forceReload) {", start)
+    clear_end = SESSIONS_JS.index("// Phase 1: Load metadata only", clear_start)
+    return SESSIONS_JS[clear_start:clear_end]
 
 
 def _ensure_messages_loaded_body() -> str:
