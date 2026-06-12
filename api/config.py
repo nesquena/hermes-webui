@@ -3187,6 +3187,10 @@ def _apply_model_filter(groups: list) -> list:
     Reads ``model_filter`` from the Hermes config.yaml.  When set, only models
     whose ``id`` appears in the list are kept; providers with no remaining
     models are dropped.  When unset or empty, ``groups`` is returned unchanged.
+
+    If a model in the filter references a provider that doesn't appear in any
+    group (e.g. the live provider fetch timed out), a synthetic group is
+    created so the model still appears in the picker dropdown.
     """
     try:
         allowlist = cfg.get("model_filter")
@@ -3199,10 +3203,41 @@ def _apply_model_filter(groups: list) -> list:
         return groups
 
     filtered: list = []
+    seen_ids: set = set()
     for g in groups:
         kept = [m for m in g.get("models", []) if m.get("id") in allowed]
         if kept:
+            for m in kept:
+                seen_ids.add(m.get("id", ""))
             filtered.append({**g, "models": kept})
+
+    # For any allowed model not seen in existing groups, create a synthetic
+    # group so it still appears.  This handles the case where a provider's
+    # live-fetch times out (e.g. Nous Portal under a short rebuild budget).
+    missing = allowed - seen_ids
+    if missing:
+        synthetic: dict[str, list[dict]] = {}
+        for mid in sorted(missing):
+            pid = "default"
+            label = mid
+            if mid.startswith("@") and ":" in mid:
+                parts = mid.split(":", 1)
+                pid = parts[0].lstrip("@")
+                raw = parts[1]
+                label = _format_nous_label(raw) if pid == "nous" else raw
+            elif "/" in mid:
+                pid = mid.split("/", 1)[0]
+                label = mid
+            synthetic.setdefault(pid, []).append({"id": mid, "label": label})
+
+        for pid, models in synthetic.items():
+            provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
+            filtered.append({
+                "provider": provider_name,
+                "provider_id": pid,
+                "models": models,
+            })
+
     return filtered
 
 
