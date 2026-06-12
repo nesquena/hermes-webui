@@ -1912,11 +1912,10 @@ function renderModelDropdown(){
         const row=document.createElement('div');
         row.className='model-opt'+(m.value===sel.value?' active':'');
         let badgeLabel = '';
-        let modelName = m.name;
+        let modelName = m.rawName || m.name || getModelLabel(m.value) || m.value;
         if (m.badge) {
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
           badgeLabel = rawId;
-          modelName = rawId;
           if(m.badge.provider){
             const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
             badgeLabel += ` (${providerName})`;

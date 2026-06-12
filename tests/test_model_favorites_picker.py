@@ -211,12 +211,14 @@ def _configured_row_block():
     return UI_JS[start:start + 2000]
 
 
-def test_configured_row_preserves_raw_configured_model_name():
+def test_configured_row_uses_display_label_not_raw_id():
     block = _configured_row_block()
     assert "badgeLabel = rawId" in block, \
-        "Configured row should preserve raw configured model ID labels"
-    assert "modelName = rawId" in block, \
-        "Configured row should preserve raw configured model ID names"
+        "Configured row badge should still use raw ID"
+    assert "modelName = rawId" not in block, \
+        "Configured row main label must NOT be rawId; should use display label"
+    assert "m.rawName" in block, \
+        "Configured row should prefer m.rawName for display label"
 
 
 def test_configured_row_raw_id_still_in_opt_id():
