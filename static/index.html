@@ -649,10 +649,6 @@
               </optgroup>
             </select>
             </div>
-            <button class="provider-quota-chip" id="providerQuotaChip" type="button" title="Provider quota" onclick="switchPanel('settings');switchSettingsSection('providers')" hidden>
-              <span class="provider-quota-chip-dot" aria-hidden="true"></span>
-              <span class="provider-quota-chip-label" id="providerQuotaChipLabel"></span>
-            </button>
             <div class="composer-reasoning-wrap" id="composerReasoningWrap" style="display:none">
               <button class="composer-reasoning-chip" id="composerReasoningChip" type="button" onclick="toggleReasoningDropdown()" title="Reasoning effort level">
                 <span class="composer-reasoning-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg></span>
@@ -693,6 +689,16 @@
               </div>
             </div>
             <span class="bg-badge" id="bgBadge" style="display:none" title="Background tasks running">0</span>
+            <button class="provider-quota-chip" id="providerQuotaChip" type="button" title="Provider quota" aria-expanded="false" aria-controls="providerQuotaPopover" onclick="toggleProviderQuotaPopover(event)" hidden>
+              <span class="provider-quota-ring" aria-hidden="true">
+                <svg class="provider-quota-ring-svg" viewBox="0 0 24 24">
+                  <circle class="provider-quota-ring-track" cx="12" cy="12" r="9.5"></circle>
+                  <circle class="provider-quota-ring-value" id="providerQuotaRingValue" cx="12" cy="12" r="9.5"></circle>
+                </svg>
+                <span class="provider-quota-chip-label" id="providerQuotaChipLabel"></span>
+              </span>
+            </button>
+            <div class="provider-quota-popover" id="providerQuotaPopover" role="dialog" aria-label="Provider quota" hidden></div>
             <button class="send-btn has-tooltip has-tooltip--left" id="btnSend" data-tooltip="Send message" disabled>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
             </button>

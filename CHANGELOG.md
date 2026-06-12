@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+- Chat turn footers now show a quiet provider-quota remainder after each completed response when the active provider exposes quota/account-limit data, reusing the cached server-side quota status without forcing a fresh quota probe per turn.
+- The opt-in provider quota chip now renders as a circular meter next to the send button on wide desktop layouts when enabled, while unsupported providers stay quiet; the ring defaults to the 5-hour account-limit window, can be switched to Weekly from the popover, drains with the selected remaining quota, low quota states tint yellow below 60% and red below 20%, and clicking it opens a compact quota details popover showing both 5-hour and weekly usage with reset dates formatted as `MM/DD/YY` when available.
+
 ## [v0.51.365] — 2026-06-11 — Release MD (lineage-segment open + reasoning chip fixes)
 
 ### Fixed

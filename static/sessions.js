@@ -1886,7 +1886,7 @@ async function _ensureMessagesLoaded(sid) {
   }
   clearLiveToolCards();
   // #3018: preserve client-side ephemeral turn fields (_turnUsage, _turnDuration,
-  // _turnTps, _gatewayRouting, _statusCard) across the loadSession replace.
+  // _turnTps, _gatewayRouting, _statusCard, _providerQuota) across the loadSession replace.
   if(typeof window._carryForwardEphemeralTurnFields==='function'){
     // #3306: Prefer the pre-clear snapshot stashed by loadSession() on a
     // force-reload of the active session; S.messages was reset to [] there

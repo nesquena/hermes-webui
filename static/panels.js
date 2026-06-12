@@ -6602,8 +6602,7 @@ async function loadSettingsPanel(){
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    // Ambient provider quota chip toggle — default off; only shows at ≥1400px viewport
-    // when enabled (see style.css @media (max-width:1399.98px) rule).
+    // Ambient provider quota chip toggle — default off; users opt in via Preferences.
     const showQuotaChipCb=$('settingsShowQuotaChip');
     if(showQuotaChipCb){
       showQuotaChipCb.checked=settings.show_quota_chip===true;

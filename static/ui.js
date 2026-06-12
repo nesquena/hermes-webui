@@ -900,14 +900,65 @@ function _formatQuotaPercentShort(value){
   if(!Number.isFinite(n)) return '';
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
 }
+function _formatQuotaResetDate(value){
+  const raw=String(value||'').trim();
+  if(!raw) return '';
+  const date=new Date(raw);
+  if(Number.isNaN(date.getTime())) return raw;
+  const mm=String(date.getMonth()+1).padStart(2,'0');
+  const dd=String(date.getDate()).padStart(2,'0');
+  const yy=String(date.getFullYear()).slice(-2);
+  return `${mm}/${dd}/${yy}`;
+}
+function _providerQuotaWindowDisplayName(window){
+  const label=String(window&&window.label||'').trim();
+  if(/^session$/i.test(label)||/5\s*(h|hour)/i.test(label)) return '5 hour';
+  if(/^weekly$/i.test(label)||/week/i.test(label)) return 'Weekly';
+  return label||'Window';
+}
+function _providerQuotaWindowMode(window){
+  const label=String(window&&window.label||'').trim();
+  if(/^weekly$/i.test(label)||/week/i.test(label)) return 'weekly';
+  if(/^session$/i.test(label)||/5\s*(h|hour)/i.test(label)) return 'five_hour';
+  return '';
+}
+function _providerQuotaAccountWindow(status,mode){
+  const accountLimits=status&&status.account_limits||null;
+  const windows=accountLimits&&Array.isArray(accountLimits.windows)?accountLimits.windows.filter(Boolean):[];
+  if(!windows.length) return null;
+  const wanted=mode==='weekly'?'weekly':'five_hour';
+  return windows.find(w=>_providerQuotaWindowMode(w)===wanted&&Number.isFinite(Number(w.remaining_percent)))
+    ||windows.find(w=>Number.isFinite(Number(w.remaining_percent)))
+    ||windows[0];
+}
+function _providerQuotaRemainingPercent(status,mode){
+  if(!status||status.status!=='available') return null;
+  const accountLimits=status.account_limits||null;
+  if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
+    const w=_providerQuotaAccountWindow(status,mode||_providerQuotaWindowModePreference);
+    const pct=Number(w&&w.remaining_percent);
+    return Number.isFinite(pct)?Math.max(0,Math.min(100,pct)):null;
+  }
+  const quota=status.quota||null;
+  if(quota){
+    const remaining=Number(quota.limit_remaining);
+    const limit=Number(quota.limit);
+    if(Number.isFinite(remaining)&&Number.isFinite(limit)&&limit>0){
+      return Math.max(0,Math.min(100,(remaining/limit)*100));
+    }
+  }
+  return null;
+}
 function _providerQuotaIndicatorText(status){
   if(!status||status.status!=='available') return null;
   const provider=status.display_name||status.provider||'Provider';
   const accountLimits=status.account_limits||null;
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
-    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
-    const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:provider+' '+remaining, title:(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    const w=_providerQuotaAccountWindow(status,_providerQuotaWindowModePreference);
+    const pct=_providerQuotaRemainingPercent(status,_providerQuotaWindowModePreference);
+    const remaining=_formatQuotaPercentShort(pct);
+    const windowName=_providerQuotaWindowDisplayName(w);
+    if(remaining) return {label:remaining, title:provider+' — '+windowName+' quota — '+remaining+' remaining'};
   }
   const quota=status.quota||null;
   if(quota){
@@ -918,20 +969,165 @@ function _providerQuotaIndicatorText(status){
       const parts=[];
       if(used) parts.push('used '+used);
       if(limit) parts.push('limit '+limit);
-      return {label:provider+' '+remaining, title:(status.message||'Provider quota loaded')+(parts.length?' — '+parts.join(' · '):'')};
+      const pct=_providerQuotaRemainingPercent(status);
+      const pctLabel=_formatQuotaPercentShort(pct);
+      return {label:pctLabel||remaining, title:provider+' — '+(status.message||'Provider quota loaded')+' — '+remaining+' remaining'+(parts.length?' · '+parts.join(' · '):'')};
     }
   }
   return null;
 }
+function _providerQuotaChatText(status){
+  const text=_providerQuotaIndicatorText(status);
+  if(!text||!status||status.status!=='available'||(!status.quota&&!status.account_limits)) return null;
+  const provider=status.display_name||status.provider||'Provider';
+  let remainder=String(text.label||'').trim();
+  if(remainder.toLowerCase().startsWith(String(provider).toLowerCase())){
+    remainder=remainder.slice(String(provider).length).trim();
+  }
+  return {
+    label:`${t('provider_quota_metric_remaining')||'Remaining'}: ${remainder||text.label}`,
+    title:text.title||status.message||'Provider quota loaded',
+    provider,
+    fetched_at:status.fetched_at||null,
+  };
+}
+async function attachProviderQuotaToLastAssistant(sessionId){
+  const sid=String(sessionId||'');
+  if(!sid||!S.session||S.session.session_id!==sid) return;
+  try{
+    const status=await api('/api/provider/quota',{timeoutToast:false});
+    const quota=_providerQuotaChatText(status);
+    if(!quota||!S.session||S.session.session_id!==sid) return;
+    const lastAsst=[...(S.messages||[])].reverse().find(m=>m&&m.role==='assistant'&&!m._ephemeral&&!m._error);
+    if(!lastAsst) return;
+    lastAsst._providerQuota=quota;
+    if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+    if(typeof renderProviderQuotaIndicator==='function') renderProviderQuotaIndicator(status);
+  }catch(_e){/* quota visibility is best-effort and must never disturb chat */}
+}
+function _providerQuotaInfo(status,text,remainingPct){
+  const quota=status&&status.quota||null;
+  const accountLimits=status&&status.account_limits||null;
+  const provider=status&&status.display_name||status&&status.provider||'Provider';
+  const lines=[];
+  const modes=[];
+  if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
+    for(const w of accountLimits.windows){
+      if(!w) continue;
+      const pct=Number(w.remaining_percent);
+      const label=_providerQuotaWindowDisplayName(w);
+      const mode=_providerQuotaWindowMode(w);
+      if(mode&&!modes.includes(mode)) modes.push(mode);
+      if(Number.isFinite(pct)) lines.push([label,_formatQuotaPercentShort(pct)]);
+      const reset=_formatQuotaResetDate(w.reset_at);
+      if(reset) lines.push([label+' resets',reset]);
+    }
+  }else if(Number.isFinite(remainingPct)) lines.push(['Remaining',_formatQuotaPercentShort(remainingPct)]);
+  if(quota){
+    const remaining=_formatQuotaMoneyShort(quota.limit_remaining);
+    const used=_formatQuotaMoneyShort(quota.usage);
+    const limit=_formatQuotaMoneyShort(quota.limit);
+    if(remaining) lines.push(['Credits left',remaining]);
+    if(used) lines.push(['Used',used]);
+    if(limit) lines.push(['Limit',limit]);
+  }
+  return {provider,label:text&&text.label||'',title:text&&text.title||status&&status.message||'Provider quota',message:status&&status.message||'',remainingPct,lines,modes};
+}
+let _providerQuotaWindowModePreference='five_hour';
+let _providerQuotaLastStatus=null;
+let _providerQuotaLastInfo=null;
+function hideProviderQuotaPopover(){
+  const pop=$('providerQuotaPopover');
+  const chip=$('providerQuotaChip');
+  if(pop) pop.hidden=true;
+  if(chip) chip.setAttribute('aria-expanded','false');
+}
+function renderProviderQuotaPopover(){
+  const pop=$('providerQuotaPopover');
+  if(!pop||!_providerQuotaLastInfo) return;
+  pop.textContent='';
+  const title=document.createElement('div');
+  title.className='provider-quota-popover-title';
+  title.textContent=_providerQuotaLastInfo.provider;
+  pop.appendChild(title);
+  if((_providerQuotaLastInfo.modes||[]).length>1){
+    const options=document.createElement('div');
+    options.className='provider-quota-popover-window-options';
+    for(const [mode,labelText] of [['five_hour','5 hour'],['weekly','Weekly']]){
+      if(!_providerQuotaLastInfo.modes.includes(mode)) continue;
+      const opt=document.createElement('button');
+      opt.type='button';
+      opt.className='provider-quota-popover-window-option';
+      opt.textContent=labelText;
+      opt.setAttribute('aria-pressed',String(_providerQuotaWindowModePreference===mode));
+      opt.onclick=ev=>{
+        ev.preventDefault();
+        ev.stopPropagation();
+        _providerQuotaWindowModePreference=mode;
+        if(_providerQuotaLastStatus) renderProviderQuotaIndicator(_providerQuotaLastStatus);
+        const next=$('providerQuotaPopover');
+        const chip=$('providerQuotaChip');
+        if(next) next.hidden=false;
+        if(chip) chip.setAttribute('aria-expanded','true');
+      };
+      options.appendChild(opt);
+    }
+    pop.appendChild(options);
+  }
+  for(const [k,v] of _providerQuotaLastInfo.lines){
+    const row=document.createElement('div');
+    row.className='provider-quota-popover-row';
+    const key=document.createElement('span');key.textContent=k;
+    const val=document.createElement('strong');val.textContent=v;
+    row.appendChild(key);row.appendChild(val);pop.appendChild(row);
+  }
+  if(_providerQuotaLastInfo.message){
+    const msg=document.createElement('div');
+    msg.className='provider-quota-popover-message';
+    msg.textContent=_providerQuotaLastInfo.message;
+    pop.appendChild(msg);
+  }
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.className='provider-quota-popover-settings';
+  btn.textContent='Provider settings';
+  btn.onclick=()=>{hideProviderQuotaPopover();switchPanel('settings');switchSettingsSection('providers');};
+  pop.appendChild(btn);
+}
+function toggleProviderQuotaPopover(event){
+  if(event){event.preventDefault();event.stopPropagation();}
+  const pop=$('providerQuotaPopover');
+  const chip=$('providerQuotaChip');
+  if(!pop||!chip) return;
+  if(pop.hidden){
+    renderProviderQuotaPopover();
+    pop.hidden=false;
+    chip.setAttribute('aria-expanded','true');
+  }else hideProviderQuotaPopover();
+}
+document.addEventListener('click',ev=>{
+  const pop=$('providerQuotaPopover');
+  const chip=$('providerQuotaChip');
+  if(!pop||pop.hidden) return;
+  if((chip&&chip.contains(ev.target))||pop.contains(ev.target)) return;
+  hideProviderQuotaPopover();
+});
 function renderProviderQuotaIndicator(status){
   const chip=$('providerQuotaChip');
   const label=$('providerQuotaChipLabel');
+  const ring=$('providerQuotaRingValue');
   if(!chip||!label) return;
-  // Hide entirely when the user has disabled the ambient quota chip in Settings.
-  // Default is off (window._showQuotaChip defaults to false in boot.js) so users
-  // never see the chip unless they opt in.
-  if(window._showQuotaChip!==true){
+  // Hide only when the user explicitly disables the ambient quota chip in Settings.
+  // Default is on so provider quota appears in the composer like Codex when
+  // the active provider exposes quota/account-limit data.
+  if(window._showQuotaChip===false){
     chip.hidden=true;
+    chip.classList.remove('quota-low','quota-mid');
+    chip.classList.remove('has-percent');
+    _providerQuotaLastStatus=null;
+    _providerQuotaLastInfo=null;
+    hideProviderQuotaPopover();
+    if(ring) ring.style.strokeDashoffset='59.69';
     label.textContent='';
     chip.removeAttribute('title');
     return;
@@ -939,20 +1135,42 @@ function renderProviderQuotaIndicator(status){
   const text=_providerQuotaIndicatorText(status);
   if(!text||status.status!=='available'||(!status.quota&&!status.account_limits)){
     chip.hidden=true;
+    chip.classList.remove('quota-low','quota-mid');
+    chip.classList.remove('has-percent');
+    _providerQuotaLastStatus=null;
+    _providerQuotaLastInfo=null;
+    hideProviderQuotaPopover();
+    if(ring) ring.style.strokeDashoffset='59.69';
     label.textContent='';
     chip.removeAttribute('title');
     return;
   }
-  label.textContent=text.label;
+  label.textContent='';
+  chip.setAttribute('aria-label',text.title||'Provider quota');
   chip.title=text.title;
+  _providerQuotaLastStatus=status;
+  const remainingPct=_providerQuotaRemainingPercent(status,_providerQuotaWindowModePreference);
+  const hasPct=Number.isFinite(remainingPct);
+  chip.classList.toggle('has-percent',hasPct);
+  chip.classList.toggle('quota-low',hasPct&&remainingPct<20);
+  chip.classList.toggle('quota-mid',hasPct&&remainingPct>=20&&remainingPct<60);
+  if(ring){
+    const offset=hasPct?59.69*(1-(Math.max(0,Math.min(100,remainingPct))/100)):59.69;
+    ring.style.strokeDashoffset=String(offset);
+  }
+  _providerQuotaLastInfo=_providerQuotaInfo(status,text,remainingPct);
+  renderProviderQuotaPopover();
   chip.hidden=false;
 }
 async function refreshProviderQuotaIndicator(){
-  // Short-circuit before the fetch when the chip is disabled — no point asking
+  // Short-circuit before the fetch only when the chip is explicitly disabled — no point asking
   // the server for quota data the UI will throw away.
-  if(window._showQuotaChip!==true){
+  if(window._showQuotaChip===false){
     const chip=$('providerQuotaChip');
-    if(chip){chip.hidden=true;chip.removeAttribute('title');}
+    if(chip){chip.hidden=true;chip.classList.remove('quota-low','quota-mid','has-percent');chip.removeAttribute('title');}
+    _providerQuotaLastStatus=null;
+    _providerQuotaLastInfo=null;
+    hideProviderQuotaPopover();
     return;
   }
   if(_providerQuotaRefreshInFlight) return;
@@ -8855,18 +9073,20 @@ function renderMessages(options){
       const gatewayText=_formatGatewayModelLabel(S.session&&S.session.model||'', '', routing);
       const failoverText=_gatewayRoutingFailoverText(routing);
       const modelWarningText=_gatewayModelWarningText(routing);
+      const providerQuota=msg._providerQuota||null;
+      const providerQuotaText=providerQuota&&providerQuota.label?String(providerQuota.label):'';
       const hasTurnUsage=!!msg._turnUsage;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
       // Worklog above the final answer.
       const compactWorklogForMessage=isSimplifiedToolCalling()&&(toolCallAssistantIdxs.has(mi)||assistantThinking.has(mi));
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
-      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;
+      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!providerQuotaText) continue;
       const seg=assistantSegments.get(mi);
       const row=seg?seg.closest('.assistant-turn'):null;
       const footerRows=row?row.querySelectorAll('.msg-foot'):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline')) continue;
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-provider-quota-inline')) continue;
       const fragments=[];
       if(modelWarningText){
         const warning=document.createElement('span');
@@ -8891,6 +9111,13 @@ function renderMessages(options){
         duration.className='msg-duration-inline';
         duration.textContent=`Done in ${durationText}`;
         fragments.push(duration);
+      }
+      if(providerQuotaText){
+        const quota=document.createElement('span');
+        quota.className='msg-provider-quota-inline';
+        quota.textContent=providerQuotaText;
+        if(providerQuota.title) quota.title=String(providerQuota.title);
+        fragments.push(quota);
       }
       if(window._showTokenUsage&&hasTurnUsage){
         const usage=document.createElement('span');
