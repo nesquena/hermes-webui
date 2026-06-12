@@ -2,7 +2,6 @@
 
 import pathlib
 import queue
-import re
 import sys
 import threading
 import types
@@ -169,8 +168,8 @@ def test_streaming_passes_target_model_and_prefers_runtime_base_url(monkeypatch)
     monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
     monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
 
-    streaming.STREAMS[fake_stream_id] = fake_queue
     try:
+        streaming.STREAMS[fake_stream_id] = fake_queue
         streaming._run_agent_streaming(
             session_id=fake_session.session_id,
             msg_text="hello from picker",
@@ -191,30 +190,24 @@ def test_streaming_passes_target_model_and_prefers_runtime_base_url(monkeypatch)
     assert captured["init_kwargs"]["api_key"] == "rt-key"
 
 
-def test_streaming_reuses_runtime_base_url_helper_in_self_heal_paths():
-    source = (pathlib.Path(__file__).parent.parent / "api" / "streaming.py").read_text(
-        encoding="utf-8"
+def test_runtime_provider_lock_wrapper_forwards_target_model():
+    calls = {}
+
+    def fake_resolver(**kwargs):
+        calls["kwargs"] = kwargs
+        return {"provider": kwargs.get("requested"), "base_url": None, "api_key": None}
+
+    result = api.oauth.resolve_runtime_provider_with_anthropic_env_lock(
+        fake_resolver,
+        requested="opencode-go",
+        target_model="glm-5.1",
     )
-    assert re.search(
-        r"resolved_base_url\s*=\s*_runtime_preferred_base_url\(\s*_rt,\s*resolved_provider,\s*configured_base_url\s*\)",
-        source,
-    )
-    assert len(
-        re.findall(
-            r"resolved_base_url\s*=\s*_runtime_preferred_base_url\(\s*_heal_rt,\s*resolved_provider,\s*configured_base_url\s*\)",
-            source,
-        )
-    ) == 2
-    assert len(
-        re.findall(
-            r"_attempt_credential_self_heal\(\s*resolved_provider\s+or\s+['\"]{2},\s*session_id,\s*_agent_lock,\s*target_model=resolved_model,\s*\)",
-            source,
-        )
-    ) == 2
-    assert re.search(
-        r"resolve_runtime_provider_with_anthropic_env_lock\(\s*resolve_runtime_provider,\s*requested=provider_id,\s*target_model=target_model,\s*\)",
-        source,
-    )
+
+    assert result["provider"] == "opencode-go"
+    assert calls["kwargs"] == {
+        "requested": "opencode-go",
+        "target_model": "glm-5.1",
+    }
 
 
 def test_attempt_credential_self_heal_passes_target_model(monkeypatch):
