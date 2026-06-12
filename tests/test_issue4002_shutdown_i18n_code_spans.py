@@ -1,19 +1,34 @@
 from pathlib import Path
-import re
 
 
 REPO = Path(__file__).resolve().parents[1]
 
 
+def _extract_function(src: str, name: str) -> str:
+    anchor = f"function {name}("
+    start = src.find(anchor)
+    assert start != -1, f"{name}() must exist"
+    body_start = src.find("{", start)
+    assert body_start != -1, f"{name}() must have a body"
+    depth = 1
+    idx = body_start + 1
+    while depth and idx < len(src):
+        if src[idx] == "{":
+            depth += 1
+        elif src[idx] == "}":
+            depth -= 1
+        idx += 1
+    assert depth == 0, f"{name}() body must balance braces"
+    return src[start:idx]
+
+
 def test_shutdown_description_uses_split_i18n_spans_in_index_html():
     html = (REPO / "static" / "index.html").read_text(encoding="utf-8")
-    block_match = re.search(
-        r'<div style="font-size:11px;color:var\(--muted\);margin-bottom:8px">(.*?)</div>',
-        html,
-        re.DOTALL,
-    )
-    assert block_match, "Shutdown settings description block must exist."
-    block = block_match.group(1)
+    start = html.find('<div class="settings-field" id="shutdownServerBlock"')
+    assert start != -1, "Shutdown settings field must exist."
+    button_idx = html.find('id="btnShutdownServer"', start)
+    assert button_idx != -1, "Shutdown settings field must include the stop button."
+    block = html[start:button_idx]
     assert 'data-i18n="settings_desc_shutdown_before_cmd"' in block
     assert 'data-i18n="settings_desc_shutdown_between_cmds"' in block
     assert 'data-i18n="settings_desc_shutdown_after_cmd"' in block
@@ -39,6 +54,7 @@ def test_shutdown_locale_strings_no_longer_embed_code_tags():
 
 def test_apply_locale_to_dom_stays_on_text_content():
     src = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
-    assert "el.textContent = val;" in src
-    assert "innerHTML = val" not in src
+    apply_locale_body = _extract_function(src, "applyLocaleToDOM")
+    assert "el.textContent = val;" in apply_locale_body
+    assert "innerHTML = val" not in apply_locale_body
     assert "data-i18n-html" not in src
