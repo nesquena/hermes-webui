@@ -20,6 +20,7 @@ def test_render_uses_single_pass_partition_helper():
     render_body = SESSIONS_JS[render_start:render_end]
 
     assert "_partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in render_body
+    assert "_renderSidebarRowsFromRawSessions(sessionsRaw)" in render_body
     assert "withMessages.filter(" not in render_body
 
 
@@ -35,3 +36,14 @@ def test_partition_helper_applies_message_source_project_and_archive_gates():
     assert "return {" in block
     assert "profileFiltered," in block
     assert "sessionsRaw," in block
+
+
+def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_counts():
+    render_start = SESSIONS_JS.index("function renderSessionListFromCache()")
+    render_end = SESSIONS_JS.index("function _showProjectPicker", render_start)
+    render_body = SESSIONS_JS[render_start:render_end]
+
+    assert "webuiSessionCount," in _partition_block()
+    assert "cliSessionCount," in _partition_block()
+    assert "const renderedWebuiSessionCount=" in render_body
+    assert "const renderedCliSessionCount=" in render_body

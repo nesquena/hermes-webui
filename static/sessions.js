@@ -4766,6 +4766,28 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   };
 }
 
+function _renderSidebarRowsFromRawSessions(sessionsRaw){
+  return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
+}
+
+function _countRenderedSidebarRows(allMatched, activeSidForSidebar, showCliOnly){
+  const sessionsRaw=[];
+  for(const s of allMatched){
+    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
+    const isCli=_isCliSession(s);
+    if(showCliOnly ? !isCli : isCli) continue;
+    if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
+    if(_activeProject===NO_PROJECT_FILTER){
+      if(s.project_id) continue;
+    } else if(_activeProject){
+      if(s.project_id!==_activeProject) continue;
+    }
+    if(!_showArchived&&s.archived) continue;
+    sessionsRaw.push(s);
+  }
+  return _renderSidebarRowsFromRawSessions(sessionsRaw).length;
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -4795,7 +4817,13 @@ function renderSessionListFromCache(){
     sessionsRaw,
     archivedCount,
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
-  const sessions=_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw);
+  const renderedWebuiSessionCount=_sessionSourceFilter==='webui'
+    ? sessions.length
+    : _countRenderedSidebarRows(allMatched, activeSidForSidebar, false);
+  const renderedCliSessionCount=_sessionSourceFilter==='cli'
+    ? sessions.length
+    : _countRenderedSidebarRows(allMatched, activeSidForSidebar, true);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
   const list=$('sessionList');
   const animateRefresh=_sessionListRefreshAnimationPending;
@@ -4830,7 +4858,7 @@ function renderSessionListFromCache(){
     const sourceTabs=document.createElement('div');
     sourceTabs.className='session-source-tabs';
     for(const filter of ['webui','cli']){
-      const count=filter==='cli'?cliSessionCount:webuiSessionCount;
+      const count=filter==='cli'?renderedCliSessionCount:renderedWebuiSessionCount;
       const btn=document.createElement('button');
       btn.type='button';
       btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
