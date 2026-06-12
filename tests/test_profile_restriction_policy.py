@@ -78,7 +78,6 @@ def test_locked_profile_filters_profiles_response(monkeypatch):
 def test_allowlist_profile_filters_without_locking_switching(monkeypatch):
     import api.profiles as profiles
     import api.routes as routes
-    import api.helpers as helpers
 
     _allowlist_default_and_macos(monkeypatch)
     monkeypatch.setattr(profiles, "list_profiles_api", _profile_rows)
