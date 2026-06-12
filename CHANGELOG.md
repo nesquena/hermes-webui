@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.369] — 2026-06-12 — Release MH (WebUI streaming honors runtime target model/base_url)
+
+### Fixed
+
+- **Provider OpenCode-Go (and similar pooled providers) no longer 404 with "model not found" when selected via the WebUI model picker (#3895).** WebUI streaming used the *configured* provider base URL instead of the runtime provider's per-model-normalized URL, which duplicated a `/v1` path segment for OpenCode-Go and produced a 404. The target model is now threaded into runtime provider resolution (including the 401 credential self-heal retries), and the runtime-normalized base URL is preferred — but only when it points at the same scheme+host+port as the configured one, so an explicit `providers.<id>.base_url` override at a different endpoint (e.g. an LM Studio LAN address or an OpenRouter mirror) is still honored. (#3895)
+
 ## [v0.51.368] — 2026-06-12 — Release MG (bind active-profile cookie to auth session)
 
 ### Security
