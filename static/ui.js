@@ -2004,16 +2004,21 @@ function _formatReasoningEffortLabel(effort){
   return effort;
 }
 
-function _reasoningEffortQuery(){
+function _reasoningEffortContext(){
   const sel=$('modelSelect');
   const model=(S&&S.session&&S.session.model)||(sel&&sel.value)||'';
   let provider=(S&&S.session&&S.session.model_provider)||'';
   if(!provider&&sel&&model&&typeof _modelStateForSelect==='function'){
     provider=_modelStateForSelect(sel, model).model_provider||'';
   }
-  const params=new URLSearchParams();
-  if(model) params.set('model', model);
-  if(provider) params.set('provider', provider);
+  const ctx={};
+  if(model) ctx.model=model;
+  if(provider) ctx.provider=provider;
+  return ctx;
+}
+
+function _reasoningEffortQuery(){
+  const params=new URLSearchParams(_reasoningEffortContext());
   const qs=params.toString();
   return qs?('?'+qs):'';
 }
@@ -2146,7 +2151,8 @@ document.addEventListener('click',function(e){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
     if(effort){
-      api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
+      const payload=Object.assign({effort:effort},_reasoningEffortContext());
+      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
