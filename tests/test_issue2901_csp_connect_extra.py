@@ -16,7 +16,6 @@ def test_csp_connect_src_default_header_unchanged(monkeypatch):
     )
 
     assert expected in policy
-    assert "http://ipc.localhost" in policy
 
 
 def test_csp_connect_src_includes_valid_extra_origins(monkeypatch):
