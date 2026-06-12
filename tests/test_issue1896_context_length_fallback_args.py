@@ -21,6 +21,8 @@ config-override args again.
 """
 
 from pathlib import Path
+import sys
+import types
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -322,7 +324,17 @@ def test_routes_session_model_resolver_passes_custom_provider_api_key(monkeypatc
     """
     from api import config as cfg_mod
     from api import routes
-    import agent.model_metadata as metadata
+
+    # Some unrelated route tests install ``sys.modules["agent"]`` as a plain
+    # module stub at collection time. Make this regression test own a package-
+    # shaped temporary ``agent.model_metadata`` import target so the production
+    # helper's local import is order-independent.
+    fake_agent = types.ModuleType("agent")
+    fake_agent.__path__ = []
+    metadata = types.ModuleType("agent.model_metadata")
+    fake_agent.model_metadata = metadata  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", fake_agent)
+    monkeypatch.setitem(sys.modules, "agent.model_metadata", metadata)
 
     seen = {}
 
@@ -345,7 +357,7 @@ def test_routes_session_model_resolver_passes_custom_provider_api_key(monkeypatc
         seen.update(model=model, base_url=base_url, kwargs=kwargs)
         return 500_000 if kwargs.get("api_key") == "sk-test-route" else 256_000
 
-    monkeypatch.setattr(metadata, "get_model_context_length", fake_get_model_context_length)
+    monkeypatch.setattr(metadata, "get_model_context_length", fake_get_model_context_length, raising=False)
 
     assert routes._resolve_context_length_for_session_model(
         "custom-model-id",
