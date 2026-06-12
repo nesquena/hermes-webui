@@ -531,6 +531,55 @@
     return list.map((event)=>applyAssistantTurnAnchorSourceEvent(registry,event,context));
   }
 
+  function _eventsForShadowSource(sources, primaryKey, fallbackKey){
+    if(!sources||typeof sources!=='object') return [];
+    const primary=sources[primaryKey];
+    if(Array.isArray(primary)) return primary;
+    const fallback=fallbackKey?sources[fallbackKey]:null;
+    return Array.isArray(fallback)?fallback:[];
+  }
+
+  function _shadowSourceContext(context, sourceLayer){
+    return {
+      ..._copyObject(context),
+      source_layer:sourceLayer,
+    };
+  }
+
+  function createAssistantTurnAnchorShadowSnapshot(input){
+    const opts=(input&&typeof input==='object')?input:{};
+    const anchorInput=(opts.anchor&&typeof opts.anchor==='object')?opts.anchor:opts;
+    const sources=(opts.sources&&typeof opts.sources==='object')?opts.sources:opts;
+    const context=(opts.context&&typeof opts.context==='object')?opts.context:{};
+    const registry=createAssistantTurnAnchorRegistry(anchorInput);
+    const results={
+      live:applyAssistantTurnAnchorSourceEvents(
+        registry,
+        _eventsForShadowSource(sources,'live_events'),
+        _shadowSourceContext(context,'live')
+      ),
+      replay:applyAssistantTurnAnchorSourceEvents(
+        registry,
+        _eventsForShadowSource(sources,'replay_events','run_journal_events'),
+        _shadowSourceContext(context,'replay')
+      ),
+      settled:applyAssistantTurnAnchorSourceEvents(
+        registry,
+        _eventsForShadowSource(sources,'settled_events'),
+        _shadowSourceContext(context,'settled')
+      ),
+      inflight:applyAssistantTurnAnchorSourceEvents(
+        registry,
+        _eventsForShadowSource(sources,'inflight_events'),
+        _shadowSourceContext(context,'inflight')
+      ),
+    };
+    return Object.freeze({
+      registry,
+      results:Object.freeze(results),
+    });
+  }
+
   function createAssistantTurnAnchorSeed(input){
     const opts=(input&&typeof input==='object')?input:{};
     const sessionId=_cleanString(opts.session_id);
@@ -593,7 +642,7 @@
   }
 
   ROOT.HermesAssistantTurnAnchors=Object.freeze({
-    version:'slice3-registry',
+    version:'slice3-registry-shadow',
     activityEventKinds:ACTIVITY_EVENT_KINDS,
     stateLayers:STATE_LAYERS,
     sourceEventClassification:SOURCE_EVENT_CLASSIFICATION,
@@ -607,6 +656,7 @@
     applyAssistantTurnAnchorNormalizedEvent,
     applyAssistantTurnAnchorSourceEvent,
     applyAssistantTurnAnchorSourceEvents,
+    createAssistantTurnAnchorShadowSnapshot,
     isAssistantTurnAnchorActivityKind,
   });
 })();

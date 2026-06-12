@@ -6,6 +6,21 @@ It documents the current per-turn state layers and the event-shape contract that
 future anchor phases must consume. It does not claim that anchors are wired into
 streaming or rendering yet.
 
+## RFC Phase Progress
+
+- The #3962 Phase 0 scaffold shipped through #3977 / v0.51.359: inventory the
+  current state layers, encode the owner seed, and pin the source classification
+  contract.
+- PR #3980 / v0.51.366 delivered the first RFC Phase 2 foundation: normalize
+  current live, replay, and settled source events into anchor-shaped events while
+  staying unwired from rendering.
+- This slice advances RFC Phase 1 and Phase 2 together: it adds a local registry
+  owner plus a shadow source-feed harness that can combine live, replay,
+  settled, and in-flight observations into one anchor snapshot.
+- The next independently reviewable boundary is Phase 3 settlement through the
+  anchor owner. `S.messages`, `INFLIGHT`, stream-local state, and DOM nodes remain
+  projection/cache layers until that wiring lands.
+
 ## State Layers
 
 | Layer | Current surface | Phase 0 anchor policy |
@@ -66,6 +81,13 @@ This slice deliberately keeps the ownership boundary inert: `send()`,
 `INFLIGHT`, and DOM continuity still do not consume the registry. Later slices
 can replace local renderer-owned state with this owner instead of adding another
 parallel source of truth.
+
+`HermesAssistantTurnAnchors.createAssistantTurnAnchorShadowSnapshot()` is the
+shadow wiring harness for this slice. It accepts grouped `live_events`,
+`replay_events` / `run_journal_events`, `settled_events`, and `inflight_events`,
+feeds them through one local registry, and returns the resulting snapshot plus
+per-source apply results. This gives later slices an invariant target without
+making the current UI consume the owner yet.
 
 ## Source Event Classification
 

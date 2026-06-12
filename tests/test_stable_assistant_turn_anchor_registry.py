@@ -63,12 +63,61 @@ console.log(JSON.stringify({{
     return json.loads(result.stdout)
 
 
+def _shadow_snapshot() -> dict:
+    assert NODE, "node is required for assistant_turn_anchors.js registry tests"
+    script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync({json.dumps(str(ANCHORS_JS))}, 'utf8');
+const sandbox = {{window:{{}}}};
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, {{filename:'assistant_turn_anchors.js'}});
+const api = sandbox.window.HermesAssistantTurnAnchors;
+const shadow = api.createAssistantTurnAnchorShadowSnapshot({{
+  anchor:{{
+    session_id:'sid-shadow',
+    turn_id:'turn-shadow',
+  }},
+  context:{{
+    run_id:'run-shadow',
+    stream_id:'stream-shadow',
+  }},
+  sources:{{
+    live_events:[
+      {{type:'token', data:'{{"text":"live token"}}', lastEventId:'run-shadow:1', created_at:'2026-06-11T00:00:01Z'}},
+    ],
+    replay_events:[
+      {{event:'token', payload:{{text:'replay duplicate'}}, event_id:'run-shadow:1', seq:1}},
+      {{event:'tool_complete', payload:{{tool_call_id:'tool-1', result:'ok'}}, event_id:'run-shadow:2', seq:2}},
+    ],
+    settled_events:[
+      {{source_type:'settled_message', payload:{{role:'assistant', id:'message-shadow', content:'shadow final'}}}},
+    ],
+    inflight_events:[
+      {{source_type:'inflight_snapshot', payload:{{status:'restoring'}}}},
+    ],
+  }},
+}});
+console.log(JSON.stringify({{
+  version:api.version,
+  registry:shadow.registry,
+  results:Object.fromEntries(Object.entries(shadow.results).map(([key, value]) => [
+    key,
+    value.map((item)=>({{applied:item.applied, reason:item.reason}})),
+  ])),
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 def test_registry_owns_one_anchor_and_dedupes_live_plus_replay_events():
     data = _registry_snapshot()
     registry = data["registry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice3-registry"
+    assert data["version"] == "slice3-registry-shadow"
     assert [item["reason"] for item in data["results"][:2]] == [None, "duplicate"]
     assert registry["event_index"]["dedupe_keys"][:2] == [
         'event_id:"run-1:1"',
@@ -121,6 +170,35 @@ def test_registry_updates_lifecycle_and_settled_final_projection():
     assert anchor["usage"] == {"input_tokens": 8, "output_tokens": 13}
 
 
+def test_shadow_snapshot_feeds_current_source_families_into_one_registry_owner():
+    data = _shadow_snapshot()
+    registry = data["registry"]
+    anchor = registry["anchor"]
+
+    assert data["version"] == "slice3-registry-shadow"
+    assert data["results"]["live"] == [{"applied": True, "reason": None}]
+    assert data["results"]["replay"] == [
+        {"applied": False, "reason": "duplicate"},
+        {"applied": True, "reason": None},
+    ]
+    assert data["results"]["settled"] == [{"applied": True, "reason": None}]
+    assert data["results"]["inflight"] == [{"applied": True, "reason": None}]
+
+    assert registry["stats"]["applied"] == 4
+    assert registry["stats"]["skipped_duplicate"] == 1
+    assert anchor["identity"]["run_id"] == "run-shadow"
+    assert anchor["identity"]["stream_id"] == "stream-shadow"
+    assert [event["kind"] for event in anchor["activity_events"]] == [
+        "process_prose",
+        "tool_completed",
+    ]
+    assert [event["source_event_type"] for event in anchor["metadata_events"]] == [
+        "settled_message",
+        "inflight_snapshot",
+    ]
+    assert anchor["content"]["final_answer"] == "shadow final"
+
+
 def test_registry_instances_do_not_share_owner_state():
     data = _registry_snapshot()
     isolated = data["isolated"]
@@ -137,6 +215,7 @@ def test_slice3_registry_is_still_unwired_from_rendering_hot_paths():
         "applyAssistantTurnAnchorNormalizedEvent",
         "applyAssistantTurnAnchorSourceEvent",
         "applyAssistantTurnAnchorSourceEvents",
+        "createAssistantTurnAnchorShadowSnapshot",
     ]
     for helper in helper_names:
         assert helper not in _read(UI_JS)
