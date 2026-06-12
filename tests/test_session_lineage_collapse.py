@@ -374,6 +374,63 @@ console.log(JSON.stringify(attached));
     assert rows[0]["_child_sessions"][0]["session_id"] == "child"
 
 
+def test_unread_only_filter_keeps_active_child_attached_to_lineage_parent():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+global.S = {{session: {{session_id:'child', message_count:1}}}};
+global.window = {{_showCliSessions:false}};
+global._showArchived = true;
+global._activeProject = null;
+global.NO_PROJECT_FILTER = '__no_project__';
+global._sessionSourceFilter = 'webui';
+global._sessionUnreadOnlyFilter = true;
+global._sidebarRowHasVisibleMessages = () => true;
+global._isCliSession = () => false;
+global._hasUnreadForSession = () => false;
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sessionMatchesActiveLineageForUnreadFilter'));
+eval(extractFunc('_partitionSidebarSessionRows'));
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const allMatched = [
+  {{session_id:'tip', title:'Parent', message_count:5, updated_at:20, last_message_at:20, _lineage_root_id:'root'}},
+  {{session_id:'child', title:'Subtask', message_count:1, updated_at:30, last_message_at:30, parent_session_id:'tip', relationship_type:'child_session', _parent_lineage_root_id:'root'}},
+];
+const partitioned = _partitionSidebarSessionRows(allMatched, 'child');
+const rows = _attachChildSessionsToSidebarRows(
+  _collapseSessionLineageForSidebar(partitioned.sessionsRaw),
+  partitioned.sessionsRaw,
+);
+console.log(JSON.stringify({{
+  sessionsRaw: partitioned.sessionsRaw.map(s => s.session_id),
+  rows,
+}}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["sessionsRaw"] == ["tip", "child"]
+    assert [row["session_id"] for row in result["rows"]] == ["tip"]
+    assert result["rows"][0]["_child_sessions"][0]["session_id"] == "child"
+    assert result["rows"][0]["_child_sessions"][0].get("_orphan_child_session") is not True
+
+
 def test_cross_surface_webui_child_session_remains_top_level_when_parent_is_messaging():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
