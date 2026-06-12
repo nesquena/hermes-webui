@@ -3408,7 +3408,7 @@ function _applySessionListPayload(sessData, projData){
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
   _syncSessionAttentionSoundState(_allSessions);
-  _clearLineageReportCache();
+  _pruneLineageReportCacheToVisibleSessions(_allSessions);
   _allProjects = projData.projects||[];
   _markPollingCompletionUnreadTransitions(_allSessions);
   const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
@@ -4247,6 +4247,20 @@ function _clearLineageReportCache(){
   _lineageReportCacheGeneration++;
 }
 
+function _pruneLineageReportCacheToVisibleSessions(sessions){
+  const visibleKeys=new Set();
+  for(const s of (Array.isArray(sessions)?sessions:[])){
+    const key=_sidebarLineageKeyForRow(s);
+    if(key) visibleKeys.add(key);
+  }
+  for(const key of Array.from(_lineageReportCache.keys())){
+    if(!visibleKeys.has(key)) _lineageReportCache.delete(key);
+  }
+  for(const key of Array.from(_lineageReportInflight.keys())){
+    if(!visibleKeys.has(key)) _lineageReportInflight.delete(key);
+  }
+}
+
 function _lineageReportCacheKey(s,lineageKey){
   return lineageKey||_sidebarLineageKeyForRow(s)||null;
 }
@@ -4291,14 +4305,16 @@ function _fetchLineageReportForRow(s,lineageKey){
   let request;
   request=api('/api/session/lineage/report?session_id='+encodeURIComponent(s.session_id))
     .then(report=>{
-      if(generation===_lineageReportCacheGeneration){
+      if(generation===_lineageReportCacheGeneration&&_lineageReportInflight.get(key)===request){
         _lineageReportCache.set(key,(report&&report.found!==false)?report:{error:true});
       }
       return report;
     })
     .catch(err=>{
       console.warn('lineage report',err);
-      if(generation===_lineageReportCacheGeneration) _lineageReportCache.set(key,{error:true});
+      if(generation===_lineageReportCacheGeneration&&_lineageReportInflight.get(key)===request){
+        _lineageReportCache.set(key,{error:true});
+      }
       return null;
     })
     .finally(()=>{
@@ -5231,6 +5247,9 @@ function renderSessionListFromCache(){
     const lineageReportKey=showLineageMetadata?_lineageReportCacheKey(s,lineageKey):null;
     const canExpandLineageSegments=showLineageMetadata&&Boolean(lineageKey&&segmentCount>1&&(lineageSegments.length>0||needsLineageReport||_lineageReportInflight.has(lineageReportKey)));
     const lineageSegmentsExpanded=canExpandLineageSegments&&_expandedLineageKeys.has(lineageKey);
+    if(lineageSegmentsExpanded&&needsLineageReport){
+      _fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache());
+    }
     if(segmentCount>0){
       const segmentCountEl=document.createElement('span');
       segmentCountEl.className='session-lineage-count'+(canExpandLineageSegments?' expandable':'');
