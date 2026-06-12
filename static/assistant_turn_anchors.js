@@ -786,6 +786,262 @@
     });
   }
 
+  function _anchorFromProjectionInput(input){
+    if(!input||typeof input!=='object') return null;
+    if(input.anchor&&typeof input.anchor==='object') return input.anchor;
+    if(input.identity&&typeof input.identity==='object') return input;
+    return null;
+  }
+
+  function _activityRowId(event, index){
+    const eventId=_cleanString(_own(event,'event_id'));
+    if(eventId) return eventId;
+    const runId=_cleanString(_own(event,'run_id'));
+    const seq=_own(event,'seq');
+    if(runId&&seq!==undefined&&seq!==null&&seq!=='') return [runId,String(seq)].join(':');
+    const localId=_cleanString(_own(event,'local_id'));
+    if(localId){
+      const sourceType=_cleanString(_own(event,'source_event_type'))||_cleanString(_own(event,'kind'))||'event';
+      return [localId,sourceType,String(index)].join(':');
+    }
+    return 'activity:'+String(index);
+  }
+
+  function _activityRowText(event){
+    const payload=_own(event,'payload')||{};
+    return _firstTextValue(
+      _own(payload,'text'),
+      _own(payload,'content'),
+      _own(payload,'message'),
+      _own(payload,'summary'),
+      _own(payload,'result'),
+      _own(payload,'output')
+    );
+  }
+
+  function _isToolActivityKind(kind){
+    return kind==='tool_started'||kind==='tool_updated'||kind==='tool_completed';
+  }
+
+  function _activityRowToolId(event, kind){
+    if(!_isToolActivityKind(kind)) return null;
+    const payload=_own(event,'payload')||{};
+    return _firstTextValue(
+      _own(payload,'tool_call_id'),
+      _own(payload,'tool_use_id'),
+      _own(payload,'call_id'),
+      _own(payload,'tid'),
+      _own(payload,'id')
+    )||null;
+  }
+
+  function _activityPayloadFirst(payload, keys){
+    return _firstOwn(payload||{},keys);
+  }
+
+  function _activityRowToolDone(kind, status, payload){
+    if(payload&&typeof _own(payload,'done')==='boolean') return _own(payload,'done');
+    if(kind==='tool_completed') return true;
+    if(kind==='tool_started'||kind==='tool_updated') return false;
+    if(status==='completed'||status==='error'||status==='failed') return true;
+    if(status==='running'||status==='pending') return false;
+    return null;
+  }
+
+  function _activityRowToolIsError(status, payload){
+    if(payload&&typeof _own(payload,'is_error')==='boolean') return _own(payload,'is_error');
+    const raw=_cleanString(status).toLowerCase();
+    if(raw==='error'||raw==='failed'||raw==='failure') return true;
+    return false;
+  }
+
+  function _activityRowGroup(event, payload, index){
+    const activitySegmentSeq=_activityPayloadFirst(payload,['activitySegmentSeq','activity_segment_seq','segmentSeq','segment_seq']);
+    const activityBurstId=_activityPayloadFirst(payload,['activityBurstId','activity_burst_id','burstId','burst_id']);
+    const assistantMsgIdx=_activityPayloadFirst(payload,['assistant_msg_idx','assistantMessageIndex','assistant_msg_index']);
+    const cleanSegment=activitySegmentSeq!==undefined&&activitySegmentSeq!==null&&String(activitySegmentSeq)!==''
+      ? activitySegmentSeq
+      : null;
+    const cleanBurst=activityBurstId!==undefined&&activityBurstId!==null&&String(activityBurstId)!==''
+      ? activityBurstId
+      : null;
+    const cleanAssistant=assistantMsgIdx!==undefined&&assistantMsgIdx!==null&&String(assistantMsgIdx)!==''
+      ? assistantMsgIdx
+      : null;
+    const fallbackSeq=_own(event,'seq');
+    const fallbackKey=fallbackSeq!==undefined&&fallbackSeq!==null&&fallbackSeq!==''?`event:${String(fallbackSeq)}`:`activity:${String(index)}`;
+    const groupKey=cleanSegment!==null
+      ? `segment:${String(cleanSegment)}`
+      : cleanBurst!==null
+        ? `burst:${String(cleanBurst)}`
+        : cleanAssistant!==null
+          ? `assistant:${String(cleanAssistant)}`
+          : fallbackKey;
+    return Object.freeze({
+      group_key:groupKey,
+      activity_burst_id:cleanBurst,
+      activity_segment_seq:cleanSegment,
+      assistant_msg_idx:cleanAssistant,
+    });
+  }
+
+  function _activityRowThinking(event, kind, text){
+    if(kind!=='reasoning') return null;
+    const payload=_own(event,'payload')||{};
+    const thinkingText=_firstTextValue(
+      _own(payload,'thinking'),
+      _own(payload,'reasoning'),
+      _own(payload,'text'),
+      text
+    );
+    const preview=thinkingText?String(thinkingText).replace(/\s+/g,' ').trim():'';
+    return Object.freeze({
+      text:thinkingText||'',
+      preview:preview.length>180?`${preview.slice(0,177)}...`:preview,
+      dedupe_key:preview?`thinking:${preview.toLowerCase()}`:'',
+    });
+  }
+
+  function _activityRowTool(event, kind, status, text, toolCallId){
+    if(!_isToolActivityKind(kind)) return null;
+    const payload=_own(event,'payload')||{};
+    const toolName=_cleanString(
+      _activityPayloadFirst(payload,['name','tool_name','function_name'])||
+      (_own(payload,'function')&&_own(_own(payload,'function'),'name'))
+    )||'tool';
+    const args=_activityPayloadFirst(payload,['args','arguments','input','params']);
+    const preview=_firstTextValue(
+      _own(payload,'preview'),
+      _own(payload,'summary'),
+      text
+    );
+    const snippet=_firstTextValue(
+      _own(payload,'snippet'),
+      _own(payload,'result'),
+      _own(payload,'output')
+    );
+    const done=_activityRowToolDone(kind,status,payload);
+    const isError=_activityRowToolIsError(status,payload);
+    const signatureParts=[
+      toolName,
+      toolCallId||'',
+      JSON.stringify(_sanitizePayload(args||{})),
+    ];
+    return Object.freeze({
+      id:toolCallId,
+      name:toolName,
+      args:_sanitizePayload(args||{}),
+      preview:preview||'',
+      snippet:snippet||'',
+      result:_sanitizePayload(_own(payload,'result'))??null,
+      output:_sanitizePayload(_own(payload,'output'))??null,
+      done,
+      is_error:isError,
+      duration:_activityPayloadFirst(payload,['duration','duration_seconds','elapsed'])??null,
+      started_at:_activityPayloadFirst(payload,['started_at','startedAt'])??null,
+      signature:signatureParts.join('|'),
+    });
+  }
+
+  function _activityRowRole(kind){
+    if(kind==='process_prose') return 'prose';
+    if(kind==='reasoning') return 'thinking';
+    if(_isToolActivityKind(kind)) return 'tool';
+    if(kind==='lifecycle_status') return 'lifecycle';
+    if(kind==='control_boundary') return 'control';
+    if(kind==='terminal_status') return 'terminal';
+    return 'activity';
+  }
+
+  function _activityRowDisplayHint(kind, mode){
+    if(mode==='transparent_stream') return 'chronological_activity';
+    if(kind==='process_prose') return 'main_prose';
+    if(kind==='reasoning') return 'collapsed_thinking';
+    if(_isToolActivityKind(kind)) return 'tool_row';
+    if(kind==='lifecycle_status') return 'quiet_lifecycle_row';
+    if(kind==='control_boundary') return 'control_boundary_row';
+    if(kind==='terminal_status') return 'terminal_status_row';
+    return 'activity_row';
+  }
+
+  function _activityRowDisplayHints(kind){
+    return Object.freeze({
+      compact_worklog:_activityRowDisplayHint(kind,'compact_worklog'),
+      transparent_stream:_activityRowDisplayHint(kind,'transparent_stream'),
+    });
+  }
+
+  function _activitySceneRow(event, index, mode){
+    const payload=_own(event,'payload');
+    const kind=_cleanString(_own(event,'kind'))||'activity';
+    const status=_cleanString(_own(event,'status'))||null;
+    const text=_activityRowText(event);
+    const toolCallId=_activityRowToolId(event,kind);
+    const sanitizedPayload=_sanitizePayload(payload);
+    return Object.freeze({
+      row_id:_activityRowId(event,index),
+      order_index:index,
+      kind,
+      role:_activityRowRole(kind),
+      display_hint:_activityRowDisplayHint(kind,mode),
+      display_hints:_activityRowDisplayHints(kind),
+      source_event_type:_cleanString(_own(event,'source_event_type'))||null,
+      event_id:_cleanString(_own(event,'event_id'))||null,
+      local_id:_cleanString(_own(event,'local_id'))||null,
+      run_id:_cleanString(_own(event,'run_id'))||null,
+      stream_id:_cleanString(_own(event,'stream_id'))||null,
+      seq:_own(event,'seq')??null,
+      status,
+      created_at:_own(event,'created_at')??null,
+      identity:Object.freeze({
+        event_id:_cleanString(_own(event,'event_id'))||null,
+        local_id:_cleanString(_own(event,'local_id'))||null,
+        run_id:_cleanString(_own(event,'run_id'))||null,
+        stream_id:_cleanString(_own(event,'stream_id'))||null,
+        seq:_own(event,'seq')??null,
+      }),
+      group:_activityRowGroup(event,payload||{},index),
+      text,
+      thinking:_activityRowThinking(event,kind,text),
+      tool_call_id:toolCallId,
+      tool:_activityRowTool(event,kind,status,text,toolCallId),
+      payload:sanitizedPayload,
+    });
+  }
+
+  function projectAssistantTurnAnchorActivityScene(input, options){
+    const anchor=_anchorFromProjectionInput(input);
+    const opts=(options&&typeof options==='object')?options:{};
+    const requestedMode=_cleanString(_own(opts,'mode'));
+    const mode=requestedMode==='transparent_stream'?'transparent_stream':'compact_worklog';
+    if(!anchor){
+      return Object.freeze({
+        version:'activity_scene_v1',
+        mode,
+        identity:Object.freeze({source_message_refs:Object.freeze([])}),
+        lifecycle:Object.freeze({}),
+        final_answer:'',
+        final_message_ref:null,
+        terminal_state:null,
+        activity_rows:Object.freeze([]),
+      });
+    }
+    const rows=(Array.isArray(anchor.activity_events)?anchor.activity_events:[])
+      .map((event,index)=>_activitySceneRow(event,index,mode));
+    const lifecycle=_copyObject(anchor.lifecycle);
+    const content=anchor.content&&typeof anchor.content==='object'?anchor.content:{};
+    return Object.freeze({
+      version:'activity_scene_v1',
+      mode,
+      identity:_frozenIdentityCopy(anchor.identity||{}),
+      lifecycle:Object.freeze(lifecycle),
+      final_answer:typeof content.final_answer==='string'?content.final_answer:'',
+      final_message_ref:typeof content.final_message_ref==='string'?content.final_message_ref:null,
+      terminal_state:_cleanString(_own(lifecycle,'terminal_state'))||null,
+      activity_rows:Object.freeze(rows),
+    });
+  }
+
   function createAssistantTurnAnchorSeed(input){
     const opts=(input&&typeof input==='object')?input:{};
     const sessionId=_cleanString(opts.session_id);
@@ -845,7 +1101,7 @@
   }
 
   ROOT.HermesAssistantTurnAnchors=Object.freeze({
-    version:'slice4-final-projection',
+    version:'slice5-activity-scene',
     activityEventKinds:ACTIVITY_EVENT_KINDS,
     stateLayers:STATE_LAYERS,
     sourceEventClassification:SOURCE_EVENT_CLASSIFICATION,
@@ -863,6 +1119,7 @@
     applyAssistantTurnAnchorSourceEvents,
     createAssistantTurnAnchorShadowSnapshot,
     projectAssistantTurnAnchorSettledMessageFinalAnswer,
+    projectAssistantTurnAnchorActivityScene,
     isAssistantTurnAnchorActivityKind,
   });
 })();
