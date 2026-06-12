@@ -675,6 +675,31 @@ function _openImgLightbox(imgEl) {
   }
   _openImgLightboxWithNav(src, alt, allImages, startIndex);
 }
+function _openMermaidLightbox(svgEl) {
+  if(!svgEl) return;
+  const lb = document.createElement('div');
+  lb.className = 'img-lightbox';
+  lb.setAttribute('role', 'dialog');
+  lb.setAttribute('aria-label', 'Mermaid diagram');
+  const clone = svgEl.cloneNode(true);
+  clone.classList.add('mermaid-lightbox-svg');
+  clone.removeAttribute('width');
+  clone.removeAttribute('height');
+  clone.onclick = e => e.stopPropagation();
+  const cls = document.createElement('button');
+  cls.className = 'img-lightbox-close';
+  cls.setAttribute('aria-label', 'Close');
+  cls.textContent = '×';
+  cls.onclick = () => _closeImgLightbox(lb);
+  lb.appendChild(clone);
+  lb.appendChild(cls);
+  lb.onclick = () => _closeImgLightbox(lb);
+  lb._keyHandler = e => {
+    if(e.key==='Escape') _closeImgLightbox(lb);
+  };
+  document.body.appendChild(lb);
+  document.addEventListener('keydown', lb._keyHandler);
+}
 function _openImgLightboxWithNav(src, alt, images, index) {
   const lb = document.createElement('div');
   lb.className = 'img-lightbox';
@@ -772,6 +797,8 @@ document.addEventListener('click', e => {
   // Message-attached images (already wired since v0.50.x).
   let img = e.target.closest('.msg-media-img');
   if(img){ _openImgLightbox(img); return; }
+  const mermaidSvg = e.target.closest('.mermaid-rendered svg');
+  if(mermaidSvg){ _openMermaidLightbox(mermaidSvg); return; }
   // Composer attach-tray image thumbnails — click any pasted/dropped image
   // chip to lightbox-zoom it before sending. Excludes audio/video chips,
   // which keep their inline media controls. SVG thumbnails (.attach-thumb--svg)
