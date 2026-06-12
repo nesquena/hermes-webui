@@ -24,9 +24,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 _GATEWAY_PID_FILE = "gateway.pid"
 _GATEWAY_RUNTIME_STATUS_FILE = "gateway_state.json"
@@ -285,6 +290,168 @@ def _runtime_detail_subset(runtime_status: dict[str, Any] | None) -> dict[str, A
     return details
 
 
+# Remote-gateway probe (#3281)
+# ------------------------------------------------------------------
+# In multi-container Docker deployments the WebUI container does not ship the
+# ``gateway`` Python package. The lazy ``importlib.import_module("gateway.status")``
+# therefore raises ``ModuleNotFoundError`` and the payload falls through to
+# ``gateway_not_configured`` even though ``HERMES_API_URL`` points at a perfectly
+# reachable remote gateway. The Tasks/Cron banner then shows a spurious amber
+# "Gateway not configured" warning.
+#
+# When a gateway base URL is set in any supported env var, we treat that as an
+# explicit declaration that the gateway lives elsewhere, and probe it over HTTP
+# before touching any local filesystem / module signal. The probe result is
+# cached briefly so a dashboard rerender that fans out to multiple panels does
+# not hammer the gateway.
+
+_REMOTE_PROBE_TIMEOUT_S: float = 2.0
+_REMOTE_PROBE_CACHE_TTL_S: float = 5.0
+_REMOTE_PROBE_PATHS: tuple[str, ...] = ("/health/detailed", "/health", "/v1/health")
+# A gateway health payload is small JSON; cap the 2xx body read so a large or
+# slow-trickled remote response can't hang /api/health/agent or balloon memory.
+_REMOTE_PROBE_BODY_LIMIT_BYTES: int = 64 * 1024
+
+_remote_probe_lock = threading.Lock()
+_remote_probe_cache: dict[str, Any] = {"url": None, "expires_at": 0.0, "result": None}
+
+
+def _remote_gateway_base_url() -> str | None:
+    """Return an explicit remote gateway base URL, or None for local-only setups.
+
+    Priority: GATEWAY_HEALTH_URL > HERMES_GATEWAY_HEALTH_URL > HERMES_API_URL
+    > HERMES_WEBUI_GATEWAY_BASE_URL.
+    Returns ``None`` when no env var is set so the caller falls through to
+    local PID/state checks.
+
+    Any of these env vars may legitimately point AT a health endpoint
+    (e.g. ``GATEWAY_HEALTH_URL=http://host:8642/health``). Since the probe
+    appends ``/health/detailed`` etc. to the returned base, strip a trailing
+    health-path suffix first so we don't build ``/health/health/detailed``
+    (mirrors the normalization in api/updates.py).
+    """
+    for var in (
+        "GATEWAY_HEALTH_URL",
+        "HERMES_GATEWAY_HEALTH_URL",
+        "HERMES_API_URL",
+        "HERMES_WEBUI_GATEWAY_BASE_URL",
+    ):
+        val = os.environ.get(var, "").strip()
+        if val:
+            base = val.rstrip("/")
+            for suffix in ("/health/detailed", "/health", "/v1/health", "/status"):
+                if base.endswith(suffix):
+                    base = base[: -len(suffix)].rstrip("/")
+                    break
+            return base
+    return None
+
+
+def _http_probe(url: str, timeout_s: float) -> tuple[bool, int | None, str | None, bytes | None]:
+    """GET ``url`` and return (ok, status_code, error_name, body).
+
+    ``ok`` is True only for a 2xx response. 5xx and network errors are not OK.
+    4xx is also treated as "responded" (the gateway is up, just answering 404
+    on this particular path) so the caller can move on to the next path.
+    ``body`` is the raw response bytes for 2xx responses, None otherwise.
+    """
+    req = urllib_request.Request(url, method="GET")
+    try:
+        with urllib_request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - trusted env var URL
+            status = getattr(resp, "status", None) or resp.getcode()
+            ok = 200 <= int(status) < 300
+            # Cap the body read: we only need a small JSON health payload, and an
+            # unbounded resp.read() on a large/trickled 2xx body could hang the
+            # /api/health/agent handler or balloon memory. Read one byte over the
+            # cap so the caller can detect (and skip) an oversized body.
+            body = resp.read(_REMOTE_PROBE_BODY_LIMIT_BYTES + 1) if ok else None
+            return (ok, int(status), None, body)
+    except urllib_error.HTTPError as exc:
+        return (False, int(exc.code), "HTTPError", None)
+    except Exception as exc:  # urllib_error.URLError, socket.timeout, ssl, etc.
+        return (False, None, type(exc).__name__, None)
+
+
+def _probe_remote_gateway(base_url: str, *, now: float | None = None) -> dict[str, Any]:
+    """Return an agent-health payload dict for a remote gateway base URL.
+
+    Result is cached for ``_REMOTE_PROBE_CACHE_TTL_S`` seconds per base_url.
+    """
+    current = time.monotonic() if now is None else now
+    with _remote_probe_lock:
+        if (
+            _remote_probe_cache.get("url") == base_url
+            and _remote_probe_cache.get("expires_at", 0.0) > current
+            and _remote_probe_cache.get("result") is not None
+        ):
+            cached = _remote_probe_cache["result"]
+            # Refresh checked_at so the UI shows a current timestamp without
+            # actually re-hitting the gateway.
+            return {**cached, "checked_at": _checked_at()}
+
+    last_status: int | None = None
+    last_error: str | None = None
+    for path in _REMOTE_PROBE_PATHS:
+        ok, status, err, body = _http_probe(base_url + path, _REMOTE_PROBE_TIMEOUT_S)
+        if ok:
+            details: dict[str, Any] = {
+                "state": "alive",
+                "reason": "remote_gateway",
+                "endpoint": base_url + path,
+                "status_code": status,
+            }
+            if body and len(body) <= _REMOTE_PROBE_BODY_LIMIT_BYTES:
+                try:
+                    data = json.loads(body)
+                    if isinstance(data, dict) and "gateway_state" in data:
+                        details["gateway_state"] = data["gateway_state"]
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+            # An over-cap body (len > limit, i.e. the +1 sentinel byte was read)
+            # is treated as "alive but no parseable gateway_state" — we still
+            # report the gateway as up, just without the detailed state.
+            payload = {
+                "alive": True,
+                "checked_at": _checked_at(),
+                "details": details,
+            }
+            break
+        # Remember the most informative failure signal we saw.
+        if status is not None:
+            last_status = status
+        if err is not None:
+            last_error = err
+    else:
+        details: dict[str, Any] = {
+            "state": "down",
+            "reason": "remote_gateway_unreachable",
+            "endpoint": base_url,
+        }
+        if last_status is not None:
+            details["status_code"] = last_status
+        if last_error is not None:
+            details["error"] = last_error
+        payload = {
+            "alive": False,
+            "checked_at": _checked_at(),
+            "details": details,
+        }
+
+    with _remote_probe_lock:
+        _remote_probe_cache["url"] = base_url
+        _remote_probe_cache["expires_at"] = current + _REMOTE_PROBE_CACHE_TTL_S
+        _remote_probe_cache["result"] = payload
+    return payload
+
+
+def _reset_remote_probe_cache_for_tests() -> None:
+    """Test hook: clear the in-process remote-probe cache."""
+    with _remote_probe_lock:
+        _remote_probe_cache["url"] = None
+        _remote_probe_cache["expires_at"] = 0.0
+        _remote_probe_cache["result"] = None
+
+
 def build_agent_health_payload() -> dict[str, Any]:
     """Return `{alive, checked_at, details}` for the Hermes gateway/agent.
 
@@ -295,6 +462,16 @@ def build_agent_health_payload() -> dict[str, Any]:
         probably not configured with a separate gateway process.
     """
     checked_at = _checked_at()
+
+    # Multi-container deployments (#3281): when HERMES_API_URL is set the
+    # gateway lives in another container/host. Probe it over HTTP before
+    # touching local module/pid/state-file signals, otherwise a missing
+    # ``gateway`` Python package in this image masquerades as
+    # "gateway_not_configured" and produces a spurious banner.
+    remote_base = _remote_gateway_base_url()
+    if remote_base is not None:
+        return _probe_remote_gateway(remote_base)
+
     try:
         gateway_status = _gateway_status_module()
     except Exception as exc:

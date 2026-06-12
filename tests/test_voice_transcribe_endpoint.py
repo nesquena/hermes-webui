@@ -3,7 +3,12 @@ import json
 import sys
 import types
 
-from api.upload import handle_transcribe
+import api.upload as upload
+from api.upload import (
+    _stt_provider_capability_from_module,
+    handle_transcribe,
+    handle_transcribe_capability,
+)
 
 
 def _multipart_body(fields=None, files=None, boundary=b"voiceboundary"):
@@ -49,6 +54,13 @@ class _FakeHandler:
         return json.loads(self.wfile.getvalue().decode("utf-8"))
 
 
+def _install_fake_transcription_tools(monkeypatch, fake_mod):
+    monkeypatch.setitem(sys.modules, "tools.transcription_tools", fake_mod)
+    tools_pkg = sys.modules.get("tools")
+    if tools_pkg is not None:
+        monkeypatch.setattr(tools_pkg, "transcription_tools", fake_mod, raising=False)
+
+
 def test_handle_transcribe_requires_file_field():
     body, content_type = _multipart_body(fields={"note": "missing file"})
     handler = _FakeHandler(body, content_type)
@@ -60,7 +72,7 @@ def test_handle_transcribe_requires_file_field():
 def test_handle_transcribe_returns_transcript(monkeypatch):
     fake_mod = types.ModuleType("tools.transcription_tools")
     fake_mod.transcribe_audio = lambda path: {"success": True, "transcript": "hello from audio"}
-    monkeypatch.setitem(sys.modules, "tools.transcription_tools", fake_mod)
+    _install_fake_transcription_tools(monkeypatch, fake_mod)
 
     body, content_type = _multipart_body(
         files={"file": ("voice.webm", b"RIFFfakeaudio", "audio/webm")}
@@ -75,7 +87,7 @@ def test_handle_transcribe_returns_transcript(monkeypatch):
 def test_handle_transcribe_surfaces_provider_error(monkeypatch):
     fake_mod = types.ModuleType("tools.transcription_tools")
     fake_mod.transcribe_audio = lambda path: {"success": False, "error": "STT not configured"}
-    monkeypatch.setitem(sys.modules, "tools.transcription_tools", fake_mod)
+    _install_fake_transcription_tools(monkeypatch, fake_mod)
 
     body, content_type = _multipart_body(
         files={"file": ("voice.webm", b"RIFFfakeaudio", "audio/webm")}
@@ -85,3 +97,62 @@ def test_handle_transcribe_surfaces_provider_error(monkeypatch):
 
     assert handler.status == 503
     assert handler.payload()["error"] == "STT not configured"
+
+
+def test_handle_transcribe_capability_reports_unavailable_without_provider(monkeypatch):
+    monkeypatch.setattr(upload, "_stt_provider_capability", lambda: (False, "none"))
+
+    handler = _FakeHandler(b"", "")
+    handle_transcribe_capability(handler)
+
+    assert handler.status == 200
+    assert handler.payload()["ok"] is True
+    assert handler.payload()["available"] is False
+
+def test_handle_transcribe_capability_reports_available_provider(monkeypatch):
+    monkeypatch.setattr(upload, "_stt_provider_capability", lambda: (True, "openai"))
+
+    handler = _FakeHandler(b"", "")
+    handle_transcribe_capability(handler)
+
+    assert handler.status == 200
+    assert handler.payload()["ok"] is True
+    assert handler.payload()["available"] is True
+    assert handler.payload()["provider"] == "openai"
+
+def test_handle_transcribe_capability_requires_ffmpeg_for_local_command_webm(monkeypatch):
+    fake_mod = types.ModuleType("tools.transcription_tools")
+    fake_mod.__dict__.update(
+        {
+            "_load_stt_config": lambda: {"provider": "local_command"},
+            "is_stt_enabled": lambda cfg=None: True,
+            "_HAS_FASTER_WHISPER": False,
+            "_HAS_OPENAI": False,
+            "_HAS_MISTRAL": False,
+            "_has_local_command": lambda: True,
+            "_find_ffmpeg_binary": lambda: None,
+        }
+    )
+    available, provider = _stt_provider_capability_from_module(fake_mod)
+
+    assert available is False
+    assert provider == "local_command"
+
+
+def test_handle_transcribe_capability_reports_actual_local_command_fallback(monkeypatch):
+    fake_mod = types.ModuleType("tools.transcription_tools")
+    fake_mod.__dict__.update(
+        {
+            "_load_stt_config": lambda: {"provider": "local"},
+            "is_stt_enabled": lambda cfg=None: True,
+            "_HAS_FASTER_WHISPER": False,
+            "_HAS_OPENAI": False,
+            "_HAS_MISTRAL": False,
+            "_has_local_command": lambda: True,
+            "_find_ffmpeg_binary": lambda: "/usr/bin/ffmpeg",
+        }
+    )
+    available, provider = _stt_provider_capability_from_module(fake_mod)
+
+    assert available is True
+    assert provider == "local_command"

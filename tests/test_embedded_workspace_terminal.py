@@ -1,5 +1,11 @@
 import os
 import pathlib
+import io
+import json
+from types import SimpleNamespace
+from urllib.parse import urlsplit
+
+import pytest
 
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -156,6 +162,17 @@ def test_terminal_slash_command_expands_existing_collapsed_terminal():
     assert "else focusComposerTerminalInput();" in toggle_block
 
 
+def test_terminal_slash_command_preflights_remote_backend_before_session_create():
+    commands_js = _read("static/commands.js")
+
+    cmd_block = commands_js.split("async function cmdTerminal", 1)[1].split("async function cmdNew", 1)[0]
+    assert "api('/api/workspaces')" in cmd_block
+    assert "syncTerminalBackendState(data)" in cmd_block
+    assert "data&&data.terminal_remote_backend" in cmd_block
+    assert "_terminalRemoteBackendUnsupportedMessage" in cmd_block
+    assert cmd_block.index("data&&data.terminal_remote_backend") < cmd_block.index("await newSession()")
+
+
 def test_terminal_v1_does_not_expose_send_to_chat_action():
     html = _read("static/index.html")
     terminal_js = _read("static/terminal.js")
@@ -199,6 +216,9 @@ def test_terminal_routes_are_registered():
 def test_terminal_process_does_not_mutate_global_terminal_cwd(tmp_path, monkeypatch):
     from api.terminal import close_terminal, start_terminal
 
+    if os.name == "nt":
+        pytest.skip("Embedded terminal PTY startup is not supported on Windows")
+
     monkeypatch.delenv("TERMINAL_CWD", raising=False)
     sid = "test-terminal-env"
     term = start_terminal(sid, tmp_path, rows=8, cols=40, restart=True)
@@ -229,3 +249,85 @@ def test_terminal_xterm_theme_follows_appearance_tokens():
     assert "attributeFilter:['class','data-skin']" in terminal_js
     assert "background:var(--code-bg)" in style_css
     assert "color:var(--pre-text)" in style_css
+
+
+def test_terminal_button_and_start_path_respect_remote_backend_guard():
+    terminal_js = _read("static/terminal.js")
+
+    sync_block = terminal_js.split("function syncTerminalButton", 1)[1].split("function focusComposerTerminalInput", 1)[0]
+    start_block = terminal_js.split("async function _startComposerTerminal", 1)[1].split("async function toggleComposerTerminal", 1)[0]
+    assert "function syncTerminalBackendState" in terminal_js
+    assert "function _terminalRemoteBackendUnsupportedMessage" in terminal_js
+    assert "toggle.disabled=!hasWorkspace||remoteBackend;" in sync_block
+    assert "_terminalRemoteBackendUnsupportedMessage()" in sync_block
+    assert "if(S.terminalRemoteBackend)" in start_block
+    assert "showToast(_terminalRemoteBackendUnsupportedMessage(),3200,'warning');" in start_block
+    assert "payload&&payload.error==='remote_terminal_backend_unsupported'" in terminal_js
+
+
+class _RouteHandler:
+    def __init__(self):
+        self.headers = {}
+        self.wfile = io.BytesIO()
+        self.responses = []
+
+    def send_response(self, status):
+        self.responses.append(status)
+
+    def send_header(self, _name, _value):
+        pass
+
+    def end_headers(self):
+        pass
+
+
+def test_workspaces_route_exposes_terminal_remote_backend_flag(monkeypatch):
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "load_workspaces",
+        lambda: [{"path": "/tmp/project", "name": "Project"}],
+    )
+    monkeypatch.setattr(routes, "get_last_workspace", lambda: "/tmp/project")
+    monkeypatch.setattr(routes, "get_config", lambda: {"terminal": {"backend": "ssh"}})
+
+    handler = _RouteHandler()
+    routes.handle_get(handler, urlsplit("/api/workspaces"))
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+    assert handler.responses == [200]
+    assert payload["terminal_remote_backend"] is True
+    assert payload["workspaces"][0]["path"] == "/tmp/project"
+    assert payload["last"] == "/tmp/project"
+
+
+def test_terminal_start_rejects_remote_backend_with_stale_workspace_before_local_validation(monkeypatch):
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid: SimpleNamespace(
+            session_id=sid,
+            workspace="/Users/other/projects/stale-remote-workspace",
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_config",
+        lambda: {"terminal": {"backend": "docker", "cwd": "/Users/joeyshiue"}},
+    )
+
+    handler = _RouteHandler()
+    routes._handle_terminal_start(
+        handler,
+        {"session_id": "session-1", "rows": 24, "cols": 80, "restart": False},
+    )
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+    assert handler.responses == [400]
+    assert payload == {
+        "error": "remote_terminal_backend_unsupported",
+        "message": "Embedded terminal is only supported for local terminal backends.",
+    }

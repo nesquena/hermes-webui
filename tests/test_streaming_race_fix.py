@@ -51,7 +51,9 @@ class TestStreamFinalized:
 
     def test_raf_handle_stored_in_schedule_render(self):
         src = read('static/messages.js')
-        assert '_pendingRafHandle=requestAnimationFrame' in src or \
+        assert '_pendingRafHandle=_pendingRafFrameHandle' in src or \
+               '_pendingRafHandle = _pendingRafFrameHandle' in src or \
+               '_pendingRafHandle=requestAnimationFrame' in src or \
                '_pendingRafHandle = requestAnimationFrame' in src, (
             "rAF handle must be stored in _pendingRafHandle for cancellation"
         )

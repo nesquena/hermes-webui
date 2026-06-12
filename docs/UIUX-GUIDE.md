@@ -79,6 +79,15 @@ not raw debug detail. Compact Activity may collapse tool arguments, long tool
 results, and low-level reasoning detail, but it must not make concise
 user-visible progress text available only inside a collapsed disclosure.
 
+Automatic compression is a live-only context barrier, not a special branded
+tool card. Render it as a centered, non-interactive divider with quiet horizontal
+rules: `Compressing context` while the compression barrier is active and
+`Context auto-compressed` when the agent has continued or the compression
+completion event arrives. Do not give it a caret, click target, leading status
+dot, or standalone running badge. In settled final history, remove live-only
+automatic compression rows unless they explain a visible recovery or error
+state.
+
 The existing two-stage proposal in `docs/ui-ux/two-stage-proposal.html` records a
 compatible direction for long turns: live work can be grouped as a worklog, then
 settled history can collapse while the final answer reads as the calm

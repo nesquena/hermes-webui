@@ -90,3 +90,15 @@ def test_selected_text_reply_styles_and_i18n_exist_for_all_locales():
         keys = set(key_pattern.findall(block))
         missing = sorted(required - keys)
         assert not missing, f"{locale} missing selected-text reply keys: {missing}"
+
+
+def test_selected_text_reply_button_has_user_select_none():
+    css = read("static/style.css")
+    # The base rule must carry user-select:none so browser selection never
+    # renders on or through the button, regardless of hover background opacity.
+    assert "user-select:none" in css
+    # Confirm it lives inside the .selected-text-reply-btn rule, not elsewhere.
+    rule_match = re.search(
+        r'\.selected-text-reply-btn\{[^}]*user-select:none[^}]*\}', css
+    )
+    assert rule_match, ".selected-text-reply-btn base rule must include user-select:none"

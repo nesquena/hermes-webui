@@ -25,6 +25,7 @@ _TASK_PREFIX = "/api/kanban/tasks/"
 
 
 def _kb():
+    """Lazily import hermes_cli.kanban_db to avoid circular imports at module load."""
     from hermes_cli import kanban_db as kb
 
     return kb
@@ -78,12 +79,29 @@ def _normalise_board_or_raise(raw):
 
 
 def _conn(board=None):
+    """Initialize the kanban DB for the given board slug and return a context manager
+    that yields a sqlite connection and CLOSES it on exit.
+
+    Must be ``kb.connect_closing`` — a raw ``kb.connect()`` connection used as
+    ``with _conn(...) as conn:`` only gets sqlite3's transaction-scope context
+    manager, which never closes the file descriptor. In this long-lived server
+    that leaks one FD per request and pins stale WAL snapshots (FDs to deleted
+    ``-wal``/``-shm`` files), which starves SQLite checkpoints on the shared
+    kanban DB and aggravates probe⇄checkpoint contention for every process.
+    """
     kb = _kb()
     kb.init_db(board=board)
+    closing = getattr(kb, "connect_closing", None)
+    if closing is not None:
+        return closing(board=board)
+    # Older kanban_db builds (and lightweight test doubles) without
+    # connect_closing: fall back to the raw connection; sqlite3's own
+    # context manager at least scopes the transaction.
     return kb.connect(board=board)
 
 
 def _obj_dict(value):
+    """Coerce a dataclass or arbitrary object to a plain dict; returns None unchanged."""
     if value is None:
         return None
     if is_dataclass(value):
@@ -94,6 +112,7 @@ def _obj_dict(value):
 
 
 def _task_dict(task):
+    """Convert a task to a JSON-serialisable dict, annotating it with computed age_seconds and progress fields."""
     data = _obj_dict(task)
     if not data:
         return data
@@ -108,6 +127,7 @@ def _task_dict(task):
 
 
 def _latest_event_id(conn) -> int:
+    """Return the highest event id in task_events, falling back to 0 when the table is empty."""
     try:
         row = conn.execute("SELECT COALESCE(MAX(id), 0) AS latest FROM task_events").fetchone()
         return int(row["latest"] or 0)
@@ -116,6 +136,7 @@ def _latest_event_id(conn) -> int:
 
 
 def _bool_query(parsed, name: str, default: bool = False) -> bool:
+    """Extract a boolean query param, treating 1/true/yes/on (case-insensitive) as True."""
     raw = (parse_qs(parsed.query or "").get(name) or [None])[0]
     if raw is None:
         return default
@@ -123,11 +144,13 @@ def _bool_query(parsed, name: str, default: bool = False) -> bool:
 
 
 def _str_query(parsed, name: str):
+    """Extract a string query param, returning None when the param is absent or blank."""
     raw = (parse_qs(parsed.query or "").get(name) or [None])[0]
     return str(raw).strip() or None if raw is not None else None
 
 
 def _int_query(parsed, name: str, default=None, *, minimum=None, maximum=None):
+    """Extract an integer query param, clamped to [minimum, maximum] when those bounds are provided."""
     raw = _str_query(parsed, name)
     if raw is None:
         return default
@@ -143,6 +166,7 @@ def _int_query(parsed, name: str, default=None, *, minimum=None, maximum=None):
 
 
 def _task_link_counts(conn, tasks):
+    """Return a dict mapping each task id to its {parents, children} dependency link counts."""
     counts = {task.id: {"parents": 0, "children": 0} for task in tasks}
     try:
         rows = conn.execute("SELECT parent_id, child_id FROM task_links").fetchall()
@@ -155,6 +179,7 @@ def _task_link_counts(conn, tasks):
 
 
 def _comment_counts(conn):
+    """Return a dict mapping each task id to its total comment count across the board."""
     try:
         rows = conn.execute(
             "SELECT task_id, COUNT(*) AS n FROM task_comments GROUP BY task_id"
@@ -165,6 +190,7 @@ def _comment_counts(conn):
 
 
 def _board_payload(parsed):
+    """Build the full board JSON payload: kanban columns with tasks, filter state, and latest_event_id."""
     board = _resolve_board(parsed)
     kb = _kb()
     tenant = _str_query(parsed, "tenant")
@@ -230,6 +256,7 @@ def _board_payload(parsed):
 
 
 def _validate_status(status: str) -> str:
+    """Validate a status string against BOARD_COLUMNS, raising ValueError for unrecognised values."""
     value = str(status or "").strip().lower()
     allowed = set(BOARD_COLUMNS) | {"archived"}
     if value not in allowed:
@@ -304,6 +331,7 @@ def _set_status_direct(conn, task_id: str, new_status: str) -> bool:
 
 
 def _create_task_payload(body: dict, *, board=None):
+    """Create a new task from a parsed request body and return the task dict in a read_only envelope."""
     title = str(body.get("title") or "").strip()
     if not title:
         raise ValueError("title is required")
@@ -336,6 +364,7 @@ def _create_task_payload(body: dict, *, board=None):
 
 
 def _patch_task(conn, task_id: str, body: dict):
+    """Apply a partial update to a task, routing status transitions through structured verbs (complete, block, archive)."""
     kb = _kb()
     task = kb.get_task(conn, task_id)
     if not task:
@@ -425,6 +454,7 @@ def _patch_task(conn, task_id: str, body: dict):
 
 
 def _patch_task_payload(task_id: str, body: dict, *, board=None):
+    """Validate task_id, open a connection, and delegate field-level updates to _patch_task."""
     task_id = str(task_id or "").strip()
     if not task_id:
         raise ValueError("task_id is required")
@@ -435,6 +465,7 @@ def _patch_task_payload(task_id: str, body: dict, *, board=None):
 
 
 def _comment_payload(task_id: str, body: dict, *, board=None):
+    """Add a comment to a task and return the new comment_id in a read_only envelope."""
     task_id = str(task_id or "").strip()
     comment_body = str(body.get("body") or "").strip()
     if not task_id:
@@ -450,6 +481,7 @@ def _comment_payload(task_id: str, body: dict, *, board=None):
 
 
 def _link_tasks_payload(body: dict, *, unlink: bool = False, board=None):
+    """Create or delete a parent-child dependency link between two tasks."""
     parent_id = str(body.get("parent_id") or "").strip()
     child_id = str(body.get("child_id") or "").strip()
     if not parent_id or not child_id:
@@ -467,6 +499,7 @@ def _link_tasks_payload(body: dict, *, unlink: bool = False, board=None):
         return {"ok": True, "parent_id": parent_id, "child_id": child_id, "read_only": False}
 
 def _links_for(conn, task_id: str) -> dict:
+    """Return {parents: [...], children: [...]} dependency id lists for a task."""
     kb = _kb()
     return {
         "parents": kb.parent_ids(conn, task_id),
@@ -475,6 +508,7 @@ def _links_for(conn, task_id: str) -> dict:
 
 
 def _task_detail_payload(task_id: str, *, board=None):
+    """Return the full task detail: task dict, comments, events, dependency links, and run history."""
     kb = _kb()
     with _conn(board=board) as conn:
         task = kb.get_task(conn, task_id)
@@ -491,6 +525,7 @@ def _task_detail_payload(task_id: str, *, board=None):
 
 
 def _events_payload(parsed):
+    """Return paginated task events from the board's event log, starting after the ?since= cursor."""
     board = _resolve_board(parsed)
     since = _int_query(parsed, "since", 0, minimum=0)
     limit = _int_query(parsed, "limit", 200, minimum=1, maximum=200)
@@ -523,6 +558,7 @@ def _events_payload(parsed):
 
 
 def _config_payload(*, board=None):
+    """Return kanban configuration: column names, known assignees, and lane/display settings from hermes_cli.config."""
     kb = _kb()
     try:
         with _conn(board=board) as conn:
@@ -551,6 +587,7 @@ def _config_payload(*, board=None):
 
 
 def _stats_payload(*, board=None):
+    """Return per-status and per-assignee task counts for the board."""
     kb = _kb()
     with _conn(board=board) as conn:
         if hasattr(kb, "board_stats"):
@@ -569,6 +606,7 @@ def _stats_payload(*, board=None):
 
 
 def _assignees_payload(*, board=None):
+    """Return the list of known assignees derived from task history."""
     kb = _kb()
     with _conn(board=board) as conn:
         try:
@@ -582,6 +620,7 @@ def _assignees_payload(*, board=None):
 
 
 def _task_log_payload(parsed, task_id: str):
+    """Return the raw worker log content and on-disk metadata for a task's dispatcher run."""
     board = _resolve_board(parsed)
     kb = _kb()
     tail = _int_query(parsed, "tail", None, minimum=1, maximum=2_000_000)
@@ -607,6 +646,7 @@ def _task_log_payload(parsed, task_id: str):
 
 
 def _bulk_tasks_payload(body: dict, *, board=None):
+    """Apply a common mutation (archive/status/assignee/priority) to multiple task ids in a single transaction."""
     ids = [str(i).strip() for i in (body.get("ids") or []) if str(i).strip()]
     if not ids:
         raise ValueError("ids is required")
@@ -644,6 +684,7 @@ def _bulk_tasks_payload(body: dict, *, board=None):
 
 
 def _dispatch_payload(parsed):
+    """Trigger a single-pass kanban dispatcher run and return the dispatch result."""
     board = _resolve_board(parsed)
     kb = _kb()
     dry_run = _bool_query(parsed, "dry_run", False)
@@ -661,6 +702,7 @@ def _dispatch_payload(parsed):
 
 
 def _task_action_payload(task_id: str, body: dict, action: str, *, board=None):
+    """Execute a named action (block or unblock) on a task and return the updated task dict."""
     kb = _kb()
     task_id = str(task_id or "").strip()
     if not task_id:

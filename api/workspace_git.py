@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import difflib
 import os
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -18,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from api.workspace import safe_resolve_ws
+from api.workspace import rmtree_anchored, safe_resolve_ws, unlink_anchored
 
 
 GIT_TIMEOUT = 5
@@ -34,9 +33,37 @@ _GIT_ENV_SCRUB_KEYS = (
     "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_PARAMETERS",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
 )
 _GIT_ENV_SCRUB_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 _HERMES_BRANCH_SWITCH_STASH_PREFIX = "hermes-webui branch switch"
+_GIT_HARDENED_CONFIG = (
+    # Workspace Git operations can run against repositories provided by agents,
+    # restored sessions, or mounted workspaces. Keep repo-local configuration
+    # from turning read/status/fetch calls into host command execution.
+    ("core.fsmonitor", "false"),
+    # Force the unmodified system ssh binary rather than clearing it — an empty
+    # value would break legitimate ssh fetches, while "ssh" overrides any
+    # repo-local core.sshCommand that points at an attacker helper.
+    ("core.sshCommand", "ssh"),
+    ("core.askPass", ""),
+    ("credential.helper", ""),
+    ("protocol.ext.allow", "never"),
+    # Neutralize repo-local core.gitProxy, which specifies an external proxy
+    # command reachable on `git fetch` against a git:// remote.
+    ("core.gitProxy", ""),
+)
+
+
+def _hardened_git_argv(args: list[str]) -> list[str]:
+    argv = ["git"]
+    for key, value in _GIT_HARDENED_CONFIG:
+        argv.extend(["-c", f"{key}={value}"])
+    argv.extend(args)
+    return argv
 
 
 def workspace_git_destructive_enabled() -> bool:
@@ -57,6 +84,7 @@ def _clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     for key in list(env):
         if key.startswith(_GIT_ENV_SCRUB_PREFIXES):
             env.pop(key, None)
+    env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
 
@@ -141,7 +169,7 @@ def _run_git(
     run_env = _clean_git_env(env)
     try:
         result = subprocess.run(
-            ["git", *args],
+            _hardened_git_argv(args),
             cwd=str(cwd),
             shell=False,
             capture_output=True,
@@ -978,9 +1006,16 @@ def git_discard(workspace: str | Path, paths: Iterable[str], *, delete_untracked
                     raise GitWorkspaceError("Untracked files require delete_untracked=true")
                 target = safe_resolve_ws(ctx.workspace, workspace_rel)
                 if target.is_dir():
-                    shutil.rmtree(target)
+                    rmtree_anchored(ctx.workspace, target)
                 else:
-                    target.unlink(missing_ok=True)
+                    try:
+                        unlink_anchored(ctx.workspace, target)
+                    except FileNotFoundError:
+                        # Preserve the previous Path.unlink(missing_ok=True)
+                        # behavior for benign races where another process
+                        # removes the untracked file after git_status() has
+                        # reported it but before this discard reaches unlink.
+                        pass
                 continue
             _run_git(ctx, ["restore", "--worktree", "--", repo_rel], check=True)
     return git_status(workspace)
@@ -1041,12 +1076,12 @@ def _selected_temp_index_env(ctx: GitContext, specs: list[str]) -> tuple[dict[st
 def _selected_files(ctx: GitContext, paths: Iterable[str]) -> tuple[list[str], list[str], list[dict]]:
     requested = _clean_paths(paths)
     requested_specs = [_repo_rel(ctx, path) for path in requested]
-    workspace_paths = [_workspace_rel(ctx, spec) or path for spec, path in zip(requested_specs, requested)]
+    workspace_paths = [_workspace_rel(ctx, spec) or path for spec, path in zip(requested_specs, requested, strict=True)]
     status = git_status(ctx.workspace)
     by_path = {f["path"]: f for f in status.get("files", [])}
     specs: list[str] = []
     selected = []
-    for path, repo_rel in zip(workspace_paths, requested_specs):
+    for path, repo_rel in zip(workspace_paths, requested_specs, strict=True):
         state = by_path.get(path)
         if not state:
             continue

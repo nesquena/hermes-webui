@@ -150,6 +150,14 @@ A tool card is a debug event row, not a chat message. Show icon, name, short tar
 
 Same visual family as tool-call metadata. They should be quieter than assistant prose and should not use bright tinted full cards unless the user expands them.
 
+Automatic compression follows a quiet live-only divider treatment rather than a
+tool-card row. Use `Compressing context` for the active barrier and
+`Context auto-compressed` after continuation/completion; render both as centered
+non-interactive text with horizontal rules. Do not give it a caret, click
+target, distinct accent color, special leading dot, or separate card identity.
+Once the final answer is settled, omit the live-only compression row unless it is
+needed to explain a visible recovery or error state.
+
 ### Composer
 
 The composer is the command surface. Keep it legible and focused: modest radius, subtle border, transparent inactive chips, no theatrical hover scaling.

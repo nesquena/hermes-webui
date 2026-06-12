@@ -267,7 +267,7 @@ def test_login_locale_count_matches_or_exceeds_floor():
         assert k in login, f"_LOGIN_LOCALE missing core locale {k!r}"
 
 
-@pytest.mark.parametrize("loc_key", ["en", "es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko"])
+@pytest.mark.parametrize("loc_key", ["en", "es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko", "pl"])
 def test_login_locale_entry_well_formed(loc_key: str):
     """Each _LOGIN_LOCALE entry must have all required sub-keys and non-empty string values."""
     login = _load_login_locale()
@@ -281,7 +281,7 @@ def test_login_locale_entry_well_formed(loc_key: str):
 
 
 def test_login_locale_resolver_handles_new_locales():
-    """_resolve_login_locale_key() must map ja/pt/ko (and common BCP-47 variants) to their entries."""
+    """_resolve_login_locale_key() must map ja/pt/ko/pl (and common BCP-47 variants) to their entries."""
     sys.path.insert(0, str(REPO))
     from api.routes import _resolve_login_locale_key
 
@@ -293,6 +293,9 @@ def test_login_locale_resolver_handles_new_locales():
     assert _resolve_login_locale_key("pt-PT") == "pt"
     assert _resolve_login_locale_key("ko") == "ko"
     assert _resolve_login_locale_key("ko-KR") == "ko"
+    assert _resolve_login_locale_key("pl") == "pl"
+    assert _resolve_login_locale_key("pl-PL") == "pl"
+    assert _resolve_login_locale_key("pl_PL") == "pl"
     assert _resolve_login_locale_key("fr") == "fr"
     assert _resolve_login_locale_key("fr-FR") == "fr"
     assert _resolve_login_locale_key("fr-CA") == "fr"
@@ -310,7 +313,7 @@ def _value_of(seg: str, key: str) -> str | None:
     return None
 
 
-@pytest.mark.parametrize("loc_key", ["es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko"])
+@pytest.mark.parametrize("loc_key", ["es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko", "pl"])
 def test_login_flow_keys_are_translated(loc_key: str):
     """Login/sign-out/password keys in static/i18n.js must NOT equal the English value.
 
@@ -351,7 +354,7 @@ SESSION_MANAGEMENT_KEYS = (
 )
 
 
-@pytest.mark.parametrize("loc_key", ["en", "es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko"])
+@pytest.mark.parametrize("loc_key", ["en", "es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko", "pl"])
 def test_session_management_keys_present(loc_key: str):
     """Every locale block must define all session-management keys (no fallback to English)."""
     seg = _i18n_locale_block(loc_key)

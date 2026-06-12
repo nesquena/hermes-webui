@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text()
+SESSIONS_SRC = (ROOT / "static" / "sessions.js").read_text()
 
 
 def test_reattach_path_uses_replay_when_status_reports_journal():
@@ -11,7 +12,7 @@ def test_reattach_path_uses_replay_when_status_reports_journal():
 
     assert "st.replay_available" in block
     assert "replayOnly=true" in block
-    assert "replayOnly?_runJournalReplayParams():''" in block
+    assert "(reconnecting||replayOnly)?_runJournalReplayParams():''" in block
     assert "_clearOwnerInflightState()" in block
 
 
@@ -64,8 +65,15 @@ def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
             f"{event_name} must be handled by the shared live/replay SSE pipeline"
         )
 
-    assert "updateThinking(" in wire_block, "reasoning replay should use the live Thinking card path"
-    assert "appendLiveToolCard(tc)" in wire_block, "tool replay should use live tool-card rendering"
+    thinking_helper = MESSAGES_SRC[
+        MESSAGES_SRC.index("function _updateLiveThinkingCard") :
+        MESSAGES_SRC.index("// Split a content string", MESSAGES_SRC.index("function _updateLiveThinkingCard"))
+    ]
+    assert "_updateLiveThinkingCard(" in wire_block, "reasoning replay should use the live Thinking card path"
+    assert "updateThinking(text, opts)" in thinking_helper and "appendThinking(text, opts)" in thinking_helper, (
+        "the shared Thinking helper should still route replay/live reasoning into the Worklog Thinking card path"
+    )
+    assert "appendLiveToolCard(tc" in wire_block, "tool replay should use live tool-card rendering"
     # Compression replay must dispatch through setCompressionUi(...). The handler
     # body may build the state object inline (`setCompressionUi({...})`) or hoist
     # it into a `state` variable first (`setCompressionUi(state)`) — both forms
@@ -100,3 +108,34 @@ def test_run_journal_cursor_tracks_every_long_task_timeline_event():
         assert f"'{event_name}'" in cursor_loop, (
             f"{event_name} must advance the replay cursor to avoid duplicate timeline replay"
         )
+
+
+def test_server_runtime_journal_snapshot_restores_structured_inflight_state():
+    helper_pos = SESSIONS_SRC.index("function _serverLiveSnapshotToolId")
+    helper_block = SESSIONS_SRC[helper_pos : helper_pos + 2600]
+    load_pos = SESSIONS_SRC.index("async function loadSession")
+    load_block = SESSIONS_SRC[load_pos : load_pos + 18000]
+
+    assert "runtime_journal_snapshot" in load_block
+    assert "_serverLiveSnapshotInflight(S.session.runtime_journal_snapshot" in load_block
+    assert "!_inflightHasVisibleLiveState(INFLIGHT[sid])" in load_block
+    assert "journalSnapshot:true" in helper_block
+    assert "lastRunJournalSeq" in helper_block
+    assert "last_assistant_text" in helper_block
+    assert "activity_burst_anchors" in helper_block
+    for key in ("tid", "id", "tool_call_id", "tool_use_id", "call_id"):
+        assert key in helper_block
+
+
+def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():
+    live_tid_pos = MESSAGES_SRC.index("function _liveToolTid")
+    live_tid_block = MESSAGES_SRC[live_tid_pos : live_tid_pos + 450]
+    find_pos = MESSAGES_SRC.index("function _findPendingLiveToolCallIndex")
+    find_block = MESSAGES_SRC[find_pos : find_pos + 900]
+    upsert_pos = MESSAGES_SRC.index("function upsertLiveToolCall")
+    upsert_block = MESSAGES_SRC[upsert_pos : upsert_pos + 600]
+
+    for key in ("tid", "id", "tool_call_id", "tool_use_id", "call_id"):
+        assert key in live_tid_block
+        assert key in find_block
+        assert key in upsert_block

@@ -72,7 +72,6 @@ def test_upward_scroll_unpins_immediately_without_hysteresis():
     """Upward motion sets _scrollPinned=false and resets the counter, no count needed."""
     block = _scroll_listener_block()
     if_idx = block.index("if(movedUp)")
-    # Tolerate either single-line or multi-line if/else formatting.
     else_idx = block.find("else", if_idx)
     assert else_idx > if_idx, "upward / downward branches not found (#1731)"
     upward_branch = block[if_idx:else_idx]
@@ -85,74 +84,40 @@ def test_upward_scroll_unpins_immediately_without_hysteresis():
         "Upward scroll must reset _nearBottomCount so a subsequent "
         "downward motion has to clear the hysteresis fresh (#1731)."
     )
-    assert "_nearBottomCount>=2" not in upward_branch, (
-        "The upward branch must not gate unpinning on hysteresis — that "
-        "was the bug (#1731)."
+    assert "_messageUserUnpinned=true" in upward_branch, (
+        "Upward scroll must set the sticky manual-unpin flag."
     )
 
 
-def test_upward_motion_only_unpins_after_recent_user_intent():
-    """Layout/programmatic scrollTop decreases must not masquerade as user scroll-up.
-
-    Long-session windowing can preserve/restore scroll positions while the live
-    stream is growing. If a plain scrollTop decrease always clears
-    ``_scrollPinned``, the viewport can be visually at bottom while the state says
-    "not pinned", so streaming stops auto-following. Explicit wheel/touch upward
-    input must still unpin immediately; passive layout movement must not.
-    """
-    assert "let _lastMessageUpwardIntentMs=" in UI_JS, (
-        "ui.js must track recent upward wheel/touch intent inside #messages so "
-        "programmatic/layout scroll changes do not permanently unpin streaming."
-    )
-    assert "function _recentMessageUpwardIntent()" in UI_JS, (
-        "ui.js must expose a recent upward transcript intent helper."
-    )
+def test_upward_motion_unpins_on_scroll_top_delta_without_intent_timeout():
+    """Scrollbar / keyboard upward scroll must unpin without a wheel intent window."""
     block = _scroll_listener_block()
     moved_idx = block.index("const movedUp=")
     moved_expr = block[moved_idx : block.find(";", moved_idx)]
-    assert "_recentMessageUpwardIntent()" in moved_expr, (
-        "movedUp must require recent wheel/touch upward intent, not only a "
-        "scrollTop decrease caused by DOM/layout changes."
+    assert "_recentMessageUpwardIntent()" not in moved_expr, (
+        "movedUp must use scrollTop direction only; sticky unpin replaces the #3250 timeout."
     )
+    assert "_lastScrollTop-2" in moved_expr or "top<_lastScrollTop -" in moved_expr
 
 
-def test_wheel_touch_upward_intent_is_recorded_inside_messages():
-    """Wheel/touch gestures inside #messages must mark real upward user intent."""
+def test_wheel_touch_upward_intent_unpins_immediately_inside_messages():
+    """Wheel/touch up inside #messages must unpin before the scroll listener runs."""
     fn_start = UI_JS.index("function _recordNonMessageScrollIntent")
     fn_end = UI_JS.index("function _recentNonMessageScrollIntent", fn_start)
     fn = UI_JS[fn_start:fn_end]
-    assert "_lastMessageUpwardIntentMs=performance.now()" in fn, (
-        "_recordNonMessageScrollIntent must timestamp real upward transcript "
-        "wheel/touch gestures before clearing _scrollPinned."
-    )
-    assert "e.deltaY<0" in fn and "e.type==='touchmove'" in fn, (
-        "Both wheel-up and touchmove gestures inside #messages should count as "
-        "user upward intent."
-    )
+    assert "_messageUserUnpinned=true" in fn.replace(" ", "")
+    assert "e.deltaY<0" in fn and "e.type==='touchmove'" in fn
 
 
 def test_downward_path_preserves_macos_momentum_hysteresis():
-    """Downward / stationary motion must still go through the original
-    hysteresis re-pin path so the #1360 macOS trackpad momentum protection
-    is preserved.
-    """
+    """Downward motion into the near-bottom zone re-follows with hysteresis (#1360)."""
     block = _scroll_listener_block()
-    else_idx = block.index("else", block.index("if(movedUp)"))
-    # End of else branch is at the next btn lookup line.
-    end_idx = block.index("const btn=", else_idx)
-    downward_branch = block[else_idx:end_idx]
-
-    assert "if(nearBottom)" in downward_branch, (
-        "Downward path must branch on near-bottom state so the macOS momentum "
-        "re-pin guard still applies (#1360)."
+    assert "elseif(movedDown&&nearBottom)" in block.replace(" ", ""), (
+        "Explicit downward scroll into the near-bottom zone must be the re-follow path "
+        "after a sticky manual unpin."
     )
-    assert "_nearBottomCount=_nearBottomCount+1" in downward_branch, (
-        "Downward path must keep incrementing the near-bottom counter so "
-        "the macOS momentum re-pin guard still applies (#1360)."
-    )
-    assert "if(_nearBottomCount>=2) _scrollPinned=true" in downward_branch, (
-        "Downward path must keep the >=2 hysteresis re-pin requirement "
-        "without downgrading an explicit bottom pin on the first near-bottom event (#1360)."
+    assert "if(_nearBottomCount>=2)" in block, (
+        "Re-follow still requires two consecutive near-bottom samples."
     )
 
 

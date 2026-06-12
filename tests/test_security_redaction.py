@@ -283,6 +283,54 @@ def test_redact_session_data_messages():
     assert result["session_id"] == "abc123"
     assert result["messages"][1]["content"] == "sure"
 
+def test_redact_session_data_todo_state_sidecar():
+    """redact_session_data masks credentials in derived todo_state sidecars."""
+    from api.helpers import redact_session_data
+    session = {
+        "session_id": "todo-redact",
+        "messages": [],
+        "tool_calls": [],
+        "todo_state": {
+            "todos": [
+                {"id": "1", "content": f"rotate api key {_FAKE_SK_KEY}", "status": "pending"},
+            ],
+            "summary": {"total": 1, "pending": 1},
+            "version": 1,
+        },
+    }
+    result = redact_session_data(session)
+    dump = json.dumps(result)
+    _assert_no_plaintext_credentials(dump, "todo_state redaction")
+    assert result["todo_state"]["todos"][0]["status"] == "pending"
+
+
+def test_redact_session_data_runtime_journal_snapshot():
+    """redact_session_data masks credentials in active run-journal snapshots."""
+    from api.helpers import redact_session_data
+    session = {
+        "session_id": "journal-redact",
+        "messages": [],
+        "tool_calls": [],
+        "runtime_journal_snapshot": {
+            "messages": [
+                {"role": "assistant", "content": f"token echoed: {_FAKE_GITHUB_PAT}"},
+            ],
+            "tool_calls": [
+                {
+                    "name": "terminal",
+                    "preview": f"using {_FAKE_SK_KEY}",
+                    "args": {"command": f"export TOKEN={_FAKE_GITHUB_PAT}"},
+                },
+            ],
+            "last_assistant_text": f"assistant saw {_FAKE_HF_TOKEN}",
+            "last_reasoning_text": f"reasoning saw {_FAKE_AWS_KEY}",
+        },
+    }
+    result = redact_session_data(session)
+    dump = json.dumps(result)
+    _assert_no_plaintext_credentials(dump, "runtime_journal_snapshot redaction")
+    assert result["runtime_journal_snapshot"]["tool_calls"][0]["name"] == "terminal"
+
 
 def test_redact_session_data_multiple_cred_types():
     """redact_session_data handles sk-, ghp_, hf_, and AKIA keys."""
