@@ -3449,17 +3449,24 @@ def _static_models_catalog_without_live_probes() -> dict:
                 if isinstance(cfg_models, dict):
                     raw_models = [{"id": key, "label": key} for key in cfg_models.keys()]
                 elif isinstance(cfg_models, list):
-                    raw_models = [
-                        {
-                            "id": item["id"] if isinstance(item, dict) else item,
-                            "label": (
-                                item.get("label", item["id"])
-                                if isinstance(item, dict)
-                                else item
-                            ),
-                        }
-                        for item in cfg_models
-                    ]
+                    raw_models = []
+                    for item in cfg_models:
+                        if isinstance(item, dict):
+                            model_id = (
+                                item.get("id")
+                                or item.get("model")
+                                or item.get("name")
+                            )
+                            if not model_id:
+                                continue
+                            raw_models.append(
+                                {
+                                    "id": model_id,
+                                    "label": item.get("label", model_id),
+                                }
+                            )
+                        elif item:
+                            raw_models.append({"id": item, "label": item})
             if not raw_models:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
             for model_id in configured_model_ids.get(pid, []):

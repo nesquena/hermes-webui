@@ -217,3 +217,47 @@ def test_default_group_survives_only_as_emergency_last_resort(
     assert catalog["groups"][0]["provider"] == "Default"
     assert catalog["groups"][0]["provider_id"] == "anthropic"
     assert catalog["groups"][0]["models"][0]["id"] == "claude-sonnet-4.6"
+
+
+def test_provider_models_list_of_dicts_without_id_does_not_collapse_catalog(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """A legal ``providers.<id>.models`` list of dicts keyed by ``model``/``name``
+    (not ``id``) must still build the rich catalog instead of KeyError-ing into
+    the minimal one-model fallback."""
+    cfg.cfg = {
+        "model": {
+            "provider": "openai-api",
+            "default": "gpt-5.5",
+        },
+        "providers": {
+            "openai_api": {
+                "api_key": "***",
+                # list-of-dicts keyed by "model"/"name", and a bare string —
+                # all legal config shapes that the strict item["id"] path broke.
+                "models": [
+                    {"model": "gpt-5.5", "label": "GPT-5.5"},
+                    {"name": "gpt-4.1"},
+                    "gpt-4o",
+                    {"label": "no-id-no-model"},  # nothing usable → skipped, no crash
+                ],
+            },
+        },
+    }
+
+    catalog = cfg._static_models_catalog_without_live_probes()
+    provider_ids = [group["provider_id"] for group in catalog["groups"]]
+
+    # Must NOT have collapsed to the emergency single "Default" group.
+    assert not (
+        len(catalog["groups"]) == 1
+        and catalog["groups"][0]["provider"] == "Default"
+    )
+    assert "openai-api" in provider_ids
+    openai_group = next(g for g in catalog["groups"] if g["provider_id"] == "openai-api")
+    group_model_ids = {str(m.get("id") or "") for m in openai_group["models"]}
+    # All three identifiable models survive; the unusable entry is dropped.
+    assert any(mid.endswith("gpt-5.5") for mid in group_model_ids)
+    assert any(mid.endswith("gpt-4.1") for mid in group_model_ids)
+    assert any(mid.endswith("gpt-4o") for mid in group_model_ids)
