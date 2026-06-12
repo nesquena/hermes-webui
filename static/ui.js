@@ -9468,6 +9468,7 @@ function buildToolCard(tc){
         ${runIndicator}
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name">${esc(displayName)}</span>
+        ${tc.done===false?'<span class="tool-card-live-duration"></span>':''}
         <span class="tool-card-preview">${esc(previewText)}</span>
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       </div>

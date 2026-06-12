@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Live streaming now shows quieter progress feedback between tool calls.** Running tool rows get a transient elapsed-time badge, the live turn can show a subtle inter-tool processing pulse after a tool completes, and successful stream reattach now surfaces a reconnect toast. These markers are live-only presentation state: they clear on normal completion, cancel, application errors, hard stream errors, stale terminal events, and settled-session restore so they do not leak into final transcript rendering. (#4078)
+
 ## [v0.51.371] — 2026-06-12 — Release MJ (low-risk batch: approval polling, composer/titlebar polish, slash-command parity, skill categories, French TTS)
 
 ### Fixed

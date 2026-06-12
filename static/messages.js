@@ -1483,11 +1483,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
+  function _clearInterToolHint(){
+    if(_interToolHintTimer){clearTimeout(_interToolHintTimer);_interToolHintTimer=null;}
+    const h=document.getElementById('interToolHint');
+    if(h)h.remove();
+  }
+  function _clearLiveVisibilityTimers(){
+    _clearInterToolHint();
+    _toolElapsedTimers.forEach(h=>clearInterval(h));
+    _toolElapsedTimers.clear();
+  }
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
     if(_ownsActiveStreamOrBackground()) return false;
+    _clearLiveVisibilityTimers();
     _closeSource(source);
     return true;
   }
@@ -1633,6 +1644,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _terminalStateReached=true;
     _streamFinalized=true;
+    _clearLiveVisibilityTimers();
     _cancelAnimationFramePendingStreamRender();
     _streamFadeCleanupReduceMotionListener();
     _smdEndParser();
@@ -1835,6 +1847,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
           if(st.active){
             setComposerStatus('Reconnected');
+            if(typeof showToast==='function'){const _rseq=_lastRunJournalSeq>0?` (${_lastRunJournalSeq} events)`:'';showToast(`Reconnected — restoring response…${_rseq}`,3000,'info');}
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
           }
@@ -1876,6 +1889,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // the final answer or the response to render twice.
   let _streamFinalized=false;
   let _pendingRafHandle=null;
+  const _toolElapsedTimers=new Map(); // tid → intervalHandle for live elapsed-time badge
+  let _interToolHintTimer=null;       // debounce handle for inter-tool "processing…" hint
   let _streamFadeVisibleText='';
   let _streamFadeLastTickMs=0;
   let _streamFadeWordCarry=0;
@@ -2784,6 +2799,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('token',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      _clearInterToolHint();
       const d=JSON.parse(e.data);
       assistantText+=d.text;
       syncInflightAssistantMessage();
@@ -2797,6 +2813,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('interim_assistant',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      _clearInterToolHint();
       const d=JSON.parse(e.data);
       const visible=String(d&&d.text?d.text:'').trim();
       const alreadyStreamed=!!(d&&d.already_streamed);
@@ -2907,6 +2924,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _flushPendingSegmentRender({force:true});
       appendLiveToolCard(tc,{sessionId:activeSid,streamId});
+      _clearInterToolHint();
+      const _liveTid=String(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'').trim();
+      if(_liveTid){
+        if(_toolElapsedTimers.has(_liveTid)) clearInterval(_toolElapsedTimers.get(_liveTid));
+        const _liveTidStartMs=Date.now();
+        _toolElapsedTimers.set(_liveTid,setInterval(()=>{
+          const _turn=$('liveAssistantTurn');
+          if(!_turn){clearInterval(_toolElapsedTimers.get(_liveTid));_toolElapsedTimers.delete(_liveTid);return;}
+          const _row=_turn.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(_liveTid)}"]`);
+          if(!_row){clearInterval(_toolElapsedTimers.get(_liveTid));_toolElapsedTimers.delete(_liveTid);return;}
+          const _de=_row.querySelector('.tool-card-live-duration');
+          if(_de){const _s=(Date.now()-_liveTidStartMs)/1000;_de.textContent=_s<60?Math.round(_s)+'s':(_s/60).toFixed(1)+'m';}
+        },500));
+      }
       snapshotLiveTurn();
       _freshSegment=true;
       _smdEndParser();
@@ -2944,6 +2975,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         appendLiveToolCard(tc,{sessionId:activeSid,streamId});
       }
       snapshotLiveTurn();
+      const _completeTid=String(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'').trim();
+      if(_completeTid&&_toolElapsedTimers.has(_completeTid)){clearInterval(_toolElapsedTimers.get(_completeTid));_toolElapsedTimers.delete(_completeTid);}
+      _clearInterToolHint();
+      _interToolHintTimer=setTimeout(()=>{
+        const _turn=$('liveAssistantTurn');
+        if(!_turn||_terminalStateReached||_streamFinalized) return;
+        const _h=document.createElement('div');
+        _h.id='interToolHint';
+        _h.className='inter-tool-hint';
+        _h.innerHTML='<span class="inter-tool-dot"></span><span class="inter-tool-dot"></span><span class="inter-tool-dot"></span>';
+        _turn.appendChild(_h);
+        if(typeof scrollIfPinned==='function') scrollIfPinned();
+      },800);
       scrollIfPinned();
     });
 
@@ -3124,6 +3168,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
       _clearStreamEndRecovery();
+      _clearLiveVisibilityTimers();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
@@ -3487,6 +3532,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
+      _clearLiveVisibilityTimers();
       _cancelAnimationFramePendingStreamRender();
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
@@ -3638,6 +3684,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
+      _clearLiveVisibilityTimers();
       _cancelAnimationFramePendingStreamRender();
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
@@ -3741,6 +3788,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
+      _clearLiveVisibilityTimers();
       _cancelAnimationFramePendingStreamRender();
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
@@ -3812,6 +3860,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _streamFinalized=true;
+    _clearLiveVisibilityTimers();
     _cancelAnimationFramePendingStreamRender();
     _streamFadeCleanupReduceMotionListener();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();

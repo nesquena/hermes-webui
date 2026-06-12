@@ -3125,6 +3125,7 @@ body.resizing .sidebar{transition:none!important;}
 .tool-card-header:hover .tool-card-title,.tl-head:hover .tl-title{opacity:.66;}
 .tool-card-preview{display:none;}
 .tool-card-duration{display:none;font-size:var(--font-size-xs);color:var(--muted);opacity:.72;white-space:nowrap;margin-left:auto;}
+.tool-card-live-duration{font-size:var(--font-size-xs);color:var(--muted);opacity:.52;white-space:nowrap;font-variant-numeric:tabular-nums;flex-shrink:0;}
 .tool-card-toggle,.tl-caret{margin-left:auto;font-size:10px;color:var(--muted);opacity:.4;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform;}
 .tool-card.open .tool-card-toggle,.tl.open .tl-caret{transform:rotate(90deg);}
 .tool-card-detail,.tl-detail{display:block;max-height:0;opacity:0;overflow:hidden;border-top:1px solid transparent;padding:0;margin-left:0;transition:max-height .26s ease,opacity .2s ease,padding .22s ease,border-top-color .22s ease;background:var(--code-bg);border-radius:8px;}
@@ -4549,6 +4550,14 @@ main.main > #mainPlugin{display:none;}
 }
 .thinking-card.open .thinking-card-body { max-height: 260px; overflow-y: auto; opacity: 1; padding: 8px 12px; border-top-color: var(--accent-bg-strong); }
 .thinking-card-body pre { font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; word-break: break-word; margin: 0; }
+
+/* ── Inter-tool processing hint ── */
+.inter-tool-hint{display:flex;align-items:center;gap:5px;padding:6px 10px;opacity:.4;}
+.inter-tool-dot{width:4px;height:4px;border-radius:50%;background:var(--muted);animation:inter-tool-pulse 1.2s ease-in-out infinite;}
+.inter-tool-dot:nth-child(2){animation-delay:.2s;}
+.inter-tool-dot:nth-child(3){animation-delay:.4s;}
+@keyframes inter-tool-pulse{0%,80%,100%{opacity:.3;transform:scale(.8);}40%{opacity:1;transform:scale(1);}}
+@media(prefers-reduced-motion:reduce){.inter-tool-dot{animation:none;opacity:.5;}}
 
 /* ── Tool cards: quiet disclosure rows ── */
 .tool-card { background:transparent;border:0;border-left:0;border-radius:0;margin-top:0;margin-bottom:0; }
