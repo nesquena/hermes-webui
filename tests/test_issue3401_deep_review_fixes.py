@@ -147,3 +147,23 @@ def test_settled_worklog_rebuild_not_gated_on_idle_only():
         "the worklog-rebuild block must not be gated on the bare !S.busy form"
     )
 
+
+
+def test_reconnect_restore_prefers_raw_inflight_accumulator():
+    """#3633 Codex CORE catch: on reconnect, the single-live-message restore must
+    prefer the RAW inflight accumulator (_fullInflightAssistant = lastAssistantText)
+    over the SPLIT live message content. Since the PR now splits a leading unclosed
+    <think> into empty content, restoring from _liveInflightAssistant.content alone
+    would drop the open tag — so a later </think> token would leak into the visible
+    reply and corrupt the accumulator. The raw text keeps the open tag intact."""
+    body = MESSAGES_JS
+    assert "_fullInflightAssistant || _liveInflightAssistant.content || ''" in body, (
+        "single-live-message reconnect restore must be "
+        "(_fullInflightAssistant || _liveInflightAssistant.content || '') so the "
+        "raw open <think> tag survives reconnect"
+    )
+    # The buggy form (split content preferred first) must be gone.
+    assert "? (_liveInflightAssistant.content || '')\n" not in body, (
+        "reconnect restore must not prefer the split live content over the raw "
+        "inflight accumulator"
+    )

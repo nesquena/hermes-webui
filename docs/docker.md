@@ -11,6 +11,14 @@ This is the comprehensive Docker reference. For a 5-minute quickstart, see the [
 | **Three-container** | Two-container PLUS the dashboard for monitoring. | `docker-compose.three-container.yml` |
 | **All-in-one image** (community fork — third-party, not maintained by us) | Podman 3.4 / multi-arch / supervisord-style preference. | [sunnysktsang/hermes-suite](https://github.com/sunnysktsang/hermes-suite) — see [#1399](https://github.com/nesquena/hermes-webui/issues/1399) for the original discussion |
 
+> **Note (v0.14+):** If you use `docker-compose.three-container.yml`, both
+> `hermes-agent` and `hermes-dashboard` initialise from the same image and write
+> to the same `hermes-home` volume simultaneously. This can cause overlapping lock
+> files and stale `gateway_state.json` entries. The unified pattern described in
+> [Three-service unified setup (v0.14+)](#three-service-unified-setup-v014) below
+> avoids this by running a single `hermes-agent` process that serves both the
+> gateway and the dashboard.
+
 If something stops working, **start with the single-container setup** — it's the simplest path and fixes most permission/UID/path-mismatch issues by construction.
 
 ## Production image security model
@@ -173,6 +181,87 @@ If the service name differs in your compose file, `docker compose -f docker-comp
 For container-to-container diagnostics, set one of `HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` in the WebUI environment when using gateway chat mode (`HERMES_WEBUI_CHAT_BACKEND=gateway`), then restart WebUI.
 
 Refs #2785.
+
+## Three-service unified setup (v0.14+)
+
+Since v0.14, `hermes-agent` can serve the gateway API and the built-in dashboard
+from the same process by setting `HERMES_DASHBOARD_HOST` and
+`HERMES_DASHBOARD_PORT`. Running agent and dashboard in one container means a
+single writer to `hermes-home`, eliminating the concurrent-init write conflicts
+that occur when `hermes-agent` and `hermes-dashboard` both start from the same
+image against the same volume.
+
+The three-service pattern uses two containers:
+
+| Service | Image | Ports |
+|---|---|---|
+| `hermes-agent` | `nousresearch/hermes-agent:latest` | 8642 (gateway), 9119 (dashboard) |
+| `hermes-webui` | `ghcr.io/nesquena/hermes-webui:latest` | 8787 (chat UI) |
+
+Example compose snippet (save as `docker-compose.three-service.yml` or inline into your own file):
+
+```yaml
+services:
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    command: gateway run
+    ports:
+      - "127.0.0.1:8642:8642"
+      - "127.0.0.1:9119:9119"
+    volumes:
+      - hermes-home:/home/hermes/.hermes
+      - hermes-agent-src:/opt/hermes
+    environment:
+      - HERMES_HOME=/home/hermes/.hermes
+      - HERMES_UID=${UID:-1000}
+      - HERMES_GID=${GID:-1000}
+      - HERMES_DASHBOARD_HOST=0.0.0.0
+      - HERMES_DASHBOARD_PORT=9119
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+  hermes-webui:
+    image: ghcr.io/nesquena/hermes-webui:latest
+    container_name: hermes-webui
+    depends_on:
+      - hermes-agent
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - hermes-home:/home/hermeswebui/.hermes
+      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro
+      - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
+      - WANTED_UID=${UID:-1000}
+      - WANTED_GID=${GID:-1000}
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+networks:
+  hermes-net:
+    driver: bridge
+
+volumes:
+  hermes-home:
+  hermes-agent-src:
+```
+
+Open http://localhost:8787 for chat and http://localhost:9119 for the dashboard.
+Check `hermes gateway run --help` for the exact flag names for your agent release —
+the env-var equivalents shown above (`HERMES_DASHBOARD_HOST`, `HERMES_DASHBOARD_PORT`)
+are available in recent releases alongside the CLI flags.
+
+If you need the separate dashboard container (e.g. resource limits per service),
+`docker-compose.three-container.yml` still works. Add a `depends_on` from
+`hermes-dashboard` to `hermes-agent` with a `condition: service_healthy` healthcheck
+so the dashboard waits for the gateway to finish initialising agent-home before it
+starts its own init pass.
 
 ## What goes wrong (and how to fix it)
 

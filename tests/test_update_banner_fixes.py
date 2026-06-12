@@ -23,6 +23,8 @@ import json
 import subprocess
 import types
 
+import pytest
+
 REPO = pathlib.Path(__file__).parent.parent
 
 
@@ -57,6 +59,26 @@ def extract_js_function(src: str, name: str) -> str:
                 break
     assert end is not None, f"{name}() body was not balanced"
     return src[match.start():end]
+
+
+@pytest.fixture(autouse=True)
+def _stub_pycache_purge(monkeypatch):
+    """No-op the __pycache__ purge for the update/restart tests in this module.
+
+    _schedule_restart() purges __pycache__ before os.execv() (#3774) so the
+    re-exec'd process recompiles freshly-pulled source. The real purge walks
+    REPO_ROOT + _AGENT_DIR on disk — slow (~0.4 s on the agent repo's ~17k
+    files) and destructive — which blows these tests' tight restart-timing
+    budgets and, worse, can delay the daemon thread past monkeypatch teardown
+    so it fires the REAL os.execv and corrupts the pytest worker. These tests
+    exercise restart coordination/locking, not the purge (which has dedicated
+    coverage in test_pycache_purge.py), so stub it to a no-op. The wiring
+    (purge happens before execv) is pinned by
+    test_schedule_restart_purges_pycache_before_execv, which re-patches with a
+    recording spy.
+    """
+    import api.updates as upd
+    monkeypatch.setattr(upd, "_purge_agent_pycache", lambda *a, **k: None)
 
 
 # ── api/updates.py ────────────────────────────────────────────────────────────
@@ -397,6 +419,39 @@ class TestScheduleRestart:
         # Give the thread time to call execv
         time.sleep(0.2)
         assert execv_called, "_schedule_restart must eventually call os.execv"
+
+    def test_schedule_restart_purges_pycache_before_execv(self, monkeypatch):
+        """The restart thread must purge __pycache__ before re-exec (#3774).
+
+        Pins the fix wiring: os.execv() replaces the process image without
+        touching on-disk .pyc files, so stale bytecode could otherwise serve
+        an old class definition after a self-update. Records the call order of
+        _purge_agent_pycache vs os.execv and asserts the purge runs first.
+        """
+        import api.updates as upd
+
+        events = []
+
+        def spy_purge(repo_dir):
+            events.append(("purge", repo_dir))
+
+        def fake_execv(exe, args):
+            events.append(("execv", exe))
+
+        # Override the autouse no-op stub with a recording spy.
+        monkeypatch.setattr(upd, "_purge_agent_pycache", spy_purge)
+        monkeypatch.setattr(os, "execv", fake_execv)
+
+        upd._schedule_restart(delay=0.05)
+        time.sleep(0.3)
+
+        kinds = [kind for kind, _ in events]
+        assert "purge" in kinds, "_schedule_restart must purge __pycache__"
+        assert "execv" in kinds, "_schedule_restart must call os.execv"
+        assert kinds.index("purge") < kinds.index("execv"), (
+            "__pycache__ purge must happen BEFORE os.execv so the re-exec'd "
+            "process recompiles from fresh source"
+        )
 
 
 class TestApplyUpdateRestartSafety:

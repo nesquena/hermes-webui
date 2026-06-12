@@ -588,18 +588,20 @@ def recover_all_sessions_on_startup(
     """
     if not session_dir.exists():
         return {"scanned": 0, "restored": 0, "orphaned_backups": 0, "details": []}
-    scanned = 0
     restored = 0
     details: list[dict] = []
     live_paths = [path for path in sorted(session_dir.glob('*.json')) if not path.name.startswith('_')]
     orphan_paths = _orphaned_backup_live_paths(session_dir, state_db_path=state_db_path)
-    for path in [*live_paths, *orphan_paths]:
-        # Skip non-session JSON files in the same dir:
-        # - ``_index.json`` is a top-level list of session metadata
-        # - any future non-session JSON marked with the ``_`` convention is
-        #   skipped automatically (project convention for system files in
-        #   directories that otherwise hold user data)
-        scanned += 1
+    # Only sessions with a backup can be restored through this startup path.
+    # Older code called recover_session() for every live sidecar, and
+    # inspect_session_recovery_status() read the complete JSON file before even
+    # checking whether <sid>.json.bak existed. Large WebUI installs therefore
+    # parsed the entire session corpus on every boot even when there was
+    # nothing to recover. Keep the public scanned count compatible, but limit
+    # expensive reads to actual recovery candidates.
+    recovery_paths = [path for path in live_paths if path.with_suffix('.json.bak').exists()]
+    scanned = len(live_paths) + len(orphan_paths)
+    for path in [*recovery_paths, *orphan_paths]:
         try:
             result = recover_session(path)
         except Exception as exc:

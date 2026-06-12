@@ -454,6 +454,63 @@ function _inflightHasVisibleLiveState(inflight) {
   return false;
 }
 
+function _serverLiveSnapshotToolId(tc){
+  return String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
+}
+
+function _serverLiveSnapshotInflight(snapshot, uploaded){
+  if(!snapshot||typeof snapshot!=='object') return null;
+  const rawMessages=Array.isArray(snapshot.messages)?snapshot.messages:[];
+  const messages=rawMessages
+    .filter(m=>m&&m.role)
+    .map(m=>({...m,_live:m._live!==false,_journal_snapshot:true}));
+  const rawToolCalls=Array.isArray(snapshot.tool_calls)?snapshot.tool_calls:[];
+  const toolCalls=rawToolCalls
+    .filter(tc=>tc&&tc.name)
+    .map(tc=>{
+      const next={...tc,_live:true,_journal_snapshot:true};
+      const tid=_serverLiveSnapshotToolId(next);
+      if(tid&&!next.tid) next.tid=tid;
+      return next;
+    });
+  let lastAssistantText=String(snapshot.last_assistant_text||snapshot.lastAssistantText||'');
+  let lastReasoningText=String(snapshot.last_reasoning_text||snapshot.lastReasoningText||'');
+  const lastLiveAssistant=[...messages].reverse().find(m=>m&&m.role==='assistant'&&m._live);
+  if(lastLiveAssistant){
+    if(!lastAssistantText&&typeof lastLiveAssistant.content==='string') lastAssistantText=lastLiveAssistant.content;
+    if(!lastReasoningText&&typeof lastLiveAssistant.reasoning==='string') lastReasoningText=lastLiveAssistant.reasoning;
+  }
+  if((lastAssistantText||lastReasoningText)&&!lastLiveAssistant){
+    messages.push({
+      role:'assistant',
+      content:lastAssistantText,
+      reasoning:lastReasoningText||undefined,
+      _live:true,
+      _journal_snapshot:true,
+    });
+  }
+  if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText) return null;
+  const replayAfterSeq=Number(snapshot.last_seq||0);
+  const activityBurstAnchors=Array.isArray(snapshot.activity_burst_anchors)
+    ? snapshot.activity_burst_anchors
+    : (Array.isArray(snapshot.activityBurstAnchors)?snapshot.activityBurstAnchors:[]);
+  return {
+    messages,
+    uploaded:Array.isArray(uploaded)?[...uploaded]:[],
+    toolCalls,
+    todos:null,
+    todoStateMeta:null,
+    reattach:true,
+    journalSnapshot:true,
+    lastAssistantText,
+    lastReasoningText,
+    lastRunJournalSeq:Number.isFinite(replayAfterSeq)?Math.max(0,replayAfterSeq):0,
+    currentActivityBurstId:Number(snapshot.current_activity_burst_id||snapshot.currentActivityBurstId||0)||0,
+    currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
+    activityBurstAnchors,
+  };
+}
+
 function _rememberRenderedSessionSnapshot(s) {
   if (!s || !s.session_id) return;
   const previous = _sessionListSnapshotById.get(s.session_id);
@@ -562,8 +619,10 @@ function _markPollingCompletionUnreadTransitions(sessions) {
 let _newSessionInFlight=null;
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
 function _setNewSessionPending(pending){
-  const btn=$('btnNewChat');
-  if(btn){
+  const ids=['btnNewChat','btnTitlebarNewChat'];
+  for (let i=0;i<ids.length;i++){
+    const btn=$(ids[i]);
+    if(!btn) continue;
     btn.disabled=!!pending;
     btn.setAttribute('aria-busy',pending?'true':'false');
   }
@@ -664,6 +723,7 @@ async function newSession(flash, options={}){
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
+    if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
     _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
     // Sync chat-header dropdown to the session's model/provider so the UI reflects
     // the default route the server actually used (#872). Compare provider state too:
@@ -729,6 +789,52 @@ async function newSession(flash, options={}){
   }
 }
 
+/**
+ * Self-heal: clear the stuck session ID from localStorage and URL when a
+ * loadSession() call failed during boot (no currentSid). This prevents the
+ * browser from retrying the same dead session on every refresh.
+ *
+ * Called from loadSession() after 401 redirect (undefined data) or any
+ * non-404 error (400, 403, 500, network). The 404 path has its own
+ * inline self-heal; this helper consolidates the non-404 cases.
+ *
+ * Only clears when !currentSid — no session is active on screen, so
+ * the stored ID is definitely stale. When currentSid is set (already
+ * viewing a session), a non-404 failure could be a transient server error
+ * and the session may still exist on the server; wiping localStorage in
+ * that case is unnecessarily destructive (#4028 follow-up).
+ *
+ * A click into a *different* dead session (currentSid && currentSid!==sid)
+ * must not run it: localStorage and the URL still point at the live session
+ * (both are only updated on a successful load), so wiping them would log
+ * the user out of a healthy session (#2782).
+ */
+function _clearStuckSessionOnBoot(sid, currentSid){
+  if(!currentSid){
+    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
+  }
+}
+
+// #2971 (Greptile P1 r3377162160): loadSession() tears down the live
+// per-session SSE at the top via stopSessionStream() (line ~754), but only the
+// success path re-arms it via startSessionStream() (line ~875). Every
+// early-return exit (fetch error, auth-redirect undefined) — and the
+// same-session no-op guard, which returns BEFORE the teardown — could leave
+// the session the user actually remains on with a permanently null
+// EventSource, silently dropping bg_task_complete delivery until a full page
+// reload or a forced loadSession. This helper re-arms the stream for whatever
+// session is currently on screen (S.session). startSessionStream() is
+// idempotent — it no-ops when already live for that sid (top guard
+// `_sessionStreamSessionId === sid && _sessionEventSource`) — so this never
+// double-arms the success path, which arms the *newly assigned* S.session
+// only after this point.
+function _rearmActiveSessionStream(){
+  if(typeof startSessionStream!=='function') return;
+  const activeSid = S.session ? S.session.session_id : null;
+  if(activeSid) startSessionStream(activeSid);
+}
+
 async function loadSession(sid){
   const opts = arguments[1] || {};
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
@@ -745,11 +851,15 @@ async function loadSession(sid){
   // Do not no-op a same-session click while another load is in flight: the
   // previous transcript may already have been cleared for the pending switch.
   // Static force-reload invariant: if(currentSid===sid && !forceReload) return;
+  // #2971: idempotent re-arm before the no-op guard revives a stream a prior
+  // failed loadSession killed; no-ops on real switches.
+  _rearmActiveSessionStream();
   if(currentSid===sid && !forceReload && !_loadingSessionId) return;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
   stopApprovalPolling();hideApprovalCard(forceReload);
+  if(typeof stopSessionStream==='function') stopSessionStream();
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
@@ -811,6 +921,17 @@ async function loadSession(sid){
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const _msgInner = $('msgInner');
+    // Stale-load guard (Codex): a newer loadSession() may have started while this
+    // request was awaiting (e.g. the user clicked a healthy session during a
+    // boot-time restore). currentSid was snapshotted before the await, so without
+    // this guard a failed superseded load could self-heal (wipe localStorage/URL)
+    // for the session the user actually navigated to. If we no longer own the
+    // load, re-arm the active session's stream and bail before any DOM mutation
+    // or self-heal.
+    if (_loadingSessionId !== sid) {
+      _rearmActiveSessionStream();
+      return;
+    }
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
@@ -834,23 +955,69 @@ async function loadSession(sid){
           }
         }
       } else {
-        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';
+        // Non-404, non-401 failure (400, 403, 500, network): 401 is handled
+        // via the if(!data) guard below since api() returns undefined on 401
+        // rather than throwing. Clear the stuck session ID only during boot
+        // (!currentSid) so the next boot doesn't retry the same dead session.
+        // When currentSid is set, a 500/network error may be transient — the
+        // session might still exist on the server (#4028 follow-up).
+        _clearStuckSessionOnBoot(sid, currentSid);
+        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }
     }
     _clearSameSessionForceReloadHint(sid);
+    // Capture whether this failure self-healed away the current session (a
+    // 404 on the *current* session whose sidecar was deleted server-side).
+    // In that case there is no live session left to stream for, so we must
+    // NOT restart — doing so would spin the SSE reconnect loop against a dead
+    // session_id.
+    const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
+    // The session stream was stopped unconditionally at the top of this load
+    // (mirroring stopApprovalPolling). On the happy path it's restarted ~120
+    // lines below, but this failure exit never reaches that point — leaving
+    // the session still on screen permanently silenced. bg_task_complete
+    // events (the new feature's primary delivery path) would be dropped until
+    // the user explicitly navigates to a session again. Restart the stream for
+    // the session that remains on screen. Skip when a newer load is already in
+    // flight (_loadingSessionId !== null after the reset above): that load owns
+    // the stream and starts its own. Skip the self-healed-current case (no live
+    // session to stream).
+    // #2971: this fetch-error path keeps its bespoke guarded restart (rather
+    // than the shared _rearmActiveSessionStream helper used on the other
+    // early-returns) because only here can the current session have just
+    // self-healed away — re-arming a 404'd/deleted session_id would spin the
+    // SSE reconnect loop against a dead session.
+    if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
+        && typeof startSessionStream === 'function') {
+      startSessionStream(currentSid);
+    }
     return;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
   // the browser is already navigating away, so abort the rest of this flow.
+  // No self-heal: 401 is transient auth expiry — the session still exists
+  // server-side. Clearing localStorage would wipe the saved session id and
+  // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
+    // #2971: re-arm the still-displayed session's stream (defensive — harmless
+    // if the 401 redirect is already tearing the page down). Idempotent.
+    _rearmActiveSessionStream();
     return;
   }
   // Stale response? A newer loadSession() call has already started (#1060).
-  if (_loadingSessionId !== sid) return;
+  if (_loadingSessionId !== sid) {
+    // #2971: a newer in-flight load owns the final stream arming, but until it
+    // assigns S.session and reaches startSessionStream() the currently-shown
+    // session must not be left stream-dead by our top-of-function teardown.
+    // Re-arm the genuinely-displayed S.session (idempotent — no-ops once the
+    // newer load arms its own sid).
+    _rearmActiveSessionStream();
+    return;
+  }
   S.session=data.session;
   if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
   S.session._modelResolutionDeferred=true;
@@ -870,6 +1037,7 @@ async function loadSession(sid){
   _clearSessionCompletionUnread(S.session.session_id);
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
+  if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;
   // If the server says the session is idle, discard any browser-side inflight
@@ -934,6 +1102,13 @@ async function loadSession(sid){
     // preserve, making a session switch look like the live turn vanished.
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+
+  const serverLiveSnapshot=activeStreamId
+    ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
+    : null;
+  if(serverLiveSnapshot&&(!INFLIGHT[sid]||!_inflightHasVisibleLiveState(INFLIGHT[sid]))){
+    INFLIGHT[sid]=serverLiveSnapshot;
   }
 
   if(INFLIGHT[sid]){
@@ -1047,34 +1222,29 @@ async function loadSession(sid){
     // Stale? A newer loadSession() call has already started (#1060).
     if (_loadingSessionId !== sid) return;
 
-    // Restore any queued message that survived page refresh via sessionStorage.
+    // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
       try{
-        const _storedQ=sessionStorage.getItem('hermes-queue-'+sid);
-        if(_storedQ){
-          const _entries=JSON.parse(_storedQ);
-          if(Array.isArray(_entries)&&_entries.length){
-            const _lastMsg=S.messages.slice().reverse()
-              .find(m=>m&&m.role==='assistant');
-            const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
-            const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
-            if(_fresh.length){
-              const _first=_fresh[0];
-              const _msg=$&&$('msg');
-              if(_msg&&_first.text&&!_msg.value){
-                _msg.value=_first.text||'';
-                if(typeof autoResize==='function') autoResize();
-                if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
-              }
-              sessionStorage.removeItem('hermes-queue-'+sid);
-            } else {
-              sessionStorage.removeItem('hermes-queue-'+sid);
+        const _entries=typeof _readPersistedSessionQueue==='function'
+          ? _readPersistedSessionQueue(sid)
+          : [];
+        if(Array.isArray(_entries)&&_entries.length){
+          const _lastMsg=S.messages.slice().reverse()
+            .find(m=>m&&m.role==='assistant');
+          const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
+          const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
+          if(_fresh.length){
+            const _first=_fresh[0];
+            const _msg=$&&$('msg');
+            if(_msg&&_first.text&&!_msg.value){
+              _msg.value=_first.text||'';
+              if(typeof autoResize==='function') autoResize();
+              if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
             }
-          } else {
-            sessionStorage.removeItem('hermes-queue-'+sid);
           }
+          if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
         }
-      }catch(_){sessionStorage.removeItem('hermes-queue-'+sid);}
+      }catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}
     }
 
     // Reconstruct tool calls from message metadata, or fall back to session-level summary.
@@ -1685,9 +1855,15 @@ async function _ensureMessagesLoaded(sid) {
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
   const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';
+  // expand_renderable=1 is sent ONLY here, on the initial cold load: it tells
+  // the server to expand the tail window backward until it holds ~msg_limit
+  // *renderable* rows so a tool-heavy session doesn't open showing 1-2 visible
+  // messages (#3790). The "Load earlier" path (_loadOlderMessages) deliberately
+  // omits it to keep its raw transport cap.
+  const expandParam = reloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}`);
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`);
   } finally {
     _clearSameSessionForceReloadHint(sid);
   }
@@ -1756,6 +1932,7 @@ async function _ensureMessagesLoaded(sid) {
       scheduleTodosRefresh();
     }
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
+    if(typeof syncTopbar==='function') syncTopbar();
   }
 }
 
@@ -3575,6 +3752,19 @@ async function probeGatewaySSEStatus(){
 function startGatewaySSE(){
   stopGatewaySSE();
   if(!window._showCliSessions) return;
+  // Visibility hook (install once) — mirror ensureSessionEventsSSE() pattern
+  if(typeof document !== 'undefined' && !document._hermesGatewaySSEVisibilityHook){
+    document.addEventListener('visibilitychange', () => {
+      if(document.hidden){
+        stopGatewaySSE();
+      }else{
+        void startGatewaySSE();
+      }
+    });
+    document._hermesGatewaySSEVisibilityHook = true;
+  }
+  // Don't open when tab is hidden — saves connection pool slots
+  if(typeof document !== 'undefined' && document.hidden) return;
   try{
     _gatewaySSE = new EventSource('api/sessions/gateway/stream');
     _gatewaySSE.addEventListener('sessions_changed', (ev) => {
@@ -5142,7 +5332,7 @@ function renderSessionListFromCache(){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:seg.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
-          await loadSession(seg.session_id);
+          await loadSession(seg.session_id, {skipLineageResolve:true});
           renderSessionListFromCache();
         };
         lineageList.appendChild(row);
@@ -5169,7 +5359,7 @@ function renderSessionListFromCache(){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:child.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
-          await loadSession(child.session_id);
+          await loadSession(child.session_id, {skipLineageResolve:true});
           renderSessionListFromCache();
         };
         childList.appendChild(row);
@@ -5770,6 +5960,7 @@ async function deleteSession(sid, beforeDelete=null){
     return false;
   }
   const response=deleteResult&&deleteResult.response;
+  if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;
     _optimisticallyRemoveSessionFromList(sid);
@@ -5889,11 +6080,17 @@ function _showProjectPicker(session, anchorEl){
     const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:name.trim(),color,profile})});
     if(res.project){
       _allProjects.push(res.project);
-      // Now move session into it
-      await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:res.project.project_id})});
-      session.project_id=res.project.project_id;
-      await renderSessionList();
-      showToast('Created "'+res.project.name+'" and moved session');
+      // Guard the move so a 503 (session busy/streaming, #3746) shows a toast
+      // instead of an unhandled rejection. Keep the authoritative refetch (#2551).
+      try{
+        await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:res.project.project_id})});
+        session.project_id=res.project.project_id;
+        await renderSessionList();
+        showToast('Created "'+res.project.name+'" and moved session');
+      }catch(e){
+        await renderSessionList();
+        showToast('Created "'+res.project.name+'" but move failed: '+(e&&e.message||'try again'));
+      }
     }
   };
   picker.appendChild(createItem);
@@ -6096,4 +6293,23 @@ async function _confirmDeleteProject(proj){
 // Global Escape handler for batch select mode
 document.addEventListener('keydown',(e)=>{
   if(e.key==='Escape'&&_sessionSelectMode) exitSessionSelectMode();
+});
+
+// Keyboard session navigation — J/K bindings
+function navigateSession(dir){
+  const rows=[...document.querySelectorAll('.session-item[data-sid]')];
+  const sids=rows.map(r=>r.dataset.sid);
+  const cur=S.session&&S.session.session_id;
+  const i=sids.indexOf(cur);
+  if(i<0||!sids.length)return;
+  const next=sids[Math.min(Math.max(i+dir,0),sids.length-1)];
+  if(next&&next!==cur) loadSession(next);
+}
+
+document.addEventListener('keydown',(e)=>{
+  if(e.key!=='j'&&e.key!=='k') return;
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  if(typeof _isInteractiveSwipeTarget==='function'&&_isInteractiveSwipeTarget(e.target)) return;
+  e.preventDefault();
+  navigateSession(e.key==='j'?1:-1);
 });

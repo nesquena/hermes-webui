@@ -41,19 +41,17 @@ def test_get_profile_skills_stats(tmp_path):
 
 @requires_agent_modules
 def test_list_profiles_api_contains_formatted_skills(monkeypatch, tmp_path):
-    class FakeProfile:
-        def __init__(self, name, path):
-            self.name = name
-            self.path = Path(path)
-            self.is_default = name == "default"
-            self.gateway_running = False
-            self.model = "gpt-4"
-            self.provider = "openai"
-            self.has_env = False
-            self.skill_count = 3  # Raw on-disk count from hermes_cli
+    """list_profiles_api() formats skill counts for each profile.
 
+    Drives the fast path (``_build_profile_rows_fast``), which discovers
+    profiles via the cheap upstream helpers and skips the alias scan, so this
+    patches ``_get_default_hermes_home`` / ``_get_profiles_root`` to point at a
+    tmp profile layout rather than monkeypatching the (now-bypassed)
+    ``list_profiles`` aggregate.
+    """
     p_default = tmp_path / "default"
-    p_fintech = tmp_path / "profiles" / "fintech"
+    profiles_root = tmp_path / "profiles"
+    p_fintech = profiles_root / "fintech"
 
     _write_skill(p_default, "a1")
     _write_skill(p_default, "a2")
@@ -64,21 +62,17 @@ def test_list_profiles_api_contains_formatted_skills(monkeypatch, tmp_path):
     _write_skill(p_fintech, "f3")
     _write_config(p_fintech, ["f2", "f3"])
 
-    fake_infos = [
-        FakeProfile("default", p_default),
-        FakeProfile("fintech", p_fintech)
-    ]
-
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
-    
-    # We patch the upstream list_profiles call to return our FakeProfile list
-    try:
-        import hermes_cli.profiles as cli_p
-        monkeypatch.setattr(cli_p, "list_profiles", lambda: fake_infos)
-    except ImportError:
-        pass
+
+    # Point the fast-path discovery helpers at our tmp layout. The base home is
+    # surfaced as "default" by _build_profile_rows_fast regardless of dir name.
+    import hermes_cli.profiles as cli_p
+    monkeypatch.setattr(cli_p, "_get_default_hermes_home", lambda: p_default)
+    monkeypatch.setattr(cli_p, "_get_profiles_root", lambda: profiles_root)
+    monkeypatch.setattr(cli_p, "_check_gateway_running", lambda home: False)
 
     profiles._SKILLS_STATS_CACHE.clear()
+    profiles._invalidate_list_profiles_cache()
 
     results = profiles.list_profiles_api()
     by_name = {p["name"]: p for p in results}
@@ -95,6 +89,15 @@ def test_list_profiles_api_contains_formatted_skills(monkeypatch, tmp_path):
     assert by_name["default"]["total_skills"] == 2
     assert by_name["fintech"]["enabled_skills"] == 1
     assert by_name["fintech"]["total_skills"] == 3
+
+    # the base home is surfaced as the default profile
+    assert by_name["default"]["is_default"] is True
+    assert by_name["fintech"]["is_default"] is False
+    # exactly one active, and it's the one get_active_profile_name reports
+    assert sum(1 for p in results if p["is_active"]) == 1
+    assert by_name["default"]["is_active"] is True
+
+    profiles._invalidate_list_profiles_cache()
 
 @requires_agent_modules
 def test_no_skills_dir(tmp_path):
@@ -140,3 +143,110 @@ def test_skills_stats_cache(tmp_path):
     profiles._SKILLS_STATS_CACHE.clear()
     enabled, compat = profiles._get_profile_skills_stats(tmp_path)
     assert enabled == 2 and compat == 2
+
+
+@requires_agent_modules
+def test_list_profiles_api_skips_alias_scan(monkeypatch, tmp_path):
+    """The fast path must NOT call find_alias_for_profile.
+
+    find_alias_for_profile reads every file in the wrapper dir (~/.local/bin),
+    including large binaries — the multi-second profile-dropdown hang. The
+    WebUI discards alias data, so the fast path must avoid that call entirely.
+    """
+    p_default = tmp_path / "default"
+    _write_skill(p_default, "a1")
+    _write_config(p_default, [])
+
+    import hermes_cli.profiles as cli_p
+    monkeypatch.setattr(cli_p, "_get_default_hermes_home", lambda: p_default)
+    monkeypatch.setattr(cli_p, "_get_profiles_root", lambda: tmp_path / "profiles")
+    monkeypatch.setattr(cli_p, "_check_gateway_running", lambda home: False)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    alias_called = []
+    if hasattr(cli_p, "find_alias_for_profile"):
+        monkeypatch.setattr(
+            cli_p, "find_alias_for_profile",
+            lambda *a, **k: alias_called.append(a) or None,
+        )
+
+    profiles._SKILLS_STATS_CACHE.clear()
+    profiles._invalidate_list_profiles_cache()
+
+    results = profiles.list_profiles_api()
+    assert any(p["name"] == "default" for p in results)
+    assert alias_called == [], "fast path must not call find_alias_for_profile"
+
+    profiles._invalidate_list_profiles_cache()
+
+
+@requires_agent_modules
+def test_list_profiles_api_caches_and_invalidates(monkeypatch, tmp_path):
+    """Repeated calls hit the TTL cache; create/delete invalidation drops it."""
+    p_default = tmp_path / "default"
+    _write_skill(p_default, "a1")
+    _write_config(p_default, [])
+
+    import hermes_cli.profiles as cli_p
+    monkeypatch.setattr(cli_p, "_get_default_hermes_home", lambda: p_default)
+    monkeypatch.setattr(cli_p, "_get_profiles_root", lambda: tmp_path / "profiles")
+    monkeypatch.setattr(cli_p, "_check_gateway_running", lambda home: False)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    build_calls = []
+    real_build = profiles._build_profile_rows_fast
+
+    def counting_build():
+        build_calls.append(1)
+        return real_build()
+
+    monkeypatch.setattr(profiles, "_build_profile_rows_fast", counting_build)
+
+    profiles._SKILLS_STATS_CACHE.clear()
+    profiles._invalidate_list_profiles_cache()
+
+    profiles.list_profiles_api()
+    profiles.list_profiles_api()
+    # Second call should be served from the TTL cache — no rebuild.
+    assert len(build_calls) == 1, "second call within TTL must hit the cache"
+
+    # Invalidation forces a rebuild on the next call.
+    profiles._invalidate_list_profiles_cache()
+    profiles.list_profiles_api()
+    assert len(build_calls) == 2, "invalidation must force a rebuild"
+
+    profiles._invalidate_list_profiles_cache()
+
+
+@requires_agent_modules
+def test_list_profiles_api_falls_back_when_fast_path_unavailable(monkeypatch, tmp_path):
+    """If the cheap helpers can't build rows, fall back to upstream list_profiles."""
+    class FakeProfile:
+        def __init__(self, name, path):
+            self.name = name
+            self.path = Path(path)
+            self.is_default = name == "default"
+            self.gateway_running = False
+            self.model = "gpt-4"
+            self.provider = "openai"
+            self.has_env = False
+            self.skill_count = 0
+
+    p_default = tmp_path / "default"
+    _write_skill(p_default, "a1")
+    _write_config(p_default, [])
+
+    monkeypatch.setattr(profiles, "_build_profile_rows_fast", lambda: None)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    import hermes_cli.profiles as cli_p
+    monkeypatch.setattr(cli_p, "list_profiles", lambda: [FakeProfile("default", p_default)])
+
+    profiles._SKILLS_STATS_CACHE.clear()
+    profiles._invalidate_list_profiles_cache()
+
+    results = profiles.list_profiles_api()
+    by_name = {p["name"]: p for p in results}
+    assert "default" in by_name
+    assert by_name["default"]["is_active"] is True
+
+    profiles._invalidate_list_profiles_cache()

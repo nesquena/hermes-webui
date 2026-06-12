@@ -57,8 +57,8 @@ def test_render_messages_preserve_scroll_option_uses_user_pin_state_not_stream_l
     assert "const preserveScroll=!!(options&&options.preserveScroll);" in render_body
     assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in render_body
     assert "const scrollSnapshot=preserveScroll?_captureMessageScrollSnapshot():null" in render_body
-    assert "if(_followMessagesAfterDomReplace()) return;" in scroll_helper
-    assert "_restoreMessageScrollSnapshot(scrollSnapshot);" in scroll_helper
+    assert "if(preserveScroll){\n    // Keep master's follow heuristic" in scroll_helper
+    assert "if(_followMessagesAfterDomReplace()) return;\n    _restoreMessageScrollSnapshot(scrollSnapshot);\n    _maybeShowNewMessageScrollCue(scrollSnapshot);\n    return;\n  }" in scroll_helper
     assert "_shouldFollowMessagesOnDomReplace()" in follow_helper
     assert "scrollToBottom();" in follow_helper
     assert "if(S.activeStreamId){\n    scrollIfPinned();\n    return;\n  }" in scroll_helper

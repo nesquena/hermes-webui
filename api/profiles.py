@@ -784,6 +784,86 @@ def profile_env_for_background_worker(
                 restore_skill_home_modules(skill_home_snapshot)
 
 
+@contextmanager
+def profile_env_for_active_request(
+    purpose: str = "provider/model read",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Apply the active per-request profile's env around a read-only API call (#3957).
+
+    WebUI profile switching is per-client/cookie scoped (issue #798): a browser
+    on a named profile sets a ``hermes_profile`` cookie, which ``server.py``
+    turns into a thread-local via ``set_request_profile()``.  But the per-client
+    switch deliberately does NOT reload the profile's ``.env`` into
+    ``os.environ`` (that would mutate process-global state shared with other
+    clients).  So read-only endpoints that resolve provider credentials through
+    ``os.environ`` / ``HERMES_HOME`` — ``/api/providers`` (``get_auth_status``
+    probes) and ``/api/models`` (``provider_model_ids`` / custom-key lookup) —
+    resolve against the *default* profile's credentials instead of the active
+    one.  Symptoms: Settings → Providers times out and the model picker shows
+    only the default profile's models.
+
+    This mirrors what streaming already does for the duration of an agent run
+    (``profile_env_for_background_worker``): it temporarily applies the active
+    profile's ``.env`` + terminal config for the duration of the wrapped read,
+    then restores the previous env under ``_ENV_LOCK``.
+
+    No-ops (zero overhead, byte-identical behavior) for the default/root profile
+    — the overwhelmingly common single-profile deployment is unaffected.
+    """
+    profile = (get_active_profile_name() or "").strip()
+    if not profile or _is_root_profile(profile):
+        yield
+        return
+    with profile_env_for_background_worker(
+        profile, purpose, logger_override=logger_override
+    ):
+        yield
+
+
+@contextmanager
+def profile_scope_for_detached_worker(
+    profile_name,
+    purpose: str = "detached worker",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Bind BOTH the per-request profile TLS and the profile env on a NEW thread (#3957).
+
+    A detached worker thread (e.g. the ``models-catalog-rebuild`` daemon that
+    ``get_available_models`` spawns for a bounded rebuild) inherits neither the
+    spawning request's profile thread-local (issue #798) nor its ``os.environ``.
+    Without re-establishing both, the worker resolves the *default* profile:
+      - profile-keyed paths (``_get_models_cache_path`` / ``_get_config_path`` /
+        ``_get_auth_store_path`` / ``_models_cache_source_fingerprint``) read the
+        per-request profile via ``get_active_profile_name()`` — needs the TLS;
+      - credential lookups (``provider_model_ids`` / ``_lookup_custom_api_key_env``)
+        read ``os.environ`` — needs the profile ``.env`` applied.
+
+    Pass the profile name CAPTURED on the spawning thread (where the TLS is
+    valid) into the worker, then enter this scope at the top of the worker body.
+    It sets the request-profile TLS for this (worker) thread and applies the
+    profile env via ``profile_env_for_background_worker``, restoring both on exit.
+    No-op for the default/root profile.
+
+    Unlike ``profile_env_for_active_request`` (which reads the *current* thread's
+    TLS and must NOT clear it — the request thread keeps using it after the call),
+    this sets and then CLEARS the TLS, which is correct for a dedicated worker
+    thread that has no other use for it.
+    """
+    name = (profile_name or "").strip()
+    if not name or _is_root_profile(name):
+        yield
+        return
+    set_request_profile(name)
+    try:
+        with profile_env_for_background_worker(
+            name, purpose, logger_override=logger_override
+        ):
+            yield
+    finally:
+        clear_request_profile()
+
+
 def _set_hermes_home(home: Path):
     """Set HERMES_HOME env var and monkey-patch cached module-level paths."""
     os.environ['HERMES_HOME'] = str(home)
@@ -1074,34 +1154,155 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     return res
 
 
-def list_profiles_api() -> list:
-    """List all profiles with metadata, serialized for JSON response."""
-    try:
-        from hermes_cli.profiles import list_profiles
-        infos = list_profiles()
-    except ImportError:
-        # hermes_cli not available -- return just the default
-        return [_default_profile_dict()]
+_LIST_PROFILES_CACHE: tuple[list, float] | None = None
+_LIST_PROFILES_CACHE_TTL = 4.0  # seconds — short enough that gateway dots / new
+                                # profiles stay near-live, long enough that rapid
+                                # re-opens of the dropdown are free.
+_LIST_PROFILES_CACHE_LOCK = threading.Lock()
 
-    active = get_active_profile_name()
-    result = []
-    for p in infos:
-        enabled_count, total_count = _get_profile_skills_stats(p.path)
-        result.append({
-            'name': p.name,
-            'path': str(p.path),
-            'is_default': p.is_default,
-            'is_active': p.name == active,
-            'gateway_running': p.gateway_running,
-            'model': p.model,
-            'provider': p.provider,
-            'has_env': p.has_env,
-            'visible': _profile_visible_from_meta(p.path),
+
+def _invalidate_list_profiles_cache() -> None:
+    """Drop the cached profile list (call after create/delete/switch)."""
+    global _LIST_PROFILES_CACHE
+    with _LIST_PROFILES_CACHE_LOCK:
+        _LIST_PROFILES_CACHE = None
+
+
+def _build_profile_rows_fast() -> list | None:
+    """Build the profile list WITHOUT the upstream alias scan.
+
+    ``hermes_cli.profiles.list_profiles()`` calls ``find_alias_for_profile()``
+    once per profile, which iterates every file in the wrapper dir
+    (``~/.local/bin``) and ``read_text()``s each one — including large binaries
+    (claude, node, uv, …). On a machine with big binaries on PATH that is
+    hundreds of MB of reads PER PROFILE, which makes the compose-footer profile
+    dropdown hang for many seconds.
+
+    The WebUI never uses the alias data (``list_profiles_api`` does not return
+    ``alias_name``/``alias_path``), so we replicate the cheap part of upstream's
+    ``list_profiles()`` — the same per-profile metadata, the same hardcoded
+    ``"default"`` name for the base home — and simply skip the alias scan.
+
+    Returns ``None`` if the upstream cheap helpers can't be imported, so the
+    caller can fall back to the original (slow but correct) path. Forward-
+    compatible: if upstream fixes ``find_alias_for_profile`` this stays fast and
+    correct with nothing to revert.
+    """
+    try:
+        from hermes_cli.profiles import (
+            _get_default_hermes_home,
+            _get_profiles_root,
+            _read_config_model,
+            _check_gateway_running,
+            _PROFILE_ID_RE as _UPSTREAM_PROFILE_ID_RE,
+        )
+    except Exception:
+        return None
+
+    def _row(home: Path, name: str, is_default: bool) -> dict:
+        try:
+            model, provider = _read_config_model(home)
+        except Exception:
+            model, provider = None, None
+        try:
+            gateway_running = _check_gateway_running(home)
+        except Exception:
+            gateway_running = False
+        enabled_count, total_count = _get_profile_skills_stats(home)
+        return {
+            'name': name,
+            'path': str(home),
+            'is_default': is_default,
+            'is_active': False,  # filled in by caller (cheap, varies per request)
+            'gateway_running': gateway_running,
+            'model': model,
+            'provider': provider,
+            'has_env': (home / '.env').exists(),
+            'visible': _profile_visible_from_meta(home),
             'skill_count': enabled_count,
             'enabled_skills': enabled_count,
             'total_skills': total_count,
-        })
-    return result
+        }
+
+    rows: list = []
+    default_home = _get_default_hermes_home()
+    if default_home.is_dir():
+        # Upstream hardcodes the base home's display name to "default" even when
+        # the directory is literally ".hermes" — match that exactly.
+        rows.append(_row(default_home, 'default', True))
+
+    profiles_root = _get_profiles_root()
+    if profiles_root.is_dir():
+        for entry in sorted(profiles_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
+                continue
+            rows.append(_row(entry, entry.name, False))
+
+    return rows
+
+
+def list_profiles_api() -> list:
+    """List all profiles with metadata, serialized for JSON response.
+
+    Fast path: build the rows from upstream's cheap per-profile helpers and skip
+    ``find_alias_for_profile`` (whose result the WebUI discards) — see
+    ``_build_profile_rows_fast``. Results are cached for a short TTL so rapid
+    re-opens of the compose-footer dropdown are free; the cache is busted on
+    profile create/delete. Falls back to upstream ``list_profiles()`` if the
+    cheap helpers are unavailable.
+    """
+    import time
+    global _LIST_PROFILES_CACHE
+    now = time.time()
+
+    with _LIST_PROFILES_CACHE_LOCK:
+        cached = _LIST_PROFILES_CACHE
+    if cached is not None and now - cached[1] < _LIST_PROFILES_CACHE_TTL:
+        active = get_active_profile_name()
+        # Return a fresh copy with is_active recomputed (cheap, per-request).
+        return [{**p, 'is_active': p['name'] == active} for p in cached[0]]
+
+    rows = _build_profile_rows_fast()
+    if rows is None:
+        # Fallback: cheap helpers unavailable — use the original (slow) path,
+        # or the default-only dict if hermes_cli isn't importable at all.
+        logger.debug(
+            "list_profiles_api: fast path unavailable, falling back to "
+            "upstream list_profiles() (slower)"
+        )
+        try:
+            from hermes_cli.profiles import list_profiles
+            infos = list_profiles()
+        except ImportError:
+            return [_default_profile_dict()]
+
+        active = get_active_profile_name()
+        result = []
+        for p in infos:
+            enabled_count, total_count = _get_profile_skills_stats(p.path)
+            result.append({
+                'name': p.name,
+                'path': str(p.path),
+                'is_default': p.is_default,
+                'is_active': p.name == active,
+                'gateway_running': p.gateway_running,
+                'model': p.model,
+                'provider': p.provider,
+                'has_env': p.has_env,
+                'visible': _profile_visible_from_meta(p.path),
+                'skill_count': enabled_count,
+                'enabled_skills': enabled_count,
+                'total_skills': total_count,
+            })
+        return result
+
+    with _LIST_PROFILES_CACHE_LOCK:
+        _LIST_PROFILES_CACHE = (rows, now)
+
+    active = get_active_profile_name()
+    return [{**p, 'is_active': p['name'] == active} for p in rows]
 
 
 def _profile_visible_from_meta(profile_path: Path) -> bool:
@@ -1546,6 +1747,7 @@ def create_profile_api(name: str, clone_from: str = None,
     # Invalidate cached root-profile-name lookup; create_profile may have added
     # a new profile that flips is_default semantics on the agent side (#1612).
     _SKILLS_STATS_CACHE.clear()
+    _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
 
     # Find and return the newly created profile info.
@@ -1600,5 +1802,6 @@ def delete_profile_api(name: str) -> dict:
 
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     _SKILLS_STATS_CACHE.clear()
+    _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
     return {'ok': True, 'name': name}

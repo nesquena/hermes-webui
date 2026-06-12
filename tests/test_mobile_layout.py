@@ -619,6 +619,54 @@ def test_new_conversation_shortcut_works_while_busy():
     )
 
 
+def test_mobile_titlebar_has_new_conversation_button():
+    """Mobile titlebar shows the New Conversation action and keeps it next to reload."""
+    header_match = re.search(
+        r'<header class="app-titlebar"[^>]*>(?P<body>.*?)</header>',
+        HTML,
+        re.S,
+    )
+    assert header_match, "app-titlebar header block missing"
+    header_html = header_match.group("body")
+
+    idx_btn = header_html.find('id="btnTitlebarNewChat"')
+    idx_reload = header_html.find('id="btnReload"')
+    idx_spacer = header_html.find('class="app-titlebar-spacer"')
+
+    assert idx_btn != -1, "titlebar mobile new chat button should exist"
+    assert idx_reload != -1, "titlebar reload button should remain present"
+    assert idx_spacer != -1, "titlebar spacer should remain present"
+    assert idx_spacer < idx_btn < idx_reload, (
+        "titlebar new chat button must sit left of the reload button on mobile"
+    )
+    assert "btnTitlebarNewChat" in header_html
+    assert "data-i18n-title=\"new_conversation\"" in header_html
+    assert "data-i18n-aria-label=\"new_conversation\"" in header_html
+    assert "aria-label=\"New conversation\"" in header_html
+    assert "title=\"New conversation\"" in header_html
+    assert "$('btnNewChat').click()" in header_html
+
+
+def test_titlebar_new_chat_button_mobile_visibility_css():
+    """Keep the titlebar new-chat control mobile-only and reuse reload button styling."""
+    base_rule = _declarations(_rule_body(CSS, ".app-titlebar-new-chat"))
+    assert base_rule.get("display") == "none", "app-titlebar new chat button must be hidden by default"
+    mobile_blocks = "".join(_max_width_media_blocks(640))
+    mobile_rule = _declarations(_rule_body(mobile_blocks, ".app-titlebar-new-chat"))
+    assert mobile_rule.get("display") == "inline-flex", (
+        "app-titlebar new chat button must be visible in mobile layout rules"
+    )
+    desktop_css = re.sub(
+        r"@media\(max-width:640px\).*",
+        "",
+        CSS,
+        flags=re.S,
+    )
+    assert ".app-titlebar-new-chat{display:inline-flex;}" not in desktop_css, (
+        "titlebar new chat button must not be exposed by desktop PWA/fullscreen rules"
+    )
+
+
 # ── Viewport and scroll safety ────────────────────────────────────────────────
 
 def test_body_overflow_hidden():
