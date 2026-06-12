@@ -226,7 +226,24 @@ def _skill_path_within(base_dir: Path, candidate: Path) -> bool:
         return False
 
 
-def _skill_category_from_path(skill_md: Path, skills_dirs: list[Path]) -> str | None:
+def _skill_category_from_path(
+    skill_md: Path,
+    skills_dirs: list[Path],
+    local_skills_dir: Path | None = None,
+) -> str | None:
+    """Return the UI category for a discovered skill path.
+
+    Flat skills directly under the active *local* skills root stay uncategorized,
+    while flat skills under an *external* root use that root's directory name as
+    their category. ``local_skills_dir`` identifies the local root explicitly; if
+    omitted it falls back to ``skills_dirs[0]`` for backward compatibility, but
+    callers should pass it directly because the local root can be filtered out of
+    ``skills_dirs`` (e.g. when it does not exist yet on a host with only external
+    skills configured), which would otherwise misclassify the first external root
+    as local.
+    """
+    if local_skills_dir is None:
+        local_skills_dir = skills_dirs[0] if skills_dirs else None
     for skills_dir in skills_dirs:
         try:
             rel_path = skill_md.relative_to(skills_dir)
@@ -235,6 +252,8 @@ def _skill_category_from_path(skill_md: Path, skills_dirs: list[Path]) -> str | 
         parts = rel_path.parts
         if len(parts) >= 3:
             return parts[0]
+        if len(parts) >= 2 and local_skills_dir is not None and skills_dir != local_skills_dir:
+            return skills_dir.name
         return None
     return None
 
@@ -391,7 +410,9 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                     {
                         "name": name,
                         "description": description,
-                        "category": _skill_category_from_path(skill_md, search_dirs),
+                        "category": _skill_category_from_path(
+                            skill_md, search_dirs, local_skills_dir=skills_dir
+                        ),
                         "disabled": name in disabled,
                     }
                 )
@@ -10318,7 +10339,10 @@ def _handle_tts(handler, parsed):
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
-        "en-US-AriaNeural", "en-US-GuyNeural"
+        "en-US-AriaNeural", "en-US-GuyNeural",
+        "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
+        "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
+        "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
     }
     if voice not in allowed:
         from api.helpers import bad as _bad

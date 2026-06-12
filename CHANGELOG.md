@@ -7,6 +7,29 @@
 
 - **Live streaming now shows quieter progress feedback between tool calls.** Running tool rows get a transient elapsed-time badge, the live turn can show a subtle inter-tool processing pulse after a tool completes, and successful stream reattach now surfaces a reconnect toast. These markers are live-only presentation state: they clear on normal completion, cancel, application errors, hard stream errors, stale terminal events, and settled-session restore so they do not leak into final transcript rendering. (#4078)
 
+## [v0.51.371] — 2026-06-12 — Release MJ (low-risk batch: approval polling, composer/titlebar polish, slash-command parity, skill categories, French TTS)
+
+### Fixed
+
+- **Tool-approval prompts no longer disappear during brief idle gaps (#4041).** The HTTP approval poll used to tear itself down — force-hiding the approval card past its visibility guard before the server had confirmed the approval was gone — on any transient busy=false dip. It now keeps polling across busy dips and stops only on a true session switch or a confirmed-idle state with no pending approvals. (#4041)
+- **Typing in the composer is smoother on long sessions (#4042).** The composer auto-resize ran a synchronous layout read on every keystroke; it's now coalesced into a single animation-frame update. (#4042)
+- **The desktop window title stays correct when switching to non-chat panels (#4039).** Switching to Settings/Tasks/etc. now stamps `document.title`, and returning to chat restores the chat title. (#4039)
+- **The Tauri desktop app's local IPC is no longer blocked by the Content-Security-Policy (#4040).** `http://ipc.localhost` is now part of the default `connect-src` allowlist. (#4040)
+- **`bootstrap.py` is tracked with its executable bit (#3914)** so direct POSIX execution keeps working after a fresh clone.
+- **`/reload-skills` now works from the WebUI (#4043).** It's routed through the same narrow WebUI agent-command allowlist as `/reload-mcp`, re-scans the installed skills and reports what changed. (#4043)
+- **`/use <skill>` now injects the actual skill content for the next turn (#4044).** Instead of only telling the agent to consult a skill, the selected skill's body is fetched and carried through to the next message as forced context. (#4044)
+- **Flat external skill directories are now categorized in the Skills tab (#4053).** Skills directly under an external skills root use that root's directory name as their category, while flat skills under the local skills root stay uncategorized. (#4053)
+
+### Added
+
+- **French Edge TTS voices (#4058).** Seven `fr-CA` / `fr-FR` neural voices are now in the Edge TTS allowlist, so French-speaking users who enable Edge TTS no longer get a 400 on every utterance.
+
+## [v0.51.370] — 2026-06-12 — Release MI (model picker shows real providers when /api/models rebuild times out)
+
+### Fixed
+
+- **The model picker no longer collapses to a single "Default" entry when the live model-catalog rebuild exceeds its time budget (#3928).** On the first cold open after a restart, `/api/models` rebuilds the provider catalog by probing each configured provider; on a slow network (or behind a corporate proxy) that probe can blow the bounded rebuild budget. The over-budget fallback previously served an emergency one-model catalog, so the picker showed only "Default" until a later request rebuilt successfully. It now serves a richer **network-free** catalog assembled from local config and the auth store — the active provider and its default model, configured `providers.*` entries, credential-pool providers (excluding ambient `gh` CLI tokens), known providers that have a key, declared fallback providers, and custom providers — with the active provider listed first. The 4-second guardrail is unchanged, the real catalog still refreshes out-of-band for the next caller, nothing is written to the 24-hour disk cache from this path, and the build safely degrades to the minimal one-model catalog if anything goes wrong. (#3928)
+
 ## [v0.51.369] — 2026-06-12 — Release MH (WebUI streaming honors runtime target model/base_url)
 
 ### Fixed
