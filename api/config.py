@@ -3203,6 +3203,7 @@ def _minimal_static_models_catalog() -> dict:
             "default_model": default_model,
             "configured_model_badges": {},
             "groups": groups,
+            "aliases": {},
         }
     except Exception:
         logger.debug("minimal static models catalog build failed", exc_info=True)
@@ -3211,6 +3212,7 @@ def _minimal_static_models_catalog() -> dict:
             "default_model": "",
             "configured_model_badges": {},
             "groups": [],
+            "aliases": {},
         }
 
 
