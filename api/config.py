@@ -2916,7 +2916,7 @@ def _minimal_static_models_catalog() -> dict:
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": {},
-            "groups": groups,
+            "groups": _apply_model_filter(groups),
         }
     except Exception:
         logger.debug("minimal static models catalog build failed", exc_info=True)
@@ -3179,6 +3179,31 @@ def _delete_models_cache_on_disk() -> None:
         os.unlink(str(_models_cache_path))
     except OSError:
         pass  # already absent
+
+
+def _apply_model_filter(groups: list) -> list:
+    """Filter model groups to only include models in the user's model_filter config.
+
+    Reads ``model_filter`` from the Hermes config.yaml.  When set, only models
+    whose ``id`` appears in the list are kept; providers with no remaining
+    models are dropped.  When unset or empty, ``groups`` is returned unchanged.
+    """
+    try:
+        allowlist = cfg.get("model_filter")
+        if not allowlist or not isinstance(allowlist, list):
+            return groups
+        allowed = {str(m).strip() for m in allowlist if m}
+        if not allowed:
+            return groups
+    except Exception:
+        return groups
+
+    filtered: list = []
+    for g in groups:
+        kept = [m for m in g.get("models", []) if m.get("id") in allowed]
+        if kept:
+            filtered.append({**g, "models": kept})
+    return filtered
 
 
 def _is_valid_models_cache(cache: object) -> bool:
@@ -4395,6 +4420,12 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
             # Only show providers that are both detected and configured
             detected_providers = detected_providers.intersection(configured_providers)
 
+        # Hide providers listed in providers.hidden_providers from the picker
+        hidden = providers_cfg.get("hidden_providers", []) if isinstance(providers_cfg, dict) else []
+        if isinstance(hidden, list):
+            hidden_canonical = {_canonicalise_provider_id(h) or str(h).strip().lower() for h in hidden}
+            detected_providers = {p for p in detected_providers if _canonicalise_provider_id(p) or p not in hidden_canonical}
+
         # Post-collection dedup: re-canonicalise every entry so any path that
         # added a non-canonical id (mixed-case from auth-store, raw config-key,
         # legacy alias) gets folded onto the canonical key. Belt-and-braces for
@@ -4953,7 +4984,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": _build_configured_model_badges(),
-            "groups": groups,
+            "groups": _apply_model_filter(groups),
             "aliases": model_aliases,
         }
 
@@ -5006,6 +5037,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
 
         # Cold path: disk cache hit — use it (fast, no lock contention)
         if disk_groups is not None:
+            disk_groups["groups"] = _apply_model_filter(disk_groups.get("groups", []))
             _available_models_cache = disk_groups
             _available_models_cache_ts = now
             _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
