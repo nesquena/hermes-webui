@@ -256,7 +256,11 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 stream_id=fake_stream_id,
             )
 
-        resolve_runtime_provider.assert_called_once_with(requested="openai-codex")
+        # #4022: the resolver is now called with the target model too so per-model
+        # base_url normalization (e.g. OpenCode-Go /v1 stripping) is applied.
+        resolve_runtime_provider.assert_called_once_with(
+            requested="openai-codex", target_model="gpt-5.4"
+        )
         init_kwargs = captured["init_kwargs"]
         self.assertEqual(init_kwargs["api_mode"], "codex_responses")
         self.assertEqual(init_kwargs["acp_command"], "codex")
