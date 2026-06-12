@@ -60,6 +60,17 @@ def _install_fake_codex_runtime_switch(monkeypatch):
     return calls
 
 
+def _install_fake_skill_commands(monkeypatch, reload_skills):
+    import sys
+    agent_pkg = sys.modules.get("agent") or ModuleType("agent")
+    agent_pkg.__path__ = []
+    skill_commands = ModuleType("agent.skill_commands")
+    skill_commands.reload_skills = reload_skills
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.skill_commands", skill_commands)
+    return skill_commands
+
+
 def _get(path):
     """GET helper -- returns parsed JSON or raises HTTPError."""
     with urllib.request.urlopen(TEST_BASE + path, timeout=10) as r:
@@ -153,6 +164,24 @@ def test_commands_exec_runs_reload_mcp_alias():
     assert isinstance(body['output'], str)
 
 
+@requires_agent_modules
+def test_commands_exec_runs_reload_skills_command():
+    """`/reload-skills` executes through the same narrow shared executor path."""
+    status, body = _post('/api/commands/exec', {'command': '/reload-skills'})
+    assert status == 200
+    assert 'output' in body
+    assert isinstance(body['output'], str)
+
+
+@requires_agent_modules
+def test_commands_exec_runs_reload_skills_alias():
+    """Telegram-style underscore alias resolves to reload-skills in the executor."""
+    status, body = _post('/api/commands/exec', {'command': '/reload_skills'})
+    assert status == 200
+    assert 'output' in body
+    assert isinstance(body['output'], str)
+
+
 def test_codex_runtime_command_uses_shared_switch_and_persists(monkeypatch, tmp_path):
     """`/codex-runtime` executes through the same shared switch as CLI/gateway."""
     calls = _install_fake_codex_runtime_switch(monkeypatch)
@@ -241,6 +270,75 @@ def test_reload_mcp_error_is_generic(monkeypatch):
     assert 'postgresql://user:pass' not in str(exc.value)
     assert 'pass@' not in str(exc.value)
     assert calls == ["shutdown"]
+
+
+def test_reload_skills_command_formats_helper_diff(monkeypatch):
+    """`/reload-skills` should summarize the shared helper diff in printable text."""
+    def reload_skills():
+        return {
+            "added": [{"name": "incident-review", "description": "desc"}],
+            "removed": [{"name": "legacy-skill", "description": "old"}],
+            "unchanged": ["skills", "use"],
+            "total": 3,
+            "commands": 3,
+        }
+
+    _install_fake_skill_commands(monkeypatch, reload_skills)
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/reload-skills')
+
+    assert output == "\n".join([
+        "Reloaded skills from disk.",
+        "Added: 1",
+        "Removed: 1",
+        "Unchanged: 2",
+        "Total skills: 3",
+        "Added skills: incident-review",
+        "Removed skills: legacy-skill",
+    ])
+
+
+def test_reload_skills_command_accepts_underscore_alias(monkeypatch):
+    """Telegram/WebUI underscore spelling routes to the canonical skills reload."""
+    calls = []
+
+    def reload_skills():
+        calls.append("reload_skills")
+        return {
+            "added": [],
+            "removed": [],
+            "unchanged": [],
+            "total": 0,
+            "commands": 0,
+        }
+
+    _install_fake_skill_commands(monkeypatch, reload_skills)
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/reload_skills')
+
+    assert calls == ["reload_skills"]
+    assert "Added: 0" in output
+    assert "Removed: 0" in output
+
+
+def test_reload_skills_error_is_generic(monkeypatch):
+    """`/reload-skills` failures must return a generic message, not internals."""
+    def reload_skills():
+        raise RuntimeError("secret_path=C:/Users/Rod/.hermes/skills/private")
+
+    _install_fake_skill_commands(monkeypatch, reload_skills)
+
+    from api.commands import execute_agent_command
+
+    with pytest.raises(RuntimeError) as exc:
+        execute_agent_command('/reload-skills')
+
+    assert str(exc.value) == "Failed to reload skills"
+    assert 'secret_path=' not in str(exc.value)
 
 
 def test_concurrent_reload_mcp_calls_are_serialized(monkeypatch):
