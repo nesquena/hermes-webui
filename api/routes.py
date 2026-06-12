@@ -3109,11 +3109,11 @@ def _lookup_gateway_session_identity(session_id: str) -> dict:
     return metadata if isinstance(metadata, dict) else {}
 
 
-def _lookup_cli_session_metadata(session_id: str) -> dict:
+def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
     if not session_id:
         return {}
     try:
-        for row in get_cli_sessions():
+        for row in get_cli_sessions(all_profiles=all_profiles):
             if row.get("session_id") == session_id:
                 return row
     except Exception:
@@ -6376,10 +6376,11 @@ def handle_get(handler, parsed) -> bool:
             diag.stage("load_settings")
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
+            all_profiles = _all_profiles_query_flag(parsed)
             webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
             if show_cli_sessions:
                 diag.stage("get_cli_sessions")
-                cli = get_cli_sessions()
+                cli = get_cli_sessions(all_profiles=all_profiles)
                 diag.stage("merge_cli_sessions")
                 cli_by_id = {s["session_id"]: s for s in cli}
                 # #3238: reconcile orphaned imported-CLI sidecars. When a CLI
@@ -6490,7 +6491,6 @@ def handle_get(handler, parsed) -> bool:
             diag.stage("active_profile")
             from api.profiles import get_active_profile_name
             active_profile = get_active_profile_name()
-            all_profiles = _all_profiles_query_flag(parsed)
             diag.stage("profile_filter")
             if all_profiles:
                 scoped = merged
@@ -15945,13 +15945,11 @@ def _handle_session_import_cli(handler, body):
     # Check if already imported — refresh messages from CLI store if new ones arrived
     existing = Session.load(sid)
     if existing:
-        fresh_msgs = get_cli_session_messages(sid)
+        cli_meta = _lookup_cli_session_metadata(sid)
+        if not cli_meta:
+            cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
+        fresh_msgs = get_cli_session_messages(sid, profile=(cli_meta or {}).get("profile"))
         changed = False
-        cli_meta = None
-        for cs in list(get_cli_sessions()):
-            if cs["session_id"] == sid:
-                cli_meta = cs
-                break
         if fresh_msgs and len(fresh_msgs) > len(existing.messages):
             # Prefix-equality guard: only extend if existing messages are a prefix of
             # the fresh CLI messages. Prevents silently dropping WebUI-added messages
@@ -15997,48 +15995,31 @@ def _handle_session_import_cli(handler, body):
         )
 
     # Fetch messages from CLI store
-    msgs = get_cli_session_messages(sid)
+    cli_meta = _lookup_cli_session_metadata(sid)
+    if not cli_meta:
+        cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
+    profile = cli_meta.get("profile") if cli_meta else None
+    msgs = get_cli_session_messages(sid, profile=profile)
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)
 
     # Get profile, model, timestamps, and title from CLI session metadata
-    profile = None
-    created_at = None
-    updated_at = None
-    cli_title = None
-    cli_source_tag = None
-    model = "unknown"
-    cli_raw_source = None
-    cli_session_source = None
-    cli_source_label = None
-    cli_user_id = None
-    cli_chat_id = None
-    cli_chat_type = None
-    cli_thread_id = None
-    cli_session_key = None
-    cli_platform = None
-    cli_parent_session_id = None
-    cli_read_only = False
-    for cs in get_cli_sessions():
-        if cs["session_id"] == sid:
-            profile = cs.get("profile")
-            model = cs.get("model", "unknown")
-            created_at = cs.get("created_at")
-            updated_at = cs.get("updated_at")
-            cli_title = cs.get("title")
-            cli_source_tag = cs.get("source_tag")
-            cli_raw_source = cs.get("raw_source")
-            cli_session_source = cs.get("session_source")
-            cli_source_label = cs.get("source_label")
-            cli_user_id = cs.get("user_id")
-            cli_chat_id = cs.get("chat_id")
-            cli_chat_type = cs.get("chat_type")
-            cli_thread_id = cs.get("thread_id")
-            cli_session_key = cs.get("session_key")
-            cli_platform = cs.get("platform")
-            cli_parent_session_id = cs.get("parent_session_id")
-            cli_read_only = bool(cs.get("read_only"))
-            break
+    created_at = cli_meta.get("created_at") if cli_meta else None
+    updated_at = cli_meta.get("updated_at") if cli_meta else None
+    cli_title = cli_meta.get("title") if cli_meta else None
+    cli_source_tag = cli_meta.get("source_tag") if cli_meta else None
+    model = cli_meta.get("model", "unknown") if cli_meta else "unknown"
+    cli_raw_source = cli_meta.get("raw_source") if cli_meta else None
+    cli_session_source = cli_meta.get("session_source") if cli_meta else None
+    cli_source_label = cli_meta.get("source_label") if cli_meta else None
+    cli_user_id = cli_meta.get("user_id") if cli_meta else None
+    cli_chat_id = cli_meta.get("chat_id") if cli_meta else None
+    cli_chat_type = cli_meta.get("chat_type") if cli_meta else None
+    cli_thread_id = cli_meta.get("thread_id") if cli_meta else None
+    cli_session_key = cli_meta.get("session_key") if cli_meta else None
+    cli_platform = cli_meta.get("platform") if cli_meta else None
+    cli_parent_session_id = cli_meta.get("parent_session_id") if cli_meta else None
+    cli_read_only = bool((cli_meta or {}).get("read_only"))
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
     title = cli_title or title_from(msgs, "CLI Session")

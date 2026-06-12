@@ -3768,12 +3768,61 @@ def _resolve_cli_sessions_context():
     return hermes_home, db_path, cli_profile, cache_key
 
 
-def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) -> list:
-    cli_sessions = []
+def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], tuple]:
+    """Return per-profile CLI scan contexts plus a cache key fragment."""
     try:
-        cli_sessions.extend(get_claude_code_sessions())
+        from api.profiles import get_active_profile_name, get_hermes_home_for_profile, list_profiles_api
     except Exception:
-        logger.debug("Claude Code session scan failed", exc_info=True)
+        return [], ()
+
+    contexts: list[tuple[Path, Path, str | None]] = []
+    cache_entries: list[tuple[str, str, object]] = []
+    seen_homes: set[str] = set()
+
+    def _add_context(profile_name) -> None:
+        try:
+            hermes_home = Path(get_hermes_home_for_profile(profile_name)).expanduser().resolve()
+        except Exception:
+            return
+        home_key = _path_cache_key(hermes_home)
+        if not home_key or home_key in seen_homes:
+            return
+        seen_homes.add(home_key)
+        db_path = hermes_home / 'state.db'
+        profile_value = str(profile_name).strip() or 'default'
+        contexts.append((hermes_home, db_path, profile_value))
+        cache_entries.append((home_key, profile_value, _sqlite_file_stat_cache_key(db_path)))
+
+    try:
+        _add_context(get_active_profile_name())
+    except Exception:
+        pass
+    try:
+        for row in list_profiles_api():
+            if not isinstance(row, dict):
+                continue
+            _add_context(row.get('name'))
+    except Exception:
+        logger.debug("All-profiles CLI context enumeration failed", exc_info=True)
+
+    return contexts, tuple(cache_entries)
+
+
+def _load_cli_sessions_uncached(
+    hermes_home: Path,
+    db_path: Path,
+    _cli_profile,
+    *,
+    visible_session_limit: int | None = CLI_VISIBLE_SESSION_LIMIT,
+    cron_project_limit: int | None | bool = CRON_PROJECT_CHIP_LIMIT,
+    include_claude_code: bool = True,
+) -> list:
+    cli_sessions = []
+    if include_claude_code:
+        try:
+            cli_sessions.extend(get_claude_code_sessions())
+        except Exception:
+            logger.debug("Claude Code session scan failed", exc_info=True)
 
     if not db_path.exists():
         return cli_sessions
@@ -3787,9 +3836,10 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
             _cron_pid_cache[0] = ensure_cron_project()
         return _cron_pid_cache[0]
 
+    profile_value = _cli_profile or 'default'
     for row in read_importable_agent_session_rows(
         db_path,
-        limit=CLI_VISIBLE_SESSION_LIMIT,
+        limit=visible_session_limit,
         log=logger,
         exclude_sources=("cron",),
     ):
@@ -3797,7 +3847,7 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
         raw_ts = row['last_activity'] or row['started_at']
         # Prefer the CLI session's own profile from the DB; fall back to
         # the active CLI profile so sidebar filtering works either way.
-        profile = _cli_profile  # CLI DB has no profile column; use active profile
+        profile = profile_value  # CLI DB has no profile column; use active profile
 
         _source = row['source'] or 'cli'
         _title = row['title']
@@ -3872,99 +3922,127 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
     # before _include_project_hidden_background_sidebar_sessions can rescue
     # them (#3172).  A separate, higher-capped cron-only pass ensures they
     # stay addressable under their project chip.
-    existing_sids = {s['session_id'] for s in cli_sessions}
-    try:
-        cron_excluded = tuple(
-            s for s in ('webui', 'claude-code')  # keep only 'cron'
-        )
-        for row in read_importable_agent_session_rows(
-            db_path,
-            limit=CRON_PROJECT_CHIP_LIMIT,
-            log=logger,
-            exclude_sources=cron_excluded,
-        ):
-            sid = row['id']
-            if sid in existing_sids:
-                continue
-            _source = row['source'] or 'cli'
-            if _source != 'cron':
-                continue
-            raw_ts = row['last_activity'] or row['started_at']
-            _title = row['title']
-            if not _title and sid.startswith('cron_'):
-                parts = sid.split('_')
-                if len(parts) >= 3:
-                    _job_id = parts[1]
-                    try:
-                        _jobs_path = hermes_home / 'cron' / 'jobs.json'
-                        if _jobs_path.exists():
-                            import json as _json
-                            _jobs_data = _json.loads(_jobs_path.read_text())
-                            for _j in _jobs_data.get('jobs', []):
-                                if _j.get('id') == _job_id:
-                                    _title = _j.get('name') or _title
-                                    break
-                    except Exception:
-                        pass
-            try:
-                _webui_meta = Session.load_metadata_only(sid)
-                if _webui_meta and getattr(_webui_meta, 'title', None):
-                    _title = _webui_meta.title
-            except Exception:
-                pass
-            _display_title = _title or 'Cron Session'
-            cli_sessions.append({
-                'session_id': sid,
-                'title': _display_title,
-                'workspace': str(get_last_workspace()),
-                'model': row['model'] or None,
-                'message_count': row['message_count'] or row['actual_message_count'] or 0,
-                'created_at': row['started_at'],
-                'updated_at': raw_ts,
-                'pinned': False,
-                'archived': False,
-                'project_id': _cron_pid(),
-                'profile': _cli_profile,
-                'source_tag': 'cron',
-                'raw_source': row.get('raw_source'),
-                'user_id': row.get('user_id'),
-                'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
-                'chat_type': row.get('chat_type'),
-                'thread_id': row.get('thread_id'),
-                'session_key': row.get('session_key'),
-                'platform': row.get('platform'),
-                'session_source': row.get('session_source'),
-                'source_label': row.get('source_label'),
-                'parent_session_id': row.get('parent_session_id'),
-                'parent_title': row.get('parent_title'),
-                'parent_source': row.get('parent_source'),
-                'relationship_type': row.get('relationship_type'),
-                '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
-                'end_reason': row.get('end_reason'),
-                'actual_message_count': row.get('actual_message_count'),
-                'user_message_count': row.get('actual_user_message_count'),
-                '_lineage_root_id': row.get('_lineage_root_id'),
-                '_lineage_tip_id': row.get('_lineage_tip_id'),
-                '_compression_segment_count': row.get('_compression_segment_count'),
-                'is_cli_session': is_cli_session_row(row),
-            })
-            existing_sids.add(sid)
-    except Exception:
-        logger.debug("Cron project-chip second pass failed", exc_info=True)
+    if cron_project_limit is not False:
+        existing_sids = {s['session_id'] for s in cli_sessions}
+        try:
+            cron_excluded = tuple(
+                s for s in ('webui', 'claude-code')  # keep only 'cron'
+            )
+            for row in read_importable_agent_session_rows(
+                db_path,
+                limit=cron_project_limit,
+                log=logger,
+                exclude_sources=cron_excluded,
+            ):
+                sid = row['id']
+                if sid in existing_sids:
+                    continue
+                _source = row['source'] or 'cli'
+                if _source != 'cron':
+                    continue
+                raw_ts = row['last_activity'] or row['started_at']
+                _title = row['title']
+                if not _title and sid.startswith('cron_'):
+                    parts = sid.split('_')
+                    if len(parts) >= 3:
+                        _job_id = parts[1]
+                        try:
+                            _jobs_path = hermes_home / 'cron' / 'jobs.json'
+                            if _jobs_path.exists():
+                                import json as _json
+                                _jobs_data = _json.loads(_jobs_path.read_text())
+                                for _j in _jobs_data.get('jobs', []):
+                                    if _j.get('id') == _job_id:
+                                        _title = _j.get('name') or _title
+                                        break
+                        except Exception:
+                            pass
+                try:
+                    _webui_meta = Session.load_metadata_only(sid)
+                    if _webui_meta and getattr(_webui_meta, 'title', None):
+                        _title = _webui_meta.title
+                except Exception:
+                    pass
+                _display_title = _title or 'Cron Session'
+                cli_sessions.append({
+                    'session_id': sid,
+                    'title': _display_title,
+                    'workspace': str(get_last_workspace()),
+                    'model': row['model'] or None,
+                    'message_count': row['message_count'] or row['actual_message_count'] or 0,
+                    'created_at': row['started_at'],
+                    'updated_at': raw_ts,
+                    'pinned': False,
+                    'archived': False,
+                    'project_id': _cron_pid(),
+                    'profile': profile_value,
+                    'source_tag': 'cron',
+                    'raw_source': row.get('raw_source'),
+                    'user_id': row.get('user_id'),
+                    'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
+                    'chat_type': row.get('chat_type'),
+                    'thread_id': row.get('thread_id'),
+                    'session_key': row.get('session_key'),
+                    'platform': row.get('platform'),
+                    'session_source': row.get('session_source'),
+                    'source_label': row.get('source_label'),
+                    'parent_session_id': row.get('parent_session_id'),
+                    'parent_title': row.get('parent_title'),
+                    'parent_source': row.get('parent_source'),
+                    'relationship_type': row.get('relationship_type'),
+                    '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
+                    'end_reason': row.get('end_reason'),
+                    'actual_message_count': row.get('actual_message_count'),
+                    'user_message_count': row.get('actual_user_message_count'),
+                    '_lineage_root_id': row.get('_lineage_root_id'),
+                    '_lineage_tip_id': row.get('_lineage_tip_id'),
+                    '_compression_segment_count': row.get('_compression_segment_count'),
+                    'is_cli_session': is_cli_session_row(row),
+                })
+                existing_sids.add(sid)
+        except Exception:
+            logger.debug("Cron project-chip second pass failed", exc_info=True)
 
     return cli_sessions
 
 
-def get_cli_sessions() -> list:
+def get_cli_sessions(*, all_profiles: bool = False) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
 
     Returns empty list if the SQLite DB is missing or any error occurs -- the
     bridge is purely additive and never crashes the WebUI.
     """
-    hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context()
+    if all_profiles:
+        contexts, context_cache_key = _all_profiles_cli_contexts()
+        cache_key = (
+            'all_profiles',
+            context_cache_key,
+            _path_cache_key(_default_claude_code_projects_dir()),
+            _path_stat_cache_key(_default_claude_code_projects_dir()),
+            _path_stat_cache_key(SESSION_INDEX_FILE),
+        )
+    else:
+        hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context()
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
+
+    def _load_sessions():
+        if all_profiles:
+            merged: list[dict] = []
+            for idx, (ctx_home, ctx_db_path, ctx_profile) in enumerate(contexts):
+                merged.extend(
+                    _load_cli_sessions_uncached(
+                        ctx_home,
+                        ctx_db_path,
+                        ctx_profile,
+                        visible_session_limit=None,
+                        cron_project_limit=None,
+                        include_claude_code=(idx == 0),
+                    )
+                )
+            return merged
+        return _load_cli_sessions_uncached(hermes_home, db_path, cli_profile)
 
     if ttl > 0:
         with _CLI_SESSIONS_CACHE_LOCK:
@@ -3975,11 +4053,11 @@ def get_cli_sessions() -> list:
                     return _copy_cli_sessions(cached_sessions)
                 _CLI_SESSIONS_CACHE.pop(cache_key, None)
             try:
-                sessions = _load_cli_sessions_uncached(hermes_home, db_path, cli_profile)
+                sessions = _load_sessions()
             except Exception as _cli_err:
                 logger.warning(
                     "get_cli_sessions() failed — check state.db schema or path (%s): %s",
-                    db_path, _cli_err,
+                    "all profiles" if all_profiles else db_path, _cli_err,
                 )
                 return []
             _CLI_SESSIONS_CACHE[cache_key] = (
@@ -3989,11 +4067,11 @@ def get_cli_sessions() -> list:
             return _copy_cli_sessions(sessions)
 
     try:
-        return _load_cli_sessions_uncached(hermes_home, db_path, cli_profile)
+        return _load_sessions()
     except Exception as _cli_err:
         logger.warning(
             "get_cli_sessions() failed — check state.db schema or path (%s): %s",
-            db_path, _cli_err,
+            "all profiles" if all_profiles else db_path, _cli_err,
         )
         return []
 
@@ -4630,7 +4708,7 @@ def reconciled_state_db_messages_for_session(
     )
 
 
-def get_cli_session_messages(sid) -> list:
+def get_cli_session_messages(sid, *, profile=None) -> list:
     """Read messages for a single CLI/external-agent session.
 
     Preserve tool-call/result and reasoning metadata from the agent state.db so
@@ -4641,7 +4719,7 @@ def get_cli_session_messages(sid) -> list:
     """
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
-    return get_state_db_session_messages(sid, stitch_continuations=True)
+    return get_state_db_session_messages(sid, stitch_continuations=True, profile=profile)
 
 
 def count_conversation_rounds(sid: str, since: float | None = None) -> int:
