@@ -27,7 +27,8 @@ def test_ui_rejects_recovery_control_as_visible_assistant_content():
     assert "function _isRecoveryControlMessageText" in UI_JS
     assert "function _assistantMessageHasVisibleContent" in UI_JS
     assert "if(_isRecoveryControlMessage(m)) return false;" in UI_JS
-    assert "if(_isRecoveryControlMessage(m)){ri++;continue;}" in UI_JS
+    assert "function _messageIsRenderable(m)" in UI_JS
+    assert "if(_isRecoveryControlMessage(m)) return false;" in UI_JS[UI_JS.index("function _messageIsRenderable(m)"):]
     assert "_assistantMessageHasVisibleContent(m)" in UI_JS
 
 

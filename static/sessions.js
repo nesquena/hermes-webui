@@ -2362,6 +2362,10 @@ async function _loadOlderMessages() {
     // Use $('messages') — the scrollable container (#msgInner is not scrollable).
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
+    const oldTop = container ? container.scrollTop : 0;
+    const viewportAnchor = (container && typeof _captureMessageViewportAnchor === 'function')
+      ? _captureMessageViewportAnchor()
+      : null;
     // Carry forward ephemeral turn fields (_turnUsage/_turnDuration/_turnTps/
     // _gatewayRouting/_statusCard) before the wholesale replace so the badge
     // does not briefly appear and disappear during older-message expansion.
@@ -2373,28 +2377,42 @@ async function _loadOlderMessages() {
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
     // hidden and the "hidden" counter rises while the viewport appears stuck.
-    // Count roughly by the same visible-message rules used by renderMessages().
+    // Count by the same visible-message rules used by renderMessages(); the
+    // virtual fallback below uses this as a pixel-height prefix length.
     const addedRenderable = olderMsgs.filter(m=>{
+      if(typeof _messageIsRenderable==='function') return _messageIsRenderable(m);
       if(!m||!m.role||m.role==='tool') return false;
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m)) return false;
       if(typeof _isPreservedCompressionTaskListMessage==='function'&&_isPreservedCompressionTaskListMessage(m)) return false;
+      if(typeof _isRecoveryControlMessage==='function'&&_isRecoveryControlMessage(m)) return false;
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m)))));
+      const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+      return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m))||(typeof _assistantMessageHasVisibleContent==='function'&&_assistantMessageHasVisibleContent(m)))));
     }).length;
     _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
     renderMessages({ preserveScroll: true });
     if (container) {
-      // Prepending older messages must not teleport the reader. Preserve the
-      // currently visible viewport by adding the inserted height to scrollTop.
-      const oldTop = container.scrollTop;
-      const newScrollH = container.scrollHeight;
-      const addedHeight = Math.max(0, newScrollH - prevScrollH);
-      _programmaticScroll = true;
-      container.scrollTop = oldTop + addedHeight;
-      requestAnimationFrame(()=>{ _programmaticScroll = false; });
+      // Prepending older messages must not teleport the reader. Anchor to the
+      // first visible rendered row and restore that row's top offset after the
+      // prepend so synthetic virtual spacer heights cannot skew the delta.
+      const restoredViaAnchor = (viewportAnchor && typeof _restoreMessageViewportAnchor === 'function')
+        ? _restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)
+        : false;
+      if (!restoredViaAnchor) {
+        const virtualAddedHeight = (typeof _messageVirtualPrependedHeightDelta === 'function')
+          ? _messageVirtualPrependedHeightDelta(addedRenderable)
+          : null;
+        const newScrollH = container.scrollHeight;
+        const addedHeight = Number.isFinite(virtualAddedHeight)
+          ? virtualAddedHeight
+          : Math.max(0, newScrollH - prevScrollH);
+        _programmaticScroll = true;
+        container.scrollTop = oldTop + addedHeight;
+        requestAnimationFrame(()=>{ _programmaticScroll = false; });
+      }
     }
     _scrollPinned = false;
   } catch(e) {

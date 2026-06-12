@@ -589,31 +589,25 @@ def test_settled_transcript_suppresses_context_compaction_reference_cards():
     assert "function _shouldShowSettledCompressionReference" in src
     assert "!_isContextCompactionText(referenceText)" in src
 
-    visible_filter_start = src.find("const vis=S.messages.filter")
-    assert visible_filter_start != -1, "visible message filter not found"
-    visible_filter_end = src.find("$('emptyState')", visible_filter_start)
-    visible_filter = src[visible_filter_start:visible_filter_end]
-    assert "if(_isContextCompactionMessage(m)) return false;" in visible_filter
-
-    vis_idx_start = src.find("for(const m of S.messages)", visible_filter_end)
-    assert vis_idx_start != -1, "raw message index loop not found"
-    vis_idx_end = src.find("let lastUserRawIdx", vis_idx_start)
-    vis_idx_loop = src[vis_idx_start:vis_idx_end]
-    assert "if(_isContextCompactionMessage(m)){ri++;continue;}" in vis_idx_loop
+    helper_start = src.find("function _messageIsRenderable")
+    assert helper_start != -1, "renderable message helper not found"
+    helper_end = src.find("function _getVisibleMessagesWithIdx", helper_start)
+    assert helper_end != -1, "visible message index helper not found after renderable helper"
+    helper = src[helper_start:helper_end]
+    assert "_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)" in helper
 
 
 def test_preserved_task_list_skips_normal_visible_message_path():
     src = _read("static/ui.js")
 
-    visible_filter_start = src.find("const vis=S.messages.filter")
-    assert visible_filter_start != -1, "visible message filter not found"
-    visible_filter_end = src.find("$('emptyState')", visible_filter_start)
-    assert visible_filter_end != -1, "empty state update after visible filter not found"
-    visible_filter = src[visible_filter_start:visible_filter_end]
-    assert "if(_isContextCompactionMessage(m)) return false;" in visible_filter
-    assert "if(_isPreservedCompressionTaskListMessage(m)) return false;" in visible_filter
+    helper_start = src.find("function _messageIsRenderable")
+    assert helper_start != -1, "renderable message helper not found"
+    helper_end = src.find("function _getVisibleMessagesWithIdx", helper_start)
+    assert helper_end != -1, "visible message index helper not found after renderable helper"
+    helper = src[helper_start:helper_end]
+    assert "_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)" in helper
 
-    vis_idx_start = src.find("for(const m of S.messages)", visible_filter_end)
+    vis_idx_start = src.find("for(const m of S.messages)", helper_end)
     assert vis_idx_start != -1, "raw message index loop not found"
     vis_idx_end = src.find("let lastUserRawIdx", vis_idx_start)
     assert vis_idx_end != -1, "last user index lookup after raw message loop not found"
@@ -675,7 +669,9 @@ def test_compression_anchor_index_is_translated_into_render_window():
     assert "_compressionAnchorIndex(\n    visWithIdx," in block
     assert "insertionAnchorFull<windowStart" in block
     assert "insertionAnchorFull-windowStart" in block
-    assert "windowStart+renderVisWithIdx.length" in block
+    assert "let previousVisibleIdx=-1;" in block
+    assert "if(renderVisibleIdxs[i]<=insertionAnchorFull) previousVisibleIdx=i;" in block
+    assert "insertionAnchor=previousVisibleIdx>=0?previousVisibleIdx:0;" in block
 
 
 def test_reference_message_uses_raw_transcript_position_before_anchor_fallback():
