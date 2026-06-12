@@ -99,6 +99,15 @@ The setup step groups providers by how much information they usually need.
 For API-key providers, the wizard writes the key to the active Hermes `.env`
 file and writes the default model/provider to `config.yaml`.
 
+AIML API uses the existing custom OpenAI-compatible setup path, not a
+first-class built-in Hermes provider id. Configure it under the
+custom-provider flow with Base URL `https://api.aimlapi.com/v1`, then use
+either the normal custom-provider API key field or a config entry that points
+at `AIMLAPI_API_KEY` if you want the custom provider to read its key from the
+environment. Create or manage keys at `https://aimlapi.com/app/keys`. Model
+discovery comes from the live `/v1/models` response for that endpoint, not from
+a static WebUI-maintained model list.
+
 For local providers, the API key field can be blank when the server is keyless.
 Most LM Studio, Ollama, vLLM, llama-server, and TabbyAPI installs run this way.
 Use **Test connection** to verify the Base URL and populate the model list
