@@ -36,11 +36,13 @@ def test_busy_dips_no_longer_force_stop_approval_polling():
     assert "!S.busy || !S.session || S.session.session_id !== sid" not in body
 
 
-def test_empty_pending_only_stops_after_confirmed_idle():
+def test_empty_pending_clears_card_and_only_stops_after_confirmed_idle():
     fallback_body = _function_body("_startApprovalFallbackPoll")
 
-    assert "else if (!_approvalPollingSessionMissingOrMismatched(sid) && !S.busy)" in fallback_body
+    assert "else if (!_approvalPollingSessionMissingOrMismatched(sid)) {" in fallback_body
     assert "_clearApprovalPendingForSession(sid);" in fallback_body
     assert "_hideApprovalCardIfOwner(sid);" in fallback_body
+    assert "if (!S.busy) {" in fallback_body
     assert "stopApprovalPollingForSession(sid);" in fallback_body
+    assert "else if (!_approvalPollingSessionMissingOrMismatched(sid) && !S.busy)" not in fallback_body
     assert "stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true); return;" in fallback_body

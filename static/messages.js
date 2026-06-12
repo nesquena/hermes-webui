@@ -4172,10 +4172,12 @@ function _startApprovalFallbackPoll(sid) {
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
-      else if (!_approvalPollingSessionMissingOrMismatched(sid) && !S.busy) {
+      else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
         _clearApprovalPendingForSession(sid);
         _hideApprovalCardIfOwner(sid);
-        stopApprovalPollingForSession(sid);
+        if (!S.busy) {
+          stopApprovalPollingForSession(sid);
+        }
       }
     } catch(e) { /* ignore poll errors */ }
     finally { _approvalFallbackPollInFlight = false; }
