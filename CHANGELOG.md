@@ -3,8 +3,28 @@
 
 ## [Unreleased]
 
+
 ### Added
 - MCP Tools now supports pinned tool shortcuts: users can pin common tools, then insert a ready-to-send tool request into the composer from the shortcut chip or each tool row (#3042).
+## [v0.51.365] — 2026-06-11 — Release MD (lineage-segment open + reasoning chip fixes)
+
+### Fixed
+
+- **Clicking an expanded session-lineage segment now opens that exact session instead of resolving back to the collapsed parent (#4003).** The explicit lineage-segment and child-row click handlers now skip the collapsed-id lineage resolution (which is only meant for stale collapsed rows), so the session you click is the session that loads.
+- **The reasoning-effort chip no longer disappears after you pick an effort (#3958).** Selecting an effort posted to `/api/reasoning`, which re-resolved the supported efforts for the config-default model rather than the active session's model — so a session whose model differs from the default lost its chip until a refresh. The effort POST now carries the active session's model/provider context, matching the GET path, so the chip stays correct. (#3958)
+
+## [v0.51.364] — 2026-06-11 — Release MC (self-heal stuck session loads)
+
+### Fixed
+
+- **A failed session load no longer wedges the WebUI so that no chat can be opened (#3993).** When a session load failed with a non-404 error (400/403/500/network) during boot, the stale session id stayed in `localStorage` and the URL, so every refresh retried the same dead session and the transcript pane stayed stuck. Boot-time load failures now self-heal by clearing the stale id (mirroring the existing 404 self-heal). The clear is strictly scoped: it only runs when no session is on screen (a boot restore), never when you're already viewing a healthy session (the error may be transient), and a stale in-flight load that's been superseded by a newer session selection bails before touching anything — so it can't wipe the session you just navigated to.
+
+## [v0.51.363] — 2026-06-11 — Release MB (rename/move/update CLI sessions without 404)
+
+### Fixed
+
+- **Renaming, moving, or updating a CLI/agent session that isn't yet in the WebUI store no longer 404s (#3985).** These actions previously only looked in the WebUI session store, so a session originating from the TUI/CLI/agent (not yet materialized into the store) couldn't be renamed/moved/updated. They now fall back to materializing the session from its CLI metadata (mirroring the existing `/api/session/archive` behavior). Read-only imported sessions (messaging channels, Claude Code) remain protected: they're refused with 403 on both the already-stored and the materialize paths, and a state.db-owned messaging session is never materialized into a writable WebUI sidecar. (#3985)
+
 
 ## [v0.51.362] — 2026-06-11 — Release MA (malformed providers config no longer crashes)
 
