@@ -1800,7 +1800,9 @@ let _messagesTruncated = false;
 // Called after loadSession fetches metadata (messages=0).
 // Idempotent: if messages are already in S.messages, resolves immediately.
 // Handles streaming sessions specially: restores from INFLIGHT cache or API.
-// msg_limit (default 30): only fetch the last N messages for fast switching.
+// msg_limit (default 30): fetch a tail window with roughly N visible
+// user/assistant rows for fast switching. Tool rows inside the window are
+// server-bounded and do not consume the visible-message budget.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
 let _sameSessionForceReloadHint = null;
@@ -1886,11 +1888,9 @@ async function _ensureMessagesLoaded(sid) {
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
   const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';
-  // expand_renderable=1 is sent ONLY here, on the initial cold load: it tells
-  // the server to expand the tail window backward until it holds ~msg_limit
-  // *renderable* rows so a tool-heavy session doesn't open showing 1-2 visible
-  // messages (#3790). The "Load earlier" path (_loadOlderMessages) deliberately
-  // omits it to keep its raw transport cap.
+  // Older frontends used expand_renderable=1 to request visible-row expansion.
+  // The server now counts msg_limit by visible transcript rows by default; keep
+  // the flag for compatibility with mixed-version deployments.
   const expandParam = reloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
