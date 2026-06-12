@@ -3763,10 +3763,22 @@ function renderMd(raw){
       return false;
     }
   }
+  function _isSafeLabelInline(tag){
+    return /^<\/?(strong|em|del|code)([\s>]|$)/i.test(tag);
+  }
+  function _markdownLabelHtml(label){
+    const _label_stash=[];
+    const tokenized=String(label||'').replace(/<\/?[a-z][^>]*>/gi,tag=>{
+      if(!_isSafeLabelInline(tag)) return tag;
+      _label_stash.push(tag);
+      return `\x00H${_label_stash.length-1}\x00`;
+    });
+    return esc(tokenized).replace(/\x00H(\d+)\x00/g,(_,i)=>_label_stash[+i]);
+  }
   function _markdownAnchor(label,rawUrl){
     const href=_markdownHref(rawUrl);
     const internal=/^session:\/\//i.test(String(rawUrl||'')) || _isInternalSessionHref(href);
-    return `<a${internal?' class="session-link"':''} href="${href}"${internal?'':' target="_blank" rel="noopener"'}>${esc(label)}</a>`;
+    return `<a${internal?' class="session-link"':''} href="${href}"${internal?'':' target="_blank" rel="noopener"'}>${_markdownLabelHtml(label)}</a>`;
   }
   function _isSafeUrl(v, img){
     const raw=_safeAttrValue(v);
