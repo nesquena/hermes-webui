@@ -1202,6 +1202,26 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           </div>
           ${isEdit ? `<div class="detail-form-hint">${esc(t('cron_skills_edit_hint') || 'Skill list is not editable after creation.')}</div>` : ''}
         </div>`;
+  const modelBlock = isNoAgent ? '' : `
+        <div class="detail-form-row">
+          <label for="cronFormModel">${esc(t('cron_model_label') || 'Model')}</label>
+          <select id="cronFormModel">
+            <option value="">${esc(t('cron_model_default') || 'Server default')}</option>
+          </select>
+        </div>
+        <div class="detail-form-row">
+          <label for="cronFormReasoning">${esc(t('cron_reasoning_label') || 'Reasoning effort')}</label>
+          <select id="cronFormReasoning">
+            <option value="" ${!reasoning_effort ? 'selected' : ''}>${esc(t('cron_reasoning_default') || 'Default')}</option>
+            <option value="none" ${reasoning_effort === 'none' ? 'selected' : ''}>None</option>
+            <option value="minimal" ${reasoning_effort === 'minimal' ? 'selected' : ''}>Minimal</option>
+            <option value="low" ${reasoning_effort === 'low' ? 'selected' : ''}>Low</option>
+            <option value="medium" ${reasoning_effort === 'medium' ? 'selected' : ''}>Medium</option>
+            <option value="high" ${reasoning_effort === 'high' ? 'selected' : ''}>High</option>
+            <option value="xhigh" ${reasoning_effort === 'xhigh' ? 'selected' : ''}>Extra High</option>
+            <option value="max" ${reasoning_effort === 'max' ? 'selected' : ''}>Max</option>
+          </select>
+        </div>`;
   body.innerHTML = `
     <div class="main-view-content">
       ${isNoAgent ? _cronScriptJobBannerHtml() : ''}
@@ -1226,6 +1246,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           </label>
           <div id="cronFormNoAgentHint" class="detail-form-hint cron-no-agent-hint" style="${isNoAgent ? '' : 'display:none'}">No-agent mode runs the configured script directly; the prompt is ignored. No-agent script: <code>${esc(script || '—')}</code></div>
         </div>
+        ${modelBlock}
         <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
           <select id="cronFormDeliver">
@@ -1254,6 +1275,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
   if (empty) empty.style.display = 'none';
   _setCronHeaderButtons(isEdit ? 'edit' : 'create');
   _populateCronDeliverOptions(deliver, isEdit);
+  if (!isNoAgent) _populateCronModelOptions(model, provider);
   if (!isNoAgent) _renderCronSkillTags();
   const scheduleEl = $('cronFormSchedule');
   if (scheduleEl) {

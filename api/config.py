@@ -4459,7 +4459,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
         hidden = providers_cfg.get("hidden_providers", []) if isinstance(providers_cfg, dict) else []
         if isinstance(hidden, list):
             hidden_canonical = {_canonicalise_provider_id(h) or str(h).strip().lower() for h in hidden}
-            detected_providers = {p for p in detected_providers if _canonicalise_provider_id(p) or p not in hidden_canonical}
+            detected_providers = {p for p in detected_providers if (_canonicalise_provider_id(p) or p) not in hidden_canonical}
 
         # Post-collection dedup: re-canonicalise every entry so any path that
         # added a non-canonical id (mixed-case from auth-store, raw config-key,
