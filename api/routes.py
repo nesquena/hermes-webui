@@ -185,12 +185,33 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
 from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
 
 
+def _webui_profile_management_restricted_response(handler) -> bool:
+    """Block profile create/delete mutations on restricted WebUI instances."""
+    try:
+        from api.profiles import webui_profile_policy_restricted
+
+        if webui_profile_policy_restricted():
+            bad(handler, "Profile management is disabled for this WebUI instance", 403)
+            return True
+    except Exception:
+        logger.debug("Failed to inspect WebUI profile policy", exc_info=True)
+    return False
+
+
 def _all_profiles_query_flag(parsed_url) -> bool:
     """Return True if the request URL has `?all_profiles=1` (or true/yes).
 
     Centralizes the opt-in parsing so /api/sessions and /api/projects use
-    the same shape. Accepts 1/true/yes (case-insensitive) for ergonomics.
+    the same semantics. Locked/allowlisted WebUI instances never expose
+    aggregate cross-profile views, even if a client supplies `all_profiles=1`.
     """
+    try:
+        from api.profiles import webui_profile_policy_restricted
+
+        if webui_profile_policy_restricted():
+            return False
+    except Exception:
+        logger.debug("Failed to inspect WebUI profile policy", exc_info=True)
     qs = parse_qs(parsed_url.query)
     raw = qs.get('all_profiles', [''])[0].strip().lower()
     return raw in ('1', 'true', 'yes', 'on')
@@ -6841,29 +6862,37 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
-        from api.profiles import list_profiles_api, get_active_profile_name
-
-        return j(
-            handler,
-            {"profiles": list_profiles_api(), "active": get_active_profile_name()},
+        from api.profiles import (
+            filter_profiles_for_webui_policy,
+            get_active_profile_name,
+            list_profiles_api,
+            webui_profile_policy_response_fields,
         )
+
+        profiles = filter_profiles_for_webui_policy(list_profiles_api())
+        payload = {
+            "profiles": profiles,
+            "active": get_active_profile_name(),
+        }
+        payload.update(webui_profile_policy_response_fields())
+        return j(handler, payload)
 
     if parsed.path == "/api/profile/active":
         from api.profiles import (
             _is_root_profile,
             get_active_hermes_home,
             get_active_profile_name,
+            webui_profile_policy_response_fields,
         )
 
         active_profile_name = get_active_profile_name()
-        return j(
-            handler,
-            {
-                "name": active_profile_name,
-                "path": str(get_active_hermes_home()),
-                "is_default": _is_root_profile(active_profile_name),
-            },
-        )
+        payload = {
+            "name": active_profile_name,
+            "path": str(get_active_hermes_home()),
+            "is_default": _is_root_profile(active_profile_name),
+        }
+        payload.update(webui_profile_policy_response_fields())
+        return j(handler, payload)
 
     # ── Gateway Status (GET) ──
     if parsed.path == "/api/gateway/status":
@@ -8349,13 +8378,22 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         try:
-            from api.profiles import switch_profile, _validate_profile_name
+            from api.profiles import (
+                _validate_profile_name,
+                ensure_profile_allowed_for_webui,
+                filter_profiles_for_webui_policy,
+                switch_profile,
+                webui_profile_policy_response_fields,
+            )
             from api.helpers import build_profile_cookie
+            name = ensure_profile_allowed_for_webui(name)
             if name != 'default':
                 _validate_profile_name(name)
             # process_wide=False: don't mutate the process-global _active_profile.
             # Per-client profile is managed via cookie + thread-local (#798).
             result = switch_profile(name, process_wide=False)
+            result['profiles'] = filter_profiles_for_webui_policy(result.get('profiles', []))
+            result.update(webui_profile_policy_response_fields())
             # Invalidate the models cache so the very next /api/models request
             # rebuilds from the new profile's config.yaml rather than returning
             # the old profile's cached model list (#1200 — profile-switch model bug).
@@ -8364,12 +8402,16 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, result, extra_headers={
                 'Set-Cookie': build_profile_cookie(name, handler),
             })
+        except PermissionError as e:
+            return bad(handler, str(e), 403)
         except (ValueError, FileNotFoundError) as e:
             return bad(handler, _sanitize_error(e), 404)
         except RuntimeError as e:
             return bad(handler, str(e), 409)
 
     if parsed.path == "/api/profile/create":
+        if _webui_profile_management_restricted_response(handler):
+            return True
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -8408,6 +8450,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
 
     if parsed.path == "/api/profile/delete":
+        if _webui_profile_management_restricted_response(handler):
+            return True
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")

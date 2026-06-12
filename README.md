@@ -238,6 +238,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Clone config from active profile on create
 - Optional custom endpoint fields on create -- Base URL and API key written into the profile's `config.yaml` at creation time, so Ollama, LMStudio, and other local endpoints can be configured without editing files manually
 - Seamless switching -- no server restart; reloads config, skills, memory, cron, models
+- Optional instance profile restrictions for shared or dedicated deployments -- lock a WebUI instance to one profile or expose only an allowlist
 - Per-session profile tracking (records which profile was active at creation)
 
 ### Authentication and security
@@ -341,6 +342,8 @@ Full list of environment variables:
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
+| `HERMES_WEBUI_PROFILE_LOCK` | *(unset)* | Optional profile name that this WebUI instance is locked to. Overrides the profile cookie and disables cross-profile switching/management. |
+| `HERMES_WEBUI_PROFILE_ALLOWLIST` | *(unset)* | Optional comma/space-separated profile names this WebUI instance may use. Filters profile lists and rejects switches outside the allowlist. |
 | `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the report-only CSP `connect-src` directive for reverse-proxy or tunnel deployments |
 | `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
 | `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
