@@ -1063,10 +1063,22 @@ async function send(){
   if(_forcedSkillDirectivePending){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
-      const _directive = await _pending.promise;
+      const _directivePayload = await _pending.promise;
       if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
-      if(typeof _directive==='string'&&_directive){
-        msgText=`${_directive}\n\n${msgText||''}`.trim();
+      if(_directivePayload){
+        const _directive = typeof _directivePayload==='string'
+          ? _directivePayload
+          : String(_directivePayload.directive||'').trim();
+        const _forcedSkillName = typeof _directivePayload==='string'
+          ? ''
+          : String(_directivePayload.name||'').trim();
+        const _forcedSkillContent = typeof _directivePayload==='string'
+          ? ''
+          : String(_directivePayload.content||'').trim();
+        const _forcedSkillBlock = _forcedSkillName&&_forcedSkillContent
+          ? `[FORCED SKILL CONTEXT: ${_forcedSkillName}]\n${_forcedSkillContent}\n[/FORCED SKILL CONTEXT]`
+          : '';
+        msgText=`${_directive}${_forcedSkillBlock?`\n\n${_forcedSkillBlock}`:''}\n\n${msgText||''}`.trim();
       }
     }
   }
