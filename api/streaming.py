@@ -7059,6 +7059,17 @@ def _run_agent_streaming(
                         _compression_summary_from_messages(s.messages)
                         or _compression_summary_from_messages(s.context_messages)
                     )
+                    # Set truncation_watermark so reconciled_state_db_messages_for_session()
+                    # skips stale pre-compression rows from state.db during context merge.
+                    # Without this, state_db_delta_after_context() can't align compressed
+                    # content with originals (different fingerprints, best_len < 2) and
+                    # returns ALL state.db rows, defeating the compression.
+                    try:
+                        from api.session_ops import _truncation_watermark_for
+                        s.truncation_watermark = _truncation_watermark_for(s.messages)
+                    except Exception:
+                        pass
+
                     if _compression_continuation_session_id is None:
                         _compression_continuation_session_id = s.session_id
                     put('compressed', {

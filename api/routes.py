@@ -14947,6 +14947,18 @@ def _handle_session_compress(handler, body):
             s.compression_anchor_summary = _compact_summary_text(
                 summary_text or _compression_summary_from_messages(compressed) or ""
             )
+
+            # Set truncation_watermark so reconciled_state_db_messages_for_session()
+            # skips stale pre-compression rows from state.db during context merge.
+            # Without this, state_db_delta_after_context() can't align compressed
+            # content with originals (different fingerprints, best_len < 2) and
+            # returns ALL state.db rows, defeating the compression.
+            try:
+                from api.session_ops import _truncation_watermark_for
+                s.truncation_watermark = _truncation_watermark_for(compressed)
+            except Exception:
+                pass
+
             s.save()
 
         session_payload = redact_session_data(
