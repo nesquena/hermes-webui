@@ -238,6 +238,19 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
 
 
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_report_collectionfinish(config, items):
+    """Avoid pytest-shard's giant nodeid dump on sharded `-v` CI runs."""
+    verbose = getattr(config.option, "verbose", 0)
+    shard_total = getattr(config.option, "num_shards", 1)
+    if shard_total > 1 and verbose > 0:
+        config.option.verbose = 0
+    try:
+        yield
+    finally:
+        config.option.verbose = verbose
+
+
 # ── Disable AWS IMDS probing for the pytest session ────────────────────────
 # Background: when hermes-agent's bedrock_adapter / botocore credential chain
 # runs during test execution (e.g. provider catalog enumeration triggered by
