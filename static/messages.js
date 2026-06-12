@@ -1476,11 +1476,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const h=document.getElementById('interToolHint');
     if(h)h.remove();
   }
+  function _clearLiveVisibilityTimers(){
+    _clearInterToolHint();
+    _toolElapsedTimers.forEach(h=>clearInterval(h));
+    _toolElapsedTimers.clear();
+  }
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
     if(_ownsActiveStreamOrBackground()) return false;
+    _clearLiveVisibilityTimers();
     _closeSource(source);
     return true;
   }
@@ -1626,6 +1632,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _terminalStateReached=true;
     _streamFinalized=true;
+    _clearLiveVisibilityTimers();
     _cancelAnimationFramePendingStreamRender();
     _streamFadeCleanupReduceMotionListener();
     _smdEndParser();
@@ -3149,9 +3156,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
       _clearStreamEndRecovery();
-      _clearInterToolHint();
-      _toolElapsedTimers.forEach(h=>clearInterval(h));
-      _toolElapsedTimers.clear();
+      _clearLiveVisibilityTimers();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
@@ -3515,6 +3520,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
+      _clearLiveVisibilityTimers();
       _cancelAnimationFramePendingStreamRender();
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
@@ -3666,6 +3672,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
+      _clearLiveVisibilityTimers();
       _cancelAnimationFramePendingStreamRender();
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
@@ -3769,6 +3776,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
+      _clearLiveVisibilityTimers();
       _cancelAnimationFramePendingStreamRender();
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
@@ -3840,6 +3848,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _streamFinalized=true;
+    _clearLiveVisibilityTimers();
     _cancelAnimationFramePendingStreamRender();
     _streamFadeCleanupReduceMotionListener();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();

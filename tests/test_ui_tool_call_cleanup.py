@@ -128,6 +128,63 @@ def _function_src(src: str, name: str) -> str:
     return src[match.start():i]
 
 
+def _listener_body(src: str, event_name: str) -> str:
+    marker = f"source.addEventListener('{event_name}',"
+    start = src.find(marker)
+    assert start != -1, f"{event_name} listener not found"
+    brace = src.find("{", start)
+    assert brace != -1, f"{event_name} listener has no body"
+    depth = 1
+    i = brace + 1
+    in_string = None
+    escaped = False
+    in_line_comment = False
+    in_block_comment = False
+    while i < len(src) and depth:
+        ch = src[i]
+        nxt = src[i + 1] if i + 1 < len(src) else ""
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+        if in_block_comment:
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == in_string:
+                in_string = None
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if ch in "'\"`":
+            in_string = ch
+            i += 1
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, f"{event_name} listener body did not close"
+    return src[brace + 1:i - 1]
+
+
 def _run_thinking_echo_helper(*args: str) -> str:
     helpers = "\n".join(
         _function_src(UI_JS, name)
@@ -333,6 +390,33 @@ class TestToolCallGroupingStatic:
         assert "tool-call-group-list" not in sync_fn, (
             "Readable progress must not reintroduce the noisy secondary tool-name list."
         )
+
+    def test_live_visibility_timers_clear_on_all_terminal_paths(self):
+        cleanup_fn = _function_body(MESSAGES_JS, "_clearLiveVisibilityTimers")
+        assert "_clearInterToolHint()" in cleanup_fn, (
+            "Live-only inter-tool hints must be removed before any terminal or settled render."
+        )
+        assert "_toolElapsedTimers.forEach" in cleanup_fn and "clearInterval" in cleanup_fn, (
+            "Live tool elapsed timers must be cleared as a group, not only by the done path."
+        )
+        assert "_toolElapsedTimers.clear()" in cleanup_fn, (
+            "Cleared interval handles must be removed from the live stream closure."
+        )
+
+        required_terminal_bodies = {
+            "done listener": _listener_body(MESSAGES_JS, "done"),
+            "apperror listener": _listener_body(MESSAGES_JS, "apperror"),
+            "cancel listener": _listener_body(MESSAGES_JS, "cancel"),
+            "stream_end fallback": _function_body(MESSAGES_JS, "_finalizeStreamEndFallback"),
+            "settled restore": _function_body(MESSAGES_JS, "_restoreSettledSession"),
+            "hard stream error": _function_body(MESSAGES_JS, "_handleStreamError"),
+            "stale terminal event": _function_body(MESSAGES_JS, "_bailOutOfTerminalEventsFromStaleStream"),
+        }
+        for label, body in required_terminal_bodies.items():
+            assert "_clearLiveVisibilityTimers()" in body, (
+                f"{label} must clear transient live visibility timers so hints/durations "
+                "cannot leak into terminal, restored, or settled DOM."
+            )
 
     def test_terminal_worklog_titles_summarize_common_diagnostic_commands(self):
         start = UI_JS.find("function _toolCommandTitle")
