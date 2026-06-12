@@ -517,7 +517,7 @@ console.log(JSON.stringify(rows));
     assert "_child_sessions" not in rows[0]
 
 
-def test_nested_fork_bubbles_parent_timestamp_for_sorting():
+def test_nested_fork_keeps_parent_timestamp_for_sorting():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
 const src = {js!r};
@@ -546,7 +546,7 @@ console.log(JSON.stringify(rows));
 """
     rows = json.loads(_run_node(source))
     assert rows[0]["session_id"] == "parent"
-    assert rows[0]["last_message_at"] == 20
+    assert rows[0]["last_message_at"] == 10
 
 
 def test_nested_fork_bubbles_parent_attention_state():
