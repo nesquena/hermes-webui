@@ -462,6 +462,25 @@
       <div id="queueCard" class="queue-card" role="region" aria-label="Queued messages" aria-live="polite">
         <div id="queueChips" class="queue-card-inner"></div>
       </div>
+      <!-- Busy hint bar: visible when agent is busy, surfaces /interrupt, /queue, /steer, New Chat -->
+      <div id="busyHintBar" class="busy-hint-bar" hidden aria-label="Available actions while agent is responding">
+        <button class="busy-hint-pill" data-action="interrupt" onclick="_handleBusyHintPill('interrupt')" title="Interrupt the current response and send your draft" aria-label="Interrupt and send">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 4v16"/><path d="M6.029 4.285A2 2 0 0 0 3 6v12a2 2 0 0 0 3.029 1.715l9.997-5.998a2 2 0 0 0 .003-3.432z"/></svg>
+          <span data-i18n="composer_interrupt">Interrupt and send</span>
+        </button>
+        <button class="busy-hint-pill" data-action="queue" onclick="_handleBusyHintPill('queue')" title="Queue a message to send after the current response" aria-label="Queue message">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 5H3"/><path d="M16 12H3"/><path d="M9 19H3"/><path d="m16 16-3 3 3 3"/><path d="M21 5v12a2 2 0 0 1-2 2h-6"/></svg>
+          <span data-i18n="composer_queue">Queue message</span>
+        </button>
+        <button class="busy-hint-pill" data-action="steer" onclick="_handleBusyHintPill('steer')" title="Steer the current response" aria-label="Steer current response">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"/></svg>
+          <span data-i18n="composer_steer">Steer current response</span>
+        </button>
+        <button class="busy-hint-pill busy-hint-pill--new-chat" data-action="new_chat" onclick="_handleBusyHintPill('new_chat')" title="Start a new conversation in parallel" aria-label="New conversation">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          <span data-i18n="new_conversation">New conversation</span>
+        </button>
+      </div>
       <div class="approval-card" id="approvalCard" role="alertdialog" aria-labelledby="approvalHeading" aria-describedby="approvalDesc">
         <div class="approval-inner">
           <div class="approval-header">
