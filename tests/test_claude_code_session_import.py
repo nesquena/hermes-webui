@@ -219,6 +219,71 @@ def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, t
     assert session["is_cli_session"] is True
 
 
+def test_session_import_cli_queues_generated_title_for_writable_default_cli_title(monkeypatch):
+    import api.routes as routes
+
+    sid = "cli_writable_default_title"
+    messages = [{"role": "user", "content": "Need a better imported title"}]
+    cli_meta = {
+        "session_id": sid,
+        "title": "CLI Session",
+        "model": "claude-code",
+        "created_at": 10.0,
+        "updated_at": 20.0,
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "session_source": "external_agent",
+        "source_label": "CLI",
+        "is_cli_session": True,
+        "read_only": False,
+    }
+    persisted = {}
+    queued = []
+    published = []
+
+    class FakeImportedSession:
+        def __init__(self):
+            self.session_id = sid
+            self.title = "CLI Session"
+            self.messages = list(messages)
+            self.profile = "default"
+            self.model = "claude-code"
+            self.read_only = False
+            self.is_cli_session = True
+
+        def save(self, touch_updated_at=False):
+            persisted["saved"] = touch_updated_at
+
+        def compact(self):
+            return {"session_id": sid, "title": self.title}
+
+    imported = FakeImportedSession()
+
+    monkeypatch.setattr(routes.Session, "load", classmethod(lambda _cls, _sid: None))
+    monkeypatch.setattr(routes, "require", lambda body, *keys: None)
+    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: messages if _sid == sid else [])
+    monkeypatch.setattr(routes, "get_cli_sessions", lambda: [cli_meta])
+    monkeypatch.setattr(routes, "import_cli_session", lambda *args, **kwargs: imported)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda reason, profile=None: published.append((reason, profile)))
+    monkeypatch.setattr(routes, "_queue_generated_title_for_imported_session", lambda session, meta: queued.append((session, meta.copy())))
+
+    response = routes._handle_session_import_cli(object(), {"session_id": sid})
+
+    assert response["imported"] is True
+    assert persisted["saved"] is False
+    assert published == [("session_import_cli", "default")]
+    assert queued == [(imported, {
+        "title": "CLI Session",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "session_source": "external_agent",
+        "source_label": "CLI",
+        "read_only": False,
+    })]
+
+
 def test_read_only_source_badge_ui_guards_are_present():
     sessions_js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     messages_js = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
