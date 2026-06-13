@@ -687,6 +687,176 @@ def _load_gateway_session_identity_map() -> dict[str, dict]:
     return mapping.copy()
 
 
+def _gateway_status_payload() -> dict:
+    import datetime
+
+    identity_map = _load_gateway_session_identity_map()
+    sessions_path = _gateway_session_metadata_path()
+
+    # Detect whether the gateway process is alive, independent of connected
+    # messaging platforms. An empty identity_map means zero connected
+    # platforms, not necessarily a stopped gateway.
+    health = build_agent_health_payload()
+    alive = health.get("alive")
+    details = health.get("details") if isinstance(health.get("details"), dict) else {}
+    health_reason = details.get("reason")
+    health_state = details.get("state")
+    health_gateway_state = details.get("gateway_state")
+    if alive is True:
+        running = True
+        configured = True
+    elif alive is False:
+        running = False
+        configured = True
+    else:
+        gateway_running_metadata = (
+            health_reason == "gateway_stale_running_state"
+            or health_gateway_state == "running"
+        )
+        configured = True if gateway_running_metadata else bool(identity_map)
+        running = bool(identity_map)
+
+    platforms_set: set[str] = set()
+    for meta in identity_map.values():
+        raw = meta.get("raw_source") or meta.get("platform") or ""
+        norm = _normalize_messaging_source(raw)
+        if norm:
+            platforms_set.add(norm)
+    platform_labels = {
+        "telegram": "Telegram",
+        "discord": "Discord",
+        "slack": "Slack",
+        "email": "Email",
+        "web": "Web",
+        "api": "API",
+    }
+    platforms = sorted(
+        [{"name": p, "label": platform_labels.get(p, p.title())} for p in platforms_set],
+        key=lambda x: x["label"],
+    )
+    last_active = ""
+    if running and sessions_path.exists():
+        try:
+            mtime = sessions_path.stat().st_mtime
+            last_active = datetime.datetime.fromtimestamp(mtime).isoformat()
+        except Exception:
+            pass
+    return {
+        "running": running,
+        "configured": configured,
+        "platforms": platforms,
+        "last_active": last_active,
+        "session_count": len(identity_map),
+        "health": {
+            "state": health_state,
+            "reason": health_reason,
+            "gateway_state": health_gateway_state,
+        },
+    }
+
+
+_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
+
+
+def _run_gateway_lifecycle_command(action: str) -> subprocess.CompletedProcess:
+    if action not in {"start", "stop", "restart"}:
+        raise ValueError("unsupported gateway action")
+
+    from api import config as api_config
+    from api.profiles import get_active_profile_name
+
+    agent_dir = getattr(api_config, "_AGENT_DIR", None)
+    if not agent_dir:
+        raise FileNotFoundError("Hermes agent checkout not found")
+    agent_dir = Path(agent_dir).expanduser().resolve()
+    main_py = agent_dir / "hermes_cli" / "main.py"
+    if not main_py.exists():
+        raise FileNotFoundError("Hermes agent CLI entrypoint not found")
+
+    cmd = [str(getattr(api_config, "PYTHON_EXE", sys.executable)), str(main_py)]
+    profile_name = ""
+    try:
+        profile_name = str(get_active_profile_name() or "").strip()
+    except Exception as exc:
+        logger.debug("Could not resolve active profile for gateway lifecycle: %s", exc)
+    if profile_name and profile_name != "default":
+        cmd.extend(["--profile", profile_name])
+    cmd.extend(["gateway", action])
+
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("BROWSER", "echo")
+    return subprocess.run(
+        cmd,
+        cwd=str(agent_dir),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
+    )
+
+
+def _handle_gateway_lifecycle(handler, action: str, body: dict):
+    del body  # Reserved for future per-gateway naming without changing the route contract.
+    try:
+        result = _run_gateway_lifecycle_command(action)
+    except ValueError as exc:
+        return bad(handler, str(exc), 400)
+    except FileNotFoundError as exc:
+        return j(handler, {"ok": False, "error": _sanitize_error(exc), "action": action}, status=500)
+    except subprocess.TimeoutExpired as exc:
+        logger.warning(
+            "Gateway %s command timed out after %ss; stdout=%r stderr=%r",
+            action,
+            _GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,
+            exc.stdout,
+            exc.stderr,
+        )
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": f"Gateway {action} timed out after {_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS} seconds",
+                "action": action,
+            },
+            status=504,
+        )
+    except Exception as exc:
+        logger.exception("Gateway %s command failed before completion", action)
+        return j(handler, {"ok": False, "error": _sanitize_error(exc), "action": action}, status=500)
+
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if result.returncode != 0:
+        logger.warning(
+            "Gateway %s command failed with exit code %s; stdout=%r stderr=%r",
+            action,
+            result.returncode,
+            stdout,
+            stderr,
+        )
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": f"Gateway {action} failed with exit code {result.returncode}",
+                "action": action,
+                "returncode": result.returncode,
+            },
+            status=500,
+        )
+
+    return j(
+        handler,
+        {
+            "ok": True,
+            "action": action,
+            "message": stdout or f"Gateway {action} completed.",
+            "status": _gateway_status_payload(),
+        },
+    )
+
+
 def _mark_cron_running(job_id: str):
     with _RUNNING_CRON_LOCK:
         _RUNNING_CRON_JOBS[job_id] = time.time()
@@ -6932,97 +7102,7 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Gateway Status (GET) ──
     if parsed.path == "/api/gateway/status":
-        import datetime
-        identity_map = _load_gateway_session_identity_map()
-        sessions_path = _gateway_session_metadata_path()
-
-        # Detect whether the gateway process is alive, independent of
-        # connected messaging platforms.  An empty identity_map just
-        # means zero platforms connected, not that the gateway is down.
-        #
-        # agent_health.build_agent_health_payload() is the authoritative
-        # signal: it reads gateway.status runtime metadata and returns a
-        # tri-state `alive` field (True/False/None).  This avoids the
-        # false-negative where the gateway is running but has zero active
-        # messaging sessions (empty identity_map).
-        #
-        # `alive` tri-state semantics:
-        #   True  → gateway process is alive
-        #   False → gateway metadata exists but process is down
-        #   None  → no gateway metadata/status available; this WebUI
-        #           setup is probably not configured with a gateway
-        health = build_agent_health_payload()
-        alive = health.get("alive")
-        details = health.get("details") if isinstance(health.get("details"), dict) else {}
-        health_reason = details.get("reason")
-        health_state = details.get("state")
-        health_gateway_state = details.get("gateway_state")
-        if alive is True:
-            running = True
-            configured = True
-        elif alive is False:
-            running = False
-            configured = True
-        else:  # alive is None
-            # `alive is None` conflates two very different states:
-            #   (a) no gateway metadata at all → genuinely not configured
-            #   (b) gateway metadata EXISTS but is stale/inconclusive.
-            # A stale-but-RUNNING gateway (freshly started, hasn't ticked
-            # `updated_at` yet, or cross-container) still proves the gateway is
-            # *configured* — the banner must not report "Gateway not configured"
-            # just because no conversation has happened yet and identity_map is
-            # empty (#3194).
-            #
-            # A stale-STOPPED gateway is deliberately NOT treated as configured:
-            # agent_health emits `gateway_stale_stopped_state` precisely so a
-            # stopped service the user isn't running reads like "no root gateway
-            # configured" rather than nagging (#1944). So stale-stopped falls
-            # through to the identity_map signal like the genuinely-unconfigured
-            # case.
-            gateway_running_metadata = (
-                health_reason == "gateway_stale_running_state"
-                or health_gateway_state == "running"
-            )
-            configured = True if gateway_running_metadata else bool(identity_map)
-            running = bool(identity_map)
-
-        platforms_set: set[str] = set()
-        for meta in identity_map.values():
-            raw = meta.get("raw_source") or meta.get("platform") or ""
-            norm = _normalize_messaging_source(raw)
-            if norm:
-                platforms_set.add(norm)
-        _PLATFORM_LABELS = {
-            "telegram": "Telegram",
-            "discord": "Discord",
-            "slack": "Slack",
-            "email": "Email",
-            "web": "Web",
-            "api": "API",
-        }
-        platforms = sorted(
-            [{"name": p, "label": _PLATFORM_LABELS.get(p, p.title())} for p in platforms_set],
-            key=lambda x: x["label"],
-        )
-        last_active = ""
-        if running and sessions_path.exists():
-            try:
-                mtime = sessions_path.stat().st_mtime
-                last_active = datetime.datetime.fromtimestamp(mtime).isoformat()
-            except Exception:
-                pass
-        return j(handler, {
-            "running": running,
-            "configured": configured,
-            "platforms": platforms,
-            "last_active": last_active,
-            "session_count": len(identity_map),
-            "health": {
-                "state": health_state,
-                "reason": health_reason,
-                "gateway_state": health_gateway_state,
-            },
-        })
+        return j(handler, _gateway_status_payload())
 
     # ── MCP Servers (GET) ──
     if parsed.path == "/api/mcp/servers":
@@ -8407,6 +8487,9 @@ def handle_post(handler, parsed) -> bool:
     # ── Memory (POST) ──
     if parsed.path == "/api/memory/write":
         return _handle_memory_write(handler, body)
+
+    if parsed.path in {"/api/gateway/start", "/api/gateway/stop", "/api/gateway/restart"}:
+        return _handle_gateway_lifecycle(handler, parsed.path.rsplit("/", 1)[-1], body)
 
     # ── Profile API (POST) ──
     if parsed.path == "/api/profile/switch":
