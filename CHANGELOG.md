@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.392] — 2026-06-13 — Release NE (align WebUI reasoning efforts to the agent's accepted set, drop "max")
+
+### Fixed
+
+- **The WebUI no longer offers a "Max" reasoning effort the agent never accepted.** `VALID_REASONING_EFFORTS` is now `minimal/low/medium/high/xhigh` — matching `hermes-agent`'s own `VALID_REASONING_EFFORTS` (which has no `max`) — and the reasoning picker, `/reasoning` slash-command args, and help text drop the stale `Max` option. A previously-saved `reasoning_effort: max` is migrated to `xhigh` at resolve time (instead of becoming parser-invalid and silently dropping reasoning), so existing configs keep working. This is the "only expose what the model/agent actually supports" cleanup. (#3505 review follow-up)
+
 ## [v0.51.391] — 2026-06-13 — Release ND (Stable Assistant Turn Anchors renderer snapshot adapter, inert, #3926)
 
 ### Added
