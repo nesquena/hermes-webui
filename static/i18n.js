@@ -870,6 +870,10 @@ const LOCALES = {
     insights_skill_usage_col_views: 'Views',
     insights_skill_usage_col_share: 'Usage %',
     insights_skill_usage_col_patches: 'Patches',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
     workspace_desc: 'Add and switch workspaces for your sessions.',
     session_meta_messages: (n) => `${n} msg${n === 1 ? '' : 's'}`,
     session_meta_children: (n) => `${n} child${n === 1 ? '' : 'ren'}`,
@@ -2833,6 +2837,10 @@ const LOCALES = {
     outline_title: 'Struttura',
     outline_empty: 'Nessuna domanda ancora.',
     outline_loading: 'Caricamento…',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
   },
 
   ja: {
@@ -4249,6 +4257,10 @@ const LOCALES = {
     outline_title: 'アウトライン',
     outline_empty: 'まだ質問はありません。',
     outline_loading: '読み込み中…',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
   },
 
   ru: {
@@ -5602,6 +5614,10 @@ const LOCALES = {
     outline_title: 'Outline',  // TODO: translate
     outline_empty: 'No questions yet.',  // TODO: translate
     outline_loading: 'Loading…',  // TODO: translate
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
   },
 
   es: {
@@ -6949,6 +6965,10 @@ const LOCALES = {
     outline_title: 'Esquema',
     outline_empty: 'Aún no hay preguntas.',
     outline_loading: 'Cargando…',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
   },
 
   de: {
@@ -8300,6 +8320,10 @@ const LOCALES = {
     outline_title: 'Gliederung',
     outline_empty: 'Noch keine Fragen.',
     outline_loading: 'Laden…',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
   },
 
   zh: {
@@ -9644,6 +9668,10 @@ const LOCALES = {
     outline_title: '大纲',
     outline_empty: '暂无问题。',
     outline_loading: '加载中…',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -11056,6 +11084,10 @@ const LOCALES = {
     outline_title: '大綱',
     outline_empty: '尚無問題。',
     outline_loading: '載入中…',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
 
   },
 
@@ -12285,6 +12317,10 @@ const LOCALES = {
     outline_title: 'Esboço',
     outline_empty: 'Ainda não há perguntas.',
     outline_loading: 'Carregando…',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
   },
   ko: {
     offline_title: '연결이 끊겼습니다',
@@ -13685,6 +13721,10 @@ const LOCALES = {
     outline_title: '개요',
     outline_empty: '아직 질문이 없습니다.',
     outline_loading: '로딩 중…',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
   },
 
   fr: {
@@ -15026,6 +15066,10 @@ const LOCALES = {
     outline_title: 'Plan',
     outline_empty: 'Pas encore de questions.',
     outline_loading: 'Chargement…',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
   },
 
   tr: {
@@ -16430,6 +16474,10 @@ const LOCALES = {
     outline_title: 'Ana Hat',
     outline_empty: 'Henüz soru yok.',
     outline_loading: 'Yükleniyor…',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
   
   
   
@@ -17348,6 +17396,10 @@ const LOCALES = {
     outline_title: 'Zarys',
     outline_empty: 'Nie ma jeszcze pytań.',
     outline_loading: 'Ładowanie…',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
     settings_sidebar_density_compact: 'Kompaktowa',
     settings_sidebar_density_detailed: 'Szczegółowa',
     settings_desc_sidebar_density: 'Kontroluje, ile metadanych wyświetla lista sesji na lewym pasku bocznym.',
