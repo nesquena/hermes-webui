@@ -1054,7 +1054,7 @@ def _purge_agent_pycache(repo_dir: Path) -> None:
         pass
 
 
-def _schedule_restart(delay: float = 2.0) -> None:
+def _schedule_restart(delay: float = 2.0, force: bool = False) -> None:
     """Re-exec this process after *delay* seconds.
 
     Called after a successful update so that the freshly-pulled code is
@@ -1072,7 +1072,8 @@ def _schedule_restart(delay: float = 2.0) -> None:
     while the second update's git-pull is still running, killing it mid-
     stream and leaving the second repo in an unknown partial state.
     Blocking on ``_apply_lock`` before ``os.execv`` means a pending
-    second update always completes before the restart happens.
+    second update always completes before the restart happens. A user-confirmed
+    forced restart skips the active-work wait but still honors the update lock.
     """
     import os
     import sys
@@ -1089,7 +1090,10 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # Threads die when execv replaces the process image, so the lock is
         # released atomically by the kernel.
         with _apply_lock:
-            _wait_until_restart_safe()
+            if force:
+                logger.warning("forcing WebUI restart without waiting for active work")
+            else:
+                _wait_until_restart_safe()
             # Purge bytecode caches so the new process imports from
             # current source.  Without this, Python may serve stale .pyc
             # files whose mtime matches the just-pulled .py files,

@@ -2216,6 +2216,75 @@ window.addEventListener('pageshow', async (event) => {
   }
 });
 
+async function restartServer() {
+  const ok = await showConfirmDialog({
+    title: (typeof t === 'function' ? t('settings_restart_confirm_title') : 'Restart Hermes WebUI'),
+    message: (typeof t === 'function' ? t('settings_restart_confirm_message') : 'Restart the Hermes WebUI server?'),
+    confirmLabel: (typeof t === 'function' ? t('settings_restart_confirm_btn') : 'Restart'),
+    danger: false,
+  });
+  if (!ok) return;
+  const restartRequest = async (force) => api('/api/restart', {
+    method: 'POST',
+    body: JSON.stringify(force ? { force: true } : {}),
+  });
+  localStorage.removeItem('hermes-webui-server-stopped');
+  try {
+    await restartRequest(false);
+  } catch (err) {
+    let payload = null;
+    try { payload = err && err.body ? JSON.parse(err.body) : null; } catch (_) {}
+    if (err && err.status === 409 && payload && payload.requires_confirmation) {
+      const forceOk = await showConfirmDialog({
+        title: (typeof t === 'function' ? t('settings_restart_force_confirm_title') : 'Active work is still running'),
+        message: (typeof t === 'function' ? t('settings_restart_force_confirm_message') : 'A reply or background run is still in progress. Forcing a restart will interrupt it, and in-progress output may be lost. Restart anyway?'),
+        confirmLabel: (typeof t === 'function' ? t('settings_restart_force_confirm_btn') : 'Restart anyway'),
+        danger: true,
+      });
+      if (!forceOk) return;
+      try {
+        await restartRequest(true);
+      } catch (forceErr) {
+        if (typeof setStatus === 'function') setStatus((forceErr && forceErr.message) ? forceErr.message : 'Restart failed');
+        return;
+      }
+    } else {
+      if (typeof setStatus === 'function') setStatus((err && err.message) ? err.message : 'Restart failed');
+      return;
+    }
+  }
+  const restartingMsg = (typeof t === 'function' ? t('settings_restart_reloading_message') : 'Restarting server… reconnecting shortly.');
+  const wrapper = document.createElement('div');
+  wrapper.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-family:system-ui,ui-sans-serif;font-size:14px';
+  const message = document.createElement('p');
+  message.textContent = restartingMsg;
+  wrapper.appendChild(message);
+  document.body.replaceChildren(wrapper);
+  waitForServerRestartAndReload();
+}
+
+function waitForServerRestartAndReload() {
+  const startedAt = Date.now();
+  const minDelayMs = 3000;
+  const maxDelayMs = 12000;
+  const poll = async () => {
+    const elapsed = Date.now() - startedAt;
+    try {
+      const res = await fetch('./?restart_check=' + Date.now(), { cache: 'no-store' });
+      if (elapsed >= minDelayMs && res && res.ok) {
+        window.location.reload();
+        return;
+      }
+    } catch (_) {}
+    if (elapsed >= maxDelayMs) {
+      window.location.reload();
+      return;
+    }
+    setTimeout(poll, 1000);
+  };
+  setTimeout(poll, 1000);
+}
+
 async function shutdownServer() {
   const ok = await showConfirmDialog({
     title: (typeof t === 'function' ? t('settings_shutdown_confirm_title') : 'Stop Hermes WebUI'),
