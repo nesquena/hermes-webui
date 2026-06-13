@@ -254,7 +254,10 @@ def test_load_session_reattaches_when_inflight_is_in_memory_and_marked_for_reatt
     pins the gate's shape so future refactors don't drop the flag check.
     """
     body = _function_body(SESSIONS_JS, "loadSession")
-    inflight_idx = body.find("if(INFLIGHT[sid]){")
+    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence): #3899
+    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would grab
+    # the wrong one. rfind = the substantive restore branch.
+    inflight_idx = body.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = body[inflight_idx : inflight_idx + 4200]
     assert "INFLIGHT[sid].reattach" in inflight_block, (
@@ -283,9 +286,17 @@ def test_load_session_attaches_sse_before_auxiliary_work():
     active_branch = body[body.find("if(activeStreamId){") : body.find("}else{", body.find("if(activeStreamId){"))]
     active_attach = active_branch.find("attachLiveStream(sid, activeStreamId")
     assert active_attach != -1
+    # #3899 inserted restoreLiveTurnHtmlForSession between renderMessages and
+    # appendThinking, and renderMessages now takes a preserveScroll arg — so the
+    # old contiguous "syncTopbar();renderMessages();appendThinking();loadDir('.');"
+    # literal no longer exists. Assert each auxiliary call individually; all must
+    # still run AFTER attachLiveStream (the invariant this test protects).
     for marker in (
         "updateSendBtn();",
-        "syncTopbar();renderMessages();appendThinking();loadDir('.');",
+        "syncTopbar();",
+        "renderMessages(",
+        "appendThinking();",
+        "loadDir('.');",
         "updateQueueBadge(sid);",
         "startApprovalPolling(sid)",
     ):
@@ -1013,7 +1024,9 @@ def test_load_session_discards_cursor_only_inflight_before_reattach():
     guard = "if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid]))"
     assert guard in compact_load
     guard_pos = compact_load.find(guard)
-    inflight_branch_pos = compact_load.find("if(INFLIGHT[sid]){")
+    # rfind: anchor on the Phase-2 restore branch, not #3899's earlier idle-reset
+    # if(INFLIGHT[sid]){ block (which now precedes the guard).
+    inflight_branch_pos = compact_load.rfind("if(INFLIGHT[sid]){")
     assert 0 <= guard_pos < inflight_branch_pos
 
 
