@@ -273,26 +273,29 @@ def test_transparent_event_row_quiet_metadata_visual_rhythm():
     assert "transition:max-height" in STYLE_CSS
     assert "data-expanded" in UI_JS
 
-    # Output / JSON: bordered code block, low opacity, inside the row's body.
-    assert "background:var(--code-bg)" in STYLE_CSS
-    assert "border:1px solid var(--border-subtle)" in STYLE_CSS
+    # Output / JSON: flattened to a quiet left-rail (no second bordered card),
+    # so args + output read as ONE expanded zone. (Trifecta V5/V7.)
+    assert ".transparent-event-row .tool-card-result pre{" in STYLE_CSS
+    _pre_start = STYLE_CSS.index(".transparent-event-row .tool-card-result pre{")
+    _pre_block = STYLE_CSS[_pre_start:_pre_start + 220]
+    assert "background:transparent;" in _pre_block
+    assert "border-left:2px solid var(--border-subtle);" in _pre_block
+    assert "max-height:none;" in _pre_block
     assert ".transparent-event-row .thinking-card-body pre{" in STYLE_CSS
-    assert "background:transparent;" in STYLE_CSS
     assert "border:0;" in STYLE_CSS
     assert "border-radius:0;" in STYLE_CSS
     assert "margin-top:0;" in STYLE_CSS
     assert "padding:0 8px 6px 27px;" in STYLE_CSS
     assert ".transparent-event-row .thinking-card.open .thinking-card-body{\n  border-top-color:transparent;\n  padding:0 0 3px;\n}" in STYLE_CSS
 
-    # Tabs: text-link style, font-weight indicates active, no pill background.
-    assert ".transparent-detail-mode.active{color:var(--text);opacity:1;font-weight:600;}" in STYLE_CSS
+    # Tabs: text-link style with an active underline (no pill background).
+    assert ".transparent-detail-mode.active{color:var(--text);opacity:1;font-weight:600;box-shadow:inset 0 -1px 0 var(--accent);}" in STYLE_CSS
     assert ".transparent-detail-mode.active{background:var(--hover-bg)" not in STYLE_CSS
 
-    # Args layout: key on own line, value on next line in monospace.
-    assert ".tool-arg-pair{display:flex;flex-direction:column" in STYLE_CSS
-    # Compact size: key font 10px (was 10.5px, was 11px originally) — reduced
-    # by two notches for the smaller-box rhythm.
-    assert ".tool-arg-key{color:var(--muted);font-size:10px" in STYLE_CSS
+    # Args layout: compact inline key beside value (not stacked). (Trifecta V4.)
+    assert ".tool-arg-pair{display:flex;flex-direction:row" in STYLE_CSS
+    # Compact size: key font 10px.
+    assert ".tool-arg-key{flex:0 0 auto;min-width:54px;color:var(--muted);font-size:10px" in STYLE_CSS
     assert "font-family:var(--font-mono);" in STYLE_CSS
 
     # Tool rows must show a useful compact preview while collapsed.
@@ -453,14 +456,16 @@ def test_transparent_turn_header_is_collapsible():
 
 
 def test_old_event_fading_medium_to_low():
-    """Older transparent event rows must fade to lower opacity (medium
-    → low) so the user's eye lands on the most recent activity. The
-    fade is per-turn and per-row position with a floor at 0.32."""
+    """Older transparent event rows fade (medium → low) so the eye lands on
+    the most recent activity. The fade applies to the LIVE turn only (settled
+    history stays full-opacity / readable) with a WCAG-respecting floor."""
     assert "function _applyTransparentRowFading" in UI_JS
-    # CSS steps from medium (~0.82) to low (~0.32).
+    # Fading is gated to the live turn in JS (settled history is not dimmed).
+    assert "id==='liveAssistantTurn'" in UI_JS
+    # CSS steps from medium down to a readable floor.
     assert 'data-transparent-fade="1"' in STYLE_CSS
     assert 'data-transparent-fade="5"' in STYLE_CSS
-    assert "opacity:.32" in STYLE_CSS
+    assert "opacity:.54" in STYLE_CSS
     # Hover restores full opacity.
     assert ".transparent-event-row[data-transparent-fade]:hover{opacity:1" in STYLE_CSS
 
@@ -566,3 +571,71 @@ def test_smaller_tool_icons_and_reduced_font_sizes():
     # Status badge: pill background + letter-spacing.
     assert "border-radius:6px" in STYLE_CSS
     assert "letter-spacing:.02em" in STYLE_CSS
+
+
+# ── Trifecta review fixes (round 2) ───────────────────────────────────────
+
+
+def test_live_turn_restore_rehydrates_transparent_dom():
+    """restoreLiveTurnHtmlForSession() restores liveTurnHtml via template.innerHTML,
+    which drops the property-bound toggle/copy/expand handlers. It must re-run
+    _rehydrateTransparentStreamDom so Transparent Stream controls keep working
+    after an active-session live-turn restore. (Trifecta C1.)"""
+    start = UI_JS.index("function restoreLiveTurnHtmlForSession")
+    end = UI_JS.index("function markInflight", start)
+    body = UI_JS[start:end]
+    assert "_rehydrateTransparentStreamDom(restored)" in body
+
+
+def test_transparent_settled_path_dedupes_echoed_thinking():
+    """The transparent settled render must dedupe echoed thinking per turn
+    (mirroring the compact path's seenReasons) so the same reasoning does not
+    render twice / out of chronological order. (Trifecta O-Bug1.)"""
+    assert "transparentSeenThinking" in UI_JS
+    assert "_normalizeThinkingEchoCompare(event.thinkingText)" in UI_JS
+
+
+def test_transparent_thinking_card_is_reset_to_flat_quiet_row():
+    """Thinking inner cards must be reset to flat/transparent inside a transparent
+    event row (they previously kept their accent-bg/border/radius/msg-rail chrome
+    and were the heaviest object in the stream). (Trifecta V1.)"""
+    assert ".transparent-event-row .thinking-card," in STYLE_CSS
+    # The reset block carries background:transparent!important + border:0!important.
+    reset_start = STYLE_CSS.index(".transparent-event-row .tool-card,")
+    reset_block = STYLE_CSS[reset_start:reset_start + 700]
+    assert ".transparent-event-row .thinking-card" in reset_block
+    assert "background:transparent!important" in reset_block
+    assert "border:0!important" in reset_block
+
+
+def test_transparent_skin_reset_beats_per_skin_card_rules():
+    """The reset must also win against the per-skin :root[data-skin] .tool-card
+    rules that otherwise re-card the rows. (Trifecta V3.)"""
+    assert ":root[data-skin] .transparent-event-row .tool-card" in STYLE_CSS
+
+
+def test_transparent_failed_status_is_legible():
+    """A failed tool must be visually legible (error color + left border), not an
+    invisible muted badge. (Trifecta V2.)"""
+    assert '.transparent-event-status[data-status="failed"]' in STYLE_CSS
+    assert '.transparent-event-row[data-event-status="Failed"]' in STYLE_CSS
+
+
+def test_transparent_interrupted_status_on_settled_tools():
+    """A settled/reloaded tool left in done===false renders as Interrupted (not a
+    permanent Running shimmer). (Trifecta O-Edge.)"""
+    assert "function _transparentToolStatus(tc, settled)" in UI_JS
+    assert "settled?'Interrupted':'Running'" in UI_JS
+    assert "_transparentToolStatus(event.toolCall,true)" in UI_JS
+
+
+def test_transparent_tool_completion_preserves_expand_state():
+    """Tool completion rebuilds the row; it must carry over the user's open state
+    and Full/Output detail tab. (Trifecta O-Bug2.)"""
+    assert "_setTransparentCardOpen(_newCard,true)" in UI_JS
+
+
+def test_transparent_entrance_animation_is_live_turn_only():
+    """The entrance animation must be scoped to the live turn so it doesn't
+    replay across the whole transcript on every renderMessages. (Trifecta V9.)"""
+    assert "#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter" in STYLE_CSS
