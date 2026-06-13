@@ -10422,12 +10422,14 @@ def _handle_voicevox_tts(handler, text, voice):
         logger.exception("VOICEVOX TTS failed")
         return _bad(handler, "VOICEVOX TTS failed", 500)
     finally:
-        # Clean up temp files — exception paths don't reach the manual unlinks
+        # Clean up temp files — exception paths don't reach the manual unlinks.
+        # Guard against None (paths stay None if exception is raised before
+        # input_path = tf.name executes) and TypeError from os.path.exists(None).
         for p in (input_path, wav_path, mp3_path):
             try:
-                if os.path.exists(p):
+                if p is not None and os.path.exists(p):
                     os.unlink(p)
-            except OSError:
+            except (OSError, TypeError):
                 pass
         _handle_voicevox_tts._semaphore.release()
 
