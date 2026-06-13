@@ -34,7 +34,7 @@ def test_preserve_scroll_unpinned_branch_shows_new_message_cue_after_restore():
     # only the genuinely-scrolled-up cohort restores their viewport + gets the
     # new-message cue. (Codex CORE catch: scrollIfPinned() in the pinned branch
     # could leave a pinned reader short of the settled response.)
-    assert "if(!_messageUserUnpinned && _followMessagesAfterDomReplace()) return;" in helper
+    assert "if(!readerAwayFromBottom && !_messageUserUnpinned && _followMessagesAfterDomReplace()) return;" in helper
     assert "_restoreMessageScrollSnapshot(scrollSnapshot);" in helper
     assert helper.index("_restoreMessageScrollSnapshot(scrollSnapshot)") < helper.index(
         "_maybeShowNewMessageScrollCue(scrollSnapshot)"
