@@ -52,6 +52,13 @@ def test_frontend_fetches_agent_command_metadata_lazily():
     assert "_agentCommandCache" in COMMANDS_JS
 
 
+def test_frontend_fetches_bundle_command_metadata_lazily():
+    assert "async function loadBundleCommands" in COMMANDS_JS
+    assert "async function getBundleCommandMetadata" in COMMANDS_JS
+    assert "api('/api/commands/bundles')" in COMMANDS_JS
+    assert "_bundleCommandCache" in COMMANDS_JS
+
+
 def test_frontend_matches_agent_command_aliases():
     helper_idx = COMMANDS_JS.find("async function getAgentCommandMetadata")
     assert helper_idx != -1
@@ -96,6 +103,7 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'browser',
                   description: 'Attach browser tools',
+                  category: 'Tools',
                   aliases: ['browse'],
                   cli_only: true,
                   gateway_only: false
@@ -103,6 +111,7 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'handoff',
                   description: 'Hand work to another agent',
+                  category: 'Tools',
                   aliases: ['delegate_work'],
                   cli_only: true,
                   gateway_only: false
@@ -110,6 +119,7 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'model',
                   description: 'Change model',
+                  category: 'Tools',
                   aliases: [],
                   cli_only: false,
                   gateway_only: false
@@ -117,6 +127,7 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'codex-runtime',
                   description: 'Toggle Codex app-server runtime',
+                  category: 'Tools',
                   aliases: ['codex_runtime'],
                   cli_only: false,
                   gateway_only: false
@@ -124,9 +135,54 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'reload-skills',
                   description: 'Re-scan installed skills',
+                  category: 'Tools',
                   aliases: ['reload_skills'],
                   cli_only: false,
                   gateway_only: false
+                }},
+                {{
+                  name: 'triage-review',
+                  description: 'Run runtime triage review',
+                  category: 'Tools',
+                  aliases: ['triage_review'],
+                  cli_only: false,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'plugin-review',
+                  description: 'Run plugin review',
+                  category: 'Plugin',
+                  aliases: ['plugin_review'],
+                  cli_only: false,
+                  gateway_only: false
+                }}
+              ]
+            }};
+            if (path === '/api/commands/bundles') return {{
+              bundles: [
+                {{
+                  name: 'handoff',
+                  description: 'Bundle collision should stay hidden behind reserved slash names',
+                  skill_count: 2,
+                  source: 'bundle'
+                }},
+                {{
+                  name: 'incident-review',
+                  description: 'Bundle should beat a same-slug plain skill',
+                  skill_count: 3,
+                  source: 'bundle'
+                }},
+                {{
+                  name: 'triage-review',
+                  description: 'Bundle collision should stay hidden behind runtime slash names',
+                  skill_count: 4,
+                  source: 'bundle'
+                }},
+                {{
+                  name: 'plugin-review',
+                  description: 'Bundle collision should stay hidden behind plugin slash names',
+                  skill_count: 5,
+                  source: 'bundle'
                 }}
               ]
             }};
@@ -143,6 +199,14 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'incident review',
                   description: 'Non-colliding skills should still autocomplete'
+                }},
+                {{
+                  name: 'triage review',
+                  description: 'Runtime collisions should stay hidden from slash autocomplete'
+                }},
+                {{
+                  name: 'plugin review',
+                  description: 'Plugin collisions should stay hidden from slash autocomplete'
                 }}
               ]
             }};
@@ -208,20 +272,50 @@ def test_cli_only_response_helper_uses_canonical_command_name():
     assert "configured server-side" in result["response"]
 
 
+def test_bundle_command_metadata_helper_resolves_known_bundle():
+    result = _run_commands_js(
+        """
+        const bundle = await getBundleCommandMetadata('incident-review');
+        const missing = await getBundleCommandMetadata('does-not-exist');
+        return {
+          by_name: bundle && bundle.name,
+          source: bundle && bundle.source,
+          skill_count: bundle && bundle.skillCount,
+          missing: missing === null
+        };
+        """
+    )
+
+    assert result == {
+        "by_name": "incident-review",
+        "source": "bundle",
+        "skill_count": 3,
+        "missing": True,
+    }
+
+
 def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
     result = _run_commands_js(
         """
         await loadAgentCommandMetadata(true);
+        await loadBundleCommands(true);
         await loadSkillCommands(true);
         const handoff = await getSlashAutocompleteMatches('/handoff');
         const delegate = await getSlashAutocompleteMatches('/delegate');
         const incident = await getSlashAutocompleteMatches('/incident');
+        const triage = await getSlashAutocompleteMatches('/triage');
+        const plugin = await getSlashAutocompleteMatches('/plugin');
         const skills = await getSlashAutocompleteMatches('/skills');
         const use = await getSlashAutocompleteMatches('/use');
         return {
           handoff_names: handoff.map(item => item.name),
           delegate_names: delegate.map(item => item.name),
           incident_names: incident.map(item => item.name),
+          incident_sources: incident.map(item => item.source),
+          triage_names: triage.map(item => item.name),
+          triage_sources: triage.map(item => item.source),
+          plugin_names: plugin.map(item => item.name),
+          plugin_sources: plugin.map(item => item.source),
           skills_names: skills.map(item => item.name),
           use_names: use.map(item => item.name)
         };
@@ -231,8 +325,85 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
     assert result["handoff_names"] == []
     assert result["delegate_names"] == []
     assert result["incident_names"] == ["incident-review"]
+    assert result["incident_sources"] == ["bundle"]
+    assert result["triage_names"] == ["triage-review"]
+    assert result["triage_sources"] == ["agent"]
+    assert result["plugin_names"] == ["plugin-review"]
+    assert result["plugin_sources"] == ["plugin"]
     assert "skills" in result["skills_names"]
     assert "use" in result["use_names"]
+
+
+def test_bundle_collisions_stay_hidden_until_agent_metadata_is_ready():
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        let releaseCommands;
+        const commandsReady = new Promise(resolve => {{ releaseCommands = resolve; }});
+        const ctx = {{
+          console,
+          localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
+          t: (key) => key,
+          api: async (path) => {{
+            if (path === '/api/commands') return commandsReady;
+            if (path === '/api/commands/bundles') return {{
+              bundles: [
+                {{
+                  name: 'plugin-review',
+                  description: 'Bundle collision should stay hidden until plugin metadata lands',
+                  skill_count: 5,
+                  source: 'bundle'
+                }}
+              ]
+            }};
+            if (path === '/api/skills') return {{ skills: [] }};
+            throw new Error('unexpected api path: ' + path);
+          }}
+        }};
+        vm.createContext(ctx);
+        vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
+        (async () => {{
+          const bundleLoad = vm.runInContext('loadBundleCommands(true)', ctx);
+          const before = await vm.runInContext("getSlashAutocompleteMatches('/plugin')", ctx);
+          releaseCommands({{
+            commands: [
+              {{
+                name: 'plugin-review',
+                description: 'Run plugin review',
+                category: 'Plugin',
+                aliases: ['plugin_review'],
+                cli_only: false,
+                gateway_only: false
+              }}
+            ]
+          }});
+          await bundleLoad;
+          const after = await vm.runInContext("getSlashAutocompleteMatches('/plugin')", ctx);
+          process.stdout.write(JSON.stringify({{
+            before_names: before.map(item => item.name),
+            before_sources: before.map(item => item.source),
+            after_names: after.map(item => item.name),
+            after_sources: after.map(item => item.source)
+          }}));
+        }})().catch(err => {{
+          console.error(err && err.stack || err);
+          process.exit(1);
+        }});
+        """
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["node", str(script_path)], check=True, capture_output=True, text=True)
+    finally:
+        script_path.unlink(missing_ok=True)
+
+    result = json.loads(proc.stdout)
+    assert result["before_names"] == []
+    assert result["before_sources"] == []
+    assert result["after_names"] == ["plugin-review"]
+    assert result["after_sources"] == ["plugin"]
 
 
 def test_send_intercepts_cli_only_commands_before_agent_round_trip():
@@ -246,6 +417,31 @@ def test_send_intercepts_cli_only_commands_before_agent_round_trip():
     assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
     assert "cliOnlyCommandResponse(_parsedCmd.name,_agentCmd)" in intercept
     assert "return;" in intercept
+
+
+def test_send_intercepts_bundle_commands_before_agent_round_trip():
+    intercept_idx = MESSAGES_JS.find("Slash command intercept")
+    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    assert normal_send_idx != -1
+    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
+
+    assert "const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'" in intercept
+    assert "await resolveBundleCommand(text,_bundleCmd)" in intercept
+    assert "_slashDisplayTextOverride=text;" in intercept
+    assert "text=_bundleMessage;" in intercept
+
+
+def test_send_consults_agent_metadata_before_bundle_resolution():
+    intercept_idx = MESSAGES_JS.find("Slash command intercept")
+    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    assert normal_send_idx != -1
+    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
+
+    agent_idx = intercept.find("await getAgentCommandMetadata(_parsedCmd.name)")
+    bundle_idx = intercept.find("await getBundleCommandMetadata(_parsedCmd.name)")
+    assert agent_idx != -1
+    assert bundle_idx != -1
+    assert agent_idx < bundle_idx
 
 
 def test_send_intercepts_reload_mcp_agent_command_before_agent_round_trip():
@@ -316,6 +512,7 @@ def test_unknown_slash_commands_still_fall_through_to_agent():
     normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
+    assert "if(_bundleCmd){" in intercept
     assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
     assert "if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" in intercept
     assert "if(_agentCmd&&_agentCmd.category==='Plugin')" in intercept
