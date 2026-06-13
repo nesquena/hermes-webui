@@ -1084,6 +1084,26 @@ async function send(){
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
+  if(typeof _skillCommandCache!=='undefined'&&_skillCommandCache.length){
+    const _skillPattern=/\/([a-z][a-z0-9-]{1,63})\b/gi;
+    const _seenSkills=new Set();
+    let _m;
+    while((_m=_skillPattern.exec(text))!==null){
+      const _afterMatch=text[_m.index+_m[0].length];
+      if(_afterMatch==='/') continue;
+      const _raw=_m[1].toLowerCase();
+      let _match=_skillCommandCache.find(s=>s.name===_raw);
+      if(!_match&&_raw.length>=2)_match=_skillCommandCache.find(s=>s.name.startsWith(_raw));
+      if(_match&&_match.source==='skill'&&!_seenSkills.has(_match.name)){
+        _seenSkills.add(_match.name);
+      }
+    }
+    if(_seenSkills.size){
+      const _skillList=[..._seenSkills].join(', ');
+      msgText=`[MANDATORY: Before any other action, load these skills with skill_view(name) — do NOT skip: ${_skillList}]\n\n${msgText}`;
+    }
+  }
+
   $('msg').value='';autoResize();
   // Clear persisted composer draft since message was sent.
   if (activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);
