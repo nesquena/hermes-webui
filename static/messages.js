@@ -4126,6 +4126,14 @@ function _approvalPromptBelongsToActiveSession(sid) {
   return !!(sid && _promptActiveSessionId() === sid);
 }
 
+function activeSessionHasPendingPromptAttention() {
+  const sid = _promptActiveSessionId();
+  return !!(sid && (
+    _approvalPendingBySession.has(sid) ||
+    _clarifyPendingBySession.has(sid)
+  ));
+}
+
 function _rememberApprovalPending(pending, pendingCount) {
   if (!pending) return null;
   const sid = pending._session_id || _promptActiveSessionId();
@@ -4136,7 +4144,10 @@ function _rememberApprovalPending(pending, pendingCount) {
 }
 
 function _clearApprovalPendingForSession(sid) {
-  if (sid) _approvalPendingBySession.delete(sid);
+  if (sid) {
+    _approvalPendingBySession.delete(sid);
+    if (typeof syncTopbar === 'function') syncTopbar();
+  }
 }
 
 function _hideApprovalCardIfOwner(sid, force=false) {
@@ -4204,6 +4215,7 @@ function showApprovalCard(pending, pendingCount) {
   if (onceBtn && document.activeElement !== $('msg')) {
     setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
   }
+  if (typeof syncTopbar === 'function') syncTopbar();
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -4590,7 +4602,10 @@ function _rememberClarifyPending(pending) {
 }
 
 function _clearClarifyPendingForSession(sid) {
-  if (sid) _clarifyPendingBySession.delete(sid);
+  if (sid) {
+    _clarifyPendingBySession.delete(sid);
+    if (typeof syncTopbar === 'function') syncTopbar();
+  }
 }
 
 function _hideClarifyCardIfOwner(sid, force=false, reason="dismissed") {
@@ -4612,8 +4627,15 @@ function showClarifyForSession(sid, pending) {
 }
 
 function _renderPendingPromptsForActiveSession() {
+  const sid = _promptActiveSessionId();
   _renderPendingApprovalForActiveSession();
   _renderPendingClarifyForActiveSession();
+  if (
+    sid &&
+    typeof activeSessionHasPendingPromptAttention === 'function' &&
+    activeSessionHasPendingPromptAttention()
+  ) return;
+  if (typeof syncTopbar === 'function') syncTopbar();
 }
 
 function _ensureClarifyCardDom() {
@@ -4966,6 +4988,7 @@ function showClarifyCard(pending) {
   if (input && !sameClarify && document.activeElement !== $('msg')) {
     input.focus({preventScroll: true});
   }
+  if (typeof syncTopbar === 'function') syncTopbar();
 }
 
 async function respondClarify(response) {
