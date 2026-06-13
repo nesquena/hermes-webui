@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Long final answers no longer snap back to the bottom while you are reading them in PWA/mobile mode (#4123).** Same-session background refreshes now preserve a reader's current transcript position whenever the viewport is clearly away from the bottom, and they no longer clear the sticky scroll-unpin state before rebuilding the transcript. (#4123)
+
 ## [v0.51.388] — 2026-06-13 — Release NA (Stable Assistant Turn Anchors dual-run reconciler, inert, #3926)
 
 ### Added
