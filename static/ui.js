@@ -6733,6 +6733,12 @@ function _worklogDetailDisclosureKeyForElement(el, counts){
 function _captureWorklogDetailDisclosureState(root){
   const state=new Map();
   if(!root||!root.querySelectorAll) return state;
+  // Stamp the capturing session so a restore can't replay one session's
+  // disclosure state onto another. Cross-session switches currently wipe
+  // #msgInner (sessions.js loading placeholder) so the capture is normally
+  // empty, but the ordinal/derived keys carry no session id — this stamp makes
+  // the isolation explicit instead of depending on that wipe invariant. (Opus #4063.)
+  try{ state._sid=S.session?S.session.session_id:null; }catch(_){ state._sid=null; }
   const counts=Object.create(null);
   root.querySelectorAll(_worklogDetailDisclosureSelector).forEach(el=>{
     const key=_worklogDetailDisclosureKeyForElement(el, counts);
@@ -6742,6 +6748,8 @@ function _captureWorklogDetailDisclosureState(root){
 }
 function _restoreWorklogDetailDisclosureState(root, state){
   if(!root||!root.querySelectorAll||!state||!state.size) return;
+  // Don't restore a snapshot captured under a different session.
+  try{ if(state._sid!==undefined && state._sid!==(S.session?S.session.session_id:null)) return; }catch(_){ /* fall through */ }
   const counts=Object.create(null);
   root.querySelectorAll(_worklogDetailDisclosureSelector).forEach(el=>{
     const key=_worklogDetailDisclosureKeyForElement(el, counts);
