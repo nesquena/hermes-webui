@@ -4546,6 +4546,7 @@ def merge_session_messages_append_only(
         sidecar_visible_sequence.append(visible_key)
         merged_messages.append(msg)
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
+    prefix_visible_lookup_cache = {}
     state_replay_idx = 0
     skipped_state_visible_counts = {}
     for msg in state_messages:
@@ -4553,22 +4554,31 @@ def merge_session_messages_append_only(
         key = _session_message_merge_key(msg)
         visible_key = _session_message_visible_key(msg)
         replays_sidecar_prefix = False
+        matched_prefix_visible_key = None
         if state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
-            if visible_key == expected_visible_key or _has_visible_duplicate(
-                visible_key, {expected_visible_key}
-            ):
+            if visible_key == expected_visible_key:
                 replays_sidecar_prefix = True
+                matched_prefix_visible_key = expected_visible_key
                 state_replay_idx += 1
+            else:
+                expected_visible_keys = {expected_visible_key}
+                expected_visible_lookup = prefix_visible_lookup_cache.get(expected_visible_key)
+                if expected_visible_lookup is None:
+                    expected_visible_lookup = _build_visible_duplicate_lookup(expected_visible_keys)
+                    prefix_visible_lookup_cache[expected_visible_key] = expected_visible_lookup
+                matched_prefix_visible_key = _matching_visible_duplicate(
+                    visible_key,
+                    expected_visible_keys,
+                    expected_visible_lookup,
+                )
+                if matched_prefix_visible_key is not None:
+                    replays_sidecar_prefix = True
+                    state_replay_idx += 1
         if replays_sidecar_prefix:
-            matched_visible_key = _matching_visible_duplicate(
-                visible_key,
-                sidecar_visible_keys,
-                sidecar_visible_lookup,
-            )
-            if matched_visible_key is not None:
-                skipped_state_visible_counts[matched_visible_key] = (
-                    skipped_state_visible_counts.get(matched_visible_key, 0) + 1
+            if matched_prefix_visible_key is not None:
+                skipped_state_visible_counts[matched_prefix_visible_key] = (
+                    skipped_state_visible_counts.get(matched_prefix_visible_key, 0) + 1
                 )
             # Record dedup key so later duplicates of this replayed message
             # are caught by the dedup guard (#3346).

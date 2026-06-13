@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Long sidecar/state.db replay-prefix merges no longer rescan every sidecar message after each prefix match.** The merge now reuses the visible key found by the ordered prefix check, avoiding an O(n²) duplicate-lookup path for long sessions whose state.db mirror differs only by small suffix/formatting changes.
+
 ## [v0.51.434] — 2026-06-15 — Release OU (reject symlinked skill files on save)
 
 ### Fixed
