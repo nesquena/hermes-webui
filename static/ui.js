@@ -5346,6 +5346,14 @@ function restoreLiveTurnHtmlForSession(sid){
   _mergeRestoredLiveAssistantSegment(restored, existing);
   if(existing) existing.replaceWith(restored);
   else inner.appendChild(restored);
+  // Transparent Stream: liveTurnHtml is restored via template.innerHTML, which
+  // drops the property-bound onclick/onkeydown handlers wired by
+  // _wireTransparentHeaderToggle / _attachCopyButton / _syncTransparentEventControls /
+  // _wireTransparentTurnToggle. The settled cache fast-path re-runs the rehydrate;
+  // this active-session live-turn restore path must too, or row toggles, copy
+  // buttons, expand/collapse, and the turn chevron silently stop working after a
+  // session-switch/reconnect restore. (Codex trifecta finding C1.)
+  if(typeof _rehydrateTransparentStreamDom==='function') _rehydrateTransparentStreamDom(restored);
   if(typeof normalizeLiveActivityGroupPlacement==='function') normalizeLiveActivityGroupPlacement(restored);
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
@@ -6619,9 +6627,9 @@ function _transparentEventPreview(text){
   if(!clean) return '';
   return clean.length>180?`${clean.slice(0,177)}...`:clean;
 }
-function _transparentToolStatus(tc){
+function _transparentToolStatus(tc, settled){
   if(tc&&tc.is_error) return 'Failed';
-  if(tc&&tc.done===false) return 'Running';
+  if(tc&&tc.done===false) return settled?'Interrupted':'Running';
   return 'Completed';
 }
 function _copyEventToClipboard(row){
@@ -6763,10 +6771,10 @@ function _wireTransparentHeaderToggle(header){
 function _transparentToolDetailHtml(tc, status){
   const args=tc&&tc.args&&typeof tc.args==='object'?tc.args:{};
   const argEntries=Object.entries(args);
-  const meta=[
-    ['tool', tc&&tc.name?tc.name:'tool'],
-    ['status', status||_transparentToolStatus(tc)],
-  ];
+  // The tool name is already shown in the row header and the status is shown as
+  // a badge, so don't repeat them as pseudo-args in the body. Only surface a
+  // duration meta when present. (Trifecta finding V6 — reduce redundancy.)
+  const meta=[];
   if(tc&&tc.duration!==undefined&&tc.duration!==null) meta.push(['duration', String(tc.duration)]);
   const preview=String((tc&&(tc.snippet||tc.preview||tc.result||tc.output))||'').trim();
   const argHtml=[...meta,...argEntries].map(([k,v])=>`<div class="tool-arg-pair"><span class="tool-arg-key">${esc(String(k))}</span><span class="tool-arg-val">${esc(typeof v==='string'?v:JSON.stringify(v,null,2))}</span></div>`).join('');
@@ -6891,7 +6899,7 @@ function _decorateTransparentEventRow(row, opts){
       // Update the 3D progress bar to reflect the new status.
       const progress=card.querySelector('.transparent-event-progress');
       if(progress){
-        if(status==='Completed'||status==='Failed'){
+        if(status==='Completed'||status==='Failed'||status==='Interrupted'){
           progress.removeAttribute('data-progress-running');
           progress.setAttribute('data-progress-percent','100%');
           progress.style.setProperty('--transparent-progress-percent','100%');
@@ -7061,9 +7069,19 @@ function _wireTransparentTurnToggle(turn){
 // at 0.32 so labels stay readable.
 function _applyTransparentRowFading(turn){
   if(!turn||!isTransparentStream()) return;
+  // Recency-fading only makes sense on the LIVE turn (draw the eye to the most
+  // recent activity). On settled/historical turns it permanently dims the trace
+  // below readable contrast (floor .32) — the opposite of a transparent record.
+  // So clear any fade on non-live turns and only fade the live turn.
+  // (Trifecta finding V8.)
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return;
   const rows=Array.from(blocks.querySelectorAll(':scope > .transparent-event-row'));
+  const isLive=turn.id==='liveAssistantTurn'||turn.getAttribute('data-live-assistant-turn')==='1';
+  if(!isLive){
+    rows.forEach(row=>row.removeAttribute('data-transparent-fade'));
+    return;
+  }
   const total=rows.length;
   for(let i=0;i<total;i++){
     const row=rows[i];
@@ -9396,6 +9414,11 @@ function renderMessages(options){
     }else{
       // ── transparent_stream path: individual expandable event rows ──
       const transparentInsertCursors=new Map();
+      // Per-turn dedup of echoed thinking text — mirrors the compact-worklog
+      // path's `seenReasons` Set (the transparent branch previously had none,
+      // so the same echoed reasoning rendered twice, once out of chronological
+      // position). Keyed by the assistant turn element. (Trifecta finding O-Bug1.)
+      const transparentSeenThinking=new Map();
       for(const entry of activityOrder){
         const event={
           ...entry,
@@ -9422,22 +9445,32 @@ function renderMessages(options){
           else blocks.appendChild(row);
         };
         if(event.thinkingText){
-          const thinkingRow=_decorateTransparentEventRow(_thinkingActivityNode(event.thinkingText,false),{
-            type:'thinking',
-            text:event.thinkingText,
-            preview:event.thinkingText,
-            segmentSeq,
-            burstId,
-          });
-          if(!anchorIsWorklogSource) insertBeforeAnchor(thinkingRow);
-          else insertAfterCursor(thinkingRow);
+          const _thinkKey=typeof _normalizeThinkingEchoCompare==='function'
+            ? _normalizeThinkingEchoCompare(event.thinkingText)
+            : String(event.thinkingText).trim();
+          let _seen=transparentSeenThinking.get(anchorTurn);
+          if(!_seen){_seen=new Set();transparentSeenThinking.set(anchorTurn,_seen);}
+          if(_thinkKey&&_seen.has(_thinkKey)){
+            // Echoed reasoning already rendered for this turn — skip the duplicate.
+          }else{
+            if(_thinkKey)_seen.add(_thinkKey);
+            const thinkingRow=_decorateTransparentEventRow(_thinkingActivityNode(event.thinkingText,false),{
+              type:'thinking',
+              text:event.thinkingText,
+              preview:event.thinkingText,
+              segmentSeq,
+              burstId,
+            });
+            if(!anchorIsWorklogSource) insertBeforeAnchor(thinkingRow);
+            else insertAfterCursor(thinkingRow);
+          }
         }
         for(const toolCall of cards){
           event.toolCall=toolCall;
           const toolRow=_decorateTransparentEventRow(buildToolCard(event.toolCall),{
             type:'tool',
             name:event.toolCall&&event.toolCall.name,
-            status:_transparentToolStatus(event.toolCall),
+            status:_transparentToolStatus(event.toolCall,true),
             toolCall:event.toolCall,
             segmentSeq,
             burstId,
@@ -10359,6 +10392,23 @@ function appendLiveToolCard(tc){
           burstId,
         });
         replacement.dataset.liveTid=tid;
+        // Preserve the user's expand state + detail tab across tool completion:
+        // the running row is rebuilt fresh on toolComplete, which would otherwise
+        // snap an expanded row shut and reset its Full/Output tab. (Trifecta O-Bug2.)
+        try{
+          const _oldCard=existing.querySelector('.tool-card,.thinking-card');
+          const _newCard=replacement.querySelector('.tool-card,.thinking-card');
+          if(_oldCard&&_newCard&&_oldCard.classList.contains('open')){
+            _setTransparentCardOpen(_newCard,true);
+            const _oldDetail=existing.querySelector('.tool-card-detail');
+            const _newDetail=replacement.querySelector('.tool-card-detail');
+            const _mode=_oldDetail&&_oldDetail.getAttribute('data-transparent-detail-mode');
+            if(_newDetail&&_mode){
+              const _tab=_newDetail.querySelector(`.transparent-detail-mode[data-mode="${_mode}"]`);
+              if(_tab) _setTransparentDetailMode(_tab,_mode);
+            }
+          }
+        }catch(_){ /* non-fatal: completion still renders, just collapsed */ }
         existing.replaceWith(replacement);
         _syncTransparentEventControls(turn);
         _moveLiveRunStatusToTurnEnd();
