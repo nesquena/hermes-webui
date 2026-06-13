@@ -341,3 +341,61 @@ class TestApprovalHTTPEndpoints:
             with _lock:
                 r._pending.pop(sid, None)
                 r._gateway_queues.pop(sid, None)
+
+    def test_stale_gateway_mirror_does_not_mask_next_live_approval(self, monkeypatch):
+        """A stale mirrored gateway approval must not outlive its live queue head."""
+        from api import routes as r
+        from api import route_approvals as ra
+
+        sid = f"http-gateway-stale-{uuid.uuid4().hex[:8]}"
+        approval_a = {
+            "command": "rm -rf /tmp/stale-a",
+            "pattern_key": "recursive delete",
+            "pattern_keys": ["recursive delete"],
+            "description": "recursive delete",
+        }
+        approval_b = {
+            "command": "rm -rf /tmp/live-b",
+            "pattern_key": "recursive delete",
+            "pattern_keys": ["recursive delete"],
+            "description": "recursive delete",
+        }
+        captured = {}
+
+        def fake_j(handler, data, status=200, extra_headers=None):
+            captured["payload"] = data
+            captured["status"] = status
+            return data
+
+        monkeypatch.setattr(r, "j", fake_j)
+        with _lock:
+            r._pending.pop(sid, None)
+            r._gateway_queues.pop(sid, None)
+            r._gateway_queues[sid] = [_ApprovalEntry(approval_a)]
+        try:
+            ra.submit_gateway_pending_mirror(sid, approval_a)
+            with _lock:
+                r._gateway_queues.pop(sid, None)
+                r._gateway_queues[sid] = [_ApprovalEntry(approval_b)]
+            ra.submit_gateway_pending_mirror(sid, approval_b)
+
+            parsed = urllib.parse.urlparse(f"/api/approval/pending?session_id={urllib.parse.quote(sid)}")
+            r._handle_approval_pending(object(), parsed)
+            assert captured["status"] == 200
+            assert captured["payload"]["pending"]["command"] == approval_b["command"]
+            assert captured["payload"]["pending_count"] == 1
+
+            with _lock:
+                queue = r._pending.get(sid)
+                assert isinstance(queue, list)
+                assert len(queue) == 1
+                assert queue[0]["command"] == approval_b["command"]
+
+            assert r._resolve_approval_legacy(sid, "", "once") is True
+            with _lock:
+                assert sid not in r._pending
+                assert sid not in r._gateway_queues
+        finally:
+            with _lock:
+                r._pending.pop(sid, None)
+                r._gateway_queues.pop(sid, None)

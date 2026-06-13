@@ -425,6 +425,48 @@ class TestSSENotifyFromSubmitPending:
         finally:
             r._approval_sse_unsubscribe(sid, q)
 
+    def test_gateway_mirror_reconcile_tags_live_head_and_purges_stale_copy(self):
+        """Gateway mirrors must track the live head and disappear when the queue does."""
+        from api import routes as r
+        from tools.approval import _ApprovalEntry
+
+        sid = f"sse-gateway-mirror-{uuid.uuid4().hex[:8]}"
+        approval = {
+            "command": "rm -rf /tmp/test",
+            "pattern_key": "recursive delete",
+            "pattern_keys": ["recursive delete"],
+            "description": "recursive delete",
+        }
+        q = r._approval_sse_subscribe(sid)
+        try:
+            with r._lock:
+                r._pending.pop(sid, None)
+                r._gateway_queues[sid] = [_ApprovalEntry(approval)]
+            r.submit_gateway_pending_mirror(sid, approval)
+
+            mirrored = q.get(timeout=1)
+            assert mirrored["pending"]["command"] == approval["command"]
+            assert mirrored["pending"]["_gateway_mirror"] is True
+            assert mirrored["pending_count"] == 1
+
+            with r._lock:
+                assert r._pending[sid][0]["_gateway_mirror"] is True
+                r._gateway_queues.pop(sid, None)
+                head, total, changed = r.reconcile_gateway_pending_mirror_locked(sid)
+                r._approval_sse_notify_locked(sid, head, total)
+            assert changed is True
+
+            cleared = q.get(timeout=1)
+            assert cleared["pending"] is None
+            assert cleared["pending_count"] == 0
+            with r._lock:
+                assert sid not in r._pending
+        finally:
+            with r._lock:
+                r._pending.pop(sid, None)
+                r._gateway_queues.pop(sid, None)
+            r._approval_sse_unsubscribe(sid, q)
+
 
 class TestSSEConcurrency:
     """Test thread safety of SSE subscribe/unsubscribe/notify."""
