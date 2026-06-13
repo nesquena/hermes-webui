@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.382] — 2026-06-13 — Release MU (Stable Assistant Turn Anchors: activity-scene projection, inert, #4093)
+
+### Added
+
+- **Stable Assistant Turn Anchors activity-scene projection (#4093, #3926).** Adds `projectAssistantTurnAnchorActivityScene` to the frozen `HermesAssistantTurnAnchors` surface — a renderer-neutral projection that turns the anchor owner's classified events into ordered activity-scene rows for the future Transparent Stream / Compact Worklog convergence. This slice is **inert**: no render path consumes the scene projection yet (the only live anchor consumer remains the #4092 settled final-answer projection, which still receives a pre-flattened string), so there is zero rendering change in this release. (#4093)
+
 ## [v0.51.381] — 2026-06-13 — Release MT (Stable Assistant Turn Anchors: settled final-answer projection, #4092)
 
 ### Changed
