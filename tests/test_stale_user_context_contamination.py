@@ -430,6 +430,50 @@ def test_merge_display_workspace_prefixed_polluted_row_is_cleaned():
     )
 
 
+def test_dedupe_replayed_context_preserves_historical_row_with_merge_shape():
+    """A historical user row shaped like <previous_user_tail>\\n\\n<msg_text> must not be rewritten.
+
+    If a prior conversation turn happens to have content exactly matching the
+    stale-merge pattern, _dedupe_replayed_context_messages must not rewrite it:
+    only the new-turn boundary/candidate slice is eligible for stale-merge cleanup.
+    """
+    from api.streaming import _dedupe_replayed_context_messages
+
+    HISTORICAL_SHAPE = f"{PRIOR_TAIL}\n\n{CURRENT_TURN}"
+
+    previous_context = [
+        {"role": "user", "content": HISTORICAL_SHAPE},  # legitimate old turn
+        {"role": "assistant", "content": "summary from that turn"},
+        {"role": "user", "content": PRIOR_TAIL},         # becomes previous_user_tail
+    ]
+    result_messages = [
+        *previous_context,
+        {"role": "user", "content": CURRENT_TURN},       # clean current turn
+        {"role": "assistant", "content": "new response"},
+    ]
+
+    cleaned = _dedupe_replayed_context_messages(
+        previous_context,
+        result_messages,
+        CURRENT_TURN,
+    )
+
+    assert any(
+        isinstance(m, dict) and m.get("content") == HISTORICAL_SHAPE
+        for m in cleaned
+    ), (
+        "Historical user row shaped like the stale merge must remain unchanged; "
+        f"got: {[m.get('content') for m in cleaned]}"
+    )
+    assert any(
+        isinstance(m, dict) and m.get("role") == "user" and m.get("content") == CURRENT_TURN
+        for m in cleaned
+    ), (
+        "Clean current user turn must appear in returned context; "
+        f"got: {[m.get('content') for m in cleaned]}"
+    )
+
+
 def test_stale_tail_candidate_returns_normalized_text():
     """_stale_user_tail_candidate normalizes whitespace and strips workspace prefix."""
     from api.streaming import _stale_user_tail_candidate
