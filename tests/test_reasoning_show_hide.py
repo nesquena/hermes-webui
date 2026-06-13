@@ -20,6 +20,23 @@ def read(rel):
     return (REPO / rel).read_text(encoding='utf-8')
 
 
+def function_body(src, name):
+    start = src.find(f"function {name}")
+    assert start != -1, f"{name} not found"
+    brace = src.find("{", start)
+    assert brace != -1, f"{name} body not found"
+    depth = 0
+    for idx in range(brace, len(src)):
+        ch = src[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[brace + 1:idx]
+    raise AssertionError(f"{name} body did not close")
+
+
 # ── api/config.py ─────────────────────────────────────────────────────────────
 
 class TestShowThinkingConfig:
@@ -79,6 +96,36 @@ class TestUiJsThinkingGate:
                     f"thinking card insertion must be gated: {line.strip()}"
                 )
                 break
+
+    def test_worklog_reasoning_rows_are_gated_by_show_thinking(self):
+        src = read('static/ui.js')
+        node_fn = function_body(src, "_worklogReasonNodeFromText")
+        assert 'window._showThinking===false' in node_fn and 'return null' in node_fn, (
+            "reasoning-source Worklog rows must not be created when thinking is hidden"
+        )
+
+    def test_show_thinking_gate_does_not_hide_worklog_anchor_text(self):
+        src = read('static/ui.js')
+        html_fn = function_body(src, "_worklogReasonHtmlFromText")
+        assert 'window._showThinking' not in html_fn, (
+            "the low-level Worklog text renderer is also used for anchor/progress text; "
+            "only reasoning-source rows should be gated"
+        )
+
+    def test_remove_thinking_prunes_reasoning_rows_but_preserves_tool_or_anchor_rows(self):
+        src = read('static/ui.js')
+        fn = function_body(src, "removeThinking")
+        assert '.wl-reason[data-worklog-reason-source="reasoning"]' in fn, (
+            "removeThinking must sweep already-rendered reasoning Worklog rows"
+        )
+        assert '.tool-card-row,.agent-activity-thinking,.wl-reason' in fn, (
+            "empty-group cleanup must preserve groups that still contain tool cards "
+            "or non-reasoning Worklog anchor rows"
+        )
+        assert '.live-worklog[data-live-worklog-shell="1"]' in fn, (
+            "live Worklog shells must be considered for cleanup after their reasoning "
+            "rows are removed"
+        )
 
 
 # ── static/messages.js ────────────────────────────────────────────────────────
@@ -157,6 +204,9 @@ class TestReasoningCommand:
         )
         assert 'renderMessages' in fn, (
             "show/hide branch must call renderMessages()"
+        )
+        assert "typeof removeThinking==='function'" in fn and "removeThinking()" in fn, (
+            "hide/off must prune already-rendered live Thinking and Worklog reasoning rows"
         )
         # Persistence: POST to /api/reasoning (CLI-shared config.yaml) AND
         # /api/settings (boot.js mirror).
