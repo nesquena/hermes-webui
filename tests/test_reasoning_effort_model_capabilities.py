@@ -83,7 +83,7 @@ def test_coerce_preserves_effort_for_unrecognized_model():
         "max",
         "brand-new-model-2099",
         provider_id="some-custom-provider",
-    ) == "max"
+    ) == "xhigh"
     # 'none' / unset still pass through unchanged for unknown models.
     assert cfg.coerce_reasoning_effort_for_model(
         "none", "some-unknown-model-xyz", provider_id="custom"
@@ -130,3 +130,13 @@ def test_get_reasoning_status_includes_supported_efforts(monkeypatch):
     )
     assert status["supported_efforts"] == ["low", "medium", "high"]
     assert status["supports_reasoning_effort"] is True
+
+
+def test_get_reasoning_status_for_reasoning_capable_model_has_no_max():
+    status = cfg.get_reasoning_status(
+        model_id="gpt-5.5",
+        provider_id="openai-codex",
+    )
+    assert status["supported_efforts"] == ["minimal", "low", "medium", "high", "xhigh"]
+    assert status["supports_reasoning_effort"] is True
+    assert "max" not in status["supported_efforts"]

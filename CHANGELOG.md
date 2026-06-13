@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The unsupported `Max` reasoning effort is no longer exposed in WebUI, and stale saved `max` configs degrade cleanly to `xhigh` (#4119).** The composer dropdown and `/reasoning` slash-command now stop at `xhigh`, matching the current WebUI parser contract, while older configs that still carry `agent.reasoning_effort: max` continue to send the strongest supported effort instead of silently dropping reasoning on unknown-model paths. (#4119)
+
 ## [v0.51.391] — 2026-06-13 — Release ND (Stable Assistant Turn Anchors renderer snapshot adapter, inert, #3926)
 
 ### Added
