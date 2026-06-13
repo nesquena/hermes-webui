@@ -5554,12 +5554,32 @@ def _run_agent_streaming(
         # the chat stuck in "Thinking…" forever.
         _approval_registered = False
         _unreg_notify = None
+        _cleanup_gateway_pending_mirror = None
         try:
+            try:
+                from api.route_approvals import (
+                    submit_gateway_pending_mirror as _submit_pending_for_polling,
+                    reconcile_gateway_pending_mirror_locked as _reconcile_gateway_pending_mirror_locked,
+                    _approval_sse_notify_locked as _approval_sse_notify_locked,
+                    _lock as _approval_lock,
+                )
+                def _cleanup_gateway_pending_mirror():
+                    with _approval_lock:
+                        head, total, _changed = _reconcile_gateway_pending_mirror_locked(session_id)
+                        _approval_sse_notify_locked(session_id, head, total)
+            except ImportError:
+                _submit_pending_for_polling = None
+                _cleanup_gateway_pending_mirror = None
             from tools.approval import (
                 register_gateway_notify as _reg_notify,
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
+                if _submit_pending_for_polling is not None:
+                    try:
+                        _submit_pending_for_polling(session_id, approval_data)
+                    except Exception:
+                        logger.warning("Failed to mirror approval into WebUI polling state", exc_info=True)
                 put('approval', approval_data)
             _reg_notify(session_id, _approval_notify_cb)
             _approval_registered = True
@@ -5857,10 +5877,30 @@ def _run_agent_streaming(
                     # Fallback: poll for pending approval in case notify_cb wasn't
                     # registered (e.g. older approval module without gateway support).
                     try:
-                        from tools.approval import has_pending as _has_pending, _pending, _lock
-                        if _has_pending(session_id):
-                            with _lock:
-                                p = dict(_pending.get(session_id, {}))
+                        from api.route_approvals import (
+                            _gateway_queues as _approval_gateway_queues,
+                            _lock as _approval_lock,
+                            _pending as _approval_pending,
+                            reconcile_gateway_pending_mirror_locked as _reconcile_gateway_pending_mirror_locked,
+                        )
+                        from tools.approval import has_blocking_approval as _has_blocking_approval
+                        if _has_blocking_approval(session_id):
+                            p = None
+                            with _approval_lock:
+                                _reconcile_gateway_pending_mirror_locked(session_id)
+                                queue = _approval_pending.get(session_id)
+                                if isinstance(queue, list):
+                                    p = dict(queue[0]) if queue else None
+                                elif queue:
+                                    p = dict(queue)
+                                if p is None:
+                                    gw_queue = _approval_gateway_queues.get(session_id) or []
+                                    if gw_queue:
+                                        raw = getattr(gw_queue[0], 'data', None) or {}
+                                        if raw:
+                                            p = dict(raw)
+                                        else:
+                                            logger.warning("Gateway queue entry for %s has no .data attribute", session_id)
                             if p:
                                 put('approval', p)
                     except ImportError:
@@ -7825,6 +7865,11 @@ def _run_agent_streaming(
                     _unreg_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister approval callback")
+            if _cleanup_gateway_pending_mirror is not None:
+                try:
+                    _cleanup_gateway_pending_mirror()
+                except Exception:
+                    logger.debug("Failed to reconcile gateway approval mirror")
             if _clarify_registered and _unreg_clarify_notify is not None:
                 try:
                     _unreg_clarify_notify(session_id)
