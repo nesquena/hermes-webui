@@ -5591,6 +5591,30 @@ function dismissAgentHealthAlert(){
   _setAgentHealthDismissed(true);
   _hideAgentHealthAlert();
 }
+async function restartGatewayService(){
+  const btn = $('btnRestartGateway');
+  const dismissBtn = $('agentHealthDismiss');
+  if(!btn) return;
+  btn.disabled = true;
+  if(dismissBtn) dismissBtn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Restarting...';
+  try {
+    const res = await api('/api/health/restart', {method: 'POST'});
+    if(res && res.ok){
+      showToast('Gateway service restarted successfully');
+      await pollAgentHealth();
+    } else {
+      showToast(res && res.error || 'Failed to restart gateway service');
+    }
+  } catch(e) {
+    showToast('Failed to restart gateway service: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    if(dismissBtn) dismissBtn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
 async function pollAgentHealth(){
   if(document.visibilityState !== 'visible') return;
   try{
