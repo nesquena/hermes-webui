@@ -1844,6 +1844,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(await _restoreSettledSession(source)) return;
       if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
+      _flushReasoningToAnchor();
+      _scheduleAnchorRegistryCleanup(120000);
       _handleStreamError(source);
     })();
   }
@@ -1903,6 +1905,63 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   const _STREAM_FADE_STAGGER_MS=16;
   const _STREAM_FADE_DONE_MAX_MS=320;
   const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
+  const _anchorApi=(typeof window!=='undefined'&&window.HermesAssistantTurnAnchors)
+    ? window.HermesAssistantTurnAnchors
+    : null;
+  const _anchorRegistryMap=(typeof window!=='undefined')
+    ? (window._liveAnchorRegistries=window._liveAnchorRegistries||new Map())
+    : null;
+  const _existingAnchorRegistry=_anchorRegistryMap?_anchorRegistryMap.get(streamId):null;
+  const _anchorRegistry=_existingAnchorRegistry||(_anchorApi&&typeof _anchorApi.createAssistantTurnAnchorRegistry==='function'
+    ? _anchorApi.createAssistantTurnAnchorRegistry({
+      session_id:activeSid,
+      stream_id:streamId,
+      run_id:null,
+    })
+    : null);
+  let _anchorShadowWarned=false;
+  let _anchorReasoningFlushed=false;
+  if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
+  function _scheduleAnchorRegistryCleanup(delayMs=600000){
+    if(!_anchorRegistryMap||!_anchorRegistry) return;
+    setTimeout(()=>{
+      if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
+    },delayMs);
+  }
+  function _applyToAnchor(sourceEventType, rawEventData, sseEvent){
+    if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return null;
+    const raw=(rawEventData&&typeof rawEventData==='object')?rawEventData:{};
+    const eventId=(sseEvent&&sseEvent.lastEventId)||raw.event_id||raw.lastEventId||raw.last_event_id||'';
+    const sourceEvent={
+      ...raw,
+      source_event_type:sourceEventType,
+      activitySegmentSeq:_assistantSegmentSeq,
+      activityBurstId:_currentActivityBurstId,
+    };
+    if(eventId) sourceEvent.event_id=eventId;
+    try{
+      return _anchorApi.applyAssistantTurnAnchorSourceEvent(
+        _anchorRegistry,
+        sourceEvent,
+        {session_id:activeSid,stream_id:streamId}
+      );
+    }catch(err){
+      if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
+        _anchorShadowWarned=true;
+        console.warn('assistant turn anchor live shadow feed failed',err);
+      }
+      return null;
+    }
+  }
+  function _flushReasoningToAnchor(){
+    if(_anchorReasoningFlushed||!reasoningText) return;
+    _anchorReasoningFlushed=true;
+    _applyToAnchor('reasoning',{
+      text:reasoningText,
+      local_id:'live-reasoning',
+      seq:_runJournalReplayAfterSeq(),
+    },null);
+  }
 
   function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
     const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
@@ -2802,6 +2861,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!visible){
         return;
       }
+      _applyToAnchor('interim_assistant',d,e);
       liveReasoningText='';
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid){
@@ -2890,6 +2950,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _completeAutomaticCompressionOnLiveProgress(activeSid);
       const tc=upsertLiveToolCall(d,'start');
       if(!tc) return;
+      _applyToAnchor('tool',{...d,...tc},e);
 
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -2922,6 +2983,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const tc=upsertLiveToolCall(d,'complete');
       if(!tc) return;
       tc.is_error=!!d.is_error;
+      _applyToAnchor('tool_complete',{...d,...tc,is_error:!!d.is_error},e);
       if(typeof noteWorkspaceMutationsFromToolCall==='function') noteWorkspaceMutationsFromToolCall(tc);
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -2989,6 +3051,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
+      _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
       sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
@@ -2996,6 +3059,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
+      _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
       sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
@@ -3083,6 +3147,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const sid=d.session_id||activeSid;
         const continuation_prompt=String(d.continuation_prompt||d.text||'').trim();
         if(!continuation_prompt||sid!==activeSid)return;
+        _applyToAnchor('goal_continue',d,e);
         const _modelState=_chatPayloadModelState();
         _pendingGoalContinuation={
           sid,
@@ -3132,6 +3197,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       const _doneData=JSON.parse(e.data);
+      const _doneEvent=e;
       const _finishDone=()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
@@ -3154,6 +3220,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _smdEndParser();
         }
         const d=_doneData;
+        _flushReasoningToAnchor();
+        _applyToAnchor('done',{
+          status:d.status||'completed',
+          usage:d.usage||null,
+          created_at:d.created_at||null,
+        },_doneEvent);
+        _scheduleAnchorRegistryCleanup();
         const isActiveSession=_isSessionCurrentPane(activeSid);
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedSession=d.session||{session_id:activeSid};
@@ -3201,6 +3274,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
           const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
+          if(_anchorRegistry&&lastAsst) lastAsst._anchor_stream_id=streamId;
           // Persist reasoning trace for Worklog Thinking Cards; normal transcript
           // rendering keeps provider reasoning out of the final answer.
           if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
@@ -3383,6 +3457,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const sid=d.session_id||activeSid;
         const txt=String(d.text||'').trim();
         if(!txt||sid!==activeSid) return;
+        _applyToAnchor('pending_steer_leftover',d,e);
         if(typeof queueSessionMessage==='function'){
           const _modelState=_chatPayloadModelState();
           queueSessionMessage(sid,{
@@ -3404,6 +3479,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
       if(d.session_id&&d.session_id!==activeSid) return;
+      _applyToAnchor('compressing',d,e);
       const state={
         sessionId:activeSid,
         phase:'running',
@@ -3438,6 +3514,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const continuationSid=d.new_session_id||d.continuation_session_id||'';
       const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||d.new_session_id===currentSid||d.continuation_session_id===currentSid));
       if(!eventMatchesCurrent) return;
+      _applyToAnchor('compressed',d,e);
       const displaySid=currentSid;
       if(d.usage&&typeof _syncCtxIndicator==='function'){
         S.lastUsage=typeof _mergeUsageForCtxIndicator==='function'
@@ -3502,8 +3579,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const eventSid=d.old_session_id||d.session_id||'';
       const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';
       const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||continuationSid===currentSid));
+      if(eventMatchesCurrent){
+        _flushReasoningToAnchor();
+        _applyToAnchor('apperror',{
+          type:d.type||'error',
+          status:d.status||d.type||'error',
+          message:d.message||'',
+          hint:d.hint||'',
+          details:d.details||'',
+          session_id:d.session_id||eventSid||activeSid,
+          old_session_id:d.old_session_id||null,
+          new_session_id:d.new_session_id||d.continuation_session_id||null,
+        },e);
+      }
       if(S.session&&eventMatchesCurrent){
         S.activeStreamId=null;
+        _scheduleAnchorRegistryCleanup();
         clearLiveToolCards();if(!assistantText)removeThinking();
         let isRecoveryControlMessage=false;
         try{
@@ -3622,6 +3713,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(await _restoreSettledSession(source)) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
+          _flushReasoningToAnchor();
+          _scheduleAnchorRegistryCleanup(120000);
           _handleStreamError(source);
         },1500);
         return;
@@ -3629,6 +3722,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(await _restoreSettledSession(source)) return;
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
+      _flushReasoningToAnchor();
+      _scheduleAnchorRegistryCleanup(120000);
       _handleStreamError(source);
     });
 
@@ -3646,6 +3741,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearOwnerInflightState();
       _clearApprovalForOwner();
       _clearClarifyForOwner('cancelled');
+      let _cancelData={};
+      try{ _cancelData=JSON.parse(e.data||'{}')||{}; }catch(_){ _cancelData={}; }
+      _flushReasoningToAnchor();
+      _applyToAnchor('cancel',{
+        status:_cancelData.status||_cancelData.type||'cancelled',
+        message:_cancelData.message||'',
+        session_id:_cancelData.session_id||activeSid,
+      },e);
+      _scheduleAnchorRegistryCleanup();
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
       }
@@ -3701,7 +3805,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
-  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard'];
+  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id'];
   function _carryForwardEphemeralTurnFields(prevMessages, nextMessages){
     if(!Array.isArray(prevMessages)||!Array.isArray(nextMessages)) return nextMessages;
     if(!prevMessages.length||!nextMessages.length) return nextMessages;
@@ -3746,6 +3850,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       _clearOwnerInflightState();
+      _flushReasoningToAnchor();
       _closeSource(source);
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');

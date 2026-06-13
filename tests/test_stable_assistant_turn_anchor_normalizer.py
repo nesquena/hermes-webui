@@ -324,15 +324,17 @@ def test_structured_fallback_dedupe_keys_do_not_collide_on_delimiters():
     assert data["localNoSeqKey"] == ""
 
 
-def test_normalizer_and_registry_helpers_are_still_unwired_from_rendering_hot_paths():
+def test_normalizer_helpers_remain_unwired_from_rendering_and_live_hot_paths():
     helper_names = [
         "normalizeAssistantTurnAnchorSourceEvent",
         "normalizeAssistantTurnAnchorSourceEvents",
-        "createAssistantTurnAnchorRegistry",
-        "applyAssistantTurnAnchorSourceEvent",
         "applyAssistantTurnAnchorSourceEvents",
     ]
     for helper in helper_names:
         assert helper not in _read(UI_JS)
         assert helper not in _read(SESSIONS_JS)
         assert helper not in _read(MESSAGES_JS)
+
+    messages_src = _read(MESSAGES_JS)
+    assert "createAssistantTurnAnchorRegistry" in messages_src
+    assert "applyAssistantTurnAnchorSourceEvent" in messages_src

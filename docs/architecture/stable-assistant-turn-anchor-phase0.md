@@ -26,10 +26,14 @@ streaming or rendering yet.
 - Slice 5 starts RFC Phase 5 by projecting anchor-owned activity events into a
   renderer-neutral activity scene that Compact Worklog and Transparent Stream
   can later consume from the same ordered rows.
-- The next independently reviewable boundary is wiring one current renderer to
-  the activity scene. `S.messages`, `INFLIGHT`, stream-local state, and DOM nodes
-  remain projection/cache layers outside the settled final-prose path and the
-  inert activity-scene projection.
+- Slice 6 starts the live shadow-feed boundary: `attachLiveStream()` now creates
+  a per-stream anchor registry and feeds non-token live activity events into it
+  without changing either current renderer.
+- The next independently reviewable boundary is a dual-run reconciler that
+  compares current Compact Worklog / Transparent Stream output with the
+  anchor-owned activity scene before visible renderer replacement. `S.messages`,
+  `INFLIGHT`, stream-local state, and DOM nodes remain projection/cache layers
+  outside the settled final-prose path and the live shadow registry.
 
 ## State Layers
 
@@ -153,7 +157,44 @@ IDs, and sanitized payloads with a chronological display hint. This pins the
 shared input shape before either renderer is rewired.
 
 This slice is still inert. No current UI module consumes the activity scene.
-`renderMessages()` and the live streaming hot path are unchanged by this slice.
+`renderMessages()` and the live streaming hot path were unchanged by Slice 5.
+
+## Slice 6 Live Shadow Feed
+
+`attachLiveStream()` now creates or reuses a per-stream local registry in
+`window._liveAnchorRegistries` and feeds current live activity events through
+`HermesAssistantTurnAnchors.applyAssistantTurnAnchorSourceEvent()`. This is a
+shadow feed only: Compact Worklog, Transparent Stream, `renderMessages()`,
+`S.messages`, `INFLIGHT`, and DOM continuity do not read from the registry yet.
+
+The feed intentionally skips `token` events. Token events can arrive at high
+frequency and would turn the anchor into a per-token append log before the
+renderer reconciliation slice has proven the row model. Reasoning deltas are
+also not fed one-by-one; Slice 6 flushes one aggregate reasoning event before a
+terminal or settled-restore path. The feed captures the non-token activity
+boundaries that define the future scene: interim assistant segments, tool
+start/complete, approval, clarify, goal continuation, pending steer leftovers,
+compression lifecycle, app errors, cancel, and done.
+
+The SSE `Last-Event-ID` value is copied into the source event before applying it
+to the registry, with current event-id fallbacks preserved. Existing registries
+are reused by `stream_id` so a reconnect continues the same dedupe ring instead
+of starting a parallel owner. Completed, errored, or cancelled streams schedule
+registry cleanup after a retention window. Permanently failed network-error
+paths schedule a shorter cleanup window after recovery/restore options are
+exhausted.
+
+The `done` feed is deliberately slim: status, usage, and creation timestamp are
+copied, but the full settled session payload is not duplicated into the live
+registry. When the active settled assistant message is available, it is stamped
+with `_anchor_stream_id` so later reconciliation can associate the settled
+message with the live shadow registry. That field is treated as client-side
+ephemeral turn metadata and is carried forward across session refreshes.
+
+EventSource network `error` remains a transport/recovery signal and is not fed
+as an anchor terminal event in this slice. Runtime app errors continue through
+the existing `apperror` event path and are fed as terminal activity only when
+they match the current session.
 
 ## Source Event Classification
 
