@@ -8718,6 +8718,16 @@ function _restoreMessageScrollSnapshot(snapshot){
   el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
+  const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
+  if(bottomDistance>250){
+    _messageUserUnpinned=true;
+    _scrollPinned=false;
+    _nearBottomCount=0;
+  }else if(bottomDistance<=120){
+    _messageUserUnpinned=false;
+    _scrollPinned=true;
+    _nearBottomCount=2;
+  }
   requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
 }
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
@@ -8773,6 +8783,11 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // pinned users stay at bottom; users who manually scrolled up get their
   // pre-render scrollTop restored after the DOM replacement.
   if(preserveScroll){
+    const readerAwayFromBottom=!!(
+      scrollSnapshot &&
+      Number.isFinite(Number(scrollSnapshot.bottom)) &&
+      Number(scrollSnapshot.bottom)>250
+    );
     // Keep master's follow heuristic for pinned / still-near-bottom users:
     // _followMessagesAfterDomReplace() does a FORCED scrollToBottom() (synchronous
     // bottom write + forced settle), so the final settled response can't leave a
@@ -8781,7 +8796,7 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
     // new-message cue. (Using scrollIfPinned() here instead would skip the forced
     // write unless distance>500 and let the DOM-rebuild scroll event cancel the
     // delayed settles — Codex CORE catch on #3631.)
-    if(!_messageUserUnpinned && _followMessagesAfterDomReplace()) return;
+    if(!readerAwayFromBottom && !_messageUserUnpinned && _followMessagesAfterDomReplace()) return;
     _restoreMessageScrollSnapshot(scrollSnapshot);
     _maybeShowNewMessageScrollCue(scrollSnapshot);
     return;

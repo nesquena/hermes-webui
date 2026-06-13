@@ -1038,10 +1038,13 @@ async function loadSession(sid){
   if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
-  // Reset scroll-direction tracker on session switch so the new chat's
-  // first scroll doesn't compare against the previous chat's scrollTop
+  // Reset scroll-direction tracker only on real session switches so the new
+  // chat's first scroll doesn't compare against the previous chat's scrollTop
   // and false-trigger an unpin (#1731 follow-up — Opus stage-302 SHOULD-FIX).
-  if (typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
+  // Same-session force refreshes reuse the current transcript viewport; clearing
+  // the sticky-unpin state here makes preserveScroll treat a reader mid-answer
+  // as pinned and snap them back to the bottom on the next render.
+  if (currentSid !== sid && typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
     try { window._resetScrollDirectionTracker(); } catch (_) {}
   }
   if(typeof _applyPendingSessionModelForSession==='function') _applyPendingSessionModelForSession(sid);
