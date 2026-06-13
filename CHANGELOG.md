@@ -3,10 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.375] — 2026-06-13 — Release MN (Transparent Stream activity display, #3820)
+
 ### Added
 
-- **Transparent Stream activity display mode.** Settings → Appearance now includes an opt-in chat activity display mode that renders each Thinking/tool event as its own chronological expandable row, with live tool completion updating the same row and settled/reloaded transcripts preserving the same event shape. Compact Worklog remains the default. (#3820)
-- **Transparent Stream turn-level collapse + old-event fading + per-turn footer.** In Transparent Stream, clicking the assistant role label (the Hermes chat name tag) collapses the entire event stack underneath into a compact "output only" view with an animated chevron. Older event rows fade progressively from medium to low opacity (steps of ~0.18, floor at 0.32) so the eye lands on the most recent activity; hover restores full opacity. A bottom-of-turn footer mirrors the live run-status line for settled turns, showing elapsed time, first-token time (TTFT), token usage, and final status. (#3820)
+- **Transparent Stream activity display mode (opt-in).** Settings → Appearance now includes a chat activity display mode that renders each Thinking/tool event as its own chronological expandable row — restoring the transparent reasoning/tool-call stream for power users — with live tool completion updating the same row and settled/reloaded transcripts preserving the same event shape and order. Compact Worklog remains the default. The rows are styled as quiet inline assistant-turn metadata (flat, theme-adaptive, prose stays the primary reading object) across light/dark and all skins; failed tools are clearly marked, args render compactly, and tool output reads as one quiet zone. (#3820)
+- **Transparent Stream turn-level collapse + recency fade + per-turn footer.** Clicking the assistant role label collapses the entire event stack into a compact "output only" view with an animated chevron. On the live turn, older event rows fade progressively (recency cue, readable floor) and restore on hover; settled history stays full-opacity. A bottom-of-turn footer mirrors the live run-status line for settled turns (elapsed time, TTFT, token usage, final status). (#3820)
 
 ## [v0.51.374] — 2026-06-12 — Release MM (custom-provider context-length probes carry the API key)
 
