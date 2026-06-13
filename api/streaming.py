@@ -1635,37 +1635,27 @@ def _is_valid_image(path: Path, mime: str) -> bool:
 
 
 def _resolve_image_input_mode(cfg: dict) -> str:
-    """Return ``"native"`` or ``"text"`` based on config, mirroring
-    ``agent/image_routing.py:decide_image_input_mode``.
+    """Return ``"native"`` or ``"text"`` based on config.
 
-    The agent has this logic, but the WebUI's ``_build_native_multimodal_message``
-    was unconditionally embedding images as native ``image_url`` parts, completely
-    bypassing ``image_input_mode``.  This caused silent failures when the main model
-    does not support images and the fallback model is also text-only (#21160-related).
+    Delegates to ``agent.image_routing.decide_image_input_mode`` which is the
+    single source of truth for image routing.  Previously this was a local
+    re-implementation that diverged from the agent's logic — it returned
+    ``"text"`` whenever auxiliary.vision was explicitly configured, even when
+    the main model supports vision natively (Issue #44299, WebUI side).
     """
+    try:
+        from agent.image_routing import decide_image_input_mode
+        from agent.auxiliary_client import _read_main_provider, _read_main_model
+        provider = _read_main_provider()
+        model = _read_main_model()
+        return decide_image_input_mode(provider, model, cfg)
+    except Exception:
+        pass
+    # Fallback: check explicit config overrides only
     agent_cfg = cfg.get("agent") or {}
     mode = str(agent_cfg.get("image_input_mode", "auto") or "auto").strip().lower()
-    if mode not in ("auto", "native", "text"):
-        mode = "auto"
-
-    if mode == "native":
-        return "native"
-    if mode == "text":
-        return "text"
-
-    # auto: if auxiliary.vision is explicitly configured → text mode
-    # (user opted into a dedicated vision backend)
-    aux = cfg.get("auxiliary") or {}
-    vision = aux.get("vision") or {}
-    provider = str(vision.get("provider") or "").strip().lower()
-    model_name = str(vision.get("model") or "").strip()
-    base_url = str(vision.get("base_url") or "").strip()
-    if provider not in ("", "auto") or model_name or base_url:
-        return "text"
-
-    # No explicit vision config, no model-capability lookup available in WebUI.
-    # Default to native — the agent's ``_strip_images_from_messages`` guard will
-    # strip images on rejection and retry as text.
+    if mode in ("native", "text"):
+        return mode
     return "native"
 
 
