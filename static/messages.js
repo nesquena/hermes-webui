@@ -910,7 +910,8 @@ async function send(){
       if(!S.session){await newSession();await renderSessionList();}
       // Busy-control slash commands must be intercepted HERE, before the
       // busyMode routing block, so the user can always type /steer, /interrupt,
-      // or /queue while the agent is running and have them execute immediately.
+      // /queue, /terminal, /goal, or /yolo while the agent is running and have
+      // them execute immediately.
       // Without this intercept they fall through to the queue and execute after
       // the current turn ends — by which point there is no active stream and
       // cmdSteer / cmdInterrupt say "No active task to stop."
