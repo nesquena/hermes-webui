@@ -2734,7 +2734,16 @@ def get_reasoning_status(
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
-        "reasoning_effort": str(effort_raw or "").strip().lower(),
+        # Report the COERCED effort (not the raw config value) so boot/status/chip
+        # read paths agree with what streaming actually sends — e.g. a stale
+        # `reasoning_effort: max` surfaces as `xhigh`, not the now-unsupported `max`.
+        # (Codex review of the drop-max alignment.)
+        "reasoning_effort": coerce_reasoning_effort_for_model(
+            str(effort_raw or "").strip().lower(),
+            resolve_model,
+            provider_id=resolve_provider,
+            base_url=resolve_base_url,
+        ),
         "supported_efforts": supported_efforts,
         "supports_reasoning_effort": bool(supported_efforts),
     }

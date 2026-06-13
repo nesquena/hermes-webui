@@ -140,3 +140,20 @@ def test_get_reasoning_status_for_reasoning_capable_model_has_no_max():
     assert status["supported_efforts"] == ["minimal", "low", "medium", "high", "xhigh"]
     assert status["supports_reasoning_effort"] is True
     assert "max" not in status["supported_efforts"]
+
+
+def test_get_reasoning_status_coerces_stale_max_to_xhigh(monkeypatch):
+    """A previously-saved `agent.reasoning_effort: max` (no longer a valid effort)
+    must be reported as the coerced `xhigh`, not the raw stale `max`, so the
+    boot/status/chip read paths agree with what streaming actually sends."""
+    monkeypatch.setattr(
+        cfg,
+        "_load_yaml_config_file",
+        lambda *a, **k: {"agent": {"reasoning_effort": "max"}},
+    )
+    status = cfg.get_reasoning_status(
+        model_id="gpt-5.5",
+        provider_id="openai-codex",
+    )
+    assert status["reasoning_effort"] == "xhigh"
+    assert status["reasoning_effort"] != "max"
