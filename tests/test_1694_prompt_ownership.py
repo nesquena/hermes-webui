@@ -62,8 +62,10 @@ def test_approval_card_render_is_gated_to_active_session_and_cached():
     body = _function_body(MESSAGES_JS, "showApprovalCard")
     assert "_rememberApprovalPending(" in body
     assert "_approvalPromptBelongsToActiveSession(sid)" in body
+    assert "syncTopbar()" in body
     assert "return;" in body
     assert "let _approvalPendingBySession" in MESSAGES_JS
+    assert "function activeSessionHasPendingPromptAttention()" in MESSAGES_JS
     assert "function _renderPendingPromptsForActiveSession()" in MESSAGES_JS
 
 
@@ -71,6 +73,7 @@ def test_clarify_card_render_is_gated_to_active_session_and_cached():
     body = _function_body(MESSAGES_JS, "showClarifyCard")
     assert "_rememberClarifyPending(" in body
     assert "_clarifyPromptBelongsToActiveSession(sid)" in body
+    assert "syncTopbar()" in body
     assert "return;" in body
     assert "let _clarifyPendingBySession" in MESSAGES_JS
     assert "function _renderPendingPromptsForActiveSession()" in MESSAGES_JS
@@ -100,7 +103,13 @@ def test_load_session_rerenders_cached_prompt_for_new_active_session():
 def test_prompt_rerender_hides_previous_session_cards_without_clearing_cache():
     approval_body = _function_body(MESSAGES_JS, "_renderPendingApprovalForActiveSession")
     clarify_body = _function_body(MESSAGES_JS, "_renderPendingClarifyForActiveSession")
+    rerender_body = _function_body(MESSAGES_JS, "_renderPendingPromptsForActiveSession")
+    clear_approval_body = _function_body(MESSAGES_JS, "_clearApprovalPendingForSession")
+    clear_clarify_body = _function_body(MESSAGES_JS, "_clearClarifyPendingForSession")
     assert "_approvalSessionId && _approvalSessionId !== sid" in approval_body
     assert "hideApprovalCard(true)" in approval_body
     assert "_clarifySessionId && _clarifySessionId !== sid" in clarify_body
     assert "hideClarifyCard(true, 'session')" in clarify_body
+    assert "syncTopbar()" in rerender_body
+    assert "syncTopbar()" in clear_approval_body
+    assert "syncTopbar()" in clear_clarify_body

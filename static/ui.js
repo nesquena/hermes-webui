@@ -6274,7 +6274,8 @@ function syncTopbar(){
   }
   const sessionTitle=S.session.title||t('untitled');
   const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
-  document.title=sessionTitle+' \u2014 '+assistantDisplayName();
+  const pendingPrefix=(typeof activeSessionHasPendingPromptAttention==='function'&&activeSessionHasPendingPromptAttention())?'● ':'';
+  document.title=pendingPrefix+sessionTitle+' \u2014 '+assistantDisplayName();
   const _topbarMeta=$('topbarMeta');
   if(_topbarMeta){
     let sourceLabel=(S.session&&(S.session.source_label||S.session.source_tag||S.session.raw_source))||'';
