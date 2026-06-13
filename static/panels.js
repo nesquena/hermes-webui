@@ -8728,15 +8728,18 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
 function updateNotificationPermissionStatus(){
   const el=$('notificationPermissionStatus');
   const btn=$('notificationPermissionButton');
+  const btnWrap=$('notificationPermissionButtonWrap');
   if(!el) return;
   if(!('Notification' in window)){
     const unsupported=t('notifications_unsupported');
     el.textContent=unsupported;
     if(btn){
       btn.disabled=true;
-      btn.title=unsupported;
+      btn.title='';
+      btn.setAttribute('aria-label', unsupported);
       btn.setAttribute('aria-disabled','true');
     }
+    if(btnWrap) btnWrap.title=unsupported;
     return;
   }
   const perm=Notification.permission||'default';
@@ -8745,7 +8748,9 @@ function updateNotificationPermissionStatus(){
   if(btn){
     const granted=perm==='granted';
     btn.disabled=granted;
-    btn.title=label;
+    btn.title=granted?'':label;
+    btn.setAttribute('aria-label', label);
     btn.setAttribute('aria-disabled', granted?'true':'false');
   }
+  if(btnWrap) btnWrap.title=label;
 }
