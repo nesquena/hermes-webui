@@ -2667,21 +2667,21 @@ def coerce_reasoning_effort_for_model(
     # both for models KNOWN not to support reasoning AND for models we simply
     # don't recognize (custom providers, aggregator-rewritten ids, brand-new
     # releases). Coercion exists to avoid sending a level a KNOWN-incompatible
-    # model rejects (e.g. openai-codex gpt-5 'max', o1/o3/o4 above 'high') —
+    # model rejects (e.g. openai-codex gpt-5 'max', o1/o3/o4 above 'high') -
     # those paths return a NON-empty clamped set, so the degrade ladder below
     # still applies. When the set is empty we can't tell "unsupported" from
-    # "unknown", so preserve the user's configured effort verbatim (the prior
-    # behavior) rather than silently disabling reasoning — the provider stays
-    # the final authority. Worst case is the same rejected request that master
-    # already produces, i.e. no regression. (#3505 review)
+    # "unknown", so preserve the user's configured effort verbatim where it is
+    # still valid. A stale 'max' value is no longer parser-valid on the WebUI
+    # side, so degrade that unknown-model case to xhigh instead of silently
+    # dropping reasoning later in parse_reasoning_effort(). (#3505 review)
     if not supported:
-        return "max" if accepts_max_as_xhigh else raw
+        return "xhigh" if accepts_max_as_xhigh else raw
     if raw in supported:
         return "xhigh" if accepts_max_as_xhigh else raw
     # Degrade to the closest *lower* supported level instead of silently
     # disabling reasoning. e.g. max -> xhigh -> high, or xhigh -> high when the
     # target model caps below the configured effort. Never escalate.
-    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..max
+    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh
     try:
         raw_idx = ladder.index(raw)
     except ValueError:
