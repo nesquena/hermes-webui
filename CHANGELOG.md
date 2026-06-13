@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.388] — 2026-06-13 — Release NA (Stable Assistant Turn Anchors dual-run reconciler, inert, #3926)
+
+### Added
+
+- **Stable Assistant Turn Anchors dual-run reconciler (#3926).** Adds `reconcileAssistantTurnAnchorActivityScene()` to compare an anchor-owned `activity_scene_v1` projection against current renderer-row snapshots before visible renderer replacement. The helper reports row-count, missing/extra row, order, and field mismatch diagnostics for Compact Worklog / Transparent Stream shadow runs while staying inert: no current `renderMessages()`, live SSE, `S.messages`, `INFLIGHT`, Compact Worklog, Transparent Stream, or DOM path consumes it yet. (Slice 7 of the live-to-final unification.)
+
 ## [v0.51.387] — 2026-06-13 — Release MZ (Stable Assistant Turn Anchors live shadow feed, inert, #3926)
 
 ### Added
