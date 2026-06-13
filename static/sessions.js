@@ -2470,7 +2470,7 @@ async function _ensureAllMessagesLoaded() {
   _loadingOlder = true;
   try {
     const sid = S.session.session_id;
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) return;
     // Session may have been switched while we awaited. Bail rather than
