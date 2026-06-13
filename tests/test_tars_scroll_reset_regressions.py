@@ -43,10 +43,21 @@ def test_scroll_to_bottom_settles_across_late_markdown_layout_growth():
     scroll = _function_body(UI_JS, "function scrollToBottom")
     pinned = _function_body(UI_JS, "function scrollIfPinned")
 
+    # The settle survives late markdown layout growth (Prism/KaTeX/Mermaid/images)
+    # via a ResizeObserver on the growing content node (#msgInner) plus a 2s
+    # static-content fallback — this replaced the old [0,16,80,180]ms setTimeout
+    # fan-out + double-rAF scrollHeight polling (#3920, Firefox reflow jitter).
     assert "requestAnimationFrame" in settle
     assert "setTimeout" in settle
-    assert "const passes=[0,16,80,180]" in settle
-    assert "_settleMessageScrollToBottom(true)" in scroll
+    assert "new ResizeObserver" in settle
+    assert "getElementById('msgInner')" in settle, (
+        "the ResizeObserver must observe the growing content node (#msgInner), "
+        "not the fixed #messages scroll container"
+    )
+    assert "2000" in settle, "a 2s fallback must cover fully-static content that never resizes"
+    # scrollToBottom uses force=false so the observer actually runs (the old
+    # force=true skipped it and caused Firefox paint jumps).
+    assert "_settleMessageScrollToBottom(false)" in scroll
     assert "_settleMessageScrollToBottom(false)" in pinned
     assert "!_scrollPinned" in settle
     assert "const token=++_bottomSettleToken" in settle
@@ -57,11 +68,12 @@ def test_scroll_to_bottom_writes_scroll_position_immediately_before_delayed_sett
     scroll = _function_body(UI_JS, "function scrollToBottom")
 
     immediate_idx = scroll.index("_setMessageScrollToBottom();")
-    settle_idx = scroll.index("_settleMessageScrollToBottom(true)")
+    settle_idx = scroll.index("_settleMessageScrollToBottom(false)")
 
     assert immediate_idx < settle_idx, (
-        "scrollToBottom() must write scrollTop synchronously before scheduling delayed settles; "
-        "otherwise a DOM-rebuild scroll event can cancel the delayed passes and strand the viewport at the top"
+        "scrollToBottom() must write scrollTop synchronously before scheduling the "
+        "ResizeObserver settle; otherwise a DOM-rebuild scroll event can cancel the "
+        "delayed settle and strand the viewport at the top"
     )
 
 
