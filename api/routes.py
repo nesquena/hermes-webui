@@ -7193,6 +7193,9 @@ def handle_get(handler, parsed) -> bool:
                     handler.wfile.write(html_content)
                     return True
 
+    if parsed.path == "/api/tts/voices":
+        return _handle_vv_voices(handler, parsed)
+
     return False  # 404
 
 
@@ -10264,6 +10267,173 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
 
 
 
+def _handle_vv_voices(handler, parsed=None):
+    """GET /api/tts/voices?engine=voicevox — return VOICEVOX speakers."""
+    import json
+    from urllib.parse import parse_qs
+
+    engine = "voicevox"
+    if parsed:
+        qs = parse_qs(parsed.query or "")
+        engine = qs.get("engine", ["voicevox"])[0]
+
+    if engine != "voicevox":
+        from api.helpers import bad as _bad
+        return _bad(handler, f"Unknown TTS engine: {engine}", 400)
+
+    # Lightweight concurrency guard — prevents a single client from
+    # flooding the endpoint and DoS-ing the local VOICEVOX process.
+    import threading as _threading
+    if not hasattr(_handle_vv_voices, "_limiter"):
+        _handle_vv_voices._limiter = _threading.Semaphore(2)
+    if not _handle_vv_voices._limiter.acquire(blocking=False):
+        from api.helpers import bad as _bad
+        return _bad(handler, "too many concurrent voice list requests", 429)
+    try:
+        from api.auth import is_auth_enabled, parse_cookie, verify_session
+        if is_auth_enabled():
+            cv = parse_cookie(handler)
+            if not (cv and verify_session(cv)):
+                from api.helpers import bad as _bad
+                return _bad(handler, "unauthorized", 401)
+
+        try:
+            import requests
+            resp = requests.get("http://127.0.0.1:50021/speakers", timeout=5)
+            resp.raise_for_status()
+            speakers = resp.json()
+            voices = []
+            for s in speakers:
+                for style in s.get("styles", []):
+                    voices.append({
+                        "value": str(style["id"]),
+                        "label": f"{s['name']} ({style.get('name', '?')})",
+                    })
+            body = json.dumps(
+                {"voices": voices, "engine": engine, "provider": "voicevox"},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json; charset=utf-8")
+            handler.send_header("Content-Length", str(len(body)))
+            handler.send_header("Cache-Control", "max-age=3600")
+            handler.end_headers()
+            handler.wfile.write(body)
+            return True
+        except Exception:
+            logger.exception("Failed to fetch VOICEVOX speakers")
+            from api.helpers import bad as _bad
+            return _bad(handler, "VOICEVOX engine not available", 503)
+    finally:
+        _handle_vv_voices._limiter.release()
+
+
+def _handle_voicevox_tts(handler, text, voice):
+    """Synthesize speech via VOICEVOX engine using the command provider."""
+    import subprocess, tempfile, os, threading
+    from api.helpers import bad as _bad
+
+    # Per-process concurrency cap: at most 4 simultaneous TTS syntheses.
+    # Double-checked locking — avoids the TOCTOU race in the plain hasattr
+    # pattern under multi-threaded dispatch.
+    if not hasattr(_handle_voicevox_tts, "_semaphore"):
+        if not hasattr(_handle_voicevox_tts, "_init_lock"):
+            _handle_voicevox_tts._init_lock = threading.Lock()
+        with _handle_voicevox_tts._init_lock:
+            if not hasattr(_handle_voicevox_tts, "_semaphore"):
+                _handle_voicevox_tts._semaphore = threading.Semaphore(4)
+    acquired = _handle_voicevox_tts._semaphore.acquire(blocking=False)
+    if not acquired:
+        return _bad(handler, "VOICEVOX busy — too many concurrent TTS requests", 503)
+    input_path = wav_path = mp3_path = None
+    try:
+        voicevox_provider = os.environ.get(
+            "VOICEVOX_PROVIDER_PATH",
+            "/opt/hermes/scripts/voicevox_tts_provider.py",
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as tf:
+            tf.write(text)
+            input_path = tf.name
+
+        base = os.path.splitext(input_path)[0]
+        wav_path = base + ".wav"
+        mp3_path = base + ".mp3"
+
+        cmd = [
+            "python3", voicevox_provider,
+            "--input", input_path,
+            "--output", wav_path,
+        ]
+
+        env = os.environ.copy()
+        if voice and voice.isdigit():
+            env["VOICEVOX_STYLE_ID"] = voice
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=30, env=env,
+        )
+
+        if result.returncode != 0 or not os.path.exists(wav_path):
+            try: os.unlink(input_path)
+            except OSError: pass
+            return _bad(handler, "VOICEVOX synthesis failed", 500)
+
+        # Convert WAV to MP3
+        conv = subprocess.run(
+            ["ffmpeg", "-y", "-i", wav_path, "-codec:a",
+             "libmp3lame", "-b:a", "128k", mp3_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        try: os.unlink(wav_path)
+        except OSError: pass
+
+        if conv.returncode != 0 or not os.path.exists(mp3_path):
+            try: os.unlink(input_path)
+            except OSError: pass
+            return _bad(handler, "audio conversion failed", 500)
+
+        with open(mp3_path, "rb") as f:
+            audio_buf = f.read()
+
+        try: os.unlink(input_path)
+        except OSError: pass
+        try: os.unlink(mp3_path)
+        except OSError: pass
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/mpeg")
+        handler.send_header("Content-Length", str(len(audio_buf)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        try:
+            handler.wfile.write(audio_buf)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return True
+    except subprocess.TimeoutExpired:
+        return _bad(handler, "VOICEVOX synthesis timed out", 504)
+    except FileNotFoundError as e:
+        logger.error("VOICEVOX TTS missing dependency: %s", e)
+        return _bad(handler, f"TTS dependency not found: {e.filename}", 500)
+    except Exception:
+        logger.exception("VOICEVOX TTS failed")
+        return _bad(handler, "VOICEVOX TTS failed", 500)
+    finally:
+        # Clean up temp files — exception paths don't reach the manual unlinks.
+        # Guard against None (paths stay None if exception is raised before
+        # input_path = tf.name executes) and TypeError from os.path.exists(None).
+        for p in (input_path, wav_path, mp3_path):
+            try:
+                if p is not None and os.path.exists(p):
+                    os.unlink(p)
+            except (OSError, TypeError):
+                pass
+        _handle_voicevox_tts._semaphore.release()
+
+
 def _normalize_tts_prosody(value, *, unit: str) -> str | None:
     if not value:
         return ""
@@ -10306,6 +10476,7 @@ def _handle_tts(handler, parsed):
         data = read_body(handler)
         text = (data.get("text") or "").strip()
         voice = data.get("voice") or voice
+        engine = str(data.get("engine") or "").strip().lower()
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
     except Exception:
@@ -10380,7 +10551,12 @@ def _handle_tts(handler, parsed):
         from api.helpers import bad as _bad
         return _bad(handler, "rate limit exceeded — please wait", 429)
 
+    # ── VOICEVOX engine ─────────────────────────────────────────────────
+    if engine == "voicevox":
+        return _handle_voicevox_tts(handler, text, voice)
+
     allowed = {
+        "ja-JP-NanamiNeural", "ja-JP-KeitaNeural",
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
         "en-US-AriaNeural", "en-US-GuyNeural",
