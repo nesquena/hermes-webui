@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Stable Assistant Turn Anchors renderer snapshot adapter (#3926).** Adds `createAssistantTurnAnchorRendererSnapshot()` and `reconcileAssistantTurnAnchorRendererSnapshot()` so current Compact Worklog / Transparent Stream row hooks can be summarized as `renderer_snapshot_v1` and compared with the anchor-owned `activity_scene_v1` through the dual-run reconciler. This is still an inert migration harness: no current `renderMessages()`, live SSE, `S.messages`, `INFLIGHT`, Compact Worklog, Transparent Stream, or DOM path invokes it automatically.
+
 ## [v0.51.389] — 2026-06-13 — Release NB (surface dirty-install state in update check, #4085)
 
 ### Fixed
