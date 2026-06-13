@@ -98,6 +98,23 @@ function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
 }
 
+function _isPhoneWidthViewport(){
+  return window.matchMedia('(max-width: 640px)').matches;
+}
+
+function _forceMobileViewportReflow(){
+  if(!_isPhoneWidthViewport()) return;
+  const layout=document.querySelector('.layout');
+  if(!layout) return;
+  document.documentElement.classList.add('viewport-reflow');
+  void layout.offsetWidth;
+  requestAnimationFrame(()=>{
+    document.documentElement.classList.remove('viewport-reflow');
+    try{ syncWorkspacePanelState(); }catch(_){ }
+    try{ if(typeof _syncSidebarAria==='function') _syncSidebarAria(); }catch(_){ }
+  });
+}
+
 function _syncWorkspacePanelInlineWidth(){
   const {panel}= _workspacePanelEls();
   if(!panel) return;
@@ -1556,7 +1573,21 @@ function applyEmptyStateSuggestionPref(){
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
+  if(!window.visualViewport) _forceMobileViewportReflow();
 });
+
+if(window.visualViewport){
+  let _mobileViewportReflowTimer=0;
+  const _scheduleMobileViewportReflow=()=>{
+    if(_mobileViewportReflowTimer) clearTimeout(_mobileViewportReflowTimer);
+    _mobileViewportReflowTimer=setTimeout(()=>{
+      _mobileViewportReflowTimer=0;
+      _forceMobileViewportReflow();
+    },60);
+  };
+  window.visualViewport.addEventListener('resize', _scheduleMobileViewportReflow);
+  window.visualViewport.addEventListener('scroll', _scheduleMobileViewportReflow);
+}
 
 // Boot: restore last session or start fresh
 // ── Resizable panels ──────────────────────────────────────────────────────
