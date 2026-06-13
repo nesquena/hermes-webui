@@ -182,7 +182,7 @@ def test_normalizer_maps_live_and_replay_to_same_anchor_event_identity():
     live = data["liveToken"]
     replay = data["replayToken"]
 
-    assert data["version"] == "slice5-activity-scene"
+    assert data["version"] == "slice7-dual-run-reconciler"
     assert live["classification"] == "activity"
     assert live["dedupe_key"] == 'event_id:"run-1:7"'
     assert replay["dedupe_key"] == live["dedupe_key"]

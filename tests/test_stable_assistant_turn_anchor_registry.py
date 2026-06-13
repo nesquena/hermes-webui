@@ -216,6 +216,83 @@ console.log(JSON.stringify({{
     return json.loads(result.stdout)
 
 
+def _activity_scene_reconciliation_snapshot() -> dict:
+    assert NODE, "node is required for assistant_turn_anchors.js registry tests"
+    script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync({json.dumps(str(ANCHORS_JS))}, 'utf8');
+const sandbox = {{window:{{}}}};
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, {{filename:'assistant_turn_anchors.js'}});
+const api = sandbox.window.HermesAssistantTurnAnchors;
+const registry = api.createAssistantTurnAnchorRegistry({{
+  session_id:'sid-reconcile',
+  turn_id:'turn-reconcile',
+}});
+api.applyAssistantTurnAnchorSourceEvents(registry, [
+  {{event:'reasoning', payload:{{text:'thinking'}}, event_id:'run-reconcile:1', seq:1}},
+  {{event:'tool', payload:{{tool_call_id:'tool-1', name:'terminal', args:{{command:'rg anchor'}}}}, event_id:'run-reconcile:2', seq:2}},
+  {{event:'tool_complete', payload:{{tool_call_id:'tool-1', name:'terminal', result:'ok', is_error:false}}, event_id:'run-reconcile:3', seq:3}},
+  {{event:'done', payload:{{status:'done'}}, event_id:'run-reconcile:4', seq:4}},
+], {{run_id:'run-reconcile', stream_id:'stream-reconcile'}});
+const scene = api.projectAssistantTurnAnchorActivityScene(registry, {{mode:'transparent_stream'}});
+const rendererRows = scene.activity_rows.map((row) => ({{
+  row_id:row.row_id,
+  kind:row.kind,
+  role:row.role,
+  source_event_type:row.source_event_type,
+  status:row.status,
+  tool_call_id:row.tool_call_id,
+  tool_name:row.tool && row.tool.name,
+  tool_done:row.tool && row.tool.done,
+  tool_is_error:row.tool && row.tool.is_error,
+}}));
+const matched = api.reconcileAssistantTurnAnchorActivityScene({{
+  registry,
+  mode:'transparent_stream',
+  renderer_rows:rendererRows,
+}});
+const mutatedRows = rendererRows
+  .filter((row) => row.row_id !== 'run-reconcile:1')
+  .map((row) => row.row_id === 'run-reconcile:3'
+    ? {{...row, status:'running', tool_done:false}}
+    : row);
+mutatedRows.push({{
+  row_id:'renderer-extra',
+  kind:'tool_started',
+  role:'tool',
+  source_event_type:'tool',
+  status:'running',
+  tool_call_id:'tool-extra',
+  tool_name:'terminal',
+  tool_done:false,
+  tool_is_error:false,
+}});
+const mismatched = api.reconcileAssistantTurnAnchorActivityScene({{
+  scene,
+  renderer_rows:mutatedRows,
+}});
+const duplicatedRows = rendererRows.map((row) => row.row_id === 'run-reconcile:3'
+  ? {{...rendererRows[1]}}
+  : row);
+const duplicated = api.reconcileAssistantTurnAnchorActivityScene({{
+  scene,
+  renderer_rows:duplicatedRows,
+}});
+console.log(JSON.stringify({{
+  version:api.version,
+  scene,
+  matched,
+  mismatched,
+  duplicated,
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 def _final_projection_snapshot() -> dict:
     assert NODE, "node is required for assistant_turn_anchors.js registry tests"
     script = f"""
@@ -446,7 +523,7 @@ def test_registry_owns_one_anchor_and_dedupes_live_plus_replay_events():
     registry = data["registry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice5-activity-scene"
+    assert data["version"] == "slice7-dual-run-reconciler"
     assert [item["reason"] for item in data["results"][:2]] == [None, "duplicate"]
     assert registry["event_index"]["dedupe_keys"][:2] == [
         'event_id:"run-1:1"',
@@ -546,7 +623,7 @@ def test_registry_does_not_destructively_dedupe_seqless_local_tool_lifecycle():
     registry = data["toolRegistry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice5-activity-scene"
+    assert data["version"] == "slice7-dual-run-reconciler"
     assert data["toolResults"] == [
         {"applied": True, "reason": None},
         {"applied": True, "reason": None},
@@ -596,7 +673,7 @@ def test_shadow_snapshot_feeds_current_source_families_into_one_registry_owner()
     registry = data["registry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice5-activity-scene"
+    assert data["version"] == "slice7-dual-run-reconciler"
     assert data["results"]["live"] == [{"applied": True, "reason": None}]
     assert data["results"]["replay"] == [
         {"applied": False, "reason": "duplicate"},
@@ -624,7 +701,7 @@ def test_activity_scene_projects_current_activity_events_for_both_render_modes()
     compact = data["compact"]
     transparent = data["transparent"]
 
-    assert data["version"] == "slice5-activity-scene"
+    assert data["version"] == "slice7-dual-run-reconciler"
     assert compact["version"] == "activity_scene_v1"
     assert transparent["version"] == "activity_scene_v1"
     assert compact["mode"] == "compact_worklog"
@@ -745,13 +822,112 @@ def test_activity_scene_is_renderer_neutral_and_empty_safe():
     }
 
 
+def test_activity_scene_reconciler_matches_renderer_snapshot_rows():
+    data = _activity_scene_reconciliation_snapshot()
+    matched = data["matched"]
+
+    assert data["version"] == "slice7-dual-run-reconciler"
+    assert matched["version"] == "activity_scene_reconciliation_v1"
+    assert matched["scene_version"] == "activity_scene_v1"
+    assert matched["mode"] == "transparent_stream"
+    assert matched["matched"] is True
+    assert matched["summary"] == {
+        "expected_count": 4,
+        "actual_count": 4,
+        "mismatch_count": 0,
+    }
+    assert matched["terminal_state"] == "completed"
+    assert matched["fields"] == [
+        "kind",
+        "role",
+        "source_event_type",
+        "status",
+        "tool_call_id",
+        "tool_name",
+        "tool_done",
+        "tool_is_error",
+    ]
+    assert [row["row_id"] for row in matched["expected_rows"]] == [
+        "run-reconcile:1",
+        "run-reconcile:2",
+        "run-reconcile:3",
+        "run-reconcile:4",
+    ]
+    assert matched["actual_rows"][2]["tool_name"] == "terminal"
+    assert matched["actual_rows"][2]["tool_done"] is True
+
+
+def test_activity_scene_reconciler_reports_missing_changed_and_extra_rows():
+    data = _activity_scene_reconciliation_snapshot()
+    mismatched = data["mismatched"]
+    kinds = [item["kind"] for item in mismatched["mismatches"]]
+
+    assert mismatched["matched"] is False
+    assert mismatched["summary"]["expected_count"] == 4
+    assert mismatched["summary"]["actual_count"] == 4
+    assert mismatched["summary"]["mismatch_count"] == len(mismatched["mismatches"])
+    assert "missing_actual_row" in kinds
+    assert "unexpected_actual_row" in kinds
+    assert {
+        "kind": "field_mismatch",
+        "row_id": "run-reconcile:3",
+        "field": "status",
+        "expected": "completed",
+        "actual": "running",
+    } in mismatched["mismatches"]
+    assert {
+        "kind": "field_mismatch",
+        "row_id": "run-reconcile:3",
+        "field": "tool_done",
+        "expected": True,
+        "actual": False,
+    } in mismatched["mismatches"]
+    missing = [
+        item for item in mismatched["mismatches"]
+        if item["kind"] == "missing_actual_row"
+    ]
+    assert missing[0]["row_id"] == "run-reconcile:1"
+    extra = [
+        item for item in mismatched["mismatches"]
+        if item["kind"] == "unexpected_actual_row"
+    ]
+    assert extra[0]["row_id"] == "renderer-extra"
+
+
+def test_activity_scene_reconciler_reports_duplicate_renderer_row_ids():
+    data = _activity_scene_reconciliation_snapshot()
+    duplicated = data["duplicated"]
+    kinds = [item["kind"] for item in duplicated["mismatches"]]
+
+    assert duplicated["matched"] is False
+    assert "duplicate_actual_row" in kinds
+    assert "missing_actual_row" in kinds
+    duplicates = [
+        item for item in duplicated["mismatches"]
+        if item["kind"] == "duplicate_actual_row"
+    ]
+    assert duplicates == [
+        {
+            "kind": "duplicate_actual_row",
+            "row_id": "run-reconcile:2",
+            "index": 2,
+            "row": duplicated["actual_rows"][2],
+        }
+    ]
+    missing = [
+        item for item in duplicated["mismatches"]
+        if item["kind"] == "missing_actual_row"
+    ]
+    assert missing[0]["row_id"] == "run-reconcile:3"
+
+
 def test_final_projection_routes_settled_assistant_message_through_anchor_owner():
     data = _final_projection_snapshot()
     projected = data["projected"]
     registry = projected["registry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice5-activity-scene"
+    assert data["version"] == "slice7-dual-run-reconciler"
     assert projected["applied"] is True
     assert projected["reason"] is None
     assert projected["final_message_ref"] == "message-final"
@@ -825,6 +1001,7 @@ def test_slice5_scene_projection_does_not_wire_activity_scene_into_rendering_hot
         "applyAssistantTurnAnchorSourceEvents",
         "createAssistantTurnAnchorShadowSnapshot",
         scene_helper,
+        "reconcileAssistantTurnAnchorActivityScene",
     ]:
         assert helper not in _read(UI_JS)
         assert helper not in _read(SESSIONS_JS)
