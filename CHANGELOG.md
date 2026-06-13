@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.383] — 2026-06-13 — Release MV (desktop tab title keeps active session name on bot-name refresh, #4086)
+
+### Fixed
+
+- **Desktop tab titles keep the active session name when profile/settings boot paths refresh the assistant name (#4086).** `applyBotName()` now leaves `document.title` alone while a chat session is active, so `syncTopbar()` remains the owner of the per-session `"<session> — <assistant>"` title and desktop tabs no longer collapse to the same fallback name. (#4086)
+
 ## [v0.51.382] — 2026-06-13 — Release MU (Stable Assistant Turn Anchors: activity-scene projection, inert, #4093)
 
 ### Added
