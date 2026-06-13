@@ -8713,12 +8713,22 @@ function _captureMessageScrollSnapshot(){
     userUnpinned:_messageUserUnpinned,
   };
 }
-function _restoreMessageScrollSnapshot(snapshot){
+function _restoreMessageScrollSnapshot(snapshot, opts){
   const el=$('messages');
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+  // When the DOM grew at the top (e.g. render window expansion prepended
+  // earlier messages), compensate scrollTop so the user's visible message
+  // group stays in view.  This is opt-in via `adjustForTopGrowth` because
+  // some callers (e.g. _loadOlderMessages in sessions.js) already handle
+  // the compensation themselves, and passing it unconditionally would
+  // apply the height adjustment twice. (#4110 review feedback.)
+  const delta=(opts&&opts.adjustForTopGrowth)
+    ? el.scrollHeight-Number(snapshot.scrollHeight||el.scrollHeight)
+    : 0;
+  const target=Math.max(0,Math.min((Number(snapshot.top)||0)+delta,maxTop));
   _programmaticScroll=true;
-  el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  el.scrollTop=target;
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
   const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
@@ -8733,14 +8743,17 @@ function _restoreMessageScrollSnapshot(snapshot){
   }
   requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
 }
-function _restoreMessageScrollSnapshotSameFrame(snapshot){
+function _restoreMessageScrollSnapshotSameFrame(snapshot, opts){
   const el=$('messages');
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
   const bottom=Number(snapshot.bottom);
+  const delta=(opts&&opts.adjustForTopGrowth)
+    ? el.scrollHeight-Number(snapshot.scrollHeight||el.scrollHeight)
+    : 0;
   const target=(snapshot.pinned===true&&Number.isFinite(bottom))
     ? maxTop-Math.max(0,bottom)
-    : Number(snapshot.top)||0;
+    : Math.max(0,Math.min((Number(snapshot.top)||0)+delta,maxTop));
   _programmaticScroll=true;
   el.scrollTop=Math.max(0,Math.min(target,maxTop));
   _lastScrollTop=el.scrollTop;
@@ -8780,7 +8793,7 @@ function _assistantTurnAnchorSettledFinalAnswer(message, content, context){
     return null;
   }
 }
-function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
+function _scrollAfterMessageRender(preserveScroll, scrollSnapshot, opts){
   // Terminal stream renders can happen after S.activeStreamId is cleared.
   // In that case, preserveScroll asks the normal pin-state helper to decide:
   // pinned users stay at bottom; users who manually scrolled up get their
@@ -8800,7 +8813,7 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
     // write unless distance>500 and let the DOM-rebuild scroll event cancel the
     // delayed settles — Codex CORE catch on #3631.)
     if(!readerAwayFromBottom && !_messageUserUnpinned && _followMessagesAfterDomReplace()) return;
-    _restoreMessageScrollSnapshot(scrollSnapshot);
+    _restoreMessageScrollSnapshot(scrollSnapshot, opts);
     _maybeShowNewMessageScrollCue(scrollSnapshot);
     return;
   }
@@ -8816,7 +8829,7 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // renderMessages() captures the pre-wipe snapshot for this case too (see its
   // scrollSnapshot init), so restoring here lands the reader where they were.
   if(!_autoScrollFollow && _messageUserUnpinned){
-    _restoreMessageScrollSnapshot(scrollSnapshot);
+    _restoreMessageScrollSnapshot(scrollSnapshot, opts);
     return;
   }
   scrollToBottom();
@@ -8824,6 +8837,11 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
 
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
+  // Opt-in top-growth adjustment for render window expansion that prepends
+  // messages at the DOM top.  Only the render-window-expansion callers
+  // (stream completion, session response refresh) pass this; _loadOlderMessages
+  // and other callers do not, so their restore path is unchanged.
+  const _scrollOpts={ adjustForTopGrowth: !!(options&&options.adjustForTopGrowth) };
   // Capture the pre-wipe scroll position when preserving OR when Auto-follow is
   // off and the user has scrolled up — both need to restore the reader's position
   // after the DOM rebuild rather than snap to the bottom. (Codex #4006 r3.)
@@ -8861,7 +8879,7 @@ function renderMessages(options){
       _rehydrateTransparentStreamDom(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
-      _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+      _scrollAfterMessageRender(preserveScroll, scrollSnapshot, _scrollOpts);
       requestAnimationFrame(()=>postProcessRenderedMessages(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
@@ -8927,7 +8945,16 @@ function renderMessages(options){
       _preservedLiveTurn=_lt;
     }
   }
+  // DOM mutation (innerHTML='') clamps scrollTop and fires a synchronous
+  // native scroll event. Guard to prevent the listener from corrupting
+  // _scrollPinned / _messageUserUnpinned on this synthetic event.
+  // Reset immediately — the event fires synchronously, so there's no
+  // risk of leaking the guard past this statement.  Leaving the guard
+  // stuck true would silently discard real user scroll events during
+  // streaming when _scrollAfterMessageRender's scrollIfPinned() early-returns.
+  _programmaticScroll=true;
   inner.innerHTML='';
+  _programmaticScroll=false;
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
     S.messages,
@@ -10045,7 +10072,7 @@ function renderMessages(options){
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
-  _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+  _scrollAfterMessageRender(preserveScroll, scrollSnapshot, _scrollOpts);
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>postProcessRenderedMessages(inner));
   // Refresh todo panel if it's currently open

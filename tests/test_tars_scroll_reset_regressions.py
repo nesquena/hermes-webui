@@ -110,15 +110,15 @@ def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
 
     snapshot_idx = render.index("const scrollSnapshot=(preserveScroll||(!_autoScrollFollow&&_messageUserUnpinned))?_captureMessageScrollSnapshot():null")
     inner_idx = render.index("const inner=$('msgInner')")
-    final_scroll_idx = render.rindex("_scrollAfterMessageRender(preserveScroll, scrollSnapshot)")
+    final_scroll_idx = render.rindex("_scrollAfterMessageRender(preserveScroll, scrollSnapshot, _scrollOpts)")
 
     assert snapshot_idx < inner_idx < final_scroll_idx, (
         "renderMessages({preserveScroll:true}) must capture #messages.scrollTop before "
         "replacing transcript DOM, then pass that snapshot to the post-render scroll helper"
     )
     assert "if(!readerAwayFromBottom && !_messageUserUnpinned && _followMessagesAfterDomReplace()) return;" in after_render
-    assert "_restoreMessageScrollSnapshot(scrollSnapshot);\n    _maybeShowNewMessageScrollCue(scrollSnapshot);" in after_render
+    assert "_restoreMessageScrollSnapshot(scrollSnapshot, opts);\n    _maybeShowNewMessageScrollCue(scrollSnapshot);" in after_render
     assert "_shouldFollowMessagesOnDomReplace()" in follow
     assert "scrollToBottom();" in follow
-    assert "el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop))" in restore
+    assert "const target=Math.max(0,Math.min((Number(snapshot.top)||0)+delta,maxTop));" in restore
     assert "_programmaticScroll=true" in restore

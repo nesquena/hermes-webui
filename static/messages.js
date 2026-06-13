@@ -1671,7 +1671,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_isActiveSession()){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
-      renderMessages({preserveScroll:true});
+      renderMessages({preserveScroll:true,adjustForTopGrowth:true});
     }
     renderSessionList();
     _setActivePaneIdleIfOwner();
@@ -3417,7 +3417,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
             _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
           }
-          syncTopbar();renderMessages({preserveScroll:true});
+          syncTopbar();renderMessages({preserveScroll:true,adjustForTopGrowth:true});
           if(shouldFollowOnDone&&typeof scrollToBottom==='function'&&typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(250)) scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
@@ -3931,7 +3931,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
           _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
         }
-        syncTopbar();renderMessages({preserveScroll:true});
+        syncTopbar();renderMessages({preserveScroll:true,adjustForTopGrowth:true});
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();

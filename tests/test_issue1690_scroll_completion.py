@@ -39,7 +39,7 @@ def test_terminal_done_render_preserves_manual_scroll_after_active_stream_is_cle
     done_block = _event_listener_body(MESSAGES_JS, "done")
 
     clear_idx = done_block.index("S.activeStreamId=null")
-    render_idx = done_block.index("renderMessages({preserveScroll:true})")
+    render_idx = done_block.index("renderMessages({preserveScroll:true,")
 
     assert clear_idx < render_idx, (
         "the done handler should clear stream liveness before the final render, "
@@ -55,7 +55,7 @@ def test_render_messages_preserve_scroll_option_uses_user_pin_state_not_stream_l
 
     assert "function renderMessages(options)" in render_body
     assert "const preserveScroll=!!(options&&options.preserveScroll);" in render_body
-    assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in render_body
+    assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot, _scrollOpts);" in render_body
     assert "const scrollSnapshot=(preserveScroll||(!_autoScrollFollow&&_messageUserUnpinned))?_captureMessageScrollSnapshot():null" in render_body
     assert "if(preserveScroll){" in scroll_helper
     # #4124: a reader clearly away from the bottom (>250px) is treated as an active
@@ -63,7 +63,7 @@ def test_render_messages_preserve_scroll_option_uses_user_pin_state_not_stream_l
     assert "const readerAwayFromBottom=" in scroll_helper
     assert "Number(scrollSnapshot.bottom)>250" in scroll_helper
     assert "// Keep master's follow heuristic" in scroll_helper
-    assert "if(!readerAwayFromBottom && !_messageUserUnpinned && _followMessagesAfterDomReplace()) return;\n    _restoreMessageScrollSnapshot(scrollSnapshot);\n    _maybeShowNewMessageScrollCue(scrollSnapshot);\n    return;\n  }" in scroll_helper
+    assert "if(!readerAwayFromBottom && !_messageUserUnpinned && _followMessagesAfterDomReplace()) return;\n    _restoreMessageScrollSnapshot(scrollSnapshot, opts);\n    _maybeShowNewMessageScrollCue(scrollSnapshot);\n    return;\n  }" in scroll_helper
     assert "_shouldFollowMessagesOnDomReplace()" in follow_helper
     assert "scrollToBottom();" in follow_helper
     assert "if(S.activeStreamId){\n    scrollIfPinned();\n    return;\n  }" in scroll_helper
@@ -73,7 +73,7 @@ def test_cached_render_path_uses_same_scroll_policy_as_fresh_render():
     render_body = _function_body(UI_JS, "renderMessages")
     cached_branch = render_body[render_body.index("if(sid&&sid!==_sessionHtmlCacheSid") : render_body.index("const compressionState=")]
 
-    assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in cached_branch
+    assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot, _scrollOpts);" in cached_branch
     assert "if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}" not in cached_branch
 
 
