@@ -5010,6 +5010,10 @@ function speakMessage(btn){
   if(!clean) return;
 
   const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  if(engine==='elevenlabs'){
+    _playElevenLabsTts(clean, btn);
+    return;
+  }
   if(engine==='edge'){
     _playEdgeTtsChunked(clean, btn);
     return;
@@ -5031,13 +5035,88 @@ function speakMessage(btn){
   speechSynthesis.speak(utter);
 }
 
+function _playElevenLabsTts(text, btn){
+  if(btn) btn.dataset.speaking='1';
+  _ttsSpeaking=true;
+  const _fail=function(msg){
+    _ttsSpeaking=false;_playingEdgeAudio=null;
+    if(btn)btn.dataset.speaking='0';
+    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+  };
+  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:text, engine:'elevenlabs'})
+  })
+  .then(function(r){
+    if(!r.ok){
+      return r.json().catch(function(){return {};}).then(function(j){
+        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+      });
+    }
+    return r.arrayBuffer();
+  })
+  .then(function(buf){
+    return _playAudioBuf(buf, btn, 'ElevenLabs TTS');
+  })
+  .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
+}
+
+// ── Shared AudioContext for TTS playback (no blob URLs needed) ──
+let _ttsAudioCtx=null;
+function _getTtsAudioCtx(){
+  if(!_ttsAudioCtx){
+    const C=window.AudioContext||window.webkitAudioContext;
+    if(!C) return null;
+    _ttsAudioCtx=new C();
+  }
+  if(_ttsAudioCtx.state==='suspended') _ttsAudioCtx.resume();
+  return _ttsAudioCtx;
+}
+
+function _playAudioBuf(arrayBuffer, btn, label){
+  const ctx=_getTtsAudioCtx();
+  if(!ctx){
+    if(btn)btn.dataset.speaking='0';
+    _ttsSpeaking=false;
+    showToast(label+': Web Audio API not available');
+    return;
+  }
+  return new Promise(function(resolve){
+    ctx.decodeAudioData(arrayBuffer.slice(0), function(audioBuffer){
+      const src=ctx.createBufferSource();
+      src.buffer=audioBuffer;
+      src.connect(ctx.destination);
+      _playingEdgeAudio=src;
+      const _cleanup=function(){
+        _ttsSpeaking=false;_playingEdgeAudio=null;
+        if(btn)btn.dataset.speaking='0';
+        try{src.stop();src.disconnect();}catch(_){}
+        resolve();
+      };
+      src.onended=_cleanup;
+      src.start(0);
+    }, function(e){
+      _ttsSpeaking=false;
+      if(btn)btn.dataset.speaking='0';
+      showToast(label+' error: '+(e&&e.message||e));
+      resolve(); // prevent permanently pending Promise on decode failure
+    });
+  });
+}
 function stopTTS(){
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
-  // Stop Edge TTS audio
+  // Stop Web Audio API playback (AudioBufferSourceNode)
   if(_playingEdgeAudio){
-    try{ _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0; }catch(_){}
+    try{
+      if(typeof _playingEdgeAudio.stop==='function'){
+        _playingEdgeAudio.stop(); _playingEdgeAudio.disconnect();
+      }else{
+        _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0;
+      }
+    }catch(_){}
     _playingEdgeAudio=null;
   }
   _ttsSpeaking=false;
@@ -5062,6 +5141,10 @@ function autoReadLastAssistant(){
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
+  if(engine==='elevenlabs'){
+    _playElevenLabsTts(clean, null);
+    return;
+  }
   if(engine==='edge'){
     _playEdgeTtsChunked(clean, null);
     return;

@@ -6784,7 +6784,9 @@ async function loadSettingsPanel(){
       if(!ttsVoiceSel) return;
       const engine=localStorage.getItem('hermes-tts-engine')||'browser';
       const current=localStorage.getItem('hermes-tts-voice')||'';
-      if(engine==='edge'){
+      if(engine==='elevenlabs'){
+        ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
+      } else if(engine==='edge'){
         const edgeVoices=[
           {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
           {value:'zh-CN-XiaoyiNeural',label:'Xiaoyi (Chinese, Female)'},
