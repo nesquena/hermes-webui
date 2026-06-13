@@ -20,8 +20,9 @@ def _install_fake_get_model_context_length(monkeypatch, recorder):
     """Install a fake get_model_context_length into a stand-in agent.model_metadata."""
     mod = types.ModuleType("agent.model_metadata")
 
-    def _fake(model, base_url="", config_context_length=None, provider="", custom_providers=None):
+    def _fake(model, base_url="", api_key="", config_context_length=None, provider="", custom_providers=None):
         recorder["model"] = model
+        recorder["api_key"] = api_key
         recorder["config_context_length"] = config_context_length
         # Pretend the real per-model metadata window is 1,000,000 unless the
         # caller forced a config cap, in which case honor the cap (mirrors the

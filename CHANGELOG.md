@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.374] — 2026-06-12 — Release MM (custom-provider context-length probes carry the API key)
+
+### Fixed
+
+- **Custom provider context-length probes now include the provider API key during session hydration and streaming fallbacks (#4059).** Static session loads and fallback usage/session-save paths now reuse the matched custom provider credentials when querying `/v1/models`, so authenticated custom endpoints do not fall back to the default 256K window and clobber a larger persisted context length / compression threshold. (#4059)
+
 ## [v0.51.373] — 2026-06-12 — Release ML (sidebar lineage + source-count fixes)
 
 ### Fixed
