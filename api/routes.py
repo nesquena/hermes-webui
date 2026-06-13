@@ -13251,6 +13251,7 @@ def _handle_chat_sync(handler, body):
         _next_context_messages = _dedupe_replayed_context_messages(
             _previous_context_messages,
             _next_context_messages,
+            msg,
         )
         s.context_messages = _next_context_messages
         s.messages = _merge_display_messages_after_agent_result(
