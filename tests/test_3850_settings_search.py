@@ -1,0 +1,197 @@
+"""Regression tests for searchable settings feature.
+
+The Settings panel must have a search input and filtering capability to allow
+users to find settings across all tabs without having to click through each section.
+
+Issue: #3850 (Add search input at top of Settings panel)
+"""
+from pathlib import Path
+
+INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
+I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+STYLE_CSS = (Path(__file__).parent.parent / "static" / "style.css").read_text(encoding="utf-8")
+
+
+class TestSettingsSearch:
+    """Search input and filtering must be present and functional."""
+
+    def test_index_html_has_search_input(self):
+        """index.html must contain the search input element with correct id."""
+        assert 'id="settingsSearch"' in INDEX_HTML, (
+            "index.html must contain a search input with id='settingsSearch'"
+        )
+        assert 'filterSettings(this.value)' in INDEX_HTML, (
+            "index.html search input must have oninput='filterSettings(this.value)'"
+        )
+        assert 'data-i18n-placeholder="settings_search_placeholder"' in INDEX_HTML, (
+            "index.html search input must have data-i18n-placeholder attribute"
+        )
+
+    def test_index_html_has_search_results_dropdown(self):
+        """index.html must contain the search results dropdown element."""
+        assert 'id="settingsSearchResults"' in INDEX_HTML, (
+            "index.html must contain a results dropdown with id='settingsSearchResults'"
+        )
+        assert 'class="settings-search-results"' in INDEX_HTML, (
+            "index.html results dropdown must have class='settings-search-results'"
+        )
+
+    def test_panels_js_has_build_settings_index_function(self):
+        """panels.js must contain _buildSettingsIndex function."""
+        assert "function _buildSettingsIndex()" in PANELS_JS, (
+            "panels.js must contain _buildSettingsIndex() function"
+        )
+        assert "settingsPaneConversation" in PANELS_JS[PANELS_JS.find("function _buildSettingsIndex()"):], (
+            "_buildSettingsIndex must reference settingsPaneConversation pane"
+        )
+
+    def test_panels_js_has_filter_settings_function(self):
+        """panels.js must contain filterSettings function."""
+        assert "function filterSettings(query)" in PANELS_JS, (
+            "panels.js must contain filterSettings(query) function"
+        )
+        assert "toLowerCase().includes(q)" in PANELS_JS, (
+            "filterSettings must do case-insensitive substring matching"
+        )
+
+    def test_panels_js_has_navigate_to_field_function(self):
+        """panels.js must contain _navigateToSettingsField function."""
+        assert "function _navigateToSettingsField(entry)" in PANELS_JS, (
+            "panels.js must contain _navigateToSettingsField(entry) function"
+        )
+        assert "switchSettingsSection" in PANELS_JS[PANELS_JS.find("function _navigateToSettingsField"):], (
+            "_navigateToSettingsField must call switchSettingsSection"
+        )
+
+    def test_panels_js_has_highlight_settings_field_function(self):
+        """panels.js must contain _highlightSettingsField function."""
+        assert "function _highlightSettingsField(el)" in PANELS_JS, (
+            "panels.js must contain _highlightSettingsField(el) function"
+        )
+        assert "settings-field-highlight" in PANELS_JS[PANELS_JS.find("function _highlightSettingsField"):], (
+            "_highlightSettingsField must toggle 'settings-field-highlight' class"
+        )
+
+    def test_panels_js_resets_index_on_panel_open(self):
+        """panels.js _beginSettingsPanelSession must reset the settings index."""
+        idx = PANELS_JS.find("function _beginSettingsPanelSession()")
+        assert idx >= 0, "_beginSettingsPanelSession function not found"
+        body = PANELS_JS[idx:idx + 300]
+        assert "_settingsIndex = null" in body, (
+            "_beginSettingsPanelSession must reset _settingsIndex to null"
+        )
+
+    def test_i18n_js_has_search_placeholder_key(self):
+        """i18n.js must contain settings_search_placeholder key."""
+        assert "settings_search_placeholder:" in I18N_JS, (
+            "i18n.js must contain settings_search_placeholder key"
+        )
+        assert "Search settings" in I18N_JS, (
+            "settings_search_placeholder must have an appropriate translation"
+        )
+
+    def test_i18n_js_has_no_results_key(self):
+        """i18n.js must contain settings_search_no_results key."""
+        assert "settings_search_no_results:" in I18N_JS, (
+            "i18n.js must contain settings_search_no_results key"
+        )
+        assert "No settings found" in I18N_JS, (
+            "settings_search_no_results must have an appropriate translation"
+        )
+
+    def test_style_css_has_search_results_style(self):
+        """style.css must contain styles for the search results dropdown."""
+        assert ".settings-search-results" in STYLE_CSS, (
+            "style.css must contain .settings-search-results class"
+        )
+        assert ".settings-search-result" in STYLE_CSS, (
+            "style.css must contain .settings-search-result class for individual items"
+        )
+
+    def test_style_css_has_field_highlight_style(self):
+        """style.css must contain styles for field highlighting."""
+        assert ".settings-field-highlight" in STYLE_CSS, (
+            "style.css must contain .settings-field-highlight class"
+        )
+        assert "settings-field-pulse" in STYLE_CSS, (
+            "style.css must contain settings-field-pulse animation"
+        )
+
+    def test_style_css_has_search_positioning(self):
+        """style.css must position search results absolutely within the menu."""
+        assert "position:relative" in STYLE_CSS and ".settings-search" in STYLE_CSS, (
+            "style.css must make .settings-search relative positioned"
+        )
+        assert "position:absolute" in STYLE_CSS and ".settings-search-results" in STYLE_CSS, (
+            "style.css must make .settings-search-results absolutely positioned"
+        )
+
+    def test_panels_js_handles_providers_pane(self):
+        """panels.js must handle the Providers pane in index building."""
+        idx = PANELS_JS.find("function _buildSettingsIndex()")
+        assert idx >= 0, "_buildSettingsIndex not found"
+        body = PANELS_JS[idx:idx + 2000]
+        assert "settingsPaneProviders" in body, (
+            "_buildSettingsIndex must handle Providers pane"
+        )
+
+    def test_panels_js_handles_plugins_pane(self):
+        """panels.js must handle the Plugins pane in index building."""
+        idx = PANELS_JS.find("function _buildSettingsIndex()")
+        assert idx >= 0, "_buildSettingsIndex not found"
+        body = PANELS_JS[idx:idx + 2000]
+        assert "settingsPanePlugins" in body, (
+            "_buildSettingsIndex must handle Plugins pane"
+        )
+
+    def test_settings_index_includes_provider_cards(self):
+        """Providers pane entries must index provider cards and API key fields."""
+        idx = PANELS_JS.find("function _buildSettingsIndex()")
+        assert idx >= 0, "_buildSettingsIndex not found"
+        body = PANELS_JS[idx:idx + 3500]
+        assert "pane.querySelectorAll('.provider-card')" in body, (
+            "_buildSettingsIndex must scan provider cards so Providers search is not empty"
+        )
+        assert "card.querySelectorAll('.provider-card-field')" in body, (
+            "_buildSettingsIndex must index provider card fields like API key controls"
+        )
+
+    def test_settings_index_includes_plugin_cards(self):
+        """Plugins pane entries must index plugin cards by plugin name."""
+        idx = PANELS_JS.find("function _buildSettingsIndex()")
+        assert idx >= 0, "_buildSettingsIndex not found"
+        body = PANELS_JS[idx:idx + 3500]
+        assert "pane.querySelectorAll('.plugin-card')" in body, (
+            "_buildSettingsIndex must scan plugin cards so Plugins search is not empty"
+        )
+
+    def test_resolve_settings_field_rehydrates_provider_plugin_cards(self):
+        """Provider and plugin search entries must survive pane re-renders."""
+        idx = PANELS_JS.find("function _resolveSettingsField(entry)")
+        assert idx >= 0, "_resolveSettingsField not found"
+        body = PANELS_JS[idx:idx + 2200]
+        assert "entry.cardName && (entry.sectionKey === 'providers' || entry.sectionKey === 'plugins')" in body, (
+            "_resolveSettingsField must re-find provider/plugin cards by name after lazy pane re-renders"
+        )
+        assert "card.querySelectorAll('.provider-card-field')" in body, (
+            "_resolveSettingsField must be able to re-find provider card fields by label"
+        )
+
+    def test_filter_settings_caps_results(self):
+        """filterSettings must cap results at 12 items."""
+        idx = PANELS_JS.find("function filterSettings(query)")
+        assert idx >= 0, "filterSettings function not found"
+        body = PANELS_JS[idx:idx + 2000]
+        assert ".slice(0, 12)" in body, (
+            "filterSettings must cap results at 12 items with .slice(0, 12)"
+        )
+
+    def test_filter_settings_uses_escaping(self):
+        """filterSettings must escape HTML in rendered text with esc()."""
+        idx = PANELS_JS.find("function filterSettings(query)")
+        assert idx >= 0, "filterSettings function not found"
+        body = PANELS_JS[idx:idx + 2000]
+        assert "esc(" in body, (
+            "filterSettings must use esc() for HTML escaping of all rendered text"
+        )

@@ -154,6 +154,8 @@ function syncAppTitlebar() {
 }
 
 function _beginSettingsPanelSession() {
+  _settingsIndex = null;
+  _settingsIndexPromise = null;
   _settingsDirty = false;
   _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
   _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
@@ -164,6 +166,18 @@ function _beginSettingsPanelSession() {
     _settingsAppearanceAutosaveTimer = null;
   }
   _settingsAppearanceAutosaveRetryPayload = null;
+  if (!_settingsSearchDismissListenerRegistered) {
+    _settingsSearchDismissListenerRegistered = true;
+    document.addEventListener('click', e => {
+      if (!e.target.closest('#settingsMenu')) {
+        const r = $('settingsSearchResults');
+        if (r) {
+          r.style.display = 'none';
+          r.innerHTML = '';
+        }
+      }
+    });
+  }
   _resetSettingsPanelState();
 }
 
@@ -5885,6 +5899,10 @@ let _settingsFontSizeOnOpen = null; // track font size at open time for discard 
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 let _currentSettingsSection = 'conversation';
+let _settingsIndex = null;
+let _settingsIndexPromise = null;
+let _settingsSearchSeq = 0;
+let _settingsSearchDismissListenerRegistered = false;
 let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveTimer = null;
@@ -6073,7 +6091,7 @@ function _toggleTabVisibilityChip(panel){
   _scheduleAppearanceAutosave();
 }
 
-function switchSettingsSection(name){
+function switchSettingsSection(name,opts){
   // If the main content is not showing settings, just remember the section
   // without force-switching the panel. The section will be applied when the
   // user next opens settings via switchPanel(). (#appearance-auto-reopen)
@@ -6107,9 +6125,171 @@ function switchSettingsSection(name){
   // Sync mobile dropdown
   const dd=$('settingsSectionDropdown');
   if(dd && dd.value!==section) dd.value=section;
-  // Lazy-load integration panels when their tabs are opened
-  if(section==='providers') loadProvidersPanel();
-  if(section==='plugins') loadPluginsPanel();
+  // Lazy-load integration panels when their tabs are opened. Search
+  // navigation passes skipLazyLoad: the loaders rebuild the pane DOM from a
+  // fresh fetch, which would detach the field it is about to scroll to.
+  if(!(opts&&opts.skipLazyLoad)){
+    if(section==='providers') loadProvidersPanel();
+    if(section==='plugins') loadPluginsPanel();
+  }
+}
+
+async function _buildSettingsIndex() {
+  if (_settingsIndex) return;
+  // Memoize the in-flight build so concurrent searches share one pass; the
+  // lazy pane loaders are not guaranteed re-entrant.
+  if (_settingsIndexPromise) return _settingsIndexPromise;
+  const promise = (async () => {
+    // Ensure lazy-loaded panes are populated before reading the DOM
+    await Promise.all([loadProvidersPanel(), loadPluginsPanel()]);
+    const index = [];
+    const sectionMap = {
+      settingsPaneConversation: 'conversation',
+      settingsPaneAppearance: 'appearance',
+      settingsPanePreferences: 'preferences',
+      settingsPaneProviders: 'providers',
+      settingsPanePlugins: 'plugins',
+      settingsPaneSystem: 'system',
+      settingsPaneHelp: 'help',
+    };
+    for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
+      const pane = $(paneId);
+      if (!pane) continue;
+      pane.querySelectorAll('.settings-field').forEach(field => {
+        const labelEl = field.querySelector('label[data-i18n]');
+        if (!labelEl) return;
+        const i18nKey = labelEl.dataset.i18n;
+        const label = t(i18nKey) || labelEl.textContent.trim();
+        if (label) index.push({ label, sectionKey, i18nKey, el: field });
+      });
+      if (sectionKey === 'providers') {
+        pane.querySelectorAll('.provider-card').forEach(card => {
+          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+          card.querySelectorAll('.provider-card-field').forEach(field => {
+            const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
+            const label = [cardName, fieldLabel].filter(Boolean).join(' ');
+            if (label) index.push({ label, sectionKey, el: field, cardName, fieldLabel });
+          });
+        });
+      }
+      if (sectionKey === 'plugins') {
+        pane.querySelectorAll('.plugin-card').forEach(card => {
+          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+        });
+      }
+    }
+    // A panel-session reset while building clears the memo; drop this result
+    // instead of resurrecting a stale index for the new session.
+    if (_settingsIndexPromise === promise) _settingsIndex = index;
+  })().catch(e => { if (_settingsIndexPromise === promise) _settingsIndexPromise = null; throw e; });
+  _settingsIndexPromise = promise;
+  return promise;
+}
+
+async function filterSettings(query) {
+  const resultsEl = $('settingsSearchResults');
+  if (!resultsEl) return;
+  const q = (query || '').trim().toLowerCase();
+  if (!q) { resultsEl.style.display = 'none'; resultsEl.innerHTML = ''; return; }
+  const seq = ++_settingsSearchSeq;
+  await _buildSettingsIndex();
+  // A newer keystroke superseded this query while the index was building.
+  if (seq !== _settingsSearchSeq) return;
+  const sectionLabels = {
+    conversation: t('settings_tab_conversation') || 'Conversation',
+    appearance: t('settings_tab_appearance') || 'Appearance',
+    preferences: t('settings_tab_preferences') || 'Preferences',
+    providers: t('providers_tab_title') || 'Providers',
+    plugins: t('settings_tab_plugins') || 'Plugins',
+    system: t('settings_tab_system') || 'System',
+    help: t('settings_tab_help') || 'Help',
+  };
+  const matches = (_settingsIndex || []).filter(entry =>
+    entry.label.toLowerCase().includes(q)
+  );
+  if (!matches.length) {
+    resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
+    resultsEl.style.display = '';
+    return;
+  }
+  resultsEl.innerHTML = '';
+  for (const m of matches.slice(0, 12)) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'settings-search-result';
+    item.innerHTML = `<span class="settings-search-section">${esc(sectionLabels[m.sectionKey] || m.sectionKey)}</span>` +
+      `<span class="settings-search-arrow">›</span>` +
+      `<span class="settings-search-label">${esc(m.label)}</span>`;
+    item.addEventListener('click', () => {
+      _navigateToSettingsField(m);
+      resultsEl.style.display = 'none';
+      resultsEl.innerHTML = '';
+      const input = $('settingsSearch');
+      if (input) input.value = '';
+    });
+    resultsEl.appendChild(item);
+  }
+  resultsEl.style.display = '';
+}
+
+function _navigateToSettingsField(entry) {
+  // The panes were populated when the index was built, so skip the tab-switch
+  // lazy reload: loadProvidersPanel()/loadPluginsPanel() rebuild the pane DOM
+  // from a fresh fetch and would detach the node mid-scroll.
+  switchSettingsSection(entry.sectionKey, { skipLazyLoad: true });
+  requestAnimationFrame(() => {
+    const el = _resolveSettingsField(entry);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    _highlightSettingsField(el);
+  });
+}
+
+function _resolveSettingsField(entry) {
+  // Re-resolve in the live DOM: any pane re-render since indexing (e.g. the
+  // user visited the tab) replaces the node the index captured.
+  const paneIds = {
+    conversation: 'settingsPaneConversation',
+    appearance: 'settingsPaneAppearance',
+    preferences: 'settingsPanePreferences',
+    providers: 'settingsPaneProviders',
+    plugins: 'settingsPanePlugins',
+    system: 'settingsPaneSystem',
+    help: 'settingsPaneHelp',
+  };
+  const pane = $(paneIds[entry.sectionKey]);
+  if (pane && entry.cardName && (entry.sectionKey === 'providers' || entry.sectionKey === 'plugins')) {
+    const cards = entry.sectionKey === 'providers'
+      ? pane.querySelectorAll('.provider-card')
+      : pane.querySelectorAll('.plugin-card');
+    for (const card of cards) {
+      const name = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+      if (name !== entry.cardName) continue;
+      if (entry.fieldLabel && entry.sectionKey === 'providers') {
+        for (const field of card.querySelectorAll('.provider-card-field')) {
+          const label = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
+          if (label === entry.fieldLabel) return field;
+        }
+      }
+      return card;
+    }
+  }
+  const labelEl = pane && entry.i18nKey
+    ? pane.querySelector(`label[data-i18n="${CSS.escape(entry.i18nKey)}"]`)
+    : null;
+  const live = labelEl && labelEl.closest('.settings-field');
+  if (live) return live;
+  return entry.el && entry.el.isConnected ? entry.el : null;
+}
+
+function _highlightSettingsField(el) {
+  if (!el) return;
+  el.classList.remove('settings-field-highlight');
+  void el.offsetWidth;
+  el.classList.add('settings-field-highlight');
+  setTimeout(() => el.classList.remove('settings-field-highlight'), 1800);
 }
 
 function _syncHermesPanelSessionActions(){
