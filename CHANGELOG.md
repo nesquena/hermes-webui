@@ -3,9 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.387] — 2026-06-13 — Release MZ (Stable Assistant Turn Anchors live shadow feed, inert, #3926)
+
 ### Added
 
-- **Stable Assistant Turn Anchors live shadow feed (#3926).** `attachLiveStream()` now creates a per-stream anchor registry and shadow-feeds non-token live activity boundaries into the existing `HermesAssistantTurnAnchors` owner, including aggregate reasoning, tools, control events, compression lifecycle, app errors, cancel, and a slim `done` payload. The feed is still renderer-neutral: Compact Worklog, Transparent Stream, `renderMessages()`, `S.messages`, `INFLIGHT`, and DOM continuity do not consume the live registry yet; token events and EventSource network `error` remain outside the shadow feed. Settled active assistant messages are stamped with `_anchor_stream_id` for the next reconciliation slice, and that ephemeral stamp is carried forward across session refreshes.
+- **Stable Assistant Turn Anchors live shadow feed (#3926).** `attachLiveStream()` now creates a per-stream anchor registry and shadow-feeds non-token live activity boundaries into the existing `HermesAssistantTurnAnchors` owner, including aggregate reasoning, tools, control events, compression lifecycle, app errors, cancel, and a slim `done` payload. The feed is still renderer-neutral: Compact Worklog, Transparent Stream, `renderMessages()`, `S.messages`, `INFLIGHT`, and DOM continuity do not consume the live registry yet; token events and EventSource network `error` remain outside the shadow feed. Settled active assistant messages are stamped with `_anchor_stream_id` for the next reconciliation slice, and that ephemeral stamp is carried forward across session refreshes. Every feed call is wrapped in a guarded helper (`_applyToAnchor`) that no-ops if the anchor API is unavailable and swallows any error (warn-once), so a shadow-feed fault can never break the live stream. (#3926)
 
 ## [v0.51.386] — 2026-06-13 — Release MY (voice mode survives a dropped speechSynthesis onend, #3983)
 
