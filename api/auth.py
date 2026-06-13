@@ -383,6 +383,204 @@ def is_auth_enabled() -> bool:
     return is_password_auth_enabled() or are_passkeys_enabled()
 
 
+# ── Trusted header authentication (issue #3351) ─────────────────────────────
+# When a reverse proxy (Authelia, Authentik, nginx auth_request, etc.) handles
+# authentication, the WebUI can trust headers sent by that proxy to identify
+# the user and optionally bind them to a specific Hermes profile.
+#
+# Security-critical: the proxy IP MUST be allowlisted via
+# HERMES_WEBUI_TRUSTED_AUTH_PROXY_IPS.  Without this, any client can forge
+# the trusted header and impersonate any user.
+# ────────────────────────────────────────────────────────────────────────────
+
+_TRUSTED_AUTH_HEADER: str | None = None
+_TRUSTED_GROUPS_HEADER: str | None = None
+_GROUP_PROFILE_MAP: dict[str, str] | None = None
+_TRUSTED_PROXY_IPS: list | None = None
+_TRUSTED_AUTH_LOGOUT_URL: str | None = None
+_TRUSTED_AUTH_CACHE_LOCK = threading.Lock()
+_TRUSTED_AUTH_CACHE_POPULATED = False
+
+
+def _populate_trusted_auth_cache() -> None:
+    """Parse env vars once and cache the result."""
+    global _TRUSTED_AUTH_CACHE_POPULATED
+    global _TRUSTED_AUTH_HEADER, _TRUSTED_GROUPS_HEADER
+    global _GROUP_PROFILE_MAP, _TRUSTED_PROXY_IPS, _TRUSTED_AUTH_LOGOUT_URL
+    with _TRUSTED_AUTH_CACHE_LOCK:
+        if _TRUSTED_AUTH_CACHE_POPULATED:
+            return
+        _TRUSTED_AUTH_HEADER = os.getenv('HERMES_WEBUI_TRUSTED_AUTH_HEADER', '').strip() or None
+        _TRUSTED_GROUPS_HEADER = os.getenv('HERMES_WEBUI_TRUSTED_GROUPS_HEADER', '').strip() or None
+        _TRUSTED_AUTH_LOGOUT_URL = os.getenv('HERMES_WEBUI_TRUSTED_AUTH_LOGOUT_URL', '').strip() or None
+
+        # Parse group→profile map: "hermes_devops=devops,hermes_coworkers=coworkers"
+        raw_map = os.getenv('HERMES_WEBUI_GROUP_PROFILE_MAP', '').strip()
+        if raw_map:
+            _GROUP_PROFILE_MAP = {}
+            for segment in raw_map.split(','):
+                segment = segment.strip()
+                if '=' in segment:
+                    group, profile = segment.split('=', 1)
+                    _GROUP_PROFILE_MAP[group.strip()] = profile.strip()
+        else:
+            _GROUP_PROFILE_MAP = None
+
+        # Parse proxy IP allowlist (CIDR or plain IPs)
+        raw_ips = os.getenv('HERMES_WEBUI_TRUSTED_AUTH_PROXY_IPS', '').strip()
+        if raw_ips:
+            _TRUSTED_PROXY_IPS = _parse_trusted_proxy_ips(raw_ips)
+        else:
+            # Default: loopback only — safe for local reverse-proxy setups
+            _TRUSTED_PROXY_IPS = _parse_trusted_proxy_ips('127.0.0.1,::1')
+
+        _TRUSTED_AUTH_CACHE_POPULATED = True
+
+
+def _parse_trusted_proxy_ips(raw: str) -> list:
+    """Parse a comma-separated list of IPs or CIDR ranges.
+
+    Supports IPv4, IPv6, and CIDR notation (e.g. 10.0.0.0/8, 192.168.1.0/24).
+    Returns a list of (network_address, prefix_len) tuples for fast matching.
+    """
+    import ipaddress
+    results = []
+    for part in raw.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            network = ipaddress.ip_network(part, strict=False)
+            results.append((network.network_address, network.prefixlen))
+        except ValueError:
+            logger.warning("Ignoring invalid trusted proxy IP/CIDR: %r", part)
+    return results
+
+
+def _is_trusted_proxy(ip_str: str) -> bool:
+    """Return True if the given IP is in the trusted proxy allowlist."""
+    _populate_trusted_auth_cache()
+    if not _TRUSTED_PROXY_IPS:
+        return False
+    import ipaddress
+    try:
+        client_ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    for network_addr, prefix_len in _TRUSTED_PROXY_IPS:
+        try:
+            network = ipaddress.ip_network(f"{network_addr}/{prefix_len}", strict=False)
+            if client_ip in network:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _get_client_ip(handler) -> str:
+    """Extract the client IP from the handler, preferring X-Forwarded-For."""
+    # In reverse-proxy setups, the immediate peer is the proxy itself.
+    # We use X-Forwarded-For to get the original client IP for logging,
+    # but for *trust decisions* we must verify the proxy's IP, not the
+    # X-Forwarded-For header (which is trivially forgeable).
+    forwarded = handler.headers.get('X-Forwarded-For', '')
+    if forwarded:
+        # First entry is the original client
+        return forwarded.split(',')[0].strip()
+    return handler.client_address[0]
+
+
+def _get_proxy_ip(handler) -> str:
+    """Return the immediate peer IP (the proxy, not the original client)."""
+    return handler.client_address[0]
+
+
+def _strip_untrusted_headers(handler) -> None:
+    """Remove trusted auth headers when the request does not come from a
+    trusted proxy.  This prevents header-forgery attacks where a client
+    directly connects and sends Remote-User themselves."""
+    _populate_trusted_auth_cache()
+    if not _TRUSTED_AUTH_HEADER:
+        return
+    proxy_ip = _get_proxy_ip(handler)
+    if _is_trusted_proxy(proxy_ip):
+        return
+    # Strip the header to prevent forgery
+    if _TRUSTED_AUTH_HEADER in handler.headers:
+        del handler.headers[_TRUSTED_AUTH_HEADER]
+    if _TRUSTED_GROUPS_HEADER and _TRUSTED_GROUPS_HEADER in handler.headers:
+        del handler.headers[_TRUSTED_GROUPS_HEADER]
+
+
+def get_trusted_user(handler) -> str | None:
+    """Extract the trusted username from the request headers.
+
+    Only returns a value when:
+      1. HERMES_WEBUI_TRUSTED_AUTH_HEADER is configured
+      2. The request comes from a trusted proxy IP
+      3. The header is present and non-empty
+    """
+    _populate_trusted_auth_cache()
+    if not _TRUSTED_AUTH_HEADER:
+        return None
+    proxy_ip = _get_proxy_ip(handler)
+    if not _is_trusted_proxy(proxy_ip):
+        return None
+    user = handler.headers.get(_TRUSTED_AUTH_HEADER, '').strip()
+    return user if user else None
+
+
+def get_trusted_groups(handler) -> list[str]:
+    """Extract trusted group names from the request headers.
+
+    Expects comma-separated group names in the configured groups header.
+    Only returns values when the request comes from a trusted proxy IP.
+    """
+    _populate_trusted_auth_cache()
+    if not _TRUSTED_GROUPS_HEADER:
+        return []
+    proxy_ip = _get_proxy_ip(handler)
+    if not _is_trusted_proxy(proxy_ip):
+        return []
+    raw = handler.headers.get(_TRUSTED_GROUPS_HEADER, '')
+    if not raw:
+        return []
+    return [g.strip() for g in raw.split(',') if g.strip()]
+
+
+def get_bound_profile_from_groups(handler) -> str | None:
+    """Map trusted group headers to a Hermes profile name.
+
+    Returns the first matching profile from the group→profile map, or None
+    if no mapping matches.
+    """
+    _populate_trusted_auth_cache()
+    if not _GROUP_PROFILE_MAP:
+        return None
+    groups = get_trusted_groups(handler)
+    for group in groups:
+        if group in _GROUP_PROFILE_MAP:
+            return _GROUP_PROFILE_MAP[group]
+    return None
+
+
+def is_trusted_auth_enabled() -> bool:
+    """True if trusted header authentication is configured."""
+    _populate_trusted_auth_cache()
+    return _TRUSTED_AUTH_HEADER is not None
+
+
+def trusted_auth_logout_url() -> str | None:
+    """Return the configured logout URL for trusted auth (e.g. Authelia), or None."""
+    _populate_trusted_auth_cache()
+    return _TRUSTED_AUTH_LOGOUT_URL
+
+
+def create_trusted_session(handler) -> str:
+    """Create a session for a trusted-auth user and return the cookie value."""
+    return create_session()
+
+
 def verify_password(plain: str) -> bool:
     """Verify a plaintext password against the stored hash.
 
@@ -564,6 +762,23 @@ def parse_cookie(handler) -> str | None:
 def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
+    # Strip forged headers before any auth decision
+    _strip_untrusted_headers(handler)
+
+    # Trusted header auth: if configured and valid, auto-create session
+    if is_trusted_auth_enabled():
+        trusted_user = get_trusted_user(handler)
+        if trusted_user:
+            # Valid trusted auth — ensure session exists
+            cookie_val = parse_cookie(handler)
+            if cookie_val and verify_session(cookie_val):
+                return True
+            # Auto-create session for trusted user
+            new_cookie = create_trusted_session(handler)
+            # Store cookie in handler for response (server.py will set it)
+            handler._trusted_auth_cookie = new_cookie
+            return True
+
     if not is_auth_enabled():
         return True
     # Public paths don't require auth

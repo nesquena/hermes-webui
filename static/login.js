@@ -9,6 +9,18 @@ document.addEventListener('DOMContentLoaded', function () {
 
   if (!form || !input) return;
 
+  // Trusted header auth: if the server says trusted auth is enabled and we're
+  // already authenticated (session cookie was auto-created), just redirect.
+  fetch('api/auth/status', { credentials: 'include' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (s) {
+      if (s && s.trusted_auth_enabled && s.logged_in) {
+        // Already authenticated via trusted header — redirect to app
+        window.location.href = _safeNextPath();
+      }
+    })
+    .catch(function () {});
+
   var invalidPw = form.getAttribute('data-invalid-pw') || 'Invalid password';
   var connFailed = form.getAttribute('data-conn-failed') || 'Connection failed';
 

@@ -5710,7 +5710,7 @@ def handle_get(handler, parsed) -> bool:
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
     if parsed.path == "/api/auth/status":
-        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, parse_cookie, verify_session
+        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, parse_cookie, verify_session, is_trusted_auth_enabled, trusted_auth_logout_url
         from api.passkeys import registered_credentials
 
         logged_in = False
@@ -5718,6 +5718,14 @@ def handle_get(handler, parsed) -> bool:
         if auth_enabled:
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
+        # Trusted auth is also "auth enabled" for UI purposes
+        trusted_auth = is_trusted_auth_enabled()
+        if trusted_auth:
+            auth_enabled = True
+            # If trusted auth header is present, user is considered logged in
+            from api.auth import get_trusted_user
+            if get_trusted_user(handler):
+                logged_in = True
         passkey_flag = _passkey_feature_flag_enabled()
         passkeys = registered_credentials() if passkey_flag else []
         password_auth_enabled = get_password_hash() is not None
@@ -5729,6 +5737,8 @@ def handle_get(handler, parsed) -> bool:
             "passkeys_enabled": bool(passkeys),
             "passkeys_count": len(passkeys),
             "passkey_feature_flag": passkey_flag,
+            "trusted_auth_enabled": trusted_auth,
+            "trusted_auth_logout_url": trusted_auth_logout_url(),
         })
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
@@ -9227,6 +9237,7 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/auth/logout":
         from api.auth import clear_auth_cookie, invalidate_session, parse_cookie
+        from api.helpers import get_profile_cookie_name
 
         cookie_val = parse_cookie(handler)
         if cookie_val:
@@ -9238,6 +9249,13 @@ def handle_post(handler, parsed) -> bool:
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         clear_auth_cookie(handler)
+        # Also clear the profile cookie so the next login starts fresh
+        import http.cookies as _hc
+        profile_cookie = _hc.SimpleCookie()
+        profile_cookie[get_profile_cookie_name()] = ''
+        profile_cookie[get_profile_cookie_name()]['path'] = '/'
+        profile_cookie[get_profile_cookie_name()]['max-age'] = '0'
+        handler.send_header('Set-Cookie', profile_cookie[get_profile_cookie_name()].OutputString())
         handler.end_headers()
         handler.wfile.write(body)
         return True

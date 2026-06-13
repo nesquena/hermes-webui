@@ -8239,8 +8239,15 @@ async function saveSettings(andClose){
 
 async function signOut(){
   try{
+    var statusRes = await fetch('/api/auth/status', { credentials: 'include' });
+    var status = statusRes.ok ? await statusRes.json() : {};
     await api('/api/auth/logout',{method:'POST',body:'{}'});
-    window.location.href='login';
+    // If trusted auth with a logout URL (e.g. Authelia), redirect there
+    if (status.trusted_auth_enabled && status.trusted_auth_logout_url) {
+      window.location.href = status.trusted_auth_logout_url;
+    } else {
+      window.location.href='login';
+    }
   }catch(e){
     showToast(t('sign_out_failed')+e.message);
   }
