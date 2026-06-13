@@ -7,6 +7,7 @@ profile has its own workspace configuration.  State files live at
 ``{profile_home}/webui_state/last_workspace.txt``.  The global STATE_DIR
 paths are used as fallback when no profile module is available.
 """
+
 import hashlib
 import json
 import logging
@@ -23,11 +24,14 @@ from api.config import (
     WORKSPACES_FILE as _GLOBAL_WS_FILE,
     LAST_WORKSPACE_FILE as _GLOBAL_LW_FILE,
     DEFAULT_WORKSPACE as _BOOT_DEFAULT_WORKSPACE,
-    MAX_FILE_BYTES, IMAGE_EXTS, MD_EXTS
+    MAX_FILE_BYTES,
+    IMAGE_EXTS,
+    MD_EXTS,
 )
 
 
 # ── Profile-aware path resolution ───────────────────────────────────────────
+
 
 def _profile_state_dir() -> Path:
     """Return the webui_state directory for the active profile.
@@ -38,9 +42,10 @@ def _profile_state_dir() -> Path:
     """
     try:
         from api.profiles import get_active_profile_name, get_active_hermes_home
+
         name = get_active_profile_name()
-        if name and name != 'default':
-            d = get_active_hermes_home() / 'webui_state'
+        if name and name != "default":
+            d = get_active_hermes_home() / "webui_state"
             d.mkdir(parents=True, exist_ok=True)
             return d
     except ImportError:
@@ -50,20 +55,20 @@ def _profile_state_dir() -> Path:
 
 def _workspaces_file() -> Path:
     """Return the workspaces.json path for the active profile."""
-    return _profile_state_dir() / 'workspaces.json'
+    return _profile_state_dir() / "workspaces.json"
 
 
 def _last_workspace_file() -> Path:
     """Return the last_workspace.txt path for the active profile."""
-    return _profile_state_dir() / 'last_workspace.txt'
+    return _profile_state_dir() / "last_workspace.txt"
 
 
 def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
     """Return True when the active terminal backend runs outside this WebUI host."""
     if not isinstance(terminal_cfg, dict):
         return False
-    backend = str(terminal_cfg.get('backend') or '').strip().lower()
-    return backend not in ('', 'local')
+    backend = str(terminal_cfg.get("backend") or "").strip().lower()
+    return backend not in ("", "local")
 
 
 def _remote_terminal_cwd() -> str | None:
@@ -71,11 +76,11 @@ def _remote_terminal_cwd() -> str | None:
     try:
         from api.config import get_config
 
-        terminal_cfg = get_config().get('terminal', {})
+        terminal_cfg = get_config().get("terminal", {})
         if not _is_remote_terminal_backend(terminal_cfg):
             return None
-        cwd = str(terminal_cfg.get('cwd') or '').strip()
-        if not cwd or cwd == '.':
+        cwd = str(terminal_cfg.get("cwd") or "").strip()
+        if not cwd or cwd == ".":
             return None
         return cwd
     except Exception:
@@ -93,7 +98,9 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
         return None
     candidate = Path(raw).expanduser().resolve()
     base = Path(cwd).expanduser().resolve()
-    if _is_blocked_workspace_path(candidate, raw) or _is_blocked_workspace_path(base, cwd):
+    if _is_blocked_workspace_path(candidate, raw) or _is_blocked_workspace_path(
+        base, cwd
+    ):
         return None
     if candidate == base or _is_within(candidate, base):
         return candidate
@@ -117,11 +124,12 @@ def _profile_default_workspace() -> str:
     """
     try:
         from api.config import get_config
+
         cfg = get_config()
-        terminal_cfg = cfg.get('terminal', {})
+        terminal_cfg = cfg.get("terminal", {})
         remote_terminal = _is_remote_terminal_backend(terminal_cfg)
         # Explicit webui workspace keys first
-        for key in ('workspace', 'default_workspace'):
+        for key in ("workspace", "default_workspace"):
             ws = cfg.get(key)
             if ws:
                 p = Path(str(ws)).expanduser().resolve()
@@ -129,8 +137,8 @@ def _profile_default_workspace() -> str:
                     return str(p)
         # Fall through to terminal.cwd — the agent's configured working directory
         if isinstance(terminal_cfg, dict):
-            cwd = terminal_cfg.get('cwd', '')
-            if cwd and str(cwd) not in ('.', ''):
+            cwd = terminal_cfg.get("cwd", "")
+            if cwd and str(cwd) not in (".", ""):
                 p = Path(str(cwd)).expanduser().resolve()
                 if remote_terminal or p.is_dir():
                     return str(p)
@@ -146,6 +154,7 @@ def _profile_default_workspace() -> str:
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
+
 def _clean_workspace_list(workspaces: list) -> list:
     """Sanitize a workspace list:
     - Preserve saved paths even when they are currently missing or inaccessible;
@@ -156,11 +165,11 @@ def _clean_workspace_list(workspaces: list) -> list:
       confusion with the 'default' profile name).
     Returns the cleaned list (may be empty).
     """
-    hermes_profiles = (Path.home() / '.hermes' / 'profiles').resolve()
+    hermes_profiles = (Path.home() / ".hermes" / "profiles").resolve()
     result = []
     for w in workspaces:
-        path = w.get('path', '')
-        name = w.get('name', '')
+        path = w.get("path", "")
+        name = w.get("name", "")
         if not path:
             continue
         p = _safe_resolve(Path(path).expanduser())
@@ -172,6 +181,7 @@ def _clean_workspace_list(workspaces: list) -> list:
             # p is under ~/.hermes/profiles/ — only skip if it's under a DIFFERENT profile
             try:
                 from api.profiles import get_active_hermes_home
+
                 own_profile_dir = get_active_hermes_home().resolve()
                 p.relative_to(own_profile_dir)
                 # p is under our own profile dir — keep it
@@ -180,13 +190,15 @@ def _clean_workspace_list(workspaces: list) -> list:
         except ValueError:
             pass  # not under profiles/ at all — keep it
         # Rename confusing 'default' label to 'Home'
-        if name.lower() == 'default':
-            name = 'Home'
-        result.append({'path': str(p), 'name': name})
+        if name.lower() == "default":
+            name = "Home"
+        result.append({"path": str(p), "name": name})
     return result
 
 
-def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does not exist") -> str | None:
+def _workspace_access_error(
+    candidate: Path, *, missing_label: str = "Path does not exist"
+) -> str | None:
     """Return a user-facing validation error for an unusable workspace path.
 
     ``Path.exists()`` can collapse permission/stat failures into a generic falsey
@@ -222,12 +234,12 @@ def _migrate_global_workspaces() -> list:
     if not _GLOBAL_WS_FILE.exists():
         return []
     try:
-        raw = json.loads(_GLOBAL_WS_FILE.read_text(encoding='utf-8'))
+        raw = json.loads(_GLOBAL_WS_FILE.read_text(encoding="utf-8"))
         cleaned = _clean_workspace_list(raw)
         if len(cleaned) != len(raw):
             # Rewrite the cleaned version so future reads are already clean
             _GLOBAL_WS_FILE.write_text(
-                json.dumps(cleaned, ensure_ascii=False, indent=2), encoding='utf-8'
+                json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8"
             )
         return cleaned
     except Exception:
@@ -238,17 +250,18 @@ def load_workspaces() -> list:
     ws_file = _workspaces_file()
     if ws_file.exists():
         try:
-            raw = json.loads(ws_file.read_text(encoding='utf-8'))
+            raw = json.loads(ws_file.read_text(encoding="utf-8"))
             cleaned = _clean_workspace_list(raw)
             if len(cleaned) != len(raw):
                 # Persist the cleaned version so stale entries don't keep reappearing
                 try:
                     ws_file.write_text(
-                        json.dumps(cleaned, ensure_ascii=False, indent=2), encoding='utf-8'
+                        json.dumps(cleaned, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
                     )
                 except Exception:
                     logger.debug("Failed to persist cleaned workspace list")
-            return cleaned or [{'path': _profile_default_workspace(), 'name': 'Home'}]
+            return cleaned or [{"path": _profile_default_workspace(), "name": "Home"}]
         except Exception:
             logger.debug("Failed to load workspaces from %s", ws_file)
     # No profile-local file yet.
@@ -256,7 +269,8 @@ def load_workspaces() -> list:
     # For NAMED profiles: always start clean with just their own workspace.
     try:
         from api.profiles import get_active_profile_name
-        is_default = get_active_profile_name() in ('default', None)
+
+        is_default = get_active_profile_name() in ("default", None)
     except ImportError:
         is_default = True
     if is_default:
@@ -264,13 +278,15 @@ def load_workspaces() -> list:
         if migrated:
             return migrated
     # Fresh start: single entry from the profile's configured workspace, labeled "Home"
-    return [{'path': _profile_default_workspace(), 'name': 'Home'}]
+    return [{"path": _profile_default_workspace(), "name": "Home"}]
 
 
 def save_workspaces(workspaces: list) -> None:
     ws_file = _workspaces_file()
     ws_file.parent.mkdir(parents=True, exist_ok=True)
-    ws_file.write_text(json.dumps(workspaces, ensure_ascii=False, indent=2), encoding='utf-8')
+    ws_file.write_text(
+        json.dumps(workspaces, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def get_last_workspace() -> str:
@@ -293,7 +309,7 @@ def get_last_workspace() -> str:
     lw_file = _last_workspace_file()
     if lw_file.exists():
         try:
-            p = valid_last_workspace(lw_file.read_text(encoding='utf-8').strip())
+            p = valid_last_workspace(lw_file.read_text(encoding="utf-8").strip())
             if p:
                 return p
         except Exception:
@@ -301,7 +317,9 @@ def get_last_workspace() -> str:
     # Fallback: try global file
     if _GLOBAL_LW_FILE.exists():
         try:
-            p = valid_last_workspace(_GLOBAL_LW_FILE.read_text(encoding='utf-8').strip())
+            p = valid_last_workspace(
+                _GLOBAL_LW_FILE.read_text(encoding="utf-8").strip()
+            )
             if p:
                 return p
         except Exception:
@@ -313,7 +331,7 @@ def set_last_workspace(path: str) -> None:
     try:
         lw_file = _last_workspace_file()
         lw_file.parent.mkdir(parents=True, exist_ok=True)
-        lw_file.write_text(str(path), encoding='utf-8')
+        lw_file.write_text(str(path), encoding="utf-8")
     except Exception:
         logger.debug("Failed to set last workspace")
 
@@ -333,10 +351,11 @@ def _safe_resolve(p: Path) -> Path:
 # carve-outs apply to BOTH workspace registration and runtime file ops so a
 # symlink target inside the carve-out is also reachable.
 _USER_TMP_PREFIXES: tuple[Path, ...] = (
-    Path('/var/folders'),         # macOS per-user tmp (literal form)
-    Path('/private/var/folders'),  # macOS per-user tmp (resolved form)
-    Path('/var/tmp'),               # Linux/macOS system-wide tmp (user-writable)
-    Path('/private/var/tmp'),       # macOS resolved form
+    Path("/var/folders"),  # macOS per-user tmp (literal form)
+    Path("/private/var/folders"),  # macOS per-user tmp (resolved form)
+    Path("/var/tmp"),  # Linux/macOS system-wide tmp (user-writable)
+    Path("/var/home"),  # ostree based systems
+    Path("/private/var/tmp"),  # macOS resolved form
 )
 
 
@@ -357,20 +376,20 @@ def _workspace_blocked_roots() -> tuple[Path, ...]:
     """
     _raw = (
         # Linux / macOS
-        '/etc',
-        '/usr',
-        '/var',
-        '/bin',
-        '/sbin',
-        '/boot',
-        '/proc',
-        '/sys',
-        '/dev',
-        '/lib',
-        '/lib64',
-        '/opt/homebrew',
-        '/System',
-        '/Library',
+        "/etc",
+        "/usr",
+        "/var",
+        "/bin",
+        "/sbin",
+        "/boot",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/lib",
+        "/lib64",
+        "/opt/homebrew",
+        "/System",
+        "/Library",
     )
     _seen: set[Path] = set()
     _out: list[Path] = []
@@ -399,7 +418,7 @@ def _is_blocked_system_path(candidate: Path) -> bool:
 
 
 def _workspace_blocked_resolved_subtrees() -> tuple[Path, ...]:
-    roots = list(_workspace_blocked_roots()) + [Path('/private/etc')]
+    roots = list(_workspace_blocked_roots()) + [Path("/private/etc")]
     resolved: list[Path] = []
     for root in roots:
         try:
@@ -412,7 +431,7 @@ def _workspace_blocked_resolved_subtrees() -> tuple[Path, ...]:
 
 
 def _workspace_blocked_exact_roots() -> tuple[Path, ...]:
-    roots = [Path('/'), Path('/private/var')]
+    roots = [Path("/"), Path("/private/var")]
     for root in _workspace_blocked_roots():
         try:
             roots.append(root.expanduser().resolve())
@@ -425,7 +444,9 @@ def _workspace_blocked_exact_roots() -> tuple[Path, ...]:
     return tuple(unique)
 
 
-def _is_blocked_workspace_path(candidate: Path, raw_path: str | Path | None = None) -> bool:
+def _is_blocked_workspace_path(
+    candidate: Path, raw_path: str | Path | None = None
+) -> bool:
     """Return True when candidate points at a known OS/system directory.
 
     Compare both the original spelling and the resolved path.  This closes the
@@ -457,9 +478,9 @@ def _is_blocked_workspace_path(candidate: Path, raw_path: str | Path | None = No
     # macOS temp root /private/var/folders is intentionally allowed for pytest
     # and per-user temporary workspaces; other direct /private/var system data
     # such as /private/var/db and /private/var/log remains blocked.
-    allowed_private_var = (Path('/private/var/folders'), Path('/private/var/tmp'))
+    allowed_private_var = (Path("/private/var/folders"), Path("/private/var/tmp"))
     for blocked in _workspace_blocked_resolved_subtrees():
-        if blocked == Path('/private/var'):
+        if blocked == Path("/private/var"):
             if candidate == blocked:
                 return True
             if any(_is_within(candidate, allowed) for allowed in allowed_private_var):
@@ -578,10 +599,10 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
         return suggestions[:limit]
 
     anchor_root = max(in_root, key=lambda p: len(str(p)))
-    ends_with_sep = raw.endswith(os.sep) or raw.endswith('/')
+    ends_with_sep = raw.endswith(os.sep) or raw.endswith("/")
     parent = target if ends_with_sep else target.parent
-    leaf = '' if ends_with_sep else target.name
-    show_hidden = leaf.startswith('.')
+    leaf = "" if ends_with_sep else target.name
+    show_hidden = leaf.startswith(".")
 
     try:
         parent_resolved = parent.expanduser().resolve()
@@ -602,7 +623,7 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
     for child in children:
         if not child.is_dir():
             continue
-        if child.name.startswith('.') and not show_hidden:
+        if child.name.startswith(".") and not show_hidden:
             continue
         if leaf_lower and not child.name.lower().startswith(leaf_lower):
             continue
@@ -693,8 +714,6 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     )
 
 
-
-
 def _strip_surrounding_quotes(path: str) -> str:
     """Strip a single pair of surrounding single or double quotes from a path string.
 
@@ -754,6 +773,7 @@ def validate_workspace_to_add(path: str) -> Path:
         raise ValueError(f"Path points to a system directory: {candidate}")
 
     return candidate
+
 
 def safe_resolve_ws(root: Path, requested: str) -> Path:
     """Resolve a relative path inside a workspace root, raising ValueError on traversal.
@@ -865,7 +885,9 @@ def open_anchored_create_fd(root: Path, dest: Path) -> int:
     if not _DIR_FD_OK:
         # Windows / no openat: create parent dirs then exclusively create the leaf.
         dest.parent.mkdir(parents=True, exist_ok=True)
-        return os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o644)
+        return os.open(
+            str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o644
+        )
 
     fd = os.open(str(root_resolved), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     try:
@@ -1025,9 +1047,13 @@ def rename_anchored(root: Path, source: Path, dest: Path) -> None:
         source_resolved.rename(dest)
         return
 
-    src_parent_fd = open_anchored_fd(root_resolved, source_resolved.parent, want_dir=True)
+    src_parent_fd = open_anchored_fd(
+        root_resolved, source_resolved.parent, want_dir=True
+    )
     try:
-        dst_parent_fd = open_anchored_fd(root_resolved, dest_parent_resolved, want_dir=True)
+        dst_parent_fd = open_anchored_fd(
+            root_resolved, dest_parent_resolved, want_dir=True
+        )
         try:
             try:
                 os.stat(dest_leaf, dir_fd=dst_parent_fd, follow_symlinks=False)
@@ -1046,7 +1072,7 @@ def rename_anchored(root: Path, source: Path, dest: Path) -> None:
         os.close(src_parent_fd)
 
 
-def list_dir(workspace: Path, rel: str='.'):
+def list_dir(workspace: Path, rel: str = "."):
     target = safe_resolve_ws(workspace, rel)
     if not target.is_dir():
         raise FileNotFoundError(f"Not a directory: {rel}")
@@ -1090,27 +1116,27 @@ def list_dir(workspace: Path, rel: str='.'):
                 return
             is_dir = link_target.is_dir()
             display_path = name
-            if rel and rel != '.':
-                display_path = rel + '/' + display_path
+            if rel and rel != ".":
+                display_path = rel + "/" + display_path
             mtime_ns = lstat_result.st_mtime_ns if lstat_result is not None else None
             entry = {
-                'name': name,
-                'path': display_path,
-                'type': 'symlink',
-                'target': str(link_target),
-                'is_dir': is_dir,
-                'mtime_ns': mtime_ns,
+                "name": name,
+                "path": display_path,
+                "type": "symlink",
+                "target": str(link_target),
+                "is_dir": is_dir,
+                "mtime_ns": mtime_ns,
             }
             if not is_dir:
                 try:
-                    entry['size'] = link_target.stat().st_size
+                    entry["size"] = link_target.stat().st_size
                 except OSError:
-                    entry['size'] = None
+                    entry["size"] = None
             entries.append(entry)
         else:
             entry_path = name
-            if rel and rel != '.':
-                entry_path = rel + '/' + name
+            if rel and rel != ".":
+                entry_path = rel + "/" + name
             if lstat_result is not None:
                 is_file = stat.S_ISREG(lstat_result.st_mode)
                 size = lstat_result.st_size if is_file else None
@@ -1120,13 +1146,15 @@ def list_dir(workspace: Path, rel: str='.'):
                 size = None
                 mtime_ns = None
                 is_dir_entry = False
-            entries.append({
-                'name': name,
-                'path': entry_path,
-                'type': 'dir' if is_dir_entry else 'file',
-                'size': size,
-                'mtime_ns': mtime_ns,
-            })
+            entries.append(
+                {
+                    "name": name,
+                    "path": entry_path,
+                    "type": "dir" if is_dir_entry else "file",
+                    "size": size,
+                    "mtime_ns": mtime_ns,
+                }
+            )
 
     if _DIR_FD_OK:
         # #3398 TOCTOU hardening (Linux/macOS): open the directory via an anchored
@@ -1223,7 +1251,9 @@ def list_dir(workspace: Path, rel: str='.'):
     return entries
 
 
-def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = None) -> str:
+def dir_signature(
+    workspace: Path, rel: str = ".", entries: list[dict] | None = None
+) -> str:
     """Return a cheap, stable signature for a listed workspace directory.
 
     The signature is based only on bounded directory-entry metadata already used
@@ -1234,17 +1264,19 @@ def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = 
         entries = list_dir(workspace, rel)
     payload = []
     for entry in entries:
-        payload.append({
-            'name': entry.get('name'),
-            'path': entry.get('path'),
-            'type': entry.get('type'),
-            'is_dir': entry.get('is_dir'),
-            'size': entry.get('size'),
-            'mtime_ns': entry.get('mtime_ns'),
-            'target': entry.get('target'),
-        })
-    raw = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
-    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+        payload.append(
+            {
+                "name": entry.get("name"),
+                "path": entry.get("path"),
+                "type": entry.get("type"),
+                "is_dir": entry.get("is_dir"),
+                "size": entry.get("size"),
+                "mtime_ns": entry.get("mtime_ns"),
+                "target": entry.get("target"),
+            }
+        )
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def read_file_content(workspace: Path, rel: str) -> dict:
@@ -1256,25 +1288,36 @@ def read_file_content(workspace: Path, rel: str) -> dict:
     # after safe_resolve_ws() cannot be followed, then read from the fd (not the
     # pathname) so the bytes returned are guaranteed to be the verified file.
     fd = open_anchored_fd(workspace, target, want_dir=False)
-    with os.fdopen(fd, 'rb', closefd=True) as fh:
+    with os.fdopen(fd, "rb", closefd=True) as fh:
         st = os.fstat(fh.fileno())
         if not stat.S_ISREG(st.st_mode):
             raise FileNotFoundError(f"Not a file: {rel}")
         if st.st_size > MAX_FILE_BYTES:
-            raise ValueError(f"File too large ({st.st_size} bytes, max {MAX_FILE_BYTES})")
+            raise ValueError(
+                f"File too large ({st.st_size} bytes, max {MAX_FILE_BYTES})"
+            )
         raw = fh.read(MAX_FILE_BYTES + 1)
-    content = raw.decode('utf-8', errors='replace')
-    return {'path': rel, 'content': content, 'size': len(raw), 'lines': content.count('\n') + 1}
+    content = raw.decode("utf-8", errors="replace")
+    return {
+        "path": rel,
+        "content": content,
+        "size": len(raw),
+        "lines": content.count("\n") + 1,
+    }
 
 
 # ── Git detection ──────────────────────────────────────────────────────────
+
 
 def _run_git(args, cwd, timeout=3):
     """Run a git command and return stdout, or None on failure."""
     try:
         r = subprocess.run(
-            ['git'] + args, cwd=str(cwd), capture_output=True,
-            text=True, timeout=timeout,
+            ["git"] + args,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         return r.stdout.strip() if r.returncode == 0 else None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -1283,40 +1326,46 @@ def _run_git(args, cwd, timeout=3):
 
 def git_info_for_workspace(workspace: Path) -> dict:
     """Return git info for a workspace directory, or None if not a git repo."""
-    if not (workspace / '.git').exists():
+    if not (workspace / ".git").exists():
         return None
-    branch = _run_git(['rev-parse', '--abbrev-ref', 'HEAD'], workspace)
+    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], workspace)
     if branch is None:
         return None
+
     # Run the remaining git commands in parallel via threads — they are
     # independent subprocess calls and together can take 50-200ms when run
     # serially.  Threading is safe here because each call blocks only on the
     # subprocess pipe, not on the GIL.
     def _ahead():
-        r = _run_git(['rev-list', '--count', '@{u}..HEAD'], workspace)
+        r = _run_git(["rev-list", "--count", "@{u}..HEAD"], workspace)
         return int(r) if r and r.isdigit() else 0
+
     def _behind():
-        r = _run_git(['rev-list', '--count', 'HEAD..@{u}'], workspace)
+        r = _run_git(["rev-list", "--count", "HEAD..@{u}"], workspace)
         return int(r) if r and r.isdigit() else 0
+
     def _status():
-        out = _run_git(['status', '--porcelain'], workspace) or ''
+        out = _run_git(["status", "--porcelain"], workspace) or ""
         lines = [l for l in out.splitlines() if l]
-        modified = sum(1 for l in lines if len(l) >= 2 and (l[0] in 'MAR' or l[1] in 'MAR'))
-        untracked = sum(1 for l in lines if l.startswith('??'))
+        modified = sum(
+            1 for l in lines if len(l) >= 2 and (l[0] in "MAR" or l[1] in "MAR")
+        )
+        untracked = sum(1 for l in lines if l.startswith("??"))
         return len(lines), modified, untracked
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         f_status = pool.submit(_status)
-        f_ahead  = pool.submit(_ahead)
+        f_ahead = pool.submit(_ahead)
         f_behind = pool.submit(_behind)
         dirty, modified, untracked = f_status.result()
-        ahead  = f_ahead.result()
+        ahead = f_ahead.result()
         behind = f_behind.result()
     return {
-        'branch': branch,
-        'dirty': dirty,
-        'modified': modified,
-        'untracked': untracked,
-        'ahead': ahead,
-        'behind': behind,
-        'is_git': True,
+        "branch": branch,
+        "dirty": dirty,
+        "modified": modified,
+        "untracked": untracked,
+        "ahead": ahead,
+        "behind": behind,
+        "is_git": True,
     }
