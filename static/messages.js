@@ -1903,7 +1903,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   const _STREAM_FADE_STAGGER_MS=16;
   const _STREAM_FADE_DONE_MAX_MS=320;
   const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
-  const _streamFadeEnabledForStream=window._fadeTextEffect===true;
 
   function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
     const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
@@ -2128,7 +2127,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _renderPending=false;
   }
   function _shouldUseStreamFade(){
-    return _streamFadeEnabledForStream;
+    return window._fadeTextEffect===true;
   }
   function _streamFadeSkipNode(node){
     if(!node||node.nodeType!==1) return false;

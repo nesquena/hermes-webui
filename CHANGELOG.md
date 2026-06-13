@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Transparent Stream activity display mode.** Settings → Appearance now includes an opt-in chat activity display mode that renders each Thinking/tool event as its own chronological expandable row, with live tool completion updating the same row and settled/reloaded transcripts preserving the same event shape. Compact Worklog remains the default. (#3820)
+- **Transparent Stream turn-level collapse + old-event fading + per-turn footer.** In Transparent Stream, clicking the assistant role label (the Hermes chat name tag) collapses the entire event stack underneath into a compact "output only" view with an animated chevron. Older event rows fade progressively from medium to low opacity (steps of ~0.18, floor at 0.32) so the eye lands on the most recent activity; hover restores full opacity. A bottom-of-turn footer mirrors the live run-status line for settled turns, showing elapsed time, first-token time (TTFT), token usage, and final status. (#3820)
+
 ## [v0.51.374] — 2026-06-12 — Release MM (custom-provider context-length probes carry the API key)
 
 ### Fixed
@@ -52,7 +57,6 @@
 ### Fixed
 
 - **Provider OpenCode-Go (and similar pooled providers) no longer 404 with "model not found" when selected via the WebUI model picker (#3895).** WebUI streaming used the *configured* provider base URL instead of the runtime provider's per-model-normalized URL, which duplicated a `/v1` path segment for OpenCode-Go and produced a 404. The target model is now threaded into runtime provider resolution (including the 401 credential self-heal retries), and the runtime-normalized base URL is preferred — but only when it points at the same scheme+host+port as the configured one, so an explicit `providers.<id>.base_url` override at a different endpoint (e.g. an LM Studio LAN address or an OpenRouter mirror) is still honored. (#3895)
-
 ## [v0.51.368] — 2026-06-12 — Release MG (bind active-profile cookie to auth session)
 
 ### Security
@@ -72,7 +76,6 @@
 ### Added
 
 - **Slice 2 of the Stable Assistant Turn Anchors foundation: a source-event normalizer (#3980, #3926).** Adds `normalizeAssistantTurnAnchorSourceEvent` / `normalizeAssistantTurnAnchorSourceEvents` to the frozen `HermesAssistantTurnAnchors` global, converting live SSE-style, replay/journal, and settled-message events into a single anchor-normalized shape with stable identity and dedupe keys. The helper is **inert** — no `send()` / `attachLiveStream()` / `renderMessages()` / settlement / `S.messages` / `INFLIGHT` / DOM path consumes it yet — so there is zero rendering change in this release; it lands the model that Compact Worklog and the in-progress Transparent Stream work will later consume from one normalizer. Identity reads are own-property-only and payload shaping uses `Object.create(null)` with unsafe-key skipping, so prototype-pollution and inherited-identity payloads can't leak through. (#3980)
-
 ## [v0.51.365] — 2026-06-11 — Release MD (lineage-segment open + reasoning chip fixes)
 
 ### Fixed
@@ -109,7 +112,6 @@
 ### Fixed
 
 - **Idle background tabs no longer exhaust the browser's connection pool and cause "Request timed out" toasts (#3992).** Each WebUI window opened three persistent SSE connections (session-events, gateway stream, per-session stream); with two windows open that reached the browser's six-connection per-origin HTTP/1.1 limit, so any subsequent request queued behind the saturated pool and timed out. The gateway and per-session streams now follow the same Page Visibility pattern the session-events stream already used: they close while the tab is hidden (freeing pool slots) and reopen when it becomes visible again. The per-session stream correctly reattaches on re-show — including for a session that was loaded or restored while the tab was already hidden — so live `bg_task_complete` / `server_turn_started` events are not missed. (#3996)
-
 ## [v0.51.359] — 2026-06-11 — Release LW (assistant turn anchor phase 0 scaffold)
 
 ### Added

@@ -65,7 +65,7 @@ def test_thinking_only_turns_use_worklog_duration():
     """Thinking-only turns now create a folded Worklog group, so that group owns
     the "Done in ..." duration instead of the final answer footer.
     """
-    m = re.search(r"const compactWorklogForMessage=isSimplifiedToolCalling\(\)&&([^;]+);", UI_JS)
+    m = re.search(r"const compactWorklogForMessage=isCompactWorklogMode\(\)&&([^;]+);", UI_JS)
     assert m, "compactWorklogForMessage suppression condition not found"
     cond = m.group(1)
     assert "toolCallAssistantIdxs.has(mi)" in cond

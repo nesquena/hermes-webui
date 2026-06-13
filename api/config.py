@@ -6232,6 +6232,7 @@ _SETTINGS_DEFAULTS = {
     "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
+    "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream
     "worklog_details_expanded_default": False,  # opt-in: expand Worklog details by default; default remains folded
     "pinned_sessions_limit": 3,  # maximum active pinned sessions shown in the sidebar
     "inflight_state_max_sessions": 8,  # max active-stream recovery snapshots kept in browser localStorage
@@ -6386,6 +6387,7 @@ _SETTINGS_ENUM_VALUES = {
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
     "busy_input_mode": {"queue", "interrupt", "steer"},
+    "chat_activity_display_mode": {"compact_worklog", "transparent_stream"},
 }
 _SETTINGS_INT_RANGES = {
     "pinned_sessions_limit": (1, 99),

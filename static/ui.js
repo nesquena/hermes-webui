@@ -2661,6 +2661,12 @@ function _formatTurnDuration(seconds){
   if(h)return`${h}h ${m}m`;
   return`${m}m ${s}s`;
 }
+function _formatFirstToken(ms){
+  const n=Number(ms);
+  if(!Number.isFinite(n)||n<0)return'';
+  if(n<1000)return`${Math.round(n)}ms`;
+  return`${(n/1000).toFixed(2)}s`;
+}
 function _formatActiveElapsedTimer(seconds){
   const n=Number(seconds);
   if(!Number.isFinite(n)||n<0)return'';
@@ -6580,6 +6586,542 @@ function _thinkingActivityNode(text, open){
   _renderThinkingInto(row,text);
   return row;
 }
+function chatActivityMode(){
+  if(typeof window==='undefined') return 'compact_worklog';
+  return window._chatActivityDisplayMode || (window._transparentStream ? 'transparent_stream' : 'compact_worklog') || 'compact_worklog';
+}
+function isTransparentStream(){
+  return chatActivityMode()==='transparent_stream';
+}
+function isCompactWorklogMode(){
+  return isSimplifiedToolCalling()&&!isTransparentStream();
+}
+if(typeof window!=='undefined'){
+  window.chatActivityMode=chatActivityMode;
+  window.isTransparentStream=isTransparentStream;
+  window.isCompactWorklogMode=isCompactWorklogMode;
+}
+function _toolShortName(name){
+  const raw=String(name||'').trim();
+  if(!raw) return 'tool';
+  if(raw.startsWith('mcp__')){
+    const parts=raw.split('__').filter(Boolean);
+    if(parts.length>1) return parts.slice(1).join('/');
+  }
+  if(raw.startsWith('mcp.')){
+    const parts=raw.split('.').filter(Boolean);
+    if(parts.length>1) return parts.slice(1).join('/');
+  }
+  return raw;
+}
+function _transparentEventPreview(text){
+  const clean=_sanitizeThinkingDisplayText(String(text||'')).replace(/\s+/g,' ').trim();
+  if(!clean) return '';
+  return clean.length>180?`${clean.slice(0,177)}...`:clean;
+}
+function _transparentToolStatus(tc){
+  if(tc&&tc.is_error) return 'Failed';
+  if(tc&&tc.done===false) return 'Running';
+  return 'Completed';
+}
+function _copyEventToClipboard(row){
+  if(!row) return;
+  const type=row.getAttribute('data-event-type');
+  let text='';
+  let label='event';
+  if(type==='tool'){
+    const tc=row._tcData||{};
+    const fallbackName=row.getAttribute('data-event-name')||row.getAttribute('data-tool-name')||'tool';
+    label=`tool ${tc.name||fallbackName}`;
+    const parts=[`tool: ${tc.name||fallbackName}`];
+    if(tc.args&&Object.keys(tc.args).length) parts.push('args: '+JSON.stringify(tc.args,null,2));
+    if(tc.snippet) parts.push('output:\n'+String(tc.snippet));
+    if(parts.length===1){
+      const argsText=Array.from(row.querySelectorAll('.tool-card-args .tool-arg-pair'))
+        .map(pair=>String(pair.textContent||'').trim())
+        .filter(Boolean)
+        .join('\n');
+      const outputText=String((row.querySelector('.tool-card-result pre')||{}).textContent||'').trim();
+      if(argsText) parts.push('args:\n'+argsText);
+      if(outputText) parts.push('output:\n'+outputText);
+    }
+    text=parts.join('\n');
+  }else if(type==='thinking'){
+    const pre=row.querySelector('.thinking-card-body pre');
+    text=pre?pre.textContent:(row.textContent||'').replace(/^\s*Thinking\s*/i,'');
+    label='thinking';
+  }else{
+    text=row.textContent||'';
+  }
+  const fallback=()=>{
+    try{
+      const ta=document.createElement('textarea');
+      ta.value=text;
+      ta.setAttribute('readonly','');
+      ta.style.position='absolute';
+      ta.style.left='-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok=document.execCommand('copy');
+      document.body.removeChild(ta);
+      if(typeof showToast==='function') showToast(ok?(t('copied')||'Copied'):(t('copy_failed')||'Copy failed'),1600);
+    }catch(_){
+      if(typeof showToast==='function') showToast(t('copy_failed')||'Copy failed',2000,'error');
+    }
+  };
+  if(navigator&&navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(()=>{
+      if(typeof showToast==='function') showToast(`${t('copied')||'Copied'} ${label}`,1600);
+    }).catch(fallback);
+  }else{
+    fallback();
+  }
+}
+function _attachCopyButton(header){
+  if(!header) return null;
+  const bindCopyButton=(btn)=>{
+    if(!btn) return null;
+    btn.classList.add('transparent-event-copy');
+    btn.setAttribute('role','button');
+    btn.setAttribute('tabindex','0');
+    btn.setAttribute('aria-label',t('copy')||'Copy');
+    btn.setAttribute('data-transparent-copy','1');
+    btn.title=t('copy')||'Copy';
+    const handler=function(ev){
+      ev.stopPropagation();
+      ev.preventDefault();
+      _copyEventToClipboard(header.closest('.transparent-event-row'));
+    };
+    btn.onclick=handler;
+    btn.onkeydown=function(ev){
+      if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();handler(ev);}
+    };
+    return btn;
+  };
+  // Reuse ANY existing copy button (handles both .transparent-event-copy
+  // added by this function AND the legacy .thinking-copy-btn baked into the
+  // thinking-card template). Returning the existing one prevents the
+  // duplicate copy buttons that appeared in thinking boxes.
+  const existing=header.querySelector('.transparent-event-copy,.thinking-copy-btn');
+  if(existing){
+    // Normalise the class so CSS treats them identically.
+    return bindCopyButton(existing);
+  }
+  const btn=document.createElement('span');
+  btn.className='transparent-event-copy';
+  btn.innerHTML=`<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+  bindCopyButton(btn);
+  // Place the copy button at a FIXED flexbox position regardless of
+  // whether a toggle or status badge is present: always right before
+  // the toggle. The CSS uses flexbox order to keep it visually stable
+  // even if other elements are inserted between header and toggle.
+  const toggle=header.querySelector('.tool-card-toggle,.thinking-card-toggle');
+  if(toggle&&toggle.parentNode===header) header.insertBefore(btn,toggle);
+  else header.appendChild(btn);
+  return btn;
+}
+function _transparentEventCountLabel(toolCount){
+  return toolCount?`Trace: ${toolCount} ${toolCount===1?'tool':'tools'}`:'Trace';
+}
+function _setTransparentDetailMode(tab, mode){
+  const row=tab&&tab.closest?tab.closest('.transparent-event-row'):null;
+  const detail=row&&row.querySelector('.tool-card-detail');
+  if(!detail) return;
+  const next=mode==='output'?'output':'full';
+  detail.setAttribute('data-transparent-detail-mode',next);
+  detail.querySelectorAll('.transparent-detail-mode').forEach(el=>{
+    el.classList.toggle('active', el===tab || el.getAttribute('data-mode')===next);
+  });
+}
+function _setTransparentCardOpen(card, open){
+  if(!card) return;
+  const expanded=!!open;
+  card.classList.toggle('open',expanded);
+  const row=card.closest&&card.closest('.transparent-event-row');
+  if(row) row.setAttribute('data-expanded',expanded?'1':'0');
+  const header=card.querySelector('.tool-card-header,.thinking-card-header');
+  if(header) header.setAttribute('aria-expanded',expanded?'true':'false');
+}
+function _wireTransparentHeaderToggle(header){
+  if(!header) return;
+  header.setAttribute('data-transparent-toggle-bound','1');
+  header.onclick=function(ev){
+    const target=ev&&ev.target;
+    if(target&&target.closest&&target.closest('.transparent-event-copy,.transparent-detail-mode,.tool-card-more')) return;
+    const card=this.closest('.tool-card,.thinking-card');
+    _setTransparentCardOpen(card,!(card&&card.classList.contains('open')));
+  };
+  header.onkeydown=function(ev){
+    if(ev.key!=='Enter'&&ev.key!==' ') return;
+    ev.preventDefault();
+    const card=this.closest('.tool-card,.thinking-card');
+    _setTransparentCardOpen(card,!(card&&card.classList.contains('open')));
+  };
+  header.setAttribute('role','button');
+  header.setAttribute('tabindex','0');
+}
+function _transparentToolDetailHtml(tc, status){
+  const args=tc&&tc.args&&typeof tc.args==='object'?tc.args:{};
+  const argEntries=Object.entries(args);
+  const meta=[
+    ['tool', tc&&tc.name?tc.name:'tool'],
+    ['status', status||_transparentToolStatus(tc)],
+  ];
+  if(tc&&tc.duration!==undefined&&tc.duration!==null) meta.push(['duration', String(tc.duration)]);
+  const preview=String((tc&&(tc.snippet||tc.preview||tc.result||tc.output))||'').trim();
+  const argHtml=[...meta,...argEntries].map(([k,v])=>`<div class="tool-arg-pair"><span class="tool-arg-key">${esc(String(k))}</span><span class="tool-arg-val">${esc(typeof v==='string'?v:JSON.stringify(v,null,2))}</span></div>`).join('');
+  return `<div class="tool-card-detail" data-transparent-detail-mode="full"><div class="transparent-detail-modes" role="tablist"><span class="transparent-detail-mode active" role="tab" tabindex="0" data-mode="full" onclick="_setTransparentDetailMode(this,'full')">Full</span><span class="transparent-detail-mode" role="tab" tabindex="0" data-mode="output" onclick="_setTransparentDetailMode(this,'output')">Output</span></div><div class="tool-card-args">${argHtml}</div>${preview?`<div class="tool-card-result"><pre>${esc(preview)}</pre></div>`:''}</div>`;
+}
+function _syncTransparentEventControls(turn){
+  if(!turn||!isTransparentStream()) return;
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return;
+  const rows=Array.from(blocks.querySelectorAll(':scope > .transparent-event-row,[data-transparent-event-row="1"]'));
+  const toolCount=rows.filter(row=>row.getAttribute('data-event-type')==='tool').length;
+  let bar=blocks.querySelector(':scope > .transparent-event-controls');
+  if(!rows.length){
+    if(bar) bar.remove();
+    return;
+  }
+  if(!bar){
+    bar=document.createElement('div');
+    bar.className='transparent-event-controls';
+    const label=document.createElement('span');
+    label.className='transparent-event-controls-label';
+    label.setAttribute('data-transparent-tool-count','1');
+    const expand=document.createElement('span');
+    expand.className='transparent-event-control';
+    expand.setAttribute('role','button');
+    expand.setAttribute('tabindex','0');
+    expand.setAttribute('data-transparent-expand-all','1');
+    expand.textContent=t('expand_all')||'Expand all';
+    expand.onclick=function(ev){ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),true);};
+    expand.onkeydown=function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),true);}};
+    const collapse=document.createElement('span');
+    collapse.className='transparent-event-control';
+    collapse.setAttribute('role','button');
+    collapse.setAttribute('tabindex','0');
+    collapse.setAttribute('data-transparent-collapse-all','1');
+    collapse.textContent=t('collapse_all')||'Collapse all';
+    collapse.onclick=function(ev){ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),false);};
+    collapse.onkeydown=function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),false);}};
+    bar.appendChild(label);
+    bar.appendChild(expand);
+    bar.appendChild(collapse);
+    // Guard: firstChild may be null (empty blocks) or orphaned from a prior
+    // DOM rebuild. Only insertBefore when it is still a child of blocks.
+    if(blocks.firstChild&&blocks.firstChild.parentNode===blocks) blocks.insertBefore(bar, blocks.firstChild);
+    else blocks.appendChild(bar);
+  }
+  const expand=bar.querySelector('[data-transparent-expand-all]');
+  if(expand){
+    expand.onclick=function(ev){ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),true);};
+    expand.onkeydown=function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),true);}};
+  }
+  const collapse=bar.querySelector('[data-transparent-collapse-all]');
+  if(collapse){
+    collapse.onclick=function(ev){ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),false);};
+    collapse.onkeydown=function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),false);}};
+  }
+  const label=bar.querySelector('.transparent-event-controls-label');
+  if(label){
+    label.textContent=_transparentEventCountLabel(toolCount);
+    label.setAttribute('data-transparent-tool-count',String(toolCount));
+  }
+  bar.setAttribute('data-tool-count',String(toolCount));
+  // Wire the Hermes chat name tag toggle for the live turn.
+  _wireTransparentTurnToggle(turn);
+}
+function _rehydrateTransparentStreamDom(root){
+  if(!root||!isTransparentStream()) return;
+  root.querySelectorAll('.assistant-turn').forEach(turn=>{
+    _wireTransparentTurnToggle(turn);
+    _syncTransparentEventControls(turn);
+  });
+  root.querySelectorAll('.transparent-event-row').forEach(row=>{
+    const card=row.querySelector('.tool-card,.thinking-card');
+    const header=row.querySelector('.tool-card-header,.thinking-card-header');
+    if(header){
+      _wireTransparentHeaderToggle(header);
+      _attachCopyButton(header);
+    }
+    if(card) _setTransparentCardOpen(card,card.classList.contains('open'));
+  });
+}
+function _decorateTransparentEventRow(row, opts){
+  if(!row) return row;
+  opts=opts||{};
+  const type=String(opts.type||row.getAttribute('data-event-type')||'event');
+  row.classList.add('transparent-event-row');
+  row.setAttribute('data-transparent-event-row','1');
+  row.setAttribute('data-transparent-stream','1');
+  row.setAttribute('data-event-type',type);
+  if(opts.name) row.setAttribute('data-event-name',String(opts.name));
+  if(opts.segmentSeq) row.setAttribute('data-live-segment-seq',String(opts.segmentSeq));
+  if(opts.burstId) row.setAttribute('data-activity-burst-id',String(opts.burstId));
+  if(type==='tool'){
+    const tc=opts.toolCall||row._tcData||{};
+    const name=String(opts.name||tc.name||'tool');
+    row.setAttribute('data-tool-name',name);
+    const status=String(opts.status||_transparentToolStatus(tc));
+    row.setAttribute('data-event-status',status);
+    const header=row.querySelector('.tool-card-header');
+    const card=row.querySelector('.tool-card');
+    if(card) card.classList.add('transparent-event-card');
+    if(header){
+      const nameEl=header.querySelector('.tool-card-name');
+      if(nameEl) nameEl.textContent=(status==='Running'?`Running: ${_toolShortName(name)}`:_toolShortName(name));
+      let statusEl=header.querySelector('.transparent-event-status');
+      if(!statusEl){
+        statusEl=document.createElement('span');
+        statusEl.className='transparent-event-status';
+        const toggle=header.querySelector('.tool-card-toggle');
+        // Guard against stale toggle (see thinking-preview fix above).
+        if(toggle&&toggle.parentNode===header) header.insertBefore(statusEl,toggle);
+        else header.appendChild(statusEl);
+      }
+      if(status==='Completed'){
+        statusEl.textContent='';
+        statusEl.removeAttribute('data-status');
+      }else{
+        statusEl.textContent=status;
+        statusEl.setAttribute('data-status',status.toLowerCase());
+      }
+      row.setAttribute('data-event-status',status);
+      // Update the 3D progress bar to reflect the new status.
+      const progress=card.querySelector('.transparent-event-progress');
+      if(progress){
+        if(status==='Completed'||status==='Failed'){
+          progress.removeAttribute('data-progress-running');
+          progress.setAttribute('data-progress-percent','100%');
+          progress.style.setProperty('--transparent-progress-percent','100%');
+        }else if(status==='Running'){
+          progress.setAttribute('data-progress-running','1');
+          progress.setAttribute('data-progress-percent','60%');
+          progress.style.setProperty('--transparent-progress-percent','60%');
+        }
+      }
+      let detail=row.querySelector('.tool-card-detail');
+      if(!detail&&card){
+        card.insertAdjacentHTML('beforeend',_transparentToolDetailHtml(tc,status));
+        detail=row.querySelector('.tool-card-detail');
+        if(!header.querySelector('.tool-card-toggle')){
+          const toggle=document.createElement('span');
+          toggle.className='tool-card-toggle';
+          toggle.innerHTML=li('chevron-right',12);
+          header.appendChild(toggle);
+        }
+      }
+      if(detail&&!detail.querySelector('.transparent-detail-modes')){
+        const modes=document.createElement('div');
+        modes.className='transparent-detail-modes';
+        modes.setAttribute('role','tablist');
+        modes.innerHTML=`<span class="transparent-detail-mode active" role="tab" tabindex="0" data-mode="full" onclick="_setTransparentDetailMode(this,'full')">Full</span><span class="transparent-detail-mode" role="tab" tabindex="0" data-mode="output" onclick="_setTransparentDetailMode(this,'output')">Output</span>`;
+        // Guard: firstChild may be orphaned from a prior DOM rebuild.
+        const firstChild=detail.firstChild;
+        if(firstChild&&firstChild.parentNode===detail) detail.insertBefore(modes, firstChild);
+        else detail.appendChild(modes);
+        detail.setAttribute('data-transparent-detail-mode','full');
+      }
+      _wireTransparentHeaderToggle(header);
+      _attachCopyButton(header);
+    }
+    // Attach the 3D progress bar BEFORE the early return so tool rows
+    // also get the bottom bar (the function used to return before
+    // reaching the bar attachment, which left tool rows bar-less).
+    _attachProgressBar(row, opts);
+    return row;
+  }
+  if(type==='thinking'){
+    row.classList.add('transparent-thinking-event');
+    row.setAttribute('data-event-name','thinking');
+    const card=row.querySelector('.thinking-card');
+    const header=row.querySelector('.thinking-card-header');
+    if(card) card.classList.add('transparent-event-card');
+    if(header){
+      const btnRow=header.querySelector('.thinking-card-btn-row');
+      const copy=header.querySelector('.thinking-copy-btn,.transparent-event-copy');
+      const toggle=header.querySelector('.thinking-card-toggle');
+      if(copy&&copy.parentNode!==header) header.appendChild(copy);
+      if(toggle&&toggle.parentNode!==header) header.appendChild(toggle);
+      if(btnRow&&btnRow.parentNode===header&&!btnRow.children.length) btnRow.remove();
+      header.style.flexDirection='row';
+      const label=header.querySelector('.thinking-card-label');
+      if(label) label.textContent='Thinking';
+      let preview=header.querySelector('.transparent-event-preview,.transparent-event-thinking-preview');
+      const previewText=_transparentEventPreview(opts.preview||opts.text||row.textContent||'');
+      if(previewText){
+        if(!preview){
+          preview=document.createElement('span');
+          preview.className='transparent-event-preview transparent-event-thinking-preview';
+          if(label&&label.parentNode===header&&label.nextSibling) header.insertBefore(preview,label.nextSibling);
+          else if(label&&label.parentNode===header) header.appendChild(preview);
+          else header.appendChild(preview);
+        }
+        preview.classList.add('transparent-event-thinking-preview');
+        preview.textContent=previewText;
+      }else if(preview){
+        preview.remove();
+      }
+      _wireTransparentHeaderToggle(header);
+      _attachCopyButton(header);
+    }
+    _attachProgressBar(row, opts);
+  }
+  return row;
+}
+// ── 3D progress bar (loading path / follow-up indicator) ───────────
+// Each transparent event card has a thin 3D bar at its bottom edge.
+// While the underlying tool is running (status === 'Running') the bar
+// shows a shimmer animation; once the tool completes the bar fills to
+// 100% and stops. The bar doubles as a visual step-break between rows
+// in the stack, so the eye reads the stream as discrete steps.
+function _attachProgressBar(row, opts){
+  if(!row) return;
+  opts=opts||{};
+  const card=row.querySelector('.tool-card,.thinking-card');
+  if(!card) return;
+  let bar=card.querySelector('.transparent-event-progress');
+  if(!bar){
+    bar=document.createElement('div');
+    bar.className='transparent-event-progress';
+    // Append to the card so it sits flush at the bottom edge.
+    card.appendChild(bar);
+  }
+  // Set the running state from opts or current status.
+  const status=String(opts.status||(row.getAttribute('data-event-status')||''));
+  const isRunning=(status==='Running'||status==='running');
+  const isCompleted=(status==='Completed'||status==='completed'||status==='Failed'||status==='failed');
+  if(isRunning) bar.setAttribute('data-progress-running','1');
+  else bar.removeAttribute('data-progress-running');
+  if(isCompleted){
+    bar.setAttribute('data-progress-percent','100%');
+    bar.style.setProperty('--transparent-progress-percent','100%');
+  }else if(isRunning){
+    bar.setAttribute('data-progress-percent','60%');
+    bar.style.setProperty('--transparent-progress-percent','60%');
+  }else{
+    bar.removeAttribute('data-progress-percent');
+    bar.style.removeProperty('--transparent-progress-percent');
+  }
+}
+function _setTransparentRowsExpanded(root, expanded){
+  const scope=root||document;
+  scope.querySelectorAll('.transparent-event-row .tool-card,.transparent-event-row .thinking-card').forEach(card=>{
+    _setTransparentCardOpen(card,!!expanded);
+  });
+}
+// ── Transparent turn-level collapse (Hermes chat name tag) ───────────────
+// In transparent_stream mode the assistant role label is the turn's "name
+// tag". Clicking it collapses the entire event stack underneath so the
+// transcript shows only the final answer (Output only). A chevron on the
+// role telegraph the affordance; the blocks body animates with the same
+// max-height transition used by individual event cards. Persisted via
+// data-attribute only — the turn's render path reads it on rebuild.
+const _transparentTurnCollapsedStates={}; // key: `${sid}:${turnMsgIdx}` → boolean
+function _wireTransparentTurnToggle(turn){
+  if(!turn) return;
+  if(!isTransparentStream()) return;
+  const role=turn.querySelector('.msg-role.assistant');
+  if(!role) return;
+  turn.setAttribute('data-transparent-turn-toggle-bound','1');
+  // Add chevron if missing.
+  if(!role.querySelector('.transparent-turn-chevron')){
+    const chev=document.createElement('span');
+    chev.className='transparent-turn-chevron';
+    chev.innerHTML=li('chevron-down',10);
+    role.appendChild(chev);
+  }
+  role.setAttribute('role','button');
+  role.setAttribute('tabindex','0');
+  role.setAttribute('aria-expanded',turn.getAttribute('data-transparent-turn-collapsed')==='1'?'false':'true');
+  const toggle=function(ev){
+    if(ev&&ev.target&&ev.target.closest&&ev.target.closest('.msg-tps-inline')) return;
+    const collapsed=turn.getAttribute('data-transparent-turn-collapsed')==='1';
+    turn.setAttribute('data-transparent-turn-collapsed',collapsed?'0':'1');
+    role.setAttribute('aria-expanded',collapsed?'true':'false');
+    // Persist state across DOM rebuilds.
+    if(S.session){
+      const seg=turn.querySelector('.assistant-segment');
+      if(seg){
+        const mi=seg.getAttribute('data-msg-idx');
+        if(mi!=null) _transparentTurnCollapsedStates[`${S.session.session_id}:${mi}`]=!collapsed;
+      }
+    }
+  };
+  role.onclick=toggle;
+  role.onkeydown=function(ev){
+    if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();toggle(ev);}
+  };
+}
+// ── Transparent old-event fading (medium → low) ───────────────────────────
+// In long streams the earliest rows fade to a lower opacity so the user's
+// eye lands on the most recent activity. The fade is per-turn: the newest
+// event stays at full opacity, each earlier event drops one step. Floors
+// at 0.32 so labels stay readable.
+function _applyTransparentRowFading(turn){
+  if(!turn||!isTransparentStream()) return;
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return;
+  const rows=Array.from(blocks.querySelectorAll(':scope > .transparent-event-row'));
+  const total=rows.length;
+  for(let i=0;i<total;i++){
+    const row=rows[i];
+    // Newest = full opacity; each step back drops by 1 (floors at 5).
+    const stepsFromEnd=total-1-i;
+    if(stepsFromEnd<=0){row.removeAttribute('data-transparent-fade');continue;}
+    const step=Math.min(5,stepsFromEnd);
+    row.setAttribute('data-transparent-fade',String(step));
+  }
+}
+// ── Transparent turn footer (elapsed · tokens · TTFT · status) ───────────
+// Mirrors the live run-status line for settled turns in transparent
+// mode. Shows duration, first-token time, token usage, and final status.
+// Only rendered for turns that have transparent event rows.
+function _transparentTurnFooterHtml(durationText, ttftText, tokensText, statusText){
+  const parts=[];
+  if(durationText) parts.push(`<span class="lf-time">${esc(durationText)}</span>`);
+  if(ttftText) parts.push(`<span class="lf-ttft" title="${esc(t('first_token_time')||'Time to first token')}">TTFT ${esc(ttftText)}</span>`);
+  if(tokensText) parts.push(`<span class="lf-tokens">${esc(tokensText)}</span>`);
+  if(statusText) parts.push(`<span class="lf-status">${esc(statusText)}</span>`);
+  if(!parts.length) return '';
+  return `<div class="transparent-turn-footer">${parts.join('<span class="lf-sep">·</span>')}</div>`;
+}
+function _renderTransparentTurnFooter(turn, opts){
+  if(!turn||!isTransparentStream()) return;
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return;
+  const hasRows=blocks.querySelector(':scope > .transparent-event-row');
+  if(!hasRows){
+    // No events → no footer (the answer itself carries the duration).
+    const existing=turn.querySelector('.transparent-turn-footer');
+    if(existing) existing.remove();
+    return;
+  }
+  const durationText=opts&&opts.durationText||'';
+  const ttftText=opts&&opts.ttftText||'';
+  const tokensText=opts&&opts.tokensText||'';
+  const statusText=opts&&opts.statusText||(t('done')||'Done');
+  const html=_transparentTurnFooterHtml(durationText, ttftText, tokensText, statusText);
+  let footer=turn.querySelector('.transparent-turn-footer');
+  if(!html){
+    if(footer) footer.remove();
+    return;
+  }
+  if(!footer){
+    footer=document.createElement('div');
+    footer.className='transparent-turn-footer';
+    const blocks=turn.querySelector('.assistant-turn-blocks');
+    // Guard: nextSibling may be null (blocks is last child) or orphaned from
+    // a prior DOM rebuild. Only insertBefore when it is still a child of turn.
+    if(blocks&&blocks.nextSibling&&blocks.nextSibling.parentNode===turn){
+      turn.insertBefore(footer, blocks.nextSibling);
+    }else{
+      turn.appendChild(footer);
+    }
+  }
+  footer.innerHTML=html.replace(/^<div class="transparent-turn-footer">|<\/div>$/g,'');
+}
 // ── Activity-group user expand intent (#1298) ──────────────────────────────
 // When the user manually expands the live "Activity" dropdown during streaming,
 // preserve that intent across the destroy/recreate cycle that fires on every
@@ -7135,9 +7677,6 @@ function _clearLiveRunStatusTimer(sid){
 function ensureRunActivityForCurrentTurn(){
   // Phase C: disabled — top live run Activity card removed
   return null;
-  const turn=$('liveAssistantTurn');
-  const blocks=_assistantTurnBlocks(turn);
-  return ensureRunActivityGroup(blocks,{live:true,collapsed:true});
 }
 function closeCurrentLiveActivityGroup(){
   const turn=$('liveAssistantTurn');
@@ -8030,6 +8569,7 @@ function renderMessages(options){
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
+      _rehydrateTransparentStreamDom(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
@@ -8320,7 +8860,7 @@ function renderMessages(options){
     if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
       content='';
     }
-    if(!isUser&&isSimplifiedToolCalling()&&!thinkingText){
+    if(!isUser&&(isCompactWorklogMode()||isTransparentStream())&&!thinkingText){
       const turnFinalVisibleContent=assistantTurnFinalVisibleContentByRawIdx.get(rawIdx)||'';
       const turnVisibleContents=assistantTurnVisibleContentByRawIdx.get(rawIdx)||[];
       thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents);
@@ -8399,7 +8939,7 @@ function renderMessages(options){
     seg.dataset.rawText=String(content).trim();
     if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
     if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
-    const messageBelongsInWorklog=!S.busy&&isSimplifiedToolCalling()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});
+    const messageBelongsInWorklog=!S.busy&&isCompactWorklogMode()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});
     if(messageBelongsInWorklog){
       seg.classList.add('assistant-segment-worklog-source');
       seg.setAttribute('aria-hidden','true');
@@ -8438,7 +8978,7 @@ function renderMessages(options){
       if(_reasoningPayload) thinkingText=_reasoningPayload;
     }
     if(thinkingText&&window._showThinking!==false){
-      if(isSimplifiedToolCalling()&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
+      if((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml);
@@ -8715,7 +9255,7 @@ function renderMessages(options){
     // regression vs master; same content-loss-on-switch class as #3668). The
     // `:not([data-live-thinking="1"])` / live-card guards below keep the active
     // turn's own live nodes from being double-built.
-    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]),.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
     const byActivity = new Map();
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const _assistantAnchorForActivity=(aIdx,segmentSeq,burstId)=>{
@@ -8807,51 +9347,106 @@ function renderMessages(options){
       if(Number.isFinite(burstA)&&Number.isFinite(burstB)&&burstA!==burstB) return burstA-burstB;
       return a.aIdx-b.aIdx;
     });
-    for(const entry of activityOrder){
-      const {aIdx,segmentSeq,burstId,cards,thinkingIdx,includeAnchorReason}=entry;
-      if(aIdx<assistantIdxs[0]) continue;
-      const anchorRow=_assistantAnchorForActivity(aIdx,segmentSeq,burstId);
-      if(!anchorRow) continue;
-      const anchorParent=anchorRow.parentElement;
-      const anchorReasonHtml=_worklogReasonHtmlFromAnchor(anchorRow);
-      const thinkingText=thinkingIdx!==null?assistantThinking.get(thinkingIdx):'';
-      if(!cards.length&&!anchorReasonHtml&&!thinkingText) continue;
-      const anchorTurn=anchorRow.closest('.assistant-turn');
-      if(!anchorTurn) continue;
-      let state=activityByTurn.get(anchorTurn);
-      if(!state){
-        const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
-        if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
-        const activityKey=`assistant:${aIdx}`;
-        const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
-        const group=ensureActivityGroup(anchorParent,{
-          collapsed:true,
-          anchor:anchorRow,
-          beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
-          syncAnchorReason:anchorIsWorklogSource,
-          activityKey,
-          burstId:burstId||'',
-          segmentSeq:segmentSeq||'',
-          turnDuration:includeTurnDuration?_turnDurationForAnchor(anchorRow):undefined,
+    if(!isTransparentStream()){
+      for(const entry of activityOrder){
+        const {aIdx,segmentSeq,burstId,cards,thinkingIdx,includeAnchorReason}=entry;
+        if(aIdx<assistantIdxs[0]) continue;
+        const anchorRow=_assistantAnchorForActivity(aIdx,segmentSeq,burstId);
+        if(!anchorRow) continue;
+        const anchorParent=anchorRow.parentElement;
+        const anchorReasonHtml=_worklogReasonHtmlFromAnchor(anchorRow);
+        const thinkingText=thinkingIdx!==null?assistantThinking.get(thinkingIdx):'';
+        if(!cards.length&&!anchorReasonHtml&&!thinkingText) continue;
+        const anchorTurn=anchorRow.closest('.assistant-turn');
+        if(!anchorTurn) continue;
+        let state=activityByTurn.get(anchorTurn);
+        if(!state){
+          const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
+          if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
+          const activityKey=`assistant:${aIdx}`;
+          const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
+          const group=ensureActivityGroup(anchorParent,{
+            collapsed:true,
+            anchor:anchorRow,
+            beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
+            syncAnchorReason:anchorIsWorklogSource,
+            activityKey,
+            burstId:burstId||'',
+            segmentSeq:segmentSeq||'',
+            turnDuration:includeTurnDuration?_turnDurationForAnchor(anchorRow):undefined,
+          });
+          const list=_toolWorklogListEl(group);
+          if(!list) continue;
+          list.innerHTML='';
+          state={group,cards:[],seenReasons:new Set(),seenTools:new Set()};
+          activityByTurn.set(anchorTurn,state);
+        }
+        state.cards.push(...cards);
+        _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
+          live:false,
+          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml,
+          thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
+          seenReasons:state.seenReasons,
+          seenTools:state.seenTools,
         });
-        const list=_toolWorklogListEl(group);
-        if(!list) continue;
-        list.innerHTML='';
-        state={group,cards:[],seenReasons:new Set(),seenTools:new Set()};
-        activityByTurn.set(anchorTurn,state);
       }
-      state.cards.push(...cards);
-      _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
-        live:false,
-        includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml,
-        thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
-        seenReasons:state.seenReasons,
-        seenTools:state.seenTools,
+      activityByTurn.forEach(state=>{
+        _syncToolCallGroupSummary(state.group);
       });
+    }else{
+      // ── transparent_stream path: individual expandable event rows ──
+      const transparentInsertCursors=new Map();
+      for(const entry of activityOrder){
+        const event={
+          ...entry,
+          thinkingText:entry.thinkingIdx!==null?assistantThinking.get(entry.thinkingIdx):'',
+        };
+        const {aIdx,segmentSeq,burstId,cards}=event;
+        if(aIdx<assistantIdxs[0]) continue;
+        const anchorRow=_assistantAnchorForActivity(aIdx,segmentSeq,burstId);
+        if(!anchorRow) continue;
+        const anchorTurn=anchorRow.closest('.assistant-turn');
+        const turn=anchorTurn;
+        const blocks=_assistantTurnBlocks(anchorTurn);
+        if(!anchorTurn||!blocks) continue;
+        const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
+        const insertAfterCursor=(row)=>{
+          const cursor=transparentInsertCursors.get(anchorRow)||anchorRow;
+          const ref=cursor&&cursor.parentElement===blocks?cursor.nextElementSibling:null;
+          if(ref&&ref.parentElement===blocks) blocks.insertBefore(row,ref);
+          else blocks.appendChild(row);
+          transparentInsertCursors.set(anchorRow,row);
+        };
+        const insertBeforeAnchor=(row)=>{
+          if(anchorRow&&anchorRow.parentElement===blocks) blocks.insertBefore(row,anchorRow);
+          else blocks.appendChild(row);
+        };
+        if(event.thinkingText){
+          const thinkingRow=_decorateTransparentEventRow(_thinkingActivityNode(event.thinkingText,false),{
+            type:'thinking',
+            text:event.thinkingText,
+            preview:event.thinkingText,
+            segmentSeq,
+            burstId,
+          });
+          if(!anchorIsWorklogSource) insertBeforeAnchor(thinkingRow);
+          else insertAfterCursor(thinkingRow);
+        }
+        for(const toolCall of cards){
+          event.toolCall=toolCall;
+          const toolRow=_decorateTransparentEventRow(buildToolCard(event.toolCall),{
+            type:'tool',
+            name:event.toolCall&&event.toolCall.name,
+            status:_transparentToolStatus(event.toolCall),
+            toolCall:event.toolCall,
+            segmentSeq,
+            burstId,
+          });
+          insertAfterCursor(toolRow);
+        }
+        _syncTransparentEventControls(turn);
+      }
     }
-    activityByTurn.forEach(state=>{
-      _syncToolCallGroupSummary(state.group);
-    });
   }
   // Render per-turn duration and optional token usage on assistant messages.
   // Duration stays visible even when token usage is disabled, because it answers
@@ -8871,7 +9466,7 @@ function renderMessages(options){
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
       // Worklog above the final answer.
-      const compactWorklogForMessage=isSimplifiedToolCalling()&&(toolCallAssistantIdxs.has(mi)||assistantThinking.has(mi));
+      const compactWorklogForMessage=isCompactWorklogMode()&&(toolCallAssistantIdxs.has(mi)||assistantThinking.has(mi));
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;
       const seg=assistantSegments.get(mi);
@@ -8919,7 +9514,65 @@ function renderMessages(options){
       }
       if(fragments.length){
         targetFoot.classList.add('msg-foot-with-usage');
-        for(let i=fragments.length-1;i>=0;i--) targetFoot.insertBefore(fragments[i], targetFoot.firstChild);
+        for(let i=fragments.length-1;i>=0;i--){
+          // Guard: firstChild may be null (empty foot) or orphaned.
+          const firstChild=targetFoot.firstChild;
+          if(firstChild&&firstChild.parentNode===targetFoot) targetFoot.insertBefore(fragments[i], firstChild);
+          else targetFoot.appendChild(fragments[i]);
+        }
+      }
+    }
+  }
+  // Transparent mode per-turn wiring: collapsible Hermes chat name tag, old-event
+  // fading, and the bottom-of-turn footer (elapsed · tokens · TTFT · status).
+  // Runs after the per-turn duration block above so the footer can reuse the
+  // computed durationText / tokens / TTFT for each settled assistant turn.
+  if(isTransparentStream()){
+    for(const turn of inner.querySelectorAll('.assistant-turn')){
+      if(turn.id==='liveAssistantTurn') continue;
+      const blocks=_assistantTurnBlocks(turn);
+      if(!blocks) continue;
+      const hasTransparentRows=blocks.querySelector(':scope > .transparent-event-row');
+      _wireTransparentTurnToggle(turn);
+      // Restore collapse state from the map (survives DOM rebuild).
+      const seg=turn.querySelector('.assistant-segment');
+      if(seg&&sid){
+        const mi=seg.getAttribute('data-msg-idx');
+        if(mi!=null&&_transparentTurnCollapsedStates[`${sid}:${mi}`]){
+          turn.setAttribute('data-transparent-turn-collapsed','1');
+          const role=turn.querySelector('.msg-role.assistant');
+          if(role) role.setAttribute('aria-expanded','false');
+        }
+      }
+      _applyTransparentRowFading(turn);
+      if(hasTransparentRows){
+        // Find the corresponding message to read duration/usage.
+        const seg=turn.querySelector('.assistant-segment');
+        let durationText='';
+        let ttftText='';
+        let tokensText='';
+        if(seg){
+          const mi=seg.getAttribute('data-msg-idx');
+          if(mi!=null){
+            const msg=S.messages[Number(mi)]||{};
+            if(msg._turnDuration!=null) durationText=_formatTurnDuration(msg._turnDuration);
+            if(msg._firstTokenMs!=null) ttftText=_formatFirstToken(msg._firstTokenMs);
+            if(msg._turnUsage){
+              const inTok=msg._turnUsage.input_tokens||0;
+              const outTok=msg._turnUsage.output_tokens||0;
+              tokensText=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
+            }
+          }
+        }
+        _renderTransparentTurnFooter(turn,{
+          durationText,
+          ttftText,
+          tokensText,
+          statusText: t('done')||'Done',
+        });
+      }else{
+        // No transparent rows → no footer needed.
+        _renderTransparentTurnFooter(turn,{});
       }
     }
   }
@@ -9362,6 +10015,8 @@ function _syncToolWorklogToolGroup(group){
   steps.forEach(tools=>_syncToolRowsContainer(tools,isLiveWorklog));
 }
 function toolIcon(name){
+  const raw=String(name||'');
+  if(raw.startsWith('mcp__')||raw.startsWith('mcp.')) return li('plug');
   const icons={
     terminal:        li('terminal'),
     read_file:       li('file-text'),
@@ -9446,6 +10101,7 @@ function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='tool-card-row';
   if(!row.dataset) row.dataset={};
+  row.dataset.toolName=String(tc&&tc.name||'tool');
   row.dataset.toolKind=typeof _toolActionKind==='function'?_toolActionKind(tc):'unknown';
   row.dataset.toolDone=String(tc&&tc.done!==false);
   row.dataset.toolError=String(!!(tc&&tc.is_error));
@@ -9485,7 +10141,7 @@ function buildToolCard(tc){
       </div>
       ${hasDetail?`<div class="tool-card-detail">
         ${tc.args&&Object.keys(tc.args).length?`<div class="tool-card-args">${
-          Object.entries(tc.args).map(([k,v])=>`<div><span class="tool-arg-key">${esc(k)}</span> <span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
+          Object.entries(tc.args).map(([k,v])=>`<div class="tool-arg-pair"><span class="tool-arg-key">${esc(k)}</span><span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
           <pre>${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?`<code class="diff-block" data-highlighted="1">${_colorDiffLines(displaySnippet)}</code>`:esc(displaySnippet)}</pre>
@@ -9682,6 +10338,49 @@ function appendLiveToolCard(tc){
   const burstAnchor=burstId?_findLatestVisibleLiveAssistantByBurst(inner, burstId):null;
   const anchor=segmentAnchor||burstAnchor||_findLatestVisibleLiveAssistant(inner)||children.filter(el=>el.matches('[data-live-assistant="1"]')).pop();
   const effectiveSegmentSeq=anchor&&anchor.getAttribute?anchor.getAttribute('data-live-segment-seq')||segmentSeq:segmentSeq;
+  if(isTransparentStream()){
+    const insertTransparentRow=(row)=>{
+      const liveFooter=inner.querySelector('#liveRunStatus');
+      if(liveFooter&&liveFooter.parentElement===inner){
+        inner.insertBefore(row,liveFooter);
+      }else{
+        inner.appendChild(row);
+      }
+    };
+    if(tid){
+      const existing=inner.querySelector(`.transparent-event-row[data-live-tid="${CSS.escape(tid)}"],.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
+      if(existing){
+        const replacement=_decorateTransparentEventRow(buildToolCard(tc),{
+          type:'tool',
+          name:tc&&tc.name,
+          status:_transparentToolStatus(tc),
+          toolCall:tc,
+          segmentSeq:effectiveSegmentSeq,
+          burstId,
+        });
+        replacement.dataset.liveTid=tid;
+        existing.replaceWith(replacement);
+        _syncTransparentEventControls(turn);
+        _moveLiveRunStatusToTurnEnd();
+        if(typeof scrollIfPinned==='function') scrollIfPinned();
+        return;
+      }
+    }
+    const row=_decorateTransparentEventRow(buildToolCard(tc),{
+      type:'tool',
+      name:tc&&tc.name,
+      status:_transparentToolStatus(tc),
+      toolCall:tc,
+      segmentSeq:effectiveSegmentSeq,
+      burstId,
+    });
+    if(tid) row.dataset.liveTid=tid;
+    insertTransparentRow(row);
+    _syncTransparentEventControls(turn);
+    _moveLiveRunStatusToTurnEnd();
+    if(typeof scrollIfPinned==='function') scrollIfPinned();
+    return;
+  }
   if(anchor) _removeEmptyLiveWorklogShells(inner);
   const group=ensureLiveWorklogContainer(inner,{
     anchor,
@@ -9761,7 +10460,7 @@ function _findLiveAssistantAnchorForSegment(inner, segmentSeq){
 function clearLiveToolCards(){
   if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
   const inner=_assistantTurnBlocks($('liveAssistantTurn'));
-  if(inner) inner.querySelectorAll('.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]').forEach(el=>el.remove());
+  if(inner) inner.querySelectorAll('.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]:not(.transparent-event-row)').forEach(el=>el.remove());
   // Reset the per-turn user expand intent so the next turn starts at the
   // default collapsed state (#1298).
   if(typeof _clearLiveActivityUserIntent==='function') _clearLiveActivityUserIntent();
@@ -9792,6 +10491,11 @@ function ensureLiveWorklogShell(){
   }
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return null;
+  if(isTransparentStream()){
+    _moveLiveRunStatusToTurnEnd();
+    scrollIfPinned();
+    return blocks;
+  }
   const group=ensureLiveWorklogContainer(blocks,{
     activityKey:_activityKeyForLiveTurn(),
   });
@@ -10533,6 +11237,15 @@ function finalizeThinkingCard(){
   // stream that started it, not the session currently displayed.
   const _guardTurn = $('liveAssistantTurn');
   if(_guardTurn && S.session && _guardTurn.dataset.sessionId !== S.session.session_id) return;
+  if(isTransparentStream()){
+    const row=$('thinkingRow');
+    if(row){
+      row.removeAttribute('id');
+      row.removeAttribute('data-thinking-active');
+      row.removeAttribute('data-live-thinking');
+    }
+    return;
+  }
   if(!isSimplifiedToolCalling()){
     const row=$('thinkingRow');
     if(!row) return;
@@ -10609,6 +11322,42 @@ function appendThinking(text='', options){
       burstId?`burst:${burstId}`:
       'turn'
     ));
+    if(isTransparentStream()){
+      let row=blocks.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
+      if(!row){
+        row=_thinkingActivityNode(clean, false);
+        row.id='thinkingRow';
+        row.setAttribute('data-live-thinking','1');
+        row.setAttribute('data-live-thinking-key',thinkingKey);
+        if(segmentSeq) row.setAttribute('data-live-segment-seq',segmentSeq);
+        if(burstId) row.setAttribute('data-activity-burst-id',burstId);
+        blocks.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(el=>{
+          if(el!==row){
+            el.removeAttribute('id');
+            el.removeAttribute('data-thinking-active');
+            el.removeAttribute('data-live-thinking');
+          }
+        });
+        row.setAttribute('data-thinking-active','1');
+        const liveFooter=blocks.querySelector('#liveRunStatus');
+        if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(row,liveFooter);
+        else blocks.appendChild(row);
+      }else{
+        _renderThinkingInto(row, clean);
+      }
+      row.id='thinkingRow';
+      row.setAttribute('data-thinking-active','1');
+      _decorateTransparentEventRow(row,{
+        type:'thinking',
+        text:clean,
+        preview:clean,
+        segmentSeq,
+        burstId,
+      });
+      _syncTransparentEventControls(turn);
+      if(typeof scrollIfPinned==='function') scrollIfPinned();
+      return;
+    }
     const group=ensureLiveWorklogContainer(blocks,{
       activityKey:options.activityKey||(S.activeStreamId?'live:'+S.activeStreamId:null),
     });
@@ -10640,12 +11389,23 @@ function appendThinking(text='', options){
 }
 function updateThinking(text='', options){appendThinking(text, options);}
 function removeThinking(){
+  if(isTransparentStream()){
+    const liveTurn=$('liveAssistantTurn');
+    const blocks=_assistantTurnBlocks(liveTurn);
+    if(blocks) blocks.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(row=>{
+      row.removeAttribute('id');
+      row.removeAttribute('data-thinking-active');
+      row.removeAttribute('data-live-thinking');
+    });
+    if(liveTurn&&blocks&&!blocks.children.length) liveTurn.remove();
+    return;
+  }
   if(!isSimplifiedToolCalling()){
     const el=$('thinkingRow');
     if(el) el.remove();
-    const turn=$('liveAssistantTurn');
-    const blocks=_assistantTurnBlocks(turn);
-    if(turn&&blocks&&!blocks.children.length) turn.remove();
+    const liveTurn=$('liveAssistantTurn');
+    const blocks=_assistantTurnBlocks(liveTurn);
+    if(liveTurn&&blocks&&!blocks.children.length) liveTurn.remove();
     return;
   }
   const turn=$('liveAssistantTurn');
