@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.385] — 2026-06-13 — Release MX (profile-cookie env var aligned to HERMES_WEBUI_ prefix, #803)
+
+### Changed
+
+- **The profile-cookie name env var now uses the standard `HERMES_WEBUI_` prefix (#803).** Set the per-instance session-profile cookie name via `HERMES_WEBUI_PROFILE_COOKIE_NAME`, matching every other WebUI setting's prefix; the original `WEBUI_PROFILE_COOKIE_NAME` keeps working as a deprecated fallback (warned once per process). Lets multiple WebUI instances on the same host+port disambiguate their profile cookies without env-var-naming surprises. (#803)
+
 ## [v0.51.384] — 2026-06-13 — Release MW (no false streaming / activity-timer reset on session switch, #3900)
 
 ### Fixed
