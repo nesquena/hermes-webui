@@ -3,11 +3,9 @@
 
 ## [Unreleased]
 
-## [v0.51.387] — 2026-06-13 — Release MZ (Stable Assistant Turn Anchors live shadow feed, inert, #3926)
+### Fixed
 
-### Added
-
-- **Stable Assistant Turn Anchors live shadow feed (#3926).** `attachLiveStream()` now creates a per-stream anchor registry and shadow-feeds non-token live activity boundaries into the existing `HermesAssistantTurnAnchors` owner, including aggregate reasoning, tools, control events, compression lifecycle, app errors, cancel, and a slim `done` payload. The feed is still renderer-neutral: Compact Worklog, Transparent Stream, `renderMessages()`, `S.messages`, `INFLIGHT`, and DOM continuity do not consume the live registry yet; token events and EventSource network `error` remain outside the shadow feed. Settled active assistant messages are stamped with `_anchor_stream_id` for the next reconciliation slice, and that ephemeral stamp is carried forward across session refreshes. Every feed call is wrapped in a guarded helper (`_applyToAnchor`) that no-ops if the anchor API is unavailable and swallows any error (warn-once), so a shadow-feed fault can never break the live stream. (#3926)
+- **Transparent Stream: agent progress text (narrative / interim assistant text) now renders chronologically interleaved with tool/thinking rows on settled refresh and reload (#4096).** Previously the single `assistant:${aIdx}` anchor collapsed all text above the entire tool stack for a turn, so on long "narrate then 30+ tools" runs the agent's own text was buried far above the live activity trace after a refresh. The settled transparent branch now treats visible assistant prose segments (carrying the live `activitySegmentSeq` / `activityBurstId` from `ensureAssistantRow` + `_freshSegment` after tools) as first-class `type:'text'` events. They share the same per-anchor cursor and seq/burst sort order as thinking+tools, so later text segments land after the tools that preceded them. Marker rows are emitted only on turns that already have tool/thinking activity (plain Q&A stays a single bubble). Styled `transparent-text-event` rows match the stream chrome. Live streaming already produced the right interleaving; settled/reload now matches. Compact Worklog is unaffected. (Reported on Discord; #4096)
 
 ## [v0.51.386] — 2026-06-13 — Release MY (voice mode survives a dropped speechSynthesis onend, #3983)
 

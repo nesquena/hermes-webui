@@ -3295,6 +3295,41 @@ body.resizing .sidebar{transition:none!important;}
   opacity:.6;
   font-size:.85em;
 }
+/* #4096: agent prose marker rows in transparent stream (PR #4114) */
+.transparent-event-row[data-event-type="text"],
+.transparent-text-event.transparent-event-row{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  padding:4px 8px;
+  border-left:2px solid color-mix(in srgb,var(--accent-text) 35%,transparent);
+  border-radius:6px;
+  background:color-mix(in srgb,var(--hover-bg) 55%,transparent);
+}
+.transparent-event-row[data-event-type="text"] .transparent-event-label,
+.transparent-text-event .transparent-event-label{
+  display:inline;
+  flex:0 0 auto;
+  color:var(--muted);
+  opacity:.88;
+  font-size:11.5px;
+  font-weight:600;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.transparent-event-text-preview,
+.transparent-event-row[data-event-type="text"] .transparent-event-preview{
+  display:inline;
+  flex:1 1 auto;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:var(--muted);
+  opacity:.72;
+  font-size:.85em;
+}
 .transparent-event-status{
   flex-shrink:0;
   order:4;
