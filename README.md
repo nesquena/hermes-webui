@@ -604,16 +604,14 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 
 Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, absorbed into a batch release, or salvaged from a larger proposal — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
-Over **248 contributors** have shipped code that landed in a release tag. The full,
-continuously-updated credit roll — including everyone with one or two PRs and the
-special-thanks roll for design and architectural work — lives in
-[`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
+<!-- BEGIN GENERATED CONTRIBUTORS -->
+Over **248 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
 
 ### Top contributors (by PR count, including absorbed/batch-released work)
 
 | # | Contributor | PRs | First → latest release |
 |---|---|---:|---|
-| 1 | [@franksong2702](https://github.com/franksong2702) | 180 | `v0.49.3` → `v0.51.384` |
+| 1 | [@franksong2702](https://github.com/franksong2702) | 181 | `v0.49.3` → `v0.51.384` |
 | 2 | [@Michaelyklam](https://github.com/Michaelyklam) | 118 | `v0.50.240` → `v0.51.198` |
 | 3 | [@rodboev](https://github.com/rodboev) | 83 | `v0.51.223` → `v0.51.384` |
 | 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 75 | `v0.50.279` → `v0.51.367` |
@@ -625,6 +623,7 @@ special-thanks roll for design and architectural work — lives in
 | 10 | [@dobby-d-elf](https://github.com/dobby-d-elf) | 15 | `v0.51.38` → `v0.51.161` |
 
 See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 248 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
+<!-- END GENERATED CONTRIBUTORS -->
 
 ### Notable contributions
 
