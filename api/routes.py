@@ -10281,6 +10281,13 @@ def _handle_vv_voices(handler, parsed=None):
         from api.helpers import bad as _bad
         return _bad(handler, f"Unknown TTS engine: {engine}", 400)
 
+    from api.auth import is_auth_enabled, parse_cookie, verify_session
+    if is_auth_enabled():
+        cv = parse_cookie(handler)
+        if not (cv and verify_session(cv)):
+            from api.helpers import bad as _bad
+            return _bad(handler, "unauthorized", 401)
+
     try:
         import requests
         resp = requests.get("http://127.0.0.1:50021/speakers", timeout=5)
@@ -10312,7 +10319,7 @@ def _handle_vv_voices(handler, parsed=None):
 
 def _handle_voicevox_tts(handler, text, voice):
     """Synthesize speech via VOICEVOX engine using the command provider."""
-    import subprocess, tempfile, shlex, os, threading
+    import subprocess, tempfile, os, threading
     from api.helpers import bad as _bad
 
     # Per-process concurrency cap: at most 4 simultaneous TTS syntheses
