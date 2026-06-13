@@ -1217,8 +1217,8 @@
 
   function _activityReconciliationMismatch(kind, detail){
     return Object.freeze({
-      kind,
       ..._copyObject(detail),
+      kind,
     });
   }
 
@@ -1240,7 +1240,7 @@
     }
     const expectedById=_activityReconciliationRowsById(expectedRows);
     const actualById=_activityReconciliationRowsById(actualRows);
-    const useRowIds=expectedById.size===expectedRows.length&&actualById.size>0;
+    const useRowIds=expectedById.size===expectedRows.length&&actualById.size===actualRows.length;
     const matchedActualIds=new Set();
     _activityReconciliationDuplicateRowIds(actualRows).forEach((duplicate)=>{
       mismatches.push(_activityReconciliationMismatch('duplicate_actual_row',duplicate));
@@ -1315,6 +1315,255 @@
     });
   }
 
+  function _rendererSnapshotMode(input, options){
+    const item=(input&&typeof input==='object')?input:{};
+    const opts=(options&&typeof options==='object')?options:{};
+    const requested=_cleanString(_own(item,'mode'))||_cleanString(_own(opts,'mode'));
+    return requested==='transparent_stream'?'transparent_stream':'compact_worklog';
+  }
+
+  function _rendererSnapshotRowsInput(input, options){
+    const item=(input&&typeof input==='object')?input:{};
+    const opts=(options&&typeof options==='object')?options:{};
+    for(const value of [
+      _own(item,'renderer_rows'),
+      _own(item,'actual_rows'),
+      _own(item,'rows'),
+      _own(opts,'renderer_rows'),
+      _own(opts,'actual_rows'),
+      _own(opts,'rows'),
+    ]){
+      if(Array.isArray(value)) return value;
+    }
+    return null;
+  }
+
+  function _rendererSnapshotRoot(input, options){
+    const item=(input&&typeof input==='object')?input:{};
+    const opts=(options&&typeof options==='object')?options:{};
+    return _own(item,'root')||_own(item,'turn')||_own(item,'element')||
+      _own(opts,'root')||_own(opts,'turn')||_own(opts,'element')||null;
+  }
+
+  function _rendererSnapshotDomRows(root, mode){
+    if(!root||typeof root.querySelectorAll!=='function') return [];
+    const selector=mode==='transparent_stream'
+      ? '.transparent-event-row,[data-transparent-event-row="1"]'
+      : [
+        '.wl-reason[data-worklog-reason-source="reasoning"]',
+        '.wl-reason[data-worklog-anchor-reason="1"]',
+        '.agent-activity-thinking',
+        '.thinking-card-row',
+        '.tool-card-row',
+      ].join(',');
+    return Array.from(root.querySelectorAll(selector)||[]);
+  }
+
+  function _rendererSnapshotAttr(row, keys){
+    return _activityReconciliationDataValue(row,keys);
+  }
+
+  function _rendererSnapshotQueryText(row, selector){
+    if(!row||typeof row.querySelector!=='function') return '';
+    const el=row.querySelector(selector);
+    return el&&typeof el.textContent==='string'?el.textContent:'';
+  }
+
+  function _rendererSnapshotText(row){
+    const explicit=_firstTextValue(
+      _rendererSnapshotAttr(row,['text']),
+      _rendererSnapshotAttr(row,['preview']),
+      _rendererSnapshotAttr(row,['summary']),
+      _rendererSnapshotAttr(row,['content'])
+    );
+    if(explicit) return explicit;
+    return _firstTextValue(
+      _rendererSnapshotQueryText(row,'.transparent-event-preview'),
+      _rendererSnapshotQueryText(row,'.transparent-event-thinking-preview'),
+      _rendererSnapshotQueryText(row,'.thinking-card-body pre'),
+      _rendererSnapshotQueryText(row,'.tool-card-preview'),
+      _rendererSnapshotQueryText(row,'.tool-card-result pre'),
+      typeof row.textContent==='string'?row.textContent:''
+    );
+  }
+
+  function _rendererSnapshotHasClass(row, className){
+    return !!(row&&row.classList&&typeof row.classList.contains==='function'&&row.classList.contains(className));
+  }
+
+  function _rendererSnapshotHasAttribute(row, attrName){
+    return !!(row&&typeof row.hasAttribute==='function'&&row.hasAttribute(attrName));
+  }
+
+  function _rendererSnapshotStatus(row){
+    const raw=_rendererSnapshotAttr(row,['status','state','event_status','eventStatus']);
+    if(raw!==undefined&&raw!==null&&raw!=='') return _activityReconciliationStatus(raw);
+    if(_rendererSnapshotHasClass(row,'tool-card-running')) return 'running';
+    return null;
+  }
+
+  function _rendererSnapshotToolDone(row, status){
+    const explicit=_rendererSnapshotAttr(row,['tool_done','toolDone','done']);
+    const parsed=_activityReconciliationBool(explicit);
+    if(parsed!==null) return parsed;
+    if(status==='completed'||status==='error'||status==='failed') return true;
+    if(status==='running'||status==='pending'||status==='interrupted') return false;
+    return null;
+  }
+
+  function _rendererSnapshotToolError(row, status){
+    const explicit=_rendererSnapshotAttr(row,['tool_is_error','toolError','is_error','isError']);
+    const parsed=_activityReconciliationBool(explicit);
+    if(parsed!==null) return parsed;
+    if(status==='error'||status==='failed') return true;
+    return false;
+  }
+
+  function _rendererSnapshotToolName(row){
+    return _firstTextValue(
+      _rendererSnapshotAttr(row,['tool_name','toolName','name']),
+      _rendererSnapshotQueryText(row,'.tool-card-name')
+    )||null;
+  }
+
+  function _rendererSnapshotToolCallId(row){
+    return _firstTextValue(
+      _rendererSnapshotAttr(row,['tool_call_id','toolCallId','tool_use_id','toolUseId','call_id','callId','tid','live_tid','liveTid'])
+    )||null;
+  }
+
+  function _rendererSnapshotRowId(row){
+    return _firstTextValue(
+      _rendererSnapshotAttr(row,[
+        'row_id',
+        'rowId',
+        'activity_row_id',
+        'activityRowId',
+        'event_id',
+        'eventId',
+        'anchor_event_id',
+        'anchorEventId',
+        'id',
+      ])
+    )||null;
+  }
+
+  function _rendererSnapshotKindFromType(type, status, toolDone){
+    if(type==='thinking'||type==='reasoning') return 'reasoning';
+    if(type==='tool'||type==='tool_call'||type==='tool-card'){
+      if(toolDone===true||status==='completed'||status==='error'||status==='failed') return 'tool_completed';
+      return 'tool_started';
+    }
+    if(type==='compressing'||type==='compressed') return 'lifecycle_status';
+    if(type==='done'||type==='cancel'||type==='error'||type==='apperror') return 'terminal_status';
+    return type||null;
+  }
+
+  function _rendererSnapshotKind(row, mode, status, toolDone){
+    const explicit=_cleanString(_rendererSnapshotAttr(row,['kind']));
+    if(explicit) return explicit;
+    const type=_cleanString(_rendererSnapshotAttr(row,['event_type','eventType','type']));
+    if(type) return _rendererSnapshotKindFromType(type,status,toolDone);
+    if(mode==='transparent_stream'){
+      if(_rendererSnapshotAttr(row,['tool_name','toolName','name'])||_rendererSnapshotQueryText(row,'.tool-card-name')){
+        return _rendererSnapshotKindFromType('tool',status,toolDone);
+      }
+      return 'reasoning';
+    }
+    if(_rendererSnapshotHasClass(row,'wl-reason')||_rendererSnapshotHasClass(row,'agent-activity-thinking')||_rendererSnapshotHasClass(row,'thinking-card-row')){
+      return 'reasoning';
+    }
+    if(_rendererSnapshotHasClass(row,'tool-card-row')){
+      const compressionCardValue=_rendererSnapshotAttr(row,['compression_card','compressionCard']);
+      const hasCompressionCard=compressionCardValue!==undefined||
+        _rendererSnapshotHasAttribute(row,'data-compression-card')||
+        _rendererSnapshotHasAttribute(row,'compression-card')||
+        _rendererSnapshotHasAttribute(row,'compression_card');
+      if(hasCompressionCard&&_activityReconciliationBool(compressionCardValue)!==false) return 'lifecycle_status';
+      return _rendererSnapshotKindFromType('tool',status,toolDone);
+    }
+    return null;
+  }
+
+  function _rendererSnapshotRole(kind){
+    return _activityRowRole(kind||'activity');
+  }
+
+  function _rendererSnapshotSourceEventType(row, kind){
+    const explicit=_cleanString(_rendererSnapshotAttr(row,['source_event_type','sourceEventType']));
+    if(explicit) return explicit;
+    const type=_cleanString(_rendererSnapshotAttr(row,['event_type','eventType','type']));
+    if(type==='thinking') return 'reasoning';
+    if(type==='tool') return kind==='tool_completed'?'tool_complete':'tool';
+    if(kind==='reasoning') return 'reasoning';
+    if(kind==='tool_started') return 'tool';
+    if(kind==='tool_completed') return 'tool_complete';
+    if(kind==='lifecycle_status') return type||'compressed';
+    if(kind==='terminal_status') return type||'done';
+    return type||null;
+  }
+
+  function _rendererSnapshotRow(row, index, mode){
+    const status=_rendererSnapshotStatus(row);
+    const provisionalDone=_rendererSnapshotToolDone(row,status);
+    const kind=_rendererSnapshotKind(row,mode,status,provisionalDone);
+    const toolDone=_isToolActivityKind(kind)?_rendererSnapshotToolDone(row,status):null;
+    const toolError=_isToolActivityKind(kind)?_rendererSnapshotToolError(row,status):null;
+    const sourceEventType=_rendererSnapshotSourceEventType(row,kind);
+    return Object.freeze({
+      row_id:_rendererSnapshotRowId(row),
+      order_index:index,
+      kind,
+      role:_rendererSnapshotRole(kind),
+      source_event_type:sourceEventType,
+      status,
+      text:_rendererSnapshotText(row),
+      tool_call_id:_isToolActivityKind(kind)?_rendererSnapshotToolCallId(row):null,
+      tool_name:_isToolActivityKind(kind)?_rendererSnapshotToolName(row):null,
+      tool_done:toolDone,
+      tool_is_error:toolError,
+    });
+  }
+
+  function createAssistantTurnAnchorRendererSnapshot(input, options){
+    const item=(input&&typeof input==='object')?input:{};
+    const opts=(options&&typeof options==='object')?options:{};
+    const mode=_rendererSnapshotMode(item,opts);
+    const renderer=_cleanString(_own(item,'renderer'))||_cleanString(_own(opts,'renderer'))||mode;
+    const explicitRows=_rendererSnapshotRowsInput(item,opts);
+    const rows=(explicitRows||_rendererSnapshotDomRows(_rendererSnapshotRoot(item,opts),mode))
+      .map((row,index)=>_rendererSnapshotRow(row,index,mode));
+    return Object.freeze({
+      version:'renderer_snapshot_v1',
+      mode,
+      renderer,
+      row_count:rows.length,
+      rows:Object.freeze(rows),
+    });
+  }
+
+  function reconcileAssistantTurnAnchorRendererSnapshot(input, options){
+    const item=(input&&typeof input==='object')?input:{};
+    const opts=(options&&typeof options==='object')?options:{};
+    const snapshotInput=_own(item,'renderer_snapshot')||_own(item,'snapshot')||_own(opts,'renderer_snapshot')||_own(opts,'snapshot');
+    const snapshot=(snapshotInput&&typeof snapshotInput==='object'&&_own(snapshotInput,'version')==='renderer_snapshot_v1')
+      ? snapshotInput
+      : createAssistantTurnAnchorRendererSnapshot(item,opts);
+    const reconciliation=reconcileAssistantTurnAnchorActivityScene({
+      ...item,
+      mode:snapshot.mode,
+      renderer_rows:snapshot.rows,
+    },opts);
+    return Object.freeze({
+      version:'renderer_snapshot_reconciliation_v1',
+      mode:snapshot.mode,
+      renderer:snapshot.renderer,
+      matched:reconciliation.matched,
+      snapshot,
+      reconciliation,
+    });
+  }
+
   function createAssistantTurnAnchorSeed(input){
     const opts=(input&&typeof input==='object')?input:{};
     const sessionId=_cleanString(opts.session_id);
@@ -1374,7 +1623,7 @@
   }
 
   ROOT.HermesAssistantTurnAnchors=Object.freeze({
-    version:'slice7-dual-run-reconciler',
+    version:'slice8-renderer-snapshot-adapter',
     activityEventKinds:ACTIVITY_EVENT_KINDS,
     stateLayers:STATE_LAYERS,
     sourceEventClassification:SOURCE_EVENT_CLASSIFICATION,
@@ -1394,6 +1643,8 @@
     projectAssistantTurnAnchorSettledMessageFinalAnswer,
     projectAssistantTurnAnchorActivityScene,
     reconcileAssistantTurnAnchorActivityScene,
+    createAssistantTurnAnchorRendererSnapshot,
+    reconcileAssistantTurnAnchorRendererSnapshot,
     isAssistantTurnAnchorActivityKind,
   });
 })();

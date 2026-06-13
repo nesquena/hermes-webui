@@ -36,6 +36,11 @@ streaming or rendering yet.
   `S.messages`, `INFLIGHT`, stream-local state, and DOM nodes remain
   projection/cache layers outside the settled final-prose path and the live
   shadow registry.
+- Slice 8 adds the renderer snapshot adapter that can extract
+  `renderer_snapshot_v1` summaries from current Compact Worklog /
+  Transparent Stream row hooks and feed them through the reconciler to produce a
+  concrete matched / mismatched answer. The adapter remains opt-in and is not
+  invoked by `renderMessages()` or the live SSE hot path.
 
 ## State Layers
 
@@ -222,6 +227,28 @@ No current hot path consumes the reconciler. `renderMessages()`, live SSE
 callbacks, `S.messages`, `INFLIGHT`, Compact Worklog, Transparent Stream, and
 DOM continuity continue to render exactly as before until a later replacement
 slice deliberately switches a renderer to anchor-owned rows.
+
+## Slice 8 Renderer Snapshot Adapter
+
+`HermesAssistantTurnAnchors.createAssistantTurnAnchorRendererSnapshot()` turns
+current renderer rows into `renderer_snapshot_v1` summaries. The helper accepts
+plain row-like objects or a DOM/root object with the existing renderer hooks:
+Transparent Stream rows (`.transparent-event-row` /
+`data-transparent-event-row`), Compact Worklog reasoning rows (`.wl-reason`,
+`.agent-activity-thinking`, `.thinking-card-row`), and Compact Worklog tool rows
+(`.tool-card-row`).
+
+`HermesAssistantTurnAnchors.reconcileAssistantTurnAnchorRendererSnapshot()` is
+the first one-call yes/no harness: it builds or accepts a renderer snapshot,
+passes its rows into `reconcileAssistantTurnAnchorActivityScene()`, and returns
+`renderer_snapshot_reconciliation_v1` with `matched: true` or `matched: false`
+plus the underlying mismatch diagnostics.
+
+This slice still does not change visible rendering. It gives later work a
+bounded way to ask whether the current renderer output is equivalent to the
+anchor-owned activity scene. A `matched: false` result is expected while current
+renderers intentionally collapse or omit events, such as representing a tool
+start + tool completion as one visible row or omitting terminal status rows.
 
 ## Source Event Classification
 
