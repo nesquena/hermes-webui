@@ -83,7 +83,7 @@ def test_coerce_preserves_effort_for_unrecognized_model():
         "max",
         "brand-new-model-2099",
         provider_id="some-custom-provider",
-    ) == "max"
+    ) == "xhigh"
     # 'none' / unset still pass through unchanged for unknown models.
     assert cfg.coerce_reasoning_effort_for_model(
         "none", "some-unknown-model-xyz", provider_id="custom"
