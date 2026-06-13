@@ -3139,11 +3139,19 @@ function _settleMessageScrollToBottom(force){
 
   const el=document.getElementById('messages');
   if(!el) return;
+  // Observe the GROWING content node, not the scroll container. #messages is the
+  // scroller but its box is fixed by the flex layout, so it never resizes — the
+  // transcript grows inside #msgInner (.messages-inner). Observing #messages
+  // would mean the callback never fires. (Codex review #2.)
+  const observed=document.getElementById('msgInner')||el;
 
-  _settleRO=new ResizeObserver(()=>{
-    if(token!==_bottomSettleToken){ if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } return; }
+  // Instance-owned cleanup: close over THIS observer so a stale callback (from a
+  // superseded settle) only ever disconnects its own observer, never the newer
+  // active one that may now be in the global _settleRO. (Codex review #3.)
+  const ro=new ResizeObserver(()=>{
+    if(token!==_bottomSettleToken){ ro.disconnect(); if(_settleRO===ro) _settleRO=null; return; }
     if(!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
-      if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
+      ro.disconnect(); if(_settleRO===ro) _settleRO=null;
       _programmaticScroll=false;
       return;
     }
@@ -3158,11 +3166,12 @@ function _settleMessageScrollToBottom(force){
     clearTimeout(_settleTimer);
     _settleTimer=setTimeout(()=>{
       if(token!==_bottomSettleToken) return;
-      if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
+      ro.disconnect(); if(_settleRO===ro) _settleRO=null;
       _setMessageScrollToBottom();
     },300);
   });
-  _settleRO.observe(el);
+  _settleRO=ro;
+  ro.observe(observed);
 
   // Static-content safety net: a fully-static response (no Prism/KaTeX/Mermaid/
   // late images) never resizes after the initial sync write, so the
@@ -3173,7 +3182,7 @@ function _settleMessageScrollToBottom(force){
   clearTimeout(_settleFinalTimer);
   _settleFinalTimer=setTimeout(()=>{
     if(token!==_bottomSettleToken) return;
-    if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
+    ro.disconnect(); if(_settleRO===ro) _settleRO=null;
     if(!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){ _programmaticScroll=false; return; }
     _settleFinalScroll(token);
   },2000);
