@@ -364,6 +364,18 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
           <span data-i18n="providers_tab_title">Providers</span>
         </button>
+        <button type="button" class="side-menu-item" data-settings-section="messagingChannels" onclick="switchSettingsSection('messagingChannels')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span data-i18n="messaging_channels_tab_title">Messaging Channels</span>
+        </button>
+        <button type="button" class="side-menu-item" data-settings-section="eventWebhooks" onclick="switchSettingsSection('eventWebhooks')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 16.5a3 3 0 1 0 0-6"/><path d="M6 7.5a3 3 0 1 0 0 6"/><path d="M8.6 8.8l6.8-3.6"/><path d="M8.6 15.2l6.8 3.6"/><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/></svg>
+          <span data-i18n="event_webhooks_tab_title">Webhooks</span>
+        </button>
+        <button type="button" class="side-menu-item" data-settings-section="developerApi" onclick="switchSettingsSection('developerApi')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 18l6-6-6-6"/><path d="M8 6l-6 6 6 6"/><path d="M14.5 4l-5 16"/></svg>
+          <span data-i18n="developer_api_tab_title">Developer API</span>
+        </button>
         <button type="button" class="side-menu-item" data-settings-section="plugins" onclick="switchSettingsSection('plugins')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l3 7h7l-5.5 4.3 2.1 7L12 16.2 5.4 20.3l2.1-7L2 9h7z"/></svg>
           <span data-i18n="settings_tab_plugins">Plugins</span>
@@ -1303,8 +1315,50 @@
             <div id="providersList" style="display:flex;flex-direction:column;margin-top:4px">
               <!-- Populated dynamically by loadProvidersPanel() -->
             </div>
-            <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
+          <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
               No configurable providers found.
+            </div>
+          </div>
+          <div class="settings-pane" id="settingsPaneMessagingChannels">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title" data-i18n="messaging_channels_section_title">Messaging Channels</div>
+                <div class="settings-section-meta" data-i18n="messaging_channels_section_meta">Configure verified Hermes chat channels. Runtime-discovered channels stay read-only until their config shape is verified.</div>
+              </div>
+              <button type="button" class="provider-card-btn provider-card-btn-ghost" onclick="loadMessagingChannelsPanel(true)" data-i18n="connectors_refresh">Refresh</button>
+            </div>
+            <div id="messagingChannelsRuntime" class="connectors-runtime-note" aria-live="polite"></div>
+            <div class="connectors-layout">
+              <div id="messagingChannelsList" class="connectors-list" aria-live="polite"></div>
+              <div id="messagingChannelsDetail" class="connector-detail" aria-live="polite"></div>
+            </div>
+          </div>
+          <div class="settings-pane" id="settingsPaneEventWebhooks">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title" data-i18n="event_webhooks_section_title">Webhooks</div>
+                <div class="settings-section-meta" data-i18n="event_webhooks_section_meta">Review Hermes event ingress surfaces. Route and subscription editing remains read-only until the Hermes route schema is verified.</div>
+              </div>
+              <button type="button" class="provider-card-btn provider-card-btn-ghost" onclick="loadEventWebhooksPanel(true)" data-i18n="connectors_refresh">Refresh</button>
+            </div>
+            <div id="eventWebhooksRuntime" class="connectors-runtime-note" aria-live="polite"></div>
+            <div class="connectors-layout">
+              <div id="eventWebhooksList" class="connectors-list" aria-live="polite"></div>
+              <div id="eventWebhooksDetail" class="connector-detail" aria-live="polite"></div>
+            </div>
+          </div>
+          <div class="settings-pane" id="settingsPaneDeveloperApi">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title" data-i18n="developer_api_section_title">Developer API</div>
+                <div class="settings-section-meta" data-i18n="developer_api_section_meta">Configure verified external API access surfaces such as the OpenAI-compatible Hermes API server.</div>
+              </div>
+              <button type="button" class="provider-card-btn provider-card-btn-ghost" onclick="loadDeveloperApiPanel(true)" data-i18n="connectors_refresh">Refresh</button>
+            </div>
+            <div id="developerApiRuntime" class="connectors-runtime-note" aria-live="polite"></div>
+            <div class="connectors-layout">
+              <div id="developerApiList" class="connectors-list" aria-live="polite"></div>
+              <div id="developerApiDetail" class="connector-detail" aria-live="polite"></div>
             </div>
           </div>
           <div class="settings-pane" id="settingsPanePlugins">
