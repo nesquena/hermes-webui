@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.377] — 2026-06-13 — Release MP (Firefox post-stream scroll jitter, #3920)
+
+### Fixed
+
+- **Firefox no longer jitters/steps the chat scroll after a streamed turn settles (#3920).** The post-stream bottom-settle replaced its `setTimeout` fan-out + double-`requestAnimationFrame` `scrollHeight` polling (which forced a reflow per frame on Firefox) with a single synchronous write plus a `ResizeObserver` that re-anchors once per frame as late layout (Prism/KaTeX/Mermaid/images) grows, disconnecting after 300ms of quiet. A 2s top-level fallback covers fully-static responses that never resize, and the deliberate Firefox session-sidebar `overflow-anchor:none` fix is preserved. (#3920)
+
 ## [v0.51.376] — 2026-06-13 — Release MO (Hide Thinking also hides Worklog reasoning, #3903)
 
 ### Fixed

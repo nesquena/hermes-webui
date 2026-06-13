@@ -2428,10 +2428,11 @@ let _bottomSettleToken=0;
 let _settleRAF=0;
 let _settleRO=null;
 let _settleTimer=0;
+let _settleFinalTimer=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
 let _touchStartY=null;
 let _newMessageCueVisible=false;
-function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); cancelAnimationFrame(_settleRAF); }
+function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
   const target=e&&e.target;
@@ -3129,6 +3130,7 @@ function _settleMessageScrollToBottom(force){
   cancelAnimationFrame(_settleRAF);
   if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
   clearTimeout(_settleTimer);
+  clearTimeout(_settleFinalTimer);
 
   // Sync write anchors the viewport immediately.
   _setMessageScrollToBottom();
@@ -3161,6 +3163,20 @@ function _settleMessageScrollToBottom(force){
     },300);
   });
   _settleRO.observe(el);
+
+  // Static-content safety net: a fully-static response (no Prism/KaTeX/Mermaid/
+  // late images) never resizes after the initial sync write, so the
+  // ResizeObserver callback above never fires and its 300ms quiet-timer is never
+  // armed. Arm a single 2s top-level fallback so a late settle still runs for
+  // that case. The token check inside _settleFinalScroll makes this a no-op if a
+  // newer settle started, and it self-skips if the user unpinned. (Review #2/#3.)
+  clearTimeout(_settleFinalTimer);
+  _settleFinalTimer=setTimeout(()=>{
+    if(token!==_bottomSettleToken) return;
+    if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
+    if(!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){ _programmaticScroll=false; return; }
+    _settleFinalScroll(token);
+  },2000);
 }
 
 function _settleFinalScroll(token){
