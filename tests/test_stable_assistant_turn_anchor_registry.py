@@ -111,6 +111,97 @@ console.log(JSON.stringify({{
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
+def _activity_scene_snapshot() -> dict:
+    assert NODE, "node is required for assistant_turn_anchors.js registry tests"
+    script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync({json.dumps(str(ANCHORS_JS))}, 'utf8');
+const sandbox = {{window:{{}}}};
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, {{filename:'assistant_turn_anchors.js'}});
+const api = sandbox.window.HermesAssistantTurnAnchors;
+const registry = api.createAssistantTurnAnchorRegistry({{
+  session_id:'sid-scene',
+  turn_id:'turn-scene',
+}});
+api.applyAssistantTurnAnchorSourceEvents(registry, [
+  {{event:'token', payload:{{text:'progress'}}, event_id:'run-scene:1', seq:1}},
+  {{event:'reasoning', payload:{{text:'private thinking'}}, event_id:'run-scene:2', seq:2}},
+  {{event:'tool', payload:{{
+    tool_call_id:'tool-1',
+    name:'terminal',
+    args:{{command:'rg anchor static'}},
+    preview:'rg anchor static',
+    activityBurstId:7,
+    activitySegmentSeq:3,
+    assistant_msg_idx:12,
+    started_at:1781200000
+  }}, event_id:'run-scene:3', seq:3}},
+  {{event:'tool_update', payload:{{
+    tool_call_id:'tool-1',
+    name:'terminal',
+    text:'running',
+    preview:'searching workspace',
+    activityBurstId:7,
+    activitySegmentSeq:3,
+    assistant_msg_idx:12
+  }}, event_id:'run-scene:4', seq:4}},
+  {{event:'tool_complete', payload:{{
+    tool_call_id:'tool-1',
+    name:'terminal',
+    result:'done',
+    output:'done',
+    snippet:'done',
+    is_error:false,
+    duration:1.25,
+    activityBurstId:7,
+    activitySegmentSeq:3,
+    assistant_msg_idx:12
+  }}, event_id:'run-scene:5', seq:5}},
+  {{event:'done', payload:{{}}, event_id:'run-scene:6', seq:6}},
+  {{source_type:'settled_message', payload:{{role:'assistant', id:'message-scene', content:'final answer'}}}},
+], {{run_id:'run-scene', stream_id:'stream-scene'}});
+const compact = api.projectAssistantTurnAnchorActivityScene(registry, {{mode:'compact_worklog'}});
+const transparent = api.projectAssistantTurnAnchorActivityScene(registry.anchor, {{mode:'transparent_stream'}});
+const empty = api.projectAssistantTurnAnchorActivityScene(null, {{mode:'transparent_stream'}});
+const seqlessRegistry = api.createAssistantTurnAnchorRegistry({{
+  session_id:'sid-seqless',
+  turn_id:'turn-seqless',
+}});
+api.applyAssistantTurnAnchorSourceEvents(seqlessRegistry, [
+  {{event:'tool', payload:{{tool_call_id:'tool-same', name:'terminal'}}}},
+  {{event:'tool_update', payload:{{tool_call_id:'tool-same', text:'running'}}}},
+  {{event:'tool_complete', payload:{{tool_call_id:'tool-same', result:'done'}}}},
+]);
+const seqless = api.projectAssistantTurnAnchorActivityScene(seqlessRegistry, {{mode:'compact_worklog'}});
+const zeroRegistry = api.createAssistantTurnAnchorRegistry({{
+  session_id:'sid-zero',
+  turn_id:'turn-zero',
+}});
+api.applyAssistantTurnAnchorSourceEvents(zeroRegistry, [
+  {{event:'tool', payload:{{
+    tool_call_id:'tool-zero',
+    name:'terminal',
+    activityBurstId:0,
+    activitySegmentSeq:0,
+    assistant_msg_idx:0
+  }}, event_id:'run-zero:0', seq:0}},
+]);
+const zero = api.projectAssistantTurnAnchorActivityScene(zeroRegistry, {{mode:'compact_worklog'}});
+console.log(JSON.stringify({{
+  version:api.version,
+  compact,
+  transparent,
+  empty,
+  seqless,
+  zero,
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
 
 def _final_projection_snapshot() -> dict:
     assert NODE, "node is required for assistant_turn_anchors.js registry tests"
@@ -342,7 +433,7 @@ def test_registry_owns_one_anchor_and_dedupes_live_plus_replay_events():
     registry = data["registry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice4-final-projection"
+    assert data["version"] == "slice5-activity-scene"
     assert [item["reason"] for item in data["results"][:2]] == [None, "duplicate"]
     assert registry["event_index"]["dedupe_keys"][:2] == [
         'event_id:"run-1:1"',
@@ -442,7 +533,7 @@ def test_registry_does_not_destructively_dedupe_seqless_local_tool_lifecycle():
     registry = data["toolRegistry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice4-final-projection"
+    assert data["version"] == "slice5-activity-scene"
     assert data["toolResults"] == [
         {"applied": True, "reason": None},
         {"applied": True, "reason": None},
@@ -492,7 +583,7 @@ def test_shadow_snapshot_feeds_current_source_families_into_one_registry_owner()
     registry = data["registry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice4-final-projection"
+    assert data["version"] == "slice5-activity-scene"
     assert data["results"]["live"] == [{"applied": True, "reason": None}]
     assert data["results"]["replay"] == [
         {"applied": False, "reason": "duplicate"},
@@ -515,6 +606,131 @@ def test_shadow_snapshot_feeds_current_source_families_into_one_registry_owner()
     ]
     assert anchor["content"]["final_answer"] == "shadow final"
 
+def test_activity_scene_projects_current_activity_events_for_both_render_modes():
+    data = _activity_scene_snapshot()
+    compact = data["compact"]
+    transparent = data["transparent"]
+
+    assert data["version"] == "slice5-activity-scene"
+    assert compact["version"] == "activity_scene_v1"
+    assert transparent["version"] == "activity_scene_v1"
+    assert compact["mode"] == "compact_worklog"
+    assert transparent["mode"] == "transparent_stream"
+    assert compact["final_answer"] == "final answer"
+    assert transparent["final_answer"] == "final answer"
+    assert compact["terminal_state"] == "completed"
+    assert transparent["terminal_state"] == "completed"
+
+    compact_rows = compact["activity_rows"]
+    transparent_rows = transparent["activity_rows"]
+    assert [row["row_id"] for row in compact_rows] == [
+        "run-scene:1",
+        "run-scene:2",
+        "run-scene:3",
+        "run-scene:4",
+        "run-scene:5",
+        "run-scene:6",
+    ]
+    assert [row["row_id"] for row in transparent_rows] == [
+        row["row_id"] for row in compact_rows
+    ]
+    assert [row["kind"] for row in compact_rows] == [
+        "process_prose",
+        "reasoning",
+        "tool_started",
+        "tool_updated",
+        "tool_completed",
+        "terminal_status",
+    ]
+    assert [row["role"] for row in compact_rows] == [
+        "prose",
+        "thinking",
+        "tool",
+        "tool",
+        "tool",
+        "terminal",
+    ]
+    assert [row["display_hint"] for row in compact_rows] == [
+        "main_prose",
+        "collapsed_thinking",
+        "tool_row",
+        "tool_row",
+        "tool_row",
+        "terminal_status_row",
+    ]
+    assert all(row["display_hint"] == "chronological_activity" for row in transparent_rows)
+    assert compact_rows[0]["text"] == "progress"
+    assert compact_rows[0]["tool_call_id"] is None
+    assert compact_rows[2]["tool_call_id"] == "tool-1"
+    assert compact_rows[4]["text"] == "done"
+    assert compact_rows[1]["thinking"] == {
+        "text": "private thinking",
+        "preview": "private thinking",
+        "dedupe_key": "thinking:private thinking",
+    }
+    assert compact_rows[2]["group"] == {
+        "group_key": "segment:3",
+        "activity_burst_id": 7,
+        "activity_segment_seq": 3,
+        "assistant_msg_idx": 12,
+    }
+    assert compact_rows[2]["tool"] == {
+        "id": "tool-1",
+        "name": "terminal",
+        "args": {"command": "rg anchor static"},
+        "preview": "rg anchor static",
+        "snippet": "",
+        "result": None,
+        "output": None,
+        "done": False,
+        "is_error": False,
+        "duration": None,
+        "started_at": 1781200000,
+        "signature": 'terminal|tool-1|{"command":"rg anchor static"}',
+    }
+    assert compact_rows[4]["tool"]["done"] is True
+    assert compact_rows[4]["tool"]["is_error"] is False
+    assert compact_rows[4]["tool"]["duration"] == 1.25
+    assert compact_rows[4]["tool"]["snippet"] == "done"
+    assert compact_rows[4]["display_hints"] == {
+        "compact_worklog": "tool_row",
+        "transparent_stream": "chronological_activity",
+    }
+    seqless_ids = [row["row_id"] for row in data["seqless"]["activity_rows"]]
+    assert len(seqless_ids) == len(set(seqless_ids))
+    assert seqless_ids == [
+        "tool-same:tool:0",
+        "tool-same:tool_update:1",
+        "tool-same:tool_complete:2",
+    ]
+    assert data["zero"]["activity_rows"][0]["group"] == {
+        "group_key": "segment:0",
+        "activity_burst_id": 0,
+        "activity_segment_seq": 0,
+        "assistant_msg_idx": 0,
+    }
+
+
+def test_activity_scene_is_renderer_neutral_and_empty_safe():
+    data = _activity_scene_snapshot()
+    compact = data["compact"]
+    empty = data["empty"]
+
+    assert "final answer" not in [row["text"] for row in compact["activity_rows"]]
+    assert compact["identity"]["session_id"] == "sid-scene"
+    assert compact["identity"]["run_id"] == "run-scene"
+    assert compact["identity"]["stream_id"] == "stream-scene"
+    assert empty == {
+        "version": "activity_scene_v1",
+        "mode": "transparent_stream",
+        "identity": {"source_message_refs": []},
+        "lifecycle": {},
+        "final_answer": "",
+        "final_message_ref": None,
+        "terminal_state": None,
+        "activity_rows": [],
+    }
+
 
 def test_final_projection_routes_settled_assistant_message_through_anchor_owner():
     data = _final_projection_snapshot()
@@ -522,7 +738,7 @@ def test_final_projection_routes_settled_assistant_message_through_anchor_owner(
     registry = projected["registry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice4-final-projection"
+    assert data["version"] == "slice5-activity-scene"
     assert projected["applied"] is True
     assert projected["reason"] is None
     assert projected["final_message_ref"] == "message-final"
@@ -589,8 +805,7 @@ def test_registry_instances_do_not_share_owner_state():
     assert isolated["stats"]["applied"] == 0
     assert isolated["anchor"]["activity_events"] == []
 
-
-def test_slice4_projection_does_not_wire_registry_into_rendering_hot_paths():
+def test_slice5_scene_projection_does_not_wire_activity_scene_into_rendering_hot_paths():
     helper_names = [
         "createAssistantTurnAnchorRegistry",
         "applyAssistantTurnAnchorNormalizedEvent",
@@ -603,3 +818,6 @@ def test_slice4_projection_does_not_wire_registry_into_rendering_hot_paths():
         assert helper not in _read(SESSIONS_JS)
         assert helper not in _read(MESSAGES_JS)
     assert "projectAssistantTurnAnchorSettledMessageFinalAnswer" in _read(UI_JS)
+    assert "projectAssistantTurnAnchorActivityScene" not in _read(UI_JS)
+    assert "projectAssistantTurnAnchorActivityScene" not in _read(SESSIONS_JS)
+    assert "projectAssistantTurnAnchorActivityScene" not in _read(MESSAGES_JS)

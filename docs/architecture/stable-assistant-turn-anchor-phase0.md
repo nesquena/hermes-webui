@@ -23,10 +23,13 @@ streaming or rendering yet.
   pinned by tests before visible wiring begins.
 - Slice 4 starts RFC Phase 3 by routing settled assistant final prose through the
   anchor owner before `renderMessages()` renders the final assistant body.
-- The next independently reviewable boundary is activity/render-scene projection
-  for reasoning, tool rows, and transparent-stream/worklog metadata. `S.messages`,
-  `INFLIGHT`, stream-local state, and DOM nodes remain projection/cache layers
-  outside the settled final-prose path.
+- Slice 5 starts RFC Phase 5 by projecting anchor-owned activity events into a
+  renderer-neutral activity scene that Compact Worklog and Transparent Stream
+  can later consume from the same ordered rows.
+- The next independently reviewable boundary is wiring one current renderer to
+  the activity scene. `S.messages`, `INFLIGHT`, stream-local state, and DOM nodes
+  remain projection/cache layers outside the settled final-prose path and the
+  inert activity-scene projection.
 
 ## State Layers
 
@@ -135,6 +138,22 @@ content path.
 This is intentionally narrower than render-scene ownership: live stream tokens,
 replay hydration, worklog rows, transparent-stream rows, tool cards, `INFLIGHT`,
 and DOM continuity are still not consumed by the anchor registry in this slice.
+
+## Slice 5 Activity Scene Projection
+
+`HermesAssistantTurnAnchors.projectAssistantTurnAnchorActivityScene()` projects
+an anchor or registry into `activity_scene_v1`: identity, lifecycle,
+`final_answer`, `final_message_ref`, terminal state, and an ordered
+`activity_rows` list.
+
+The rows are renderer-neutral. Compact Worklog receives display hints such as
+`main_prose`, `collapsed_thinking`, `tool_row`, and `terminal_status_row`.
+Transparent Stream receives the same row IDs, order, kinds, roles, text, tool
+IDs, and sanitized payloads with a chronological display hint. This pins the
+shared input shape before either renderer is rewired.
+
+This slice is still inert. No current UI module consumes the activity scene.
+`renderMessages()` and the live streaming hot path are unchanged by this slice.
 
 ## Source Event Classification
 
