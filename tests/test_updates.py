@@ -5,6 +5,8 @@ import api.updates as updates
 
 
 def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
+    if args == ['diff-index', '--quiet', 'HEAD', '--']:
+        return '', True  # clean tree
     if args == ['fetch', 'origin', '--tags', '--force']:
         return 'would clobber existing tag v0.50.294', False
     if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
@@ -32,6 +34,9 @@ def test_check_repo_reports_release_gap_even_when_tag_fetch_fails(tmp_path):
     assert info['latest_version'] == 'v0.51.106'
     assert info['stale_check'] is True
     assert 'would clobber existing tag' in info['error']
+    # Issue #4085: the dirty flag must ride along on every payload shape.
+    # The mock returns ('', True) for the dirty probe, so the tree is clean.
+    assert info['dirty'] is False
 
 
 def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
@@ -45,6 +50,8 @@ def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
     )
 
     def fake_git(args, cwd, timeout=10):
+        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+            return '', True
         if args == ['fetch', 'origin', '--tags', '--force']:
             return raw_error, False
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
@@ -68,6 +75,8 @@ def test_check_repo_fetch_failure_without_tags_is_not_up_to_date(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
+        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+            return '', True
         if args == ['fetch', 'origin', '--tags', '--force']:
             return 'network unavailable', False
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
@@ -225,6 +234,8 @@ def test_check_repo_fetches_tags_with_force(tmp_path):
 
     def fake_git(args, cwd, timeout=10):
         seen_args.append(args)
+        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+            return '', True
         if args[:2] == ['fetch', 'origin']:
             # Force a fetch failure path so we don't have to mock the rest of
             # the release/branch logic; the assertion is about the args shape.
