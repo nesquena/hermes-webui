@@ -35,7 +35,9 @@ def read_brief_file(path: Path) -> str:
             from docx import Document
         except ImportError:
             print('  ⚠️  未安裝 python-docx，自動安裝中...')
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--user', '--quiet', 'python-docx'])
+            # Homebrew Python 3.13+ 強制 PEP 668，需 --break-system-packages
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--user', '--quiet',
+                                   '--break-system-packages', 'python-docx'])
             from docx import Document
         doc = Document(str(path))
         lines = []
@@ -279,14 +281,24 @@ def parse_brief(brief_text: str, filename_stem: str, model: str) -> dict | None:
     return data
 
 
+def safe_int(val, default=0) -> int:
+    """安全轉成整數，若為 None 或無法轉型則回傳預設值。"""
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def normalize_to_job_profile(parsed: dict, filename_stem: str, brief_text: str) -> dict:
     """把 LLM 抽出的精簡結構展開成完整 jobs/<id>.json 格式（補預設值）"""
     display_name = parsed.get('display_name', filename_stem)
     job_id = derive_job_id(filename_stem, display_name)
     role_kw = detect_role_kw_set(brief_text)
 
-    search = parsed.get('search', {})
-    meta = parsed.get('scoring_meta', {})
+    search = parsed.get('search') or {}
+    meta = parsed.get('scoring_meta') or {}
 
     # 居住地關鍵字（用於加分）
     residence_kw = ''
@@ -295,9 +307,9 @@ def normalize_to_job_profile(parsed: dict, filename_stem: str, brief_text: str) 
         residence_kw = locs[0].replace('市', '').replace('縣', '')
 
     # 等級規則
-    senior_years = int(meta.get('level_senior_years', 5))
-    junior_years = int(meta.get('level_junior_years', 3))
-    min_long = int(meta.get('min_long_tenure_count', 1))
+    senior_years = safe_int(meta.get('level_senior_years'), 5)
+    junior_years = safe_int(meta.get('level_junior_years'), 3)
+    min_long = safe_int(meta.get('min_long_tenure_count'), 1)
 
     profile = {
         'job_id': job_id,
@@ -309,13 +321,13 @@ def normalize_to_job_profile(parsed: dict, filename_stem: str, brief_text: str) 
             'work_locations': search.get('work_locations', []),
             'home_locations': search.get('home_locations', search.get('work_locations', [])),
             'last_action_days': search.get('last_action_days', '14天內'),
-            'work_exp_years': int(search.get('work_exp_years', 3)),
+            'work_exp_years': safe_int(search.get('work_exp_years'), 3),
             'work_exp_range': search.get('work_exp_range', '以上'),
             'majors': search.get('majors', []),
-            'age_min': int(search.get('age_min', 30)),
-            'age_max': int(search.get('age_max', 60)),
+            'age_min': safe_int(search.get('age_min'), 30),
+            'age_max': safe_int(search.get('age_max'), 60),
             'tools': search.get('tools', []),
-            'tools_min_match': int(search.get('tools_min_match', 1)),
+            'tools_min_match': safe_int(search.get('tools_min_match'), 1),
             'certificates': search.get('certificates', []),
         },
         'scoring': {
@@ -324,7 +336,7 @@ def normalize_to_job_profile(parsed: dict, filename_stem: str, brief_text: str) 
             'residential_kw': meta.get('preferred_project_types') or DEFAULT_RESIDENTIAL_KW,
             'public_kw': meta.get('secondary_project_types') or role_kw['public_kw'],
             'autobio_positive': DEFAULT_AUTOBIO_KW,
-            'threshold': int(meta.get('threshold', 65)),
+            'threshold': safe_int(meta.get('threshold'), 65),
             'level_rules': {
                 'senior': {'min_years': senior_years, 'min_projects': 2, 'name': '主任級'},
                 'junior': {'min_years': junior_years, 'min_projects': 1, 'name': '副主任級'},

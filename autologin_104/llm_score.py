@@ -21,18 +21,146 @@ import re
 import urllib.error
 import urllib.request
 
-DEFAULT_ENDPOINT = 'http://localhost:11434'
-# 實測：qwen3.5:9b 在長中文 prompt 上會回空，故改用 gemma4
-DEFAULT_SCORING_MODEL = 'gemma4:e4b'    # 9.6GB，~40s/履歷
-DEFAULT_SUMMARY_MODEL = 'gemma4:e4b'    # 9.6GB，~30s/封信件（從 26b 換來省 60%+ 時間）
+DEFAULT_LLAMACPP_ENDPOINT = 'http://localhost:8080'  # llama.cpp llama-server 預設
+DEFAULT_OLLAMA_ENDPOINT = 'http://localhost:11434'   # Ollama（fallback）
+# 預設改為 llama.cpp（速度比 Ollama 快 15x+）
+DEFAULT_ENDPOINT = DEFAULT_OLLAMA_ENDPOINT  # 切回 Ollama gemma4:e4b（品質優先）
+# model 名稱僅在 Ollama 模式下使用；llama.cpp 啟動時就決定模型
+DEFAULT_SCORING_MODEL = 'gemma4:e4b'    # Ollama 用
+DEFAULT_SUMMARY_MODEL = 'gemma4:e4b'    # Ollama 用
 TIMEOUT_SECS = 300                       # 冷啟動模型載入要花較久
+
+
+def sanitize_untrusted_text(text: str) -> str:
+    """過濾與去毒化潛在的提示詞注入 (Prompt Injection) 與資安注入攻擊。"""
+    if not text:
+        return ""
+    
+    # 1. 移除或轉義 <untrusted> 與 </untrusted>，避免混淆系統沙箱邊界
+    text = text.replace("<untrusted>", "[untrusted_tag]")
+    text = text.replace("</untrusted>", "[/untrusted_tag]")
+    
+    # 2. 偵測並去毒化 (defang) 常見的 RCE 遠端執行指令特徵 (如 curl/wget/bash 相關管道指令)
+    def defang_rce(match):
+        val = match.group(0)
+        def repl(m):
+            word = m.group(0).lower()
+            return f"[blocked_{word}]"
+        return re.sub(r"\b(curl|wget|bash|sh|zsh|dash)\b", repl, val, flags=re.IGNORECASE)
+                   
+    # 匹配像是 curl ... | bash, wget ... | sh, bash <(curl ...) 等特徵
+    rce_patterns = [
+        r"(curl|wget)\s+.*?\s*\|\s*(bash|sh|zsh|dash|python|perl|php)",
+        r"(bash|sh|zsh|dash|python|perl|php)\s+<\s*\(\s*(curl|wget)",
+        r"bash\s+-c\s+['\"].*?(curl|wget)",
+    ]
+    for pattern in rce_patterns:
+        text = re.sub(pattern, defang_rce, text, flags=re.IGNORECASE)
+        
+    # 3. 阻斷常見的覆寫指令 (Prompt Override / Jailbreak) 關鍵字
+    override_patterns = [
+        r"ignore\s+(previous|prior|above|under|the)\s+(instructions|directives|rules|steps|criteria)",
+        r"忽略(先前|前面|上述|評分|前述|規則|指令)的?(指令|標準|規定|規則|要求)",
+        r"請(直接|特別|強制)?給?此人?(打|打分|評定為|評為)?\s*(\d+|滿分|100分)",
+        r"忽略所有的?評分"
+    ]
+    for pattern in override_patterns:
+        text = re.sub(pattern, "[blocked_prompt_override]", text, flags=re.IGNORECASE)
+        
+    return text
+
+
+def _is_llamacpp_endpoint(endpoint: str) -> bool:
+    """判斷 endpoint 是否為 llama.cpp（含 8080 或顯式 llamacpp tag）。"""
+    if 'llamacpp' in endpoint.lower() or 'llama-cpp' in endpoint.lower():
+        return True
+    # 預設 llama.cpp 在 8080，Ollama 在 11434
+    return ':8080' in endpoint and '11434' not in endpoint
+
+
+def llamacpp_call(prompt: str, endpoint: str = DEFAULT_LLAMACPP_ENDPOINT,
+                   json_schema: dict | None = None) -> str | None:
+    """呼叫 llama.cpp llama-server 的 /completion endpoint。失敗回 None。
+
+    llama.cpp 的 server 不需要 model 名稱（model 啟動時就決定了），
+    並且 /completion API 直接接受 prompt 字串。
+
+    json_schema：若提供，llama.cpp 會用 grammar 約束輸出必須符合此 JSON schema。
+    這能完全消除 JSON 解析失敗，並提升速度 20-30%。
+    """
+    payload = {
+        'prompt': prompt,
+        'n_predict': 2500,  # 從 4500 降到 2500（實測輸出 ~1500 tokens 已夠）
+        'temperature': 0,
+        'top_p': 0.9,
+        'cache_prompt': True,
+        'stream': False,
+    }
+    if json_schema:
+        payload['json_schema'] = json_schema
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        f'{endpoint}/completion',
+        data=data,
+        headers={'Content-Type': 'application/json'},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECS) as resp:
+            body = json.loads(resp.read())
+            return (body.get('content') or '').strip()
+    except urllib.error.URLError as e:
+        print(f'  ⚠️  llama.cpp 連線失敗: {e}')
+        return None
+    except Exception as e:
+        print(f'  ⚠️  llama.cpp 呼叫錯誤: {e}')
+        return None
+
+
+SCORING_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "level_assessment": {"type": "string", "maxLength": 20},
+        "reasoning": {"type": "string", "maxLength": 200},
+        "highlights": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": 60},
+            "maxItems": 3,
+        },
+        "jobs": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "maxLength": 50},
+                    "title": {"type": "string", "maxLength": 40},
+                    "duration": {"type": "string", "maxLength": 20},
+                    "score": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "relevance": {"type": "string", "enum": ["高", "中", "低"]},
+                    "summary": {"type": "string", "maxLength": 100},
+                },
+                "required": ["company", "title", "score", "relevance"],
+            },
+        },
+    },
+    "required": ["score", "reasoning", "level_assessment", "jobs"],
+}
 
 
 def ollama_call(model: str, prompt: str, want_json: bool = False,
                 endpoint: str = DEFAULT_ENDPOINT) -> str | None:
-    """呼叫 Ollama /api/generate。失敗回 None。
-    注意：want_json=True 時不依賴 Ollama 的 format=json（部分模型如 qwen3.5:9b 會回空），
-    改用 prompt 指示 + 從輸出抽 JSON 區塊。"""
+    """呼叫 LLM。自動偵測 endpoint，路由到 Ollama 或 llama.cpp。
+
+    - Ollama: http://localhost:11434 (預設) → /api/generate，需要 model 名稱
+    - llama.cpp: http://localhost:8080 → /completion，不需 model（啟動時決定）
+    - want_json=True 且為 llama.cpp 時，自動套用 SCORING_JSON_SCHEMA grammar 約束
+    """
+    if _is_llamacpp_endpoint(endpoint):
+        schema = SCORING_JSON_SCHEMA if want_json else None
+        return llamacpp_call(prompt, endpoint=endpoint, json_schema=schema)
+
+    # 走 Ollama
     payload = {
         'model': model,
         'prompt': prompt,
@@ -109,6 +237,7 @@ def get_llm_config(profile: dict) -> dict:
 def score_autobiography(body: str, profile: dict) -> dict | None:
     """讓 LLM 對履歷自傳/工作內容打 0-20 語意分。
     回傳 {score, reasoning} 或 None（失敗）"""
+    body = sanitize_untrusted_text(body)
     cfg = get_llm_config(profile)
     if not cfg.get('enabled') or not body or len(body) < 200:
         return None
@@ -120,7 +249,7 @@ def score_autobiography(body: str, profile: dict) -> dict | None:
     construction_kw = '/'.join(sc.get('construction_kw', []))
     title_kw = '/'.join(sc.get('title_kw', []))
 
-    body_excerpt = body[:6000]  # 控制 prompt 長度
+    body_excerpt = body[:6000]  # 控制 prompt 長度（7B ctx 8192 足夠）
 
     prompt = f"""你是專業的人資招募官，要為「{job_name}」職缺評估這份履歷的「軟性條件」匹配度。
 
@@ -177,7 +306,8 @@ def score_autobiography(body: str, profile: dict) -> dict | None:
 4. jobs 陣列「最多列前 10 段」（依時間倒序，最近的在前），早期/無相關的工作可省略
 5. 字數短才能完整輸出 JSON，務必精簡到位"""
 
-    raw = ollama_call(cfg['scoring_model'], prompt, want_json=False, endpoint=cfg['endpoint'])
+    # 評分要結構化 JSON，want_json=True → llama.cpp 自動套用 grammar schema
+    raw = ollama_call(cfg['scoring_model'], prompt, want_json=True, endpoint=cfg['endpoint'])
     if not raw:
         return None
     data = extract_json(raw)
@@ -203,17 +333,21 @@ def generate_summary(name: str, body: str, rule_result: dict,
                      llm_score_result: dict | None, profile: dict,
                      max_chars: int = 980) -> str | None:
     """讓 LLM 為達門檻人選生成「說明」欄客製化文字。失敗回 None（呼叫端 fallback 範本）"""
+    body = sanitize_untrusted_text(body)
     cfg = get_llm_config(profile)
     if not cfg.get('enabled'):
         return None
 
-    # 嚴格用 HR 原始檔名作為職缺名稱（不可用 LLM 解析出來的 display_name）
+    # 優先用 HR 原始檔名；_source_brief 缺失時以 display_name 為備用（確保顯示中文）
     import re as _re
     source = profile.get('_source_brief', '')
-    if not source:
-        return None  # 無 _source_brief 則拒絕產生 summary（呼叫端 fallback 範本）
-    job_name = _re.sub(r'\.(docx|doc|txt|md)$', '', source)
-    job_name = _re.sub(r'_\d{8}$', '', job_name)
+    if source:
+        job_name = _re.sub(r'\.(docx|doc|txt|md)$', '', source)
+        job_name = _re.sub(r'_\d{8}$', '', job_name)
+    else:
+        job_name = ''
+    if not job_name:
+        job_name = profile.get('display_name', '')
     if not job_name:
         return None
     residence_kw = profile.get('scoring', {}).get('residence_bonus_keyword', '')
@@ -291,13 +425,33 @@ def generate_summary(name: str, body: str, rule_result: dict,
 
 
 def health_check(endpoint: str = DEFAULT_ENDPOINT) -> dict:
-    """回傳 {ok: bool, models: list, error: str}"""
+    """回傳 {ok: bool, models: list, provider: 'ollama'|'llamacpp', error: str}"""
+    if _is_llamacpp_endpoint(endpoint):
+        try:
+            with urllib.request.urlopen(f'{endpoint}/health', timeout=3) as resp:
+                d = json.loads(resp.read())
+                if d.get('status') == 'ok':
+                    # 嘗試取得模型資訊（/props）
+                    try:
+                        with urllib.request.urlopen(f'{endpoint}/props', timeout=3) as r2:
+                            props = json.loads(r2.read())
+                            model_path = props.get('model_path', '?')
+                            return {'ok': True, 'provider': 'llamacpp',
+                                    'models': [model_path.split('/')[-1]]}
+                    except Exception:
+                        return {'ok': True, 'provider': 'llamacpp', 'models': ['(unknown)']}
+                return {'ok': False, 'provider': 'llamacpp', 'models': [], 'error': str(d)}
+        except Exception as e:
+            return {'ok': False, 'provider': 'llamacpp', 'models': [], 'error': str(e)}
+
+    # Ollama
     try:
         with urllib.request.urlopen(f'{endpoint}/api/tags', timeout=3) as resp:
             data = json.loads(resp.read())
-            return {'ok': True, 'models': [m['name'] for m in data.get('models', [])]}
+            return {'ok': True, 'provider': 'ollama',
+                    'models': [m['name'] for m in data.get('models', [])]}
     except Exception as e:
-        return {'ok': False, 'models': [], 'error': str(e)}
+        return {'ok': False, 'provider': 'ollama', 'models': [], 'error': str(e)}
 
 
 if __name__ == '__main__':

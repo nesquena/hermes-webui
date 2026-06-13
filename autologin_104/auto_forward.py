@@ -36,7 +36,9 @@ try:
     import websockets
 except ImportError:
     print('⚠️  缺少 websockets 套件，自動安裝中...', flush=True)
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--user', '--quiet', 'websockets'])
+    # Homebrew Python 3.13+ 強制 PEP 668，需 --break-system-packages
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--user', '--quiet',
+                           '--break-system-packages', 'websockets'])
     import websockets  # noqa: E402
 
 # 本地 LLM 評分（可選；llm_score.py 失敗或未啟用時自動 fallback）
@@ -45,6 +47,18 @@ try:
     LLM_AVAILABLE = True
 except ImportError:
     LLM_AVAILABLE = False
+
+
+def sanitize_untrusted_text(text: str) -> str:
+    """過濾與去毒化潛在的提示詞注入與資安注入攻擊。"""
+    if LLM_AVAILABLE and hasattr(llm_score, 'sanitize_untrusted_text'):
+        return llm_score.sanitize_untrusted_text(text)
+    # 本地降級版（以防 llm_score 載入失敗）
+    if not text:
+        return ""
+    text = text.replace("<untrusted>", "[untrusted_tag]").replace("</untrusted>", "[/untrusted_tag]")
+    return text
+
 
 # ----- 路徑 -----
 ROOT = Path(__file__).resolve().parent
@@ -195,12 +209,12 @@ async def dismiss_network_error(ws_url: str) -> bool:
     result = await cdp_eval(ws_url, """
     (function() {
         var pageText = document.body.textContent || '';
-        if (!pageText.includes('網路連線') && !pageText.includes('連線發生錯誤'))
+        if (!pageText.includes('網路連線發生錯誤'))
             return false;
         // SweetAlert2
         var btn = document.querySelector('.swal2-confirm');
         if (btn) { btn.click(); return 'swal2'; }
-        // modal / dialog
+        // modal / dialog — only click 確定 inside an error-containing modal
         var modals = document.querySelectorAll('.modal, .dialog, [role="dialog"], .swal2-popup');
         for (var m of modals) {
             if (m.textContent.includes('網路連線') || m.textContent.includes('連線發生錯誤')) {
@@ -210,13 +224,6 @@ async def dismiss_network_error(ws_url: str) -> bool:
                         b.click(); return 'modal';
                     }
                 }
-            }
-        }
-        // fallback
-        var allBtns = document.querySelectorAll('button');
-        for (var b of allBtns) {
-            if (b.textContent.trim() === '確定' || b.textContent.trim() === '確認') {
-                b.click(); return 'fallback';
             }
         }
         return false;
@@ -246,8 +253,9 @@ def score(candidate: dict, full_text: str, profile: dict) -> dict:
     autobio_positive = sc.get('autobio_positive', [])
     long_tenure_months = sc.get('long_tenure_months', 36)
     require_two_long = sc.get('require_two_long_tenures', False)
-    senior_rule = sc['level_rules']['senior']
-    junior_rule = sc['level_rules']['junior']
+    level_rules = sc.get('level_rules', {})
+    senior_rule = level_rules.get('senior', {'min_years': 5, 'min_projects': 2, 'name': '主任級'})
+    junior_rule = level_rules.get('junior', {'min_years': 3, 'min_projects': 1, 'name': '副主任級'})
     residence_kw = sc.get('residence_bonus_keyword', '')
 
     reasons = []
@@ -359,9 +367,9 @@ def _render_html_report(job_id: str, display_name: str, profile: dict,
     try:
         job_title = get_job_title_from_brief(profile)
     except ValueError:
-        job_title = profile.get('job_id', '未知職缺')
-    threshold_priority = 80  # 與 build_summary 一致
-    threshold_consider = 70
+        job_title = profile.get('display_name') or profile.get('job_id', '未知職缺')
+    threshold_priority = threshold + 15
+    threshold_consider = threshold + 5
 
     # 統計
     total = len(scored)
@@ -403,8 +411,8 @@ def _render_html_report(job_id: str, display_name: str, profile: dict,
             recommend = '— 供參考'
             card_class = 'card card-below'
 
-        # LLM jobs[] 詳析
-        llm = resume_cache.get(rid, {}).get('llm_score', {}) or {}
+        # LLM jobs[] 詳析（直接從 _result['llm'] 取，避免 resume_cache 缺鍵）
+        llm = r.get('llm') or resume_cache.get(rid, {}).get('llm_score', {}) or {}
         jobs_data = llm.get('jobs', []) or []
         highlights = llm.get('highlights', []) or []
         reasoning = llm.get('reasoning', '') or ''
@@ -475,7 +483,7 @@ def _render_html_report(job_id: str, display_name: str, profile: dict,
             <dt>年齡/性別</dt><dd>{_html_escape(c.get('age',''))} {_html_escape(c.get('gender',''))}</dd>
             <dt>居住地</dt><dd>{_html_escape(c.get('residence',''))}</dd>
             <dt>學歷</dt><dd>{_html_escape(c.get('education',''))}</dd>
-            <dt>希望職稱</dt><dd>{_html_escape(c.get('preferJobTitle','').replace('希望職稱 :','').strip())}</dd>
+            <dt>希望職稱</dt><dd>{_html_escape(re.sub(r'^希望職稱\s*[：:]\s*', '', c.get('preferJobTitle','')).strip())}</dd>
             <dt>建築年資</dt><dd>{metrics.get('construction_years','—')} 年</dd>
             <dt>3 年以上任職</dt><dd>{metrics.get('long_tenure_count','—')} 份</dd>
           </dl>
@@ -701,7 +709,7 @@ def build_summary(name: str, result: dict, body: str, profile: dict) -> str:
     try:
         display_name = get_job_title_from_brief(profile)
     except ValueError:
-        display_name = profile.get('job_id', '未知職缺')
+        display_name = profile.get('display_name') or profile.get('job_id', '未知職缺')
     residence_kw = profile.get('scoring', {}).get('residence_bonus_keyword', '')
 
     bio = ''
@@ -732,12 +740,13 @@ def build_summary(name: str, result: dict, body: str, profile: dict) -> str:
     head += '■評分依據：\n' + '；'.join(result['reasons'][:6])
     # 只有匹配度 ≥80% 才標「建議優先邀約面試」；70-79% 為「可考慮邀約」；<70% 為「供參考」
     score = result.get('score', 0)
-    if score >= 80:
+    job_threshold = profile.get('scoring', {}).get('threshold', 65)
+    if score >= job_threshold + 15:
         if residence_kw:
             head += f'\n\n建議優先邀約面試，確認集合住宅意願與駐點{residence_kw}條件。'
         else:
             head += '\n\n建議優先邀約面試。'
-    elif score >= 70:
+    elif score >= job_threshold + 5:
         head += '\n\n可考慮邀約面試。'
     else:
         head += '\n\n供參考。'
@@ -760,228 +769,10 @@ async def fetch_resume_text(ws_url: str, detail_url: str) -> str:
 DEFAULT_FORWARD_EMAILS = ['i00788@fong-yi.com.tw', 'fongchien19@gmail.com', '990409@fong-yi.com.tw']
 
 
-async def select_contact_by_search(ws_url: str, email: str) -> bool:
-    """在「選擇聯絡人」modal 的搜尋框輸入 email → 等過濾結果 → 勾選 checkbox。
-    用 placeholder 'mail' / '聯絡人' 來定位搜尋框，不依賴 .modal-dialog class。"""
-    email_json = json.dumps(email)
-
-    # Step 1: 找全頁中含 'mail'/'聯絡人'/'姓名' 的 input（即「選擇聯絡人」modal 的搜尋框）
-    typed = await cdp_eval(ws_url, f"""
-    (function(email) {{
-        // 全頁搜尋符合的 input（modal 可能用任何 class）
-        const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])'));
-        let input = inputs.find(i => i.offsetParent !== null && /mail|聯絡人|姓名/i.test(i.placeholder || ''));
-        if (!input) {{
-            // 找含「選擇聯絡人」標題的容器
-            const titleEl = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,div,span'))
-                .find(e => e.offsetParent !== null && /選擇聯絡人/.test((e.textContent||'').trim()) && (e.textContent||'').length < 30);
-            if (titleEl) {{
-                // 從標題往上找 modal container
-                let container = titleEl;
-                for (let i = 0; i < 8 && container; i++) {{
-                    container = container.parentElement;
-                    if (!container) break;
-                    const inp = container.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
-                    if (inp && inp.offsetParent !== null) {{
-                        input = inp;
-                        break;
-                    }}
-                }}
-            }}
-        }}
-        if (!input) return {{ ok: false, reason: 'no search input found' }};
-
-        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        input.focus();
-        setter.call(input, '');
-        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-        setter.call(input, email);
-        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-        input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-        input.dispatchEvent(new KeyboardEvent('keydown', {{ bubbles: true, key: email.slice(-1) }}));
-        input.dispatchEvent(new KeyboardEvent('keyup', {{ bubbles: true, key: email.slice(-1) }}));
-        // 記住此 input 給後續用
-        window.__contactSearchInput = input;
-        return {{ ok: true, placeholder: input.placeholder || '' }};
-    }})({email_json})
-    """)
-    if not typed or not typed.get('ok'):
-        print(f'    ↳ debug: 搜尋框找不到 (typed={typed})')
-        return False
-
-    # Step 2: 等過濾結果出現（最多 4 秒）
-    # 偵測策略：找一個葉節點 text 等於 email（過濾後 list 的 email cell）
-    matched = False
-    for _ in range(8):
-        await asyncio.sleep(0.5)
-        found = await cdp_eval(ws_url, f"""
-        (function(email) {{
-            // 找文字節點剛好等於 email 的可見元素（list 中的 email 欄位）
-            const all = document.querySelectorAll('span, div, td, p, a');
-            for (const el of all) {{
-                if (el.offsetParent === null) continue;
-                if (el.children.length > 0) continue;  // 只看葉節點
-                const t = (el.textContent || '').trim();
-                if (t === email) {{
-                    return true;
-                }}
-            }}
-            return false;
-        }})({email_json})
-        """)
-        if found:
-            matched = True
-            break
-
-    if not matched:
-        print(f'    ↳ debug: 等待過濾結果逾時，頁面找不到「{email}」的 list 項目')
-        return False
-
-    # Step 3: 找含此 email 的「列表 row」（不是「已選取」chip），回傳該列座標
-    coords_str = await cdp_eval(ws_url, f"""
-    (function(email) {{
-        // 找所有文字節點等於 email 的可見葉節點（可能含列表 row + 已選取 chip）
-        const all = document.querySelectorAll('span, div, td, p, a');
-        const candidates = [];
-        for (const el of all) {{
-            if (el.offsetParent === null) continue;
-            if (el.children.length > 0) continue;
-            if ((el.textContent || '').trim() === email) {{
-                candidates.push(el);
-            }}
-        }}
-        if (candidates.length === 0) {{
-            return JSON.stringify({{ ok: false, reason: 'no email cell' }});
-        }}
-
-        // 從每個 candidate 往上找 checkbox 祖先（chip 區沒有 checkbox，會被排除）
-        for (const cell of candidates) {{
-            let row = cell;
-            let cbEl = null;
-            for (let i = 0; i < 10; i++) {{
-                row = row.parentElement;
-                if (!row) break;
-                cbEl = row.querySelector('input[type="checkbox"]')
-                    || row.querySelector('aot-checkbox')
-                    || row.querySelector('[role="checkbox"]')
-                    || row.querySelector('.checkbox')
-                    || row.querySelector('.el-checkbox');
-                if (cbEl) break;
-            }}
-            if (!cbEl) continue;  // 此 candidate 是 chip，跳過
-
-            // 進一步檢查：row 容器不應該整段含「已選取」標題（避免把整個已選取區當 row）
-            const rowText = (row.textContent || '').trim();
-            if (rowText.length > 200) continue;  // row 應該短，整段就是 row 容器太大了
-
-            const rowRect = row.getBoundingClientRect();
-            const cbRect = cbEl.getBoundingClientRect();
-            // 如果 checkbox 太小（被視覺隱藏），點 row 最左端
-            if (cbRect.width < 8 || cbRect.height < 8) {{
-                return JSON.stringify({{
-                    ok: true, x: rowRect.left + 16, y: rowRect.top + rowRect.height/2,
-                    note: 'click-row-left', rowText: rowText.slice(0, 80),
-                }});
-            }}
-            return JSON.stringify({{
-                ok: true, x: cbRect.left + cbRect.width/2, y: cbRect.top + cbRect.height/2,
-                note: 'click-checkbox', rowText: rowText.slice(0, 80),
-            }});
-        }}
-        return JSON.stringify({{ ok: false, reason: 'all candidates are chips (no checkbox ancestor)', count: candidates.length }});
-    }})({email_json})
-    """)
-    if not coords_str:
-        print(f'    ↳ debug: 取得座標失敗')
-        return False
-    try:
-        coords = json.loads(coords_str)
-    except Exception:
-        return False
-    if not coords.get('ok'):
-        print(f'    ↳ debug: {coords}')
-        return False
-
-    # Step 4: 用 CDP Input.dispatchMouseEvent 點擊（穿透 web component shadow DOM）
-    await cdp_click_at(ws_url, coords['x'], coords['y'])
-    await asyncio.sleep(0.6)
-
-    # Step 5: 驗證已選取（檢查「已選取」區塊是否含此 email chip）
-    verified = await cdp_eval(ws_url, f"""
-    (function(email) {{
-        // 找「已選取」區塊
-        const all = document.querySelectorAll('div, span');
-        for (const el of all) {{
-            if (el.offsetParent === null) continue;
-            if (el.children.length > 0) continue;
-            if ((el.textContent || '').trim() === email) {{
-                // 從這個 cell 往上看是否在「已選取」區塊下
-                let p = el.parentElement;
-                for (let i = 0; i < 12 && p; i++) {{
-                    if (/已選取/.test(p.textContent || '')) {{
-                        return true;
-                    }}
-                    p = p.parentElement;
-                }}
-            }}
-        }}
-        return false;
-    }})({email_json})
-    """)
-    if not verified:
-        print(f'    ↳ debug: 已點擊但驗證「已選取」chip 不含 {email}（點擊位置: {coords.get("note","?")}, row: {coords.get("rowText","?")}）')
-    return bool(verified)
-
-
-async def submit_contact_picker(ws_url: str) -> bool:
-    """點「選擇聯絡人」modal 底部的「送出」按鈕關閉 picker。"""
-    result = await cdp_eval(ws_url, """
-    (function() {
-        // 找含「選擇聯絡人」標題的容器內的「送出」按鈕
-        const titleEl = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,div,span'))
-            .find(e => e.offsetParent !== null && /選擇聯絡人/.test((e.textContent||'').trim()) && (e.textContent||'').length < 30);
-        let container = titleEl;
-        for (let i = 0; i < 10 && container; i++) {
-            container = container.parentElement;
-            if (!container) break;
-            // 在 container 內找「送出」按鈕
-            const btns = container.querySelectorAll('button, aot-button, .btn');
-            for (const b of btns) {
-                const t = (b.innerText || b.textContent || b.getAttribute('label') || '').trim();
-                if (t === '送出' && b.offsetParent !== null) {
-                    const r = b.getBoundingClientRect();
-                    return JSON.stringify({ ok: true, x: r.left + r.width/2, y: r.top + r.height/2 });
-                }
-            }
-        }
-        // fallback：全頁找「送出」按鈕
-        const all = document.querySelectorAll('button, aot-button, .btn');
-        for (const b of all) {
-            const t = (b.innerText || b.textContent || b.getAttribute('label') || '').trim();
-            if (t === '送出' && b.offsetParent !== null) {
-                const r = b.getBoundingClientRect();
-                return JSON.stringify({ ok: true, x: r.left + r.width/2, y: r.top + r.height/2, fallback: true });
-            }
-        }
-        return JSON.stringify({ ok: false });
-    })()
-    """)
-    if not result:
-        return False
-    try:
-        data = json.loads(result)
-    except Exception:
-        return False
-    if not data.get('ok'):
-        return False
-    await cdp_click_at(ws_url, data['x'], data['y'])
-    await asyncio.sleep(2)
-    return True
-
-
 async def _search_and_check_in_picker(ws_url: str, email: str) -> bool:
     """在已開啟的「選擇聯絡人」picker 中：清空搜尋框 → 輸入 email → 等過濾 → 勾選 row 內的 label。"""
     email_json = json.dumps(email)
+
     typed = await cdp_eval(ws_url, f"""
         (function(email) {{
             const inputs = document.querySelectorAll('input[placeholder*="輸入聯絡人"]');
@@ -998,30 +789,206 @@ async def _search_and_check_in_picker(ws_url: str, email: str) -> bool:
         }})({email_json})
     """)
     if not typed:
+        print(f'    ⚠️ 找不到「輸入聯絡人」的搜尋輸入框')
         return False
     await asyncio.sleep(1.2)
 
     check_result = await cdp_eval(ws_url, f"""
         (function(email) {{
-            const rows = document.querySelectorAll('.mail-list .row');
+            // picker 搜尋後 row 顯示的是聯絡人姓名，不一定包含 email 文字。
+            // 策略：
+            //   1. 優先找 textContent 含 email 的 row（email 有時會顯示在 row 內）
+            //   2. fallback：搜尋框已過濾到匹配聯絡人，直接點第一個可見的 unchecked checkbox
+            const selectors = '.mail-list .row, .aot-select-item, [class*="select-item"], ' +
+                               '[class*="contact-item"], [class*="member-item"], .row, tr, li';
+            // 找 picker container 限縮範圍（避免點到 picker 外的元素）
+            const container = document.querySelector(
+                '[class*="contact-picker"], [class*="mail-picker"], ' +
+                'aot-tag-selector, .aot-tag-selector, [role="dialog"]'
+            ) || document;
+            const rows = Array.from(container.querySelectorAll(selectors))
+                .filter(r => r.offsetParent !== null);
+
+            // debug：印出前 5 筆 row 的文字，幫助診斷結構
+            const debug = rows.slice(0, 5).map(r => r.textContent.trim().slice(0, 60));
+
+            // 策略 1：textContent 含 email
             for (const row of rows) {{
-                if (row.offsetParent === null) continue;
                 if (!(row.textContent || '').includes(email)) continue;
-                const cb = row.querySelector('input[type="checkbox"]');
+                const cb = row.querySelector('input[type="checkbox"]')
+                    || row.querySelector('aot-checkbox')
+                    || row.querySelector('[role="checkbox"]');
                 if (!cb) continue;
                 if (!cb.checked) {{
-                    const label = cb.closest('label') || row.querySelector('label');
-                    if (label) {{ label.click(); }} else {{ cb.click(); }}
+                    const label = cb.closest('label') || row.querySelector('label') || cb;
+                    label ? label.click() : cb.click();
                 }}
-                return JSON.stringify({{ ok: true, rowText: row.textContent.trim().slice(0, 50) }});
+                return JSON.stringify({{ ok: true, strategy: 'email-text', rowText: row.textContent.trim().slice(0, 60) }});
             }}
-            return JSON.stringify({{ ok: false, reason: 'no matching row' }});
+
+            // 策略 2：搜尋框已過濾，點第一個可見的 unchecked checkbox
+            for (const row of rows) {{
+                const cb = row.querySelector('input[type="checkbox"]')
+                    || row.querySelector('aot-checkbox')
+                    || row.querySelector('[role="checkbox"]');
+                if (!cb) continue;
+                if (cb.checked) {{
+                    // 已勾選（可能是預設收件者），直接算成功
+                    return JSON.stringify({{ ok: true, strategy: 'already-checked', rowText: row.textContent.trim().slice(0, 60) }});
+                }}
+                const label = cb.closest('label') || row.querySelector('label') || cb;
+                label ? label.click() : cb.click();
+                return JSON.stringify({{ ok: true, strategy: 'first-checkbox', rowText: row.textContent.trim().slice(0, 60) }});
+            }}
+
+            return JSON.stringify({{ ok: false, reason: 'no checkbox row found after search', debug: debug }});
         }})({email_json})
     """)
     cr = json.loads(check_result or '{}')
     if not cr.get('ok'):
+        print(f'    ⚠️ 勾選失敗: {cr}')
+        return False
+
+    # Verify the email chip appeared in the selected section.
+    # 104 Vue UI 可能用不同方式標示：textContent「已選取/已選擇」、className、aria-selected。
+    # 若第一次 0.3s 不夠，再等 0.6s 重試一次（Vue reactivity 延遲保護）。
+    def _check_selected_js(email_json: str) -> str:
+        return f"""
+        (function(email) {{
+            const all = document.querySelectorAll('div, span');
+            for (const el of all) {{
+                if (el.offsetParent === null) continue;
+                if (el.children.length > 0) continue;
+                if ((el.textContent || '').trim() === email) {{
+                    let p = el.parentElement;
+                    for (let i = 0; i < 12 && p; i++) {{
+                        if (/已選取|已選擇|selected/i.test(p.className || '') ||
+                            /已選取|已選擇/.test(p.textContent || '') ||
+                            p.getAttribute('aria-selected') === 'true') return true;
+                        p = p.parentElement;
+                    }}
+                }}
+            }}
+            return false;
+        }})({email_json})
+        """
+
+    await asyncio.sleep(0.3)
+    verified = await cdp_eval(ws_url, _check_selected_js(email_json))
+    if not verified:
+        await asyncio.sleep(0.6)
+        verified = await cdp_eval(ws_url, _check_selected_js(email_json))
+    if not verified:
+        print(f'    ⚠️ 已點擊但選取狀態未確認（已選取/已選擇 區域未偵測到）：{email}')
         return False
     return True
+
+
+async def _press_escape(ws_url: str):
+    """Press Escape to close the topmost open modal or picker."""
+    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+        for i, evt in enumerate(['keyDown', 'keyUp']):
+            await ws.send(json.dumps({
+                'id': i + 1, 'method': 'Input.dispatchKeyEvent',
+                'params': {'type': evt, 'key': 'Escape', 'code': 'Escape',
+                           'windowsVirtualKeyCode': 27}
+            }))
+            await ws.recv()
+
+
+async def _select_recipients_via_picker(ws_url: str, emails: list) -> int:
+    """開啟「選擇聯絡人」picker → 逐一搜尋勾選 emails → 送出。回傳成功勾選人數（0=失敗）。
+
+    呼叫前提：「轉寄」modal 已開啟、預設收件者已清空。失敗時不 press Escape（由呼叫端統一收尾）。
+    """
+    # 4. 點收件者 selector 開 picker
+    sel_clicked = await cdp_eval(ws_url, """
+        (function() {
+            const selectors = document.querySelectorAll('.aot-tag-selector__input');
+            for (const s of selectors) {
+                if (s.offsetParent === null) continue;
+                const r = s.getBoundingClientRect();
+                if (r.width < 5 || r.height < 5) continue;
+                return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
+            }
+            return null;
+        })()
+    """)
+    if not sel_clicked:
+        print(f'    ✗ 找不到 收件者 selector')
+        return 0
+    sc = json.loads(sel_clicked)
+    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+        for i_id, params in enumerate([
+            {'type': 'mouseMoved', 'x': sc['x'], 'y': sc['y']},
+            {'type': 'mousePressed', 'x': sc['x'], 'y': sc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
+            {'type': 'mouseReleased', 'x': sc['x'], 'y': sc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
+        ]):
+            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
+            await ws.recv()
+            await asyncio.sleep(0.1)
+    await asyncio.sleep(2)
+
+    picker_opened = await cdp_eval(ws_url, """
+        (function() {
+            const titles = document.querySelectorAll('.modal-title');
+            for (const t of titles) {
+                if (t.offsetParent === null) continue;
+                if ((t.textContent || '').trim() === '選擇聯絡人') return true;
+            }
+            return false;
+        })()
+    """)
+    if not picker_opened:
+        print(f'    ✗ 「選擇聯絡人」picker 未開啟')
+        return 0
+    print(f'    📋 選擇聯絡人 picker 已開啟')
+
+    # 5. 對每個 email 在 picker 內搜尋 + 勾選（chip 累積到「已選取」）
+    checked_count = 0
+    for email in emails:
+        ok = await _search_and_check_in_picker(ws_url, email)
+        if ok:
+            checked_count += 1
+            print(f'    ☑ 已勾選 {email}')
+        else:
+            print(f'    ⚠️ 找不到聯絡人 {email}（跳過）')
+        await asyncio.sleep(0.5)
+
+    if checked_count == 0:
+        print(f'    ✗ 沒有任何聯絡人成功勾選，中止')
+        return 0
+
+    # 6. 點 picker「送出」
+    submit_coords = await cdp_eval(ws_url, """
+        (function() {
+            const btns = document.querySelectorAll('button.btn-primary, button');
+            for (const b of btns) {
+                if (b.offsetParent === null) continue;
+                if ((b.textContent || '').trim() === '送出') {
+                    const r = b.getBoundingClientRect();
+                    return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
+                }
+            }
+            return null;
+        })()
+    """)
+    if not submit_coords:
+        print(f'    ✗ 找不到 picker 送出 按鈕')
+        return 0
+    sb = json.loads(submit_coords)
+    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+        for i_id, params in enumerate([
+            {'type': 'mouseMoved', 'x': sb['x'], 'y': sb['y']},
+            {'type': 'mousePressed', 'x': sb['x'], 'y': sb['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
+            {'type': 'mouseReleased', 'x': sb['x'], 'y': sb['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
+        ]):
+            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
+            await ws.recv()
+            await asyncio.sleep(0.1)
+    await asyncio.sleep(2)
+    print(f'    ✓ 已送出 picker（{checked_count}/{len(emails)} 人勾選）')
+    return checked_count
 
 
 async def forward_to_recipients(ws_url: str, summary: str, emails: list, detail_url: str) -> int:
@@ -1111,106 +1078,49 @@ async def forward_to_recipients(ws_url: str, summary: str, emails: list, detail_
         return 0
     print(f'    📋 轉寄 modal 已開啟')
 
-    # 3. 移除預設收件者 tags
-    await cdp_eval(ws_url, """
-        (function() {
-            const selectors = document.querySelectorAll('.aot-tag-selector');
-            for (const s of selectors) {
-                if (s.offsetParent === null) continue;
-                const deletes = s.querySelectorAll('.vip-icon-delete');
-                for (const d of deletes) d.click();
-            }
-        })()
+    # 3. 偵測收件者欄位是否已含所有必要 email tags
+    emails_json = json.dumps(emails)
+    existing_check = await cdp_eval(ws_url, f"""
+        (function(required) {{
+            // 收集 aot-tag-selector 內所有可見 tag 的文字
+            const texts = [];
+            document.querySelectorAll('.aot-tag-selector .aot-tag, .aot-tag-selector [class*="tag"]').forEach(t => {{
+                if (t.offsetParent !== null) texts.push((t.textContent || '').trim());
+            }});
+            const found = required.filter(e => texts.some(t => t.includes(e)));
+            return JSON.stringify({{ found: found, texts: texts }});
+        }})({emails_json})
     """)
-    await asyncio.sleep(0.8)
-
-    # 4. 點收件者 selector 開 picker
-    sel_clicked = await cdp_eval(ws_url, """
-        (function() {
-            const selectors = document.querySelectorAll('.aot-tag-selector__input');
-            for (const s of selectors) {
-                if (s.offsetParent === null) continue;
-                const r = s.getBoundingClientRect();
-                if (r.width < 5 || r.height < 5) continue;
-                return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
-            }
-            return null;
-        })()
-    """)
-    if not sel_clicked:
-        print(f'    ✗ 找不到 收件者 selector')
-        return 0
-    sc = json.loads(sel_clicked)
-    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
-        for i_id, params in enumerate([
-            {'type': 'mouseMoved', 'x': sc['x'], 'y': sc['y']},
-            {'type': 'mousePressed', 'x': sc['x'], 'y': sc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
-            {'type': 'mouseReleased', 'x': sc['x'], 'y': sc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
-        ]):
-            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
-            await ws.recv()
-            await asyncio.sleep(0.1)
-    await asyncio.sleep(2)
-
-    picker_opened = await cdp_eval(ws_url, """
-        (function() {
-            const titles = document.querySelectorAll('.modal-title');
-            for (const t of titles) {
-                if (t.offsetParent === null) continue;
-                if ((t.textContent || '').trim() === '選擇聯絡人') return true;
-            }
-            return false;
-        })()
-    """)
-    if not picker_opened:
-        print(f'    ✗ 「選擇聯絡人」picker 未開啟')
-        return 0
-    print(f'    📋 選擇聯絡人 picker 已開啟')
-
-    # 5. 對每個 email 在 picker 內搜尋 + 勾選（chip 累積到「已選取」）
-    checked_count = 0
-    for email in emails:
-        ok = await _search_and_check_in_picker(ws_url, email)
-        if ok:
-            checked_count += 1
-            print(f'    ☑ 已勾選 {email}')
+    ec = json.loads(existing_check or '{}')
+    already_found = ec.get('found', [])
+    tag_texts = ec.get('texts', [])
+    if len(already_found) == len(emails):
+        print(f'    ✓ 收件者欄位已含全部 {len(emails)} 位，跳過 picker 直接填說明')
+        checked_count = len(emails)
+    else:
+        if already_found:
+            print(f'    ℹ 收件者已有 {already_found}，缺少 {[e for e in emails if e not in already_found]}')
         else:
-            print(f'    ⚠️ 找不到聯絡人 {email}（跳過）')
-        await asyncio.sleep(0.5)
+            print(f'    ℹ 收件者欄位目前的 tags: {tag_texts[:5]}')
 
-    if checked_count == 0:
-        print(f'    ✗ 沒有任何聯絡人成功勾選，中止')
-        return 0
-
-    # 6. 點 picker「送出」
-    submit_coords = await cdp_eval(ws_url, """
-        (function() {
-            const btns = document.querySelectorAll('button.btn-primary, button');
-            for (const b of btns) {
-                if (b.offsetParent === null) continue;
-                if ((b.textContent || '').trim() === '送出') {
-                    const r = b.getBoundingClientRect();
-                    return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
+        # 移除預設收件者 tags，重新從 picker 勾選
+        await cdp_eval(ws_url, """
+            (function() {
+                const selectors = document.querySelectorAll('.aot-tag-selector');
+                for (const s of selectors) {
+                    if (s.offsetParent === null) continue;
+                    const deletes = s.querySelectorAll('.vip-icon-delete');
+                    for (const d of deletes) d.click();
                 }
-            }
-            return null;
-        })()
-    """)
-    if not submit_coords:
-        print(f'    ✗ 找不到 picker 送出 按鈕')
-        return 0
-    sb = json.loads(submit_coords)
-    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
-        for i_id, params in enumerate([
-            {'type': 'mouseMoved', 'x': sb['x'], 'y': sb['y']},
-            {'type': 'mousePressed', 'x': sb['x'], 'y': sb['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
-            {'type': 'mouseReleased', 'x': sb['x'], 'y': sb['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
-        ]):
-            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
-            await ws.recv()
-            await asyncio.sleep(0.1)
-    await asyncio.sleep(2)
-    print(f'    ✓ 已送出 picker（{checked_count}/{len(emails)} 人勾選）')
+            })()
+        """)
+        await asyncio.sleep(0.8)
+
+        # 4-6. 開 picker、逐一勾選、送出
+        checked_count = await _select_recipients_via_picker(ws_url, emails)
+        if checked_count == 0:
+            await _press_escape(ws_url)
+            return 0
 
     # 7. 填說明 textarea
     fill_expr = """
@@ -1233,6 +1143,7 @@ async def forward_to_recipients(ws_url: str, summary: str, emails: list, detail_
         await asyncio.sleep(0.5)
     if not isinstance(fill_result, int) or fill_result == 0:
         print(f'    ✗ 找不到說明 textarea')
+        await _press_escape(ws_url)
         return 0
     print(f'    ✓ 已填說明（{fill_result} 字）')
     await asyncio.sleep(1)
@@ -1253,6 +1164,7 @@ async def forward_to_recipients(ws_url: str, summary: str, emails: list, detail_
     """)
     if not send_coords:
         print(f'    ✗ 找不到 發送 aot-button')
+        await _press_escape(ws_url)
         return 0
     sd = json.loads(send_coords)
     async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
@@ -1303,17 +1215,17 @@ def load_history(log_path: Path) -> dict:
         runs = [raw]
     else:
         runs = raw.get('runs', [])
-    forwarded_ids = set(raw.get('forwarded_ids', []))
+    forwarded_ids = {x for x in raw.get('forwarded_ids', []) if x is not None}
     for r in runs:
         for x in r.get('results', []):
-            if x.get('forwarded'):
-                forwarded_ids.add(x.get('resumeId'))
+            if x.get('forwarded') and x.get('resumeId'):
+                forwarded_ids.add(x['resumeId'])
     return {'forwarded_ids': forwarded_ids, 'runs': runs}
 
 
 def save_history(log_path: Path, forwarded_ids: set, runs: list):
     payload = {
-        'forwarded_ids': sorted(forwarded_ids),
+        'forwarded_ids': sorted(x for x in forwarded_ids if x is not None),
         'runs': runs,
     }
     log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1515,6 +1427,7 @@ ul li{{margin:6px 0}}
         force_refresh = rid in refresh_ids
         if cache_entry and not force_refresh and not no_cache:
             body = cache_entry.get('body', '')
+            body = sanitize_untrusted_text(body)
             print(f'  ⚡ 命中快取（{len(body)} 字，{cache_entry.get("cached_at","")[:10]}），跳過 navigation')
             from_cache = True
             cache_hits += 1
@@ -1523,6 +1436,7 @@ ul li{{margin:6px 0}}
                 print(f'  ✗ 需重抓但無 Chrome session，略過')
                 continue
             body = await fetch_resume_text(ws_url, c['detailHref'])
+            body = sanitize_untrusted_text(body)
             resume_cache[rid] = {
                 'body': body,
                 'cached_at': datetime.now().isoformat(),
@@ -1654,7 +1568,7 @@ ul li{{margin:6px 0}}
         md_lines.append(f"## {rk}. {c['name']}｜{r['level']}｜{r['score']}%")
         md_lines.append(f"- 履歷代碼：{c['resumeId']}｜{c.get('age','')}｜{c.get('residence','')}")
         md_lines.append(f"- 學歷：{c.get('education','')}")
-        md_lines.append(f"- 希望職稱：{c.get('preferJobTitle','').replace('希望職稱 :','').strip()}")
+        md_lines.append(f"- 希望職稱：{re.sub(r'^希望職稱\s*[：:]\s*', '', c.get('preferJobTitle','')).strip()}")
         md_lines.append(f"- 評分依據：")
         for rr in r['reasons']:
             md_lines.append(f"  - {rr}")

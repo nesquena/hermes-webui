@@ -869,6 +869,18 @@ async def py_select_modal_options(targets: list[str], confirm: bool = True):
         const notFound = [];
         const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+        function normalizeText(s) {{
+            if (!s) return '';
+            return s.replace(/／/g, '/')
+                    .replace(/（/g, '(')
+                    .replace(/）/g, ')')
+                    .replace(/，/g, ',')
+                    .replace(/－/g, '-')
+                    .replace(/\\s+/g, '')
+                    .trim()
+                    .toLowerCase();
+        }}
+
         function findCheckbox(target) {{
             // 先試 value
             const byValue = document.querySelector(
@@ -880,7 +892,7 @@ async def py_select_modal_options(targets: list[str], confirm: bool = True):
             for (const label of labels) {{
                 const span = label.querySelector('span.children');
                 if (!span) continue;
-                if (span.textContent.trim() === target) {{
+                if (normalizeText(span.textContent) === normalizeText(target)) {{
                     return {{ cb: label.querySelector('input[type="checkbox"]'), by: 'text' }};
                 }}
             }}

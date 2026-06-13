@@ -12,6 +12,9 @@ search104/
 __pycache__/
 *.pyc
 
+# Talent KB generated database
+talent_kb/*.db
+
 # Backup files
 *.bak
 

@@ -161,3 +161,12 @@ Google Drive:
 - **蘇倉億** (1843770840755) at jidian-tainan：已轉寄至 i00788@fong-yi.com.tw
   - 規則 92% / 加 LLM 後 86%
   - 主任級，PCM 經驗 20+ 案
+
+---
+
+## 招募人才知識庫 talent_kb/（2026-06）
+- build_db.py：彙整 results/*/ → SQLite talent.db（去重、bge-m3 1024維向量、增量）
+- server.py：本機網頁 http://localhost:8090（搜尋/語意RAG/跨職缺媒合/決策回饋）
+- talent.db 不進 git，由 build_db.py 重建
+- 已接在 sync_briefs_claude.sh Step 5 自動更新
+- embedding：bge-m3（曾用 all-minilm 中文差換掉）；跑時勿同時開 llama-server 會 OOM

@@ -64,15 +64,17 @@ ensure_cdp_chrome() {
     fi
     echo "  ▶ 沒有 CDP Chrome，啟動中..."
     # 用 Profile 4（已有 104 登入 session）
-    local profile_src="$HOME/Library/Application Support/Google/Chrome/Profile 4"
+    local profile_name="Profile 4"
+    local profile_src="$HOME/Library/Application Support/Google/Chrome/$profile_name"
     local tmp_dir
     tmp_dir=$(mktemp -d /tmp/chrome-cdp-forward-XXXXXX)
-    cp -R "$profile_src" "$tmp_dir/Default" 2>/dev/null || true
+    cp -R "$profile_src" "$tmp_dir/$profile_name" 2>/dev/null || true
     cp "$HOME/Library/Application Support/Google/Chrome/Local State" "$tmp_dir/" 2>/dev/null || true
 
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
         --remote-debugging-port=9222 \
         --user-data-dir="$tmp_dir" \
+        --profile-directory="$profile_name" \
         --no-first-run \
         --disable-default-apps \
         --disable-popup-blocking \
