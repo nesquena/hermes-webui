@@ -79,6 +79,6 @@ def test_child_session_open_uses_is_external_session():
     """Child session open handler must use _isExternalSession."""
     js = _read_js()
     assert re.search(
-        r'if\s*\(\s*_isExternalSession\s*\(\s*child\s*\)\s*\)',
+        r'if\s*\(\s*_isExternalSession\s*\(\s*(?:child|childSession)\s*\)\s*\)',
         js,
-    ), 'Child session open must use _isExternalSession(child)'
+    ), 'Child session open must use _isExternalSession for the selected child session'

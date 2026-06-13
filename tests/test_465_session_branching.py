@@ -11,22 +11,25 @@ Verifies:
   8. git-branch icon exists in icons.js
 """
 import re
+from pathlib import Path
+
+
+def _read(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8")
 
 
 # ── Backend ────────────────────────────────────────────────────────────────────
 
 def test_branch_endpoint_exists():
     """Verify the POST /api/session/branch route handler exists."""
-    with open('api/routes.py') as f:
-        src = f.read()
+    src = _read('api/routes.py')
     assert '"POST /api/session/branch"' in src or '"/api/session/branch"' in src, \
         "Missing /api/session/branch route"
 
 
 def test_branch_endpoint_validates_session_id():
     """Verify the branch endpoint requires session_id."""
-    with open('api/routes.py') as f:
-        src = f.read()
+    src = _read('api/routes.py')
     # Find the branch block
     branch_match = re.search(
         r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
@@ -40,8 +43,7 @@ def test_branch_endpoint_validates_session_id():
 
 def test_branch_endpoint_returns_new_session_id():
     """Verify the branch endpoint returns session_id and title."""
-    with open('api/routes.py') as f:
-        src = f.read()
+    src = _read('api/routes.py')
     branch_match = re.search(
         r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
         src, re.DOTALL
@@ -56,8 +58,7 @@ def test_branch_endpoint_returns_new_session_id():
 
 def test_branch_creates_session_with_parent():
     """Verify the branch creates a Session with parent_session_id set."""
-    with open('api/routes.py') as f:
-        src = f.read()
+    src = _read('api/routes.py')
     branch_match = re.search(
         r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
         src, re.DOTALL
@@ -70,8 +71,7 @@ def test_branch_creates_session_with_parent():
 
 def test_branch_marks_explicit_forks_as_fork_sessions():
     """Explicit branches must not be mistaken for compression lineage rows."""
-    with open('api/routes.py') as f:
-        src = f.read()
+    src = _read('api/routes.py')
     branch_match = re.search(
         r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
         src, re.DOTALL
@@ -83,21 +83,71 @@ def test_branch_marks_explicit_forks_as_fork_sessions():
 
 
 def test_branch_fork_sessions_do_not_collapse_into_parent_lineage():
-    """Forks remain selectable rows even if their parent is not in the current list."""
-    with open('static/sessions.js') as f:
-        src = f.read()
+    """Fork sessions are not collapsed into compression-lineage; guard must remain in _sessionLineageKey."""
+    src = _read('static/sessions.js')
     fn = re.search(r'function _sessionLineageKey\(.*?\n\}', src, re.DOTALL)
     assert fn, "Could not find _sessionLineageKey"
     block = fn.group(0)
     assert "if(s.session_source==='fork') return null;" in block, \
-        "Explicit fork sessions should not collapse via parent_session_id"
+        "Fork guard must remain in _sessionLineageKey to prevent compression-lineage merging"
     assert block.index("if(s.session_source==='fork') return null;") < block.index('return s.parent_session_id || null')
+
+
+def test_branch_fork_sessions_nest_under_parent():
+    """Forks with a resolvable in-list parent are subgrouped via _isForkWithResolvableParent
+    and fed into _attachChildSessionsToSidebarRows, not rendered as flat top-level rows."""
+    src = _read('static/sessions.js')
+    # Helper must exist
+    assert 'function _isForkWithResolvableParent(' in src, \
+        "Missing _isForkWithResolvableParent helper"
+    # _attachChildSessionsToSidebarRows must check for fork children
+    fn = re.search(r'function _attachChildSessionsToSidebarRows\(.*?\n\}', src, re.DOTALL)
+    assert fn, "Could not find _attachChildSessionsToSidebarRows"
+    block = fn.group(0)
+    assert '_isForkWithResolvableParent' in block, \
+        "_attachChildSessionsToSidebarRows must route fork children via _isForkWithResolvableParent"
+    # _resolveSessionIdFromSidebarLineage must no longer skip fork rows wholesale
+    resolve_fn = re.search(
+        r'function _resolveSessionIdFromSidebarLineage\(.*?\n\}', src, re.DOTALL)
+    assert resolve_fn, "Could not find _resolveSessionIdFromSidebarLineage"
+    resolve_block = resolve_fn.group(0)
+    assert "row.session_source==='fork'" not in resolve_block, \
+        "_resolveSessionIdFromSidebarLineage must not skip fork rows; they may now be active nested children"
+    assert "!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList))" in block, \
+        "Only unpinned resolvable fork rows should be filtered out of the top-level rows array"
+
+
+def test_branch_nested_fork_rows_keep_session_actions():
+    """Nested fork rows should keep the standard session action menu path."""
+    src = _read('static/sessions.js')
+    assert 'session-child-session-fork' in src, \
+        "Missing fork-specific nested child row path"
+    assert '_openSessionActionMenu(child, menuBtn)' in src, \
+        "Nested fork rows should route the standard session action menu"
+    assert 'row._startRename=_buildSessionRenameStarter(child, mainBtn' in src, \
+        "Nested fork rows should expose the same rename entry point as top-level rows"
+
+
+def test_branch_nested_fork_search_results_auto_expand():
+    """Nested fork hits should stay visible while sidebar search is active."""
+    src = _read('static/sessions.js')
+    assert "(_expandedChildSessionKeys.has(lineageKey)||!!searchQueryRaw)" in src, \
+        "Search-active fork matches should auto-expand their nested child group"
+
+
+def test_branch_nested_fork_rows_render_their_own_state_indicator():
+    """Expanded fork rows should keep unread/streaming/attention affordances."""
+    src = _read('static/sessions.js')
+    css = _read('static/style.css')
+    assert "session-state-indicator session-child-session-state" in src, \
+        "Nested fork rows should render a per-row state indicator"
+    assert "session-child-session-fork.streaming" in css, \
+        "Nested fork rows should expose row-level streaming styling"
 
 
 def test_branch_keep_count_support():
     """Verify the branch endpoint supports keep_count parameter."""
-    with open('api/routes.py') as f:
-        src = f.read()
+    src = _read('api/routes.py')
     branch_match = re.search(
         r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
         src, re.DOTALL
@@ -111,8 +161,7 @@ def test_branch_keep_count_support():
 
 def test_branch_auto_title():
     """Verify fork title defaults to '<original> (fork)'."""
-    with open('api/routes.py') as f:
-        src = f.read()
+    src = _read('api/routes.py')
     branch_match = re.search(
         r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
         src, re.DOTALL
@@ -126,8 +175,7 @@ def test_branch_auto_title():
 
 def test_session_model_parent_session_id():
     """Verify Session model supports parent_session_id."""
-    with open('api/models.py') as f:
-        src = f.read()
+    src = _read('api/models.py')
     assert 'parent_session_id' in src, "Session model should have parent_session_id"
     # Check __init__ parameter
     assert 'parent_session_id: str=None' in src, \
@@ -139,8 +187,7 @@ def test_session_model_parent_session_id():
 
 def test_session_compact_includes_parent():
     """Verify compact() includes parent_session_id."""
-    with open('api/models.py') as f:
-        src = f.read()
+    src = _read('api/models.py')
     # Find the compact method and scan its full body for parent_session_id.
     # PR #1591 (May 2026) added a has_pending_user_message recompute block at
     # the top of compact() which pushed the parent_session_id field beyond a
@@ -155,8 +202,7 @@ def test_session_compact_includes_parent():
 
 def test_session_metadata_fields_includes_parent():
     """Verify parent_session_id is in METADATA_FIELDS for persistence."""
-    with open('api/models.py') as f:
-        src = f.read()
+    src = _read('api/models.py')
     assert "'parent_session_id'" in src, \
         "METADATA_FIELDS should include parent_session_id"
 
@@ -165,24 +211,21 @@ def test_session_metadata_fields_includes_parent():
 
 def test_branch_slash_command_registered():
     """Verify /branch is registered as a slash command."""
-    with open('static/commands.js') as f:
-        src = f.read()
+    src = _read('static/commands.js')
     assert "name:'branch'" in src, "/branch should be registered as a command"
     assert 'cmdBranch' in src, "cmdBranch handler should be defined"
 
 
 def test_cmdBranch_function_exists():
     """Verify cmdBranch function is defined."""
-    with open('static/commands.js') as f:
-        src = f.read()
+    src = _read('static/commands.js')
     assert 'async function cmdBranch(' in src, \
         "cmdBranch should be an async function"
 
 
 def test_cmdBranch_calls_branch_endpoint():
     """Verify cmdBranch calls the /api/session/branch endpoint."""
-    with open('static/commands.js') as f:
-        src = f.read()
+    src = _read('static/commands.js')
     branch_fn = re.search(r'async function cmdBranch\(.*?\n\}', src, re.DOTALL)
     assert branch_fn, "Could not find cmdBranch function"
     block = branch_fn.group(0)
@@ -192,8 +235,7 @@ def test_cmdBranch_calls_branch_endpoint():
 
 def test_cmdBranch_switches_session():
     """Verify cmdBranch calls loadSession after branching."""
-    with open('static/commands.js') as f:
-        src = f.read()
+    src = _read('static/commands.js')
     branch_fn = re.search(r'async function cmdBranch\(.*?\n\}', src, re.DOTALL)
     assert branch_fn
     block = branch_fn.group(0)
@@ -205,16 +247,14 @@ def test_cmdBranch_switches_session():
 
 def test_forkFromMessage_function_exists():
     """Verify forkFromMessage function exists."""
-    with open('static/commands.js') as f:
-        src = f.read()
+    src = _read('static/commands.js')
     assert 'async function forkFromMessage(' in src, \
         "forkFromMessage should be defined"
 
 
 def test_forkFromMessage_passes_keep_count():
     """Verify forkFromMessage passes keep_count to the endpoint."""
-    with open('static/commands.js') as f:
-        src = f.read()
+    src = _read('static/commands.js')
     fn = re.search(r'async function forkFromMessage\(.*?\n\}', src, re.DOTALL)
     assert fn
     block = fn.group(0)
@@ -226,8 +266,7 @@ def test_forkFromMessage_passes_keep_count():
 
 def test_fork_button_rendered_in_ui():
     """Verify fork button is rendered in message actions."""
-    with open('static/ui.js') as f:
-        src = f.read()
+    src = _read('static/ui.js')
     assert "forkBtn" in src, "forkBtn variable should exist in ui.js"
     assert "fork_from_here" in src, \
         "fork_from_here i18n key should be referenced for tooltip"
@@ -237,8 +276,7 @@ def test_fork_button_rendered_in_ui():
 
 def test_fork_button_in_message_actions():
     """Verify fork button is included in the msg-actions span."""
-    with open('static/ui.js') as f:
-        src = f.read()
+    src = _read('static/ui.js')
     # The footHtml template should include forkBtn
     assert '${forkBtn}' in src, \
         "forkBtn should be included in message actions template"
@@ -248,8 +286,7 @@ def test_fork_button_in_message_actions():
 
 def test_sidebar_parent_indicator():
     """Verify parent session indicator is rendered in session list."""
-    with open('static/sessions.js') as f:
-        src = f.read()
+    src = _read('static/sessions.js')
     assert 'parent_session_id' in src, \
         "sessions.js should check parent_session_id"
     assert 'session-branch-indicator' in src, \
@@ -262,8 +299,7 @@ def test_sidebar_parent_indicator():
 
 def test_parent_indicator_not_clickable():
     """Verify parent indicator is informational, not hidden navigation."""
-    with open('static/sessions.js') as f:
-        src = f.read()
+    src = _read('static/sessions.js')
     # Find the parent indicator block
     parent_block = re.search(
         r'branch-indicator[\s\S]*?parent_session_id[\s\S]*?titleRow\.appendChild',
@@ -279,8 +315,7 @@ def test_parent_indicator_not_clickable():
 
 def test_parent_indicator_tooltip_uses_parent_title_fallback():
     """Tooltip should prefer a parent title and only fall back to a short id."""
-    with open('static/sessions.js') as f:
-        src = f.read()
+    src = _read('static/sessions.js')
     assert 'function _sessionTitleForForkParent' in src, \
         "sessions.js should resolve a user-facing parent title"
     assert 'function _truncatedSessionId' in src, \
@@ -291,8 +326,7 @@ def test_parent_indicator_tooltip_uses_parent_title_fallback():
 
 def test_parent_indicator_hover_only_style():
     """The sidebar lineage indicator should be visually subdued until row hover/focus."""
-    with open('static/style.css') as f:
-        src = f.read()
+    src = _read('static/style.css')
     assert '.session-branch-indicator' in src, \
         "Missing session branch indicator CSS"
     assert 'opacity:.35' in src, \
@@ -305,8 +339,7 @@ def test_parent_indicator_hover_only_style():
 
 def test_i18n_branch_keys():
     """Verify all branch-related i18n keys exist in English locale."""
-    with open('static/i18n.js') as f:
-        src = f.read()
+    src = _read('static/i18n.js')
     required_keys = [
         'cmd_branch',
         'cmd_branch_usage',
@@ -324,7 +357,6 @@ def test_i18n_branch_keys():
 
 def test_git_branch_icon_exists():
     """Verify git-branch icon is defined in icons.js."""
-    with open('static/icons.js') as f:
-        src = f.read()
+    src = _read('static/icons.js')
     assert "'git-branch'" in src, \
         "git-branch icon should be defined in LI_PATHS"
