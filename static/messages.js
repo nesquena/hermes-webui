@@ -892,7 +892,7 @@ async function send(){
   }
   _sendInProgress = true;
   try{
-  const text=$('msg').value.trim();
+  let text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
@@ -969,6 +969,7 @@ async function send(){
     if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
     return;
   }
+  let _slashDisplayTextOverride=null;
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -998,6 +999,26 @@ async function send(){
       }
     }
     if(_parsedCmd&&!_cmd){
+      const _bundleCmd=typeof getBundleCommandMetadata==='function'
+        ? await getBundleCommandMetadata(_parsedCmd.name)
+        : null;
+      if(_bundleCmd){
+        try{
+          const _bundleResolved=typeof resolveBundleCommand==='function'
+            ? await resolveBundleCommand(text,_bundleCmd)
+            : null;
+          const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
+          if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
+          _slashDisplayTextOverride=text;
+          text=_bundleMessage;
+        }catch(e){
+          if(!S.session){await newSession();await renderSessionList();}
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
+          renderMessages();
+          $('msg').value='';autoResize();hideCmdDropdown();return;
+        }
+      }
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
@@ -1087,7 +1108,7 @@ async function send(){
   $('msg').value='';autoResize();
   // Clear persisted composer draft since message was sent.
   if (activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);
-  const displayText=text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
+  const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn

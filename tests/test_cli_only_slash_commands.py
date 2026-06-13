@@ -52,6 +52,13 @@ def test_frontend_fetches_agent_command_metadata_lazily():
     assert "_agentCommandCache" in COMMANDS_JS
 
 
+def test_frontend_fetches_bundle_command_metadata_lazily():
+    assert "async function loadBundleCommands" in COMMANDS_JS
+    assert "async function getBundleCommandMetadata" in COMMANDS_JS
+    assert "api('/api/commands/bundles')" in COMMANDS_JS
+    assert "_bundleCommandCache" in COMMANDS_JS
+
+
 def test_frontend_matches_agent_command_aliases():
     helper_idx = COMMANDS_JS.find("async function getAgentCommandMetadata")
     assert helper_idx != -1
@@ -127,6 +134,22 @@ def _run_commands_js(script_body: str) -> dict:
                   aliases: ['reload_skills'],
                   cli_only: false,
                   gateway_only: false
+                }}
+              ]
+            }};
+            if (path === '/api/commands/bundles') return {{
+              bundles: [
+                {{
+                  name: 'handoff',
+                  description: 'Bundle collision should stay hidden behind reserved slash names',
+                  skill_count: 2,
+                  source: 'bundle'
+                }},
+                {{
+                  name: 'incident-review',
+                  description: 'Bundle should beat a same-slug plain skill',
+                  skill_count: 3,
+                  source: 'bundle'
                 }}
               ]
             }};
@@ -208,10 +231,33 @@ def test_cli_only_response_helper_uses_canonical_command_name():
     assert "configured server-side" in result["response"]
 
 
+def test_bundle_command_metadata_helper_resolves_known_bundle():
+    result = _run_commands_js(
+        """
+        const bundle = await getBundleCommandMetadata('incident-review');
+        const missing = await getBundleCommandMetadata('does-not-exist');
+        return {
+          by_name: bundle && bundle.name,
+          source: bundle && bundle.source,
+          skill_count: bundle && bundle.skillCount,
+          missing: missing === null
+        };
+        """
+    )
+
+    assert result == {
+        "by_name": "incident-review",
+        "source": "bundle",
+        "skill_count": 3,
+        "missing": True,
+    }
+
+
 def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
     result = _run_commands_js(
         """
         await loadAgentCommandMetadata(true);
+        await loadBundleCommands(true);
         await loadSkillCommands(true);
         const handoff = await getSlashAutocompleteMatches('/handoff');
         const delegate = await getSlashAutocompleteMatches('/delegate');
@@ -222,6 +268,7 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
           handoff_names: handoff.map(item => item.name),
           delegate_names: delegate.map(item => item.name),
           incident_names: incident.map(item => item.name),
+          incident_sources: incident.map(item => item.source),
           skills_names: skills.map(item => item.name),
           use_names: use.map(item => item.name)
         };
@@ -231,6 +278,7 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
     assert result["handoff_names"] == []
     assert result["delegate_names"] == []
     assert result["incident_names"] == ["incident-review"]
+    assert result["incident_sources"] == ["bundle"]
     assert "skills" in result["skills_names"]
     assert "use" in result["use_names"]
 
@@ -246,6 +294,18 @@ def test_send_intercepts_cli_only_commands_before_agent_round_trip():
     assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
     assert "cliOnlyCommandResponse(_parsedCmd.name,_agentCmd)" in intercept
     assert "return;" in intercept
+
+
+def test_send_intercepts_bundle_commands_before_agent_round_trip():
+    intercept_idx = MESSAGES_JS.find("Slash command intercept")
+    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    assert normal_send_idx != -1
+    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
+
+    assert "await getBundleCommandMetadata(_parsedCmd.name)" in intercept
+    assert "await resolveBundleCommand(text,_bundleCmd)" in intercept
+    assert "_slashDisplayTextOverride=text;" in intercept
+    assert "text=_bundleMessage;" in intercept
 
 
 def test_send_intercepts_reload_mcp_agent_command_before_agent_round_trip():
@@ -315,6 +375,7 @@ def test_unknown_slash_commands_still_fall_through_to_agent():
     normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
+    assert "if(_bundleCmd){" in intercept
     assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
     assert "if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" in intercept
     assert "if(_agentCmd&&_agentCmd.category==='Plugin')" in intercept
