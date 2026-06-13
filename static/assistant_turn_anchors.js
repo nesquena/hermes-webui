@@ -1,8 +1,8 @@
 // Stable Assistant Turn Anchors scaffold (#3926).
 //
 // This file is intentionally inert: it defines the current ownership inventory,
-// event classifications, and small pure helpers, but it does not register
-// anchors or change any renderer. Later phases can wire these helpers into
+// event classifications, and small owner helpers, but it does not register
+// anchors globally or change any renderer. Later phases can wire these helpers into
 // send(), attachLiveStream(), replay hydration, and renderMessages().
 (function(){
   const ROOT=(typeof window!=='undefined')?window:globalThis;
@@ -113,6 +113,40 @@
     'excluded',
   ]);
 
+  const TERMINAL_STATES=Object.freeze({
+    completed:'completed',
+    cancelled:'cancelled',
+    interrupted:'interrupted',
+    no_response:'no_response',
+    tool_limit_reached:'tool_limit_reached',
+    compression_exhausted:'compression_exhausted',
+    connection_lost:'connection_lost',
+    degraded:'degraded',
+    error:'error',
+  });
+
+  const TERMINAL_STATE_ALIASES=Object.freeze({
+    completed:TERMINAL_STATES.completed,
+    complete:TERMINAL_STATES.completed,
+    done:TERMINAL_STATES.completed,
+    cancelled:TERMINAL_STATES.cancelled,
+    canceled:TERMINAL_STATES.cancelled,
+    cancel:TERMINAL_STATES.cancelled,
+    interrupted:TERMINAL_STATES.interrupted,
+    interrupted_by_user:TERMINAL_STATES.interrupted,
+    no_response:TERMINAL_STATES.no_response,
+    no_response_generated:TERMINAL_STATES.no_response,
+    tool_limit_reached:TERMINAL_STATES.tool_limit_reached,
+    max_iterations:TERMINAL_STATES.tool_limit_reached,
+    compression_exhausted:TERMINAL_STATES.compression_exhausted,
+    connection_lost:TERMINAL_STATES.connection_lost,
+    lost_worker_bookkeeping:TERMINAL_STATES.connection_lost,
+    degraded:TERMINAL_STATES.degraded,
+    error:TERMINAL_STATES.error,
+    failed:TERMINAL_STATES.error,
+    apperror:TERMINAL_STATES.error,
+  });
+
   const UNSAFE_OBJECT_KEYS=Object.freeze([
     '__proto__',
     'constructor',
@@ -142,6 +176,20 @@
 
   function _cleanString(value){
     return typeof value==='string'?value.trim():'';
+  }
+
+  function _terminalStateKey(value){
+    return _cleanString(value).toLowerCase().replace(/[\s-]+/g,'_');
+  }
+
+  function normalizeAssistantTurnAnchorTerminalState(value, fallback){
+    const key=_terminalStateKey(value);
+    if(key&&_hasOwn(TERMINAL_STATE_ALIASES,key)) return TERMINAL_STATE_ALIASES[key];
+    const fallbackKey=_terminalStateKey(fallback);
+    if(fallbackKey&&_hasOwn(TERMINAL_STATE_ALIASES,fallbackKey)){
+      return TERMINAL_STATE_ALIASES[fallbackKey];
+    }
+    return null;
   }
 
   function _coercePayload(value){
@@ -242,14 +290,16 @@
   }
 
   function _statusForSourceEvent(sourceType, kind, payload){
-    const explicit=_cleanString(payload&&(payload.status||payload.state||payload.phase));
-    if(explicit) return explicit;
+    const explicit=_cleanString(_firstOwn(payload,['status','state','phase']));
+    if(explicit){
+      return kind==='terminal_status'
+        ?normalizeAssistantTurnAnchorTerminalState(explicit,sourceType)||explicit
+        :explicit;
+    }
     if(kind==='tool_started') return 'running';
-    if(kind==='tool_completed') return payload&&payload.is_error?'error':'completed';
+    if(kind==='tool_completed') return _own(payload,'is_error')?'error':'completed';
     if(kind==='terminal_status'){
-      if(sourceType==='done') return 'completed';
-      if(sourceType==='cancel') return 'cancelled';
-      return 'error';
+      return normalizeAssistantTurnAnchorTerminalState(sourceType)||TERMINAL_STATES.error;
     }
     if(kind==='lifecycle_status') return 'running';
     if(kind==='control_boundary') return 'pending';
@@ -280,7 +330,8 @@
     if(runId&&seq) return 'run_seq:'+JSON.stringify([runId,seq]);
     const sid=_cleanString(_own(event,'session_id'));
     const localId=_cleanString(_own(event,'local_id'));
-    if(sid&&localId) return 'local:'+JSON.stringify([sid,localId]);
+    const sourceType=_cleanString(_own(event,'source_event_type'))||'event';
+    if(sid&&localId&&seq&&seq!=='pending') return 'local:'+JSON.stringify([sid,sourceType,localId,seq]);
     return '';
   }
 
@@ -374,6 +425,277 @@
     return out;
   }
 
+  function _copyObject(value){
+    if(!value||typeof value!=='object'||Array.isArray(value)) return {};
+    return {...value};
+  }
+
+  function _frozenIdentityCopy(identity){
+    const refs=Array.isArray(identity&&identity.source_message_refs)
+      ?identity.source_message_refs.slice()
+      :[];
+    return Object.freeze({
+      ..._copyObject(identity),
+      source_message_refs:Object.freeze(refs),
+    });
+  }
+
+  function _registryAnchor(registry){
+    return registry&&typeof registry==='object'&&registry.anchor&&typeof registry.anchor==='object'
+      ?registry.anchor
+      :null;
+  }
+
+  function _registryContext(registry, context){
+    const anchor=_registryAnchor(registry);
+    const identity=anchor&&anchor.identity?anchor.identity:{};
+    return {
+      ..._copyObject(context),
+      session_id:_cleanString(_own(identity,'session_id'))||_cleanString(_own(context,'session_id')),
+      turn_id:_cleanString(_own(identity,'turn_id'))||_cleanString(_own(context,'turn_id')),
+      run_id:_cleanString(_own(identity,'run_id'))||_cleanString(_own(context,'run_id')),
+      stream_id:_cleanString(_own(identity,'stream_id'))||_cleanString(_own(context,'stream_id')),
+    };
+  }
+
+  function _eventBelongsToAnchor(anchor, event){
+    const identity=anchor.identity||{};
+    const sessionId=_cleanString(_own(event,'session_id'));
+    const identitySessionId=_cleanString(_own(identity,'session_id'));
+    if(sessionId&&identitySessionId&&sessionId!==identitySessionId) return false;
+    const turnId=_cleanString(_own(event,'turn_id'));
+    const identityTurnId=_cleanString(_own(identity,'turn_id'));
+    if(turnId&&identityTurnId&&turnId!==identityTurnId) return false;
+    const runId=_cleanString(_own(event,'run_id'));
+    const identityRunId=_cleanString(_own(identity,'run_id'));
+    if(runId&&identityRunId&&runId!==identityRunId) return false;
+    return true;
+  }
+
+  function _ensureDedupeKeySet(eventIndex){
+    const existing=eventIndex.dedupe_key_set;
+    if(existing instanceof Set) return existing;
+    const set=new Set(Array.isArray(eventIndex.dedupe_keys)?eventIndex.dedupe_keys:[]);
+    Object.defineProperty(eventIndex,'dedupe_key_set',{
+      value:set,
+      enumerable:false,
+      configurable:true,
+      writable:true,
+    });
+    return set;
+  }
+
+  function _ensureRegistryShape(registry){
+    const anchor=_registryAnchor(registry);
+    if(!anchor) throw new Error('assistant turn anchor registry requires anchor');
+    registry.event_index=registry.event_index&&typeof registry.event_index==='object'
+      ?registry.event_index
+      :{};
+    if(!Array.isArray(registry.event_index.dedupe_keys)) registry.event_index.dedupe_keys=[];
+    registry.stats=registry.stats&&typeof registry.stats==='object'?registry.stats:{};
+    registry.stats.applied=Number(registry.stats.applied)||0;
+    registry.stats.skipped_duplicate=Number(registry.stats.skipped_duplicate)||0;
+    registry.stats.skipped_excluded=Number(registry.stats.skipped_excluded)||0;
+    registry.stats.skipped_mismatched=Number(registry.stats.skipped_mismatched)||0;
+    if(!Array.isArray(anchor.metadata_events)) anchor.metadata_events=[];
+    if(!Array.isArray(anchor.transport_events)) anchor.transport_events=[];
+    _ensureDedupeKeySet(registry.event_index);
+    return anchor;
+  }
+
+  function _syncAnchorIdentity(anchor, event){
+    const identity=anchor.identity||{};
+    const runId=_cleanString(_own(event,'run_id'));
+    const streamId=_cleanString(_own(event,'stream_id'));
+    if(!_cleanString(_own(identity,'run_id'))&&runId) identity.run_id=runId;
+    if(!_cleanString(_own(identity,'stream_id'))&&streamId) identity.stream_id=streamId;
+  }
+
+  function _textFromContentValue(value){
+    if(typeof value==='string') return value;
+    if(Array.isArray(value)){
+      return value.map((item)=>{
+        if(typeof item==='string') return item;
+        if(!item||typeof item!=='object') return '';
+        const text=_firstOwn(item,['text','content']);
+        return typeof text==='string'?text:'';
+      }).join('');
+    }
+    if(value&&typeof value==='object'){
+      const text=_firstOwn(value,['text','content']);
+      return typeof text==='string'?text:'';
+    }
+    return '';
+  }
+
+  function _firstTextValue(...values){
+    for(let i=0;i<values.length;i+=1){
+      const value=_textFromContentValue(values[i]);
+      if(value.length>0) return value;
+    }
+    return '';
+  }
+
+  function _messageRefFromPayload(payload, event){
+    return _firstTextValue(
+      _firstOwn(payload,['message_id','id','local_id']),
+      _firstOwn(event,['local_id','event_id'])
+    )||null;
+  }
+
+  function _updateLifecycleFromEvent(anchor, event){
+    const lifecycle=anchor.lifecycle||{};
+    const createdAt=_own(event,'created_at');
+    const status=_cleanString(_own(event,'status'));
+    const kind=_cleanString(_own(event,'kind'));
+    if(!lifecycle.started_at&&createdAt) lifecycle.started_at=createdAt;
+    if((!lifecycle.status||lifecycle.status==='created')&&status==='running'){
+      lifecycle.status='running';
+    }
+    if(kind==='terminal_status'){
+      const terminal=normalizeAssistantTurnAnchorTerminalState(
+        status,
+        _own(event,'source_event_type')
+      )||TERMINAL_STATES.completed;
+      lifecycle.status=terminal;
+      lifecycle.terminal_state=terminal;
+      lifecycle.completed_at=createdAt||lifecycle.completed_at||null;
+    }
+    anchor.lifecycle=lifecycle;
+  }
+
+  function _updateContentFromMetadata(anchor, event){
+    const payload=_own(event,'payload')||{};
+    const sourceType=_cleanString(_own(event,'source_event_type'));
+    if(sourceType==='usage'){
+      anchor.usage=_copyObject(payload);
+      return;
+    }
+    if(sourceType!=='settled_message') return;
+    const role=_cleanString(_own(payload,'role'));
+    if(role&&role!=='assistant') return;
+    const finalAnswer=_firstTextValue(
+      _own(payload,'content'),
+      _own(payload,'text'),
+      _own(payload,'final_answer'),
+      _own(payload,'answer')
+    );
+    if(finalAnswer){
+      anchor.content=anchor.content||{};
+      anchor.content.final_answer=finalAnswer;
+      anchor.content.final_message_ref=_messageRefFromPayload(payload,event);
+    }
+    const usage=_own(payload,'usage');
+    const turnUsage=_own(payload,'_turnUsage');
+    if(usage&&typeof usage==='object') anchor.usage=_copyObject(usage);
+    if(turnUsage&&typeof turnUsage==='object') anchor.usage=_copyObject(turnUsage);
+  }
+
+  function _routeAnchorEvent(anchor, normalized){
+    const event=_own(normalized,'anchor_event');
+    const classification=_cleanString(_own(normalized,'classification'));
+    if(classification==='activity'){
+      anchor.activity_events.push(event);
+      _updateLifecycleFromEvent(anchor,event);
+    }else if(classification==='artifact'){
+      anchor.artifacts.push(event);
+    }else if(classification==='side_effect'){
+      anchor.side_effects.push(event);
+    }else if(classification==='metadata'){
+      anchor.metadata_events.push(event);
+      _updateContentFromMetadata(anchor,event);
+    }else if(classification==='transport'){
+      anchor.transport_events.push(event);
+    }
+  }
+
+  function applyAssistantTurnAnchorNormalizedEvent(registry, normalized){
+    const anchor=_ensureRegistryShape(registry);
+    const item=(normalized&&typeof normalized==='object')?normalized:{};
+    const event=_own(item,'anchor_event');
+    if(!event){
+      registry.stats.skipped_excluded+=1;
+      return Object.freeze({applied:false,reason:'excluded',normalized:item});
+    }
+    if(!_eventBelongsToAnchor(anchor,event)){
+      registry.stats.skipped_mismatched+=1;
+      return Object.freeze({applied:false,reason:'mismatched_anchor',normalized:item});
+    }
+    const dedupeKey=_cleanString(_own(item,'dedupe_key'))||assistantTurnAnchorEventDedupeKey(event);
+    const dedupeKeySet=_ensureDedupeKeySet(registry.event_index);
+    if(dedupeKey&&dedupeKeySet.has(dedupeKey)){
+      registry.stats.skipped_duplicate+=1;
+      return Object.freeze({applied:false,reason:'duplicate',normalized:item});
+    }
+    if(dedupeKey){
+      dedupeKeySet.add(dedupeKey);
+      registry.event_index.dedupe_keys.push(dedupeKey);
+    }
+    _syncAnchorIdentity(anchor,event);
+    _routeAnchorEvent(anchor,item);
+    registry.stats.applied+=1;
+    return Object.freeze({applied:true,reason:null,normalized:item});
+  }
+
+  function applyAssistantTurnAnchorSourceEvent(registry, input, context){
+    const normalized=normalizeAssistantTurnAnchorSourceEvent(input,_registryContext(registry,context));
+    return applyAssistantTurnAnchorNormalizedEvent(registry,normalized);
+  }
+
+  function applyAssistantTurnAnchorSourceEvents(registry, events, context){
+    const list=Array.isArray(events)?events:[];
+    return list.map((event)=>applyAssistantTurnAnchorSourceEvent(registry,event,context));
+  }
+
+  function _eventsForShadowSource(sources, primaryKey, fallbackKey){
+    if(!sources||typeof sources!=='object') return [];
+    const primary=sources[primaryKey];
+    if(Array.isArray(primary)) return primary;
+    const fallback=fallbackKey?sources[fallbackKey]:null;
+    return Array.isArray(fallback)?fallback:[];
+  }
+
+  function _shadowSourceContext(context, sourceLayer){
+    return {
+      ..._copyObject(context),
+      source_layer:sourceLayer,
+    };
+  }
+
+  function createAssistantTurnAnchorShadowSnapshot(input){
+    const opts=(input&&typeof input==='object')?input:{};
+    const anchorInput=(opts.anchor&&typeof opts.anchor==='object')?opts.anchor:opts;
+    const sources=(opts.sources&&typeof opts.sources==='object')?opts.sources:opts;
+    const context=(opts.context&&typeof opts.context==='object')?opts.context:{};
+    const registry=createAssistantTurnAnchorRegistry(anchorInput);
+    const results={
+      live:applyAssistantTurnAnchorSourceEvents(
+        registry,
+        _eventsForShadowSource(sources,'live_events'),
+        _shadowSourceContext(context,'live')
+      ),
+      replay:applyAssistantTurnAnchorSourceEvents(
+        registry,
+        _eventsForShadowSource(sources,'replay_events','run_journal_events'),
+        _shadowSourceContext(context,'replay')
+      ),
+      settled:applyAssistantTurnAnchorSourceEvents(
+        registry,
+        _eventsForShadowSource(sources,'settled_events'),
+        _shadowSourceContext(context,'settled')
+      ),
+      inflight:applyAssistantTurnAnchorSourceEvents(
+        registry,
+        _eventsForShadowSource(sources,'inflight_events'),
+        _shadowSourceContext(context,'inflight')
+      ),
+    };
+    return Object.freeze({
+      registry,
+      results:Object.freeze(results),
+    });
+  }
+
   function createAssistantTurnAnchorSeed(input){
     const opts=(input&&typeof input==='object')?input:{};
     const sessionId=_cleanString(opts.session_id);
@@ -407,26 +729,49 @@
       activity_events:[],
       artifacts:[],
       side_effects:[],
+      metadata_events:[],
+      transport_events:[],
       usage:null,
-      presentation_state:{
-        compact_worklog:{expanded:false},
-        transparent_stream:{expanded:false},
-        scroll:{follow:true},
-      },
     };
   }
 
+  function createAssistantTurnAnchorRegistry(input){
+    const anchor=createAssistantTurnAnchorSeed(input);
+    const registry={
+      identity:_frozenIdentityCopy(anchor.identity),
+      anchor,
+      event_index:{
+        dedupe_keys:[],
+      },
+      stats:{
+        applied:0,
+        skipped_duplicate:0,
+        skipped_excluded:0,
+        skipped_mismatched:0,
+      },
+    };
+    _ensureDedupeKeySet(registry.event_index);
+    return registry;
+  }
+
   ROOT.HermesAssistantTurnAnchors=Object.freeze({
-    version:'slice2-normalizer',
+    version:'slice3-registry-shadow',
     activityEventKinds:ACTIVITY_EVENT_KINDS,
     stateLayers:STATE_LAYERS,
     sourceEventClassification:SOURCE_EVENT_CLASSIFICATION,
     classificationOrder:CLASSIFICATION_ORDER,
+    terminalStates:TERMINAL_STATES,
     createAssistantTurnAnchorSeed,
+    normalizeAssistantTurnAnchorTerminalState,
     assistantTurnAnchorEventDedupeKey,
     classifyAssistantTurnAnchorSourceEvent,
     normalizeAssistantTurnAnchorSourceEvent,
     normalizeAssistantTurnAnchorSourceEvents,
+    createAssistantTurnAnchorRegistry,
+    applyAssistantTurnAnchorNormalizedEvent,
+    applyAssistantTurnAnchorSourceEvent,
+    applyAssistantTurnAnchorSourceEvents,
+    createAssistantTurnAnchorShadowSnapshot,
     isAssistantTurnAnchorActivityKind,
   });
 })();
