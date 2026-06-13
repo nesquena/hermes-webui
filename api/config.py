@@ -2361,7 +2361,8 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 # Mirrors hermes_constants.parse_reasoning_effort so WebUI can validate without
 # importing from the agent tree (which may not be installed).  Any drift here
 # will show up in the shared test suite since both sides accept the same set.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+# Keep this WebUI-visible set aligned with hermes-agent#29248.
+VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 
 def parse_reasoning_effort(effort):
@@ -2652,6 +2653,9 @@ def coerce_reasoning_effort_for_model(
         return ""
     if raw == "none":
         return "none"
+    accepts_max_as_xhigh = raw == "max"
+    if accepts_max_as_xhigh:
+        raw = "xhigh"
     if raw not in VALID_REASONING_EFFORTS:
         return ""
     supported = resolve_model_reasoning_efforts(
@@ -2671,9 +2675,9 @@ def coerce_reasoning_effort_for_model(
     # the final authority. Worst case is the same rejected request that master
     # already produces, i.e. no regression. (#3505 review)
     if not supported:
-        return raw
+        return "max" if accepts_max_as_xhigh else raw
     if raw in supported:
-        return raw
+        return "xhigh" if accepts_max_as_xhigh else raw
     # Degrade to the closest *lower* supported level instead of silently
     # disabling reasoning. e.g. max -> xhigh -> high, or xhigh -> high when the
     # target model caps below the configured effort. Never escalate.
