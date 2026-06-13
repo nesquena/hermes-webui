@@ -73,6 +73,7 @@ class TestMermaidLightboxCss:
         src = _style_css()
         rule = ".img-lightbox .mermaid-lightbox-svg{max-width:90vw;max-height:90vh;"
         assert rule in src
+        assert "background:var(--code-bg);" in src
 
 
 class TestLightboxAria:
