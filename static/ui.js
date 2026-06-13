@@ -11159,8 +11159,33 @@ function loadDiffInline(container){
   });
 }
 
+const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
+
+function buildCsvTablePreview(path, text){
+  if(typeof text!=='string') return {errorKey:'csv_error'};
+  if(text.length>CSV_MAX_SIZE) return {errorKey:'csv_too_large'};
+  const rows=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(r=>r.trim());
+  if(rows.length<2) return {errorKey:'csv_no_data'};
+  // Auto-detect separator (comma, semicolon, tab)
+  // Heuristic: uses the first separator found in the header row. Edge case:
+  // quoted fields containing commas without non-quoted commas in the header
+  // could cause misdetection — acceptable trade-off for a preview renderer.
+  const firstLine=rows[0];
+  const separators=[',',';','\t'];
+  const sep=separators.find(s=>firstLine.includes(s))||',';
+  const headers=rows[0].split(sep).map(c=>c.trim().replace(/^["']|["']$/g,''));
+  const bodyRows=rows.slice(1).map(r=>'<tr>'+r.split(sep).map(c=>`<td>${esc(c.trim().replace(/^["']|["']$/g,''))}</td>`).join('')+'</tr>').join('');
+  const headerRow=headers.map(h=>`<th>${esc(h)}</th>`).join('');
+  return {
+    html:`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())} <span style="opacity:.5;font-size:11px">${t('csv_header_note')}</span></div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`,
+  };
+}
+
+function _csvPreviewErrorHtml(path, errorKey){
+  return `<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
+}
+
 function loadCsvInline(container){
-  const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
   const root=container||document;
   root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
@@ -11168,29 +11193,11 @@ function loadCsvInline(container){
     fetch('api/media?path='+encodeURIComponent(path))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
-        if(text.length>CSV_MAX_SIZE){
-          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_too_large')}</span></div>`;
-          return;
-        }
-        const rows=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(r=>r.trim());
-        if(rows.length<2){
-          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_no_data')}</span></div>`;
-          return;
-        }
-        // Auto-detect separator (comma, semicolon, tab)
-        // Heuristic: uses the first separator found in the header row. Edge case:
-        // quoted fields containing commas without non-quoted commas in the header
-        // could cause misdetection — acceptable trade-off for a preview renderer.
-        const firstLine=rows[0];
-        const separators=[',',';','\t'];
-        let sep=separators.find(s=>firstLine.includes(s))||',';
-        const headers=rows[0].split(sep).map(c=>c.trim().replace(/^["']|["']$/g,''));
-        const bodyRows=rows.slice(1).map(r=>'<tr>'+r.split(sep).map(c=>`<td>${esc(c.trim().replace(/^["']|["']$/g,''))}</td>`).join('')+'</tr>').join('');
-        const headerRow=headers.map(h=>`<th>${esc(h)}</th>`).join('');
-        el.outerHTML=`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())} <span style="opacity:.5;font-size:11px">${t('csv_header_note')}</span></div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
+        const preview=buildCsvTablePreview(path, text);
+        el.outerHTML=preview.html||_csvPreviewErrorHtml(path, preview.errorKey||'csv_error');
       })
       .catch(()=>{
-        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_error')}</span></div>`;
+        el.outerHTML=_csvPreviewErrorHtml(path, 'csv_error');
       });
   });
 }
