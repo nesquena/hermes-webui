@@ -10281,40 +10281,51 @@ def _handle_vv_voices(handler, parsed=None):
         from api.helpers import bad as _bad
         return _bad(handler, f"Unknown TTS engine: {engine}", 400)
 
-    from api.auth import is_auth_enabled, parse_cookie, verify_session
-    if is_auth_enabled():
-        cv = parse_cookie(handler)
-        if not (cv and verify_session(cv)):
-            from api.helpers import bad as _bad
-            return _bad(handler, "unauthorized", 401)
-
-    try:
-        import requests
-        resp = requests.get("http://127.0.0.1:50021/speakers", timeout=5)
-        resp.raise_for_status()
-        speakers = resp.json()
-        voices = []
-        for s in speakers:
-            for style in s.get("styles", []):
-                voices.append({
-                    "value": str(style["id"]),
-                    "label": f"{s['name']} ({style.get('name', '?')})",
-                })
-        body = json.dumps(
-            {"voices": voices, "engine": engine, "provider": "voicevox"},
-            ensure_ascii=False,
-        ).encode("utf-8")
-        handler.send_response(200)
-        handler.send_header("Content-Type", "application/json; charset=utf-8")
-        handler.send_header("Content-Length", str(len(body)))
-        handler.send_header("Cache-Control", "max-age=3600")
-        handler.end_headers()
-        handler.wfile.write(body)
-        return True
-    except Exception:
-        logger.exception("Failed to fetch VOICEVOX speakers")
+    # Lightweight concurrency guard — prevents a single client from
+    # flooding the endpoint and DoS-ing the local VOICEVOX process.
+    import threading as _threading
+    if not hasattr(_handle_vv_voices, "_limiter"):
+        _handle_vv_voices._limiter = _threading.Semaphore(2)
+    if not _handle_vv_voices._limiter.acquire(blocking=False):
         from api.helpers import bad as _bad
-        return _bad(handler, "VOICEVOX engine not available", 503)
+        return _bad(handler, "too many concurrent voice list requests", 429)
+    try:
+        from api.auth import is_auth_enabled, parse_cookie, verify_session
+        if is_auth_enabled():
+            cv = parse_cookie(handler)
+            if not (cv and verify_session(cv)):
+                from api.helpers import bad as _bad
+                return _bad(handler, "unauthorized", 401)
+
+        try:
+            import requests
+            resp = requests.get("http://127.0.0.1:50021/speakers", timeout=5)
+            resp.raise_for_status()
+            speakers = resp.json()
+            voices = []
+            for s in speakers:
+                for style in s.get("styles", []):
+                    voices.append({
+                        "value": str(style["id"]),
+                        "label": f"{s['name']} ({style.get('name', '?')})",
+                    })
+            body = json.dumps(
+                {"voices": voices, "engine": engine, "provider": "voicevox"},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json; charset=utf-8")
+            handler.send_header("Content-Length", str(len(body)))
+            handler.send_header("Cache-Control", "max-age=3600")
+            handler.end_headers()
+            handler.wfile.write(body)
+            return True
+        except Exception:
+            logger.exception("Failed to fetch VOICEVOX speakers")
+            from api.helpers import bad as _bad
+            return _bad(handler, "VOICEVOX engine not available", 503)
+    finally:
+        _handle_vv_voices._limiter.release()
 
 
 def _handle_voicevox_tts(handler, text, voice):
@@ -10322,12 +10333,19 @@ def _handle_voicevox_tts(handler, text, voice):
     import subprocess, tempfile, os, threading
     from api.helpers import bad as _bad
 
-    # Per-process concurrency cap: at most 4 simultaneous TTS syntheses
+    # Per-process concurrency cap: at most 4 simultaneous TTS syntheses.
+    # Double-checked locking — avoids the TOCTOU race in the plain hasattr
+    # pattern under multi-threaded dispatch.
     if not hasattr(_handle_voicevox_tts, "_semaphore"):
-        _handle_voicevox_tts._semaphore = threading.Semaphore(4)
+        if not hasattr(_handle_voicevox_tts, "_init_lock"):
+            _handle_voicevox_tts._init_lock = threading.Lock()
+        with _handle_voicevox_tts._init_lock:
+            if not hasattr(_handle_voicevox_tts, "_semaphore"):
+                _handle_voicevox_tts._semaphore = threading.Semaphore(4)
     acquired = _handle_voicevox_tts._semaphore.acquire(blocking=False)
     if not acquired:
         return _bad(handler, "VOICEVOX busy — too many concurrent TTS requests", 503)
+    input_path = wav_path = mp3_path = None
     try:
         voicevox_provider = os.environ.get(
             "VOICEVOX_PROVIDER_PATH",
@@ -10404,6 +10422,13 @@ def _handle_voicevox_tts(handler, text, voice):
         logger.exception("VOICEVOX TTS failed")
         return _bad(handler, "VOICEVOX TTS failed", 500)
     finally:
+        # Clean up temp files — exception paths don't reach the manual unlinks
+        for p in (input_path, wav_path, mp3_path):
+            try:
+                if os.path.exists(p):
+                    os.unlink(p)
+            except OSError:
+                pass
         _handle_voicevox_tts._semaphore.release()
 
 
