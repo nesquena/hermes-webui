@@ -3150,7 +3150,7 @@ function _settleMessageScrollToBottom(force){
   // active one that may now be in the global _settleRO. (Codex review #3.)
   const ro=new ResizeObserver(()=>{
     if(token!==_bottomSettleToken){ ro.disconnect(); if(_settleRO===ro) _settleRO=null; return; }
-    if(!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
+    if(!_autoScrollFollow||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
       ro.disconnect(); if(_settleRO===ro) _settleRO=null;
       _programmaticScroll=false;
       return;
@@ -3183,7 +3183,7 @@ function _settleMessageScrollToBottom(force){
   _settleFinalTimer=setTimeout(()=>{
     if(token!==_bottomSettleToken) return;
     ro.disconnect(); if(_settleRO===ro) _settleRO=null;
-    if(!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){ _programmaticScroll=false; return; }
+    if(!_autoScrollFollow||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){ _programmaticScroll=false; return; }
     _settleFinalScroll(token);
   },2000);
 }
@@ -8648,6 +8648,15 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   }
   if(S.activeStreamId){
     scrollIfPinned();
+    return;
+  }
+  // Auto-follow OFF + the user has scrolled up: don't yank them to the bottom on
+  // an automatic (non-preserve) re-render. This also covers the send() race where
+  // renderMessages() runs before S.activeStreamId is set, so a stream-start
+  // wouldn't otherwise be caught by the scrollIfPinned() branch above. A fresh
+  // session load (not unpinned) still lands at the bottom as expected. (Codex #4006.)
+  if(!_autoScrollFollow && _messageUserUnpinned){
+    _restoreMessageScrollSnapshot(scrollSnapshot);
     return;
   }
   scrollToBottom();
