@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.384] — 2026-06-13 — Release MW (no false streaming / activity-timer reset on session switch, #3900)
+
+### Fixed
+
+- **An idle session no longer shows streaming chrome (Stop/spinner/thinking) right after a sidebar switch, and switching back to a live stream no longer resets its activity timer (#3900).** `loadSession` now clears `S.busy` / `S.activeStreamId` as soon as the session metadata confirms there is no `active_stream_id` — before the async message-load gap — so the previous session's busy flag can't bleed onto an idle chat. On switch-away it snapshots the live-turn DOM before replacing the message pane (seeding an `INFLIGHT` bucket if needed) and restores that HTML on the active-stream return path instead of rebuilding the worklog shell from scratch, so the elapsed timer and live trace survive the round-trip. (#3900)
+
 ## [v0.51.383] — 2026-06-13 — Release MV (desktop tab title keeps active session name on bot-name refresh, #4086)
 
 ### Fixed
@@ -264,6 +270,7 @@
 ### Changed
 
 - **Worklog details settings now align with the live-to-final model.** The old "Activity expanded by default" setting is renamed to **Worklog details** (default folded), the legacy "Compact tool activity" preference is deprecated, and the Worklog renderer stays enabled for older installs that had saved `simplified_tool_calling=false`. (#3400, #3820)
+
 
 ## [v0.51.346] — 2026-06-09 — Release LJ (PWA notification controls)
 

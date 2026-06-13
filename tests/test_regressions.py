@@ -426,7 +426,10 @@ def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
     # INFLIGHT branch must call appendLiveToolCard
-    inflight_idx = src.find("if(INFLIGHT[sid]){")
+    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
+    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
+    # grab the wrong one. (rfind = the substantive restore branch.)
+    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+4200]
     assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
@@ -647,7 +650,10 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
     session switch.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    inflight_idx = src.find("if(INFLIGHT[sid]){")
+    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
+    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
+    # grab the wrong one. (rfind = the substantive restore branch.)
+    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+4200]
     busy_pos = inflight_block.find("S.busy=true;")
@@ -662,7 +668,10 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
 
 def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test_sessions):
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    inflight_idx = src.find("if(INFLIGHT[sid]){")
+    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
+    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
+    # grab the wrong one. (rfind = the substantive restore branch.)
+    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+1200]
 
@@ -756,7 +765,10 @@ def test_loadSession_inflight_sets_active_stream_before_replaying_live_tool_card
     counter drops the previously-seen tools after a focus change.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    inflight_idx = src.find("if(INFLIGHT[sid]){")
+    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
+    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
+    # grab the wrong one. (rfind = the substantive restore branch.)
+    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+4200]
     active_pos = inflight_block.find("S.activeStreamId=activeStreamId;")

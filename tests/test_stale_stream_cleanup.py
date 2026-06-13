@@ -398,13 +398,19 @@ def test_stale_stream_cleanup_does_not_clobber_concurrent_chat_start(monkeypatch
 
 
 def test_frontend_drops_inflight_cache_when_server_session_is_idle():
-    marker = "If the server says the session is idle, discard any browser-side inflight"
+    # #3900/#3899 generalized this block: on an idle server session it now resets
+    # the streaming flags (S.busy/S.activeStreamId) AND drops the inflight cache,
+    # before the async message-load gap. Anchor on the current comment + assert the
+    # (preserved) cache-drop behavior in the now-nested form.
+    marker = "If the server says the session is idle, reset browser-side streaming flags"
     marker_pos = SESSIONS_SRC.index(marker)
-    window = SESSIONS_SRC[marker_pos:marker_pos + 500]
-    assert "if(!activeStreamId&&INFLIGHT[sid])" in window
+    window = SESSIONS_SRC[marker_pos:marker_pos + 900]
+    assert "if(!activeStreamId){" in window
+    assert "S.busy=false" in window
+    assert "S.activeStreamId=null" in window
+    assert "if(INFLIGHT[sid]){" in window
     assert "delete INFLIGHT[sid]" in window
     assert "clearInflightState" in window
-    assert "S.busy=false" in window
 
 
 def test_service_worker_cache_bumped_for_frontend_fix_delivery():
