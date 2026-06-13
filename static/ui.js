@@ -6839,6 +6839,11 @@ function _syncTransparentEventControls(turn){
   bar.setAttribute('data-tool-count',String(toolCount));
   // Wire the Hermes chat name tag toggle for the live turn.
   _wireTransparentTurnToggle(turn);
+  // Apply recency fade so the newest activity stands out while streaming. The
+  // fade helper is internally gated to the live turn, so this no-ops on settled
+  // turns — without this call the fade feature stayed dormant (only ever cleared
+  // from the settled render loop). (Trifecta r2 follow-up.)
+  _applyTransparentRowFading(turn);
 }
 function _rehydrateTransparentStreamDom(root){
   if(!root||!isTransparentStream()) return;
@@ -7008,7 +7013,7 @@ function _attachProgressBar(row, opts){
   // Set the running state from opts or current status.
   const status=String(opts.status||(row.getAttribute('data-event-status')||''));
   const isRunning=(status==='Running'||status==='running');
-  const isCompleted=(status==='Completed'||status==='completed'||status==='Failed'||status==='failed');
+  const isCompleted=(status==='Completed'||status==='completed'||status==='Failed'||status==='failed'||status==='Interrupted'||status==='interrupted');
   if(isRunning) bar.setAttribute('data-progress-running','1');
   else bar.removeAttribute('data-progress-running');
   if(isCompleted){
