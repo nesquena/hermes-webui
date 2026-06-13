@@ -160,6 +160,20 @@ def test_ensure_all_resets_oldest_idx_to_zero():
     )
 
 
+def test_ensure_all_messages_uses_extended_timeout_for_full_history_load():
+    """Full-history loads for fork/export/start-jump can legitimately exceed the API default timeout."""
+    body = _function_body(SESSIONS_JS, "_ensureAllMessagesLoaded")
+    full_history_call = re.search(
+        r"api\((?P<url>`[^`]*messages=1&resolve_model=0[^`]*`)\s*,\s*\{(?P<opts>[^}]*)\}\s*\)",
+        body,
+        re.S,
+    )
+    assert full_history_call, "_ensureAllMessagesLoaded must pass options to the full-history api() call"
+    timeout_match = re.search(r"timeoutMs\s*:\s*(\d+)", full_history_call.group("opts"))
+    assert timeout_match, "Full-history api() call must specify timeoutMs"
+    assert int(timeout_match.group(1)) >= 120000
+
+
 # ---------------------------------------------------------------------------
 # Short-session / full-transcript behaviour preserved
 # ---------------------------------------------------------------------------
