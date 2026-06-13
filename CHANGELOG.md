@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Long final answers no longer snap back to the bottom while you are reading them after a same-session refresh (#4123).** Same-session background refreshes now preserve a reader's current transcript position whenever the viewport is clearly away from the bottom, and they no longer clear the sticky scroll-unpin state before rebuilding the transcript. PWA/mobile remains the easiest reproduction surface, but the fix applies to the shared browser transcript refresh path. (#4123)
+
 ## [v0.51.389] — 2026-06-13 — Release NB (surface dirty-install state in update check, #4085)
 
 ### Fixed
