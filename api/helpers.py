@@ -495,11 +495,36 @@ def read_body(handler) -> dict:
 # ── Profile cookie helpers (issue #798) ─────────────────────────────────────
 
 PROFILE_COOKIE_NAME = 'hermes_profile'
+_PROFILE_COOKIE_ENV = 'HERMES_WEBUI_PROFILE_COOKIE_NAME'
+_LEGACY_PROFILE_COOKIE_ENV = 'WEBUI_PROFILE_COOKIE_NAME'
+_legacy_profile_cookie_warned = False
 
 
 def get_profile_cookie_name() -> str:
-    """Return the cookie name used to persist the active WebUI profile."""
-    return os.getenv('WEBUI_PROFILE_COOKIE_NAME', PROFILE_COOKIE_NAME)
+    """Return the cookie name used to persist the active WebUI profile.
+
+    Honours ``HERMES_WEBUI_PROFILE_COOKIE_NAME`` so multiple WebUI instances
+    sharing a hostname (different ports) can use distinct profile-cookie names
+    instead of trampling each other; browsers scope cookies by host, not
+    host+port (RFC 6265). The original ``WEBUI_PROFILE_COOKIE_NAME`` is still
+    honoured as a deprecated fallback (warned once per process, since this is
+    called on every request).
+    """
+    name = os.getenv(_PROFILE_COOKIE_ENV, '').strip()
+    if name:
+        return name
+    legacy = os.getenv(_LEGACY_PROFILE_COOKIE_ENV, '').strip()
+    if legacy:
+        global _legacy_profile_cookie_warned
+        if not _legacy_profile_cookie_warned:
+            logger.warning(
+                '%s is deprecated; use %s instead.',
+                _LEGACY_PROFILE_COOKIE_ENV,
+                _PROFILE_COOKIE_ENV,
+            )
+            _legacy_profile_cookie_warned = True
+        return legacy
+    return PROFILE_COOKIE_NAME
 
 
 def get_profile_cookie(handler) -> str | None:
