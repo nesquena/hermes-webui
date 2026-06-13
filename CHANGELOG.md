@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.399] — 2026-06-13 — Release NL (per-home provider probe-worker pool, #3787)
+
+### Fixed
+
+- **Concurrent provider-usage probes for the same home no longer spawn O(N) cold subprocesses, and the worker pool is race-safe (#3787).** `_AccountUsageProbeWorker` previously cold-spawned a fresh subprocess whenever its single worker was busy; it now uses a per-home worker pool. Critically, `_get_account_usage_probe_worker()` claims a worker **with its lock already held, inside the pool lock**, eliminating the TOCTOU window where a worker could be popped/closed by cache invalidation between the pool read and the claim (which previously relaunched an untracked subprocess). Cache invalidation flushes workers scoped to the active home (the status cache clears across all homes — an intentional, commented asymmetry). (#3787)
+
 ## [v0.51.398] — 2026-06-13 — Release NK (auto-generate titles for imported CLI sessions, #3987)
 
 ### Fixed
