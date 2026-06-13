@@ -88,6 +88,7 @@ def _persist_generated_session_title(
 ) -> str:
     normalized_title = str(next_title or "").strip()[:80] or "Untitled"
     sid = str(getattr(session, "session_id", "") or "")
+    original_session = session
     with _get_session_agent_lock(sid):
         with LOCK:
             latest = SESSIONS.get(sid)
@@ -100,36 +101,37 @@ def _persist_generated_session_title(
             latest = Session.load(sid)
             if latest is None:
                 raise KeyError(sid)
-        latest = _ensure_full_session_before_mutation(sid, latest)
-        if getattr(latest, "read_only", False):
+        session = _ensure_full_session_before_mutation(sid, latest)
+        if getattr(session, "read_only", False):
             raise PermissionError(f"Session {sid} is read-only")
         if require_default_title:
             latest_meta = {
-                "title": getattr(latest, "title", None),
-                "source_tag": getattr(latest, "source_tag", None),
-                "raw_source": getattr(latest, "raw_source", None),
-                "session_source": getattr(latest, "session_source", None),
-                "source_label": getattr(latest, "source_label", None),
+                "title": getattr(session, "title", None),
+                "source_tag": getattr(session, "source_tag", None),
+                "raw_source": getattr(session, "raw_source", None),
+                "session_source": getattr(session, "session_source", None),
+                "source_label": getattr(session, "source_label", None),
             }
             if not _looks_like_default_cli_title(latest_meta):
-                return latest.title
-        latest.title = normalized_title
+                return session.title
+        session.title = normalized_title
         from api.session_ops import mark_session_title_generated
 
         # mark_session_title_generated sets s.llm_title_generated = True and clears manual_title.
-        mark_session_title_generated(latest)
-        latest.save(touch_updated_at=False)
+        mark_session_title_generated(session)
+        session.save(touch_updated_at=False)
         with LOCK:
-            SESSIONS[sid] = latest
+            SESSIONS[sid] = session
             SESSIONS.move_to_end(sid)
             while len(SESSIONS) > SESSIONS_MAX:
                 SESSIONS.popitem(last=False)
-    session.title = latest.title
-    session.llm_title_generated = latest.llm_title_generated
-    session.manual_title = latest.manual_title
-    _sync_session_title_to_insights(latest)
-    _publish_session_list_changed(event_reason, profile=getattr(latest, "profile", None))
-    return latest.title
+    _sync_session_title_to_insights(session)
+    _publish_session_list_changed(event_reason, profile=getattr(session, "profile", None))
+    if original_session is not session:
+        original_session.title = session.title
+        original_session.llm_title_generated = session.llm_title_generated
+        original_session.manual_title = session.manual_title
+    return session.title
 
 
 def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) -> None:
