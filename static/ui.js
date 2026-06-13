@@ -7172,6 +7172,15 @@ function _decorateTransparentEventRow(row, opts){
     }
     _attachProgressBar(row, opts);
   }
+  if(type==='text'){
+    row.classList.add('transparent-text-event');
+    row.setAttribute('data-event-name','agent');
+    const label=row.querySelector('.transparent-event-label');
+    if(label) label.textContent='agent';
+    let preview=row.querySelector('.transparent-event-text-preview,.transparent-event-preview');
+    const previewText=_transparentEventPreview(opts.preview||opts.text||'');
+    if(previewText&&preview) preview.textContent=previewText;
+  }
   return row;
 }
 // ── 3D progress bar (loading path / follow-up indicator) ───────────
@@ -9675,12 +9684,54 @@ function renderMessages(options){
       });
     }else{
       // ── transparent_stream path: individual expandable event rows ──
+      // #4096-chronological-text-segments: treat visible assistant prose
+      // segments (the agent's emitted progress / narrative text) as first-class
+      // chronological entries keyed by their activitySegmentSeq / activityBurstId
+      // so they interleave with thinking+tools in emission order instead of the
+      // entire turn's prose being pinned above the tool stack on settled render
+      // / refresh / reload for long "narrate then many tools" turns.
       const transparentInsertCursors=new Map();
       // Per-turn dedup of echoed thinking text — mirrors the compact-worklog
       // path's `seenReasons` Set (the transparent branch previously had none,
       // so the same echoed reasoning rendered twice, once out of chronological
       // position). Keyed by the assistant turn element. (Trifecta finding O-Bug1.)
       const transparentSeenThinking=new Map();
+
+      // #4096: Only emit chronological text marker rows on turns that already
+      // have thinking/tool activity — plain Q&A turns keep a single prose bubble
+      // with no duplicate "agent" trace row above it (PR #4114 feedback).
+      const turnsWithActivity=new Set();
+      for(const entry of activityOrder){
+        const {aIdx,segmentSeq,burstId}=entry;
+        const anchorRow=_assistantAnchorForActivity(aIdx,segmentSeq,burstId);
+        if(!anchorRow) continue;
+        const anchorTurn=anchorRow.closest('.assistant-turn');
+        if(anchorTurn) turnsWithActivity.add(anchorTurn);
+      }
+
+      // Collect visible non-worklog-source assistant segments that carry the
+      // agent's actual prose/progress text. These already have the live
+      // segmentSeq / burstId stamped on them (from messages.js ensureAssistantRow
+      // + _freshSegment after tools, and from settled projection). We surface
+      // them as type:'text' events so the transparent trace shows chronological
+      // "agent text" rows between the tools/thinking that happened around them.
+      const textSegmentEntries=[];
+      for(const [aIdx,seg] of assistantSegments){
+        if(!seg||!seg.parentElement) continue;
+        if(seg.classList&&seg.classList.contains('assistant-segment-worklog-source')) continue;
+        const turn=seg.closest&&seg.closest('.assistant-turn');
+        if(!turn) continue;
+        if(!turnsWithActivity.has(turn)) continue;
+        const blocks=_assistantTurnBlocks(turn);
+        if(!blocks) continue;
+        const body=seg.querySelector&&seg.querySelector('.msg-body');
+        const raw=(seg.dataset&&seg.dataset.rawText)||(body&&body.textContent)||'';
+        if(!String(raw).trim()) continue;
+        const segmentSeq=seg.getAttribute('data-live-segment-seq')||'';
+        const burstId=seg.getAttribute('data-activity-burst-id')||'';
+        textSegmentEntries.push({aIdx,segmentSeq,burstId,seg,rawText:String(raw).trim(),type:'text'});
+      }
+
       for(const entry of activityOrder){
         const event={
           ...entry,
@@ -9741,6 +9792,39 @@ function renderMessages(options){
         }
         _syncTransparentEventControls(turn);
       }
+
+      // Emit collected text segments as type:'text' chronological events.
+      // They use the same per-anchor cursor and seq/burst discipline so a
+      // later text segment (new assistant-segment after a tool) lands after
+      // the preceding tool rows instead of jumping back to the top of the turn.
+      const textTurnsSynced=new Set();
+      for(const t of textSegmentEntries){
+        const {aIdx,segmentSeq,burstId,seg,rawText}=t;
+        const anchorRow=seg; // the segment itself is the text anchor
+        if(!anchorRow||!anchorRow.parentElement) continue;
+        const anchorTurn=anchorRow.closest('.assistant-turn');
+        const turn=anchorTurn;
+        const blocks=_assistantTurnBlocks(anchorTurn);
+        if(!anchorTurn||!blocks) continue;
+        const insertBeforeAnchor=(row)=>{
+          if(anchorRow&&anchorRow.parentElement===blocks) blocks.insertBefore(row,anchorRow);
+          else blocks.appendChild(row);
+        };
+        const textPreview=_transparentEventPreview?_transparentEventPreview(rawText):(rawText.length>120?rawText.slice(0,117)+'...':rawText);
+        const textNode=document.createElement('div');
+        textNode.className='transparent-text-event';
+        textNode.innerHTML=`<span class="transparent-event-label">agent</span> <span class="transparent-event-preview transparent-event-text-preview">${esc(textPreview)}</span>`;
+        const textRow=_decorateTransparentEventRow(textNode,{
+          type:'text',
+          text:rawText,
+          preview:textPreview,
+          segmentSeq,
+          burstId,
+        });
+        insertBeforeAnchor(textRow);
+        if(turn) textTurnsSynced.add(turn);
+      }
+      textTurnsSynced.forEach(turn=>_syncTransparentEventControls(turn));
     }
   }
   _restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);

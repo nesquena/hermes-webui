@@ -639,3 +639,43 @@ def test_transparent_entrance_animation_is_live_turn_only():
     """The entrance animation must be scoped to the live turn so it doesn't
     replay across the whole transcript on every renderMessages. (Trifecta V9.)"""
     assert "#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter" in STYLE_CSS
+
+
+def test_4096_transparent_settled_uses_segmentseq_burstid_for_text_segments():
+    """#4096: In transparent settled render, progress/agent text segments must
+    participate as first-class chronological entries (using activitySegmentSeq /
+    activityBurstId) alongside tools/thinking so prose interleaves in emission
+    order rather than the whole turn's prose always grouping above the tool stack
+    on refresh/reload/long turns. PR #4114: gate markers to turnsWithActivity."""
+    marker = "// ── transparent_stream path: individual expandable event rows ──"
+    assert marker in UI_JS
+    start = UI_JS.index(marker)
+    end_marker = "// Render per-turn duration"
+    assert end_marker in UI_JS[start:]
+    end = UI_JS.index(end_marker, start)
+    transparent_branch = UI_JS[start:end]
+
+    assert "4096-chronological-text-segments" in transparent_branch or \
+           "type:'text'" in transparent_branch
+
+    assert "data-live-segment-seq" in transparent_branch
+    assert "data-activity-burst-id" in transparent_branch
+    assert "segmentSeq" in transparent_branch and "burstId" in transparent_branch
+
+    assert "turnsWithActivity" in transparent_branch
+    assert "turnsWithActivity.has(turn)" in transparent_branch
+
+
+def test_4096_transparent_text_event_has_css():
+    """Agent text marker rows must match transparent stream visual language."""
+    assert 'data-event-type="text"' in STYLE_CSS or "[data-event-type=\"text\"]" in STYLE_CSS
+    assert ".transparent-event-text-preview" in STYLE_CSS
+    assert ".transparent-text-event" in STYLE_CSS or "transparent-text-event" in STYLE_CSS
+
+
+def test_4096_decorate_transparent_event_row_handles_text_type():
+    """Text events are first-class in _decorateTransparentEventRow (type=text)."""
+    start = UI_JS.index("function _decorateTransparentEventRow")
+    end = UI_JS.index("function _attachProgressBar", start)
+    body = UI_JS[start:end]
+    assert "type==='text'" in body or 'type==="text"' in body
