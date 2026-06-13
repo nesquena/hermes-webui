@@ -103,6 +103,7 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'browser',
                   description: 'Attach browser tools',
+                  category: 'Tools',
                   aliases: ['browse'],
                   cli_only: true,
                   gateway_only: false
@@ -110,6 +111,7 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'handoff',
                   description: 'Hand work to another agent',
+                  category: 'Tools',
                   aliases: ['delegate_work'],
                   cli_only: true,
                   gateway_only: false
@@ -117,6 +119,7 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'model',
                   description: 'Change model',
+                  category: 'Tools',
                   aliases: [],
                   cli_only: false,
                   gateway_only: false
@@ -124,6 +127,7 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'codex-runtime',
                   description: 'Toggle Codex app-server runtime',
+                  category: 'Tools',
                   aliases: ['codex_runtime'],
                   cli_only: false,
                   gateway_only: false
@@ -131,7 +135,24 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'reload-skills',
                   description: 'Re-scan installed skills',
+                  category: 'Tools',
                   aliases: ['reload_skills'],
+                  cli_only: false,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'triage-review',
+                  description: 'Run runtime triage review',
+                  category: 'Tools',
+                  aliases: ['triage_review'],
+                  cli_only: false,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'plugin-review',
+                  description: 'Run plugin review',
+                  category: 'Plugin',
+                  aliases: ['plugin_review'],
                   cli_only: false,
                   gateway_only: false
                 }}
@@ -150,6 +171,18 @@ def _run_commands_js(script_body: str) -> dict:
                   description: 'Bundle should beat a same-slug plain skill',
                   skill_count: 3,
                   source: 'bundle'
+                }},
+                {{
+                  name: 'triage-review',
+                  description: 'Bundle collision should stay hidden behind runtime slash names',
+                  skill_count: 4,
+                  source: 'bundle'
+                }},
+                {{
+                  name: 'plugin-review',
+                  description: 'Bundle collision should stay hidden behind plugin slash names',
+                  skill_count: 5,
+                  source: 'bundle'
                 }}
               ]
             }};
@@ -166,6 +199,14 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'incident review',
                   description: 'Non-colliding skills should still autocomplete'
+                }},
+                {{
+                  name: 'triage review',
+                  description: 'Runtime collisions should stay hidden from slash autocomplete'
+                }},
+                {{
+                  name: 'plugin review',
+                  description: 'Plugin collisions should stay hidden from slash autocomplete'
                 }}
               ]
             }};
@@ -262,6 +303,8 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
         const handoff = await getSlashAutocompleteMatches('/handoff');
         const delegate = await getSlashAutocompleteMatches('/delegate');
         const incident = await getSlashAutocompleteMatches('/incident');
+        const triage = await getSlashAutocompleteMatches('/triage');
+        const plugin = await getSlashAutocompleteMatches('/plugin');
         const skills = await getSlashAutocompleteMatches('/skills');
         const use = await getSlashAutocompleteMatches('/use');
         return {
@@ -269,6 +312,10 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
           delegate_names: delegate.map(item => item.name),
           incident_names: incident.map(item => item.name),
           incident_sources: incident.map(item => item.source),
+          triage_names: triage.map(item => item.name),
+          triage_sources: triage.map(item => item.source),
+          plugin_names: plugin.map(item => item.name),
+          plugin_sources: plugin.map(item => item.source),
           skills_names: skills.map(item => item.name),
           use_names: use.map(item => item.name)
         };
@@ -279,6 +326,10 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
     assert result["delegate_names"] == []
     assert result["incident_names"] == ["incident-review"]
     assert result["incident_sources"] == ["bundle"]
+    assert result["triage_names"] == ["triage-review"]
+    assert result["triage_sources"] == ["agent"]
+    assert result["plugin_names"] == ["plugin-review"]
+    assert result["plugin_sources"] == ["plugin"]
     assert "skills" in result["skills_names"]
     assert "use" in result["use_names"]
 
@@ -302,10 +353,23 @@ def test_send_intercepts_bundle_commands_before_agent_round_trip():
     assert normal_send_idx != -1
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
-    assert "await getBundleCommandMetadata(_parsedCmd.name)" in intercept
+    assert "const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'" in intercept
     assert "await resolveBundleCommand(text,_bundleCmd)" in intercept
     assert "_slashDisplayTextOverride=text;" in intercept
     assert "text=_bundleMessage;" in intercept
+
+
+def test_send_consults_agent_metadata_before_bundle_resolution():
+    intercept_idx = MESSAGES_JS.find("Slash command intercept")
+    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    assert normal_send_idx != -1
+    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
+
+    agent_idx = intercept.find("await getAgentCommandMetadata(_parsedCmd.name)")
+    bundle_idx = intercept.find("await getBundleCommandMetadata(_parsedCmd.name)")
+    assert agent_idx != -1
+    assert bundle_idx != -1
+    assert agent_idx < bundle_idx
 
 
 def test_send_intercepts_reload_mcp_agent_command_before_agent_round_trip():

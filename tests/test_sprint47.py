@@ -67,11 +67,22 @@ def test_builtin_commands_take_precedence_over_skill_slug_collisions():
 
 
 def test_bundle_entries_merge_before_plain_skill_entries():
+    agent_loop = COMMANDS_JS.find("for(const cmd of (_agentCommandCache||[])){")
     bundle_loop = COMMANDS_JS.find("for(const bundle of _bundleCommandCache){")
     skill_loop = COMMANDS_JS.find("for(const skill of _skillCommandCache){")
+    assert agent_loop != -1
     assert bundle_loop != -1
     assert skill_loop != -1
+    assert agent_loop < bundle_loop
     assert bundle_loop < skill_loop
+
+
+def test_reserved_slugs_include_all_agent_and_plugin_aliases():
+    reserved_idx = COMMANDS_JS.find("function _getReservedSlashCommandSlugs(){")
+    assert reserved_idx != -1
+    reserved = COMMANDS_JS[reserved_idx : reserved_idx + 500]
+    assert "const names=[cmd.name].concat(Array.isArray(cmd&&cmd.aliases)?cmd.aliases:[]);" in reserved
+    assert "cmd&&cmd.cli_only" not in reserved
 
 
 def test_typing_slash_primes_async_skill_command_loading():

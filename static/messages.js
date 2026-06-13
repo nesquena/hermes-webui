@@ -999,26 +999,6 @@ async function send(){
       }
     }
     if(_parsedCmd&&!_cmd){
-      const _bundleCmd=typeof getBundleCommandMetadata==='function'
-        ? await getBundleCommandMetadata(_parsedCmd.name)
-        : null;
-      if(_bundleCmd){
-        try{
-          const _bundleResolved=typeof resolveBundleCommand==='function'
-            ? await resolveBundleCommand(text,_bundleCmd)
-            : null;
-          const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
-          if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
-          _slashDisplayTextOverride=text;
-          text=_bundleMessage;
-        }catch(e){
-          if(!S.session){await newSession();await renderSessionList();}
-          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-          S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
-          renderMessages();
-          $('msg').value='';autoResize();hideCmdDropdown();return;
-        }
-      }
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
@@ -1059,6 +1039,26 @@ async function send(){
         S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
+      const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
+        ? await getBundleCommandMetadata(_parsedCmd.name)
+        : null;
+      if(_bundleCmd){
+        try{
+          const _bundleResolved=typeof resolveBundleCommand==='function'
+            ? await resolveBundleCommand(text,_bundleCmd)
+            : null;
+          const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
+          if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
+          _slashDisplayTextOverride=text;
+          text=_bundleMessage;
+        }catch(e){
+          if(!S.session){await newSession();await renderSessionList();}
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
+          renderMessages();
+          $('msg').value='';autoResize();hideCmdDropdown();return;
+        }
       }
     }
   }

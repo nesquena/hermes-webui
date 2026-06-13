@@ -76,16 +76,6 @@ function getMatchingCommands(prefix){
     });
     seen.add(name);
   }
-  for(const bundle of _bundleCommandCache){
-    if(!bundle.name.startsWith(q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
-    matches.push(bundle);
-    seen.add(bundle.name);
-  }
-  for(const skill of _skillCommandCache){
-    if(!skill.name.startsWith(q)||seen.has(skill.name)||reserved.has(skill.name))continue;
-    matches.push(skill);
-    seen.add(skill.name);
-  }
   // Include agent/plugin commands from /api/commands metadata
   for(const cmd of (_agentCommandCache||[])){
     const name=String(cmd&&cmd.name||'').toLowerCase();
@@ -97,6 +87,16 @@ function getMatchingCommands(prefix){
       source:cmd.category==='Plugin'?'plugin':'agent',
     });
     seen.add(name);
+  }
+  for(const bundle of _bundleCommandCache){
+    if(!bundle.name.startsWith(q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
+    matches.push(bundle);
+    seen.add(bundle.name);
+  }
+  for(const skill of _skillCommandCache){
+    if(!skill.name.startsWith(q)||seen.has(skill.name)||reserved.has(skill.name))continue;
+    matches.push(skill);
+    seen.add(skill.name);
   }
   return matches;
 }
@@ -1551,7 +1551,6 @@ function _skillCommandSlug(name){
 function _getReservedSlashCommandSlugs(){
   const reserved=new Set(COMMANDS.map(c=>String(c&&c.name||'').trim().toLowerCase()).filter(Boolean));
   for(const cmd of (_agentCommandCache||[])){
-    if(!(cmd&&cmd.cli_only)) continue;
     const names=[cmd.name].concat(Array.isArray(cmd&&cmd.aliases)?cmd.aliases:[]);
     for(const name of names){
       const slug=_skillCommandSlug(name);
