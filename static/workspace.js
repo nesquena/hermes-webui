@@ -145,10 +145,11 @@ if(typeof document !== 'undefined'){
 }
 
 function switchWorkspacePanelTab(tab){
-  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : 'files';
+  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : tab === 'todos' ? 'todos' : 'files';
   _setWorkspacePanelTabDataset();
   const filesTab = $('workspaceFilesTab');
   const artifactsTab = $('workspaceArtifactsTab');
+  const todosTab = $('workspaceTodosTab');
   if(filesTab){
     filesTab.classList.toggle('active', _workspacePanelActiveTab === 'files');
     filesTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'files' ? 'true' : 'false');
@@ -157,9 +158,55 @@ function switchWorkspacePanelTab(tab){
     artifactsTab.classList.toggle('active', _workspacePanelActiveTab === 'artifacts');
     artifactsTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'artifacts' ? 'true' : 'false');
   }
+  if(todosTab){
+    todosTab.classList.toggle('active', _workspacePanelActiveTab === 'todos');
+    todosTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'todos' ? 'true' : 'false');
+  }
   const artifacts = $('workspaceArtifacts');
   if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
+  const todosPanel = $('workspaceTodosPanel');
+  if(todosPanel) todosPanel.hidden = _workspacePanelActiveTab !== 'todos';
   if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
+  if(_workspacePanelActiveTab === 'todos') _loadWorkspacePanelTodos();
+}
+
+function _loadWorkspacePanelTodos(){
+  const panel = $('workspaceTodosPanel');
+  if(!panel) return;
+  let todos = [];
+  try{
+    if(S && Array.isArray(S.todos)){
+      todos = S.todos;
+    } else if(S && S.session && S.session.todo_state && Array.isArray(S.session.todo_state.todos)){
+      todos = S.session.todo_state.todos;
+    } else if(typeof _legacyTodosFromMessages === 'function'){
+      todos = _legacyTodosFromMessages() || [];
+    }
+  }catch(e){ todos = []; }
+  if(!todos.length){
+    panel.innerHTML = '<div style="padding:24px 12px;text-align:center;color:var(--muted);font-size:12px">No active tasks</div>';
+    return;
+  }
+  const statusIcon = (s) => {
+    if(s === 'completed') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+    if(s === 'in_progress') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+    if(s === 'cancelled') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+    // pending
+    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/></svg>';
+  };
+  const items = todos.map(t => {
+    const s = t.status || 'pending';
+    const isDone = s === 'completed' || s === 'cancelled';
+    return `<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">`+
+      `<span style="flex-shrink:0;margin-top:2px">${statusIcon(s)}</span>`+
+      `<span style="font-size:12px;color:${isDone?'var(--muted)':'var(--text)'};text-decoration:${s==='cancelled'?'line-through':'none'}">${_escHtml(t.content||t.text||'')}</span>`+
+      `</div>`;
+  }).join('');
+  panel.innerHTML = `<div style="padding:4px 0">${items}</div>`;
+}
+
+function _escHtml(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
