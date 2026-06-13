@@ -1,8 +1,7 @@
 """Phase 0 contract tests for Stable Assistant Turn Anchors (#3926).
 
-The first implementation slice is intentionally non-visual. It adds the
-inventory and pure helper surface that later phases can wire into send(),
-attachLiveStream(), replay hydration, and renderMessages().
+The first implementation slice was intentionally non-visual. Later slices keep
+the same inventory contract while adding narrow, tested wiring points.
 """
 from __future__ import annotations
 
@@ -94,7 +93,11 @@ def test_phase0_scaffold_is_loaded_before_current_rendering_modules():
     assert "createAssistantTurnAnchorRegistry" not in ui_src
     assert "applyAssistantTurnAnchorSourceEvent" not in ui_src
     assert "HermesAssistantTurnAnchors" not in _read(SESSIONS_JS)
-    assert "HermesAssistantTurnAnchors" not in _read(MESSAGES_JS)
+    messages_src = _read(MESSAGES_JS)
+    assert "window._liveAnchorRegistries" in messages_src
+    assert "createAssistantTurnAnchorRegistry" in messages_src
+    assert "applyAssistantTurnAnchorSourceEvent" in messages_src
+    assert "projectAssistantTurnAnchorActivityScene" not in messages_src
 
 
 def test_phase0_inventory_names_current_state_layers_in_authority_order():
