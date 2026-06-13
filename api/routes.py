@@ -21,8 +21,7 @@ import sys
 import threading
 import time
 import uuid
-import re
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, urlsplit
@@ -34,6 +33,7 @@ from api.agent_sessions import (
 )
 from api.compression_anchor import visible_messages_for_anchor
 from api.session_events import (
+    add_session_list_changed_listener,
     publish_session_list_changed,
     subscribe_session_events,
     unsubscribe_session_events,
@@ -54,6 +54,17 @@ def _publish_session_list_changed(reason: str, *, profile: str | None = None) ->
         # historical one-argument shape. Preserve the old signal instead of
         # turning unrelated session mutations into 500s.
         publish_session_list_changed(reason)
+
+
+def _on_session_list_changed(profile: str | None = None) -> None:
+    """Invalidate in-process /api/sessions cache when sidebar state mutates."""
+    _clear_session_list_cache(profile)
+
+
+try:
+    add_session_list_changed_listener(_on_session_list_changed)
+except Exception:
+    logger.debug("Failed to register session list cache invalidation listener", exc_info=True)
 
 
 # ── Cron run tracking ────────────────────────────────────────────────────────
@@ -1083,6 +1094,495 @@ def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
 def _clear_live_models_cache() -> None:
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE.clear()
+
+
+# ── /api/sessions response cache (hot-sidebar response) ──────────────────────
+
+_SESSIONS_CACHE_TTL_SECONDS = 2.5
+_SESSIONS_CACHE_MAX_ENTRIES = 64
+_SESSIONS_CACHE_WAIT_SECONDS = 0.25
+_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
+_SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple, dict]] = OrderedDict()
+_SESSIONS_CACHE_LOCK = threading.RLock()
+_SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
+_SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION = 0
+_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION = 0
+_SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION: dict[str, int] = {}
+
+
+def _session_list_cache_profile_scope(profile: str | None) -> str:
+    normalized = str(profile or "").strip() or "default"
+    if _profiles_match(normalized, "default"):
+        return "default"
+    return normalized
+
+
+def _session_list_cache_key(
+    active_profile: str | None,
+    all_profiles: bool,
+    show_cli_sessions: bool,
+    show_previous_messaging_sessions: bool,
+    show_cron_sessions: bool,
+) -> tuple:
+    return (
+        _session_list_cache_profile_scope(active_profile),
+        bool(all_profiles),
+        bool(show_cli_sessions),
+        bool(show_previous_messaging_sessions),
+        bool(show_cron_sessions),
+    )
+
+
+def _session_list_cache_get(
+    key: tuple,
+    allow_stale: bool = False,
+) -> tuple[dict | None, bool]:
+    now = time.monotonic()
+    current_stamp = _session_list_cache_source_stamp(key)
+    with _SESSIONS_CACHE_LOCK:
+        entry = _SESSIONS_CACHE.get(key)
+        if not entry:
+            return None, False
+        ts, stamp, payload = entry
+        if stamp != current_stamp:
+            _SESSIONS_CACHE.pop(key, None)
+            return None, False
+        fresh = (now - ts) < _SESSIONS_CACHE_TTL_SECONDS
+        if fresh:
+            _SESSIONS_CACHE.move_to_end(key)
+            return copy.deepcopy(payload), True
+        if allow_stale:
+            _SESSIONS_CACHE.move_to_end(key)
+            return copy.deepcopy(payload), False
+        _SESSIONS_CACHE.pop(key, None)
+        return None, False
+
+
+def _session_list_cache_set(key: tuple, payload: dict) -> None:
+    if not isinstance(payload, dict):
+        return
+    stamp = _session_list_cache_source_stamp(key)
+    with _SESSIONS_CACHE_LOCK:
+        _SESSIONS_CACHE[key] = (time.monotonic(), stamp, copy.deepcopy(payload))
+        _SESSIONS_CACHE.move_to_end(key)
+        while len(_SESSIONS_CACHE) > _SESSIONS_CACHE_MAX_ENTRIES:
+            _SESSIONS_CACHE.popitem(last=False)
+
+
+def _session_list_cache_clear(profile: str | None = None) -> None:
+    normalized_profile = _session_list_cache_profile_scope(profile) if profile else None
+    with _SESSIONS_CACHE_LOCK:
+        global _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION
+        global _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION
+        if not profile:
+            _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION += 1
+            _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION += 1
+            _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION.clear()
+            _SESSIONS_CACHE.clear()
+            return
+        _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION += 1
+        _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION[normalized_profile] = (
+            _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION.get(normalized_profile, 0) + 1
+        )
+        for cache_key in list(_SESSIONS_CACHE.keys()):
+            cache_profile, cache_all_profiles, *_rest = cache_key
+            if cache_all_profiles:
+                _SESSIONS_CACHE.pop(cache_key, None)
+                continue
+            if _profiles_match(cache_profile, normalized_profile):
+                _SESSIONS_CACHE.pop(cache_key, None)
+
+
+def _clear_session_list_cache(profile: str | None = None) -> None:
+    _session_list_cache_clear(profile=profile)
+
+
+def _session_list_cache_invalidation_stamp(key: tuple) -> tuple[int, int]:
+    cache_profile, cache_all_profiles, *_rest = key
+    with _SESSIONS_CACHE_LOCK:
+        global_version = _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION
+        if cache_all_profiles:
+            return (
+                global_version,
+                _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION,
+            )
+        return (
+            global_version,
+            _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION.get(cache_profile, 0),
+        )
+
+
+def _session_list_cache_path_stamp(path: Path | None) -> tuple[int, int]:
+    try:
+        if path is None:
+            return (0, 0)
+        st = Path(path).stat()
+        return (int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))), int(st.st_size))
+    except Exception:
+        return (0, 0)
+
+
+def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
+    _cache_profile, _cache_all_profiles, cache_show_cli_sessions, *_rest = key
+    if not cache_show_cli_sessions:
+        return ((0, 0), (0, 0), (0, 0))
+    try:
+        state_db_path = Path(_active_state_db_path())
+    except Exception:
+        state_db_path = None
+    try:
+        gateway_metadata_path = _gateway_session_metadata_path()
+    except Exception:
+        gateway_metadata_path = None
+    try:
+        session_index_path = SESSION_DIR / "_index.json"
+    except Exception:
+        session_index_path = None
+    return (
+        _session_list_cache_path_stamp(state_db_path),
+        _session_list_cache_path_stamp(gateway_metadata_path),
+        _session_list_cache_path_stamp(session_index_path),
+    )
+
+
+def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
+    if not rows:
+        return []
+    try:
+        active_stream_ids = _active_stream_ids()
+    except Exception:
+        active_stream_ids = set()
+    session_ids = [
+        str(row.get("session_id") or "").strip()
+        for row in rows
+        if isinstance(row, dict) and str(row.get("session_id") or "").strip()
+    ]
+    live_sessions = {}
+    if session_ids:
+        with LOCK:
+            for sid in session_ids:
+                live = SESSIONS.get(sid)
+                if live is not None:
+                    live_sessions[sid] = live
+    overlaid = []
+    for row in rows:
+        item = dict(row) if isinstance(row, dict) else {}
+        sid = str(item.get("session_id") or "").strip()
+        live = live_sessions.get(sid)
+        if live is not None:
+            live_stream_id = getattr(live, "active_stream_id", None)
+            item["active_stream_id"] = live_stream_id or None
+            item["has_pending_user_message"] = bool(
+                getattr(live, "pending_user_message", None)
+            )
+        stream_id = item.get("active_stream_id")
+        item["is_streaming"] = bool(stream_id and stream_id in active_stream_ids)
+        overlaid.append(item)
+    return overlaid
+
+
+def _session_list_cache_claim_rebuild(key: tuple) -> tuple[threading.Event, bool]:
+    with _SESSIONS_CACHE_LOCK:
+        current = _SESSIONS_CACHE_INFLIGHT.get(key)
+        if current is not None:
+            return current, False
+        event = threading.Event()
+        _SESSIONS_CACHE_INFLIGHT[key] = event
+        return event, True
+
+
+def _session_list_cache_done(key: tuple, event: threading.Event | None) -> None:
+    with _SESSIONS_CACHE_LOCK:
+        if event is None:
+            return
+        if _SESSIONS_CACHE_INFLIGHT.get(key) is event:
+            _SESSIONS_CACHE_INFLIGHT.pop(key, None)
+    if event is not None:
+        event.set()
+
+
+def _build_session_list_cache_payload(
+    active_profile: str | None,
+    all_profiles: bool,
+    show_cli_sessions: bool,
+    show_previous_messaging_sessions: bool,
+    show_cron_sessions: bool,
+    diag=None,
+) -> dict:
+    diag_stage = diag.stage if diag is not None else lambda *_a, **_k: None
+
+    diag_stage("all_sessions")
+    webui_sessions = all_sessions(diag=diag)
+    diag_stage("reconcile_stale_stream_state")
+    if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
+        diag_stage("all_sessions_after_stale_stream_reconcile")
+        webui_sessions = all_sessions(diag=diag)
+    diag_stage("normalize_cli_rows")
+    show_cli_sessions = bool(show_cli_sessions)
+    show_previous_messaging_sessions = bool(show_previous_messaging_sessions)
+    show_cron_sessions = bool(show_cron_sessions)
+    webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
+    if show_cli_sessions:
+        diag_stage("get_cli_sessions")
+        cli = get_cli_sessions()
+        diag_stage("merge_cli_sessions")
+        cli_by_id = {s["session_id"]: s for s in cli}
+        # #3238: reconcile orphaned imported-CLI sidecars. When a CLI
+        # session was clicked in WebUI it gets a WebUI-owned sidecar that
+        # all_sessions() returns independently of state.db. If the user
+        # later deletes the backing CLI session from the command line,
+        # the sidecar is never pruned and the stale row lingers in the
+        # sidebar forever (there is no WebUI delete affordance for it).
+        # Drop rows whose backing agent row is genuinely gone. We probe
+        # state.db directly (agent_session_rows_existing) rather than trust
+        # cli_by_id absence, because get_cli_sessions() caps at
+        # CLI_VISIBLE_SESSION_LIMIT (20) — an existing session can fall
+        # out of that window and look deleted. Native WebUI sessions
+        # (source == "webui") that merely have a CLI ancestor are never
+        # pruned.
+        _orphan_probe_rows = []
+        _kept_after_orphan_prune = []
+        for s in webui_sessions:
+            _sid = s.get("session_id")
+            if (
+                _sid
+                and is_cli_session_row(s)
+                and not _session_source_is_webui(s)
+                and _sid not in cli_by_id
+            ):
+                _orphan_probe_rows.append(s)
+            else:
+                _kept_after_orphan_prune.append(s)
+        if _orphan_probe_rows:
+            rows_by_profile: dict[object, list[dict]] = defaultdict(list)
+            for row in _orphan_probe_rows:
+                rows_by_profile[row.get("profile")].append(row)
+            missing_orphan_ids: set[str] = set()
+            for profile_key, rows in rows_by_profile.items():
+                probe_ids = [
+                    str(row.get("session_id")).strip()
+                    for row in rows
+                    if str(row.get("session_id") or "").strip()
+                ]
+                existing = agent_session_rows_existing(
+                    probe_ids,
+                    profile=profile_key if isinstance(profile_key, str) and profile_key else None,
+                )
+                for row in rows:
+                    _sid = str(row.get("session_id") or "").strip()
+                    if _sid and _sid not in existing:
+                        missing_orphan_ids.add(_sid)
+            for s in _orphan_probe_rows:
+                _sid = str(s.get("session_id") or "").strip()
+                if _sid in missing_orphan_ids:
+                    try:
+                        prune_session_from_index(_sid)
+                    except Exception:
+                        logger.debug(
+                            "Failed to prune orphaned CLI sidecar %s",
+                            _sid,
+                            exc_info=True,
+                        )
+                    diag_stage("prune_orphaned_cli_sidecar")
+                    continue
+                _kept_after_orphan_prune.append(s)
+        webui_sessions = _kept_after_orphan_prune
+        for s in webui_sessions:
+            meta = cli_by_id.get(s.get("session_id"))
+            if not meta:
+                continue
+            if _is_messaging_session_record(meta):
+                s.update(_merge_cli_sidebar_metadata(s, meta))
+                if s.get("session_id") != meta.get("session_id"):
+                    s["session_id"] = meta.get("session_id")
+            else:
+                for key in ("source_tag", "raw_source", "session_source", "source_label"):
+                    if not s.get(key) and meta.get(key):
+                        s[key] = meta[key]
+        webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
+        # Apply the same CLI visibility semantics to imported local copies so
+        # low-value imported artifacts do not leak into the sidebar.
+        webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
+        represented_webui_ids = set()
+        for s in webui_sessions:
+            represented_webui_ids.update(_session_lineage_ids(s))
+        deduped_cli = _dedupe_cli_sidebar_sessions_for_api(
+            cli,
+            represented_webui_ids,
+            show_cron_sessions=show_cron_sessions,
+        )
+    else:
+        diag_stage("filter_webui_sessions")
+        webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
+        deduped_cli = []
+    diag_stage("sort_sessions")
+    merged = webui_sessions + deduped_cli
+    merged.sort(
+        key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
+        reverse=True,
+    )
+    # ── Profile scoping (#1611) ────────────────────────────────────────
+    # Default: filter to the active profile. ?all_profiles=1 opts into
+    # the aggregate view used by the "All profiles" sidebar toggle.
+    # The other_profile_count is always returned so the UI can render
+    # the "Show N from other profiles" affordance without sending the
+    # cross-profile rows by default.
+    #
+    # IMPORTANT: scope BEFORE _keep_latest_messaging_session_per_source.
+    # _messaging_source_key is profile-blind (#1614 follow-up): if the
+    # same Slack/Telegram identity has sessions in profiles A and B, a
+    # profile-blind dedupe would discard the older one even when scoped
+    # to its own profile, leaving that profile with zero rows for that
+    # source. Filter first so the dedupe operates only within the active
+    # profile's rows.
+    diag_stage("profile_scope")
+    if all_profiles:
+        scoped = merged
+        other_profile_count = 0
+    else:
+        scoped = [s for s in merged if _profiles_match(s.get("profile"), active_profile)]
+        other_profile_count = len(merged) - len(scoped)
+    diag_stage("messaging_dedupe")
+    scoped = _keep_latest_messaging_session_per_source(
+        scoped,
+        show_previous_messaging_sessions=show_previous_messaging_sessions,
+    )
+    if show_cli_sessions:
+        diag_stage("cli_cap")
+        scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+    return {
+        "sessions": [
+            dict(s) if isinstance(s, dict) else {}
+            for s in scoped
+        ],
+        "cli_count": len(deduped_cli),
+        "all_profiles": all_profiles,
+        "active_profile": active_profile,
+        "other_profile_count": other_profile_count,
+        "settings": {
+            "show_cli_sessions": show_cli_sessions,
+            "show_previous_messaging_sessions": show_previous_messaging_sessions,
+            "show_cron_sessions": show_cron_sessions,
+        },
+    }
+
+
+def _session_list_payload_to_response(payload: dict) -> dict:
+    safe_merged = []
+    runtime_rows = _session_list_cache_overlay_runtime_rows(payload.get("sessions", []) or [])
+    for s in runtime_rows:
+        item = dict(s) if isinstance(s, dict) else {}
+        if isinstance(item.get("title"), str):
+            item["title"] = _redact_text(item["title"])
+        item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
+        safe_merged.append(item)
+    return {
+        "sessions": safe_merged,
+        "cli_count": int(payload.get("cli_count", 0)),
+        "all_profiles": bool(payload.get("all_profiles", False)),
+        "active_profile": payload.get("active_profile"),
+        "other_profile_count": int(payload.get("other_profile_count", 0)),
+        "server_time": time.time(),
+        "server_tz": time.strftime("%z"),
+    }
+
+
+def _get_cached_session_list_payload(
+    *,
+    key: tuple,
+    builder,
+    diag=None,
+) -> dict:
+    if diag is not None:
+        try:
+            diag.stage("session_list_cache_lookup")
+        except Exception:
+            pass
+
+    cached, is_fresh = _session_list_cache_get(key, allow_stale=True)
+    if cached is not None and is_fresh:
+        if diag is not None:
+            try:
+                diag.stage("session_list_cache_hit")
+            except Exception:
+                pass
+        return cached
+
+    stale = cached  # now actually a stale payload when one exists, else None
+    event, is_owner = _session_list_cache_claim_rebuild(key)
+    if is_owner:
+        if diag is not None:
+            try:
+                diag.stage("session_list_cache_rebuild_owner")
+            except Exception:
+                pass
+        try:
+            rebuild_attempts = 0
+            while True:
+                invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                payload = builder()
+                if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
+                    _session_list_cache_set(key, payload)
+                    if diag is not None:
+                        try:
+                            diag.stage("session_list_cache_stored")
+                        except Exception:
+                            pass
+                    return payload
+                rebuild_attempts += 1
+                if diag is not None:
+                    try:
+                        diag.stage("session_list_cache_invalidated_during_rebuild")
+                    except Exception:
+                        pass
+                if rebuild_attempts >= 3:
+                    return payload
+        finally:
+            _session_list_cache_done(key, event)
+
+    if diag is not None:
+        try:
+            if stale is not None:
+                diag.stage("session_list_cache_wait_stale")
+            else:
+                diag.stage("session_list_cache_wait")
+        except Exception:
+            pass
+
+    if stale is not None:
+        timeout = _SESSIONS_CACHE_STALE_WAIT_SECONDS
+    else:
+        timeout = _SESSIONS_CACHE_WAIT_SECONDS
+    event.wait(timeout)
+
+    latest, is_fresh = _session_list_cache_get(key, allow_stale=False)
+    if latest is not None:
+        if diag is not None:
+            try:
+                diag.stage("session_list_cache_wait_hit")
+            except Exception:
+                pass
+        return latest
+
+    if stale is not None:
+        if diag is not None:
+            try:
+                diag.stage("session_list_cache_wait_stale_fallback")
+            except Exception:
+                pass
+        return stale
+
+    # Safety path if the owner died before storing anything.
+    if diag is not None:
+        try:
+            diag.stage("session_list_cache_fallback_rebuild")
+        except Exception:
+            pass
+    invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+    payload = builder()
+    if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
+        _session_list_cache_set(key, payload)
+    return payload
 
 from api.config import (
     STATE_DIR,
@@ -6367,166 +6867,41 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
         try:
-            diag.stage("all_sessions")
-            webui_sessions = all_sessions(diag=diag)
-            diag.stage("reconcile_stale_stream_state")
-            if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
-                diag.stage("all_sessions_after_stale_stream_reconcile")
-                webui_sessions = all_sessions(diag=diag)
+            from api.profiles import get_active_profile_name
             diag.stage("load_settings")
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
-            webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
-            if show_cli_sessions:
-                diag.stage("get_cli_sessions")
-                cli = get_cli_sessions()
-                diag.stage("merge_cli_sessions")
-                cli_by_id = {s["session_id"]: s for s in cli}
-                # #3238: reconcile orphaned imported-CLI sidecars. When a CLI
-                # session was clicked in WebUI it gets a WebUI-owned sidecar that
-                # all_sessions() returns independently of state.db. If the user
-                # later deletes the backing CLI session from the command line,
-                # the sidecar is never pruned and the stale row lingers in the
-                # sidebar forever (there is no WebUI delete affordance for it).
-                # Drop rows whose backing agent row is genuinely gone. We probe
-                # state.db directly (agent_session_rows_existing) rather than trust
-                # cli_by_id absence, because get_cli_sessions() caps at
-                # CLI_VISIBLE_SESSION_LIMIT (20) — an existing session can fall
-                # out of that window and look deleted. Native WebUI sessions
-                # (source == "webui") that merely have a CLI ancestor are never
-                # pruned.
-                _orphan_probe_rows = []
-                _kept_after_orphan_prune = []
-                for s in webui_sessions:
-                    _sid = s.get("session_id")
-                    if (
-                        _sid
-                        and is_cli_session_row(s)
-                        and not _session_source_is_webui(s)
-                        and _sid not in cli_by_id
-                    ):
-                        _orphan_probe_rows.append(s)
-                    else:
-                        _kept_after_orphan_prune.append(s)
-                if _orphan_probe_rows:
-                    rows_by_profile: dict[object, list[dict]] = defaultdict(list)
-                    for row in _orphan_probe_rows:
-                        rows_by_profile[row.get("profile")].append(row)
-                    missing_orphan_ids: set[str] = set()
-                    for profile_key, rows in rows_by_profile.items():
-                        probe_ids = [
-                            str(row.get("session_id")).strip()
-                            for row in rows
-                            if str(row.get("session_id") or "").strip()
-                        ]
-                        existing = agent_session_rows_existing(
-                            probe_ids,
-                            profile=profile_key if isinstance(profile_key, str) and profile_key else None,
-                        )
-                        for row in rows:
-                            sid = str(row.get("session_id") or "").strip()
-                            if sid and sid not in existing:
-                                missing_orphan_ids.add(sid)
-                    for s in _orphan_probe_rows:
-                        _sid = str(s.get("session_id") or "").strip()
-                        if _sid in missing_orphan_ids:
-                            try:
-                                prune_session_from_index(_sid)
-                            except Exception:
-                                logger.debug(
-                                    "Failed to prune orphaned CLI sidecar %s",
-                                    _sid,
-                                    exc_info=True,
-                                )
-                            diag.stage("prune_orphaned_cli_sidecar")
-                            continue
-                        _kept_after_orphan_prune.append(s)
-                webui_sessions = _kept_after_orphan_prune
-                for s in webui_sessions:
-                    meta = cli_by_id.get(s.get("session_id"))
-                    if not meta:
-                        continue
-                    if _is_messaging_session_record(meta):
-                        s.update(_merge_cli_sidebar_metadata(s, meta))
-                        if s.get("session_id") != meta.get("session_id"):
-                            s["session_id"] = meta.get("session_id")
-                    else:
-                        for key in ("source_tag", "raw_source", "session_source", "source_label"):
-                            if not s.get(key) and meta.get(key):
-                                s[key] = meta[key]
-                webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
-                # Apply the same CLI visibility semantics to imported local copies so
-                # low-value imported artifacts do not leak into the sidebar.
-                webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
-                represented_webui_ids = set()
-                for s in webui_sessions:
-                    represented_webui_ids.update(_session_lineage_ids(s))
-                show_cron_sessions = bool(settings.get("show_cron_sessions"))
-                deduped_cli = _dedupe_cli_sidebar_sessions_for_api(cli, represented_webui_ids, show_cron_sessions=show_cron_sessions)
-            else:
-                diag.stage("filter_webui_sessions")
-                webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
-                deduped_cli = []
-            diag.stage("sort_sessions")
-            merged = webui_sessions + deduped_cli
-            merged.sort(
-                key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
-                reverse=True,
+            show_previous_messaging_sessions = bool(
+                settings.get("show_previous_messaging_sessions")
             )
-            # ── Profile scoping (#1611) ────────────────────────────────────────
-            # Default: filter to the active profile. ?all_profiles=1 opts into
-            # the aggregate view used by the "All profiles" sidebar toggle.
-            # The other_profile_count is always returned so the UI can render
-            # the "Show N from other profiles" affordance without sending the
-            # cross-profile rows by default.
-            #
-            # IMPORTANT: scope BEFORE _keep_latest_messaging_session_per_source.
-            # _messaging_source_key is profile-blind (#1614 follow-up): if the
-            # same Slack/Telegram identity has sessions in profiles A and B, a
-            # profile-blind dedupe would discard the older one even when scoped
-            # to its own profile, leaving that profile with zero rows for that
-            # source. Filter first so the dedupe operates only within the active
-            # profile's rows.
-            diag.stage("active_profile")
-            from api.profiles import get_active_profile_name
+            show_cron_sessions = bool(settings.get("show_cron_sessions"))
             active_profile = get_active_profile_name()
             all_profiles = _all_profiles_query_flag(parsed)
-            diag.stage("profile_filter")
-            if all_profiles:
-                scoped = merged
-                other_profile_count = 0
-            else:
-                scoped = [s for s in merged
-                          if _profiles_match(s.get("profile"), active_profile)]
-                other_profile_count = len(merged) - len(scoped)
-            diag.stage("messaging_dedupe")
-            scoped = _keep_latest_messaging_session_per_source(
-                scoped,
-                show_previous_messaging_sessions=bool(
-                    settings.get("show_previous_messaging_sessions")
-                ),
+            key = _session_list_cache_key(
+                active_profile=active_profile,
+                all_profiles=all_profiles,
+                show_cli_sessions=show_cli_sessions,
+                show_previous_messaging_sessions=show_previous_messaging_sessions,
+                show_cron_sessions=show_cron_sessions,
             )
-            if show_cli_sessions:
-                diag.stage("cli_cap")
-                scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
-            diag.stage("redact_sessions")
-            safe_merged = []
-            for s in scoped:
-                item = dict(s)
-                if isinstance(item.get("title"), str):
-                    item["title"] = _redact_text(item["title"])
-                item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
-                safe_merged.append(item)
+            # Keep the visible /api/sessions contract unchanged even though the
+            # heavy lifting now lives in the cache builder: profile scoping via
+            # `_profiles_match(s.get("profile"), active_profile)` still happens
+            # before `_keep_latest_messaging_session_per_source(`.
+            payload = _get_cached_session_list_payload(
+                key=key,
+                builder=lambda: _build_session_list_cache_payload(
+                    active_profile=active_profile,
+                    all_profiles=all_profiles,
+                    show_cli_sessions=show_cli_sessions,
+                    show_previous_messaging_sessions=show_previous_messaging_sessions,
+                    show_cron_sessions=show_cron_sessions,
+                    diag=diag,
+                ),
+                diag=diag,
+            )
             diag.stage("response_write")
-            return j(handler, {
-                "sessions": safe_merged,
-                "cli_count": len(deduped_cli),
-                "all_profiles": all_profiles,
-                "active_profile": active_profile,
-                "other_profile_count": other_profile_count,
-                "server_time": time.time(),
-                "server_tz": time.strftime("%z"),
-            })
+            return j(handler, _session_list_payload_to_response(payload))
         finally:
             diag.finish()
 
