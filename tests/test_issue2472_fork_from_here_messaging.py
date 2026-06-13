@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+import api.models as models
 import api.routes as routes
 
 REPO = Path(__file__).resolve().parents[1]
@@ -96,6 +98,86 @@ def test_messaging_merge_preserves_longer_sidecar_order_when_timestamps_collapse
         "first answer",
         "second prompt",
         "second answer",
+    ]
+
+
+def test_messaging_merge_does_not_reappend_proven_replayed_cli_tail_after_repaired_sidecar():
+    session = SimpleNamespace(
+        messages=[
+            {"id": "m1", "role": "user", "content": "start", "timestamp": 100},
+            {"id": "m2", "role": "assistant", "content": "ready", "timestamp": 101},
+            {"id": "m3", "role": "user", "content": "latest question", "timestamp": 200},
+            {"id": "m4", "role": "assistant", "content": "latest answer", "timestamp": 201},
+        ]
+    )
+    cli_messages = [
+        {"message_id": "m1", "role": "user", "content": "start", "timestamp": 100},
+        {"message_id": "m2", "role": "assistant", "content": "ready", "timestamp": 101},
+        {"message_id": "m3", "role": "user", "content": "latest question", "timestamp": 300},
+        {"message_id": "m4", "role": "assistant", "content": "latest answer", "timestamp": 301},
+        {"message_id": "m5", "role": "user", "content": "latest question", "timestamp": 302},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m["content"] for m in merged] == [
+        "start",
+        "ready",
+        "latest question",
+        "latest answer",
+        "latest question",
+    ]
+
+
+def test_messaging_merge_preserves_repeated_user_suffix_after_sidecar():
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "alpha", "timestamp": 100},
+            {"role": "assistant", "content": "one", "timestamp": 101},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "alpha", "timestamp": 100},
+        {"role": "assistant", "content": "one", "timestamp": 101},
+        {"role": "user", "content": "alpha", "timestamp": 300},
+        {"role": "assistant", "content": "two", "timestamp": 301},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [(m["role"], m["content"]) for m in merged] == [
+        ("user", "alpha"),
+        ("assistant", "one"),
+        ("user", "alpha"),
+        ("assistant", "two"),
+    ]
+
+
+def test_state_db_reader_preserves_message_ids_for_merge_dedupe(monkeypatch, tmp_path):
+    state_db = tmp_path / "state.db"
+    with sqlite3.connect(state_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+            ("msg-1", "sid-repeat", "user", "alpha", 100.0),
+        )
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: state_db)
+
+    messages = models.get_state_db_session_messages("sid-repeat")
+
+    assert messages == [
+        {"id": "msg-1", "role": "user", "content": "alpha", "timestamp": 100.0},
     ]
 
 

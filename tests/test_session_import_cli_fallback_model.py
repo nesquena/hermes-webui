@@ -389,12 +389,88 @@ def test_sessions_endpoint_suppresses_duplicate_webui_state_projection(monkeypat
     assert "telegram_tip" in session_ids
 
 
-def test_messaging_session_loader_prefers_longer_sidecar_transcript():
-    """Pin the /api/session invariant that repaired sidecars can be longer than state.db segments."""
+def test_messaging_session_loader_prefers_repaired_sidecar_transcript():
+    """Pin the /api/session invariant that repaired sidecars keep authoritative order."""
     handler = _extract_handler("handle_get")
     old = "if is_messaging_session and cli_messages:\n                    _all_msgs = cli_messages"
     assert old not in handler
     assert "_all_msgs = _merged_session_messages_for_display(s, cli_messages)" in handler
     src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
     assert "sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)" in src
-    assert "len(sidecar_messages) > len(cli_messages)" in src
+    assert "return prefix + merged_sidecar + suffix" in src
+    assert "Visible text alone is not proof" in src
+
+
+class _MessageSession:
+    def __init__(self, messages):
+        self.messages = messages
+        self.truncation_watermark = None
+
+
+def test_messaging_display_merge_dedupes_id_and_message_id_aliases():
+    """Stable IDs may arrive as either id or message_id; treat them as the same row."""
+    import api.routes as routes
+
+    sidecar = [
+        {"message_id": "m1", "role": "user", "content": "hello", "timestamp": 10.0},
+        {"message_id": "m2", "role": "assistant", "content": "ok", "timestamp": 11.0},
+    ]
+    cli = [
+        {"id": "m1", "role": "user", "content": "hello", "timestamp": 10.0},
+        {"id": "m2", "role": "assistant", "content": "ok", "timestamp": 11.0},
+        {"id": "m3", "role": "assistant", "content": "tail", "timestamp": 12.0},
+    ]
+
+    merged = routes._merged_session_messages_for_display(_MessageSession(sidecar), cli)
+
+    assert [msg.get("content") for msg in merged] == ["hello", "ok", "tail"]
+    assert sum(1 for msg in merged if msg.get("content") == "hello") == 1
+    assert sum(1 for msg in merged if msg.get("content") == "ok") == 1
+
+
+def test_messaging_display_merge_preserves_no_id_genuine_repeated_turns():
+    """No-ID rows with repeated visible text but distinct timestamps are real turns."""
+    import api.routes as routes
+
+    sidecar = [
+        {"role": "user", "content": "repeat", "timestamp": 10.0},
+        {"role": "assistant", "content": "ack", "timestamp": 12.0},
+    ]
+    cli = [
+        {"role": "user", "content": "repeat", "timestamp": 10.0},  # exact replay
+        {"role": "user", "content": "repeat", "timestamp": 11.0},  # genuine repeat
+        {"role": "assistant", "content": "ack", "timestamp": 12.0},  # exact replay
+        {"role": "user", "content": "repeat", "timestamp": 13.0},  # genuine tail repeat
+    ]
+
+    merged = routes._merged_session_messages_for_display(_MessageSession(sidecar), cli)
+
+    assert [(msg.get("role"), msg.get("content"), msg.get("timestamp")) for msg in merged] == [
+        ("user", "repeat", 10.0),
+        ("user", "repeat", 11.0),
+        ("assistant", "ack", 12.0),
+        ("user", "repeat", 13.0),
+    ]
+
+
+def test_messaging_display_merge_drops_replayed_edges_only_with_stable_id_or_exact_timestamp():
+    """Ordered edge replay removal must not drop same-text no-ID rows with new timestamps."""
+    import api.routes as routes
+
+    sidecar = [
+        {"role": "user", "content": "same", "timestamp": 10.0},
+        {"role": "assistant", "content": "done", "timestamp": 11.0},
+    ]
+    cli = [
+        {"role": "assistant", "content": "done", "timestamp": 9.0},
+        {"role": "user", "content": "same", "timestamp": 12.0},
+    ]
+
+    merged = routes._merged_session_messages_for_display(_MessageSession(sidecar), cli)
+
+    assert [(msg.get("content"), msg.get("timestamp")) for msg in merged] == [
+        ("done", 9.0),
+        ("same", 10.0),
+        ("done", 11.0),
+        ("same", 12.0),
+    ]
