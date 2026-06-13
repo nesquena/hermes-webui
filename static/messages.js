@@ -1638,6 +1638,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdEndParser();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
+    _flushReasoningToAnchor();
+    _scheduleAnchorRegistryCleanup();
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
     if(_isActiveSession()){
@@ -3851,6 +3853,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       _clearOwnerInflightState();
       _flushReasoningToAnchor();
+      _scheduleAnchorRegistryCleanup();
       _closeSource(source);
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
