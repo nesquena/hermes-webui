@@ -4932,6 +4932,7 @@ function _buildBrowserUtterance(text, btn){
     if(btn) btn.dataset.speaking='0';
   };
   return utter;
+}
 // ── Server-side TTS (Edge & VOICEVOX) ────────────────────────────
 
 // Shared blob player — handles Audio element lifecycle
