@@ -1,9 +1,9 @@
 // Stable Assistant Turn Anchors scaffold (#3926).
 //
-// This file is intentionally inert: it defines the current ownership inventory,
-// event classifications, and small owner helpers, but it does not register
-// anchors globally or change any renderer. Later phases can wire these helpers into
-// send(), attachLiveStream(), replay hydration, and renderMessages().
+// This file defines the current ownership inventory, event classifications, and
+// small owner helpers. It does not register anchors globally. The only renderer
+// wiring in this slice is settled assistant final-answer projection; live
+// streaming, replay hydration, tools, and DOM ownership remain unwired.
 (function(){
   const ROOT=(typeof window!=='undefined')?window:globalThis;
 
@@ -696,6 +696,96 @@
     });
   }
 
+  function _contextValue(context, keys){
+    return _firstOwn(context&&typeof context==='object'?context:{},keys);
+  }
+
+  function _messageValue(message, keys){
+    return _firstOwn(message&&typeof message==='object'?message:{},keys);
+  }
+
+  function _rawIndexMessageRef(context){
+    const rawIdx=_contextValue(context,['raw_idx','rawIdx']);
+    if(rawIdx===undefined||rawIdx===null||rawIdx==='') return '';
+    return 'raw_idx:'+String(rawIdx);
+  }
+
+  function projectAssistantTurnAnchorSettledMessageFinalAnswer(input, context){
+    const message=(input&&typeof input==='object')?input:{};
+    const ctx=(context&&typeof context==='object')?context:{};
+    const sessionId=_cleanString(_contextValue(ctx,['session_id','sessionId']))
+      ||_cleanString(_messageValue(message,['session_id','sessionId']));
+    if(!sessionId){
+      return Object.freeze({applied:false,reason:'missing_session',final_answer:'',final_message_ref:null,registry:null});
+    }
+    const role=_cleanString(_messageValue(message,['role']))||'assistant';
+    if(role&&role!=='assistant'){
+      return Object.freeze({applied:false,reason:'non_assistant',final_answer:'',final_message_ref:null,registry:null});
+    }
+    const runId=_cleanString(_contextValue(ctx,['run_id','runId']))
+      ||_cleanString(_messageValue(message,['run_id','runId','_run_id','runtime_run_id']));
+    const streamId=_cleanString(_contextValue(ctx,['stream_id','streamId']))
+      ||_cleanString(_messageValue(message,['stream_id','streamId','_stream_id']));
+    const messageRef=_firstTextValue(
+      _messageValue(message,['message_id','id','local_id']),
+      _contextValue(ctx,['message_id','messageId','local_id','localId'])
+    )||_rawIndexMessageRef(ctx);
+    const turnId=_cleanString(_contextValue(ctx,['turn_id','turnId']))
+      ||_cleanString(_messageValue(message,['turn_id','turnId']))
+      ||[
+        'settled',
+        sessionId,
+        runId||streamId||messageRef||'assistant',
+      ].join(':');
+    const registry=createAssistantTurnAnchorRegistry({
+      session_id:sessionId,
+      turn_id:turnId,
+      run_id:runId||null,
+      stream_id:streamId||null,
+      local_id:messageRef||null,
+      source_message_refs:messageRef?[messageRef]:[],
+    });
+    const payload={
+      role:'assistant',
+      id:messageRef||null,
+      content:_hasOwn(ctx,'content')?_own(ctx,'content'):_own(message,'content'),
+    };
+    const usage=_own(message,'usage');
+    const turnUsage=_own(message,'_turnUsage');
+    if(usage&&typeof usage==='object') payload.usage=usage;
+    if(turnUsage&&typeof turnUsage==='object') payload._turnUsage=turnUsage;
+    const result=applyAssistantTurnAnchorSourceEvent(registry,{
+      source_type:'settled_message',
+      payload,
+      local_id:messageRef||null,
+    },{
+      session_id:sessionId,
+      turn_id:turnId,
+      run_id:runId||null,
+      stream_id:streamId||null,
+    });
+    if(!result.applied){
+      return Object.freeze({
+        applied:false,
+        reason:result.reason||null,
+        final_answer:'',
+        final_message_ref:null,
+        registry,
+      });
+    }
+    const rawFinalAnswer=registry.anchor&&registry.anchor.content&&registry.anchor.content.final_answer;
+    const rawFinalMessageRef=registry.anchor&&registry.anchor.content&&registry.anchor.content.final_message_ref;
+    const finalAnswer=typeof rawFinalAnswer==='string'?rawFinalAnswer:'';
+    const finalMessageRef=typeof rawFinalMessageRef==='string'?rawFinalMessageRef:null;
+    return Object.freeze({
+      applied:!!result.applied,
+      reason:result.reason||null,
+      final_answer:finalAnswer,
+      final_message_ref:finalMessageRef,
+      registry,
+    });
+  }
+
   function createAssistantTurnAnchorSeed(input){
     const opts=(input&&typeof input==='object')?input:{};
     const sessionId=_cleanString(opts.session_id);
@@ -755,7 +845,7 @@
   }
 
   ROOT.HermesAssistantTurnAnchors=Object.freeze({
-    version:'slice3-registry-shadow',
+    version:'slice4-final-projection',
     activityEventKinds:ACTIVITY_EVENT_KINDS,
     stateLayers:STATE_LAYERS,
     sourceEventClassification:SOURCE_EVENT_CLASSIFICATION,
@@ -772,6 +862,7 @@
     applyAssistantTurnAnchorSourceEvent,
     applyAssistantTurnAnchorSourceEvents,
     createAssistantTurnAnchorShadowSnapshot,
+    projectAssistantTurnAnchorSettledMessageFinalAnswer,
     isAssistantTurnAnchorActivityKind,
   });
 })();

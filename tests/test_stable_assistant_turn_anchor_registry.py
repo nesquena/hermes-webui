@@ -112,6 +112,59 @@ console.log(JSON.stringify({{
     return json.loads(result.stdout)
 
 
+def _final_projection_snapshot() -> dict:
+    assert NODE, "node is required for assistant_turn_anchors.js registry tests"
+    script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync({json.dumps(str(ANCHORS_JS))}, 'utf8');
+const sandbox = {{window:{{}}}};
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, {{filename:'assistant_turn_anchors.js'}});
+const api = sandbox.window.HermesAssistantTurnAnchors;
+const projected = api.projectAssistantTurnAnchorSettledMessageFinalAnswer({{
+  role:'assistant',
+  id:'message-final',
+  content:'raw content should be replaced by render-preserved content',
+  _turnUsage:{{input_tokens:8, output_tokens:13}},
+}}, {{
+  session_id:'sid-project',
+  raw_idx:7,
+  content:'line one\\nline two',
+}});
+const projectedByRawIdx = api.projectAssistantTurnAnchorSettledMessageFinalAnswer({{
+  role:'assistant',
+  content:'message without id',
+}}, {{
+  session_id:'sid-project',
+  raw_idx:11,
+  content:'raw index final',
+}});
+const missingSession = api.projectAssistantTurnAnchorSettledMessageFinalAnswer({{
+  role:'assistant',
+  id:'message-missing-session',
+  content:'final',
+}}, {{}});
+const nonAssistant = api.projectAssistantTurnAnchorSettledMessageFinalAnswer({{
+  role:'user',
+  id:'message-user',
+  content:'user text',
+}}, {{
+  session_id:'sid-project',
+}});
+console.log(JSON.stringify({{
+  version:api.version,
+  projected,
+  projectedByRawIdx,
+  missingSession,
+  nonAssistant,
+}}));
+"""
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 def _hardening_snapshot() -> dict:
     assert NODE, "node is required for assistant_turn_anchors.js registry tests"
     script = f"""
@@ -289,7 +342,7 @@ def test_registry_owns_one_anchor_and_dedupes_live_plus_replay_events():
     registry = data["registry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice3-registry-shadow"
+    assert data["version"] == "slice4-final-projection"
     assert [item["reason"] for item in data["results"][:2]] == [None, "duplicate"]
     assert registry["event_index"]["dedupe_keys"][:2] == [
         'event_id:"run-1:1"',
@@ -389,7 +442,7 @@ def test_registry_does_not_destructively_dedupe_seqless_local_tool_lifecycle():
     registry = data["toolRegistry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice3-registry-shadow"
+    assert data["version"] == "slice4-final-projection"
     assert data["toolResults"] == [
         {"applied": True, "reason": None},
         {"applied": True, "reason": None},
@@ -439,7 +492,7 @@ def test_shadow_snapshot_feeds_current_source_families_into_one_registry_owner()
     registry = data["registry"]
     anchor = registry["anchor"]
 
-    assert data["version"] == "slice3-registry-shadow"
+    assert data["version"] == "slice4-final-projection"
     assert data["results"]["live"] == [{"applied": True, "reason": None}]
     assert data["results"]["replay"] == [
         {"applied": False, "reason": "duplicate"},
@@ -463,6 +516,70 @@ def test_shadow_snapshot_feeds_current_source_families_into_one_registry_owner()
     assert anchor["content"]["final_answer"] == "shadow final"
 
 
+def test_final_projection_routes_settled_assistant_message_through_anchor_owner():
+    data = _final_projection_snapshot()
+    projected = data["projected"]
+    registry = projected["registry"]
+    anchor = registry["anchor"]
+
+    assert data["version"] == "slice4-final-projection"
+    assert projected["applied"] is True
+    assert projected["reason"] is None
+    assert projected["final_message_ref"] == "message-final"
+    assert projected["final_answer"] == "line one\nline two"
+    assert registry["stats"]["applied"] == 1
+    assert anchor["identity"]["session_id"] == "sid-project"
+    assert anchor["content"]["final_answer"] == "line one\nline two"
+    assert anchor["content"]["final_message_ref"] == "message-final"
+    assert anchor["usage"] == {"input_tokens": 8, "output_tokens": 13}
+    assert [event["source_event_type"] for event in anchor["metadata_events"]] == [
+        "settled_message",
+    ]
+    assert data["projectedByRawIdx"]["final_message_ref"] == "raw_idx:11"
+    assert data["projectedByRawIdx"]["registry"]["anchor"]["identity"][
+        "source_message_refs"
+    ] == ["raw_idx:11"]
+    anchor_src = _read(ANCHORS_JS)
+    assert "if(!result.applied)" in anchor_src
+
+
+def test_final_projection_is_scoped_to_settled_assistant_messages():
+    data = _final_projection_snapshot()
+
+    assert data["missingSession"] == {
+        "applied": False,
+        "reason": "missing_session",
+        "final_answer": "",
+        "final_message_ref": None,
+        "registry": None,
+    }
+    assert data["nonAssistant"] == {
+        "applied": False,
+        "reason": "non_assistant",
+        "final_answer": "",
+        "final_message_ref": None,
+        "registry": None,
+    }
+
+
+def test_render_messages_uses_anchor_projection_only_for_settled_final_prose():
+    src = _read(UI_JS)
+    start = src.index("function renderMessages")
+    end = src.index("function _toolDisplayName", start)
+    render_body = src[start:end]
+
+    flatten_idx = render_body.index("content=content.filter(p=>p&&p.type==='text')")
+    projection_idx = render_body.index("_assistantTurnAnchorSettledFinalAnswer(m, content")
+    thinking_idx = render_body.index("_extractInlineThinkingFromContentForRender(content")
+
+    assert flatten_idx < projection_idx < thinking_idx
+    assert "if(m.role==='assistant'&&!m._live&&typeof content==='string'){" in render_body
+    assert "createAssistantTurnAnchorRegistry" not in render_body
+    assert "applyAssistantTurnAnchorSourceEvent" not in render_body
+    assert "_assistantTurnAnchorSettledFinalAnswerWarned" in src
+    assert "console.warn('assistant turn anchor settled-final projection failed',err)" in src
+
+
 def test_registry_instances_do_not_share_owner_state():
     data = _registry_snapshot()
     isolated = data["isolated"]
@@ -473,7 +590,7 @@ def test_registry_instances_do_not_share_owner_state():
     assert isolated["anchor"]["activity_events"] == []
 
 
-def test_slice3_registry_is_still_unwired_from_rendering_hot_paths():
+def test_slice4_projection_does_not_wire_registry_into_rendering_hot_paths():
     helper_names = [
         "createAssistantTurnAnchorRegistry",
         "applyAssistantTurnAnchorNormalizedEvent",
@@ -485,3 +602,4 @@ def test_slice3_registry_is_still_unwired_from_rendering_hot_paths():
         assert helper not in _read(UI_JS)
         assert helper not in _read(SESSIONS_JS)
         assert helper not in _read(MESSAGES_JS)
+    assert "projectAssistantTurnAnchorSettledMessageFinalAnswer" in _read(UI_JS)
