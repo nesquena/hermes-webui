@@ -2675,9 +2675,9 @@ def coerce_reasoning_effort_for_model(
     # side, so degrade that unknown-model case to xhigh instead of silently
     # dropping reasoning later in parse_reasoning_effort(). (#3505 review)
     if not supported:
-        return "xhigh" if accepts_max_as_xhigh else raw
+        return raw
     if raw in supported:
-        return "xhigh" if accepts_max_as_xhigh else raw
+        return raw
     # Degrade to the closest *lower* supported level instead of silently
     # disabling reasoning. e.g. max -> xhigh -> high, or xhigh -> high when the
     # target model caps below the configured effort. Never escalate.
