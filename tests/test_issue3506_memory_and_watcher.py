@@ -368,9 +368,9 @@ def test_poll_loop_skips_projection_when_unchanged(tmp_path, monkeypatch):
     calls = {"n": 0}
     real = gw._get_agent_sessions_from_db
 
-    def counting():
+    def counting(db_path=None):
         calls["n"] += 1
-        return real()
+        return real(db_path)
 
     monkeypatch.setattr(gw, "_get_agent_sessions_from_db", counting)
 
@@ -378,11 +378,11 @@ def test_poll_loop_skips_projection_when_unchanged(tmp_path, monkeypatch):
 
     # Run the change-detection body directly (one iteration) without the thread.
     def one_iteration():
-        db_path = gw._get_state_db_path()
+        db_path = w._state_db_path
         cheap_fp = gw._cheap_change_fingerprint(db_path) if db_path.exists() else ''
         if cheap_fp is not None and cheap_fp == w._last_cheap_fp:
             return
-        sessions = gw._get_agent_sessions_from_db()
+        sessions = gw._get_agent_sessions_from_db(db_path)
         if cheap_fp is not None:
             w._last_cheap_fp = cheap_fp
         _ = gw._snapshot_hash(sessions)
