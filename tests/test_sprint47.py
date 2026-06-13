@@ -3,7 +3,9 @@ Sprint 47 tests: skill-backed slash commands appear in the Web UI autocomplete.
 
 Covers:
 - commands.js lazily loads /api/skills for slash autocomplete
+- commands.js lazily loads /api/commands/bundles for bundle autocomplete
 - built-in commands still win over skill name collisions
+- bundle entries merge ahead of plain skill entries for the same slug
 - boot.js primes the async skill load when typing '/'
 - the dropdown marks skill-backed entries visually
 """
@@ -34,6 +36,12 @@ def test_skill_commands_are_loaded_from_api_skills_for_autocomplete():
     assert "source:'skill'" in COMMANDS_JS
 
 
+def test_bundle_commands_are_loaded_from_dedicated_api_for_autocomplete():
+    assert "loadBundleCommands" in COMMANDS_JS
+    assert "api('/api/commands/bundles')" in COMMANDS_JS
+    assert "source:'bundle'" in COMMANDS_JS
+
+
 def test_use_command_declares_skills_subargs():
     assert "{name:'use'" in COMMANDS_JS
     assert "subArgs:'skills'" in COMMANDS_JS
@@ -56,6 +64,25 @@ def test_builtin_commands_take_precedence_over_skill_slug_collisions():
     assert "_getReservedSlashCommandSlugs" in COMMANDS_JS
     assert "if(_getReservedSlashCommandSlugs().has(slug)) return null;" in COMMANDS_JS
     assert "if(!skill.name.startsWith(q)||seen.has(skill.name)||reserved.has(skill.name))continue;" in COMMANDS_JS
+
+
+def test_bundle_entries_merge_before_plain_skill_entries():
+    agent_loop = COMMANDS_JS.find("for(const cmd of (_agentCommandCache||[])){")
+    bundle_loop = COMMANDS_JS.find("for(const bundle of _bundleCommandCache){")
+    skill_loop = COMMANDS_JS.find("for(const skill of _skillCommandCache){")
+    assert agent_loop != -1
+    assert bundle_loop != -1
+    assert skill_loop != -1
+    assert agent_loop < bundle_loop
+    assert bundle_loop < skill_loop
+
+
+def test_reserved_slugs_include_all_agent_and_plugin_aliases():
+    reserved_idx = COMMANDS_JS.find("function _getReservedSlashCommandSlugs(){")
+    assert reserved_idx != -1
+    reserved = COMMANDS_JS[reserved_idx : reserved_idx + 500]
+    assert "const names=[cmd.name].concat(Array.isArray(cmd&&cmd.aliases)?cmd.aliases:[]);" in reserved
+    assert "cmd&&cmd.cli_only" not in reserved
 
 
 def test_typing_slash_primes_async_skill_command_loading():

@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.400] — 2026-06-13 — Release NM (skill bundles in WebUI slash commands, #4087)
+
+### Fixed
+
+- **Skill bundles now appear in the WebUI slash-command autocomplete and dispatch, without shadowing existing commands (#4087).** Bundle-backed `/commands` (from the agent's `skill_bundles` registry) are surfaced alongside skills/plugins, restoring CLI↔WebUI parity. Command resolution keeps strict precedence: built-in → CLI-only → runtime/plugin (`getAgentCommandMetadata` / `_AGENT_COMMANDS_RUN_ON_WEBUI`) → **then** bundle (gated on no agent command claiming the name) → plain skill, so a bundle whose slug collides with `reload-skills`/`codex-runtime`/a plugin can't hijack dispatch. Autocomplete mirrors that order via `_getReservedSlashCommandSlugs()` (built-ins + all agent/runtime/plugin names + aliases reserved before bundles). Bundle execution runs through the same profile-scoped trusted path as skills. (#4087)
+
 ## [v0.51.399] — 2026-06-13 — Release NL (per-home provider probe-worker pool, #3787)
 
 ### Fixed
