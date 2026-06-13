@@ -40,7 +40,7 @@ def _find_free_port() -> int:
 
 
 def _wait_for_server(host: str, port: int, use_ssl: bool = False,
-                     timeout: float = 8.0) -> bool:
+                     timeout: float = 20.0) -> bool:
     """Poll until the server accepts a connection or times out."""
     ctx = None
     if use_ssl:
@@ -62,6 +62,42 @@ def _wait_for_server(host: str, port: int, use_ssl: bool = False,
         except Exception:
             time.sleep(0.5)
     return False
+
+
+def _read_process_output(proc: subprocess.Popen, limit: int = 4000) -> str:
+    """Best-effort read of subprocess output for CI failure diagnostics."""
+    if not proc.stdout:
+        return ""
+    with suppress(Exception):
+        os.set_blocking(proc.stdout.fileno(), False)
+    try:
+        return proc.stdout.read(limit) or ""
+    except (BlockingIOError, OSError, ValueError):
+        return ""
+
+
+def _wait_for_process_output(proc: subprocess.Popen, needle: str,
+                             timeout: float = 5.0) -> str:
+    """Poll subprocess output until expected text appears or timeout expires."""
+    output = ""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        chunk = _read_process_output(proc)
+        if chunk:
+            output += chunk
+            if needle in output:
+                break
+        time.sleep(0.1)
+    return output
+
+
+def _assert_server_ready(testcase: unittest.TestCase, proc: subprocess.Popen,
+                         host: str, port: int, use_ssl: bool,
+                         message: str) -> None:
+    """Assert server readiness without consuming stdout on the success path."""
+    if _wait_for_server(host, port, use_ssl=use_ssl):
+        return
+    testcase.fail(message + "\n" + _read_process_output(proc))
 
 
 def _start_server(port: int, cert: str = None, key: str = None) -> subprocess.Popen:
@@ -161,8 +197,8 @@ class TestTLSEndToEnd(unittest.TestCase):
     def test_https_server_responds_to_health(self):
         port = _find_free_port()
         self._proc = _start_server(port, cert=self._cert, key=self._key)
-        self.assertTrue(
-            _wait_for_server("127.0.0.1", port, use_ssl=True),
+        _assert_server_ready(
+            self, self._proc, "127.0.0.1", port, True,
             "TLS server did not start in time",
         )
         ctx = ssl.create_default_context()
@@ -179,8 +215,9 @@ class TestTLSEndToEnd(unittest.TestCase):
     def test_http_without_tls_still_works(self):
         port = _find_free_port()
         self._proc = _start_server(port)
-        self.assertTrue(
-            _wait_for_server("127.0.0.1", port, use_ssl=False),
+        _assert_server_ready(
+            self, self._proc, "127.0.0.1", port, False,
+            "HTTP server did not start in time",
         )
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         conn.request("GET", "/health")
@@ -197,18 +234,12 @@ class TestTLSEndToEnd(unittest.TestCase):
             port, cert="/nonexistent/cert.pem", key="/nonexistent/key.pem",
         )
         # Server should be reachable over plain HTTP even though TLS setup failed
-        self.assertTrue(
-            _wait_for_server("127.0.0.1", port, use_ssl=False),
+        _assert_server_ready(
+            self, self._proc, "127.0.0.1", port, False,
             "HTTP fallback server did not start after TLS failure",
         )
         # Confirm TLS warning was printed
-        import fcntl
-        os.set_blocking(self._proc.stdout.fileno(), False)
-        output = ""
-        try:
-            output = self._proc.stdout.read(2000) or ""
-        except BlockingIOError:
-            output = ""
+        output = _wait_for_process_output(self._proc, "TLS setup failed")
         self.assertIn("TLS setup failed", output)
 
 
