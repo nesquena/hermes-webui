@@ -8714,8 +8714,15 @@ function _restoreMessageScrollSnapshot(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+  // Proportional scroll adjustment: when DOM has grown/shrunk since the
+  // snapshot was taken (e.g. render window expansion prepended earlier
+  // messages), compensate scrollTop by the height delta so the user's
+  // visible message group stays in view.  Falls back to 0 delta (current
+  // behaviour) when snapshot.scrollHeight is absent.
+  const delta=el.scrollHeight-Number(snapshot.scrollHeight||el.scrollHeight);
+  const target=Math.max(0,Math.min((Number(snapshot.top)||0)+delta,maxTop));
   _programmaticScroll=true;
-  el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  el.scrollTop=target;
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
   requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
@@ -8727,7 +8734,7 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   const bottom=Number(snapshot.bottom);
   const target=(snapshot.pinned===true&&Number.isFinite(bottom))
     ? maxTop-Math.max(0,bottom)
-    : Number(snapshot.top)||0;
+    : Math.max(0,Math.min((Number(snapshot.top)||0)+(el.scrollHeight-Number(snapshot.scrollHeight||el.scrollHeight)),maxTop));
   _programmaticScroll=true;
   el.scrollTop=Math.max(0,Math.min(target,maxTop));
   _lastScrollTop=el.scrollTop;
@@ -8909,7 +8916,16 @@ function renderMessages(options){
       _preservedLiveTurn=_lt;
     }
   }
+  // DOM mutation (innerHTML='') clamps scrollTop and fires a synchronous
+  // native scroll event. Guard to prevent the listener from corrupting
+  // _scrollPinned / _messageUserUnpinned on this synthetic event.
+  // Reset immediately — the event fires synchronously, so there's no
+  // risk of leaking the guard past this statement.  Leaving the guard
+  // stuck true would silently discard real user scroll events during
+  // streaming when _scrollAfterMessageRender's scrollIfPinned() early-returns.
+  _programmaticScroll=true;
   inner.innerHTML='';
+  _programmaticScroll=false;
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
     S.messages,
