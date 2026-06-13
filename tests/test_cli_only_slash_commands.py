@@ -266,6 +266,7 @@ def test_reload_mcp_reload_skills_and_codex_runtime_webui_intercept_aliases_are_
     assert "'reload_skills'" in MESSAGES_JS
     assert "'codex-runtime'" in MESSAGES_JS
     assert "'codex_runtime'" in MESSAGES_JS
+    assert "'credits'" in MESSAGES_JS
     assert "if(_agentCmd&&_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" not in MESSAGES_JS
 
 

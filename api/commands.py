@@ -27,7 +27,7 @@ _AGENT_COMMAND_ALIASES = {
     'reload_skills': 'reload-skills',
     'codex_runtime': 'codex-runtime',
 }
-_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime'})
+_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime', 'credits'})
 _RELOAD_MCP_LOCK = threading.Lock()
 _RELOAD_SKILLS_LOCK = threading.Lock()
 _CODEX_RUNTIME_LOCK = threading.Lock()
@@ -126,6 +126,8 @@ def execute_agent_command(command: str) -> str:
         return _run_reload_skills_command()
     if canonical == 'codex-runtime':
         return _run_codex_runtime_command(arg_string)
+    if canonical == 'credits':
+        return _run_credits_command()
 
     raise KeyError(canonical)
 
@@ -253,6 +255,42 @@ def _run_reload_skills_command() -> str:
         lines.append(f"Added skills: {', '.join(sorted(added_names))}")
     if removed_names:
         lines.append(f"Removed skills: {', '.join(sorted(removed_names))}")
+    return "\n".join(lines)
+
+
+def _run_credits_command() -> str:
+    """Render Hermes' shared credits view for the WebUI slash-command path."""
+    try:
+        from agent.account_usage import build_credits_view
+    except Exception:
+        logger.warning("Failed to import credits view runtime", exc_info=True)
+        return "Couldn't fetch credits right now."
+
+    try:
+        view = build_credits_view(markdown=True)
+    except Exception:
+        logger.warning("Failed to build /credits view", exc_info=True)
+        return "Couldn't fetch credits right now."
+
+    if not getattr(view, "logged_in", False):
+        return "Not logged into Nous. Run `hermes auth login nous` in Hermes CLI, then try /credits again."
+
+    lines = ["💳 **Nous credits**"]
+    for line in tuple(getattr(view, "balance_lines", ()) or ()):
+        if str(line).lstrip().startswith("📈"):
+            continue
+        lines.append(str(line))
+
+    identity_line = str(getattr(view, "identity_line", "") or "").strip()
+    if identity_line:
+        lines.append("")
+        lines.append(identity_line)
+
+    topup_url = str(getattr(view, "topup_url", "") or "").strip()
+    if topup_url:
+        lines.append("")
+        lines.append(f"Top up: {topup_url}")
+        lines.append("Complete your top-up in the browser; credits will appear in /credits shortly.")
     return "\n".join(lines)
 
 
