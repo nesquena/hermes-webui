@@ -1990,7 +1990,7 @@ function applyBotName(){
     api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false})}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
   // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';S.activeProfileIsDefault=!!p.is_default;}catch(e){S.activeProfile='default';S.activeProfileIsDefault=true;}
+  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';S.activeProfileIsDefault=!!p.is_default;S.profileLocked=!!p.profile_locked;S.lockedProfile=p.locked_profile||null;S.profilePolicyMode=p.profile_policy_mode||(S.profileLocked?'locked':'normal');}catch(e){S.activeProfile='default';S.activeProfileIsDefault=true;S.profileLocked=false;S.lockedProfile=null;S.profilePolicyMode='normal';}
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

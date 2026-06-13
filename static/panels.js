@@ -5262,6 +5262,9 @@ async function loadProfilesPanel() {
   try {
     const data = await api('/api/profiles');
     _profilesCache = data;
+    S.profileLocked=!!data.profile_locked;
+    S.lockedProfile=data.locked_profile||null;
+    S.profilePolicyMode=data.profile_policy_mode||(S.profileLocked?'locked':'normal');
     panel.innerHTML = '';
     const explainer = document.createElement('div');
     explainer.className = 'profile-card profile-help-card';
@@ -5390,12 +5393,14 @@ function _setProfileHeaderButtons(mode, p, activeName){
   const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
   if (mode === 'read') {
+    if(S.profilePolicyMode==='locked'){ hide(actBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); return; }
     const isActive = p && p.name === activeName;
     const isDefault = !!(p && p.is_default);
     if (isActive) hide(actBtn); else show(actBtn);
-    if (isDefault) hide(delBtn); else show(delBtn);
+    if(S.profileLocked||isDefault) hide(delBtn); else show(delBtn);
     hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create') {
+    if(S.profileLocked){ hide(actBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); return; }
     hide(actBtn); hide(delBtn); show(cancelBtn); show(saveBtn);
   } else {
     [actBtn, delBtn, cancelBtn, saveBtn].forEach(hide);
@@ -5448,6 +5453,9 @@ function renderProfileDropdown(data) {
   const dd = $('profileDropdown');
   if (!dd) return;
   dd.innerHTML = '';
+  S.profileLocked=!!(data&&data.profile_locked);
+  S.lockedProfile=(data&&data.locked_profile)||null;
+  S.profilePolicyMode=(data&&data.profile_policy_mode)||(S.profileLocked?'locked':'normal');
   const allProfiles = data.profiles || [];
   const active = (S.activeProfile && allProfiles.some(p => p.name === S.activeProfile))
     ? S.activeProfile
@@ -5482,6 +5490,12 @@ function renderProfileDropdown(data) {
 function toggleProfileDropdown() {
   const dd = $('profileDropdown');
   if (!dd) return;
+  if(S.profilePolicyMode==='locked'){
+    const chip=$('profileChip');
+    if(chip) chip.title='Profile is locked to '+(S.lockedProfile||S.activeProfile||'this profile');
+    showToast('Profile is locked to '+(S.lockedProfile||S.activeProfile||'this profile'));
+    return;
+  }
   if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
@@ -5538,6 +5552,9 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    S.profileLocked=!!(data&&data.profile_locked);
+    S.lockedProfile=(data&&data.locked_profile)||null;
+    S.profilePolicyMode=(data&&data.profile_policy_mode)||(S.profileLocked?'locked':'normal');
 
     // Update composer placeholder and title bar while the core profile-switch
     // state is still close to the profile API response.
@@ -5661,6 +5678,7 @@ async function switchToProfile(name) {
 }
 
 function openProfileCreate(){
+  if (S.profileLocked) { showToast('Profile management is disabled on this WebUI instance'); return; }
   if (typeof switchPanel === 'function' && _currentPanel !== 'profiles') switchPanel('profiles');
   _profilePreFormDetail = _currentProfileDetail ? { ..._currentProfileDetail } : null;
   _profileMode = 'create';

@@ -277,17 +277,112 @@ def _profiles_match(row_profile, active_profile) -> bool:
     return False
 
 
+def _split_profile_csv(raw: str) -> list[str]:
+    """Parse a comma/space separated profile list from an environment value."""
+    names: list[str] = []
+    for part in re.split(r"[,\s]+", raw or ""):
+        name = part.strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def get_webui_profile_policy() -> dict:
+    """Return this WebUI instance's optional profile restriction policy.
+
+    Environment contract:
+      - HERMES_WEBUI_PROFILE_LOCK=<name> locks the whole WebUI instance to one
+        profile, regardless of the request's hermes_profile cookie.
+      - HERMES_WEBUI_PROFILE_ALLOWLIST=a,b filters profile lists and rejects
+        switching outside the allowlist. When a locked profile is set, it is
+        always included in the effective allowlist.
+    """
+    locked = os.getenv("HERMES_WEBUI_PROFILE_LOCK", "").strip()
+    allowed = _split_profile_csv(os.getenv("HERMES_WEBUI_PROFILE_ALLOWLIST", ""))
+    if locked and locked not in allowed:
+        allowed.insert(0, locked)
+    return {
+        "mode": "locked" if locked else ("allowlist" if allowed else "normal"),
+        "locked_profile": locked or None,
+        "allowed_profiles": allowed,
+        "locked": bool(locked or allowed),
+    }
+
+
+def webui_profile_policy_restricted() -> bool:
+    return bool(get_webui_profile_policy().get("locked"))
+
+
 def get_active_profile_name() -> str:
     """Return the currently active profile name.
 
     Priority:
+      0. Locked WebUI profile policy (dedicated single-profile instance)
       1. Thread-local (set per-request from hermes_profile cookie) — issue #798
       2. Process-level default (_active_profile)
+
+    In allowlist mode, a stale/out-of-scope cookie falls back to the first
+    allowed profile so request routing cannot escape the instance policy.
     """
+    policy = get_webui_profile_policy()
+    locked = policy.get("locked_profile")
+    if locked:
+        return locked
     tls_name = getattr(_tls, 'profile', None)
-    if tls_name is not None:
-        return tls_name
-    return _active_profile
+    active = tls_name if tls_name is not None else _active_profile
+    allowed = policy.get("allowed_profiles") or []
+    if allowed and active not in allowed:
+        return allowed[0]
+    return active
+
+
+def ensure_profile_allowed_for_webui(name: str) -> str:
+    """Validate an explicit client-requested profile against WebUI policy."""
+    requested = (name or "").strip()
+    policy = get_webui_profile_policy()
+    locked = policy.get("locked_profile")
+    if locked:
+        if requested != locked:
+            raise PermissionError(
+                f"Profile {requested!r} is not allowed on this WebUI instance; "
+                f"this instance is locked to {locked!r}."
+            )
+        return locked
+    allowed = policy.get("allowed_profiles") or []
+    if allowed and requested not in allowed:
+        raise PermissionError(
+            f"Profile {requested!r} is not allowed on this WebUI instance."
+        )
+    return requested
+
+
+def filter_profiles_for_webui_policy(rows: list[dict]) -> list[dict]:
+    """Filter and re-mark profile rows according to the WebUI profile policy."""
+    policy = get_webui_profile_policy()
+    allowed = set(policy.get("allowed_profiles") or [])
+    if not allowed:
+        return rows
+    active = get_active_profile_name()
+    result = []
+    for row in rows:
+        name = str((row or {}).get("name") or "")
+        if name in allowed:
+            result.append({**row, "is_active": name == active})
+    return result
+
+
+def webui_profile_policy_response_fields() -> dict:
+    """JSON fields advertised to the frontend for profile-lock UX."""
+    policy = get_webui_profile_policy()
+    fields = {
+        "profile_locked": bool(policy.get("locked")),
+        "profile_policy_mode": policy.get("mode") or "normal",
+        "allowed_profiles": policy.get("allowed_profiles") or [],
+    }
+    locked = policy.get("locked_profile")
+    if locked:
+        fields["locked_profile"] = locked
+    return fields
 
 
 def set_request_profile(name: str) -> None:
