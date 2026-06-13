@@ -3310,7 +3310,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
           }
           syncTopbar();renderMessages({preserveScroll:true});
-          if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
+          if(shouldFollowOnDone&&typeof scrollToBottom==='function'&&typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(250)) scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)

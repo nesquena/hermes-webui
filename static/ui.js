@@ -3103,7 +3103,7 @@ function _shouldFollowMessagesOnDomReplace(){
   // following only for users who are still pinned or effectively at the tail.
   // A broad near-bottom window causes long answers/mobile readers who scroll up
   // a little to read mid-stream to get snapped back to the bottom on completion.
-  return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(120));
+  return _autoScrollFollow && !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(120));
 }
 function _followMessagesAfterDomReplace(){
   if(_shouldFollowMessagesOnDomReplace()){
@@ -3112,8 +3112,11 @@ function _followMessagesAfterDomReplace(){
   }
   return false;
 }
-function _settleMessageScrollToBottom(force){
-  // Markdown post-processing (Prism, tables, Mermaid/KaTeX/PDF placeholders)
+function _settleMessageScrollToBottom(force, explicit){
+  // `explicit` = a user-invoked scroll-to-bottom (End button / scrollToBottom()).
+  // When explicit, late-layout settling runs even if Auto-follow is OFF — the
+  // setting only suppresses AUTOMATIC streaming follow, not a deliberate jump
+  // to the bottom. (Codex #4006 r3.)
   // can grow the transcript after the first scroll write. Re-apply the bottom
   // position when content settles so late layout does not leave the viewport
   // above the real end. User scroll increments _bottomSettleToken and cancels.
@@ -3150,7 +3153,7 @@ function _settleMessageScrollToBottom(force){
   // active one that may now be in the global _settleRO. (Codex review #3.)
   const ro=new ResizeObserver(()=>{
     if(token!==_bottomSettleToken){ ro.disconnect(); if(_settleRO===ro) _settleRO=null; return; }
-    if(!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
+    if((!_autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
       ro.disconnect(); if(_settleRO===ro) _settleRO=null;
       _programmaticScroll=false;
       return;
@@ -3183,7 +3186,7 @@ function _settleMessageScrollToBottom(force){
   _settleFinalTimer=setTimeout(()=>{
     if(token!==_bottomSettleToken) return;
     ro.disconnect(); if(_settleRO===ro) _settleRO=null;
-    if(!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){ _programmaticScroll=false; return; }
+    if((!_autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){ _programmaticScroll=false; return; }
     _settleFinalScroll(token);
   },2000);
 }
@@ -3202,6 +3205,7 @@ function _settleFinalScroll(token){
   });
 }
 function scrollIfPinned(){
+  if(!_autoScrollFollow) return;
   if(_messageUserUnpinned) return;
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
@@ -3218,7 +3222,7 @@ function scrollToBottom(){
   // was skipping the observer and causing Firefox paint jumps when
   // renderMessages({preserveScroll:true}) + scrollToBottom() fired back-to-back.
   _setMessageScrollToBottom();
-  _settleMessageScrollToBottom(false);
+  _settleMessageScrollToBottom(false, true);
   _syncScrollToBottomCue(false,{newMessage:false});
   if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
 }
@@ -8640,7 +8644,7 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
     // new-message cue. (Using scrollIfPinned() here instead would skip the forced
     // write unless distance>500 and let the DOM-rebuild scroll event cancel the
     // delayed settles — Codex CORE catch on #3631.)
-    if(_followMessagesAfterDomReplace()) return;
+    if(!_messageUserUnpinned && _followMessagesAfterDomReplace()) return;
     _restoreMessageScrollSnapshot(scrollSnapshot);
     _maybeShowNewMessageScrollCue(scrollSnapshot);
     return;
@@ -8649,12 +8653,26 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
     scrollIfPinned();
     return;
   }
+  // Auto-follow OFF + the user has scrolled up: don't yank them to the bottom on
+  // an automatic (non-preserve) re-render. This also covers the send() race where
+  // renderMessages() runs before S.activeStreamId is set, so a stream-start
+  // wouldn't otherwise be caught by the scrollIfPinned() branch above. A fresh
+  // session load (not unpinned) still lands at the bottom as expected. (Codex #4006.)
+  // renderMessages() captures the pre-wipe snapshot for this case too (see its
+  // scrollSnapshot init), so restoring here lands the reader where they were.
+  if(!_autoScrollFollow && _messageUserUnpinned){
+    _restoreMessageScrollSnapshot(scrollSnapshot);
+    return;
+  }
   scrollToBottom();
 }
 
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
-  const scrollSnapshot=preserveScroll?_captureMessageScrollSnapshot():null;
+  // Capture the pre-wipe scroll position when preserving OR when Auto-follow is
+  // off and the user has scrolled up — both need to restore the reader's position
+  // after the DOM rebuild rather than snap to the bottom. (Codex #4006 r3.)
+  const scrollSnapshot=(preserveScroll||(!_autoScrollFollow&&_messageUserUnpinned))?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const msgCount=S.messages.length;
