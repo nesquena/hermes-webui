@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.380] — 2026-06-13 — Release MS (tool-iteration-limit stops surfaced explicitly, #3821)
+
+### Fixed
+
+- **Tool iteration-limit stops are now surfaced explicitly instead of looking like a normal user turn (#3821).** When Hermes Agent stops a turn at the max tool-calling iteration budget, WebUI filters the agent's synthetic max-iteration summary prompt out of both the visible transcript and the model-facing context (so it isn't persisted or replayed as if the human typed it), marks a usable final answer with a `tool_limit_reached` terminal state, and shows a no-final terminal error when the limit fires before any assistant answer is available. Detection reads current-turn result metadata only (not conversation history), and the status annotation is gated behind the terminal-failure check so a genuine failure still takes the error path. (#3821)
+
 ## [v0.51.379] — 2026-06-13 — Release MR (Worklog detail collapse survives live refresh, #4062)
 
 ### Fixed
@@ -106,6 +112,7 @@
 ### Added
 
 - **Slice 2 of the Stable Assistant Turn Anchors foundation: a source-event normalizer (#3980, #3926).** Adds `normalizeAssistantTurnAnchorSourceEvent` / `normalizeAssistantTurnAnchorSourceEvents` to the frozen `HermesAssistantTurnAnchors` global, converting live SSE-style, replay/journal, and settled-message events into a single anchor-normalized shape with stable identity and dedupe keys. The helper is **inert** — no `send()` / `attachLiveStream()` / `renderMessages()` / settlement / `S.messages` / `INFLIGHT` / DOM path consumes it yet — so there is zero rendering change in this release; it lands the model that Compact Worklog and the in-progress Transparent Stream work will later consume from one normalizer. Identity reads are own-property-only and payload shaping uses `Object.create(null)` with unsafe-key skipping, so prototype-pollution and inherited-identity payloads can't leak through. (#3980)
+
 ## [v0.51.365] — 2026-06-11 — Release MD (lineage-segment open + reasoning chip fixes)
 
 ### Fixed
