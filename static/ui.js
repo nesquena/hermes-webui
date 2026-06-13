@@ -7241,6 +7241,7 @@ function _renderWorklogReasonInto(row, text){
   row.innerHTML=html;
 }
 function _worklogReasonNodeFromText(text, attrs){
+  if(window._showThinking===false) return null;
   const html=_worklogReasonHtmlFromText(text);
   if(!html) return null;
   const row=document.createElement('div');
@@ -7274,10 +7275,19 @@ function _syncWorklogReasonFromAnchor(group, anchor, displayTextOverride){
   const list=_toolWorklogListEl(group);
   if(!group||!list) return;
   const anchorKey=_worklogReasonAnchorKey(anchor);
+  const selector=anchorKey?`:scope > .wl-reason[data-worklog-anchor-key="${CSS.escape(anchorKey)}"]`:':scope > .wl-reason[data-worklog-anchor-reason="1"]';
+  // When reasoning/thinking display is turned off (#3903), do not render Worklog
+  // reasoning rows on the live OR settled path — remove any existing one and bail
+  // before building. (The gate must live here, in the actual render path, not in
+  // the unused _worklogReasonNodeFromText helper.)
+  if(window._showThinking===false){
+    const existing=list.querySelector(selector);
+    if(existing) existing.remove();
+    return;
+  }
   const html=arguments.length>2
     ? _worklogReasonHtmlFromAnchor(anchor, displayTextOverride)
     : _worklogReasonHtmlFromAnchor(anchor);
-  const selector=anchorKey?`:scope > .wl-reason[data-worklog-anchor-key="${CSS.escape(anchorKey)}"]`:':scope > .wl-reason[data-worklog-anchor-reason="1"]';
   let reason=list.querySelector(selector);
   if(!html){
     if(reason) reason.remove();
@@ -7343,6 +7353,8 @@ function _migrateLegacyLiveActivityGroupsToWorklog(blocks, worklog){
 }
 function _appendWorklogReason(list, anchor){
   if(!list) return null;
+  // Reasoning display off (#3903): never append a Worklog reasoning row.
+  if(window._showThinking===false) return null;
   const html=_worklogReasonHtmlFromAnchor(anchor);
   if(!html) return null;
   const reason=document.createElement('div');
@@ -9287,7 +9299,7 @@ function renderMessages(options){
     // regression vs master; same content-loss-on-switch class as #3668). The
     // `:not([data-live-thinking="1"])` / live-card guards below keep the active
     // turn's own live nodes from being double-built.
-    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
     const byActivity = new Map();
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const _assistantAnchorForActivity=(aIdx,segmentSeq,burstId)=>{
@@ -11477,9 +11489,10 @@ function removeThinking(){
   const turn=$('liveAssistantTurn');
   const blocks=_assistantTurnBlocks(turn);
   if(blocks) blocks.querySelectorAll('.agent-activity-thinking').forEach(el=>el.remove());
-  if(blocks) blocks.querySelectorAll('.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
+  if(blocks) blocks.querySelectorAll('.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+  if(blocks) blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
     _syncToolCallGroupSummary(group);
-    if(!group.querySelector('.tool-card-row,.agent-activity-thinking')){
+    if(!group.querySelector('.tool-card-row,.agent-activity-thinking,.wl-reason')){
       if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
       group.remove();
     }

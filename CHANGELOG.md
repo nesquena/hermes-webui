@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.376] — 2026-06-13 — Release MO (Hide Thinking also hides Worklog reasoning, #3903)
+
+### Fixed
+
+- **Hiding Thinking now also hides Worklog reasoning rows, without hiding tool activity (#3903).** When reasoning/thinking display is turned off, the Worklog reasoning rows (`.wl-reason`) are now suppressed on both the live streaming path and the settled/reloaded render path, and any already-rendered reasoning rows are pruned when Thinking is toggled off — while tool cards and ordinary Worklog anchor/progress rows are preserved. (Previously the gate sat on an unused helper, so reasoning rows kept rendering even with Thinking off.) (#3903)
+
 ## [v0.51.375] — 2026-06-13 — Release MN (Transparent Stream activity display, #3820)
 
 ### Added
