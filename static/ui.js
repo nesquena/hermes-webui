@@ -8715,7 +8715,13 @@ function _restoreMessageScrollSnapshot(snapshot){
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
   _programmaticScroll=true;
-  el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  // DOM may have grown/shrunk since snapshot (e.g. render window expansion
+  // prepends earlier messages to the top). Adjust scrollTop by the height
+  // delta so the user sees the same content group, not a different portion
+  // of a differently-sized DOM. (#scroll-expansion-bug)
+  const delta=el.scrollHeight-Number(snapshot.scrollHeight||el.scrollHeight);
+  const target=(Number(snapshot.top)||0)+delta;
+  el.scrollTop=Math.max(0,Math.min(target,maxTop));
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
   requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
@@ -8727,7 +8733,7 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   const bottom=Number(snapshot.bottom);
   const target=(snapshot.pinned===true&&Number.isFinite(bottom))
     ? maxTop-Math.max(0,bottom)
-    : Number(snapshot.top)||0;
+    : (Number(snapshot.top)||0)+(el.scrollHeight-Number(snapshot.scrollHeight||el.scrollHeight));
   _programmaticScroll=true;
   el.scrollTop=Math.max(0,Math.min(target,maxTop));
   _lastScrollTop=el.scrollTop;
@@ -8909,6 +8915,9 @@ function renderMessages(options){
       _preservedLiveTurn=_lt;
     }
   }
+  // Guard: prevent scrollTop clamp during DOM clear from corrupting
+  // _scrollPinned / _messageUserUnpinned via a native scroll event.
+  _programmaticScroll=true;
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
