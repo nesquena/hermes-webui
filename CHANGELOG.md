@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.395] — 2026-06-13 — Release NH (push source filters into agent session scans, #3930)
+
+### Fixed
+
+- **The sidebar source filter (WebUI / CLI / cron) is now applied inside the session scan instead of projecting every row and filtering after (#3930).** A `claude_code`-only or `cron`-only filter now early-returns out of the unrelated side scans (Claude-Code import scan / cron-session scan) rather than building the full cross-source list and discarding most of it, cutting work on installs with large CLI or cron histories. The filter pushdown is correctness-preserving — no source's sessions are wrongly dropped from the list. (#3930)
+
 ## [v0.51.394] — 2026-06-13 — Release NG (document-title attention badge for pending prompts, #4121)
 
 ### Added

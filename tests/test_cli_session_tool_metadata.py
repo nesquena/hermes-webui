@@ -142,7 +142,7 @@ def test_existing_cli_import_refreshes_same_length_tool_metadata(monkeypatch):
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid: enriched if sid == session_id else [])
-    monkeypatch.setattr(routes, "get_cli_sessions", lambda: [{"session_id": session_id, "source_tag": "cli", "raw_source": "cli", "session_source": "cli", "source_label": "CLI"}])
+    monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None: [{"session_id": session_id, "source_tag": "cli", "raw_source": "cli", "session_source": "cli", "source_label": "CLI"}])
 
     response = routes._handle_session_import_cli(object(), {"session_id": session_id})
 
