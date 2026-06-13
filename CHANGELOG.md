@@ -3,9 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.396] — 2026-06-13 — Release NI (longer timeout for full-history session loads, #4139)
+
 ### Fixed
 
-- **Full-history session loads now use an extended client timeout.** Actions that intentionally fetch the entire transcript (fork/export/start-jump helpers) can legitimately take longer than the default API timeout on very large sessions; the WebUI now gives that path up to 120 seconds instead of showing a premature "Request timed out" toast while the backend is still working.
+- **Full-history session loads now use an extended client timeout.** Actions that intentionally fetch the entire transcript (fork/export/start-jump helpers) can legitimately take longer than the default API timeout on very large sessions; the WebUI now gives that path up to 120 seconds instead of showing a premature "Request timed out" toast while the backend is still working. (#4139)
 
 ## [v0.51.395] — 2026-06-13 — Release NH (push source filters into agent session scans, #3930)
 
