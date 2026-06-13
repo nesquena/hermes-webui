@@ -1934,6 +1934,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
     },delayMs);
   }
+  // Backstop: schedule an identity-guarded cleanup at creation so this shadow
+  // registry self-expires no matter which teardown path the stream takes
+  // (incl. external ones like sidebar cancelSessionStream() that bypass the
+  // in-closure SSE handlers). Explicit terminal-path calls above just expire it
+  // sooner; this guarantees window._liveAnchorRegistries can't grow unbounded.
+  _scheduleAnchorRegistryCleanup(600000);
   function _applyToAnchor(sourceEventType, rawEventData, sseEvent){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return null;
     const raw=(rawEventData&&typeof rawEventData==='object')?rawEventData:{};
