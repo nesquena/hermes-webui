@@ -1835,8 +1835,17 @@ function renderModelDropdown(){
     }
     const matches=(m)=>!term||found.has(m.value);
     const favoriteKeys=_modelFavoriteKeySet();
+    const favoriteModels=_modelData
+      .filter(m=>!m.endpointErrorOnly&&_isModelFavorite(m.value,_modelFavoriteProviderId(m),favoriteKeys)&&matches(m));
+    const favoriteByKey=new Map();
+    for(const m of favoriteModels){
+      const key=_favoriteModelKey(m.value,_modelFavoriteProviderId(m));
+      if(!favoriteByKey.has(key)) favoriteByKey.set(key,m);
+    }
+    const favoriteRows=[...favoriteByKey.values()]
+      .sort((a,b)=>(a.name||'').localeCompare(b.name||'')||(a.group||'').localeCompare(b.group||'')||(a.value||'').localeCompare(b.value||''));
     const configuredCandidates=_modelData
-      .filter(m=>m.badge&&!m.syntheticFavorite&&matches(m));
+      .filter(m=>m.badge&&!m.syntheticFavorite&&!favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))&&matches(m));
     const configuredBySemanticKey=new Map();
     const _configuredProviderKey=(m)=>String((m&&m.badge&&m.badge.provider)||_providerFromModelValue(m&&m.value)||'').toLowerCase();
     const _configuredModelKey=(m)=>_normalizeConfiguredModelKey(m&&m.value||'');
@@ -1867,15 +1876,6 @@ function renderModelDropdown(){
         return a.name.localeCompare(b.name);
       });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
-    const favoriteModels=_modelData
-      .filter(m=>!m.endpointErrorOnly&&_isModelFavorite(m.value,_modelFavoriteProviderId(m),favoriteKeys)&&matches(m));
-    const favoriteByKey=new Map();
-    for(const m of favoriteModels){
-      const key=_favoriteModelKey(m.value,_modelFavoriteProviderId(m));
-      if(!favoriteByKey.has(key)) favoriteByKey.set(key,m);
-    }
-    const favoriteRows=[...favoriteByKey.values()]
-      .sort((a,b)=>(a.name||'').localeCompare(b.name||'')||(a.group||'').localeCompare(b.group||'')||(a.value||'').localeCompare(b.value||''));
     // Clear and rebuild
     dd.innerHTML='';
     // Add search and custom elements first (CRITICAL: must be before models)
@@ -1932,7 +1932,7 @@ function renderModelDropdown(){
     let _lastGroup=null;
     const _groupCounts={};
     for(const m of _modelData){
-      if(configuredIds.has(m.value)||m.syntheticFavorite) continue;
+      if(configuredIds.has(m.value)||m.syntheticFavorite||favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))) continue;
       if(m.group&&!m.endpointErrorOnly) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
     }
     const _renderProviderEndpointHint=(groupName)=>{
@@ -1945,7 +1945,7 @@ function renderModelDropdown(){
       dd.appendChild(hint);
     };
     for(const m of _modelData){
-      if(configuredIds.has(m.value)||m.syntheticFavorite||!matches(m)) continue;
+      if(configuredIds.has(m.value)||m.syntheticFavorite||favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))||!matches(m)) continue;
       if(m.group&&m.group!==_lastGroup){
         const heading=document.createElement('div');
         heading.className='model-group';

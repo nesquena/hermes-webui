@@ -5,13 +5,31 @@ structure, star button markup, deterministic sorting, i18n key
 coverage, and provider identity fallback via _modelFavoriteProviderId.
 """
 
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS = (ROOT / "static" / "ui.js").read_text()
 STYLE_CSS = (ROOT / "static" / "style.css").read_text()
 I18N_JS = (ROOT / "static" / "i18n.js").read_text()
+NODE = shutil.which("node")
+
+
+def _run_node(script: str, payload: dict | None = None) -> dict:
+    if NODE is None:
+        pytest.skip("node not on PATH")
+    proc = subprocess.run(
+        [NODE, "-e", script, str(ROOT / "static" / "ui.js"), json.dumps(payload or {})],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return json.loads(proc.stdout)
 
 
 def test_model_favorites_key_constant_exists():
@@ -119,10 +137,105 @@ def test_synthetic_favorites_injected_before_render():
 
 def test_synthetic_favorites_excluded_from_provider_and_configured_groups():
     filter_section = UI_JS[UI_JS.index("const _filterModels=(term)=>"):UI_JS.index("// Restore focus to search input")]
-    # Not treated as a configured catalog entry.
-    assert "m.badge&&!m.syntheticFavorite&&matches(m)" in filter_section
-    # Not counted toward or rendered inside regular provider groups.
-    assert "configuredIds.has(m.value)||m.syntheticFavorite||!matches(m)" in filter_section
+    # Not treated as a configured catalog entry (syntheticFavorite AND already-favorited excluded).
+    assert "m.badge&&!m.syntheticFavorite&&!favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))&&matches(m)" in filter_section
+    # Not counted toward or rendered inside regular provider groups (syntheticFavorite AND already-favorited excluded).
+    assert "configuredIds.has(m.value)||m.syntheticFavorite||favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))||!matches(m)" in filter_section
+
+
+def test_configured_candidates_exclude_favorited_models():
+    """Configured section must skip models already shown in Favorites (provider-aware)."""
+    filter_section = UI_JS[UI_JS.index("const _filterModels=(term)=>"):UI_JS.index("// Clear and rebuild")]
+    # favoriteByKey must be built before configuredCandidates so it can be used for exclusion
+    fav_by_key_pos = filter_section.index("const favoriteByKey=new Map()")
+    conf_candidates_pos = filter_section.index("const configuredCandidates")
+    assert fav_by_key_pos < conf_candidates_pos, \
+        "favoriteByKey must be built before configuredCandidates"
+    # The configured filter must use provider-aware favoriteByKey exclusion
+    assert "!favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))" in filter_section
+
+
+def test_provider_sections_exclude_favorited_models():
+    """Provider counting and rendering loops must skip models already shown in Favorites."""
+    filter_section = UI_JS[UI_JS.index("const _filterModels=(term)=>"):UI_JS.index("// Restore focus to search input")]
+    # Provider group count loop must skip favorited models
+    remaining_section = filter_section[filter_section.index("// Add remaining models matching filter"):]
+    count_skip = "configuredIds.has(m.value)||m.syntheticFavorite||favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))"
+    assert count_skip in remaining_section
+    # Provider render loop must also skip favorited models
+    render_skip = "configuredIds.has(m.value)||m.syntheticFavorite||favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))||!matches(m)"
+    assert render_skip in remaining_section
+
+
+def test_favorite_dedup_uses_provider_aware_key_not_bare_value():
+    """The dedup check must use _favoriteModelKey + _modelFavoriteProviderId, not bare m.value."""
+    filter_section = UI_JS[UI_JS.index("const _filterModels=(term)=>"):UI_JS.index("// Restore focus to search input")]
+    assert "favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))" in filter_section
+    # Must not fall back to bare value-only lookup
+    assert "favoriteByKey.has(m.value)" not in filter_section
+
+
+def test_favorite_dedup_behavior_is_provider_aware():
+    """Executing the real key helpers keeps same-ID models from other providers visible."""
+    script = r"""
+const fs = require('fs');
+const ui = fs.readFileSync(process.argv[1], 'utf8');
+
+function extractFunc(name) {
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = ui.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = ui.indexOf('{', start) + 1;
+  let depth = 1;
+  while (depth > 0 && i < ui.length) {
+    if (ui[i] === '{') depth++;
+    else if (ui[i] === '}') depth--;
+    i++;
+  }
+  return ui.slice(start, i);
+}
+
+for (const name of ['_providerFromModelValue', '_favoriteModelKey', '_modelFavoriteProviderId']) {
+  eval(extractFunc(name));
+}
+
+const _modelData = [
+  {value: 'shared-model', providerId: 'openai', group: 'OpenAI', badge: {provider: 'openai'}},
+  {value: 'shared-model', providerId: 'openai', group: 'OpenAI'},
+  {value: 'shared-model', providerId: 'anthropic', group: 'Anthropic'},
+  {value: 'other-model', providerId: 'openai', group: 'OpenAI'},
+  {value: '@custom:shared-model', group: 'Custom'},
+];
+
+const favoriteKeys = new Set([_favoriteModelKey('shared-model', 'openai')]);
+const favoriteModels = _modelData.filter(m => favoriteKeys.has(_favoriteModelKey(m.value, _modelFavoriteProviderId(m))));
+const favoriteByKey = new Map();
+for (const m of favoriteModels) {
+  const key = _favoriteModelKey(m.value, _modelFavoriteProviderId(m));
+  if (!favoriteByKey.has(key)) favoriteByKey.set(key, m);
+}
+
+const configuredCandidates = _modelData
+  .filter(m => m.badge && !m.syntheticFavorite && !favoriteByKey.has(_favoriteModelKey(m.value, _modelFavoriteProviderId(m))));
+const configuredIds = new Set(configuredCandidates.map(m => m.value));
+const providerRows = _modelData
+  .filter(m => !(configuredIds.has(m.value) || m.syntheticFavorite || favoriteByKey.has(_favoriteModelKey(m.value, _modelFavoriteProviderId(m)))))
+  .map(m => `${_modelFavoriteProviderId(m)}:${m.value}`);
+
+process.stdout.write(JSON.stringify({
+  configuredRows: configuredCandidates.map(m => `${_modelFavoriteProviderId(m)}:${m.value}`),
+  providerRows,
+  favoriteKeys: [...favoriteByKey.keys()],
+}));
+"""
+    result = _run_node(script)
+
+    assert result["configuredRows"] == []
+    assert "openai:shared-model" not in result["providerRows"]
+    assert "anthropic:shared-model" in result["providerRows"]
+    assert "openai:other-model" in result["providerRows"]
+    assert "custom:@custom:shared-model" in result["providerRows"]
+    assert result["favoriteKeys"] == ["openai\u0000shared-model"]
 
 
 def test_render_model_dropdown_includes_favorites_group():
