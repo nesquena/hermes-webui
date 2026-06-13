@@ -323,6 +323,92 @@ class TestProbeWorkerPoolPerHome(unittest.TestCase):
             release_signal.set()
             holder_thread.join(timeout=1.0)
 
+    def test_invalidation_cannot_pop_worker_between_lookup_and_claim(self):
+        """Getter keeps the pool lock through worker claim, so invalidation cannot pop first."""
+        home = Path("/tmp/test_claim_under_pool_lock")
+
+        initial = _get_account_usage_probe_worker(home)
+        self.assertIsNotNone(initial)
+        initial._lock.release()
+
+        with _account_usage_worker_pool_lock:
+            workers = _account_usage_worker_pool[str(Path(home))]
+
+        workers[1]._lock.acquire()
+        self.addCleanup(workers[1]._lock.release)
+
+        acquire_entered = threading.Event()
+        allow_acquire = threading.Event()
+        claimed = threading.Event()
+        release_claim = threading.Event()
+        invalidation_done = threading.Event()
+        result: dict[str, object] = {}
+        target = workers[0]
+        original_lock = target._lock
+        self_outer = self
+
+        class GateLock:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def acquire(self, blocking=True, timeout=-1):
+                if blocking is False:
+                    self_outer.assertTrue(
+                        _account_usage_worker_pool_lock.locked(),
+                        "worker claim must happen while the pool lock is still held",
+                    )
+                    acquire_entered.set()
+                    allow_acquire.wait(timeout=2.0)
+                if timeout == -1:
+                    return self._inner.acquire(blocking)
+                return self._inner.acquire(blocking, timeout)
+
+            def release(self):
+                return self._inner.release()
+
+            def __enter__(self):
+                self._inner.acquire()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self._inner.release()
+                return False
+
+        target._lock = GateLock(original_lock)
+
+        def run_getter():
+            result["worker"] = _get_account_usage_probe_worker(home)
+            claimed.set()
+            release_claim.wait(timeout=2.0)
+            if result["worker"] is not None:
+                result["worker"]._lock.release()
+
+        def run_invalidation():
+            with mock.patch("api.providers._get_hermes_home", return_value=home):
+                invalidate_account_usage_status_cache(provider_id="anthropic")
+            invalidation_done.set()
+
+        fetch_thread = threading.Thread(target=run_getter, daemon=True)
+        invalidation_thread = threading.Thread(target=run_invalidation, daemon=True)
+        fetch_thread.start()
+        self.assertTrue(acquire_entered.wait(timeout=2.0))
+
+        invalidation_thread.start()
+        time.sleep(0.05)
+        self.assertFalse(invalidation_done.is_set())
+
+        allow_acquire.set()
+        self.assertTrue(claimed.wait(timeout=2.0))
+        self.assertIs(result["worker"], target)
+
+        release_claim.set()
+        fetch_thread.join(timeout=2.0)
+
+        invalidation_thread.join(timeout=2.0)
+        self.assertTrue(invalidation_done.is_set())
+        with _account_usage_worker_pool_lock:
+            self.assertNotIn(str(Path(home)), _account_usage_worker_pool)
+
 
 class TestWorkerPoolConfiguration(unittest.TestCase):
     """Test that constants are properly configured."""

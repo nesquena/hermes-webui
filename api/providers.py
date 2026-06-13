@@ -1354,6 +1354,7 @@ class _AccountUsageProbeWorker:
                 env=_account_usage_subprocess_env(self.home, provider, None),
                 **kwargs,
             )
+            self._closed = False
         except Exception:
             self._proc = None
             logger.debug("Account usage worker for %s failed to launch", provider, exc_info=True)
@@ -1434,15 +1435,26 @@ def _get_account_usage_probe_worker(home: Path) -> "_AccountUsageProbeWorker | N
     let two concurrent probes both observe the same worker as free.
     """
     key = str(Path(home))
+    stale: list[_AccountUsageProbeWorker] = []
+    claimed: _AccountUsageProbeWorker | None = None
     with _account_usage_worker_pool_lock:
-        workers = _account_usage_worker_pool.get(key)
-        if not workers:
+        existing_workers = _account_usage_worker_pool.get(key)
+        workers: list[_AccountUsageProbeWorker]
+        if not existing_workers:
             workers = [_AccountUsageProbeWorker(Path(home)) for _ in range(_ACCOUNT_USAGE_WORKERS_PER_HOME)]
-            _account_usage_worker_pool[key] = workers
-    for w in workers:
-        if w._lock.acquire(blocking=False):
-            return w
-    return None
+        else:
+            stale = [worker for worker in existing_workers if worker._closed]
+            workers = [worker for worker in existing_workers if not worker._closed]
+            while len(workers) < _ACCOUNT_USAGE_WORKERS_PER_HOME:
+                workers.append(_AccountUsageProbeWorker(Path(home)))
+        _account_usage_worker_pool[key] = workers
+        for worker in workers:
+            if worker._lock.acquire(blocking=False):
+                claimed = worker
+                break
+    for worker in stale:
+        worker.close()
+    return claimed
 
 
 def _cleanup_account_usage_probe_workers(
