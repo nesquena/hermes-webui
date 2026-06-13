@@ -7303,6 +7303,21 @@ def handle_post(handler, parsed) -> bool:
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
         return j(handler, result, status=200 if result.get("clean") else 409)
 
+    if parsed.path == "/api/actions":
+        from api.actions import register_builtins, default_registry
+        from api.actions_http import handle_actions_post
+
+        # Idempotent on the default_registry singleton (see
+        # register_builtins docstring). First request in the process
+        # pays for registration; later calls return immediately under
+        # the module-level lock. Tracking the call rather than any
+        # individual action name means new builtins added in follow-up
+        # PRs are picked up automatically.
+        register_builtins(default_registry)
+
+        body_dict, status = handle_actions_post(handler, body)
+        return j(handler, body_dict, status=status)
+
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post
 
