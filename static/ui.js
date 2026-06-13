@@ -976,6 +976,81 @@ window._configuredModelBadges=window._configuredModelBadges||{};
 const MODEL_STATE_KEY='hermes-webui-model-state';
 const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
 const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
+const MODEL_FAVORITES_KEY='hermes-webui-model-favorites';
+let _modelDropdownSearchTerm='';
+function _readModelFavorites(){
+  try{
+    const raw=localStorage.getItem(MODEL_FAVORITES_KEY);
+    if(!raw) return [];
+    const parsed=JSON.parse(raw);
+    if(!Array.isArray(parsed)) return [];
+    return parsed.filter(r=>r&&r.value);
+  }catch(_){return [];}
+}
+function _writeModelFavorites(records){
+  try{localStorage.setItem(MODEL_FAVORITES_KEY,JSON.stringify(records));}catch(_){}
+}
+function _favoriteModelKey(value,providerId){
+  const v=String(value||'').trim();
+  const p=String(providerId||_providerFromModelValue(v)||'').trim();
+  return p+'\u0000'+v;
+}
+function _modelFavoriteProviderId(m){
+  return String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||_providerFromModelValue(m&&m.value)||'').trim();
+}
+function _modelFavoriteKeySet(records){
+  return new Set((records||_readModelFavorites()).map(r=>_favoriteModelKey(r.value,r.providerId)));
+}
+function _isModelFavorite(value,providerId,favoriteKeys){
+  const key=_favoriteModelKey(value,providerId);
+  return (favoriteKeys||_modelFavoriteKeySet()).has(key);
+}
+function _toggleModelFavorite(record){
+  const records=_readModelFavorites();
+  const key=_favoriteModelKey(record.value,record.providerId);
+  const idx=records.findIndex(r=>_favoriteModelKey(r.value,r.providerId)===key);
+  if(idx>=0){records.splice(idx,1);}
+  else{records.push({value:record.value,providerId:record.providerId||'',name:record.name||record.value,id:record.id||record.value,group:record.group||'',badgeProvider:record.badgeProvider||'',badgeRole:record.badgeRole||''});}
+  _writeModelFavorites(records);
+  return idx<0;
+}
+function _renderModelFavoriteButton(m,favoriteKeys){
+  const favProvider=_modelFavoriteProviderId(m);
+  const isFav=_isModelFavorite(m.value,favProvider,favoriteKeys);
+  const label=isFav?(t('model_favorite_remove')||'Remove from favorites')+' '+m.name:(t('model_favorite_add')||'Add to favorites')+' '+m.name;
+  return `<button type="button" class="model-opt-favorite" aria-pressed="${isFav?'true':'false'}" title="${esc(label)}" aria-label="${esc(label)}" data-fav-value="${esc(m.value)}" data-fav-prov="${esc(favProvider)}">${li('star',12)}</button>`;
+}
+// Build synthetic picker-data entries for persisted favorites that are absent
+// from the current /api/models list (cold/stale catalog). Favorites live in
+// localStorage and must stay usable even when the live model list does not
+// include them, so we materialize them straight from the stored record rather
+// than relying on the select options. Entries already represented in
+// existingModelData (matched by provider-aware _favoriteModelKey) are skipped so
+// a stale favorite that later reappears in the catalog does not duplicate.
+// Records without a usable value are ignored. The returned rows are flagged
+// `syntheticFavorite` so the renderer keeps them out of provider/configured
+// groups and only surfaces them in the Favorites section.
+function _syntheticFavoriteModelData(existingModelData){
+  const existingKeys=new Set((existingModelData||[]).map(m=>_favoriteModelKey(m.value,_modelFavoriteProviderId(m))));
+  const seen=new Set();
+  const out=[];
+  for(const rec of _readModelFavorites()){
+    const value=String(rec&&rec.value||'').trim();
+    if(!value) continue;
+    const providerId=String((rec&&rec.providerId)||_providerFromModelValue(value)||'').trim();
+    const key=_favoriteModelKey(value,providerId);
+    if(existingKeys.has(key)||seen.has(key)) continue;
+    seen.add(key);
+    const badgeProvider=String(rec&&rec.badgeProvider||'').trim();
+    const badgeRole=String(rec&&rec.badgeRole||'').trim();
+    const badge=(badgeProvider||badgeRole)?{provider:badgeProvider||providerId,role:badgeRole,label:String(rec&&rec.badgeLabel||'').trim()}:null;
+    const name=String(rec&&rec.name||'').trim()||getModelLabel(value)||value;
+    const id=String(rec&&rec.id||'').trim()||value;
+    const group=String(rec&&rec.group||'').trim();
+    out.push({value,rawName:name,name,id,group,providerId,badge,favoriteKey:key,syntheticFavorite:true});
+  }
+  return out;
+}
 
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
@@ -1669,7 +1744,8 @@ function renderModelDropdown(){
   const dd=$('composerModelDropdown');
   const sel=$('modelSelect');
   if(!dd||!sel) return;
-  // Store model data for filtering
+  const _existingSearch=dd.querySelector('.model-search-input');
+  if(_existingSearch) _modelDropdownSearchTerm=_existingSearch.value||'';
   const _modelData=[];
   const _badgeMap=window._configuredModelBadges||{};
   for(const child of Array.from(sel.children)){
@@ -1684,10 +1760,10 @@ function renderModelDropdown(){
         const displayName=rawValue.startsWith('@custom:')
           ? getModelLabel(rawValue)
           : (opt.textContent||getModelLabel(rawValue));
-        _modelData.push({value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
+        _modelData.push({value:opt.value,rawName:displayName,name:displayName,id:rawValue,group:child.label||'',providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId),favoriteKey:_favoriteModelKey(opt.value,providerId)});
       }
       if(modelsEndpointError && !child.children.length){
-        _modelData.push({value:`__models_endpoint_error__:${providerId||child.label||''}`,name:'',id:'',group:child.label||'',providerId,modelsEndpointError,endpointErrorOnly:true});
+        _modelData.push({value:`__models_endpoint_error__:${providerId||child.label||''}`,rawName:'',name:'',id:'',group:child.label||'',providerId,modelsEndpointError,endpointErrorOnly:true,favoriteKey:''});
       }
     }
     if(child.tagName==='OPTION'){
@@ -1695,7 +1771,7 @@ function renderModelDropdown(){
       const displayName=rawValue.startsWith('@custom:')
         ? getModelLabel(rawValue)
         : (child.textContent||getModelLabel(rawValue));
-      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
+      _modelData.push({value:child.value,rawName:displayName,name:displayName,id:rawValue,group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap),favoriteKey:_favoriteModelKey(child.value,'')});
     }
   }
   const _existingConfiguredKeys=new Set(_modelData.map(existing=>_normalizeConfiguredModelKey(existing.value)));
@@ -1703,12 +1779,21 @@ function renderModelDropdown(){
     if(_existingConfiguredKeys.has(_normalizeConfiguredModelKey(modelId))) continue;
     _modelData.push({
       value:modelId,
-      name:esc(getModelLabel(modelId)),
-      id:esc(modelId),
+      rawName:getModelLabel(modelId),
+      name:getModelLabel(modelId),
+      id:modelId,
       group:'',
       badge,
+      providerId:badge&&badge.provider||'',
+      favoriteKey:_favoriteModelKey(modelId,badge&&badge.provider||''),
     });
     _existingConfiguredKeys.add(_normalizeConfiguredModelKey(modelId));
+  }
+  // Inject persisted favorites that the live catalog omits (cold/stale
+  // /api/models) so they remain visible and selectable in the Favorites
+  // section regardless of the current server list.
+  for(const fav of _syntheticFavoriteModelData(_modelData)){
+    _modelData.push(fav);
   }
   // Create search input FIRST before filterModels definition
   const _scopeNote=document.createElement('div');
@@ -1749,13 +1834,22 @@ function renderModelDropdown(){
       }
     }
     const matches=(m)=>!term||found.has(m.value);
+    const favoriteKeys=_modelFavoriteKeySet();
+    const favoriteModels=_modelData
+      .filter(m=>!m.endpointErrorOnly&&_isModelFavorite(m.value,_modelFavoriteProviderId(m),favoriteKeys)&&matches(m));
+    const favoriteByKey=new Map();
+    for(const m of favoriteModels){
+      const key=_favoriteModelKey(m.value,_modelFavoriteProviderId(m));
+      if(!favoriteByKey.has(key)) favoriteByKey.set(key,m);
+    }
+    const favoriteRows=[...favoriteByKey.values()]
+      .sort((a,b)=>(a.name||'').localeCompare(b.name||'')||(a.group||'').localeCompare(b.group||'')||(a.value||'').localeCompare(b.value||''));
     const configuredCandidates=_modelData
-      .filter(m=>m.badge&&matches(m));
+      .filter(m=>m.badge&&!m.syntheticFavorite&&!favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))&&matches(m));
     const configuredBySemanticKey=new Map();
     const _configuredProviderKey=(m)=>String((m&&m.badge&&m.badge.provider)||_providerFromModelValue(m&&m.value)||'').toLowerCase();
     const _configuredModelKey=(m)=>_normalizeConfiguredModelKey(m&&m.value||'');
     const _configuredDisplayPriority=(m)=>{
-      // Prefer plain IDs over provider-qualified aliases for readability.
       const v=String((m&&m.value)||'');
       if(v.startsWith('@')) return 0;
       if(v.includes('/')) return 1;
@@ -1789,12 +1883,27 @@ function renderModelDropdown(){
     dd.appendChild(_searchRow);
     dd.appendChild(_custSep);
     dd.appendChild(_custRow);
+    // Favorites group before Configured
+    if(favoriteRows.length){
+      const favHeading=document.createElement('div');
+      favHeading.className='model-group';
+      favHeading.textContent=t('model_group_favorites')||'Favorites';
+      dd.appendChild(favHeading);
+      for(const m of favoriteRows){
+        const row=document.createElement('div');
+        row.className='model-opt'+(m.value===sel.value?' active':'');
+        const favBtn=_renderModelFavoriteButton(m,favoriteKeys);
+        const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
+        row.innerHTML=`<div class="model-opt-top">${favBtn}<span class="model-opt-name">${esc(m.name)}</span>${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
+        dd.appendChild(row);
+      }
+    }
     if(configuredModels.length){
       const configuredHeading=document.createElement('div');
       configuredHeading.className='model-group';
       configuredHeading.textContent=t('model_group_configured')||'Configured';
       dd.appendChild(configuredHeading);
-      // 为了显示原始ID，建立 badgeKeyMap: badge对象->原始key
       const badgeKeyMap = new Map();
       for(const [k, v] of Object.entries(_badgeMap)){
         badgeKeyMap.set(v, k);
@@ -1803,29 +1912,27 @@ function renderModelDropdown(){
         const row=document.createElement('div');
         row.className='model-opt'+(m.value===sel.value?' active':'');
         let badgeLabel = '';
-        let modelName = m.name;
+        let modelName = m.rawName || m.name || getModelLabel(m.value) || m.value;
         if (m.badge) {
-          // 直接用badge的原始key（即config.yaml里的ID）
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
           badgeLabel = rawId;
-          modelName = rawId; // model-opt-name直接用原始ID
           if(m.badge.provider){
             const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
             badgeLabel += ` (${providerName})`;
           }
         }
+        const favBtn=_renderModelFavoriteButton(m,favoriteKeys);
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        row.innerHTML=`<div class="model-opt-top">${favBtn}<span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectModelFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
     }
     // Add remaining models matching filter
     let _lastGroup=null;
-    // Count models per group for heading labels (#1425)
     const _groupCounts={};
     for(const m of _modelData){
-      if(configuredIds.has(m.value)) continue;
+      if(configuredIds.has(m.value)||m.syntheticFavorite||favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))) continue;
       if(m.group&&!m.endpointErrorOnly) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
     }
     const _renderProviderEndpointHint=(groupName)=>{
@@ -1838,7 +1945,7 @@ function renderModelDropdown(){
       dd.appendChild(hint);
     };
     for(const m of _modelData){
-      if(configuredIds.has(m.value)||!matches(m)) continue;
+      if(configuredIds.has(m.value)||m.syntheticFavorite||favoriteByKey.has(_favoriteModelKey(m.value,_modelFavoriteProviderId(m)))||!matches(m)) continue;
       if(m.group&&m.group!==_lastGroup){
         const heading=document.createElement('div');
         heading.className='model-group';
@@ -1851,10 +1958,10 @@ function renderModelDropdown(){
       if(m.endpointErrorOnly) continue;
       const row=document.createElement('div');
       row.className='model-opt'+(m.value===sel.value?' active':'');
+      const favBtn=_renderModelFavoriteButton(m,favoriteKeys);
       const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
-      // Inline provider chip on every row that has a group (#1425)
       const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
-      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+      row.innerHTML=`<div class="model-opt-top">${favBtn}<span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
       row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
       dd.appendChild(row);
     }
@@ -1868,11 +1975,27 @@ function renderModelDropdown(){
       noResult.style.textAlign='center';
       dd.appendChild(noResult);
     }
+    // Wire favorite buttons
+    dd.querySelectorAll('.model-opt-favorite').forEach(btn=>{
+      btn.addEventListener('click',e=>{
+        e.preventDefault();
+        e.stopPropagation();
+        const fv=btn.dataset.favValue;
+        const fp=btn.dataset.favProv;
+        const mItem=_modelData.find(x=>x.value===fv&&_modelFavoriteProviderId(x)===fp);
+        if(!mItem) return;
+        const toggleProviderId=_modelFavoriteProviderId(mItem);
+        _toggleModelFavorite({value:mItem.value,providerId:toggleProviderId,name:mItem.name,id:mItem.id,group:mItem.group,badgeProvider:mItem.badge&&mItem.badge.provider||'',badgeRole:mItem.badge&&mItem.badge.role||''});
+        _modelDropdownSearchTerm=_si.value||'';
+        _filterModels(_modelDropdownSearchTerm);
+        if(document.activeElement!==_si) _si.focus();
+      });
+    });
     // Restore focus to search input
     _si.focus();
   };
   // Event handlers for search input
-  _si.addEventListener('input',()=>_filterModels(_si.value));
+  _si.addEventListener('input',()=>{_modelDropdownSearchTerm=_si.value;_filterModels(_si.value);});
   // Keyboard navigation through filtered model rows (#2791).
   const _visibleModelRows=()=>Array.from(dd.querySelectorAll('.model-opt'));
   const _activeRowIndex=(rows)=>rows.findIndex(r=>r.classList.contains('is-highlighted'));
@@ -1900,8 +2023,8 @@ function renderModelDropdown(){
   });
   _si.addEventListener('click',e=>e.stopPropagation());
   // Event handlers for clear button
-  _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
-  _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
+  _sc.onclick=()=>{ _si.value=''; _modelDropdownSearchTerm=''; _filterModels(''); _si.focus(); };
+  _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _modelDropdownSearchTerm=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
   // Event handlers for custom input
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
   _cb.onclick=_applyCustom;
@@ -1912,8 +2035,12 @@ function renderModelDropdown(){
   dd.appendChild(_searchRow);
   dd.appendChild(_custSep);
   dd.appendChild(_custRow);
+  // Restore previous search term if any
+  if(_modelDropdownSearchTerm){
+    _si.value=_modelDropdownSearchTerm;
+  }
   // Apply initial filter (empty shows all)
-  _filterModels('');
+  _filterModels(_modelDropdownSearchTerm);
 }
 
 async function selectModelFromDropdown(value){
@@ -1967,7 +2094,12 @@ function closeModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
   const mobileAction=$('composerMobileModelAction');
-  if(dd) dd.classList.remove('open');
+  if(dd){
+    dd.classList.remove('open');
+    const search=dd.querySelector('.model-search-input');
+    if(search) search.value='';
+  }
+  _modelDropdownSearchTerm='';
   if(chip) chip.classList.remove('active');
   if(mobileAction) mobileAction.classList.remove('active');
 }
