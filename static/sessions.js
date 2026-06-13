@@ -4839,6 +4839,8 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   let cliSessionCount=0;
   let webuiUnreadCount=0;
   let cliUnreadCount=0;
+  const viewedCounts=_getSessionViewedCounts();
+  const unreadById=new Map();
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
   const webuiSessionsRaw=[];
@@ -4872,7 +4874,8 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
       else webuiArchivedCount++;
     }
     if(!_showArchived&&s.archived) continue;
-    const hasUnread=_hasUnreadForSession(s);
+    const hasUnread=_sessionHasUnreadForSidebar(s, viewedCounts);
+    unreadById.set(s.session_id, hasUnread);
     if(hasUnread){
       if(isCli) cliUnreadCount++;
       else webuiUnreadCount++;
@@ -4895,6 +4898,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   return {
     cliSessionCount,
     unreadCount: showCliOnly ? cliUnreadCount : webuiUnreadCount,
+    unreadById,
     profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered,
     sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw,
     archivedCount: showCliOnly ? cliArchivedCount : webuiArchivedCount,

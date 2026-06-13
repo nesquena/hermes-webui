@@ -29,7 +29,7 @@ def test_unread_only_toggle_uses_sidebar_filter_chip_pattern():
     js = _js()
     css = _css()
     assert "sourceTabs.className='session-source-tabs';" in js
-    assert "if(window._showCliSessions || cliSessionCount>0){" in js
+    assert "if(window._showCliSessions || renderedCliSessionCount>0){" in js
     assert "unreadBtn.className='session-source-tab session-source-toggle'+(_sessionUnreadOnlyFilter?' active':'');" in js
     assert "unreadBtn.textContent=_sessionUnreadOnlyLabel(unreadCount);" in js
     assert "unreadBtn.onclick=()=>_setSessionUnreadOnlyFilter(!_sessionUnreadOnlyFilter);" in js
@@ -40,12 +40,12 @@ def test_unread_only_filter_runs_inside_partition_pipeline():
     js = _js()
     assert "function _sessionHasUnreadForSidebar(s, viewedCounts=null)" in js
     assert "const viewedCounts=_getSessionViewedCounts();" in js
-    assert "let unreadCount=0;" in js
+    assert "let webuiUnreadCount=0;" in js
+    assert "let cliUnreadCount=0;" in js
     assert "const unreadById=new Map();" in js
     assert "const hasUnread=_sessionHasUnreadForSidebar(s, viewedCounts);" in js
     assert "unreadById.set(s.session_id, hasUnread);" in js
-    assert "if(hasUnread) unreadCount++;" in js
-    assert "if(_sessionUnreadOnlyFilter&&!hasUnread&&s.session_id!==activeSidForSidebar) continue;" in js
+    assert "if(_sessionUnreadOnlyFilter&&!hasUnread&&!keepActiveLineage) continue;" in js
     assert "unreadCount," in js
     assert "unreadById," in js
 
@@ -53,10 +53,11 @@ def test_unread_only_filter_runs_inside_partition_pipeline():
 def test_unread_only_composes_with_source_filter_before_row_rendering():
     js = _js()
     assert "const showCliOnly=_sessionSourceFilter==='cli';" in js
-    assert "if(showCliOnly ? !isCli : isCli) continue;" in js
     assert "if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0 && !_sessionUnreadOnlyFilter){" in js
-    source_gate = js.index("if(showCliOnly ? !isCli : isCli) continue;")
-    unread_gate = js.index("if(_sessionUnreadOnlyFilter&&!hasUnread&&s.session_id!==activeSidForSidebar) continue;")
+    assert "sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw," in js
+    assert "const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw);" in js
+    source_gate = js.index("const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;")
+    unread_gate = js.index("if(_sessionUnreadOnlyFilter&&!hasUnread&&!keepActiveLineage) continue;")
     assert source_gate < unread_gate, (
         "The unread-only predicate must run after the source filter inside "
         "_partitionSidebarSessionRows so the filters compose in one pipeline."
@@ -73,4 +74,4 @@ def test_unread_only_empty_state_is_specific():
 
 def test_unread_only_chip_does_not_force_cli_chips_for_webui_only_users():
     js = _js()
-    assert "if(webuiSessionCount>0 || _sessionUnreadOnlyFilter || window._showCliSessions || cliSessionCount>0){" in js
+    assert "if(renderedWebuiSessionCount>0 || window._showCliSessions || renderedCliSessionCount>0 || _sessionUnreadOnlyFilter){" in js
