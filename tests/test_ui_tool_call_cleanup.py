@@ -418,6 +418,27 @@ class TestToolCallGroupingStatic:
                 "cannot leak into terminal, restored, or settled DOM."
             )
 
+    def test_live_tool_elapsed_badge_is_right_aligned_metadata(self):
+        card_fn = _function_body(UI_JS, "buildToolCard")
+        name_idx = card_fn.find('tool-card-name')
+        preview_idx = card_fn.find('tool-card-preview')
+        live_duration_idx = card_fn.find('tool-card-live-duration')
+        toggle_idx = card_fn.find('tool-card-toggle')
+        assert -1 not in (name_idx, preview_idx, live_duration_idx, toggle_idx), (
+            "buildToolCard() should render name, preview, live elapsed badge, and toggle hooks."
+        )
+        assert name_idx < preview_idx < live_duration_idx < toggle_idx, (
+            "Live elapsed time should render after the preview as right-side metadata, "
+            "not between the tool name and preview text."
+        )
+        assert ".tool-card-live-duration" in CSS and "margin-left:auto" in CSS, (
+            "The live elapsed badge should push to the right edge of the tool row."
+        )
+        assert ".tool-card-live-duration + .tool-card-toggle{margin-left:0;}" in CSS, (
+            "When a caret is present, it should sit next to the elapsed badge instead "
+            "of competing for the same auto margin."
+        )
+
     def test_terminal_worklog_titles_summarize_common_diagnostic_commands(self):
         start = UI_JS.find("function _toolCommandTitle")
         end = UI_JS.find("function _toolQueryTitle", start)
