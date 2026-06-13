@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
@@ -76,6 +77,36 @@ def test_same_frame_snapshot_preserves_bottom_distance_and_unpinned_state():
     assert "_scrollPinned=false" in restore
     assert "renderMessages({...(options||{}),preserveScroll:true});" in wrapper
     assert "_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);" in wrapper
+
+
+def test_preserve_scroll_restores_reader_away_from_bottom_before_following():
+    body = _function_body(UI_JS, "_scrollAfterMessageRender")
+    compact = _compact(body)
+
+    reader_idx = compact.index("constreaderAwayFromBottom=")
+    follow_idx = compact.index("if(!readerAwayFromBottom&&!_messageUserUnpinned&&_followMessagesAfterDomReplace())return;")
+    restore_idx = compact.index("_restoreMessageScrollSnapshot(scrollSnapshot);")
+
+    assert "Number(scrollSnapshot.bottom)>250" in compact
+    assert reader_idx < follow_idx < restore_idx
+
+
+def test_scroll_snapshot_restore_reinstates_unpinned_state_when_reader_is_mid_answer():
+    restore = _function_body(UI_JS, "_restoreMessageScrollSnapshot")
+    compact = _compact(restore)
+
+    assert "constbottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;" in compact
+    assert "if(bottomDistance>250)" in compact
+    assert "_messageUserUnpinned=true" in compact
+    assert "_scrollPinned=false" in compact
+
+
+def test_same_session_force_refresh_does_not_reset_scroll_direction_tracker():
+    body = _function_body(SESSIONS_JS, "loadSession")
+    compact = _compact(body)
+
+    assert "constcurrentSid=S.session?S.session.session_id:null;" in compact
+    assert "if(currentSid!==sid&&typeofwindow!=='undefined'&&typeofwindow._resetScrollDirectionTracker==='function')" in compact
 
 
 def test_clarify_card_is_height_clamped_and_scrollable_on_mobile_viewports():

@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.390] — 2026-06-13 — Release NC (don't snap long final answers to bottom on PWA refresh, #4123)
+
+### Fixed
+
+- **Long final answers no longer snap back to the bottom while you are reading them in PWA/mobile mode (#4123).** Same-session background refreshes now treat a preserved scroll snapshot whose viewport is clearly away from the bottom (>250px) as an active reading position and restore it before any follow-to-bottom path runs, re-mark restored mid-answer positions as unpinned so later refreshes keep respecting the reader, and no longer reset the scroll-direction tracker on same-session force refreshes (that reset stays scoped to real session switches). (#4123)
+
 ## [v0.51.389] — 2026-06-13 — Release NB (surface dirty-install state in update check, #4085)
 
 ### Fixed

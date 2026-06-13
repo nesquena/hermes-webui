@@ -57,8 +57,13 @@ def test_render_messages_preserve_scroll_option_uses_user_pin_state_not_stream_l
     assert "const preserveScroll=!!(options&&options.preserveScroll);" in render_body
     assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in render_body
     assert "const scrollSnapshot=(preserveScroll||(!_autoScrollFollow&&_messageUserUnpinned))?_captureMessageScrollSnapshot():null" in render_body
-    assert "if(preserveScroll){\n    // Keep master's follow heuristic" in scroll_helper
-    assert "if(!_messageUserUnpinned && _followMessagesAfterDomReplace()) return;\n    _restoreMessageScrollSnapshot(scrollSnapshot);\n    _maybeShowNewMessageScrollCue(scrollSnapshot);\n    return;\n  }" in scroll_helper
+    assert "if(preserveScroll){" in scroll_helper
+    # #4124: a reader clearly away from the bottom (>250px) is treated as an active
+    # reading position, so the forced follow-to-bottom is gated behind it.
+    assert "const readerAwayFromBottom=" in scroll_helper
+    assert "Number(scrollSnapshot.bottom)>250" in scroll_helper
+    assert "// Keep master's follow heuristic" in scroll_helper
+    assert "if(!readerAwayFromBottom && !_messageUserUnpinned && _followMessagesAfterDomReplace()) return;\n    _restoreMessageScrollSnapshot(scrollSnapshot);\n    _maybeShowNewMessageScrollCue(scrollSnapshot);\n    return;\n  }" in scroll_helper
     assert "_shouldFollowMessagesOnDomReplace()" in follow_helper
     assert "scrollToBottom();" in follow_helper
     assert "if(S.activeStreamId){\n    scrollIfPinned();\n    return;\n  }" in scroll_helper
