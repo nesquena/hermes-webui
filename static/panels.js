@@ -6220,6 +6220,7 @@ function _appearancePayloadFromUi(){
     chat_activity_display_mode: chatActivityModeSel&&chatActivityModeSel.value==='transparent_stream'?'transparent_stream':'compact_worklog',
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
+    auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
     worklog_details_expanded_default: worklogDetailsExpanded,
     activity_feed_expanded_default: worklogDetailsExpanded,
     hidden_tabs: _getHiddenTabs(),
@@ -6305,6 +6306,7 @@ async function _autosaveAppearanceSettings(payload){
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
+    window._autoScrollFollow=!!(saved&&saved.auto_scroll_follow);
     if(saved&&payload&&Object.prototype.hasOwnProperty.call(payload,'worklog_details_expanded_default')&&(
       Object.prototype.hasOwnProperty.call(saved,'worklog_details_expanded_default') ||
       Object.prototype.hasOwnProperty.call(saved,'activity_feed_expanded_default')
@@ -6536,6 +6538,15 @@ async function loadSettingsPanel(){
       window._sessionEndlessScrollEnabled=endlessScrollCb.checked;
       endlessScrollCb.onchange=function(){
         window._sessionEndlessScrollEnabled=this.checked;
+        _scheduleAppearanceAutosave();
+      };
+    }
+    const autoScrollFollowCb=$('settingsAutoScrollFollow');
+    if(autoScrollFollowCb){
+      autoScrollFollowCb.checked=settings.auto_scroll_follow!==false;
+      window._autoScrollFollow=autoScrollFollowCb.checked;
+      autoScrollFollowCb.onchange=function(){
+        window._autoScrollFollow=this.checked;
         _scheduleAppearanceAutosave();
       };
     }
@@ -7823,6 +7834,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._busyInputMode=body.busy_input_mode||'queue';
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
+  window._autoScrollFollow=!!body.auto_scroll_follow;
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
@@ -8155,6 +8167,7 @@ async function saveSettings(andClose){
   body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
   body.chat_activity_display_mode=(($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')?'transparent_stream':'compact_worklog';
+  body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
   body.language=language;
   body.show_token_usage=showTokenUsage;
   body.show_quota_chip=showQuotaChip===true;

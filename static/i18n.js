@@ -558,6 +558,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Load older messages while scrolling up',
 
     settings_desc_session_endless_scroll: 'When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.',
+    settings_label_auto_scroll_follow: 'Auto-follow new content',
+    settings_desc_auto_scroll_follow: 'When enabled, the view scrolls to the bottom as new tokens stream in. When disabled, you control the scroll position manually.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -9452,6 +9454,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: '向上滚动时加载更早的消息',
 
     settings_desc_session_endless_scroll: '启用后，向上滚动时会自动加载更早的消息。禁用时请使用加载更早消息按钮。',
+    settings_label_auto_scroll_follow: '自动跟随新内容',
+    settings_desc_auto_scroll_follow: '启用后，流式输出时页面会自动滚动到底部。禁用后，你可以自由控制滚动位置，阅读答案不会被拽到底部。',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
