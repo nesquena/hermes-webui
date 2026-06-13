@@ -5234,11 +5234,17 @@ function _showPwaNotification(title,body,options={}){
 function requestNotificationPermission(){
   if(!('Notification' in window)){
     if(typeof showToast==='function') showToast(t('notifications_unsupported'),3000,'error');
+    if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
     return Promise.resolve('unsupported');
   }
-  if(Notification.permission==='granted') return Promise.resolve('granted');
+  if(Notification.permission==='granted'){
+    if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
+    if(typeof showToast==='function') showToast(t('notifications_enabled_toast'),3000);
+    return Promise.resolve('granted');
+  }
   if(Notification.permission==='denied'){
     if(typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+    if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
     return Promise.resolve('denied');
   }
   return Notification.requestPermission().then(p=>{
