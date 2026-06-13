@@ -1956,7 +1956,7 @@ function applyBotName(){
     applyEmptyStateSuggestionPref();
     window._showTps=false;
     window._fadeTextEffect=false;
-    window._showCliSessions=false;
+    window._showCliSessions=true;
     window._soundEnabled=false;
     window._notificationsEnabled=false;
     window._whatsNewSummaryEnabled=false;

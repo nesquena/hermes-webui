@@ -6220,7 +6220,7 @@ _SETTINGS_DEFAULTS = {
     "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
     "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
-    "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
+    "show_cli_sessions": True,  # merge CLI sessions from state.db into the sidebar
     "show_cron_sessions": False,  # surface cron sessions in the sidebar (subordinate to show_cli_sessions)
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
