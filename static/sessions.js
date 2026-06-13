@@ -4249,10 +4249,25 @@ function _clearLineageReportCache(){
 
 function _pruneLineageReportCacheToVisibleSessions(sessions){
   const visibleKeys=new Set();
-  for(const s of (Array.isArray(sessions)?sessions:[])){
+  const rows=Array.isArray(sessions)?sessions:[];
+  for(const s of rows){
     const key=_sidebarLineageKeyForRow(s);
     if(key) visibleKeys.add(key);
   }
+  // Also retain the cache keys derived from the COLLAPSED/rendered rows. The
+  // render loop keys the lineage-report cache by _sidebarLineageKeyForRow on
+  // the COLLAPSED row (see renderSessionListFromCache), and collapse can merge
+  // segments so a collapsed row's key differs from any single raw input row's
+  // key. Mirroring the precedent in _resolveSessionIdFromSidebarLineage, fold
+  // the collapsed rows' keys in so a still-visible expanded row is never evicted
+  // (and re-fetched every payload) on a chain the raw keys alone wouldn't cover.
+  try{
+    for(const row of _collapseSessionLineageForSidebar(rows)){
+      if(!row||_isChildSession(row)) continue;
+      const key=_lineageReportCacheKey(row,_sidebarLineageKeyForRow(row));
+      if(key) visibleKeys.add(key);
+    }
+  }catch(_){ /* defensive: never let a prune-key derivation break list apply */ }
   for(const key of Array.from(_lineageReportCache.keys())){
     if(!visibleKeys.has(key)) _lineageReportCache.delete(key);
   }
