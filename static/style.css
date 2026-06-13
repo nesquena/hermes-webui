@@ -5250,6 +5250,9 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .insights-table-head{display:grid;grid-template-columns:1fr 80px;padding:4px 0;border-bottom:1px solid var(--border);font-weight:600;color:var(--muted);font-size:11px;}
 .insights-table-row{display:grid;grid-template-columns:1fr 80px;padding:6px 0;border-bottom:1px solid var(--border,.05);}
 .insights-model-table .insights-table-head,.insights-model-table .insights-table-row{grid-template-columns:minmax(90px,1.5fr) 64px 76px 74px 52px;gap:8px;align-items:center;}
+.insights-model-health-table{overflow-x:auto;display:block;}
+.insights-model-health-table .insights-table-head,.insights-model-health-table .insights-table-row{grid-template-columns:minmax(130px,1.5fr) 86px 92px 122px 142px minmax(150px,1.4fr);gap:8px;align-items:center;min-width:760px;}
+.insights-model-health-replacement{overflow-wrap:anywhere;color:var(--muted);}
 .insights-model-cost,.insights-model-tokens{font-variant-numeric:tabular-nums;}
 .insights-model-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .insights-empty{font-size:12px;color:var(--muted);padding:12px 0;}
