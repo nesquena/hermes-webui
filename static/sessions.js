@@ -2862,6 +2862,7 @@ function _showBatchProjectPicker(){
 function closeSessionActionMenu(){
   if(_sessionActionMenu){
     _sessionActionMenu.remove();
+    document.removeEventListener('keydown', _handleSessionActionMenuKeydown);
     _sessionActionMenu = null;
   }
   if(_sessionActionAnchor){
@@ -2909,10 +2910,15 @@ function _positionSessionActionMenu(anchorEl){
   _sessionActionMenu.style.top=top+'px';
 }
 
-function _buildSessionAction(label, meta, icon, onSelect, extraClass=''){
+function _buildSessionAction(label, meta, icon, onSelect, extraClass='', options=null){
   const opt=document.createElement('button');
   opt.type='button';
   opt.className='ws-opt session-action-opt'+(extraClass?` ${extraClass}`:'');
+  const shortcutKey=options&&options.shortcutKey?String(options.shortcutKey).slice(0,1):'';
+  if(shortcutKey){
+    opt.setAttribute('data-shortcut-key', shortcutKey.toLowerCase());
+    opt.setAttribute('aria-keyshortcuts', shortcutKey.toUpperCase());
+  }
   // Compact context-menu shape (#3223 redesign, Nathan 2026-06-01): show only
   // icon + label, matching VS Code / browser / ChatGPT conversation menus. The
   // descriptive `meta` is preserved as a hover tooltip (title=) so the
@@ -2925,6 +2931,7 @@ function _buildSessionAction(label, meta, icon, onSelect, extraClass=''){
       + `<span class="session-action-copy">`
         + `<span class="ws-opt-name">${esc(label)}</span>`
       + `</span>`
+      + (shortcutKey?`<span class="session-action-shortcut" aria-hidden="true">${esc(shortcutKey.toUpperCase())}</span>`:'')
     + `</span>`;
   opt.onclick=async(e)=>{
     e.preventDefault();
@@ -2932,6 +2939,29 @@ function _buildSessionAction(label, meta, icon, onSelect, extraClass=''){
     await onSelect();
   };
   return opt;
+}
+
+function _isSessionActionShortcutEditableTarget(target){
+  if(!target) return false;
+  const tag=(target.tagName||'').toLowerCase();
+  if(tag==='input'||tag==='textarea'||tag==='select') return true;
+  if(target.isContentEditable) return true;
+  const contentEditable=target.getAttribute&&target.getAttribute('contenteditable');
+  return contentEditable==='' || contentEditable==='true';
+}
+
+function _handleSessionActionMenuKeydown(e){
+  if(!_sessionActionMenu) return;
+  if(!e||!e.key||e.metaKey||e.ctrlKey||e.altKey) return;
+  const contentEditableTarget=e.target&&e.target.isContentEditable;
+  if(contentEditableTarget||_isSessionActionShortcutEditableTarget(e.target)) return;
+  const key=String(e.key).toLowerCase();
+  if(key.length!==1) return;
+  const target=_sessionActionMenu.querySelector('.session-action-opt[data-shortcut-key="'+key+'"]');
+  if(!target||target.disabled) return;
+  e.preventDefault();
+  e.stopPropagation();
+  target.click();
 }
 
 function _sessionMarkdownLabel(session){
@@ -2986,6 +3016,8 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   _sessionActionMenu = menu;
   _sessionActionAnchor = anchorEl;
   _sessionActionSessionId = session.session_id;
+  document.removeEventListener('keydown', _handleSessionActionMenuKeydown);
+  document.addEventListener('keydown', _handleSessionActionMenuKeydown);
   if(anchorEl.classList&&anchorEl.classList.contains('session-actions-trigger')) anchorEl.classList.add('active');
   const row=anchorEl.closest('.session-item');
   if(row) row.classList.add('menu-open');
@@ -3001,7 +3033,9 @@ function _appendSessionCopyLinkAction(menu, session){
     async()=>{
       closeSessionActionMenu();
       await _copySessionLink(session);
-    }
+    },
+    '',
+    {shortcutKey:'C'}
   ));
 }
 
@@ -3020,7 +3054,9 @@ function _appendSessionDuplicateAction(menu, session){
           showToast(t('session_duplicated'));
         }
       }catch(err){showToast(t('session_duplicate_failed')+err.message);}
-    }
+    },
+    '',
+    {shortcutKey:'D'}
   ));
 }
 
@@ -3105,7 +3141,9 @@ function _openSessionActionMenu(session, anchorEl){
         } else if(typeof showToast==='function'){
           showToast(t('session_rename_failed_no_row')||'Could not start rename — row not found.', 3000, 'error');
         }
-      }
+      },
+      '',
+      {shortcutKey:'R'}
     ));
   }
   menu.appendChild(_buildSessionAction(
@@ -3125,7 +3163,8 @@ function _openSessionActionMenu(session, anchorEl){
         await renderSessionList();
       }
     },
-    session.pinned?'is-active':''
+    session.pinned?'is-active':'',
+    {shortcutKey:'P'}
   ));
   menu.appendChild(_buildSessionAction(
     t('session_move_project'),
@@ -3134,7 +3173,9 @@ function _openSessionActionMenu(session, anchorEl){
     async()=>{
       closeSessionActionMenu();
       _showProjectPicker(session, anchorEl);
-    }
+    },
+    '',
+    {shortcutKey:'M'}
   ));
   menu.appendChild(_buildSessionAction(
     session.archived?t('session_restore'):t('session_archive'),
@@ -3143,7 +3184,9 @@ function _openSessionActionMenu(session, anchorEl){
     async()=>{
       closeSessionActionMenu();
       await _archiveSession(session,!session.archived);
-    }
+    },
+    '',
+    {shortcutKey:'A'}
   ));
   if(isExternalSession && !session.archived){
     menu.appendChild(_buildSessionAction(
@@ -3160,7 +3203,9 @@ function _openSessionActionMenu(session, anchorEl){
           void renderSessionList();
           showToast(t('session_hidden'));
         }catch(err){showToast(t('session_archive_failed')+err.message);}
-      }
+      },
+      '',
+      {shortcutKey:'H'}
     ));
   }
   if(!isExternalSession){
@@ -3175,7 +3220,9 @@ function _openSessionActionMenu(session, anchorEl){
         closeSessionActionMenu();
         await cancelSessionStream(session);
         showToast(t('stream_stopped'));
-      }
+      },
+      '',
+      {shortcutKey:'S'}
     ));
   }
   // Title regeneration matches the backend guard (api/routes.py rejects
@@ -3208,7 +3255,9 @@ function _openSessionActionMenu(session, anchorEl){
           setStatus(msg);
           if(typeof showToast==='function') showToast(msg,3000,'error');
         }
-      }
+      },
+      '',
+      {shortcutKey:'G'}
     ));
   }
   if(!isExternalSession){
