@@ -1,0 +1,22 @@
+# Runtime output
+logs/
+results/
+daily.log
+
+# Job data (runtime)
+jobs/
+jobs_brief/
+search104/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Talent KB generated database
+talent_kb/*.db
+
+# Backup files
+*.bak
+
+# OS files
+.DS_Store
