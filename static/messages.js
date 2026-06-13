@@ -1488,6 +1488,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _bailOutOfTerminalEventsFromStaleStream(source){
     if(_ownsActiveStreamOrBackground()) return false;
+    // This stale stream no longer owns the session — schedule cleanup of ITS own
+    // anchor registry (identity-guarded, so it can't clobber the newer stream's
+    // registry for the same session) before closing. (Codex leak catch.)
+    _scheduleAnchorRegistryCleanup(120000);
     _closeSource(source);
     return true;
   }
@@ -3963,6 +3967,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             renderMessages({preserveScroll:true});
             renderSessionList();
           }
+          _scheduleAnchorRegistryCleanup(120000);
           return;
         }
       }catch(_){}
