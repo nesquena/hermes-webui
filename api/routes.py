@@ -182,7 +182,10 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
 # (mcp_server.py) can import it without duplicating the visibility model.
 # Re-exported here so existing `_profiles_match(...)` call sites in this
 # module keep resolving without per-call-site refactors.
-from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
+from api.profiles import (  # noqa: F401, E402  (re-export)
+    _profiles_match,
+    get_active_profile_name,
+)
 
 
 def _all_profiles_query_flag(parsed_url) -> bool:
@@ -9433,6 +9436,9 @@ def _handle_session_export(handler, parsed):
     try:
         s = get_session(sid)
     except KeyError:
+        return bad(handler, "Session not found", 404)
+    active_profile = get_active_profile_name()
+    if not _profiles_match(getattr(s, "profile", None), active_profile):
         return bad(handler, "Session not found", 404)
     safe = redact_session_data(s.__dict__)
     payload = json.dumps(safe, ensure_ascii=False, indent=2)

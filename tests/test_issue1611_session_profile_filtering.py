@@ -14,6 +14,8 @@ all_profiles=1 opt-in path. End-to-end HTTP-level tests live separately under
 tests/test_sessions_endpoint.py if/when added.
 """
 
+from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import urlparse
 
 import pytest
@@ -207,6 +209,87 @@ def test_static_sessions_js_trusts_server_profile_scoping():
     assert forbidden_count not in src, (
         "Client otherProfileCount must come from server, not strict-equality fallback"
     )
+
+
+# ── Direct session export must also honor active profile ───────────────────
+
+
+class _ExportCaptureHandler:
+    def __init__(self):
+        self.headers = {}
+        self.status = None
+        self.sent_headers = []
+        self.ended = False
+        self.wfile = SimpleNamespace(write=self._write)
+        self.body = b""
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.sent_headers.append((name, value))
+
+    def end_headers(self):
+        self.ended = True
+
+    def _write(self, data):
+        self.body += data
+
+
+def test_session_export_rejects_session_from_inactive_profile():
+    """A known session_id from another profile must not bypass /api/sessions scoping.
+
+    /api/sessions hides foreign-profile rows by default, but the export endpoint
+    loaded directly by id and serialized the sidecar. It must apply the same
+    active-profile check before writing the JSON attachment.
+    """
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    foreign = SimpleNamespace(
+        session_id="foreign_export_001",
+        profile="other",
+        messages=[{"role": "user", "content": "foreign profile secret"}],
+    )
+
+    handler = _ExportCaptureHandler()
+    parsed = urlparse("/api/session/export?session_id=foreign_export_001")
+    with patch("api.routes.get_session", return_value=foreign), \
+         patch("api.routes.get_active_profile_name", return_value="default"), \
+         patch("api.routes.bad", side_effect=fake_bad):
+        routes._handle_session_export(handler, parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert handler.status is None
+    assert handler.body == b""
+
+
+def test_session_export_allows_session_from_active_profile():
+    """Same-profile exports still stream the redacted JSON attachment."""
+    import api.routes as routes
+
+    active = SimpleNamespace(
+        session_id="active_export_001",
+        profile="default",
+        messages=[{"role": "user", "content": "same profile content"}],
+    )
+
+    handler = _ExportCaptureHandler()
+    parsed = urlparse("/api/session/export?session_id=active_export_001")
+    with patch("api.routes.get_session", return_value=active), \
+         patch("api.routes.get_active_profile_name", return_value="default"), \
+         patch("api.routes.redact_session_data", side_effect=lambda data: data):
+        routes._handle_session_export(handler, parsed)
+
+    assert handler.status == 200
+    assert handler.ended is True
+    assert b"same profile content" in handler.body
+    assert ("Cache-Control", "no-store") in handler.sent_headers
 
 
 # ── Cleanup ────────────────────────────────────────────────────────────────
