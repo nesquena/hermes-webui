@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.393] — 2026-06-13 — Release NF (run /yolo immediately while the agent is busy)
+
+### Fixed
+
+- **`/yolo` now takes effect immediately when sent during a running turn, instead of being queued behind it.** The busy-send fast path already ran `/steer`, `/interrupt`, `/queue`, `/terminal`, and `/goal` immediately; `/yolo` (session-scoped approval bypass) is now in that allowlist too, so toggling YOLO mid-turn applies to the in-flight approvals rather than only the next turn. (#467 follow-up)
+
 ## [v0.51.392] — 2026-06-13 — Release NE (align WebUI reasoning efforts to the agent's accepted set, drop "max")
 
 ### Fixed
