@@ -79,55 +79,106 @@ def _sync_session_title_to_insights(session) -> None:
         logger.debug("Failed to update session title in state.db", exc_info=True)
 
 
-def _persist_generated_session_title(session, next_title: str, *, event_reason: str) -> str:
+def _persist_generated_session_title(
+    session,
+    next_title: str,
+    *,
+    event_reason: str,
+    require_default_title: bool = False,
+) -> str:
     normalized_title = str(next_title or "").strip()[:80] or "Untitled"
-    with _get_session_agent_lock(session.session_id):
-        session.title = normalized_title
+    sid = str(getattr(session, "session_id", "") or "")
+    with _get_session_agent_lock(sid):
+        with LOCK:
+            latest = SESSIONS.get(sid)
+            if latest is not None and str(getattr(latest, "session_id", "") or "") != sid:
+                SESSIONS.pop(sid, None)
+                latest = None
+            elif latest is not None:
+                SESSIONS.move_to_end(sid)
+        if latest is None:
+            latest = Session.load(sid)
+            if latest is None:
+                raise KeyError(sid)
+        latest = _ensure_full_session_before_mutation(sid, latest)
+        if getattr(latest, "read_only", False):
+            raise PermissionError(f"Session {sid} is read-only")
+        if require_default_title:
+            latest_meta = {
+                "title": getattr(latest, "title", None),
+                "source_tag": getattr(latest, "source_tag", None),
+                "raw_source": getattr(latest, "raw_source", None),
+                "session_source": getattr(latest, "session_source", None),
+                "source_label": getattr(latest, "source_label", None),
+            }
+            if not _looks_like_default_cli_title(latest_meta):
+                return latest.title
+        latest.title = normalized_title
         from api.session_ops import mark_session_title_generated
 
         # mark_session_title_generated sets s.llm_title_generated = True and clears manual_title.
-        mark_session_title_generated(session)
-        session.save(touch_updated_at=False)
-    _sync_session_title_to_insights(session)
-    _publish_session_list_changed(event_reason, profile=getattr(session, "profile", None))
-    return session.title
+        mark_session_title_generated(latest)
+        latest.save(touch_updated_at=False)
+        with LOCK:
+            SESSIONS[sid] = latest
+            SESSIONS.move_to_end(sid)
+            while len(SESSIONS) > SESSIONS_MAX:
+                SESSIONS.popitem(last=False)
+    session.title = latest.title
+    session.llm_title_generated = latest.llm_title_generated
+    session.manual_title = latest.manual_title
+    _sync_session_title_to_insights(latest)
+    _publish_session_list_changed(event_reason, profile=getattr(latest, "profile", None))
+    return latest.title
 
 
 def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) -> None:
-    cli_meta = dict(cli_meta or {})
-    if not session or cli_meta.get("read_only") or not _looks_like_default_cli_title(cli_meta):
-        return
-    sid = str(getattr(session, "session_id", "") or "")
-    if not sid:
-        return
+    try:
+        cli_meta = dict(cli_meta or {})
+        if not session or cli_meta.get("read_only") or not _looks_like_default_cli_title(cli_meta):
+            return
+        sid = str(getattr(session, "session_id", "") or "")
+        if not sid:
+            return
 
-    def _run() -> None:
-        try:
-            current = Session.load(sid)
-            if not current:
-                return
-            current = _ensure_full_session_before_mutation(sid, current)
-            if getattr(current, "read_only", False):
-                return
-            current_meta = {
-                "title": getattr(current, "title", None),
-                "source_tag": getattr(current, "source_tag", None),
-                "raw_source": getattr(current, "raw_source", None),
-                "session_source": getattr(current, "session_source", None),
-                "source_label": getattr(current, "source_label", None),
-            }
-            if not _looks_like_default_cli_title(current_meta):
-                return
-            next_title, _reason, _raw_preview = generate_session_title_for_session(current)
-            normalized_current = str(getattr(current, "title", "") or "").strip()
-            normalized_next = str(next_title or "").strip()
-            if not normalized_next or normalized_next == normalized_current:
-                return
-            _persist_generated_session_title(current, normalized_next, event_reason="session_title_regenerate")
-        except Exception:
-            logger.debug("Failed to generate imported session title for %s", sid, exc_info=True)
+        def _run() -> None:
+            try:
+                current = Session.load(sid)
+                if not current:
+                    return
+                current = _ensure_full_session_before_mutation(sid, current)
+                if getattr(current, "read_only", False):
+                    return
+                current_meta = {
+                    "title": getattr(current, "title", None),
+                    "source_tag": getattr(current, "source_tag", None),
+                    "raw_source": getattr(current, "raw_source", None),
+                    "session_source": getattr(current, "session_source", None),
+                    "source_label": getattr(current, "source_label", None),
+                }
+                if not _looks_like_default_cli_title(current_meta):
+                    return
+                next_title, _reason, _raw_preview = generate_session_title_for_session(current)
+                normalized_current = str(getattr(current, "title", "") or "").strip()
+                normalized_next = str(next_title or "").strip()
+                if not normalized_next or normalized_next == normalized_current:
+                    return
+                _persist_generated_session_title(
+                    current,
+                    normalized_next,
+                    event_reason="session_title_regenerate",
+                    require_default_title=True,
+                )
+            except Exception:
+                logger.debug("Failed to generate imported session title for %s", sid, exc_info=True)
 
-    threading.Thread(target=_run, daemon=True, name=f"imported-title-{sid}").start()
+        threading.Thread(target=_run, daemon=True, name=f"imported-title-{sid}").start()
+    except Exception:
+        logger.debug(
+            "Failed to queue imported session title generation for %s",
+            getattr(session, "session_id", None),
+            exc_info=True,
+        )
 
 
 # ── Cron run tracking ────────────────────────────────────────────────────────

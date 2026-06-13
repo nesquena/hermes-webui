@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import io
 import json
+from collections import OrderedDict
 from pathlib import Path
 
+import api.models as models
 import api.routes as routes
 
 
@@ -54,7 +56,7 @@ def test_import_cli_queue_helper_is_guarded_and_runs_in_background():
     assert "not _looks_like_default_cli_title(cli_meta)" in block
     assert "if not _looks_like_default_cli_title(current_meta):" in block
     assert "generate_session_title_for_session(current)" in block
-    assert "_persist_generated_session_title(current, normalized_next, event_reason=\"session_title_regenerate\")" in block
+    assert "require_default_title=True" in block
     assert "threading.Thread(target=_run, daemon=True" in block
 
 
@@ -85,12 +87,18 @@ def test_import_cli_queue_helper_generates_title_once_for_placeholder_session(mo
     monkeypatch.setattr(routes.Session, "load", classmethod(lambda _cls, sid: current if sid == current.session_id else None))
     monkeypatch.setattr(routes, "_ensure_full_session_before_mutation", lambda sid, session: session)
     monkeypatch.setattr(routes, "generate_session_title_for_session", lambda session: (generated.append(session.session_id) or "Better imported title", "llm", "raw"))
-    monkeypatch.setattr(routes, "_persist_generated_session_title", lambda session, title, *, event_reason: persisted.append((session.session_id, title, event_reason)))
+    monkeypatch.setattr(
+        routes,
+        "_persist_generated_session_title",
+        lambda session, title, *, event_reason, require_default_title=False: persisted.append(
+            (session.session_id, title, event_reason, require_default_title)
+        ),
+    )
 
     routes._queue_generated_title_for_imported_session(current, {"title": "CLI Session", "source_tag": "cli"})
 
     assert generated == [current.session_id]
-    assert persisted == [(current.session_id, "Better imported title", "session_title_regenerate")]
+    assert persisted == [(current.session_id, "Better imported title", "session_title_regenerate", True)]
 
 
 def test_import_cli_queue_helper_skips_sessions_that_already_have_real_titles(monkeypatch):
@@ -124,7 +132,13 @@ def test_import_cli_queue_helper_skips_sessions_that_already_have_real_titles(mo
         "generate_session_title_for_session",
         lambda session: generated.append(session.session_id) or ("Unexpected generated title", "llm", "raw"),
     )
-    monkeypatch.setattr(routes, "_persist_generated_session_title", lambda session, title, *, event_reason: persisted.append((session.session_id, title, event_reason)))
+    monkeypatch.setattr(
+        routes,
+        "_persist_generated_session_title",
+        lambda session, title, *, event_reason, require_default_title=False: persisted.append(
+            (session.session_id, title, event_reason, require_default_title)
+        ),
+    )
 
     routes._queue_generated_title_for_imported_session(
         current,
@@ -133,6 +147,66 @@ def test_import_cli_queue_helper_skips_sessions_that_already_have_real_titles(mo
 
     assert generated == []
     assert persisted == []
+
+
+def test_generated_title_persist_reloads_latest_session_before_saving(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    cache = OrderedDict()
+
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSIONS", cache, raising=False)
+    monkeypatch.setattr(routes, "SESSIONS", cache, raising=False)
+    monkeypatch.setattr(routes, "_sync_session_title_to_insights", lambda session: None)
+    monkeypatch.setattr(routes, "_publish_session_list_changed", lambda *args, **kwargs: None)
+
+    stale = models.Session(
+        session_id="cli_import_race",
+        title="CLI Session",
+        workspace=".",
+        model="test-model",
+        messages=[{"role": "user", "content": "first"}],
+        source_tag="cli",
+        raw_source="cli",
+        session_source="external_agent",
+        source_label="CLI",
+    )
+    stale.save(skip_index=True)
+    stale_snapshot = models.Session.load(stale.session_id)
+
+    latest = models.Session(
+        session_id=stale.session_id,
+        title="CLI Session",
+        workspace=".",
+        model="test-model",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "second"},
+        ],
+        source_tag="cli",
+        raw_source="cli",
+        session_source="external_agent",
+        source_label="CLI",
+    )
+    latest.save(skip_index=True)
+    cache[latest.session_id] = latest
+
+    saved_title = routes._persist_generated_session_title(
+        stale_snapshot,
+        "Better imported title",
+        event_reason="session_title_regenerate",
+        require_default_title=True,
+    )
+
+    reloaded = models.Session.load(stale.session_id)
+    assert saved_title == "Better imported title"
+    assert reloaded.title == "Better imported title"
+    assert len(reloaded.messages) == 3
+    assert reloaded.llm_title_generated is True
+    assert reloaded.manual_title is False
+    assert len(cache[stale.session_id].messages) == 3
+    assert stale_snapshot.title == "Better imported title"
 
 
 def test_regenerate_endpoint_only_blocks_read_only_imported_sessions():
