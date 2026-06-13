@@ -6306,7 +6306,7 @@ async function _autosaveAppearanceSettings(payload){
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
-    window._autoScrollFollow=!!(saved&&saved.auto_scroll_follow);
+    window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
     if(saved&&payload&&Object.prototype.hasOwnProperty.call(payload,'worklog_details_expanded_default')&&(
       Object.prototype.hasOwnProperty.call(saved,'worklog_details_expanded_default') ||
       Object.prototype.hasOwnProperty.call(saved,'activity_feed_expanded_default')
@@ -7834,7 +7834,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._busyInputMode=body.busy_input_mode||'queue';
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
-  window._autoScrollFollow=!!body.auto_scroll_follow;
+  window._autoScrollFollow=body.auto_scroll_follow!==false;
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
