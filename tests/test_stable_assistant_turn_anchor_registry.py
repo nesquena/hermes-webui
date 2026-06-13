@@ -18,6 +18,19 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _event_listener_body(src: str, event_name: str) -> str:
+    start = src.index(f"source.addEventListener('{event_name}'")
+    end = src.find("\n    source.addEventListener(", start + 1)
+    if end < 0:
+        end = src.find("\n    source.onerror", start + 1)
+    if end < 0:
+        end = src.find("\n  }catch", start + 1)
+    if end < 0:
+        end = len(src)
+    assert end > start
+    return src[start:end]
+
+
 def _registry_snapshot() -> dict:
     assert NODE, "node is required for assistant_turn_anchors.js registry tests"
     script = f"""
@@ -806,18 +819,76 @@ def test_registry_instances_do_not_share_owner_state():
     assert isolated["anchor"]["activity_events"] == []
 
 def test_slice5_scene_projection_does_not_wire_activity_scene_into_rendering_hot_paths():
-    helper_names = [
-        "createAssistantTurnAnchorRegistry",
+    scene_helper = "projectAssistantTurnAnchorActivityScene"
+    for helper in [
         "applyAssistantTurnAnchorNormalizedEvent",
-        "applyAssistantTurnAnchorSourceEvent",
         "applyAssistantTurnAnchorSourceEvents",
         "createAssistantTurnAnchorShadowSnapshot",
-    ]
-    for helper in helper_names:
+        scene_helper,
+    ]:
         assert helper not in _read(UI_JS)
         assert helper not in _read(SESSIONS_JS)
         assert helper not in _read(MESSAGES_JS)
     assert "projectAssistantTurnAnchorSettledMessageFinalAnswer" in _read(UI_JS)
-    assert "projectAssistantTurnAnchorActivityScene" not in _read(UI_JS)
-    assert "projectAssistantTurnAnchorActivityScene" not in _read(SESSIONS_JS)
-    assert "projectAssistantTurnAnchorActivityScene" not in _read(MESSAGES_JS)
+    assert scene_helper not in _read(UI_JS)
+    assert scene_helper not in _read(SESSIONS_JS)
+    assert scene_helper not in _read(MESSAGES_JS)
+
+
+def test_slice6_live_shadow_feed_wires_non_token_events_without_renderer_scene_consumption():
+    src = _read(MESSAGES_JS)
+    helper_body = src.split("function _applyToAnchor", 1)[1].split(
+        "function _mergeSettledToolCallsWithLiveMetadata", 1
+    )[0]
+
+    assert "window._liveAnchorRegistries=window._liveAnchorRegistries||new Map()" in src
+    assert "_anchorRegistryMap.get(streamId)" in src
+    assert "_anchorRegistryMap.set(streamId,_anchorRegistry)" in src
+    assert "createAssistantTurnAnchorRegistry" in src
+    assert "applyAssistantTurnAnchorSourceEvent" in src
+    assert "const eventId=(sseEvent&&sseEvent.lastEventId)||raw.event_id||raw.lastEventId||raw.last_event_id||'';" in helper_body
+    assert helper_body.index("...raw,") < helper_body.index("source_event_type:sourceEventType")
+
+    for event_name in [
+        "interim_assistant",
+        "tool",
+        "tool_complete",
+        "approval",
+        "clarify",
+        "goal_continue",
+        "pending_steer_leftover",
+        "compressing",
+        "compressed",
+        "apperror",
+        "cancel",
+    ]:
+        assert f"_applyToAnchor('{event_name}'" in _event_listener_body(src, event_name)
+
+    token_body = _event_listener_body(src, "token")
+    assert "_applyToAnchor" not in token_body
+    reasoning_body = _event_listener_body(src, "reasoning")
+    assert "_applyToAnchor" not in reasoning_body
+    assert "function _flushReasoningToAnchor()" in src
+    assert "_applyToAnchor('reasoning',{" in src
+    assert "local_id:'live-reasoning'" in src
+    error_body = _event_listener_body(src, "error")
+    assert "_applyToAnchor('error'" not in error_body
+    assert "_flushReasoningToAnchor();" in error_body
+    assert "_scheduleAnchorRegistryCleanup(120000);" in error_body
+    assert "_handleStreamError(source)" in error_body
+    assert "projectAssistantTurnAnchorActivityScene" not in src
+
+    tool_body = _event_listener_body(src, "tool")
+    assert tool_body.index("upsertLiveToolCall(d,'start')") < tool_body.index(
+        "_applyToAnchor('tool'"
+    )
+    done_body = _event_listener_body(src, "done")
+    assert "_applyToAnchor('done',{" in done_body
+    assert "usage:d.usage||null" in done_body
+    assert "created_at:d.created_at||null" in done_body
+    assert "_applyToAnchor('done',{...d" not in done_body
+    assert "_flushReasoningToAnchor();" in done_body
+    assert "_scheduleAnchorRegistryCleanup();" in done_body
+    assert "lastAsst._anchor_stream_id=streamId" in done_body
+    assert "'_anchor_stream_id'" in src
+    assert src.index("'_anchor_stream_id'") < src.index("function _carryForwardEphemeralTurnFields")

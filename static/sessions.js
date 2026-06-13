@@ -22,7 +22,7 @@ let _loadingSessionId = null;
 // clears them on a force-reload of the active session. Consumed by
 // _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
 // ephemeral fields (_turnUsage, _turnDuration, _turnTps, _gatewayRouting,
-// _statusCard) survive the wholesale replace. null when there is nothing
+// _statusCard, _anchor_stream_id) survive the wholesale replace. null when there is nothing
 // to carry forward (initial load, switch-to-different-session, etc.).
 let _pendingCarryForwardSnapshot = null;
 
@@ -900,7 +900,7 @@ async function loadSession(sid){
     // poll triggering a refresh), snapshot the existing messages BEFORE we
     // clear them. _ensureMessagesLoaded() runs the ephemeral-field
     // carry-forward (_turnUsage, _turnDuration, _turnTps, _gatewayRouting,
-    // _statusCard) against S.messages, but by the time the API fetch returns
+    // _statusCard, _anchor_stream_id) against S.messages, but by the time the API fetch returns
     // S.messages has already been reset to [] here and the carry-forward is a
     // no-op. The visible symptom is the token-usage badge vanishing ~10s
     // after each assistant turn completes. Stash the snapshot so the
@@ -1914,7 +1914,7 @@ async function _ensureMessagesLoaded(sid) {
   }
   clearLiveToolCards();
   // #3018: preserve client-side ephemeral turn fields (_turnUsage, _turnDuration,
-  // _turnTps, _gatewayRouting, _statusCard) across the loadSession replace.
+  // _turnTps, _gatewayRouting, _statusCard, _anchor_stream_id) across the loadSession replace.
   if(typeof window._carryForwardEphemeralTurnFields==='function'){
     // #3306: Prefer the pre-clear snapshot stashed by loadSession() on a
     // force-reload of the active session; S.messages was reset to [] there
@@ -2391,7 +2391,7 @@ async function _loadOlderMessages() {
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
     // Carry forward ephemeral turn fields (_turnUsage/_turnDuration/_turnTps/
-    // _gatewayRouting/_statusCard) before the wholesale replace so the badge
+    // _gatewayRouting/_statusCard/_anchor_stream_id) before the wholesale replace so the badge
     // does not briefly appear and disappear during older-message expansion.
     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
       nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
@@ -2482,7 +2482,7 @@ async function _ensureAllMessagesLoaded() {
     // #3306: Same ephemeral-field carry-forward as _ensureMessagesLoaded.
     // Loading older messages also does a wholesale replace of S.messages
     // and would otherwise drop _turnUsage/_turnDuration/_turnTps/
-    // _gatewayRouting/_statusCard on the existing turns.
+    // _gatewayRouting/_statusCard/_anchor_stream_id on the existing turns.
     let _msgsToAssign = msgs;
     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
       _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
@@ -3823,7 +3823,8 @@ function startGatewaySSE(){
                     if (next.length < prev) return;
                     if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;
                     // Carry forward ephemeral turn fields (_turnUsage/
-                    // _turnDuration/_turnTps/_gatewayRouting/_statusCard) so
+                    // _turnDuration/_turnTps/_gatewayRouting/_statusCard/
+                    // _anchor_stream_id) so
                     // gateway-driven CLI refreshes do not drop the badge.
                     let _nextToAssign = next;
                     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
