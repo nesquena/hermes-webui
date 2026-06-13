@@ -1005,6 +1005,29 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_session_endless_scroll">When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.</div>
             </div>
             <div class="settings-field" style="margin-top:8px">
+              <label id="settingsChatActivityDisplayModeLabel" for="settingsChatActivityDisplayMode" data-i18n="settings_label_chat_activity_display_mode">Activity display</label>
+              <div class="chat-activity-mode-toggle" role="group" aria-labelledby="settingsChatActivityDisplayModeLabel">
+                <button type="button" class="chat-activity-mode-btn active" data-chat-activity-mode="compact_worklog" onclick="_pickChatActivityDisplayMode('compact_worklog')">
+                  <span data-i18n="settings_option_compact_worklog">Compact Worklog</span>
+                </button>
+                <button type="button" class="chat-activity-mode-btn" data-chat-activity-mode="transparent_stream" onclick="_pickChatActivityDisplayMode('transparent_stream')">
+                  <span data-i18n="settings_option_transparent_stream">Transparent Stream</span>
+                </button>
+              </div>
+              <select id="settingsChatActivityDisplayMode" style="display:none">
+                <option value="compact_worklog" data-i18n="settings_option_compact_worklog">Compact Worklog</option>
+                <option value="transparent_stream" data-i18n="settings_option_transparent_stream">Transparent Stream</option>
+              </select>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_chat_activity_display_mode">Compact Worklog groups supporting activity into a quiet summary. Transparent Stream keeps each thinking/tool event as its own chronological expandable row.</div>
+            </div>
+            <div class="settings-field" style="margin-top:8px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsAutoScrollFollow" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_auto_scroll_follow">Auto-follow new content</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_auto_scroll_follow">When enabled, the view scrolls to the bottom as new tokens stream in. When disabled, you control the scroll position manually.</div>
+            </div>
+            <div class="settings-field" style="margin-top:8px">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsWorklogDetailsExpandedDefault" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_worklog_details_expanded_default">Open Worklog details automatically</span>
@@ -1321,7 +1344,7 @@
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
             <div class="settings-field" id="shutdownServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="settings_label_shutdown">Stop the Hermes WebUI server</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_shutdown">Gracefully stops the local WebUI server. Useful if you launched via <code>./ctl.sh start</code> and want to stop without switching to a terminal. You'll need to relaunch the server (<code>./ctl.sh start</code> or the native app) before the WebUI is reachable again.</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px"><span data-i18n="settings_desc_shutdown_before_cmd">Gracefully stops the local WebUI server. Useful if you launched via </span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_between_cmds"> and want to stop without switching to a terminal. You'll need to relaunch the server (</span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_after_cmd"> or the native app) before the WebUI is reachable again.</span></div>
               <button class="sm-btn" id="btnShutdownServer" onclick="shutdownServer()" style="width:100%;padding:8px;font-weight:600;color:#e74c3c;border-color:rgba(231,76,60,.3)" data-i18n="settings_btn_shutdown">Stop server</button>
             </div>
             <div class="settings-field" id="passkeysSettingsBlock" style="display:none;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">

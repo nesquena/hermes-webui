@@ -469,19 +469,23 @@ def test_lineage_segment_expansion_static_contract():
     assert "const _expandedLineageKeys = new Set();" in js
     assert "const _lineageReportCache = new Map();" in js
     assert "const _lineageReportInflight = new Map();" in js
+    assert "_pruneLineageReportCacheToVisibleSessions(_allSessions);" in js
     assert "session-lineage-count,.session-lineage-segments,.session-lineage-segment" in js
     assert "segmentCountEl.setAttribute('aria-expanded'" in js
     assert "_expandedLineageKeys.has(lineageKey)" in js
     assert "_expandedLineageKeys.add(lineageKey)" in js
     assert "_expandedLineageKeys.delete(lineageKey)" in js
     assert "_fetchLineageReportForRow(s,lineageKey).then" in js
+    assert js.count("_fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache());") == 2
     assert "'/api/session/lineage/report?session_id='" in js
     assert "encodeURIComponent(s.session_id)" in js
     assert "className='session-lineage-segments'" in js
     assert "className='session-lineage-segment'" in js
     assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
     assert "row.title=t('session_lineage_segment_open');" in js
-    assert "await loadSession(seg.session_id);" in js
+    assert "await loadSession(seg.session_id, {skipLineageResolve:true});" in js
+    assert "await loadSession(child.session_id, {skipLineageResolve:true});" in js
+    assert "if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){" in js
     assert ".session-lineage-count.expandable{" in css
     assert ".session-lineage-count.expandable:hover" in css
     assert ".session-lineage-segments{" in css
@@ -612,6 +616,98 @@ eval(extractFunc('_fetchLineageReportForRow'));
         "calls": ["/api/session/lineage/report?session_id=tip"],
         "cached": True,
         "same": True,
+    }
+
+
+def test_lineage_refresh_cache_prune_keeps_visible_keys_and_drops_missing_ones():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+const _lineageReportInflight = new Map();
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_pruneLineageReportCacheToVisibleSessions'));
+const visibleRequest = Promise.resolve({{found:true}});
+const staleRequest = Promise.resolve({{found:true}});
+_lineageReportCache.set('root', {{segments:[{{session_id:'root'}}]}});
+_lineageReportCache.set('stale', {{segments:[{{session_id:'stale'}}]}});
+_lineageReportInflight.set('root', visibleRequest);
+_lineageReportInflight.set('stale', staleRequest);
+_pruneLineageReportCacheToVisibleSessions([
+  {{session_id:'tip', _lineage_key:'root'}},
+  {{session_id:'child', parent_session_id:'root'}},
+]);
+console.log(JSON.stringify({{
+  cacheKeys:Array.from(_lineageReportCache.keys()),
+  inflightKeys:Array.from(_lineageReportInflight.keys()),
+}}));
+"""
+    assert json.loads(_run_node(source)) == {
+        "cacheKeys": ["root"],
+        "inflightKeys": ["root"],
+    }
+
+
+def test_pruned_lineage_inflight_request_cannot_repopulate_cache():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+const _lineageReportInflight = new Map();
+let _lineageReportCacheGeneration = 0;
+let resolveApi;
+function api(path) {{
+  return new Promise(resolve => {{
+    resolveApi = () => resolve({{found:true, path, segments:[{{session_id:'stale'}}]}});
+  }});
+}}
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_pruneLineageReportCacheToVisibleSessions'));
+eval(extractFunc('_fetchLineageReportForRow'));
+(async()=>{{
+  const staleRow = {{session_id:'stale-tip', _lineage_key:'stale'}};
+  const request = _fetchLineageReportForRow(staleRow, 'stale');
+  _pruneLineageReportCacheToVisibleSessions([{{session_id:'tip', _lineage_key:'root'}}]);
+  resolveApi();
+  await request;
+  console.log(JSON.stringify({{
+    staleCached:_lineageReportCache.has('stale'),
+    staleInflight:_lineageReportInflight.has('stale'),
+    visibleCached:_lineageReportCache.has('root'),
+  }}));
+}})().catch(err=>{{console.error(err); process.exit(1);}});
+"""
+    assert json.loads(_run_node(source)) == {
+        "staleCached": False,
+        "staleInflight": False,
+        "visibleCached": False,
     }
 
 

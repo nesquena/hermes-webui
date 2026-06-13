@@ -792,7 +792,7 @@ const _sessionTitleProvisionalBySid = new Map();
 // their canonical command is registered on the backend (for example
 // /reload-mcp). Keep this intentionally narrow and include underscore variants
 // observed by users so typing either form still routes through executeAgentCommand.
-const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'codex-runtime', 'codex_runtime']);
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'reload-skills', 'reload_skills', 'codex-runtime', 'codex_runtime']);
 
 function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   if(!S||!S.busy||compressionRunning) return false;
@@ -1063,10 +1063,22 @@ async function send(){
   if(_forcedSkillDirectivePending){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
-      const _directive = await _pending.promise;
+      const _directivePayload = await _pending.promise;
       if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
-      if(typeof _directive==='string'&&_directive){
-        msgText=`${_directive}\n\n${msgText||''}`.trim();
+      if(_directivePayload){
+        const _directive = typeof _directivePayload==='string'
+          ? _directivePayload
+          : String(_directivePayload.directive||'').trim();
+        const _forcedSkillName = typeof _directivePayload==='string'
+          ? ''
+          : String(_directivePayload.name||'').trim();
+        const _forcedSkillContent = typeof _directivePayload==='string'
+          ? ''
+          : String(_directivePayload.content||'').trim();
+        const _forcedSkillBlock = _forcedSkillName&&_forcedSkillContent
+          ? `[FORCED SKILL CONTEXT: ${_forcedSkillName}]\n${_forcedSkillContent}\n[/FORCED SKILL CONTEXT]`
+          : '';
+        msgText=`${_directive}${_forcedSkillBlock?`\n\n${_forcedSkillBlock}`:''}\n\n${msgText||''}`.trim();
       }
     }
   }
@@ -1891,7 +1903,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   const _STREAM_FADE_STAGGER_MS=16;
   const _STREAM_FADE_DONE_MAX_MS=320;
   const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
-  const _streamFadeEnabledForStream=window._fadeTextEffect===true;
 
   function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
     const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
@@ -2116,7 +2127,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _renderPending=false;
   }
   function _shouldUseStreamFade(){
-    return _streamFadeEnabledForStream;
+    return window._fadeTextEffect===true;
   }
   function _streamFadeSkipNode(node){
     if(!node||node.nodeType!==1) return false;
@@ -3299,7 +3310,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
           }
           syncTopbar();renderMessages({preserveScroll:true});
-          if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
+          if(shouldFollowOnDone&&typeof scrollToBottom==='function'&&typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(250)) scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)
@@ -3504,12 +3515,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isCancelled=d.type==='cancelled';
           const isInterrupted=d.type==='interrupted';
           const isCompressionExhausted=d.type==='compression_exhausted';
+          const isToolLimitReached=d.type==='tool_limit_reached';
           isRecoveryControlMessage=isInterrupted && (d.recovery_control===true || _streamRecoveryControlMessageText(d.message));
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
-          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isCompressionExhausted?'Context compression exhausted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
+          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isCompressionExhausted?'Context compression exhausted':isToolLimitReached?'Tool iteration limit reached':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
-          const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
+          const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':isToolLimitReached?'Terminal state details':undefined;
           window._compressionUi=null;
           if(typeof clearCompressionUi==='function') clearCompressionUi();
           if(isRecoveryControlMessage){
@@ -3868,7 +3880,25 @@ function transcript(){
   return lines.join('\n');
 }
 
-function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();}
+let _composerAutoResizeRaf=0;
+function autoResize(){
+  if(_composerAutoResizeRaf && typeof cancelAnimationFrame==='function'){
+    cancelAnimationFrame(_composerAutoResizeRaf);
+    _composerAutoResizeRaf=0;
+  }
+  const el=$('msg');
+  el.style.height='auto';
+  el.style.height=Math.min(el.scrollHeight,200)+'px';
+  updateSendBtn();
+}
+function scheduleComposerAutoResize(){
+  if(typeof requestAnimationFrame!=='function'){autoResize();return;}
+  if(_composerAutoResizeRaf) return;
+  _composerAutoResizeRaf=requestAnimationFrame(()=>{
+    _composerAutoResizeRaf=0;
+    autoResize();
+  });
+}
 
 
 // ── YOLO mode state ──
@@ -3992,6 +4022,10 @@ function _clearApprovalPendingForSession(sid) {
 
 function _hideApprovalCardIfOwner(sid, force=false) {
   if (!sid || _approvalSessionId === sid) hideApprovalCard(force);
+}
+
+function _approvalPollingSessionMissingOrMismatched(sid) {
+  return !sid || !S.session || S.session.session_id !== sid;
 }
 
 function _renderPendingApprovalForActiveSession() {
@@ -4160,7 +4194,7 @@ function _startApprovalFallbackPoll(sid) {
   // shows its card instantly (the removed SSE 'initial' event used to do this);
   // then poll on the 1500ms cadence. (#3913 SHOULD-FIX)
   const _tick = async () => {
-    if (!S.busy || !S.session || S.session.session_id !== sid) {
+    if (_approvalPollingSessionMissingOrMismatched(sid)) {
       stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true); return;
     }
     if (_approvalFallbackPollInFlight) return;
@@ -4168,7 +4202,13 @@ function _startApprovalFallbackPoll(sid) {
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
-      else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
+      else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
+        _clearApprovalPendingForSession(sid);
+        _hideApprovalCardIfOwner(sid);
+        if (!S.busy) {
+          stopApprovalPollingForSession(sid);
+        }
+      }
     } catch(e) { /* ignore poll errors */ }
     finally { _approvalFallbackPollInFlight = false; }
   };
@@ -4202,6 +4242,9 @@ function stopApprovalPolling() {
 let _sessionEventSource = null;
 let _sessionStreamSessionId = null;
 let _sessionStreamReconnectTimer = null;
+// Holds the session id across a hidden-tab close so the visibility handler can
+// reopen the per-session SSE on re-show (stopSessionStream nulls _sessionStreamSessionId).
+let _sessionStreamHiddenSid = null;
 
 function startSessionStream(sid) {
   if (!sid) return;
@@ -4210,6 +4253,30 @@ function startSessionStream(sid) {
   if (_sessionStreamSessionId === sid && _sessionEventSource) return;
   stopSessionStream();
   _sessionStreamSessionId = sid;
+  // Visibility hook (install once) — mirror ensureSessionEventsSSE() pattern.
+  // Capture the active session id into a dedicated var BEFORE closing, because
+  // stopSessionStream() nulls _sessionStreamSessionId — so the reopen path can't
+  // rely on it (that was the bug: the stream never reopened on tab re-show).
+  if (typeof document !== 'undefined' && !document._hermesSessionStreamVisibilityHook) {
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        _sessionStreamHiddenSid = _sessionStreamSessionId;
+        stopSessionStream();
+      } else if (_sessionStreamHiddenSid) {
+        const resumeSid = _sessionStreamHiddenSid;
+        _sessionStreamHiddenSid = null;
+        void startSessionStream(resumeSid);
+      }
+    });
+    document._hermesSessionStreamVisibilityHook = true;
+  }
+  // Don't open when tab is hidden — saves connection pool slots. Preserve the
+  // pending session id so the visibility handler reopens it on re-show (a session
+  // loaded/restored while the tab is already hidden must still reattach).
+  if (typeof document !== 'undefined' && document.hidden) {
+    _sessionStreamHiddenSid = sid;
+    return;
+  }
   try {
     const es = new EventSource(_apiUrl('api/session/stream?session_id=' + encodeURIComponent(sid)));
     _sessionEventSource = es;

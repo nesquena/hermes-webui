@@ -853,7 +853,47 @@ window._micPendingSend=window._micPendingSend||false;
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
   let _voiceModeThinkingSid=null;
+  let _browserTtsKeepAlive=null;
+  let _browserTtsWatchdog=null;
+  let _browserTtsSuppressNextErrorRearm=false;
   const SILENCE_MS=1800; // auto-send after 1.8s silence
+
+  function _clearBrowserTtsRecovery(){
+    if(_browserTtsKeepAlive){
+      clearInterval(_browserTtsKeepAlive);
+      _browserTtsKeepAlive=null;
+    }
+    if(_browserTtsWatchdog){
+      clearTimeout(_browserTtsWatchdog);
+      _browserTtsWatchdog=null;
+    }
+  }
+
+  function _armBrowserTtsRecovery(clean, rate){
+    _clearBrowserTtsRecovery();
+    _browserTtsSuppressNextErrorRearm=false;
+    const safeRate=(Number.isFinite(rate)&&rate>0)?rate:1;
+    // Chromium can drop utter.onend on later turns, so force a recovery path.
+    const watchdogMs=Math.max(4000,Math.round((String(clean||'').length/(12*safeRate))*1000)+10000);
+    _browserTtsWatchdog=setTimeout(()=>{
+      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      _browserTtsSuppressNextErrorRearm=true;
+      try{ speechSynthesis.cancel(); }catch(_){}
+      _clearBrowserTtsRecovery();
+      _startListening();
+    },watchdogMs);
+    _browserTtsKeepAlive=setInterval(()=>{
+      if(!_voiceModeActive||_voiceModeState!=='speaking'){
+        _clearBrowserTtsRecovery();
+        return;
+      }
+      if(!speechSynthesis.speaking) return;
+      try{
+        speechSynthesis.pause();
+        speechSynthesis.resume();
+      }catch(_){}
+    },10000);
+  }
 
   function _setState(state){
     _voiceModeState=state;
@@ -867,6 +907,7 @@ window._micPendingSend=window._micPendingSend||false;
 
   function _startListening(){
     if(!_voiceModeActive) return;
+    _clearBrowserTtsRecovery();
     _setState('listening');
 
     _recognition=new SpeechRecognition();
@@ -1057,14 +1098,27 @@ window._micPendingSend=window._micPendingSend||false;
     if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
 
     utter.onend=()=>{
+      _browserTtsSuppressNextErrorRearm=false;
+      _clearBrowserTtsRecovery();
       // After speaking, go back to listening
-      if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+      if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
     };
     utter.onerror=()=>{
+      _clearBrowserTtsRecovery();
+      if(_browserTtsSuppressNextErrorRearm){
+        _browserTtsSuppressNextErrorRearm=false;
+        return;
+      }
       if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
     };
 
-    speechSynthesis.speak(utter);
+    _armBrowserTtsRecovery(clean, utter.rate);
+    try{
+      speechSynthesis.speak(utter);
+    }catch(_){
+      _clearBrowserTtsRecovery();
+      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+    }
   }
 
   // Hook into response completion — observe when the agent finishes
@@ -1121,10 +1175,12 @@ window._micPendingSend=window._micPendingSend||false;
     _voiceModeActive=false;
     _voiceModeState='idle';
     _voiceModeThinkingSid=null;
+    _browserTtsSuppressNextErrorRearm=false;
     modeBtn.classList.remove('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
     bar.style.display='none';
     clearTimeout(_silenceTimer);
+    _clearBrowserTtsRecovery();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
@@ -1288,8 +1344,8 @@ $('modelSelect').onchange=async()=>{
   }
 };
 $('msg').addEventListener('input',()=>{
-  autoResize();
   updateSendBtn();
+  scheduleComposerAutoResize();
   // Persist composer draft to server (debounced in _saveComposerDraft).
   const sid = S && S.session && S.session.session_id;
   if (sid && typeof _saveComposerDraft === 'function') {
@@ -1761,7 +1817,7 @@ function applyBotName(){
   // The saved assistant name applies to the default profile only.
   // Non-default profiles use their own profile names.
   const name=assistantDisplayName();
-  document.title=name;
+  if(!S.session) document.title=name;
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
   const logo=document.querySelector('.sidebar-header .logo');
@@ -1798,6 +1854,8 @@ function applyBotName(){
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=true;
+    window._chatActivityDisplayMode=s.chat_activity_display_mode==='transparent_stream'?'transparent_stream':'compact_worklog';
+    window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._worklogDetailsExpandedByDefault=!!(
       Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')
@@ -1815,6 +1873,7 @@ function applyBotName(){
     };
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
+    window._autoScrollFollow=s.auto_scroll_follow!==false;
     window._botName=s.bot_name||'Hermes';
     if(s.default_model_provider) window._activeProvider=s.default_model_provider;
     if(s.default_model){
@@ -1903,12 +1962,15 @@ function applyBotName(){
     window._whatsNewSummaryEnabled=false;
     window._showThinking=true;
     window._simplifiedToolCalling=true;
+    window._chatActivityDisplayMode='compact_worklog';
+    window._transparentStream=false;
     window._terminalAutoExpandOnOutput=false;
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
+    window._autoScrollFollow=true;
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){

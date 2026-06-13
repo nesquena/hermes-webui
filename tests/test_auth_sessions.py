@@ -254,3 +254,55 @@ class TestSessionTtlResolution(unittest.TestCase):
                 break
         else:
             self.fail("Session token not found in _sessions")
+
+
+class TestCookieNameResolution(unittest.TestCase):
+    """Verify the auth cookie name resolution (env > default)."""
+
+    def setUp(self):
+        self._saved = os.environ.get("HERMES_WEBUI_COOKIE_NAME")
+        os.environ.pop("HERMES_WEBUI_COOKIE_NAME", None)
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("HERMES_WEBUI_COOKIE_NAME", None)
+        else:
+            os.environ["HERMES_WEBUI_COOKIE_NAME"] = self._saved
+
+    def test_default_when_unset(self):
+        """With the env var unset the legacy default name is used."""
+        self.assertEqual(auth._resolve_cookie_name(), auth.COOKIE_NAME)
+
+    def test_env_var_overrides_default(self):
+        """A valid env var name overrides the default."""
+        os.environ["HERMES_WEBUI_COOKIE_NAME"] = "hermes_session_alt"
+        self.assertEqual(auth._resolve_cookie_name(), "hermes_session_alt")
+
+    def test_empty_env_falls_back(self):
+        """Whitespace-only env var falls back to the default."""
+        os.environ["HERMES_WEBUI_COOKIE_NAME"] = "   "
+        self.assertEqual(auth._resolve_cookie_name(), auth.COOKIE_NAME)
+
+    def test_invalid_name_falls_back(self):
+        """A name with characters illegal in an RFC 6265 token is rejected."""
+        os.environ["HERMES_WEBUI_COOKIE_NAME"] = "bad name=x"
+        self.assertEqual(auth._resolve_cookie_name(), auth.COOKIE_NAME)
+
+    def test_set_cookie_uses_resolved_name(self):
+        """set_auth_cookie emits the resolved name in the Set-Cookie header."""
+        os.environ["HERMES_WEBUI_COOKIE_NAME"] = "hermes_session_alt"
+        sent = {}
+
+        class _H:
+            request = object()  # no getpeercert -> not a TLS socket
+            headers: dict = {}
+
+            def send_header(self, k, v):
+                sent[k] = v
+
+        auth.set_auth_cookie(_H(), "tok.sig")
+        self.assertIn("hermes_session_alt=", sent["Set-Cookie"])
+
+
+if __name__ == "__main__":
+    unittest.main()

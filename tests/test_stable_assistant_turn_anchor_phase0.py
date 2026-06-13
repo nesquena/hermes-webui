@@ -48,12 +48,23 @@ const out = {{
   layers: api.stateLayers,
   classifications: api.sourceEventClassification,
   classificationOrder: api.classificationOrder,
+  terminalStates: api.terminalStates,
+  terminalAliases: {{
+    done: api.normalizeAssistantTurnAnchorTerminalState('done'),
+    cancel: api.normalizeAssistantTurnAnchorTerminalState('cancel'),
+    apperror: api.normalizeAssistantTurnAnchorTerminalState('apperror'),
+    interruptedByUser: api.normalizeAssistantTurnAnchorTerminalState('interrupted-by-user'),
+    lostBookkeeping: api.normalizeAssistantTurnAnchorTerminalState('lost_worker_bookkeeping'),
+    maxIterations: api.normalizeAssistantTurnAnchorTerminalState('max_iterations'),
+    unknown: api.normalizeAssistantTurnAnchorTerminalState('unknown'),
+  }},
   tokenKind: api.classifyAssistantTurnAnchorSourceEvent('token').kind,
   streamEndClass: api.classifyAssistantTurnAnchorSourceEvent('stream_end').classification,
   unknownClass: api.classifyAssistantTurnAnchorSourceEvent('unknown_future').classification,
   eventIdKey: api.assistantTurnAnchorEventDedupeKey({{event_id:'run-1:2', text:'same'}}),
   runSeqKey: api.assistantTurnAnchorEventDedupeKey({{run_id:'run-1', seq:2, timestamp:123}}),
-  localKey: api.assistantTurnAnchorEventDedupeKey({{session_id:'sid-1', local_id:'local-1', content:'ignored'}}),
+  localKey: api.assistantTurnAnchorEventDedupeKey({{session_id:'sid-1', source_event_type:'token', local_id:'local-1', seq:2, content:'ignored'}}),
+  localNoSeqKey: api.assistantTurnAnchorEventDedupeKey({{session_id:'sid-1', source_event_type:'token', local_id:'local-1', content:'ignored'}}),
   zeroSeqKey: api.assistantTurnAnchorEventDedupeKey({{run_id:'run-1', seq:0, session_id:'sid-1', local_id:'local-1'}}),
   nanSeqKey: api.assistantTurnAnchorEventDedupeKey({{run_id:'run-1', seq:NaN, session_id:'sid-1', local_id:'local-1'}}),
   emptySeqKey: api.assistantTurnAnchorEventDedupeKey({{run_id:'run-1', seq:'', session_id:'sid-1', local_id:'local-1'}}),
@@ -77,8 +88,11 @@ def test_phase0_scaffold_is_loaded_before_current_rendering_modules():
     messages_pos = html.index('static/messages.js?v=__WEBUI_VERSION__')
 
     assert anchor_pos < ui_pos < sessions_pos < messages_pos
+    ui_src = _read(UI_JS)
     assert "'./static/assistant_turn_anchors.js' + VQ" in _read(SW_JS)
-    assert "HermesAssistantTurnAnchors" not in _read(UI_JS)
+    assert "projectAssistantTurnAnchorSettledMessageFinalAnswer" in ui_src
+    assert "createAssistantTurnAnchorRegistry" not in ui_src
+    assert "applyAssistantTurnAnchorSourceEvent" not in ui_src
     assert "HermesAssistantTurnAnchors" not in _read(SESSIONS_JS)
     assert "HermesAssistantTurnAnchors" not in _read(MESSAGES_JS)
 
@@ -144,12 +158,13 @@ def test_phase0_classifies_all_current_live_to_final_sources():
 
 def test_phase0_dedupe_prefers_event_envelope_not_visible_text_or_timestamps():
     data = _anchor_api_snapshot()
-    assert data["eventIdKey"] == "event_id:run-1:2"
-    assert data["runSeqKey"] == "run_seq:run-1:2"
-    assert data["localKey"] == "local:sid-1:local-1"
-    assert data["zeroSeqKey"] == "run_seq:run-1:0"
-    assert data["nanSeqKey"] == "run_seq:run-1:NaN"
-    assert data["emptySeqKey"] == "local:sid-1:local-1"
+    assert data["eventIdKey"] == 'event_id:"run-1:2"'
+    assert data["runSeqKey"] == 'run_seq:["run-1","2"]'
+    assert data["localKey"] == 'local:["sid-1","token","local-1","2"]'
+    assert data["localNoSeqKey"] == ""
+    assert data["zeroSeqKey"] == 'run_seq:["run-1","0"]'
+    assert data["nanSeqKey"] == 'run_seq:["run-1","NaN"]'
+    assert data["emptySeqKey"] == ""
     assert data["emptyKey"] == ""
 
     helper_src = _read(ANCHORS_JS).split("function assistantTurnAnchorEventDedupeKey", 1)[1]
@@ -163,6 +178,30 @@ def test_phase0_dedupe_prefers_event_envelope_not_visible_text_or_timestamps():
     assert "created_at" not in helper_src
 
 
+def test_phase0_exports_terminal_state_contract_and_aliases():
+    data = _anchor_api_snapshot()
+    assert data["terminalStates"] == {
+        "completed": "completed",
+        "cancelled": "cancelled",
+        "interrupted": "interrupted",
+        "no_response": "no_response",
+        "tool_limit_reached": "tool_limit_reached",
+        "compression_exhausted": "compression_exhausted",
+        "connection_lost": "connection_lost",
+        "degraded": "degraded",
+        "error": "error",
+    }
+    assert data["terminalAliases"] == {
+        "done": "completed",
+        "cancel": "cancelled",
+        "apperror": "error",
+        "interruptedByUser": "interrupted",
+        "lostBookkeeping": "connection_lost",
+        "maxIterations": "tool_limit_reached",
+        "unknown": None,
+    }
+
+
 def test_phase0_anchor_seed_matches_rfc_shape_without_registering_state():
     data = _anchor_api_snapshot()
     anchor = data["anchor"]
@@ -174,8 +213,7 @@ def test_phase0_anchor_seed_matches_rfc_shape_without_registering_state():
     assert anchor["activity_events"] == []
     assert anchor["artifacts"] == []
     assert anchor["side_effects"] == []
-    assert anchor["presentation_state"]["compact_worklog"]["expanded"] is False
-    assert anchor["presentation_state"]["transparent_stream"]["expanded"] is False
+    assert "presentation_state" not in anchor
 
 
 def test_phase0_inventory_doc_matches_scaffold_contract():
@@ -191,6 +229,6 @@ def test_phase0_inventory_doc_matches_scaffold_contract():
         "Dedupe Invariant",
         "`event_id`",
         "`run_id + seq`",
-        "`session_id + local_id`",
+        "`session_id + source_event_type + local_id + seq`",
     ]:
         assert marker in doc

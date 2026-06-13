@@ -789,6 +789,33 @@ async function newSession(flash, options={}){
   }
 }
 
+/**
+ * Self-heal: clear the stuck session ID from localStorage and URL when a
+ * loadSession() call failed during boot (no currentSid). This prevents the
+ * browser from retrying the same dead session on every refresh.
+ *
+ * Called from loadSession() after 401 redirect (undefined data) or any
+ * non-404 error (400, 403, 500, network). The 404 path has its own
+ * inline self-heal; this helper consolidates the non-404 cases.
+ *
+ * Only clears when !currentSid — no session is active on screen, so
+ * the stored ID is definitely stale. When currentSid is set (already
+ * viewing a session), a non-404 failure could be a transient server error
+ * and the session may still exist on the server; wiping localStorage in
+ * that case is unnecessarily destructive (#4028 follow-up).
+ *
+ * A click into a *different* dead session (currentSid && currentSid!==sid)
+ * must not run it: localStorage and the URL still point at the live session
+ * (both are only updated on a successful load), so wiping them would log
+ * the user out of a healthy session (#2782).
+ */
+function _clearStuckSessionOnBoot(sid, currentSid){
+  if(!currentSid){
+    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
+  }
+}
+
 // #2971 (Greptile P1 r3377162160): loadSession() tears down the live
 // per-session SSE at the top via stopSessionStream() (line ~754), but only the
 // success path re-arms it via startSessionStream() (line ~875). Every
@@ -851,6 +878,22 @@ async function loadSession(sid){
     // close streams for the session the user actually landed on (#1060 guard,
     // extended to cover the new pre-switch await).
     if (_loadingSessionId !== sid) return;
+    // Snapshot the live turn before msgInner is replaced. Preserves the activity
+    // timer, partial response, and tool cards so switching back does not rebuild
+    // the stream UI from scratch.
+    if(
+      (S.busy||S.activeStreamId||(INFLIGHT&&INFLIGHT[currentSid]))&&
+      typeof snapshotLiveTurnHtmlForSession==='function'
+    ){
+      if(!INFLIGHT[currentSid]){
+        INFLIGHT[currentSid]={
+          messages:Array.isArray(S.messages)?[...S.messages]:[],
+          uploaded:[],
+          toolCalls:Array.isArray(S.toolCalls)?[...S.toolCalls]:[],
+        };
+      }
+      snapshotLiveTurnHtmlForSession(currentSid);
+    }
   }
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
@@ -894,6 +937,17 @@ async function loadSession(sid){
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const _msgInner = $('msgInner');
+    // Stale-load guard (Codex): a newer loadSession() may have started while this
+    // request was awaiting (e.g. the user clicked a healthy session during a
+    // boot-time restore). currentSid was snapshotted before the await, so without
+    // this guard a failed superseded load could self-heal (wipe localStorage/URL)
+    // for the session the user actually navigated to. If we no longer own the
+    // load, re-arm the active session's stream and bail before any DOM mutation
+    // or self-heal.
+    if (_loadingSessionId !== sid) {
+      _rearmActiveSessionStream();
+      return;
+    }
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
@@ -917,7 +971,14 @@ async function loadSession(sid){
           }
         }
       } else {
-        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';
+        // Non-404, non-401 failure (400, 403, 500, network): 401 is handled
+        // via the if(!data) guard below since api() returns undefined on 401
+        // rather than throwing. Clear the stuck session ID only during boot
+        // (!currentSid) so the next boot doesn't retry the same dead session.
+        // When currentSid is set, a 500/network error may be transient — the
+        // session might still exist on the server (#4028 follow-up).
+        _clearStuckSessionOnBoot(sid, currentSid);
+        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }
     }
@@ -952,6 +1013,9 @@ async function loadSession(sid){
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
   // the browser is already navigating away, so abort the rest of this flow.
+  // No self-heal: 401 is transient auth expiry — the session still exists
+  // server-side. Clearing localStorage would wipe the saved session id and
+  // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
@@ -992,14 +1056,21 @@ async function loadSession(sid){
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;
-  // If the server says the session is idle, discard any browser-side inflight
-  // cache left behind by a crashed/restarted stream. Otherwise the UI can keep
-  // showing a permanent thinking/running state even though active_streams=0.
-  if(!activeStreamId&&INFLIGHT[sid]){
-    delete INFLIGHT[sid];
-    if(typeof clearInflightState==='function') clearInflightState(sid);
+  // If the server says the session is idle, reset browser-side streaming flags
+  // NOW — before the async _ensureMessagesLoaded gap below. Without this,
+  // S.busy can remain true from a still-running stream in the PREVIOUS session
+  // while S.session.session_id has already advanced to the new one.
+  // _isSessionLocallyStreaming() checks (isActive && S.busy), so during the
+  // async window the new session would appear locally-streaming (sidebar spinner,
+  // Stop button, thinking state on an idle chat). Also clears stale INFLIGHT
+  // entries left behind by a crashed/restarted stream.
+  if(!activeStreamId){
     S.activeStreamId=null;
     S.busy=false;
+    if(INFLIGHT[sid]){
+      delete INFLIGHT[sid];
+      if(typeof clearInflightState==='function') clearInflightState(sid);
+    }
   }
 
   function _mergePendingSessionMessage(session,messages){
@@ -1214,10 +1285,15 @@ async function loadSession(sid){
       updateSendBtn();
       setStatus('');
       setComposerStatus('');
-      // syncTopbar();renderMessages();appendThinking();loadDir('.');
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
-      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
-      else appendThinking();
+      let restoredLiveTurn=false;
+      if(typeof restoreLiveTurnHtmlForSession==='function'){
+        restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+      }
+      if(!restoredLiveTurn){
+        if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+        else appendThinking();
+      }
       loadDir('.');
       updateQueueBadge(sid);
       startApprovalPolling(sid);
@@ -3360,7 +3436,7 @@ function _applySessionListPayload(sessData, projData){
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
   _syncSessionAttentionSoundState(_allSessions);
-  _clearLineageReportCache();
+  _pruneLineageReportCacheToVisibleSessions(_allSessions);
   _allProjects = projData.projects||[];
   _markPollingCompletionUnreadTransitions(_allSessions);
   const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
@@ -3704,6 +3780,19 @@ async function probeGatewaySSEStatus(){
 function startGatewaySSE(){
   stopGatewaySSE();
   if(!window._showCliSessions) return;
+  // Visibility hook (install once) — mirror ensureSessionEventsSSE() pattern
+  if(typeof document !== 'undefined' && !document._hermesGatewaySSEVisibilityHook){
+    document.addEventListener('visibilitychange', () => {
+      if(document.hidden){
+        stopGatewaySSE();
+      }else{
+        void startGatewaySSE();
+      }
+    });
+    document._hermesGatewaySSEVisibilityHook = true;
+  }
+  // Don't open when tab is hidden — saves connection pool slots
+  if(typeof document !== 'undefined' && document.hidden) return;
   try{
     _gatewaySSE = new EventSource('api/sessions/gateway/stream');
     _gatewaySSE.addEventListener('sessions_changed', (ev) => {
@@ -4186,6 +4275,35 @@ function _clearLineageReportCache(){
   _lineageReportCacheGeneration++;
 }
 
+function _pruneLineageReportCacheToVisibleSessions(sessions){
+  const visibleKeys=new Set();
+  const rows=Array.isArray(sessions)?sessions:[];
+  for(const s of rows){
+    const key=_sidebarLineageKeyForRow(s);
+    if(key) visibleKeys.add(key);
+  }
+  // Also retain the cache keys derived from the COLLAPSED/rendered rows. The
+  // render loop keys the lineage-report cache by _sidebarLineageKeyForRow on
+  // the COLLAPSED row (see renderSessionListFromCache), and collapse can merge
+  // segments so a collapsed row's key differs from any single raw input row's
+  // key. Mirroring the precedent in _resolveSessionIdFromSidebarLineage, fold
+  // the collapsed rows' keys in so a still-visible expanded row is never evicted
+  // (and re-fetched every payload) on a chain the raw keys alone wouldn't cover.
+  try{
+    for(const row of _collapseSessionLineageForSidebar(rows)){
+      if(!row||_isChildSession(row)) continue;
+      const key=_lineageReportCacheKey(row,_sidebarLineageKeyForRow(row));
+      if(key) visibleKeys.add(key);
+    }
+  }catch(_){ /* defensive: never let a prune-key derivation break list apply */ }
+  for(const key of Array.from(_lineageReportCache.keys())){
+    if(!visibleKeys.has(key)) _lineageReportCache.delete(key);
+  }
+  for(const key of Array.from(_lineageReportInflight.keys())){
+    if(!visibleKeys.has(key)) _lineageReportInflight.delete(key);
+  }
+}
+
 function _lineageReportCacheKey(s,lineageKey){
   return lineageKey||_sidebarLineageKeyForRow(s)||null;
 }
@@ -4230,14 +4348,16 @@ function _fetchLineageReportForRow(s,lineageKey){
   let request;
   request=api('/api/session/lineage/report?session_id='+encodeURIComponent(s.session_id))
     .then(report=>{
-      if(generation===_lineageReportCacheGeneration){
+      if(generation===_lineageReportCacheGeneration&&_lineageReportInflight.get(key)===request){
         _lineageReportCache.set(key,(report&&report.found!==false)?report:{error:true});
       }
       return report;
     })
     .catch(err=>{
       console.warn('lineage report',err);
-      if(generation===_lineageReportCacheGeneration) _lineageReportCache.set(key,{error:true});
+      if(generation===_lineageReportCacheGeneration&&_lineageReportInflight.get(key)===request){
+        _lineageReportCache.set(key,{error:true});
+      }
       return null;
     })
     .finally(()=>{
@@ -4667,42 +4787,54 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
 }
 
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
-  let webuiSessionCount=0;
   let cliSessionCount=0;
-  for(const s of allMatched){
-    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
-    if(_isCliSession(s)) cliSessionCount++;
-    else webuiSessionCount++;
-  }
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
-    _sessionSourceFilter='webui';
-  }
-  const showCliOnly=_sessionSourceFilter==='cli';
-  const profileFiltered=[];
-  const sessionsRaw=[];
-  let archivedCount=0;
+  const webuiProfileFiltered=[];
+  const cliProfileFiltered=[];
+  const webuiSessionsRaw=[];
+  const cliSessionsRaw=[];
+  let webuiArchivedCount=0;
+  let cliArchivedCount=0;
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
     const isCli=_isCliSession(s);
-    if(showCliOnly ? !isCli : isCli) continue;
+    if(isCli) cliSessionCount++;
     if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
+    const profileFiltered=isCli ? cliProfileFiltered : webuiProfileFiltered;
+    const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;
     profileFiltered.push(s);
     if(_activeProject===NO_PROJECT_FILTER){
       if(s.project_id) continue;
     } else if(_activeProject){
       if(s.project_id!==_activeProject) continue;
     }
-    if(s.archived) archivedCount++;
+    if(s.archived){
+      if(isCli) cliArchivedCount++;
+      else webuiArchivedCount++;
+    }
     if(!_showArchived&&s.archived) continue;
     sessionsRaw.push(s);
   }
+  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
+    _sessionSourceFilter='webui';
+  }
+  const showCliOnly=_sessionSourceFilter==='cli';
   return {
-    webuiSessionCount,
     cliSessionCount,
-    profileFiltered,
-    sessionsRaw,
-    archivedCount,
+    profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered,
+    sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw,
+    archivedCount: showCliOnly ? cliArchivedCount : webuiArchivedCount,
+    webuiSessionsRaw,
+    cliSessionsRaw,
   };
+}
+
+function _renderSidebarRowsFromRawSessions(sessionsRaw){
+  return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
+}
+
+function _countRenderedSidebarRowsFromRawSessions(sessionsRaw){
+  // Keep inactive-tab chip counts on the exact same top-level row path as render.
+  return _renderSidebarRowsFromRawSessions(sessionsRaw).length;
 }
 
 function renderSessionListFromCache(){
@@ -4728,13 +4860,20 @@ function renderSessionListFromCache(){
   const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
   const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
   const {
-    webuiSessionCount,
     cliSessionCount,
     profileFiltered,
     sessionsRaw,
     archivedCount,
+    webuiSessionsRaw,
+    cliSessionsRaw,
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
-  const sessions=_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw);
+  const renderedWebuiSessionCount=_sessionSourceFilter==='webui'
+    ? sessions.length
+    : _countRenderedSidebarRowsFromRawSessions(webuiSessionsRaw);
+  const renderedCliSessionCount=_sessionSourceFilter==='cli'
+    ? sessions.length
+    : _countRenderedSidebarRowsFromRawSessions(cliSessionsRaw);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
   const list=$('sessionList');
   const animateRefresh=_sessionListRefreshAnimationPending;
@@ -4769,7 +4908,7 @@ function renderSessionListFromCache(){
     const sourceTabs=document.createElement('div');
     sourceTabs.className='session-source-tabs';
     for(const filter of ['webui','cli']){
-      const count=filter==='cli'?cliSessionCount:webuiSessionCount;
+      const count=filter==='cli'?renderedCliSessionCount:renderedWebuiSessionCount;
       const btn=document.createElement('button');
       btn.type='button';
       btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
@@ -5170,6 +5309,9 @@ function renderSessionListFromCache(){
     const lineageReportKey=showLineageMetadata?_lineageReportCacheKey(s,lineageKey):null;
     const canExpandLineageSegments=showLineageMetadata&&Boolean(lineageKey&&segmentCount>1&&(lineageSegments.length>0||needsLineageReport||_lineageReportInflight.has(lineageReportKey)));
     const lineageSegmentsExpanded=canExpandLineageSegments&&_expandedLineageKeys.has(lineageKey);
+    if(lineageSegmentsExpanded&&needsLineageReport){
+      _fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache());
+    }
     if(segmentCount>0){
       const segmentCountEl=document.createElement('span');
       segmentCountEl.className='session-lineage-count'+(canExpandLineageSegments?' expandable':'');
@@ -5271,7 +5413,7 @@ function renderSessionListFromCache(){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:seg.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
-          await loadSession(seg.session_id);
+          await loadSession(seg.session_id, {skipLineageResolve:true});
           renderSessionListFromCache();
         };
         lineageList.appendChild(row);
@@ -5298,7 +5440,7 @@ function renderSessionListFromCache(){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:child.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
-          await loadSession(child.session_id);
+          await loadSession(child.session_id, {skipLineageResolve:true});
           renderSessionListFromCache();
         };
         childList.appendChild(row);

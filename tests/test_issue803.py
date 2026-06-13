@@ -13,6 +13,7 @@ Covers:
   4. switch_profile(process_wide=False) does NOT mutate process globals
   5. Concurrent requests on different threads see independent profiles
 """
+import logging
 import os
 import threading
 from pathlib import Path
@@ -45,21 +46,108 @@ class TestProfileCookieHelpers:
         handler.headers.get = lambda k, d='': ''
         assert get_profile_cookie(handler) is None
 
-    def test_get_profile_cookie_extracts_valid_name(self):
+    def test_get_profile_cookie_extracts_valid_name(self, monkeypatch):
         from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
         handler = MagicMock()
         handler.headers.get = lambda k, d='': 'hermes_profile=alice' if k == 'Cookie' else d
         assert get_profile_cookie(handler) == 'alice'
 
-    def test_get_profile_cookie_accepts_default(self):
+    def test_get_profile_cookie_requires_session_bound_signature_when_auth_enabled(self, monkeypatch):
+        from api.auth import sign_profile_cookie_value
         from api.helpers import get_profile_cookie
+
+        session_cookie = 'session-token.session-sig'
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        monkeypatch.setattr('api.auth.verify_session', lambda cookie: cookie == session_cookie)
+        signed_profile = sign_profile_cookie_value('alice', session_cookie)
+
+        handler = MagicMock()
+        handler.headers.get = lambda k, d='': (
+            f'hermes_session={session_cookie}; hermes_profile={signed_profile}' if k == 'Cookie' else d
+        )
+        assert get_profile_cookie(handler) == 'alice'
+
+    def test_get_profile_cookie_rejects_unsigned_profile_when_auth_enabled(self, monkeypatch):
+        from api.helpers import get_profile_cookie
+
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        handler = MagicMock()
+        handler.headers.get = lambda k, d='': (
+            'hermes_session=session-token.session-sig; hermes_profile=alice' if k == 'Cookie' else d
+        )
+        assert get_profile_cookie(handler) is None
+
+    def test_get_profile_cookie_rejects_profile_signed_for_another_session(self, monkeypatch):
+        from api.auth import sign_profile_cookie_value
+        from api.helpers import get_profile_cookie
+
+        other_session = 'other-token.other-sig'
+        current_session = 'session-token.session-sig'
+        monkeypatch.setattr('api.auth.verify_session', lambda cookie: cookie in {other_session, current_session})
+        signed_profile = sign_profile_cookie_value('alice', other_session)
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        handler = MagicMock()
+        handler.headers.get = lambda k, d='': (
+            f'hermes_session={current_session}; hermes_profile={signed_profile}' if k == 'Cookie' else d
+        )
+        assert get_profile_cookie(handler) is None
+
+    def test_build_profile_cookie_binds_to_auth_session_when_auth_enabled(self, monkeypatch):
+        from api.auth import verify_profile_cookie_value
+        from api.helpers import build_profile_cookie
+
+        session_cookie = 'session-token.session-sig'
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        monkeypatch.setattr('api.auth.verify_session', lambda cookie: cookie == session_cookie)
+        handler = MagicMock()
+        handler.headers.get = lambda k, d='': f'hermes_session={session_cookie}' if k == 'Cookie' else d
+
+        cookie = build_profile_cookie('alice', handler)
+        value = cookie.split('hermes_profile=', 1)[1].split(';', 1)[0]
+        assert value != 'alice'
+        assert verify_profile_cookie_value(value, session_cookie) == 'alice'
+
+    def test_sign_profile_cookie_requires_active_session(self, monkeypatch):
+        from api.auth import sign_profile_cookie_value
+
+        monkeypatch.setattr('api.auth.verify_session', lambda cookie: False)
+        with pytest.raises(ValueError):
+            sign_profile_cookie_value('alice', 'expired-token.session-sig')
+
+    def test_verify_profile_cookie_rejects_expired_session(self, monkeypatch):
+        from api.auth import sign_profile_cookie_value, verify_profile_cookie_value
+
+        session_cookie = 'session-token.session-sig'
+        monkeypatch.setattr('api.auth.verify_session', lambda cookie: True)
+        signed_profile = sign_profile_cookie_value('alice', session_cookie)
+
+        monkeypatch.setattr('api.auth.verify_session', lambda cookie: False)
+        assert verify_profile_cookie_value(signed_profile, session_cookie) is None
+
+    def test_build_profile_cookie_fails_closed_when_auth_session_missing(self, monkeypatch, caplog):
+        from api.helpers import build_profile_cookie
+
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        monkeypatch.setattr('api.auth.verify_session', lambda cookie: False)
+        handler = MagicMock()
+        handler.headers.get = lambda k, d='': ''
+
+        with pytest.raises(RuntimeError):
+            build_profile_cookie('alice', handler)
+        assert 'Failed to sign active profile cookie' in caplog.text
+
+    def test_get_profile_cookie_accepts_default(self, monkeypatch):
+        from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
         handler = MagicMock()
         handler.headers.get = lambda k, d='': 'hermes_profile=default' if k == 'Cookie' else d
         assert get_profile_cookie(handler) == 'default'
 
-    def test_get_profile_cookie_rejects_injection(self):
+    def test_get_profile_cookie_rejects_injection(self, monkeypatch):
         """Cookie value must pass _PROFILE_ID_RE fullmatch — rejects traversal/injection."""
         from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
         for bad in ('../etc', 'a/b', 'name;DROP', 'WithCaps', 'has space', '.hidden'):
             handler = MagicMock()
             handler.headers.get = lambda k, d='', v=bad: f'hermes_profile={v}' if k == 'Cookie' else d
@@ -85,6 +173,7 @@ class TestProfileCookieHelpers:
         from api.helpers import build_profile_cookie, get_profile_cookie
 
         monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_social')
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
 
         s = build_profile_cookie('writer')
         assert 'hermes_profile_social=writer' in s
@@ -96,14 +185,104 @@ class TestProfileCookieHelpers:
         )
         assert get_profile_cookie(handler) == 'writer'
 
+    def test_verify_profile_cookie_rejects_invalid_name_pattern(self, monkeypatch):
+        """Defense-in-depth (#4023 Opus hardening): even a correctly-HMAC-signed
+        cookie whose profile name fails _PROFILE_ID_RE must be rejected by the
+        verifier itself, so a future caller can't skip the pattern gate."""
+        from api.auth import sign_profile_cookie_value, verify_profile_cookie_value
+
+        session_cookie = 'session-token.session-sig'
+        monkeypatch.setattr('api.auth.verify_session', lambda cookie: cookie == session_cookie)
+        # Sign a hostile name (would never come from a real switch, but proves the
+        # verifier validates the name even when the signature is valid).
+        signed = sign_profile_cookie_value('../etc', session_cookie)
+        assert verify_profile_cookie_value(signed, session_cookie) is None
+        # And a normal name still round-trips.
+        ok = sign_profile_cookie_value('alice', session_cookie)
+        assert verify_profile_cookie_value(ok, session_cookie) == 'alice'
+
+    def test_build_profile_cookie_requires_handler_when_auth_enabled(self, monkeypatch):
+        """Defense-in-depth (#4023 Opus hardening): a future call site that forgets
+        to pass the handler while auth is enabled must NOT silently emit an
+        unsigned profile cookie — it raises instead."""
+        from api.helpers import build_profile_cookie
+
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        with pytest.raises(RuntimeError):
+            build_profile_cookie('alice')  # no handler
+
+    def test_build_profile_cookie_allows_no_handler_when_auth_disabled(self, monkeypatch):
+        """No-auth mode keeps the legacy plain-name cookie with no handler."""
+        from api.helpers import build_profile_cookie
+
+        monkeypatch.delenv('WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
+        s = build_profile_cookie('alice')
+        assert 'hermes_profile=alice' in s
+
     def test_configured_profile_cookie_ignores_default_cookie_name(self, monkeypatch):
         from api.helpers import get_profile_cookie
 
         monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_main')
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
 
         handler = MagicMock()
         handler.headers.get = lambda k, d='': 'hermes_profile=social_profile' if k == 'Cookie' else d
         assert get_profile_cookie(handler) is None
+
+
+# ── 1b. Profile cookie name resolution (env > legacy env > default) ───────────
+
+class TestProfileCookieNameResolution:
+
+    def test_default_when_unset(self, monkeypatch):
+        from api.helpers import PROFILE_COOKIE_NAME, get_profile_cookie_name
+        monkeypatch.delenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        monkeypatch.delenv('WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        assert get_profile_cookie_name() == PROFILE_COOKIE_NAME
+
+    def test_canonical_env_overrides_default(self, monkeypatch):
+        from api.helpers import get_profile_cookie_name
+        monkeypatch.delenv('WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        monkeypatch.setenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_alt')
+        assert get_profile_cookie_name() == 'hermes_profile_alt'
+
+    def test_legacy_env_still_honoured(self, monkeypatch):
+        from api.helpers import get_profile_cookie_name
+        monkeypatch.delenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_legacy')
+        assert get_profile_cookie_name() == 'hermes_profile_legacy'
+
+    def test_canonical_takes_precedence_over_legacy(self, monkeypatch):
+        from api.helpers import get_profile_cookie_name
+        monkeypatch.setenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', 'canonical')
+        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'legacy')
+        assert get_profile_cookie_name() == 'canonical'
+
+    def test_blank_canonical_falls_back_to_legacy(self, monkeypatch):
+        from api.helpers import get_profile_cookie_name
+        monkeypatch.setenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', '   ')
+        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_legacy')
+        assert get_profile_cookie_name() == 'hermes_profile_legacy'
+
+    def test_blank_envs_fall_back_to_default(self, monkeypatch):
+        from api.helpers import PROFILE_COOKIE_NAME, get_profile_cookie_name
+        monkeypatch.setenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', '   ')
+        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', '')
+        assert get_profile_cookie_name() == PROFILE_COOKIE_NAME
+
+    def test_legacy_deprecation_warns_only_once(self, monkeypatch, caplog):
+        # get_profile_cookie_name() runs on every request, so the deprecation
+        # warning for the legacy env var must be emitted once per process.
+        import api.helpers as helpers
+        monkeypatch.delenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_legacy')
+        monkeypatch.setattr(helpers, '_legacy_profile_cookie_warned', False)
+        with caplog.at_level(logging.WARNING, logger='api.helpers'):
+            for _ in range(3):
+                assert helpers.get_profile_cookie_name() == 'hermes_profile_legacy'
+        warned = [r for r in caplog.records if 'deprecated' in r.getMessage()]
+        assert len(warned) == 1
 
 
 # ── 2. Thread-local request context ──────────────────────────────────────────

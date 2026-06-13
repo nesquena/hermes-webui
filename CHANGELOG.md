@@ -3,6 +3,188 @@
 
 ## [Unreleased]
 
+## [v0.51.386] — 2026-06-13 — Release MY (voice mode survives a dropped speechSynthesis onend, #3983)
+
+### Fixed
+
+- **Hands-free voice mode no longer dead-ends after the first browser-TTS reply (#3983).** Chromium intermittently drops the `speechSynthesis` utterance's `onend` event, which left voice mode stuck "speaking" and never re-armed listening. A watchdog now forces a return to listening if `onend` never fires, with the recovery handles cleared on normal completion and on deactivation. The fix is scoped to the browser `speechSynthesis` path — the Edge `Audio` branch (which has a reliable `onended`) is untouched. (#3983)
+
+## [v0.51.385] — 2026-06-13 — Release MX (profile-cookie env var aligned to HERMES_WEBUI_ prefix, #803)
+
+### Changed
+
+- **The profile-cookie name env var now uses the standard `HERMES_WEBUI_` prefix (#803).** Set the per-instance session-profile cookie name via `HERMES_WEBUI_PROFILE_COOKIE_NAME`, matching every other WebUI setting's prefix; the original `WEBUI_PROFILE_COOKIE_NAME` keeps working as a deprecated fallback (warned once per process). Lets multiple WebUI instances on the same host+port disambiguate their profile cookies without env-var-naming surprises. (#803)
+
+## [v0.51.384] — 2026-06-13 — Release MW (no false streaming / activity-timer reset on session switch, #3900)
+
+### Fixed
+
+- **An idle session no longer shows streaming chrome (Stop/spinner/thinking) right after a sidebar switch, and switching back to a live stream no longer resets its activity timer (#3900).** `loadSession` now clears `S.busy` / `S.activeStreamId` as soon as the session metadata confirms there is no `active_stream_id` — before the async message-load gap — so the previous session's busy flag can't bleed onto an idle chat. On switch-away it snapshots the live-turn DOM before replacing the message pane (seeding an `INFLIGHT` bucket if needed) and restores that HTML on the active-stream return path instead of rebuilding the worklog shell from scratch, so the elapsed timer and live trace survive the round-trip. (#3900)
+
+## [v0.51.383] — 2026-06-13 — Release MV (desktop tab title keeps active session name on bot-name refresh, #4086)
+
+### Fixed
+
+- **Desktop tab titles keep the active session name when profile/settings boot paths refresh the assistant name (#4086).** `applyBotName()` now leaves `document.title` alone while a chat session is active, so `syncTopbar()` remains the owner of the per-session `"<session> — <assistant>"` title and desktop tabs no longer collapse to the same fallback name. (#4086)
+
+## [v0.51.382] — 2026-06-13 — Release MU (Stable Assistant Turn Anchors: activity-scene projection, inert, #4093)
+
+### Added
+
+- **Stable Assistant Turn Anchors activity-scene projection (#4093, #3926).** Adds `projectAssistantTurnAnchorActivityScene` to the frozen `HermesAssistantTurnAnchors` surface — a renderer-neutral projection that turns the anchor owner's classified events into ordered activity-scene rows for the future Transparent Stream / Compact Worklog convergence. This slice is **inert**: no render path consumes the scene projection yet (the only live anchor consumer remains the #4092 settled final-answer projection, which still receives a pre-flattened string), so there is zero rendering change in this release. (#4093)
+
+## [v0.51.381] — 2026-06-13 — Release MT (Stable Assistant Turn Anchors: settled final-answer projection, #4092)
+
+### Changed
+
+- **Settled assistant final answers now route through the Stable Assistant Turn Anchor owner (#4092, #3926).** As the first RFC Phase 3 wiring slice, `renderMessages()` derives each *settled* assistant message's final-answer text via `projectAssistantTurnAnchorSettledMessageFinalAnswer` (the anchor registry's settled-message projection) instead of reading the raw content directly. The projection is a faithful identity transform for normal string content (verified by unit echo across plain/markdown/inline-think/unicode/whitespace/code, a real-transcript A/B render that was byte-identical to master, and a live-build `applied:true` echo check), is wrapped in a try/catch that falls back to the original content on any error, and only applies when it produces a usable string — so there is no visible rendering change today; it moves the settled-final derivation onto the single anchor owner that live/replay/settled sources will converge on. Live (`_live`) turns and non-string content are untouched. (#4092)
+
+## [v0.51.380] — 2026-06-13 — Release MS (tool-iteration-limit stops surfaced explicitly, #3821)
+
+### Fixed
+
+- **Tool iteration-limit stops are now surfaced explicitly instead of looking like a normal user turn (#3821).** When Hermes Agent stops a turn at the max tool-calling iteration budget, WebUI filters the agent's synthetic max-iteration summary prompt out of both the visible transcript and the model-facing context (so it isn't persisted or replayed as if the human typed it), marks a usable final answer with a `tool_limit_reached` terminal state, and shows a no-final terminal error when the limit fires before any assistant answer is available. Detection reads current-turn result metadata only (not conversation history), and the status annotation is gated behind the terminal-failure check so a genuine failure still takes the error path. (#3821)
+
+## [v0.51.379] — 2026-06-13 — Release MR (Worklog detail collapse survives live refresh, #4062)
+
+### Fixed
+
+- **Manual Thinking/Tool detail collapse choices now survive live transcript refreshes (#4062).** `renderMessages()` captures the open/closed disclosure state of Worklog Thinking cards, Tool cards, and multi-tool detail groups before rebuilding the transcript, then restores it afterward — keyed on stable render-time row attributes (`data-thinking-key` / tool id) rather than streaming body text — so new streaming results no longer reset every detail row back to the global Worklog-details default. (Reported via Discord; #4062)
+
+## [v0.51.378] — 2026-06-13 — Release MQ (don't yank the viewport while reading; auto-follow toggle, #4006)
+
+### Fixed
+
+- **Streaming no longer snaps you to the bottom when you've scrolled up to read (#4006).** Two pin-hysteresis bugs are fixed: `_scrollAfterMessageRender` now honors `_messageUserUnpinned` (so a forced follow can't override a deliberate scroll-up after the 250px near-bottom counter re-pins), and `_finishDone`'s completion scroll is gated on an actual near-bottom check instead of firing unconditionally. (#4006)
+
+### Added
+
+- **Auto-follow toggle (Settings → Appearance).** A new "Auto-follow new content" setting controls whether the transcript follows new output to the bottom while streaming. It defaults **on** — a Codex/Claude-Code-style sticky bottom: you stay pinned to the latest output until you scroll up, at which point you're left where you are. Turn it off to always manage the scroll position yourself. (#4006)
+
+## [v0.51.377] — 2026-06-13 — Release MP (Firefox post-stream scroll jitter, #3920)
+
+### Fixed
+
+- **Firefox no longer jitters/steps the chat scroll after a streamed turn settles (#3920).** The post-stream bottom-settle replaced its `setTimeout` fan-out + double-`requestAnimationFrame` `scrollHeight` polling (which forced a reflow per frame on Firefox) with a single synchronous write plus a `ResizeObserver` that re-anchors once per frame as late layout (Prism/KaTeX/Mermaid/images) grows, disconnecting after 300ms of quiet. A 2s top-level fallback covers fully-static responses that never resize, and the deliberate Firefox session-sidebar `overflow-anchor:none` fix is preserved. (#3920)
+
+## [v0.51.376] — 2026-06-13 — Release MO (Hide Thinking also hides Worklog reasoning, #3903)
+
+### Fixed
+
+- **Hiding Thinking now also hides Worklog reasoning rows, without hiding tool activity (#3903).** When reasoning/thinking display is turned off, the Worklog reasoning rows (`.wl-reason`) are now suppressed on both the live streaming path and the settled/reloaded render path, and any already-rendered reasoning rows are pruned when Thinking is toggled off — while tool cards and ordinary Worklog anchor/progress rows are preserved. (Previously the gate sat on an unused helper, so reasoning rows kept rendering even with Thinking off.) (#3903)
+
+## [v0.51.375] — 2026-06-13 — Release MN (Transparent Stream activity display, #3820)
+
+### Added
+
+- **Transparent Stream activity display mode (opt-in).** Settings → Appearance now includes a chat activity display mode that renders each Thinking/tool event as its own chronological expandable row — restoring the transparent reasoning/tool-call stream for power users — with live tool completion updating the same row and settled/reloaded transcripts preserving the same event shape and order. Compact Worklog remains the default. The rows are styled as quiet inline assistant-turn metadata (flat, theme-adaptive, prose stays the primary reading object) across light/dark and all skins; failed tools are clearly marked, args render compactly, and tool output reads as one quiet zone. (#3820)
+- **Transparent Stream turn-level collapse + recency fade + per-turn footer.** Clicking the assistant role label collapses the entire event stack into a compact "output only" view with an animated chevron. On the live turn, older event rows fade progressively (recency cue, readable floor) and restore on hover; settled history stays full-opacity. A bottom-of-turn footer mirrors the live run-status line for settled turns (elapsed time, TTFT, token usage, final status). (#3820)
+
+## [v0.51.374] — 2026-06-12 — Release MM (custom-provider context-length probes carry the API key)
+
+### Fixed
+
+- **Custom provider context-length probes now include the provider API key during session hydration and streaming fallbacks (#4059).** Static session loads and fallback usage/session-save paths now reuse the matched custom provider credentials when querying `/v1/models`, so authenticated custom endpoints do not fall back to the default 256K window and clobber a larger persisted context length / compression threshold. (#4059)
+
+## [v0.51.373] — 2026-06-12 — Release ML (sidebar lineage + source-count fixes)
+
+### Fixed
+
+- **Expanded lineage segments no longer collapse when the session list refreshes mid-stream (#4005).** While a turn was streaming, each sidebar refresh wiped the lineage-report cache and re-collapsed any expanded lineage row. The cache is now pruned to only the rows that left the visible set (kept for still-visible rows), the in-flight report request is identity-guarded so a stale response can't overwrite a newer one, and an expanded row that still needs its report fetches and re-renders in place. (#4005)
+- **The sidebar source-filter counts (WebUI / CLI) now match the number of rows actually shown (#3966).** The chip counts were computed from pre-collapse session totals, so they could disagree with the collapsed/grouped rows rendered in the list. Counts are now derived from the same collapse-and-attach pass used to render each source's rows. (#3966)
+
+## [v0.51.372] — 2026-06-12 — Release MK (markdown link-label inline code, /use skill autocomplete, mobile Worklog overflow)
+
+### Fixed
+
+- **Inline code (and bold/italic/strikethrough) inside a markdown link label now renders correctly (#4001).** A link like `` [`abc123`](https://…) `` previously showed the literal `` `abc123` `` backticks (or escaped `&lt;code&gt;`) instead of a code span. The renderer now preserves `code`/`strong`/`em`/`del` formatting inside link labels while still escaping everything else and running the result through the existing tag/attribute sanitizer. (#4001)
+- **`/use` now autocompletes installed skill names (#3968).** Typing `/use ` offers the available skills, matching how `/model` and `/personality` already autocomplete their arguments. The suggestion list refreshes when skills are enabled, disabled, saved, or deleted. (#3968)
+- **The Worklog summary no longer causes sideways panning on narrow mobile viewports (#4064).** A long single-line Worklog label could widen the chat column past the screen on Android; the summary row is now bounded to the available width and truncates with an ellipsis instead. (#4064)
+
+## [v0.51.371] — 2026-06-12 — Release MJ (low-risk batch: approval polling, composer/titlebar polish, slash-command parity, skill categories, French TTS)
+
+### Fixed
+
+- **Tool-approval prompts no longer disappear during brief idle gaps (#4041).** The HTTP approval poll used to tear itself down — force-hiding the approval card past its visibility guard before the server had confirmed the approval was gone — on any transient busy=false dip. It now keeps polling across busy dips and stops only on a true session switch or a confirmed-idle state with no pending approvals. (#4041)
+- **Typing in the composer is smoother on long sessions (#4042).** The composer auto-resize ran a synchronous layout read on every keystroke; it's now coalesced into a single animation-frame update. (#4042)
+- **The desktop window title stays correct when switching to non-chat panels (#4039).** Switching to Settings/Tasks/etc. now stamps `document.title`, and returning to chat restores the chat title. (#4039)
+- **The Tauri desktop app's local IPC is no longer blocked by the Content-Security-Policy (#4040).** `http://ipc.localhost` is now part of the default `connect-src` allowlist. (#4040)
+- **`bootstrap.py` is tracked with its executable bit (#3914)** so direct POSIX execution keeps working after a fresh clone.
+- **`/reload-skills` now works from the WebUI (#4043).** It's routed through the same narrow WebUI agent-command allowlist as `/reload-mcp`, re-scans the installed skills and reports what changed. (#4043)
+- **`/use <skill>` now injects the actual skill content for the next turn (#4044).** Instead of only telling the agent to consult a skill, the selected skill's body is fetched and carried through to the next message as forced context. (#4044)
+- **Flat external skill directories are now categorized in the Skills tab (#4053).** Skills directly under an external skills root use that root's directory name as their category, while flat skills under the local skills root stay uncategorized. (#4053)
+
+### Added
+
+- **French Edge TTS voices (#4058).** Seven `fr-CA` / `fr-FR` neural voices are now in the Edge TTS allowlist, so French-speaking users who enable Edge TTS no longer get a 400 on every utterance.
+
+## [v0.51.370] — 2026-06-12 — Release MI (model picker shows real providers when /api/models rebuild times out)
+
+### Fixed
+
+- **The model picker no longer collapses to a single "Default" entry when the live model-catalog rebuild exceeds its time budget (#3928).** On the first cold open after a restart, `/api/models` rebuilds the provider catalog by probing each configured provider; on a slow network (or behind a corporate proxy) that probe can blow the bounded rebuild budget. The over-budget fallback previously served an emergency one-model catalog, so the picker showed only "Default" until a later request rebuilt successfully. It now serves a richer **network-free** catalog assembled from local config and the auth store — the active provider and its default model, configured `providers.*` entries, credential-pool providers (excluding ambient `gh` CLI tokens), known providers that have a key, declared fallback providers, and custom providers — with the active provider listed first. The 4-second guardrail is unchanged, the real catalog still refreshes out-of-band for the next caller, nothing is written to the 24-hour disk cache from this path, and the build safely degrades to the minimal one-model catalog if anything goes wrong. (#3928)
+
+## [v0.51.369] — 2026-06-12 — Release MH (WebUI streaming honors runtime target model/base_url)
+
+### Fixed
+
+- **Provider OpenCode-Go (and similar pooled providers) no longer 404 with "model not found" when selected via the WebUI model picker (#3895).** WebUI streaming used the *configured* provider base URL instead of the runtime provider's per-model-normalized URL, which duplicated a `/v1` path segment for OpenCode-Go and produced a 404. The target model is now threaded into runtime provider resolution (including the 401 credential self-heal retries), and the runtime-normalized base URL is preferred — but only when it points at the same scheme+host+port as the configured one, so an explicit `providers.<id>.base_url` override at a different endpoint (e.g. an LM Studio LAN address or an OpenRouter mirror) is still honored. (#3895)
+## [v0.51.368] — 2026-06-12 — Release MG (bind active-profile cookie to auth session)
+
+### Security
+
+- **The active-profile cookie is now cryptographically bound to the auth session when auth is enabled (#803).** The `hermes_profile` cookie is client-controlled and is read by profile-scoped routes to decide which profile's data is visible. Previously, with auth enabled, a client could forge `hermes_profile=<other-profile>` to have requests treated under another profile. The cookie is now HMAC-signed over both the session token and the profile name, so it can't be forged, replayed across sessions, or altered to another profile; verification fails closed (an unsigned, tampered, or stale plain-name cookie is rejected and the request falls back to the default profile). No-auth deployments keep the legacy plain-name cookie, which was never an authorization boundary there. As a side benefit, an unauthenticated client can no longer influence the profile context that pre-login (public-path) handlers run under. (#803)
+
+## [v0.51.367] — 2026-06-12 — Release MF (autocomplete filter + lineage merge + shutdown i18n fixes)
+
+### Fixed
+
+- **CLI-only slash commands no longer clutter the WebUI autocomplete (#3969).** Commands that only work in the terminal (and skill-shortcut names that collide with them) are filtered out of the autocomplete list; if you type one anyway, you still get the WebUI-only explanation.
+- **Session-lineage display rows that were being dropped on full session loads are now merged back in.** A merge gap omitted some lineage rows from `GET /api/session`; they're now included (additive, deduped by merge key, leaving explicit forks/child rows alone).
+- **The "Stop the Hermes WebUI server" settings description renders correctly in every language (#4002).** The string embedded `<code>` HTML inside translatable text; it's now split into plain text fragments composed around statically-rendered code spans, applied across all 13 locales.
+
+## [v0.51.366] — 2026-06-12 — Release ME (assistant turn anchor source normalizer — Slice 2, inert)
+
+### Added
+
+- **Slice 2 of the Stable Assistant Turn Anchors foundation: a source-event normalizer (#3980, #3926).** Adds `normalizeAssistantTurnAnchorSourceEvent` / `normalizeAssistantTurnAnchorSourceEvents` to the frozen `HermesAssistantTurnAnchors` global, converting live SSE-style, replay/journal, and settled-message events into a single anchor-normalized shape with stable identity and dedupe keys. The helper is **inert** — no `send()` / `attachLiveStream()` / `renderMessages()` / settlement / `S.messages` / `INFLIGHT` / DOM path consumes it yet — so there is zero rendering change in this release; it lands the model that Compact Worklog and the in-progress Transparent Stream work will later consume from one normalizer. Identity reads are own-property-only and payload shaping uses `Object.create(null)` with unsafe-key skipping, so prototype-pollution and inherited-identity payloads can't leak through. (#3980)
+
+## [v0.51.365] — 2026-06-11 — Release MD (lineage-segment open + reasoning chip fixes)
+
+### Fixed
+
+- **Clicking an expanded session-lineage segment now opens that exact session instead of resolving back to the collapsed parent (#4003).** The explicit lineage-segment and child-row click handlers now skip the collapsed-id lineage resolution (which is only meant for stale collapsed rows), so the session you click is the session that loads.
+- **The reasoning-effort chip no longer disappears after you pick an effort (#3958).** Selecting an effort posted to `/api/reasoning`, which re-resolved the supported efforts for the config-default model rather than the active session's model — so a session whose model differs from the default lost its chip until a refresh. The effort POST now carries the active session's model/provider context, matching the GET path, so the chip stays correct. (#3958)
+
+## [v0.51.364] — 2026-06-11 — Release MC (self-heal stuck session loads)
+
+### Fixed
+
+- **A failed session load no longer wedges the WebUI so that no chat can be opened (#3993).** When a session load failed with a non-404 error (400/403/500/network) during boot, the stale session id stayed in `localStorage` and the URL, so every refresh retried the same dead session and the transcript pane stayed stuck. Boot-time load failures now self-heal by clearing the stale id (mirroring the existing 404 self-heal). The clear is strictly scoped: it only runs when no session is on screen (a boot restore), never when you're already viewing a healthy session (the error may be transient), and a stale in-flight load that's been superseded by a newer session selection bails before touching anything — so it can't wipe the session you just navigated to.
+
+## [v0.51.363] — 2026-06-11 — Release MB (rename/move/update CLI sessions without 404)
+
+### Fixed
+
+- **Renaming, moving, or updating a CLI/agent session that isn't yet in the WebUI store no longer 404s (#3985).** These actions previously only looked in the WebUI session store, so a session originating from the TUI/CLI/agent (not yet materialized into the store) couldn't be renamed/moved/updated. They now fall back to materializing the session from its CLI metadata (mirroring the existing `/api/session/archive` behavior). Read-only imported sessions (messaging channels, Claude Code) remain protected: they're refused with 403 on both the already-stored and the materialize paths, and a state.db-owned messaging session is never materialized into a writable WebUI sidecar. (#3985)
+
+## [v0.51.362] — 2026-06-11 — Release MA (malformed providers config no longer crashes)
+
+### Fixed
+
+- **A malformed `providers` config no longer crashes provider/model resolution (#3979).** If `providers` in `config.yaml` was set to a truthy non-dict value (e.g. a list), several resolution paths called `.get(...)` on it and raised `AttributeError`. Provider config is now read through isinstance-guarded helpers that treat a malformed value as unconfigured (empty), so resolution degrades gracefully instead of crashing. Valid dict-shaped configs are unaffected. (#3979)
+
+## [v0.51.361] — 2026-06-11 — Release LZ (configurable session cookie name)
+
+### Added
+
+- **The auth session cookie name is now configurable via `HERMES_WEBUI_COOKIE_NAME`.** Browsers scope cookies by host, not host+port (RFC 6265), so two WebUI instances on the same hostname but different ports previously trampled each other's `hermes_session` cookie. Set `HERMES_WEBUI_COOKIE_NAME` to give each instance a distinct cookie name. The value is validated as an RFC 6265 token (falling back to the default `hermes_session` when unset, empty, or invalid), and existing deployments are unaffected. (#3981)
+
+## [v0.51.360] — 2026-06-11 — Release LY (close idle SSE on hidden tabs)
+
+### Fixed
+
+- **Idle background tabs no longer exhaust the browser's connection pool and cause "Request timed out" toasts (#3992).** Each WebUI window opened three persistent SSE connections (session-events, gateway stream, per-session stream); with two windows open that reached the browser's six-connection per-origin HTTP/1.1 limit, so any subsequent request queued behind the saturated pool and timed out. The gateway and per-session streams now follow the same Page Visibility pattern the session-events stream already used: they close while the tab is hidden (freeing pool slots) and reopen when it becomes visible again. The per-session stream correctly reattaches on re-show — including for a session that was loaded or restored while the tab was already hidden — so live `bg_task_complete` / `server_turn_started` events are not missed. (#3996)
 ## [v0.51.359] — 2026-06-11 — Release LW (assistant turn anchor phase 0 scaffold)
 
 ### Added
@@ -100,6 +282,7 @@
 ### Changed
 
 - **Worklog details settings now align with the live-to-final model.** The old "Activity expanded by default" setting is renamed to **Worklog details** (default folded), the legacy "Compact tool activity" preference is deprecated, and the Worklog renderer stays enabled for older installs that had saved `simplified_tool_calling=false`. (#3400, #3820)
+
 
 ## [v0.51.346] — 2026-06-09 — Release LJ (PWA notification controls)
 
