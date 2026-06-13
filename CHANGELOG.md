@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.381] — 2026-06-13 — Release MT (Stable Assistant Turn Anchors: settled final-answer projection, #4092)
+
+### Changed
+
+- **Settled assistant final answers now route through the Stable Assistant Turn Anchor owner (#4092, #3926).** As the first RFC Phase 3 wiring slice, `renderMessages()` derives each *settled* assistant message's final-answer text via `projectAssistantTurnAnchorSettledMessageFinalAnswer` (the anchor registry's settled-message projection) instead of reading the raw content directly. The projection is a faithful identity transform for normal string content (verified by unit echo across plain/markdown/inline-think/unicode/whitespace/code, a real-transcript A/B render that was byte-identical to master, and a live-build `applied:true` echo check), is wrapped in a try/catch that falls back to the original content on any error, and only applies when it produces a usable string — so there is no visible rendering change today; it moves the settled-final derivation onto the single anchor owner that live/replay/settled sources will converge on. Live (`_live`) turns and non-string content are untouched. (#4092)
+
 ## [v0.51.380] — 2026-06-13 — Release MS (tool-iteration-limit stops surfaced explicitly, #3821)
 
 ### Fixed

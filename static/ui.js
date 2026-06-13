@@ -8747,6 +8747,26 @@ function _renderMessagesWithScrollSnapshot(options){
   renderMessages({...(options||{}),preserveScroll:true});
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
 }
+let _assistantTurnAnchorSettledFinalAnswerWarned=false;
+function _assistantTurnAnchorSettledFinalAnswer(message, content, context){
+  try{
+    const api=(typeof window!=='undefined')?window.HermesAssistantTurnAnchors:null;
+    if(!api||typeof api.projectAssistantTurnAnchorSettledMessageFinalAnswer!=='function') return null;
+    const result=api.projectAssistantTurnAnchorSettledMessageFinalAnswer(message,{
+      session_id:context&&context.session_id,
+      raw_idx:context&&context.raw_idx,
+      content,
+    });
+    const finalAnswer=result&&typeof result.final_answer==='string'?result.final_answer:'';
+    return finalAnswer?finalAnswer:null;
+  }catch(err){
+    if(!_assistantTurnAnchorSettledFinalAnswerWarned&&typeof console!=='undefined'&&console.warn){
+      _assistantTurnAnchorSettledFinalAnswerWarned=true;
+      console.warn('assistant turn anchor settled-final projection failed',err);
+    }
+    return null;
+  }
+}
 function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // Terminal stream renders can happen after S.activeStreamId is cleared.
   // In that case, preserveScroll asks the normal pin-state helper to decide:
@@ -9076,6 +9096,13 @@ function renderMessages(options){
     let thinkingText='';
     if(Array.isArray(content)){
       content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
+    }
+    if(m.role==='assistant'&&!m._live&&typeof content==='string'){
+      const anchorFinal=_assistantTurnAnchorSettledFinalAnswer(m, content, {
+        session_id:sid,
+        raw_idx:rawIdx,
+      });
+      if(anchorFinal!==null) content=anchorFinal;
     }
     if(typeof content==='string'){
       if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
