@@ -88,10 +88,12 @@ function getMatchingCommands(prefix){
     });
     seen.add(name);
   }
-  for(const bundle of _bundleCommandCache){
-    if(!bundle.name.startsWith(q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
-    matches.push(bundle);
-    seen.add(bundle.name);
+  if(_agentCommandCacheReady){
+    for(const bundle of _bundleCommandCache){
+      if(!bundle.name.startsWith(q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
+      matches.push(bundle);
+      seen.add(bundle.name);
+    }
   }
   for(const skill of _skillCommandCache){
     if(!skill.name.startsWith(q)||seen.has(skill.name)||reserved.has(skill.name))continue;
@@ -1598,6 +1600,7 @@ async function loadBundleCommands(force=false){
   if(_bundleCommandLoadPromise&&!force)return _bundleCommandLoadPromise;
   _bundleCommandLoadPromise=(async()=>{
     try{
+      await loadAgentCommandMetadata();
       const data=await api('/api/commands/bundles');
       const deduped=new Map();
       for(const bundle of (data&&data.bundles)||[]){const entry=_buildBundleCommandEntry(bundle);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}

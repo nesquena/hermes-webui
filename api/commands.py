@@ -175,11 +175,17 @@ def resolve_bundle_command(command: str) -> dict[str, Any]:
         logger.warning("Skill bundle runtime unavailable", exc_info=True)
         raise RuntimeError("Skill bundle runtime unavailable") from exc
 
-    with _bundle_profile_context("/api/commands/bundles/resolve"):
-        bundle_key = resolve_bundle_command_key(bundle_name)
-        if bundle_key is None:
-            raise KeyError(bundle_name)
-        bundle_result = build_bundle_invocation_message(bundle_key, user_instruction)
+    try:
+        with _bundle_profile_context("/api/commands/bundles/resolve"):
+            bundle_key = resolve_bundle_command_key(bundle_name)
+            if bundle_key is None:
+                raise KeyError(bundle_name)
+            bundle_result = build_bundle_invocation_message(bundle_key, user_instruction)
+    except (KeyError, ValueError, RuntimeError):
+        raise
+    except Exception as exc:
+        logger.warning("Failed to resolve skill bundle command", exc_info=True)
+        raise RuntimeError("Skill bundle command unavailable") from exc
 
     if not bundle_result:
         raise RuntimeError("Bundle command returned no invocation text")

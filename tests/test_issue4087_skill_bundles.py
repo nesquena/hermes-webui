@@ -38,6 +38,7 @@ def test_bundle_routes_are_wired_through_dedicated_endpoints():
 def test_frontend_bundle_dispatch_uses_dedicated_metadata_and_resolve_calls():
     assert "api('/api/commands/bundles')" in COMMANDS_JS
     assert "api('/api/commands/bundles/resolve'" in COMMANDS_JS
+    assert "await loadAgentCommandMetadata();" in COMMANDS_JS
     assert "const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'" in MESSAGES_JS
     assert "await resolveBundleCommand(text,_bundleCmd)" in MESSAGES_JS
 
@@ -125,3 +126,14 @@ def test_resolve_bundle_command_raises_for_unknown_bundle(monkeypatch):
 
     with pytest.raises(KeyError):
         commands.resolve_bundle_command("/does-not-exist investigate this")
+
+
+def test_resolve_bundle_command_wraps_unexpected_runtime_errors(monkeypatch):
+    def _explode(_name):
+        raise AttributeError("bundle runtime broke")
+
+    _install_fake_skill_bundles(monkeypatch, resolver=_explode)
+    monkeypatch.setattr(commands, "_bundle_profile_context", lambda purpose: nullcontext())
+
+    with pytest.raises(RuntimeError, match="Skill bundle command unavailable"):
+        commands.resolve_bundle_command("/incident-review investigate this")

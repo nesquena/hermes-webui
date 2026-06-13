@@ -334,6 +334,78 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
     assert "use" in result["use_names"]
 
 
+def test_bundle_collisions_stay_hidden_until_agent_metadata_is_ready():
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        let releaseCommands;
+        const commandsReady = new Promise(resolve => {{ releaseCommands = resolve; }});
+        const ctx = {{
+          console,
+          localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
+          t: (key) => key,
+          api: async (path) => {{
+            if (path === '/api/commands') return commandsReady;
+            if (path === '/api/commands/bundles') return {{
+              bundles: [
+                {{
+                  name: 'plugin-review',
+                  description: 'Bundle collision should stay hidden until plugin metadata lands',
+                  skill_count: 5,
+                  source: 'bundle'
+                }}
+              ]
+            }};
+            if (path === '/api/skills') return {{ skills: [] }};
+            throw new Error('unexpected api path: ' + path);
+          }}
+        }};
+        vm.createContext(ctx);
+        vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
+        (async () => {{
+          const bundleLoad = vm.runInContext('loadBundleCommands(true)', ctx);
+          const before = await vm.runInContext("getSlashAutocompleteMatches('/plugin')", ctx);
+          releaseCommands({{
+            commands: [
+              {{
+                name: 'plugin-review',
+                description: 'Run plugin review',
+                category: 'Plugin',
+                aliases: ['plugin_review'],
+                cli_only: false,
+                gateway_only: false
+              }}
+            ]
+          }});
+          await bundleLoad;
+          const after = await vm.runInContext("getSlashAutocompleteMatches('/plugin')", ctx);
+          process.stdout.write(JSON.stringify({{
+            before_names: before.map(item => item.name),
+            before_sources: before.map(item => item.source),
+            after_names: after.map(item => item.name),
+            after_sources: after.map(item => item.source)
+          }}));
+        }})().catch(err => {{
+          console.error(err && err.stack || err);
+          process.exit(1);
+        }});
+        """
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["node", str(script_path)], check=True, capture_output=True, text=True)
+    finally:
+        script_path.unlink(missing_ok=True)
+
+    result = json.loads(proc.stdout)
+    assert result["before_names"] == []
+    assert result["before_sources"] == []
+    assert result["after_names"] == ["plugin-review"]
+    assert result["after_sources"] == ["plugin"]
+
+
 def test_send_intercepts_cli_only_commands_before_agent_round_trip():
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
     assert intercept_idx != -1
