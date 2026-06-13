@@ -6842,7 +6842,13 @@ function _syncTransparentEventControls(turn){
 }
 function _rehydrateTransparentStreamDom(root){
   if(!root||!isTransparentStream()) return;
-  root.querySelectorAll('.assistant-turn').forEach(turn=>{
+  // Handle BOTH a container root and a root that IS itself an assistant turn
+  // (the live-turn restore path passes the #liveAssistantTurn element directly,
+  // which querySelectorAll('.assistant-turn') would not match). (Trifecta C1 r2.)
+  const turns=[];
+  if(root.matches&&root.matches('.assistant-turn')) turns.push(root);
+  root.querySelectorAll('.assistant-turn').forEach(turn=>turns.push(turn));
+  turns.forEach(turn=>{
     _wireTransparentTurnToggle(turn);
     _syncTransparentEventControls(turn);
   });
@@ -6878,7 +6884,10 @@ function _decorateTransparentEventRow(row, opts){
     if(card) card.classList.add('transparent-event-card');
     if(header){
       const nameEl=header.querySelector('.tool-card-name');
-      if(nameEl) nameEl.textContent=(status==='Running'?`Running: ${_toolShortName(name)}`:_toolShortName(name));
+      // The status badge (now legible per V2) already carries "Running", so don't
+      // also prefix the name with "Running:" — that's the same redundancy class
+      // V6 removed from the detail body. (Trifecta r2 #4.)
+      if(nameEl) nameEl.textContent=_toolShortName(name);
       let statusEl=header.querySelector('.transparent-event-status');
       if(!statusEl){
         statusEl=document.createElement('span');
@@ -10394,19 +10403,21 @@ function appendLiveToolCard(tc){
         replacement.dataset.liveTid=tid;
         // Preserve the user's expand state + detail tab across tool completion:
         // the running row is rebuilt fresh on toolComplete, which would otherwise
-        // snap an expanded row shut and reset its Full/Output tab. (Trifecta O-Bug2.)
+        // snap an expanded row shut and reset its Full/Output tab. The detail-mode
+        // is preserved regardless of open state (a user who picked Output then
+        // collapsed should still get Output on re-open). (Trifecta O-Bug2 + r2.)
         try{
           const _oldCard=existing.querySelector('.tool-card,.thinking-card');
           const _newCard=replacement.querySelector('.tool-card,.thinking-card');
+          const _oldDetail=existing.querySelector('.tool-card-detail');
+          const _newDetail=replacement.querySelector('.tool-card-detail');
+          const _mode=_oldDetail&&_oldDetail.getAttribute('data-transparent-detail-mode');
+          if(_newDetail&&_mode){
+            const _tab=_newDetail.querySelector(`.transparent-detail-mode[data-mode="${_mode}"]`);
+            if(_tab) _setTransparentDetailMode(_tab,_mode);
+          }
           if(_oldCard&&_newCard&&_oldCard.classList.contains('open')){
             _setTransparentCardOpen(_newCard,true);
-            const _oldDetail=existing.querySelector('.tool-card-detail');
-            const _newDetail=replacement.querySelector('.tool-card-detail');
-            const _mode=_oldDetail&&_oldDetail.getAttribute('data-transparent-detail-mode');
-            if(_newDetail&&_mode){
-              const _tab=_newDetail.querySelector(`.transparent-detail-mode[data-mode="${_mode}"]`);
-              if(_tab) _setTransparentDetailMode(_tab,_mode);
-            }
           }
         }catch(_){ /* non-fatal: completion still renders, just collapsed */ }
         existing.replaceWith(replacement);
