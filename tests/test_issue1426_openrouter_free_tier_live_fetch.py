@@ -178,7 +178,8 @@ def test_openrouter_falls_back_to_static_when_live_fails(monkeypatch):
 
 def test_free_tier_cap_prevents_picker_drowning(monkeypatch):
     """OpenRouter may return hundreds of free-tier variants — the implementation
-    caps the live-fetch additions at 30 to keep the picker usable."""
+    must keep the picker usable without letting the experimental free-tier
+    augmentation balloon without bound."""
     items = []
     for i in range(50):
         items.append({
@@ -203,9 +204,28 @@ def test_free_tier_cap_prevents_picker_drowning(monkeypatch):
     grouped = _get_grouped_models()
     or_group = next((g for g in grouped if g.get("provider_id") == "openrouter"), None)
     assert or_group is not None
-    free_added_ids = {m["id"] for m in or_group["models"] if ":free" in m["id"]}
-    assert len(free_added_ids) <= 50, "should not exceed the items provided"
-    assert len(free_added_ids) > 0, "free-tier live fetch should add at least some entries"
+    free_added_ids = {
+        m["id"]
+        for bucket_name in ("models", "extra_models")
+        for m in or_group.get(bucket_name, [])
+        if m["id"].startswith("vendor")
+    }
+    expected_ids = {
+        f"vendor{i}/model-{i}:free"
+        for i in range(config._OPENROUTER_FREE_TIER_AUGMENT_CAP)
+    }
+    assert expected_ids.issubset(free_added_ids), (
+        "The picker should retain the first capped tranche of free-tier models "
+        "instead of discarding the augmentation entirely."
+    )
+    assert len(free_added_ids) == config._OPENROUTER_FREE_TIER_AUGMENT_CAP, (
+        "The OpenRouter free-tier live fetch should stay capped so extra_models "
+        "does not balloon to hundreds of experimental variants."
+    )
+    assert len(or_group.get("extra_models", [])) > 0, (
+        "When the visible picker cap is exceeded, free-tier overflow models "
+        "must move into extra_models instead of being discarded."
+    )
 
 
 def test_openrouter_dedupe_curated_and_free_tier(monkeypatch):

@@ -1401,7 +1401,7 @@ async function populateModelDropdown(opts={}){
         opt.value=m.id;
         opt.textContent=m.label;
         og.appendChild(opt);
-        _dynamicModelLabels[m.id]=m.id;
+        _dynamicModelLabels[m.id]=m.label||m.id;
       }
       // Hydrate the label map from extra_models too (the catalog tail that
       // doesn't render as <option> entries when the picker is capped — see
@@ -1410,8 +1410,9 @@ async function populateModelDropdown(opts={}){
       // persisted-localStorage value renderable with its proper label
       // instead of falling back to the bare ID. #1567.
       if(Array.isArray(g.extra_models)){
+        try{ og.dataset.extraModels=JSON.stringify(g.extra_models); }catch(_e){ og.dataset.extraModels='[]'; }
         for(const m of g.extra_models){
-          if(m && m.id) _dynamicModelLabels[m.id]=m.id;
+          if(m && m.id) _dynamicModelLabels[m.id]=m.label||m.id;
         }
       }
       sel.appendChild(og);
@@ -1665,37 +1666,109 @@ function _positionModelDropdown(){
   dd.style.left=`${left}px`;
 }
 
+function _readModelOverflowData(group){
+  if(!group||!group.dataset||!group.dataset.extraModels) return [];
+  try{
+    const parsed=JSON.parse(group.dataset.extraModels);
+    return Array.isArray(parsed)?parsed.filter(m=>m&&m.id):[];
+  }catch(_e){
+    return [];
+  }
+}
+
+function _appendOverflowOptionsToGroup(group, extraModels){
+  if(!group||!Array.isArray(extraModels)||!extraModels.length) return 0;
+  let appended=0;
+  for(const m of extraModels){
+    if(!m||!m.id) continue;
+    const opt=document.createElement('option');
+    opt.value=m.id;
+    opt.textContent=m.label||m.id;
+    group.appendChild(opt);
+    appended++;
+  }
+  if(group.dataset){
+    group.dataset.extraModels='[]';
+    group.dataset.overflowExpanded='1';
+  }
+  return appended;
+}
+
 function renderModelDropdown(){
   const dd=$('composerModelDropdown');
   const sel=$('modelSelect');
   if(!dd||!sel) return;
-  // Store model data for filtering
   const _modelData=[];
+  const _groupMeta=new Map();
+  const _groupOrder=[];
   const _badgeMap=window._configuredModelBadges||{};
+  const _ensureGroupMeta=(groupKey,groupLabel,providerId,optgroup)=>{
+    if(!_groupMeta.has(groupKey)){
+      _groupMeta.set(groupKey,{
+        key:groupKey,
+        label:groupLabel||'',
+        providerId:providerId||'',
+        optgroup:optgroup||null,
+        modelsEndpointError:null,
+        modelCount:0,
+        hiddenCount:0,
+        endpointErrorOnly:false,
+      });
+      _groupOrder.push(groupKey);
+    }
+    return _groupMeta.get(groupKey);
+  };
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
       const providerId=child.dataset&&child.dataset.provider?child.dataset.provider:'';
+      const groupKey=providerId||child.label||`group-${_groupOrder.length}`;
+      const groupMeta=_ensureGroupMeta(groupKey,child.label||'',providerId,child);
       let modelsEndpointError=null;
       if(child.dataset&&child.dataset.modelsEndpointError){
         try{ modelsEndpointError=JSON.parse(child.dataset.modelsEndpointError); }catch(_e){ modelsEndpointError=null; }
       }
+      groupMeta.modelsEndpointError=modelsEndpointError;
       for(const opt of Array.from(child.children)){
         const rawValue=String(opt.value||'');
         const displayName=rawValue.startsWith('@custom:')
           ? getModelLabel(rawValue)
           : (opt.textContent||getModelLabel(rawValue));
-        _modelData.push({value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
+        const entry={value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',groupKey,providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId),hiddenByDefault:false};
+        _modelData.push(entry);
+        groupMeta.modelCount++;
       }
-      if(modelsEndpointError && !child.children.length){
-        _modelData.push({value:`__models_endpoint_error__:${providerId||child.label||''}`,name:'',id:'',group:child.label||'',providerId,modelsEndpointError,endpointErrorOnly:true});
+      for(const overflowModel of _readModelOverflowData(child)){
+        const displayName=overflowModel.id.startsWith('@custom:')
+          ? getModelLabel(overflowModel.id)
+          : (overflowModel.label||getModelLabel(overflowModel.id));
+        _modelData.push({
+          value:overflowModel.id,
+          name:esc(displayName),
+          id:esc(overflowModel.id),
+          group:child.label||'',
+          groupKey,
+          providerId,
+          modelsEndpointError,
+          badge:_getConfiguredModelBadge(overflowModel.id,_badgeMap,providerId),
+          hiddenByDefault:true,
+        });
+        groupMeta.modelCount++;
+        groupMeta.hiddenCount++;
+      }
+      if(modelsEndpointError && !child.children.length && !groupMeta.hiddenCount){
+        groupMeta.endpointErrorOnly=true;
+        _modelData.push({value:`__models_endpoint_error__:${providerId||child.label||''}`,name:'',id:'',group:child.label||'',groupKey,providerId,modelsEndpointError,endpointErrorOnly:true});
       }
     }
     if(child.tagName==='OPTION'){
+      const groupKey='__ungrouped__';
+      _ensureGroupMeta(groupKey,'','',null);
       const rawValue=String(child.value||'');
       const displayName=rawValue.startsWith('@custom:')
         ? getModelLabel(rawValue)
         : (child.textContent||getModelLabel(rawValue));
-      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
+      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:'',badge:_getConfiguredModelBadge(child.value,_badgeMap),hiddenByDefault:false});
+      _groupMeta.get(groupKey).modelCount++;
     }
   }
   const _existingConfiguredKeys=new Set(_modelData.map(existing=>_normalizeConfiguredModelKey(existing.value)));
@@ -1737,7 +1810,30 @@ function renderModelDropdown(){
     }
     return 500;
   };
-  // Filter function (defined AFTER _searchRow and _cust* are created)
+  const _renderProviderEndpointHint=(entry)=>{
+    if(!entry||!entry.label||!entry.modelsEndpointError) return;
+    const hint=document.createElement('div');
+    hint.className='model-provider-hint';
+    hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
+    dd.appendChild(hint);
+  };
+  const _expandOverflowGroup=(groupMetaEntry)=>{
+    if(!groupMetaEntry||!groupMetaEntry.optgroup) return;
+    const currentTerm=_si.value;
+    const extraModels=_readModelOverflowData(groupMetaEntry.optgroup);
+    if(!_appendOverflowOptionsToGroup(groupMetaEntry.optgroup,extraModels)) return;
+    renderModelDropdown();
+    const nextSearch=dd.querySelector('.model-search-input');
+    if(!nextSearch) return;
+    nextSearch.value=currentTerm;
+    if(nextSearch._listeners&&typeof nextSearch._listeners.input==='function'){
+      nextSearch._listeners.input();
+      return;
+    }
+    if(typeof nextSearch.dispatchEvent==='function'){
+      nextSearch.dispatchEvent(new Event('input'));
+    }
+  };
   const _filterModels=(term)=>{
     term=term.trim().toLowerCase();
     const found=new Set();
@@ -1782,9 +1878,13 @@ function renderModelDropdown(){
         return a.name.localeCompare(b.name);
       });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
-    // Clear and rebuild
+    const configuredSemanticKeys=new Set(configuredModels.map(m=>`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`));
+    const _effectiveHiddenCount=(groupKey)=>_modelData.filter(m=>
+      m.groupKey===groupKey
+      && m.hiddenByDefault
+      && !configuredSemanticKeys.has(`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`)
+    ).length;
     dd.innerHTML='';
-    // Add search and custom elements first (CRITICAL: must be before models)
     dd.appendChild(_scopeNote);
     dd.appendChild(_searchRow);
     dd.appendChild(_custSep);
@@ -1820,45 +1920,53 @@ function renderModelDropdown(){
         dd.appendChild(row);
       }
     }
-    // Add remaining models matching filter
-    let _lastGroup=null;
-    // Count models per group for heading labels (#1425)
-    const _groupCounts={};
-    for(const m of _modelData){
-      if(configuredIds.has(m.value)) continue;
-      if(m.group&&!m.endpointErrorOnly) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
-    }
-    const _renderProviderEndpointHint=(groupName)=>{
-      if(!groupName) return;
-      const entry=_modelData.find(m=>m.group===groupName&&m.modelsEndpointError);
-      if(!entry||!entry.modelsEndpointError) return;
-      const hint=document.createElement('div');
-      hint.className='model-provider-hint';
-      hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
-      dd.appendChild(hint);
-    };
-    for(const m of _modelData){
-      if(configuredIds.has(m.value)||!matches(m)) continue;
-      if(m.group&&m.group!==_lastGroup){
+    for(const groupKey of _groupOrder){
+      const meta=_groupMeta.get(groupKey);
+      if(!meta) continue;
+      const hiddenCount=_effectiveHiddenCount(groupKey);
+      const groupRows=_modelData.filter(m=>
+        m.groupKey===groupKey
+        && !configuredIds.has(m.value)
+        && !m.endpointErrorOnly
+        && matches(m)
+        && (!m.hiddenByDefault || !!term)
+      );
+      const shouldRenderHeading=!!meta.label&&(groupRows.length||meta.endpointErrorOnly||(!term&&hiddenCount));
+      if(shouldRenderHeading){
         const heading=document.createElement('div');
         heading.className='model-group';
-        const count=_groupCounts[m.group]||0;
-        heading.textContent=count>1?`${m.group} (${count})`:m.group;
+        const count=hiddenCount?0:(meta.modelCount||0);
+        heading.textContent=count>1?`${meta.label} (${count})`:meta.label;
         dd.appendChild(heading);
-        _renderProviderEndpointHint(m.group);
-        _lastGroup=m.group;
+        _renderProviderEndpointHint(meta);
       }
-      if(m.endpointErrorOnly) continue;
-      const row=document.createElement('div');
-      row.className='model-opt'+(m.value===sel.value?' active':'');
-      const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
-      // Inline provider chip on every row that has a group (#1425)
-      const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
-      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-      row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
-      dd.appendChild(row);
+      for(const m of groupRows){
+        const row=document.createElement('div');
+        row.className='model-opt'+(m.value===sel.value?' active':'');
+        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+        const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
+        dd.appendChild(row);
+      }
+      if(!term&&hiddenCount){
+        const showAll=document.createElement('div');
+        showAll.className='model-opt model-opt-show-all';
+        showAll.tabIndex=0;
+        showAll.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(t('model_show_all_models',hiddenCount)||`Show all ${hiddenCount} models`)}</span></div>`;
+        showAll.onclick=(e)=>{
+          if(e&&typeof e.stopPropagation==='function') e.stopPropagation();
+          _expandOverflowGroup(meta);
+        };
+        showAll.addEventListener('keydown',e=>{
+          if(e.key==='Enter'||e.key===' '){
+            e.preventDefault();
+            _expandOverflowGroup(meta);
+          }
+        });
+        dd.appendChild(showAll);
+      }
     }
-    // Show "No results" if filtered and nothing matched
     if(term&&found.size===0){
       const noResult=document.createElement('div');
       noResult.className='model-search-no-results';
@@ -1868,10 +1976,8 @@ function renderModelDropdown(){
       noResult.style.textAlign='center';
       dd.appendChild(noResult);
     }
-    // Restore focus to search input
     _si.focus();
   };
-  // Event handlers for search input
   _si.addEventListener('input',()=>_filterModels(_si.value));
   // Keyboard navigation through filtered model rows (#2791).
   const _visibleModelRows=()=>Array.from(dd.querySelectorAll('.model-opt'));
@@ -1899,20 +2005,16 @@ function renderModelDropdown(){
     }
   });
   _si.addEventListener('click',e=>e.stopPropagation());
-  // Event handlers for clear button
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
-  // Event handlers for custom input
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
   _cb.onclick=_applyCustom;
   _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
-  // Add search and custom elements to dropdown (initial render)
   dd.appendChild(_scopeNote);
   dd.appendChild(_searchRow);
   dd.appendChild(_custSep);
   dd.appendChild(_custRow);
-  // Apply initial filter (empty shows all)
   _filterModels('');
 }
 
