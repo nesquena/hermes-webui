@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.376] — 2026-06-13 — Release MO (Hide Thinking also hides Worklog reasoning, #3903)
+
+### Fixed
+
+- **Hiding Thinking now also hides Worklog reasoning rows, without hiding tool activity (#3903).** When reasoning/thinking display is turned off, the Worklog reasoning rows (`.wl-reason`) are now suppressed on both the live streaming path and the settled/reloaded render path, and any already-rendered reasoning rows are pruned when Thinking is toggled off — while tool cards and ordinary Worklog anchor/progress rows are preserved. (Previously the gate sat on an unused helper, so reasoning rows kept rendering even with Thinking off.) (#3903)
+
 ## [v0.51.375] — 2026-06-13 — Release MN (Transparent Stream activity display, #3820)
 
 ### Added
@@ -120,10 +126,6 @@
 
 - **Internal Stable Assistant Turn Anchors Phase 0 scaffold.** The browser now ships an inert `HermesAssistantTurnAnchors` helper surface plus a documented state-layer inventory for #3926, pinning current live/replay/settled source classifications and event dedupe precedence without changing visible chat rendering.
 - **New RFC: Stable Assistant Turn Anchors for Live-to-Final rendering.** Defines a frontend presentation/reconciliation model for anchoring one assistant turn across live streaming, settlement, replay/reload/recovery, Compact Worklog, Transparent Stream, terminal states, artifacts, and side effects. (#3926)
-
-### Fixed
-
-- **Hide Thinking now also hides Worklog reasoning rows without hiding tool activity.** The `show_thinking=false` path now suppresses `.wl-reason` entries that come from reasoning text and prunes already-rendered rows when Thinking is toggled off, while preserving tool cards and ordinary Worklog anchor/progress rows. (#3903)
 
 ## [v0.51.358] — 2026-06-11 — Release LV (first-run password bootstrap hardening)
 
