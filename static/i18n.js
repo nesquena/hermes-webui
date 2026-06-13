@@ -558,6 +558,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Load older messages while scrolling up',
 
     settings_desc_session_endless_scroll: 'When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.',
+    settings_label_auto_scroll_follow: 'Auto-follow new content',
+    settings_desc_auto_scroll_follow: 'When enabled, the view scrolls to the bottom as new tokens stream in. When disabled, you control the scroll position manually.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -1976,6 +1978,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Carica messaggi precedenti scorrendo in alto',
 
     settings_desc_session_endless_scroll: 'Se abilitato, i messaggi precedenti si caricano automaticamente scorrendo in alto. Se disabilitato, usa il pulsante messaggi precedenti.',
+    settings_label_auto_scroll_follow: 'Segui automaticamente i nuovi contenuti',
+    settings_desc_auto_scroll_follow: 'Se abilitato, la vista scorre verso il basso man mano che arrivano nuovi token. Se disabilitato, controlli tu la posizione di scorrimento.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -3385,6 +3389,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: '上スクロールで古いメッセージを読み込む',
 
     settings_desc_session_endless_scroll: '有効にすると、上にスクロールしたとき古いメッセージを自動で読み込みます。無効の場合は古いメッセージボタンを使います。',
+    settings_label_auto_scroll_follow: '新しい内容を自動で追従',
+    settings_desc_auto_scroll_follow: '有効にすると、ストリーミング中に画面が自動で一番下までスクロールします。無効にすると、スクロール位置を自分で操作できます。',
     settings_label_worklog_details_expanded_default: 'Worklog の詳細を自動的に開く',
     settings_desc_worklog_details_expanded_default: '有効にすると、新しい Worklog の詳細が展開された状態で始まり、ツール、Thinking、進捗カードをクリックなしで確認できます。無効の場合、Worklog の詳細はデフォルトで折りたたまれます。ターンごとの手動折りたたみ/展開は優先されます。',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -5415,6 +5421,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Загружать старые сообщения при прокрутке вверх',
 
     settings_desc_session_endless_scroll: 'Если включено, старые сообщения загружаются автоматически при прокрутке вверх. Если выключено, используйте кнопку загрузки старых сообщений.',
+    settings_label_auto_scroll_follow: 'Автопрокрутка к новому содержимому',
+    settings_desc_auto_scroll_follow: 'Если включено, область прокручивается вниз по мере поступления новых токенов. Если выключено, вы сами управляете прокруткой.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -6749,6 +6757,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Cargar mensajes antiguos al desplazarse hacia arriba',
 
     settings_desc_session_endless_scroll: 'Si está activado, los mensajes antiguos se cargan automáticamente al desplazarte hacia arriba. Si está desactivado, usa el botón de mensajes antiguos.',
+    settings_label_auto_scroll_follow: 'Seguir automáticamente el contenido nuevo',
+    settings_desc_auto_scroll_follow: 'Si está activado, la vista se desplaza hacia abajo a medida que llegan nuevos tokens. Si está desactivado, controlas tú la posición de desplazamiento.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -7783,6 +7793,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Ältere Nachrichten beim Hochscrollen laden',
 
     settings_desc_session_endless_scroll: 'Wenn aktiviert, werden ältere Nachrichten beim Hochscrollen automatisch geladen. Wenn deaktiviert, nutzt du den Button für ältere Nachrichten.',
+    settings_label_auto_scroll_follow: 'Neuen Inhalten automatisch folgen',
+    settings_desc_auto_scroll_follow: 'Wenn aktiviert, scrollt die Ansicht nach unten, während neue Tokens eintreffen. Wenn deaktiviert, steuerst du die Scrollposition selbst.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -9452,6 +9464,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: '向上滚动时加载更早的消息',
 
     settings_desc_session_endless_scroll: '启用后，向上滚动时会自动加载更早的消息。禁用时请使用加载更早消息按钮。',
+    settings_label_auto_scroll_follow: '自动跟随新内容',
+    settings_desc_auto_scroll_follow: '启用后，流式输出时页面会自动滚动到底部。禁用后，你可以自由控制滚动位置，阅读答案不会被拽到底部。',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -10179,6 +10193,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: '向上捲動時載入較早訊息',
 
     settings_desc_session_endless_scroll: '啟用後，向上捲動時會自動載入較早訊息。停用時請使用載入較早訊息按鈕。',
+    settings_label_auto_scroll_follow: '自動跟隨新內容',
+    settings_desc_auto_scroll_follow: '啟用後，串流輸出時畫面會自動捲動到底部。停用後，你可以自由控制捲動位置。',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -11478,6 +11494,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Carregar mensagens antigas ao rolar para cima',
 
     settings_desc_session_endless_scroll: 'Quando ativado, mensagens antigas carregam automaticamente ao rolar para cima. Quando desativado, use o botão de mensagens antigas.',
+    settings_label_auto_scroll_follow: 'Acompanhar automaticamente o novo conteúdo',
+    settings_desc_auto_scroll_follow: 'Quando ativado, a visualização rola para baixo conforme novos tokens chegam. Quando desativado, você controla a posição de rolagem.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -12788,6 +12806,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: '위로 스크롤할 때 이전 메시지 불러오기',
 
     settings_desc_session_endless_scroll: '활성화하면 위로 스크롤할 때 이전 메시지를 자동으로 불러옵니다. 비활성화하면 이전 메시지 버튼을 사용합니다.',
+    settings_label_auto_scroll_follow: '새 내용 자동 따라가기',
+    settings_desc_auto_scroll_follow: '활성화하면 토큰이 스트리밍되는 동안 화면이 자동으로 맨 아래로 스크롤됩니다. 비활성화하면 스크롤 위치를 직접 제어합니다.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -14115,6 +14135,8 @@ const LOCALES = {
     settings_desc_terminal_auto_expand: 'Développer automatiquement le panneau de terminal réduit lorsqu\'une commande en cours d\'exécution émet une nouvelle sortie.',
     settings_label_session_endless_scroll: 'Charger les anciens messages en faisant défiler vers le haut',
     settings_desc_session_endless_scroll: 'Lorsqu\'ils sont activés, les anciens messages se chargent automatiquement lorsque vous faites défiler vers le haut. Lorsqu\'il est désactivé, utilisez le bouton des messages plus anciens.',
+    settings_label_auto_scroll_follow: 'Suivre automatiquement le nouveau contenu',
+    settings_desc_auto_scroll_follow: 'Lorsque cette option est activée, la vue défile vers le bas à mesure que de nouveaux jetons arrivent. Lorsqu\'elle est désactivée, vous contrôlez la position de défilement.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -15543,6 +15565,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Yukarı kaydırırken eski mesajları yükle',
 
     settings_desc_session_endless_scroll: 'Etkinleştirildiğinde, yukarı doğru kaydırdığınızda eski mesajlar otomatik olarak yüklenir. Devre dışı bırakıldığında eski mesajlar düğmesini kullanın.',
+    settings_label_auto_scroll_follow: 'Yeni içeriği otomatik takip et',
+    settings_desc_auto_scroll_follow: 'Etkinleştirildiğinde, yeni belirteçler akarken görünüm en alta kaydırılır. Devre dışı bırakıldığında kaydırma konumunu kendiniz kontrol edersiniz.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
     settings_label_chat_activity_display_mode: 'Activity display',
@@ -16963,6 +16987,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Ładuj starsze wiadomości podczas przewijania w górę',
 
     settings_desc_session_endless_scroll: 'Gdy ta opcja jest włączona, starsze wiadomości ładują się automatycznie przy przewijaniu w górę. Gdy jest wyłączona, użyj przycisku wczytywania starszych wiadomości.',
+    settings_label_auto_scroll_follow: 'Automatycznie podążaj za nową treścią',
+    settings_desc_auto_scroll_follow: 'Gdy włączone, widok przewija się na dół w miarę napływania nowych tokenów. Gdy wyłączone, sam kontrolujesz pozycję przewijania.',
     settings_label_worklog_details_expanded_default: 'Otwieraj szczegóły Worklog automatycznie',
     settings_desc_worklog_details_expanded_default: 'Gdy ta opcja jest włączona, nowe szczegóły Worklog zaczynają rozwinięte, dzięki czemu karty narzędzi, Thinking i postępu są widoczne bez dodatkowego kliknięcia. Gdy jest wyłączona, szczegóły Worklog pozostają domyślnie zwinięte. Ręczne decyzje o zwinięciu/rozwinięciu w danej turze mają pierwszeństwo.',
     settings_label_chat_activity_display_mode: 'Activity display',

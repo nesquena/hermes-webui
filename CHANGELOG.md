@@ -3,6 +3,16 @@
 
 ## [Unreleased]
 
+## [v0.51.378] — 2026-06-13 — Release MQ (don't yank the viewport while reading; auto-follow toggle, #4006)
+
+### Fixed
+
+- **Streaming no longer snaps you to the bottom when you've scrolled up to read (#4006).** Two pin-hysteresis bugs are fixed: `_scrollAfterMessageRender` now honors `_messageUserUnpinned` (so a forced follow can't override a deliberate scroll-up after the 250px near-bottom counter re-pins), and `_finishDone`'s completion scroll is gated on an actual near-bottom check instead of firing unconditionally. (#4006)
+
+### Added
+
+- **Auto-follow toggle (Settings → Appearance).** A new "Auto-follow new content" setting controls whether the transcript follows new output to the bottom while streaming. It defaults **on** — a Codex/Claude-Code-style sticky bottom: you stay pinned to the latest output until you scroll up, at which point you're left where you are. Turn it off to always manage the scroll position yourself. (#4006)
+
 ## [v0.51.377] — 2026-06-13 — Release MP (Firefox post-stream scroll jitter, #3920)
 
 ### Fixed
