@@ -99,9 +99,17 @@ class TestUiJsThinkingGate:
 
     def test_worklog_reasoning_rows_are_gated_by_show_thinking(self):
         src = read('static/ui.js')
-        node_fn = function_body(src, "_worklogReasonNodeFromText")
-        assert 'window._showThinking===false' in node_fn and 'return null' in node_fn, (
-            "reasoning-source Worklog rows must not be created when thinking is hidden"
+        # The gate must sit in the ACTUAL render paths that build Worklog reasoning
+        # rows — _syncWorklogReasonFromAnchor (live + settled) and _appendWorklogReason
+        # (settled rebuild) — not in the unused _worklogReasonNodeFromText helper.
+        sync_fn = function_body(src, "_syncWorklogReasonFromAnchor")
+        assert 'window._showThinking===false' in sync_fn and 'return' in sync_fn, (
+            "_syncWorklogReasonFromAnchor must bail (and remove any existing row) "
+            "when thinking display is off"
+        )
+        append_fn = function_body(src, "_appendWorklogReason")
+        assert 'window._showThinking===false' in append_fn and 'return null' in append_fn, (
+            "_appendWorklogReason must not build a reasoning row when thinking is hidden"
         )
 
     def test_show_thinking_gate_does_not_hide_worklog_anchor_text(self):
@@ -115,8 +123,12 @@ class TestUiJsThinkingGate:
     def test_remove_thinking_prunes_reasoning_rows_but_preserves_tool_or_anchor_rows(self):
         src = read('static/ui.js')
         fn = function_body(src, "removeThinking")
-        assert '.wl-reason[data-worklog-reason-source="reasoning"]' in fn, (
-            "removeThinking must sweep already-rendered reasoning Worklog rows"
+        # The live/settled reasoning rows are tagged data-worklog-anchor-reason="1"
+        # (by _syncWorklogReasonFromAnchor / _appendWorklogReason); the sweep MUST
+        # target that attribute, not only the legacy data-worklog-reason-source.
+        assert '.wl-reason[data-worklog-anchor-reason="1"]' in fn, (
+            "removeThinking must sweep the actually-rendered reasoning Worklog rows "
+            '(data-worklog-anchor-reason="1")'
         )
         assert '.tool-card-row,.agent-activity-thinking,.wl-reason' in fn, (
             "empty-group cleanup must preserve groups that still contain tool cards "
