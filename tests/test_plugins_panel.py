@@ -372,6 +372,21 @@ class TestPluginAssetIsolationHardening:
         assert "_dashboard_plugin_enabled" in asset_seg
         assert "_dashboard_plugin_enabled" in page_seg
 
+    def test_plugin_page_embed_is_manifest_driven_not_name_special_cased(self):
+        # Sandboxed iframe plugins may opt into server-side bootstrap payloads
+        # and inline dist assets via manifest["webui"]. The route must not
+        # hard-code a Project-Cockpit plugin name to decide this behavior.
+        routes = read("api/routes.py")
+        page_seg = routes[routes.find("# ── Plugin pages"):routes.find("# ── Plugin pages") + 7000]
+        assert 'manifest.get("webui"' in page_seg
+        assert 'inline_payload' in page_seg
+        assert 'inline_dist_assets' in page_seg
+        assert '_safe_js_global' in page_seg
+        assert '<style>{style_text}</style>' in page_seg
+        assert '<script>{script_text}</script>' in page_seg
+        assert 'window.__LOCAL_PLUGIN_OVERVIEW__' not in page_seg
+        assert 'name == "local-plugin"' not in page_seg
+
 
 class TestSettingsAllowlistGuard:
     """The dashboard_plugins save path must not weaken the settings allowlist.
