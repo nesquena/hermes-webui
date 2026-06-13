@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.394] — 2026-06-13 — Release NG (document-title attention badge for pending prompts, #4121)
+
+### Added
+
+- **Desktop/PWA wrappers can now detect approval/clarify attention from the document title without stealing chat-title ownership (#4121).** An active chat tab prepends a `● ` marker only while the current session has a pending approval or clarification prompt; the badge clears on prompt dismissal or session switch. It composes on top of the #4086 title-owner model — `syncTopbar()` still owns the underlying `"<session> — <assistant>"` format and the badge is layered in front of it. (#4121)
+
 ## [v0.51.393] — 2026-06-13 — Release NF (run /yolo immediately while the agent is busy)
 
 ### Fixed
