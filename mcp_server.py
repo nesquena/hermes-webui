@@ -548,12 +548,45 @@ async def list_tools() -> list[Tool]:
     return TOOLS
 
 
+def _require_auth() -> str:
+    """Require HERMES_WEBUI_PASSWORD to be set. Returns password if set.
+
+    Raises RuntimeError if password is not configured.
+    """
+    pw = _api_password()
+    if not pw:
+        raise RuntimeError(
+            "HERMES_WEBUI_PASSWORD must be set for MCP write operations. "
+            "Read-only tools (list_projects, list_sessions) work without authentication."
+        )
+    return pw
+
+
+# Tools that require authentication (write operations)
+_AUTH_REQUIRED_TOOLS = {
+    "create_project",
+    "rename_project",
+    "delete_project",
+    "rename_session",
+    "move_session",
+}
+
+
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     handler = HANDLERS.get(name)
     if not handler:
         return [TextContent(type="text", text=json.dumps(
             {"error": f"Unknown tool: {name}"}, ensure_ascii=False))]
+
+    # Require authentication for write operations
+    if name in _AUTH_REQUIRED_TOOLS:
+        try:
+            _require_auth()
+        except RuntimeError as e:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": str(e)}, ensure_ascii=False))]
+
     return await handler(arguments)
 
 
