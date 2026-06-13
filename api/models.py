@@ -707,6 +707,14 @@ class Session:
             except (TypeError, ValueError):
                 parsed_message_count = None
         self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
+        raw_tool_call_count = kwargs.get('tool_call_count')
+        parsed_tool_call_count = None
+        if raw_tool_call_count is not None:
+            try:
+                parsed_tool_call_count = int(raw_tool_call_count)
+            except (TypeError, ValueError):
+                parsed_tool_call_count = None
+        self._metadata_tool_call_count = parsed_tool_call_count if parsed_tool_call_count is not None and parsed_tool_call_count >= 0 else None
 
     @property
     def path(self):
@@ -758,6 +766,7 @@ class Session:
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['message_count'] = len(self.messages or [])
+        meta['tool_call_count'] = len(self.tool_calls or [])
         meta['messages'] = self.messages
         meta['tool_calls'] = self.tool_calls
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end
@@ -896,6 +905,7 @@ class Session:
             parsed['tool_calls'] = []
             session = cls(**parsed)
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
+            sidecar_tool_call_count = _parse_nonnegative_int(parsed.get('tool_call_count'))
             index_message_count = None
             if sidecar_message_count is None:
                 if index_message_counts is not None:
@@ -913,6 +923,7 @@ class Session:
                 if count is not None
             ]
             session._metadata_message_count = max(known_counts) if known_counts else None
+            session._metadata_tool_call_count = sidecar_tool_call_count
             # Mark this session as a metadata-only stub. save() refuses to write
             # such a session because doing so would atomically replace the
             # on-disk JSON with messages=[], wiping the conversation. Any

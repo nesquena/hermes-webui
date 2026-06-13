@@ -4328,6 +4328,39 @@ def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict
     }
 
 
+def _state_db_tail_fastpath_eligible(session, state_db_messages: list, *, msg_limit, msg_before) -> bool:
+    """Return True when /api/session can avoid full sidecar hydration.
+
+    A normal initial tail-window load only needs compact session metadata plus
+    the append-only state.db transcript. Large WebUI sidecars can be tens of MB;
+    full ``get_session()`` hydrates those before the route immediately slices the
+    tail. Keep the fast path deliberately narrow so legacy sidecar-only,
+    messaging, compression lineage, truncation, and active/pending recovery paths
+    continue through the existing full-load reconciliation.
+    """
+    if msg_limit is None or msg_before is not None:
+        return False
+    if not state_db_messages:
+        return False
+    if getattr(session, "truncation_watermark", None) is not None:
+        return False
+    if getattr(session, "pending_user_message", None) or getattr(session, "active_stream_id", None):
+        return False
+    try:
+        sidecar_count = int(getattr(session, "_metadata_message_count", 0) or 0)
+    except (TypeError, ValueError):
+        sidecar_count = 0
+    try:
+        tool_call_count = int(getattr(session, "_metadata_tool_call_count", -1))
+    except (TypeError, ValueError):
+        tool_call_count = -1
+    if tool_call_count != 0:
+        return False
+    if str(getattr(session, "parent_session_id", "") or "").strip():
+        return False
+    return len(state_db_messages) >= sidecar_count
+
+
 def _session_requires_cli_metadata_lookup(session) -> bool:
     """Return True when a sidecar/session row still needs CLI metadata.
 
@@ -6739,7 +6772,7 @@ def handle_get(handler, parsed) -> bool:
         expand_renderable = str(_expand_renderable).strip() in ("1", "true", "True")
         try:
             _t1 = _time.monotonic()
-            s = get_session(sid, metadata_only=(not load_messages))
+            s = get_session(sid, metadata_only=True)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
@@ -6747,11 +6780,39 @@ def handle_get(handler, parsed) -> bool:
             cli_messages = []
             state_db_messages = []
             metadata_summary = None
+            using_state_db_tail_fastpath = False
+            state_db_tail_total_count = None
             _session_profile = getattr(s, 'profile', None) or None
             if is_messaging_session:
+                if load_messages:
+                    # Messaging sessions need the existing aggregate/sidecar merge.
+                    s = get_session(sid, metadata_only=False)
+                    original_stream_id = getattr(s, "active_stream_id", None)
+                    _clear_stale_stream_state(s)
+                    _session_profile = getattr(s, 'profile', None) or None
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
                 state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
+                if _state_db_tail_fastpath_eligible(
+                    s,
+                    state_db_messages,
+                    msg_limit=msg_limit,
+                    msg_before=msg_before,
+                ):
+                    using_state_db_tail_fastpath = True
+                    try:
+                        _metadata_count = int(getattr(s, "_metadata_message_count", 0) or 0)
+                    except (TypeError, ValueError):
+                        _metadata_count = 0
+                    state_db_tail_total_count = max(_metadata_count, len(state_db_messages))
+                else:
+                    _previous_profile = _session_profile
+                    s = get_session(sid, metadata_only=False)
+                    original_stream_id = getattr(s, "active_stream_id", None)
+                    _clear_stale_stream_state(s)
+                    _session_profile = getattr(s, 'profile', None) or None
+                    if _session_profile != _previous_profile:
+                        state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
                 # reconciliation contract as full loads so stale/replayed
@@ -6781,6 +6842,8 @@ def handle_get(handler, parsed) -> bool:
                     # different slices of the same stitched conversation, merge
                     # them chronologically and dedupe exact repeats.
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
+                elif using_state_db_tail_fastpath:
+                    _all_msgs = state_db_messages
                 elif msg_limit is not None:
                     _all_msgs = _limited_webui_messages_for_display(s, state_db_messages)
                 else:
@@ -6826,6 +6889,13 @@ def handle_get(handler, parsed) -> bool:
                     msg_before=msg_before,
                     expand_renderable=expand_renderable,
                 )
+                if using_state_db_tail_fastpath and state_db_tail_total_count is not None:
+                    _messages_offset += max(0, int(state_db_tail_total_count) - len(_all_msgs))
+                if msg_before is not None:
+                    _before_idx = max(0, min(int(msg_before), len(_all_msgs)))
+                    _slice = _all_msgs[:_before_idx]
+                else:
+                    _slice = _all_msgs
                 if msg_limit is not None:
                     _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
             else:
@@ -6879,7 +6949,11 @@ def handle_get(handler, parsed) -> bool:
                     _messages_offset,
                     len(_truncated_msgs),
                 )
-            _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
+            _merged_message_count = (
+                int(state_db_tail_total_count)
+                if state_db_tail_total_count is not None
+                else (_summary_message_count if _summary_message_count is not None else len(_all_msgs))
+            )
             _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
             if _summary_last_message_at is None and _all_msgs:
                 try:
@@ -6963,6 +7037,8 @@ def handle_get(handler, parsed) -> bool:
             # Signal to the frontend that older messages were omitted. The
             # message window cursor already reflects visible-row pagination and
             # avoids false positives when raw hidden tool rows exceed msg_limit.
+            # The state-db tail fastpath carries a global count, so preserve that
+            # offset even though only the tail rows were loaded.
             _truncated = load_messages and msg_limit is not None and _messages_offset > 0
             raw["_messages_truncated"] = _truncated
             raw["_messages_offset"] = _messages_offset

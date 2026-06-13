@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Long no-parent WebUI sessions can open their initial tail from a complete `state.db` transcript without hydrating the full sidecar.** `/api/session?msg_limit=…` now takes the fast path only when metadata proves there are no legacy session-level tool calls, there is no compression-lineage parent, and `state.db` covers the sidecar message count; lineage children and legacy tool-call sidecars stay on the full-hydration path so parent history, global counts, and tool cards remain correct.
+
 ## [v0.51.434] — 2026-06-15 — Release OU (reject symlinked skill files on save)
 
 ### Fixed
