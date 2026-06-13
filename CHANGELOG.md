@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Desktop wrappers can now detect approval/clarify attention from the document title without stealing chat-title ownership (#4121).** Active chat tabs prepend a `● ` marker only while the current session has a pending approval or clarification prompt, and the badge clears cleanly on prompt dismissal or session switch while `syncTopbar()` keeps owning the underlying `"<session> — <assistant>"` title format. (#4121)
+
 ## [v0.51.392] — 2026-06-13 — Release NE (align WebUI reasoning efforts to the agent's accepted set, drop "max")
 
 ### Fixed

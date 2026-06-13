@@ -4144,8 +4144,10 @@ function _rememberApprovalPending(pending, pendingCount) {
 }
 
 function _clearApprovalPendingForSession(sid) {
-  if (sid) _approvalPendingBySession.delete(sid);
-  if (typeof syncTopbar === 'function') syncTopbar();
+  if (sid) {
+    _approvalPendingBySession.delete(sid);
+    if (typeof syncTopbar === 'function') syncTopbar();
+  }
 }
 
 function _hideApprovalCardIfOwner(sid, force=false) {
@@ -4600,8 +4602,10 @@ function _rememberClarifyPending(pending) {
 }
 
 function _clearClarifyPendingForSession(sid) {
-  if (sid) _clarifyPendingBySession.delete(sid);
-  if (typeof syncTopbar === 'function') syncTopbar();
+  if (sid) {
+    _clarifyPendingBySession.delete(sid);
+    if (typeof syncTopbar === 'function') syncTopbar();
+  }
 }
 
 function _hideClarifyCardIfOwner(sid, force=false, reason="dismissed") {
@@ -4623,8 +4627,14 @@ function showClarifyForSession(sid, pending) {
 }
 
 function _renderPendingPromptsForActiveSession() {
+  const sid = _promptActiveSessionId();
   _renderPendingApprovalForActiveSession();
   _renderPendingClarifyForActiveSession();
+  if (
+    sid &&
+    typeof activeSessionHasPendingPromptAttention === 'function' &&
+    activeSessionHasPendingPromptAttention()
+  ) return;
   if (typeof syncTopbar === 'function') syncTopbar();
 }
 

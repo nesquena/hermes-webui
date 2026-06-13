@@ -111,5 +111,8 @@ def test_prompt_rerender_hides_previous_session_cards_without_clearing_cache():
     assert "_clarifySessionId && _clarifySessionId !== sid" in clarify_body
     assert "hideClarifyCard(true, 'session')" in clarify_body
     assert "syncTopbar()" in rerender_body
+    assert "activeSessionHasPendingPromptAttention()" in rerender_body
+    assert "if (sid) {" in clear_approval_body
     assert "syncTopbar()" in clear_approval_body
+    assert "if (sid) {" in clear_clarify_body
     assert "syncTopbar()" in clear_clarify_body
