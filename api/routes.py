@@ -7193,6 +7193,9 @@ def handle_get(handler, parsed) -> bool:
                     handler.wfile.write(html_content)
                     return True
 
+    if parsed.path == "/api/tts/voices":
+        return _handle_vv_voices(handler, parsed)
+
     return False  # 404
 
 
@@ -10264,6 +10267,122 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
 
 
 
+def _handle_vv_voices(handler, parsed=None):
+    """GET /api/tts/voices?engine=voicevox — return VOICEVOX speakers."""
+    import json
+    from urllib.parse import parse_qs
+
+    engine = "voicevox"
+    if parsed:
+        qs = parse_qs(parsed.query or "")
+        engine = qs.get("engine", ["voicevox"])[0]
+
+    if engine != "voicevox":
+        from api.helpers import bad as _bad
+        return _bad(handler, f"Unknown TTS engine: {engine}", 400)
+
+    try:
+        import requests
+        resp = requests.get("http://127.0.0.1:50021/speakers", timeout=5)
+        resp.raise_for_status()
+        speakers = resp.json()
+        voices = []
+        for s in speakers:
+            for style in s.get("styles", []):
+                voices.append({
+                    "value": str(style["id"]),
+                    "label": f"{s['name']} ({style.get('name', '?')})",
+                })
+        body = json.dumps(
+            {"voices": voices, "engine": engine, "provider": "voicevox"},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("Cache-Control", "max-age=3600")
+        handler.end_headers()
+        handler.wfile.write(body)
+        return True
+    except Exception:
+        logger.exception("Failed to fetch VOICEVOX speakers")
+        from api.helpers import bad as _bad
+        return _bad(handler, "VOICEVOX engine not available", 503)
+
+
+def _handle_voicevox_tts(handler, text, voice):
+    """Synthesize speech via VOICEVOX engine using the command provider."""
+    import subprocess, tempfile, shlex, os
+    from api.helpers import bad as _bad
+
+    voicevox_cmd = (
+        "python3 /opt/hermes/scripts/voicevox_tts_provider.py "
+        "--input {input_path} --output {output_path}"
+    )
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as tf:
+            tf.write(text)
+            input_path = tf.name
+
+        wav_path = input_path.replace(".txt", ".wav")
+        mp3_path = input_path.replace(".txt", ".mp3")
+
+        cmd_str = voicevox_cmd.replace("{input_path}", shlex.quote(input_path))
+        cmd_str = cmd_str.replace("{output_path}", shlex.quote(wav_path))
+
+        env = os.environ.copy()
+        if voice and voice.isdigit():
+            env["VOICEVOX_STYLE_ID"] = voice
+
+        result = subprocess.run(
+            cmd_str, shell=True, capture_output=True, text=True,
+            timeout=120, env=env,
+        )
+
+        if result.returncode != 0 or not os.path.exists(wav_path):
+            try: os.unlink(input_path)
+            except OSError: pass
+            return _bad(handler, "VOICEVOX synthesis failed", 500)
+
+        # Convert WAV to MP3
+        conv = subprocess.run(
+            ["ffmpeg", "-y", "-i", wav_path, "-codec:a",
+             "libmp3lame", "-b:a", "128k", mp3_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        try: os.unlink(wav_path)
+        except OSError: pass
+
+        if conv.returncode != 0 or not os.path.exists(mp3_path):
+            try: os.unlink(input_path)
+            except OSError: pass
+            return _bad(handler, "audio conversion failed", 500)
+
+        with open(mp3_path, "rb") as f:
+            audio_buf = f.read()
+
+        try: os.unlink(input_path)
+        except OSError: pass
+        try: os.unlink(mp3_path)
+        except OSError: pass
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/mpeg")
+        handler.send_header("Content-Length", str(len(audio_buf)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        try:
+            handler.wfile.write(audio_buf)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return True
+    except Exception:
+        logger.exception("VOICEVOX TTS failed")
+        return _bad(handler, "VOICEVOX TTS failed", 500)
+
+
 def _normalize_tts_prosody(value, *, unit: str) -> str | None:
     if not value:
         return ""
@@ -10294,7 +10413,7 @@ def _handle_tts(handler, parsed):
     async API at that time.
     """
     text = ""
-    voice = "zh-CN-XiaoxiaoNeural"
+    voice = "ja-JP-NanamiNeural"
     rate_str = ""
     pitch_str = ""
 
@@ -10306,6 +10425,7 @@ def _handle_tts(handler, parsed):
         data = read_body(handler)
         text = (data.get("text") or "").strip()
         voice = data.get("voice") or voice
+        engine = str(data.get("engine") or "").strip().lower()
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
     except Exception:
@@ -10325,6 +10445,10 @@ def _handle_tts(handler, parsed):
     if len(text) > 5000:
         from api.helpers import bad as _bad
         return _bad(handler, "text too long (max 5000 characters)", 400)
+
+    # ── VOICEVOX engine ─────────────────────────────────────────────────
+    if engine == "voicevox":
+        return _handle_voicevox_tts(handler, text, voice)
 
     from api.auth import is_auth_enabled, parse_cookie, verify_session
     cv = None
@@ -10381,6 +10505,7 @@ def _handle_tts(handler, parsed):
         return _bad(handler, "rate limit exceeded — please wait", 429)
 
     allowed = {
+        "ja-JP-NanamiNeural", "ja-JP-KeitaNeural",
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
         "en-US-AriaNeural", "en-US-GuyNeural",

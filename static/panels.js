@@ -6774,7 +6774,20 @@ async function loadSettingsPanel(){
       const saved=localStorage.getItem('hermes-tts-engine')||'browser';
       ttsEngineSel.value=saved;
       ttsEngineSel.onchange=function(){
+        var prevEngine=localStorage.getItem('hermes-tts-engine')||'browser';
         localStorage.setItem('hermes-tts-engine',this.value);
+        // Reset voice when switching between engines to prevent cross-engine pollution
+        if(prevEngine!==this.value){
+          if(this.value==='voicevox'){
+            // Switching TO voicevox: clear non-numeric voicevox voices from shared key
+            var v=localStorage.getItem('hermes-tts-voice')||'';
+            if(!/^\d+$/.test(v)) localStorage.removeItem('hermes-tts-voice');
+          } else if(prevEngine==='voicevox'){
+            // Switching FROM voicevox: clear numeric voicevox IDs from shared key
+            var v=localStorage.getItem('hermes-tts-voice')||'';
+            if(/^\d+$/.test(v)) localStorage.removeItem('hermes-tts-voice');
+          }
+        }
         window._populateTtsVoices();
       };
     }
@@ -6786,6 +6799,8 @@ async function loadSettingsPanel(){
       const current=localStorage.getItem('hermes-tts-voice')||'';
       if(engine==='edge'){
         const edgeVoices=[
+          {value:'ja-JP-NanamiNeural',label:'Nanami (日本語, 女性)'},
+          {value:'ja-JP-KeitaNeural',label:'Keita (日本語, 男性)'},
           {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
           {value:'zh-CN-XiaoyiNeural',label:'Xiaoyi (Chinese, Female)'},
           {value:'zh-CN-YunxiNeural',label:'Yunxi (Chinese, Male)'},
@@ -6794,13 +6809,30 @@ async function loadSettingsPanel(){
           {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
           {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
         ];
-        ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
+        ttsVoiceSel.innerHTML='<option value="">Default (Nanami)</option>';
         edgeVoices.forEach(v=>{
           const opt=document.createElement('option');
           opt.value=v.value;opt.textContent=v.label;
           if(v.value===current) opt.selected=true;
           ttsVoiceSel.appendChild(opt);
         });
+      } else if(engine==='voicevox'){
+        var vvCurrent=localStorage.getItem('hermes-tts-voice-voicevox')||'';
+        fetch(new URL('api/tts/voices?engine=voicevox', document.baseURI || location.href).href)
+          .then(function(r){ return r.ok ? r.json() : Promise.reject(r); })
+          .then(function(data){
+            var voices=data.voices||[];
+            ttsVoiceSel.innerHTML='<option value="">Default (つむぎ)</option>';
+            voices.forEach(function(v){
+              var opt=document.createElement('option');
+              opt.value=v.value;opt.textContent=v.label;
+              if(v.value===vvCurrent) opt.selected=true;
+              ttsVoiceSel.appendChild(opt);
+            });
+          })
+          .catch(function(){
+            ttsVoiceSel.innerHTML='<option value="">Default (つむぎ)</option>';
+          });
       } else {
         if(!('speechSynthesis' in window)){
           ttsVoiceSel.innerHTML='<option value="">Speech synthesis not available</option>';
@@ -6822,7 +6854,11 @@ async function loadSettingsPanel(){
         const engine=localStorage.getItem('hermes-tts-engine')||'browser';
         if(engine==='browser') window._populateTtsVoices();
       },{once:false});
-      ttsVoiceSel.onchange=function(){localStorage.setItem('hermes-tts-voice',this.value);};
+      ttsVoiceSel.onchange=function(){
+        var eng=localStorage.getItem('hermes-tts-engine')||'browser';
+        if(eng==='voicevox') localStorage.setItem('hermes-tts-voice-voicevox',this.value);
+        else localStorage.setItem('hermes-tts-voice',this.value);
+      };
     }
     // TTS rate/pitch sliders
     const ttsRateSlider=$('settingsTtsRate');

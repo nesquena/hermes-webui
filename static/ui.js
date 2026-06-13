@@ -4934,7 +4934,7 @@ function _buildBrowserUtterance(text, btn){
   return utter;
 }
 
-function _playEdgeTtsChunked(text, btn){
+function _playEdgeTtsChunked(text, btn, engine){
   const chunks=_splitForTTS(text);
   const _playOne=function(idx){
     if(idx>=chunks.length){
@@ -4943,7 +4943,14 @@ function _playEdgeTtsChunked(text, btn){
       return;
     }
     const chunk=chunks[idx];
-    const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
+    var voice;
+    if(engine==='voicevox'){
+      voice=localStorage.getItem('hermes-tts-voice-voicevox')||'8';
+    } else {
+      voice=localStorage.getItem('hermes-tts-voice')||'ja-JP-NanamiNeural';
+      // If voice is a numeric ID left over from voicevox, reset to default
+      if(/^\d+$/.test(voice)) voice='ja-JP-NanamiNeural';
+    }
     const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
     const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
     let rate='', pitch='';
@@ -4952,7 +4959,7 @@ function _playEdgeTtsChunked(text, btn){
     fetch(new URL('api/tts', document.baseURI || location.href).href, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch})
+      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch, engine:engine||'edge'})
     })
     .then(function(r){
       if(!r.ok){
@@ -4966,22 +4973,27 @@ function _playEdgeTtsChunked(text, btn){
       if(!_ttsSpeaking) return;
       const url=URL.createObjectURL(blob);
       const audio=new Audio(url);
+      audio.style.display='none';
+      document.body.appendChild(audio);
       _playingEdgeAudio=audio;
       audio.onended=function(){
         URL.revokeObjectURL(url);
         _playingEdgeAudio=null;
+        try{document.body.removeChild(audio);}catch(_){}
         if(_ttsSpeaking) _playOne(idx+1);
       };
       audio.onerror=function(){
         URL.revokeObjectURL(url);
         _playingEdgeAudio=null;
         _ttsSpeaking=false;
+        try{document.body.removeChild(audio);}catch(_){}
         if(btn) btn.dataset.speaking='0';
       };
       audio.play().catch(function(e){
         URL.revokeObjectURL(url);
         _playingEdgeAudio=null;
         _ttsSpeaking=false;
+        try{document.body.removeChild(audio);}catch(_){}
         if(btn) btn.dataset.speaking='0';
         if(typeof showToast==='function') showToast('Edge TTS error: '+(e&&e.message||e));
       });
@@ -5011,7 +5023,15 @@ function speakMessage(btn){
 
   const engine=localStorage.getItem('hermes-tts-engine')||'browser';
   if(engine==='edge'){
+    _ttsSpeaking=true;
+    if(btn) btn.dataset.speaking='1';
     _playEdgeTtsChunked(clean, btn);
+    return;
+  }
+  if(engine==='voicevox'){
+    _ttsSpeaking=true;
+    if(btn) btn.dataset.speaking='1';
+    _playEdgeTtsChunked(clean, btn, 'voicevox');
     return;
   }
 
@@ -5063,7 +5083,13 @@ function autoReadLastAssistant(){
   const clean=_stripForTTS(text);
   if(!clean) return;
   if(engine==='edge'){
+    _ttsSpeaking=true;
     _playEdgeTtsChunked(clean, null);
+    return;
+  }
+  if(engine==='voicevox'){
+    _ttsSpeaking=true;
+    _playEdgeTtsChunked(clean, null, 'voicevox');
     return;
   }
   // Use chunked playback for browser TTS

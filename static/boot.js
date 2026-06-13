@@ -1035,7 +1035,8 @@ window._micPendingSend=window._micPendingSend||false;
     if(!clean){ _startListening(); return; }
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
     if(engine==="edge"){
-      const voice=localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural";
+      var voice=localStorage.getItem("hermes-tts-voice")||"ja-JP-NanamiNeural";
+      if(/^\d+$/.test(voice)) voice="ja-JP-NanamiNeural";
       const savedRate=parseFloat(localStorage.getItem("hermes-tts-rate"));
       const savedPitch=parseFloat(localStorage.getItem("hermes-tts-pitch"));
       let rate='', pitch='';
@@ -1045,7 +1046,7 @@ window._micPendingSend=window._micPendingSend||false;
       fetch(new URL('api/tts', document.baseURI || location.href).href, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, voice, rate, pitch})
+        body: JSON.stringify({text: clean, voice, rate, pitch, engine: 'edge'})
       })
       .then(r => {
         if(!r.ok) throw new Error('TTS request failed: ' + r.status);
@@ -1054,6 +1055,8 @@ window._micPendingSend=window._micPendingSend||false;
       .then(blob => {
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
+        audio.style.display='none';
+        document.body.appendChild(audio);
         // Register with the shared handle (declared in ui.js, same global scope;
         // both scripts are fully evaluated before any voice interaction) so
         // stopTTS() — called from _deactivate() — can actually pause hands-free
@@ -1063,17 +1066,66 @@ window._micPendingSend=window._micPendingSend||false;
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
+          try{document.body.removeChild(audio);}catch(_){}
           if(_voiceModeActive) setTimeout(()=>_startListening(),500);
         };
         audio.onerror = () => {
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
+          try{document.body.removeChild(audio);}catch(_){}
           if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
         };
         audio.play().catch(e => {
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          try{document.body.removeChild(audio);}catch(_){}
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        });
+      })
+      .catch(() => {
+        _ttsSpeaking=false;
+        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      });
+      return;
+    }
+    if(engine==="voicevox"){
+      const voice=localStorage.getItem("hermes-tts-voice-voicevox")||"8";
+      _ttsSpeaking=true;
+      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: clean, voice, engine: 'voicevox'})
+      })
+      .then(r => {
+        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
+        return r.blob();
+      })
+      .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.style.display='none';
+        document.body.appendChild(audio);
+        _playingEdgeAudio=audio;
+        audio.onended = () => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          try{document.body.removeChild(audio);}catch(_){}
+          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+        };
+        audio.onerror = () => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          try{document.body.removeChild(audio);}catch(_){}
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        };
+        audio.play().catch(e => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          try{document.body.removeChild(audio);}catch(_){}
           if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
         });
       })
