@@ -47,11 +47,36 @@ def test_service_worker_handles_notification_clicks_without_hijacking_other_sess
 
 def test_settings_expose_permission_and_test_controls():
     assert "notificationPermissionStatus" in INDEX_HTML
+    assert 'id="notificationPermissionButtonWrap"' in INDEX_HTML
+    assert 'id="notificationPermissionButton"' in INDEX_HTML
     assert "requestNotificationPermission()" in INDEX_HTML
     assert "sendBrowserNotification('Hermes test'" in INDEX_HTML
     assert "{force:true}" in INDEX_HTML
     assert "function updateNotificationPermissionStatus" in PANELS_JS
+    assert "const btn=$('notificationPermissionButton');" in PANELS_JS
+    assert "const btnWrap=$('notificationPermissionButtonWrap');" in PANELS_JS
+    assert "btn.disabled=granted;" in PANELS_JS
+    assert "btn.title=granted?'':label;" in PANELS_JS
+    assert "if(btnWrap) btnWrap.title=label;" in PANELS_JS
     assert "notifications_permission_status" in PANELS_JS
+    assert "btn.setAttribute('aria-label', label);" in PANELS_JS
+    assert "btn.setAttribute('aria-disabled', granted?'true':'false');" in PANELS_JS
+    assert "btn.setAttribute('aria-disabled','true');" in PANELS_JS
+
+
+def test_granted_permission_branch_is_not_silent():
+    fn = MESSAGES_JS[
+        MESSAGES_JS.index("function requestNotificationPermission(){") :
+        MESSAGES_JS.index("function sendBrowserNotification(", MESSAGES_JS.index("function requestNotificationPermission(){"))
+    ]
+    assert "if(Notification.permission==='granted'){" in fn
+    granted_branch = fn[
+        fn.index("if(Notification.permission==='granted'){") :
+        fn.index("if(Notification.permission==='denied'){")
+    ]
+    assert "updateNotificationPermissionStatus()" in granted_branch
+    assert "showToast(t('notifications_enabled_toast'),3000)" in granted_branch
+    assert "return Promise.resolve('granted');" in granted_branch
 
 
 def test_notification_i18n_and_changelog_entries_exist():
@@ -66,3 +91,8 @@ def test_notification_i18n_and_changelog_entries_exist():
         assert key in I18N_JS
     assert "PWA notifications now use the service worker" in CHANGELOG
     assert "#3196" in CHANGELOG
+    entry = next(
+        line for line in CHANGELOG.splitlines()
+        if "Notification permission controls now reflect the real browser state" in line
+    )
+    assert entry.count("#4118") == 1
