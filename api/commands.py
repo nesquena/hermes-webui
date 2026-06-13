@@ -62,7 +62,7 @@ def _bundle_profile_context(purpose: str):
 
     try:
         from api.profiles import profile_env_for_active_request
-    except Exception:
+    except ImportError:
         return nullcontext()
     return profile_env_for_active_request(purpose, logger_override=logger)
 
