@@ -24,10 +24,12 @@ _NEVER_EXPOSE: frozenset[str] = frozenset({
 # Narrow agent-side execution allowlist for /api/commands/exec.
 _AGENT_COMMAND_ALIASES = {
     'reload_mcp': 'reload-mcp',
+    'reload_skills': 'reload-skills',
     'codex_runtime': 'codex-runtime',
 }
-_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'codex-runtime'})
+_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime'})
 _RELOAD_MCP_LOCK = threading.Lock()
+_RELOAD_SKILLS_LOCK = threading.Lock()
 _CODEX_RUNTIME_LOCK = threading.Lock()
 
 
@@ -120,6 +122,8 @@ def execute_agent_command(command: str) -> str:
 
     if canonical == 'reload-mcp':
         return _run_reload_mcp_command()
+    if canonical == 'reload-skills':
+        return _run_reload_skills_command()
     if canonical == 'codex-runtime':
         return _run_codex_runtime_command(arg_string)
 
@@ -201,6 +205,54 @@ def _run_reload_mcp_command() -> str:
     if not reconnected and not added and not removed:
         lines.append("Tooling state was already current")
 
+    return "\n".join(lines)
+
+
+def _run_reload_skills_command() -> str:
+    """Re-scan the installed skills directory and summarize the diff."""
+    with _RELOAD_SKILLS_LOCK:
+        try:
+            from agent.skill_commands import reload_skills
+        except Exception as exc:
+            logger.warning("Failed to import skills runtime for /reload-skills", exc_info=True)
+            raise RuntimeError("Skills runtime unavailable") from exc
+
+        try:
+            result = reload_skills() or {}
+        except Exception as exc:
+            logger.warning("Failed to reload skills", exc_info=True)
+            raise RuntimeError("Failed to reload skills") from exc
+
+    added = result.get("added", [])
+    removed = result.get("removed", [])
+    unchanged = result.get("unchanged", [])
+    total = int(result.get("total", 0) or 0)
+
+    def _names(items: Any) -> list[str]:
+        out: list[str] = []
+        for item in items or []:
+            if isinstance(item, dict):
+                name = str(item.get("name", "")).strip()
+            else:
+                name = str(item).strip()
+            if name:
+                out.append(name)
+        return out
+
+    added_names = _names(added)
+    removed_names = _names(removed)
+
+    lines = [
+        "Reloaded skills from disk.",
+        f"Added: {len(added_names)}",
+        f"Removed: {len(removed_names)}",
+        f"Unchanged: {len(list(unchanged or []))}",
+        f"Total skills: {total}",
+    ]
+    if added_names:
+        lines.append(f"Added skills: {', '.join(sorted(added_names))}")
+    if removed_names:
+        lines.append(f"Removed skills: {', '.join(sorted(removed_names))}")
     return "\n".join(lines)
 
 

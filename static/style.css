@@ -2834,8 +2834,9 @@ body.resizing .sidebar{transition:none!important;}
   margin:4px 0 14px;
 }
 .tool-worklog-summary{
-  width:auto;
   display:inline-flex;
+  max-width:100%;
+  min-width:0;
   align-items:center;
   gap:9px;
   padding:5px 8px;
@@ -2856,6 +2857,8 @@ body.resizing .sidebar{transition:none!important;}
   font-weight:500;
   line-height:var(--message-body-line-height);
   letter-spacing:0;
+  flex:1 1 auto;
+  min-width:0;
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
@@ -3135,6 +3138,383 @@ body.resizing .sidebar{transition:none!important;}
 .tool-arg-key{color:var(--blue);font-family:'SF Mono',ui-monospace,monospace;font-size:var(--message-code-font-size);display:block;margin-bottom:2px;}
 .tool-arg-val{color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;font-size:var(--message-code-font-size);white-space:pre-wrap;word-break:break-word;display:block;overflow-x:auto;}
 .tool-card-result pre{font-size:var(--message-code-font-size);color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;margin:0;line-height:1.55;}
+
+/* ── Transparent Stream event rows ── */
+/* Inline rhythm: transparent stream events are transcript metadata inside an
+   assistant turn, not first-class cards. Keep them inspectable but visually
+   below assistant prose unless hovered, focused, or expanded. */
+.transparent-event-controls{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  margin:0 0 2px var(--msg-rail);
+  max-width:var(--msg-max);
+  color:var(--muted);
+  font-size:11px;
+  line-height:1.3;
+}
+.transparent-event-controls-label{font-weight:600;color:var(--muted);}
+.transparent-event-action,
+.transparent-event-control{
+  cursor:pointer;
+  color:var(--muted);
+  opacity:.78;
+  text-decoration:underline;
+  text-decoration-color:transparent;
+  text-underline-offset:3px;
+}
+.transparent-event-action:hover,
+.transparent-event-control:hover{color:var(--text);opacity:1;text-decoration-color:currentColor;}
+.transparent-event-row{
+  margin:0 0 1px var(--msg-rail);
+  max-width:var(--msg-max);
+  width:calc(100% - var(--msg-rail));
+  border:1px solid transparent;
+  border-left:1px solid transparent;
+  border-radius:6px;
+  background:transparent;
+  overflow:hidden;
+  box-shadow:none;
+  transition:background .18s ease,border-color .18s ease,opacity .22s ease;
+}
+/* Only animate entrance for rows in the LIVE turn — putting the animation on the
+   base row class replayed the whole transcript's shimmer on every renderMessages
+   rebuild. (Trifecta finding V9.) */
+#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter .18s ease-out both;}
+.transparent-event-row[data-event-type="thinking"]{
+  background:transparent;
+  border-color:transparent;
+  border-left-color:transparent;
+}
+.transparent-event-row[data-expanded="1"]{
+  border-color:var(--border-subtle);
+  background:color-mix(in srgb,var(--surface-subtle) 62%,transparent);
+  box-shadow:none;
+}
+.transparent-event-row:hover,
+.transparent-event-row:focus-within{
+  border-color:var(--border-subtle);
+  background:color-mix(in srgb,var(--surface-subtle) 48%,transparent);
+}
+/* Transparent Stream: both tool AND thinking inner cards must reset to a flat,
+   transparent row. The thinking-card previously kept its base accent-bg/border/
+   radius/msg-rail chrome (it was the heaviest object in the stream — Frank's
+   complaint, trifecta V1). The scoped !important also beats the per-skin
+   `:root[data-skin] .tool-card{...!important}` rules (graphite/sienna/catppuccin/
+   hepburn/neon/verdigris) that otherwise re-card every row (trifecta V3). */
+.transparent-event-row .tool-card,
+.transparent-event-row .tool-card:hover,
+.transparent-event-row .tool-card-running,
+.transparent-event-row .thinking-card,
+.transparent-event-row .thinking-card:hover,
+:root[data-skin] .transparent-event-row .tool-card,
+:root[data-skin] .transparent-event-row .tool-card:hover,
+:root[data-skin] .transparent-event-row .tool-card-running,
+:root[data-skin] .transparent-event-row .thinking-card,
+:root[data-skin] .transparent-event-row .thinking-card:hover{
+  border:0!important;
+  border-left:0!important;
+  border-radius:0!important;
+  background:transparent!important;
+  box-shadow:none!important;
+  margin:0!important;
+  max-width:none!important;
+  overflow:visible;
+}
+.transparent-event-row .tool-card-header,
+.transparent-event-row .thinking-card-header{
+  display:flex;
+  flex-direction:row;
+  align-items:center;
+  gap:5px;
+  min-height:19px;
+  padding:1px 4px 1px 7px;
+  margin-left:0;
+  border-radius:0;
+  color:var(--muted);
+  transition:background .18s ease,color .18s ease;
+}
+.transparent-event-row .tool-card-header:hover,
+.transparent-event-row .thinking-card-header:hover{background:var(--hover-bg);color:var(--text);}
+.transparent-event-row .tool-card-icon,
+.transparent-event-row .thinking-card-icon{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:14px;height:14px;
+  flex-shrink:0;
+  opacity:.7;
+}
+.transparent-event-row .tool-card-icon{order:1;}
+.transparent-event-row .tool-card-icon svg,
+.transparent-event-row .thinking-card-icon svg{width:11px;height:11px;}
+.transparent-event-row .tool-card-name{
+  font-weight:600;
+  color:var(--muted);
+  opacity:.86;
+  font-size:11.5px;
+  order:2;
+  flex-shrink:0;
+  max-width:40%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.transparent-event-row .tool-card-title,
+.transparent-event-row .tool-card-preview{
+  display:inline;
+  min-width:0;
+  flex:1 1 auto;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:var(--muted);
+  opacity:.74;
+  font-size:11.5px;
+  order:3;
+}
+.transparent-event-row .thinking-card-label{
+  display:inline;
+  flex:0 0 auto;
+  color:var(--muted);
+  opacity:.88;
+  font-size:11.5px;
+  font-weight:600;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.transparent-event-thinking-preview{
+  display:inline;
+  flex:1 1 auto;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:var(--muted);
+  opacity:.6;
+  font-size:.85em;
+}
+.transparent-event-status{
+  flex-shrink:0;
+  order:4;
+  color:var(--muted);
+  opacity:.64;
+  font-size:10px;
+  font-weight:500;
+  letter-spacing:.02em;
+  padding:1px 5px;
+  border-radius:6px;
+  background:transparent;
+}
+/* Failed / running / interrupted must be legible — a failure in a long trace was
+   previously invisible (only a muted .64 badge), a regression vs the old card's
+   accent. (Trifecta finding V2.) */
+.transparent-event-status[data-status="failed"]{color:var(--error,#e5484d);opacity:1;font-weight:600;}
+.transparent-event-status[data-status="running"]{color:var(--accent-text);opacity:.95;font-weight:600;}
+.transparent-event-status[data-status="interrupted"]{color:var(--warning,var(--muted));opacity:.95;font-weight:600;}
+.transparent-event-row[data-event-status="Failed"]{
+  border-left-color:color-mix(in srgb,var(--error,#e5484d) 55%,transparent)!important;
+}
+.transparent-event-row[data-event-status="Failed"]:hover,
+.transparent-event-row[data-event-status="Failed"][data-expanded="1"]{
+  border-left-color:color-mix(in srgb,var(--error,#e5484d) 70%,transparent)!important;
+}
+.transparent-event-copy{
+  border:0;
+  background:transparent;
+  color:var(--muted);
+  opacity:.28;
+  padding:1px 2px;
+  cursor:pointer;
+  flex-shrink:0;
+  order:9;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:4px;
+  transition:opacity .18s ease,color .18s ease;
+}
+.transparent-event-copy:hover,
+.transparent-event-copy:focus-visible{opacity:1;color:var(--text);background:transparent;}
+.transparent-event-row .tool-card-toggle,
+.transparent-event-row .thinking-card-toggle{
+  order:10;
+  flex-shrink:0;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:14px;height:14px;
+  opacity:.34;
+  transition:opacity .18s ease,transform .22s ease;
+}
+.transparent-event-row:hover .transparent-event-copy,
+.transparent-event-row:focus-within .transparent-event-copy,
+.transparent-event-row:hover .tool-card-toggle,
+.transparent-event-row:focus-within .tool-card-toggle,
+.transparent-event-row:hover .thinking-card-toggle,
+.transparent-event-row:focus-within .thinking-card-toggle{opacity:.76;}
+.transparent-event-row .tool-card:hover .tool-card-toggle,
+.transparent-event-row .thinking-card:hover .thinking-card-toggle{opacity:1;}
+.transparent-event-row .tool-card.open .tool-card-toggle,
+.transparent-event-row .thinking-card.open .thinking-card-toggle{transform:rotate(90deg);opacity:.9;}
+.transparent-event-progress{
+  position:relative;
+  height:1px;
+  background:transparent;
+  border-radius:0 0 6px 6px;
+  overflow:hidden;
+  margin:0 -1px -1px -1px;
+}
+.transparent-event-progress::before{
+  content:"";
+  position:absolute;left:0;top:0;bottom:0;
+  width:0%;
+  background:color-mix(in srgb,var(--muted) 42%,transparent);
+  box-shadow:none;
+  opacity:0;
+  border-radius:inherit;
+  transition:width .35s cubic-bezier(.4,0,.2,1);
+}
+.transparent-event-progress[data-progress-running="1"]::before{opacity:.55;animation:transparent-progress-shimmer 1.6s ease-in-out infinite;}
+.transparent-event-progress[data-progress-percent]::before{width:var(--transparent-progress-percent,0%);}
+.transparent-event-progress::after{
+  content:none;
+}
+@keyframes transparent-progress-shimmer{
+  0%{left:0;right:100%;}
+  100%{left:100%;right:0;}
+}
+.transparent-event-row + .transparent-event-row::before{
+  content:none;
+}
+.transparent-detail-modes{
+  display:flex;
+  gap:10px;
+  padding:4px 8px 0;
+  color:var(--muted);
+  font-size:10.5px;
+}
+.transparent-detail-mode{cursor:pointer;opacity:.72;padding:2px 4px 3px;transition:opacity .18s ease,color .18s ease,box-shadow .18s ease;}
+.transparent-detail-mode.active{color:var(--text);opacity:1;font-weight:600;box-shadow:inset 0 -1px 0 var(--accent);}
+.transparent-event-row .tool-card-detail,
+.transparent-event-row .thinking-card-body{
+  display:block;
+  max-height:0;
+  opacity:0;
+  overflow:hidden;
+  padding:0;
+  margin:0;
+  border-top:1px solid transparent;
+  background:transparent;
+  transform:translateY(-1px);
+  transition:max-height .28s cubic-bezier(.4,0,.2,1),opacity .2s ease,transform .24s ease,border-top-color .2s ease,padding .22s ease;
+}
+.transparent-event-row .tool-card.open .tool-card-detail,
+.transparent-event-row .thinking-card.open .thinking-card-body{
+  max-height:520px;
+  opacity:1;
+  transform:translateY(0);
+  border-top-color:var(--border-subtle);
+  padding:1px 0 3px;
+  overflow:auto;
+}
+.transparent-event-row .thinking-card.open .thinking-card-body{
+  border-top-color:transparent;
+  padding:0 0 3px;
+}
+.transparent-event-row .tool-card-detail > *,
+.transparent-event-row .thinking-card-body > *{min-height:0;}
+.transparent-event-row .tool-card-args,
+.transparent-event-row .tool-card-result{padding:4px 7px 4px 9px;}
+.transparent-event-row .tool-card-detail[data-transparent-detail-mode="output"] .tool-card-args{display:none;}
+.transparent-event-row .tool-card-args{margin-bottom:0;}
+/* Compact inline args: key beside value (not stacked), no per-pair rules — the
+   stacked column layout made offset=735 consume two ruled lines and read like a
+   form. Restores the old .tool-card-args density. (Trifecta V4/V5.) */
+.transparent-event-row .tool-arg-pair{display:flex;flex-direction:row;align-items:baseline;gap:8px;padding:1px 0;border-bottom:0;}
+.transparent-event-row .tool-arg-key{flex:0 0 auto;min-width:54px;color:var(--muted);font-size:10px;font-family:var(--font-mono);letter-spacing:.01em;opacity:.85;}
+.transparent-event-row .tool-arg-val{flex:1 1 auto;min-width:0;font-family:var(--font-mono);font-size:var(--message-code-font-size);color:var(--text);line-height:1.5;white-space:pre-wrap;word-break:break-word;}
+/* Flatten the output box into a quiet left-rail instead of a second bordered
+   card, so args + output read as ONE expanded zone, not two disjoint cards.
+   max-height:none kills the nested scrollbar — the detail's own scroll owns it. */
+.transparent-event-row .tool-card-result pre{
+  background:transparent;
+  border:0;
+  border-left:2px solid var(--border-subtle);
+  border-radius:0;
+  padding:2px 0 2px 9px;
+  margin:0;
+  max-height:none;
+  color:var(--muted);
+  line-height:1.5;
+}
+.transparent-event-row .thinking-card-body pre{
+  background:transparent;
+  border:0;
+  border-radius:0;
+  margin-top:0;
+  padding:0 8px 6px 27px;
+  color:var(--muted);
+  line-height:1.5;
+}
+@media(max-width:600px){
+  .transparent-event-controls,
+  .transparent-event-row{margin-left:0;width:100%;max-width:none;}
+  /* Larger header tap targets on mobile (the 19px desktop header is a poor
+     touch target). (Trifecta finding V10.) */
+  .transparent-event-row .tool-card-header,
+  .transparent-event-row .thinking-card-header{min-height:30px;padding:5px 8px;}
+  .transparent-detail-mode{padding:4px 6px 5px;}
+}
+@keyframes transparent-event-enter{
+  from{opacity:0;transform:translateY(2px);}
+  to{opacity:1;transform:translateY(0);}
+}
+
+/* ── Old-event fading (transparent mode: medium → low) ─────────────── */
+/* ── Old-event fading (transparent mode, LIVE turn only — gated in JS) ───── */
+.transparent-event-row[data-transparent-fade="1"]{opacity:.86;}
+.transparent-event-row[data-transparent-fade="2"]{opacity:.76;}
+.transparent-event-row[data-transparent-fade="3"]{opacity:.68;}
+.transparent-event-row[data-transparent-fade="4"]{opacity:.6;}
+.transparent-event-row[data-transparent-fade="5"]{opacity:.54;}
+.transparent-event-row[data-transparent-fade]{transition:opacity .22s ease;}
+.transparent-event-row[data-transparent-fade]:hover{opacity:1;}
+
+/* ── Collapsible Hermes chat name tag ───────── */
+.assistant-turn[data-transparent-turn-collapsed="1"] .transparent-event-row,
+.assistant-turn[data-transparent-turn-collapsed="1"] .transparent-event-controls{
+  display:none;
+}
+.assistant-turn .msg-role.assistant{cursor:pointer;user-select:none;}
+.assistant-turn .msg-role.assistant .transparent-turn-chevron{
+  display:inline-block;margin-left:6px;opacity:.6;
+  transition:transform .2s ease;
+}
+.assistant-turn[data-transparent-turn-collapsed="1"] .msg-role.assistant .transparent-turn-chevron{
+  transform:rotate(-90deg);
+}
+
+/* ── Turn footer (transparent mode: elapsed · tokens · TTFT · status) ─ */
+/* Mirrors the live run-status line for settled turns in transparent
+   mode. Shows duration, first-token time, token usage, and final
+   status. Lives OUTSIDE assistant-turn-blocks so it stays visible even
+   when the event rows are collapsed. Tight offset and small font to
+   keep the visual rhythm with the event cards above it. */
+.transparent-turn-footer{
+  display:flex;align-items:center;flex-wrap:wrap;gap:6px;
+  margin:2px 0 2px var(--msg-rail);
+  max-width:var(--msg-max);
+  font-size:11.5px;color:var(--muted);line-height:1.3;
+  font-variant-numeric:tabular-nums;
+  padding:2px 4px;
+}
+.transparent-turn-footer .lf-time{color:var(--text);}
+.transparent-turn-footer .lf-sep{opacity:.4;}
+.transparent-turn-footer .lf-status{color:var(--muted);opacity:.85;}
+.transparent-turn-footer .lf-ttft{color:var(--accent);opacity:.9;}
+.transparent-turn-footer .lf-tokens{font-variant-numeric:tabular-nums;}
 
 /* ── Manual compression cards (transient transcript-local feedback) ── */
 .live-compression-cards{
@@ -3799,6 +4179,10 @@ main.main > #mainPlugin{display:none;}
 #mainSettings .theme-pick-btn.active,
 #mainSettings .skin-pick-btn.active,
 #mainSettings .font-size-pick-btn.active{border-color:var(--accent)!important;box-shadow:0 0 0 1px var(--accent-bg-strong)!important;background:var(--surface)!important;}
+#mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:4px;}
+#mainSettings .chat-activity-mode-btn{min-height:34px;padding:7px 10px;border:1px solid var(--border2);border-radius:8px;background:var(--surface);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;}
+#mainSettings .chat-activity-mode-btn:hover{border-color:var(--accent-bg-strong);color:var(--text);background:var(--hover-bg);}
+#mainSettings .chat-activity-mode-btn.active{border-color:var(--accent);color:var(--accent-text);background:var(--accent-bg);box-shadow:0 0 0 1px var(--accent-bg-strong);}
 
 /* Responsive: tighten canvas on small screens. */
 @media (max-width: 768px){
@@ -3809,6 +4193,7 @@ main.main > #mainPlugin{display:none;}
   .settings-version-badge{white-space:nowrap;}
   .hermes-action-grid{grid-template-columns:1fr;}
   #mainSettings .settings-field{padding:14px;}
+  #mainSettings .chat-activity-mode-toggle{grid-template-columns:1fr;}
 }
 
 /* ── Provider cards (Settings → Providers) ──

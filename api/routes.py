@@ -226,7 +226,24 @@ def _skill_path_within(base_dir: Path, candidate: Path) -> bool:
         return False
 
 
-def _skill_category_from_path(skill_md: Path, skills_dirs: list[Path]) -> str | None:
+def _skill_category_from_path(
+    skill_md: Path,
+    skills_dirs: list[Path],
+    local_skills_dir: Path | None = None,
+) -> str | None:
+    """Return the UI category for a discovered skill path.
+
+    Flat skills directly under the active *local* skills root stay uncategorized,
+    while flat skills under an *external* root use that root's directory name as
+    their category. ``local_skills_dir`` identifies the local root explicitly; if
+    omitted it falls back to ``skills_dirs[0]`` for backward compatibility, but
+    callers should pass it directly because the local root can be filtered out of
+    ``skills_dirs`` (e.g. when it does not exist yet on a host with only external
+    skills configured), which would otherwise misclassify the first external root
+    as local.
+    """
+    if local_skills_dir is None:
+        local_skills_dir = skills_dirs[0] if skills_dirs else None
     for skills_dir in skills_dirs:
         try:
             rel_path = skill_md.relative_to(skills_dir)
@@ -235,6 +252,8 @@ def _skill_category_from_path(skill_md: Path, skills_dirs: list[Path]) -> str | 
         parts = rel_path.parts
         if len(parts) >= 3:
             return parts[0]
+        if len(parts) >= 2 and local_skills_dir is not None and skills_dir != local_skills_dir:
+            return skills_dir.name
         return None
     return None
 
@@ -391,7 +410,9 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                     {
                         "name": name,
                         "description": description,
-                        "category": _skill_category_from_path(skill_md, search_dirs),
+                        "category": _skill_category_from_path(
+                            skill_md, search_dirs, local_skills_dir=skills_dir
+                        ),
                         "disabled": name in disabled,
                     }
                 )
@@ -2276,7 +2297,7 @@ def _model_matches_configured_default(
 
 
 class _ContextLengthLookupInputs:
-    __slots__ = ("config_context_length", "custom_providers", "base_url", "provider")
+    __slots__ = ("config_context_length", "custom_providers", "base_url", "provider", "api_key")
 
     def __init__(
         self,
@@ -2285,11 +2306,13 @@ class _ContextLengthLookupInputs:
         custom_providers: list | None = None,
         base_url: str = "",
         provider: str = "",
+        api_key: str = "",
     ) -> None:
         self.config_context_length = config_context_length
         self.custom_providers = custom_providers
         self.base_url = base_url
         self.provider = provider
+        self.api_key = api_key
 
 
 def _positive_context_length(value) -> int | None:
@@ -2379,6 +2402,44 @@ def _providers_match_for_context(config_key: object, requested_provider: str) ->
     )
 
 
+def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
+    """Resolve the API key for a matched ``custom_providers`` entry.
+
+    Static session hydration/update routes already have a per-profile config
+    snapshot. Resolve from the matched entry instead of re-reading global config,
+    while preserving the same literal, ``${ENV_VAR}``, ``key_env``, and
+    sanitized-env shapes used by streaming/provider resolution.
+    """
+    raw_api_key = entry.get("api_key")
+    if raw_api_key is not None:
+        api_key_text = str(raw_api_key).strip()
+        if api_key_text.startswith("${") and api_key_text.endswith("}") and len(api_key_text) > 3:
+            env_name = api_key_text[2:-1]
+            resolved = os.getenv(env_name, "").strip()
+            if resolved:
+                return resolved
+            logger.debug(
+                "Custom provider %s api_key references %s, but the environment variable is unset or empty",
+                provider,
+                api_key_text,
+            )
+        elif api_key_text:
+            return api_key_text
+
+    key_env = str(entry.get("key_env") or "").strip()
+    if key_env:
+        resolved = os.getenv(key_env, "").strip()
+        if resolved:
+            return resolved
+
+    try:
+        from api.config import _lookup_custom_api_key_env
+
+        return _lookup_custom_api_key_env(provider) or ""
+    except Exception:
+        return ""
+
+
 def _context_length_lookup_inputs_for_model(
     model: str | None,
     provider: str | None = None,
@@ -2438,6 +2499,7 @@ def _context_length_lookup_inputs_for_model(
             break
 
     custom_context_length = None
+    effective_api_key = ""
     if custom_providers:
         target_base = effective_base_url.rstrip("/")
         model_candidates = set(_model_lookup_candidates(bare_model or model_for_lookup))
@@ -2467,6 +2529,7 @@ def _context_length_lookup_inputs_for_model(
                 effective_provider = entry_slug
             if not effective_base_url and entry_base:
                 effective_base_url = entry_base
+            effective_api_key = _custom_provider_api_key_for_context(entry, effective_provider or entry_slug)
             custom_context_length = _models_config_context_length(models_cfg, bare_model or model_for_lookup)
             break
 
@@ -2489,6 +2552,7 @@ def _context_length_lookup_inputs_for_model(
         custom_providers=custom_providers,
         base_url=effective_base_url,
         provider=effective_provider,
+        api_key=effective_api_key,
     )
 
 
@@ -3002,6 +3066,7 @@ def _resolve_context_length_for_session_model(
             return _get_cl(
                 model_for_lookup,
                 _ctx_lookup.base_url,
+                api_key=_ctx_lookup.api_key,
                 config_context_length=_ctx_lookup.config_context_length,
                 provider=_ctx_lookup.provider or provider or "",
                 custom_providers=_ctx_lookup.custom_providers,
@@ -10318,7 +10383,10 @@ def _handle_tts(handler, parsed):
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
-        "en-US-AriaNeural", "en-US-GuyNeural"
+        "en-US-AriaNeural", "en-US-GuyNeural",
+        "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
+        "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
+        "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
     }
     if voice not in allowed:
         from api.helpers import bad as _bad
