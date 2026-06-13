@@ -3790,15 +3790,7 @@ def _stale_user_tail_candidate(msg):
     """Return normalized text if msg is a user row that could be a stale tail."""
     if not isinstance(msg, dict) or msg.get('role') != 'user':
         return None
-    content = msg.get('content', '')
-    if isinstance(content, list):
-        raw = ' '.join(
-            str(p.get('text') or p.get('content') or '')
-            for p in content
-            if isinstance(p, dict)
-        )
-    else:
-        raw = str(content or '')
+    raw = _raw_message_text(msg.get('content', ''))
     if not raw.strip():
         return None
     return _normalize_user_text(raw)
@@ -3816,9 +3808,11 @@ def _detect_stale_user_merge(message, msg_text, previous_user_tail):
     """Return True if `message` is the current user turn with a stale prefix merged in.
 
     The agent's defensive repair path can concatenate the prior context-tail
-    user row with the submitted current turn as ``<stale>\n\n<current>``.
-    When the prior tail is present in `previous_user_tail`, treat the merged
-    text as a contaminated current user turn.
+    user row with the submitted current turn as ``<stale>\\n\\n<current>``.
+    The literal ``\\n\\n`` boundary must survive into the comparison; a
+    single-newline or space-only join is not the repair shape and must not
+    match. Workspace sentinels may be present on either or both halves and
+    are stripped before comparison.
     """
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
@@ -3831,11 +3825,15 @@ def _detect_stale_user_merge(message, msg_text, previous_user_tail):
     merged = _raw_message_text(message.get('content', ''))
     if not merged:
         return False
-    merged_norm = " ".join(merged.split())
-    merged_compare_norm = " ".join(_strip_workspace_prefixes_for_compare(merged).split())
-    prefix_norm = " ".join(f"{tail_norm}\n\n{current_norm}".split())
-    if merged_norm == prefix_norm or merged_compare_norm == prefix_norm:
-        return True
+    # Require the literal \n\n repair boundary to be present after sentinel
+    # stripping. Check both the raw text and the workspace-stripped text so
+    # that workspace-prefixed rows on either or both halves still match.
+    for candidate in (merged, _strip_workspace_prefixes_for_compare(merged)):
+        if '\n\n' not in candidate:
+            continue
+        head, _, rest = candidate.partition('\n\n')
+        if _normalize_user_text(head) == tail_norm and _normalize_user_text(rest) == current_norm:
+            return True
     return False
 
 

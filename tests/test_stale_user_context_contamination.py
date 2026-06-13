@@ -88,6 +88,22 @@ def test_detect_stale_user_merge_handles_workspace_prefix_on_both_halves():
     assert _detect_stale_user_merge(prefixed_both, CURRENT_TURN, PRIOR_TAIL) is True
 
 
+def test_detect_stale_user_merge_does_not_match_single_newline_joined():
+    """A single-\\n separator is not the repair shape and must not be flagged."""
+    from api.streaming import _detect_stale_user_merge
+
+    single_nl = {"role": "user", "content": f"{PRIOR_TAIL}\n{CURRENT_TURN}"}
+    assert _detect_stale_user_merge(single_nl, CURRENT_TURN, PRIOR_TAIL) is False
+
+
+def test_detect_stale_user_merge_does_not_match_space_joined():
+    """A space-only separator is not the repair shape and must not be flagged."""
+    from api.streaming import _detect_stale_user_merge
+
+    space_joined = {"role": "user", "content": f"{PRIOR_TAIL} {CURRENT_TURN}"}
+    assert _detect_stale_user_merge(space_joined, CURRENT_TURN, PRIOR_TAIL) is False
+
+
 def test_strip_stale_user_merge_from_messages_replaces_polluted_row():
     """Normalizer replaces a polluted current row with a clean copy of msg_text."""
     from api.streaming import _strip_stale_user_merge_from_messages
@@ -329,8 +345,8 @@ def test_merge_display_does_not_overstrip_when_current_already_clean():
     )
 
 
-def test_merge_display_passes_through_when_no_prior_user_tail():
-    """Without a prior user tail, the polluted pattern cannot match — no over-strip."""
+def test_merge_display_passes_through_when_prior_tail_text_differs():
+    """Detector skips when the prior-tail text does not match PRIOR_TAIL — no over-strip."""
     from api.streaming import _merge_display_messages_after_agent_result
 
     previous_display = [
@@ -341,8 +357,9 @@ def test_merge_display_passes_through_when_no_prior_user_tail():
         {"role": "user", "content": "first question"},
         {"role": "assistant", "content": "first answer"},
     ]
-    # Note: the "polluted" string is here, but the prior tail is not a user row,
-    # so the detector must not match and the row survives untouched.
+    # _last_user_row finds "first question" as the prior tail, but its
+    # normalized text does not match PRIOR_TAIL, so _detect_stale_user_merge
+    # correctly returns False and the polluted row is not cleaned.
     polluted_msg = {"role": "user", "content": POLLUTED}
     result_messages = [
         *previous_context,
