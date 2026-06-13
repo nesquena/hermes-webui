@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.397] — 2026-06-13 — Release NJ (wire /credits through WebUI command dispatch, #4071)
+
+### Fixed
+
+- **The `/credits` slash command now works in the WebUI, not just the CLI (#4071).** `/credits` is added to the allowed-agent-command set and rendered via the shared `agent.account_usage.build_credits_view`, so the browser shows the same Nous credit balance view. It degrades gracefully — a logged-out user gets a "Not logged into Nous" hint, and an import/build failure returns "Couldn't fetch credits right now." instead of erroring. (#4071)
+
 ## [v0.51.396] — 2026-06-13 — Release NI (longer timeout for full-history session loads, #4139)
 
 ### Fixed

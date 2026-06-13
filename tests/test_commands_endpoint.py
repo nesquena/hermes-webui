@@ -1,4 +1,5 @@
 """Tests for GET /api/commands -- exposes hermes-agent COMMAND_REGISTRY."""
+import io
 import json
 import urllib.error
 import urllib.request
@@ -69,6 +70,26 @@ def _install_fake_skill_commands(monkeypatch, reload_skills):
     monkeypatch.setitem(sys.modules, "agent", agent_pkg)
     monkeypatch.setitem(sys.modules, "agent.skill_commands", skill_commands)
     return skill_commands
+
+
+def _install_fake_account_usage(monkeypatch, *, view=None, exc=None):
+    import sys
+
+    agent_pkg = sys.modules.get("agent") or ModuleType("agent")
+    agent_pkg.__path__ = []
+    account_usage = ModuleType("agent.account_usage")
+
+    def build_credits_view(*, markdown=False, timeout=10.0):
+        assert markdown is True
+        if exc is not None:
+            raise exc
+        return view
+
+    account_usage_any = cast(Any, account_usage)
+    account_usage_any.build_credits_view = build_credits_view
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage)
+    return account_usage
 
 
 def _get(path):
@@ -180,6 +201,118 @@ def test_commands_exec_runs_reload_skills_alias():
     assert status == 200
     assert 'output' in body
     assert isinstance(body['output'], str)
+
+
+def test_credits_command_renders_shared_credits_view(monkeypatch):
+    """`/credits` should reuse the shared Hermes credits view in WebUI output."""
+    _install_fake_account_usage(
+        monkeypatch,
+        view=SimpleNamespace(
+            logged_in=True,
+            balance_lines=("📈 **Balance**", "- Subscription credits: $12.34", "- Top-up credits: $1.23"),
+            identity_line="Topping up as rod@example.com / org Nous",
+            topup_url="https://portal.nous.example/topup",
+        ),
+    )
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/credits')
+
+    assert output == "\n".join(
+        [
+            "💳 **Nous credits**",
+            "- Subscription credits: $12.34",
+            "- Top-up credits: $1.23",
+            "",
+            "Topping up as rod@example.com / org Nous",
+            "",
+            "Top up: https://portal.nous.example/topup",
+            "Complete your top-up in the browser; credits will appear in /credits shortly.",
+        ]
+    )
+
+
+def test_commands_exec_routes_credits_through_agent_dispatch(monkeypatch):
+    """`/credits` should go through the POST route's agent-command path, not the plugin fallback."""
+
+    class _FakeHandler:
+        def __init__(self, body_bytes: bytes):
+            self.status = None
+            self.sent_headers = []
+            self.body = bytearray()
+            self.wfile = self
+            self.rfile = io.BytesIO(body_bytes)
+            self.headers = {"Content-Length": str(len(body_bytes))}
+            self.request = None
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, name, value):
+            self.sent_headers.append((name, value))
+
+        def end_headers(self):
+            pass
+
+        def write(self, data):
+            self.body.extend(data)
+
+        def json_body(self):
+            return json.loads(bytes(self.body).decode("utf-8"))
+
+    import api.commands as commands
+    from api import routes
+
+    calls = []
+
+    def _fake_execute_agent_command(command):
+        calls.append(command)
+        return "credits ok"
+
+    def _fake_execute_plugin_command(command):
+        raise AssertionError(f"plugin path should not run for {command!r}")
+
+    monkeypatch.setattr(commands, "execute_agent_command", _fake_execute_agent_command)
+    monkeypatch.setattr(commands, "execute_plugin_command", _fake_execute_plugin_command)
+
+    raw = json.dumps({"command": "/credits"}).encode("utf-8")
+    handler = _FakeHandler(raw)
+    routes.handle_post(handler, SimpleNamespace(path="/api/commands/exec", query=""))
+
+    assert calls == ["/credits"]
+    assert handler.status == 200
+    assert handler.json_body() == {"output": "credits ok"}
+
+
+def test_credits_command_returns_not_logged_in_message(monkeypatch):
+    """`/credits` should degrade to a friendly login hint when Nous auth is absent."""
+    _install_fake_account_usage(
+        monkeypatch,
+        view=SimpleNamespace(
+            logged_in=False,
+            balance_lines=(),
+            identity_line=None,
+            topup_url=None,
+        ),
+    )
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/credits')
+
+    assert output == "Not logged into Nous. Run `hermes auth login nous` in Hermes CLI, then try /credits again."
+
+
+def test_credits_command_fail_opens_on_runtime_error(monkeypatch):
+    """`/credits` failures should return a short user-facing message, not 500s."""
+    _install_fake_account_usage(monkeypatch, exc=RuntimeError("portal timeout"))
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/credits')
+
+    assert output == "Couldn't fetch credits right now."
 
 
 def test_codex_runtime_command_uses_shared_switch_and_persists(monkeypatch, tmp_path):
