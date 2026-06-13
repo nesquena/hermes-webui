@@ -4898,7 +4898,7 @@ let _ttsCurrentUtterance=null;
 let _ttsChunkQueue=[];
 let _ttsChunkIndex=0;
 let _ttsActiveBtn=null;
-let _playingEdgeAudio=null;
+let _playingServerAudio=null;
 
 function _buildBrowserUtterance(text, btn){
   const utter=new SpeechSynthesisUtterance(text);
@@ -4932,34 +4932,55 @@ function _buildBrowserUtterance(text, btn){
     if(btn) btn.dataset.speaking='0';
   };
   return utter;
+// ── Server-side TTS (Edge & VOICEVOX) ────────────────────────────
+
+// Shared blob player — handles Audio element lifecycle
+function _playServerTtsBlob(blob, opts){
+  const url=URL.createObjectURL(blob);
+  const audio=new Audio(url);
+  audio.style.display='none';
+  document.body.appendChild(audio);
+  _playingServerAudio=audio;
+  audio.onended=function(){
+    URL.revokeObjectURL(url);
+    _playingServerAudio=null;
+    try{document.body.removeChild(audio);}catch(_){}
+    if(opts.onDone) opts.onDone();
+  };
+  audio.onerror=function(){
+    URL.revokeObjectURL(url);
+    _playingServerAudio=null;
+    _ttsSpeaking=false;
+    try{document.body.removeChild(audio);}catch(_){}
+    if(opts.btn) opts.btn.dataset.speaking='0';
+    if(opts.onError) opts.onError();
+  };
+  audio.play().catch(function(e){
+    URL.revokeObjectURL(url);
+    _playingServerAudio=null;
+    _ttsSpeaking=false;
+    try{document.body.removeChild(audio);}catch(_){}
+    if(opts.btn) opts.btn.dataset.speaking='0';
+    if(typeof showToast==='function') showToast((opts.engineName||'Server')+' TTS error: '+(e&&e.message||e));
+    if(opts.onError) opts.onError();
+  });
 }
 
-function _playEdgeTtsChunked(text, btn, engine){
+// Shared chunked server TTS — splits text, fetches each chunk, plays via _playServerTtsBlob
+function _playServerTts(text, opts){
   const chunks=_splitForTTS(text);
   const _playOne=function(idx){
     if(idx>=chunks.length){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
-      if(btn) btn.dataset.speaking='0';
+      _ttsSpeaking=false;_playingServerAudio=null;
+      if(opts.btn) opts.btn.dataset.speaking='0';
+      if(opts.onAllDone) opts.onAllDone();
       return;
     }
     const chunk=chunks[idx];
-    var voice;
-    if(engine==='voicevox'){
-      voice=localStorage.getItem('hermes-tts-voice-voicevox')||'8';
-    } else {
-      voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
-      // If voice is a numeric ID left over from voicevox, reset to default
-      if(/^\d+$/.test(voice)) voice='zh-CN-XiaoxiaoNeural';
-    }
-    const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-    const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-    let rate='', pitch='';
-    if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
-    if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
     fetch(new URL('api/tts', document.baseURI || location.href).href, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch, engine:engine||'edge'})
+      body:JSON.stringify({text:chunk, voice:opts.voice, rate:opts.rate||'', pitch:opts.pitch||'', engine:opts.engine})
     })
     .then(function(r){
       if(!r.ok){
@@ -4971,40 +4992,56 @@ function _playEdgeTtsChunked(text, btn, engine){
     })
     .then(function(blob){
       if(!_ttsSpeaking) return;
-      const url=URL.createObjectURL(blob);
-      const audio=new Audio(url);
-      audio.style.display='none';
-      document.body.appendChild(audio);
-      _playingEdgeAudio=audio;
-      audio.onended=function(){
-        URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        try{document.body.removeChild(audio);}catch(_){}
-        if(_ttsSpeaking) _playOne(idx+1);
-      };
-      audio.onerror=function(){
-        URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        _ttsSpeaking=false;
-        try{document.body.removeChild(audio);}catch(_){}
-        if(btn) btn.dataset.speaking='0';
-      };
-      audio.play().catch(function(e){
-        URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        _ttsSpeaking=false;
-        try{document.body.removeChild(audio);}catch(_){}
-        if(btn) btn.dataset.speaking='0';
-        if(typeof showToast==='function') showToast('Edge TTS error: '+(e&&e.message||e));
+      _playServerTtsBlob(blob, {
+        btn: opts.btn,
+        engineName: opts.engineName,
+        onDone: function(){ if(_ttsSpeaking) _playOne(idx+1); },
+        onError: opts.onAllDone,
       });
     })
     .catch(function(e){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
-      if(btn) btn.dataset.speaking='0';
-      if(typeof showToast==='function') showToast('Edge TTS failed: '+(e&&e.message||e));
+      _ttsSpeaking=false;_playingServerAudio=null;
+      if(opts.btn) opts.btn.dataset.speaking='0';
+      if(typeof showToast==='function') showToast((opts.engineName||'Server')+' TTS failed: '+(e&&e.message||e));
+      if(opts.onAllDone) opts.onAllDone();
     });
   };
   _playOne(0);
+}
+
+// ── Edge TTS ──────────────────────────────────────────────────────
+
+function _playEdgeTts(text, btn, onAllDone){
+  var voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
+  // If voice is a numeric ID left over from voicevox, reset to default
+  if(/^\d+$/.test(voice)) voice='zh-CN-XiaoxiaoNeural';
+  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+  let rate='', pitch='';
+  if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
+  if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
+  _playServerTts(text, {
+    voice: voice,
+    engine: 'edge',
+    engineName: 'Edge',
+    rate: rate,
+    pitch: pitch,
+    btn: btn,
+    onAllDone: onAllDone,
+  });
+}
+
+// ── VOICEVOX TTS ──────────────────────────────────────────────────
+
+function _playVoicevoxTts(text, btn, onAllDone){
+  const voice=localStorage.getItem('hermes-tts-voice-voicevox')||'8';
+  _playServerTts(text, {
+    voice: voice,
+    engine: 'voicevox',
+    engineName: 'VOICEVOX',
+    btn: btn,
+    onAllDone: onAllDone,
+  });
 }
 
 function speakMessage(btn){
@@ -5025,13 +5062,13 @@ function speakMessage(btn){
   if(engine==='edge'){
     _ttsSpeaking=true;
     if(btn) btn.dataset.speaking='1';
-    _playEdgeTtsChunked(clean, btn);
+    _playEdgeTts(clean, btn);
     return;
   }
   if(engine==='voicevox'){
     _ttsSpeaking=true;
     if(btn) btn.dataset.speaking='1';
-    _playEdgeTtsChunked(clean, btn, 'voicevox');
+    _playVoicevoxTts(clean, btn);
     return;
   }
 
@@ -5056,9 +5093,9 @@ function stopTTS(){
     speechSynthesis.cancel();
   }
   // Stop Edge TTS audio
-  if(_playingEdgeAudio){
-    try{ _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0; }catch(_){}
-    _playingEdgeAudio=null;
+  if(_playingServerAudio){
+    try{ _playingServerAudio.pause(); _playingServerAudio.currentTime=0; }catch(_){}
+    _playingServerAudio=null;
   }
   _ttsSpeaking=false;
   _ttsCurrentUtterance=null;
@@ -5084,12 +5121,12 @@ function autoReadLastAssistant(){
   if(!clean) return;
   if(engine==='edge'){
     _ttsSpeaking=true;
-    _playEdgeTtsChunked(clean, null);
+    _playEdgeTts(clean, null);
     return;
   }
   if(engine==='voicevox'){
     _ttsSpeaking=true;
-    _playEdgeTtsChunked(clean, null, 'voicevox');
+    _playVoicevoxTts(clean, null);
     return;
   }
   // Use chunked playback for browser TTS
