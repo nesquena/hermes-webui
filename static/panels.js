@@ -8727,8 +8727,25 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
 
 function updateNotificationPermissionStatus(){
   const el=$('notificationPermissionStatus');
+  const btn=$('notificationPermissionButton');
   if(!el) return;
-  if(!('Notification' in window)){el.textContent=t('notifications_unsupported');return;}
+  if(!('Notification' in window)){
+    const unsupported=t('notifications_unsupported');
+    el.textContent=unsupported;
+    if(btn){
+      btn.disabled=true;
+      btn.title=unsupported;
+      btn.setAttribute('aria-disabled','true');
+    }
+    return;
+  }
   const perm=Notification.permission||'default';
-  el.textContent=t('notifications_permission_status', perm);
+  const label=t('notifications_permission_status', perm);
+  el.textContent=label;
+  if(btn){
+    const granted=perm==='granted';
+    btn.disabled=granted;
+    btn.title=label;
+    btn.setAttribute('aria-disabled', granted?'true':'false');
+  }
 }

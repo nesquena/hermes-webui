@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Notification permission controls now reflect the real browser state instead of failing silently when permission is already granted (#4118).** Settings → Preferences disables the enable button once notifications are granted, surfaces the current permission label on the button tooltip/status text, and shows the same enabled toast when the user re-clicks an already-granted state instead of doing nothing. (#4118)
+
 ## [v0.51.392] — 2026-06-13 — Release NE (align WebUI reasoning efforts to the agent's accepted set, drop "max")
 
 ### Fixed
