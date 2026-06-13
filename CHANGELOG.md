@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dirty install no longer reports "Up to date" with no remediation affordance (#4085).** The update check payload now carries a `dirty: bool` reflecting the working-tree state vs HEAD, so the Settings update panel can surface a "Local changes detected" state with an apply-latest action wired to the existing destructive-reset endpoint when the install is dirty and at-or-past the latest release tag.
+
 ## [v0.51.382] — 2026-06-13 — Release MU (Stable Assistant Turn Anchors: activity-scene projection, inert, #4093)
 
 ### Added
