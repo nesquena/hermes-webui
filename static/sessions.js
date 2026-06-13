@@ -878,6 +878,22 @@ async function loadSession(sid){
     // close streams for the session the user actually landed on (#1060 guard,
     // extended to cover the new pre-switch await).
     if (_loadingSessionId !== sid) return;
+    // Snapshot the live turn before msgInner is replaced. Preserves the activity
+    // timer, partial response, and tool cards so switching back does not rebuild
+    // the stream UI from scratch.
+    if(
+      (S.busy||S.activeStreamId||(INFLIGHT&&INFLIGHT[currentSid]))&&
+      typeof snapshotLiveTurnHtmlForSession==='function'
+    ){
+      if(!INFLIGHT[currentSid]){
+        INFLIGHT[currentSid]={
+          messages:Array.isArray(S.messages)?[...S.messages]:[],
+          uploaded:[],
+          toolCalls:Array.isArray(S.toolCalls)?[...S.toolCalls]:[],
+        };
+      }
+      snapshotLiveTurnHtmlForSession(currentSid);
+    }
   }
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
@@ -1040,14 +1056,21 @@ async function loadSession(sid){
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;
-  // If the server says the session is idle, discard any browser-side inflight
-  // cache left behind by a crashed/restarted stream. Otherwise the UI can keep
-  // showing a permanent thinking/running state even though active_streams=0.
-  if(!activeStreamId&&INFLIGHT[sid]){
-    delete INFLIGHT[sid];
-    if(typeof clearInflightState==='function') clearInflightState(sid);
+  // If the server says the session is idle, reset browser-side streaming flags
+  // NOW — before the async _ensureMessagesLoaded gap below. Without this,
+  // S.busy can remain true from a still-running stream in the PREVIOUS session
+  // while S.session.session_id has already advanced to the new one.
+  // _isSessionLocallyStreaming() checks (isActive && S.busy), so during the
+  // async window the new session would appear locally-streaming (sidebar spinner,
+  // Stop button, thinking state on an idle chat). Also clears stale INFLIGHT
+  // entries left behind by a crashed/restarted stream.
+  if(!activeStreamId){
     S.activeStreamId=null;
     S.busy=false;
+    if(INFLIGHT[sid]){
+      delete INFLIGHT[sid];
+      if(typeof clearInflightState==='function') clearInflightState(sid);
+    }
   }
 
   function _mergePendingSessionMessage(session,messages){
@@ -1262,10 +1285,15 @@ async function loadSession(sid){
       updateSendBtn();
       setStatus('');
       setComposerStatus('');
-      // syncTopbar();renderMessages();appendThinking();loadDir('.');
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
-      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
-      else appendThinking();
+      let restoredLiveTurn=false;
+      if(typeof restoreLiveTurnHtmlForSession==='function'){
+        restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+      }
+      if(!restoredLiveTurn){
+        if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+        else appendThinking();
+      }
       loadDir('.');
       updateQueueBadge(sid);
       startApprovalPolling(sid);
