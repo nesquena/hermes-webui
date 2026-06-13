@@ -4947,9 +4947,9 @@ function _playEdgeTtsChunked(text, btn, engine){
     if(engine==='voicevox'){
       voice=localStorage.getItem('hermes-tts-voice-voicevox')||'8';
     } else {
-      voice=localStorage.getItem('hermes-tts-voice')||'ja-JP-NanamiNeural';
+      voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
       // If voice is a numeric ID left over from voicevox, reset to default
-      if(/^\d+$/.test(voice)) voice='ja-JP-NanamiNeural';
+      if(/^\d+$/.test(voice)) voice='zh-CN-XiaoxiaoNeural';
     }
     const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
     const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));

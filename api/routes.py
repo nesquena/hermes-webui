@@ -10312,33 +10312,43 @@ def _handle_vv_voices(handler, parsed=None):
 
 def _handle_voicevox_tts(handler, text, voice):
     """Synthesize speech via VOICEVOX engine using the command provider."""
-    import subprocess, tempfile, shlex, os
+    import subprocess, tempfile, shlex, os, threading
     from api.helpers import bad as _bad
 
-    voicevox_cmd = (
-        "python3 /opt/hermes/scripts/voicevox_tts_provider.py "
-        "--input {input_path} --output {output_path}"
-    )
+    # Per-process concurrency cap: at most 4 simultaneous TTS syntheses
+    if not hasattr(_handle_voicevox_tts, "_semaphore"):
+        _handle_voicevox_tts._semaphore = threading.Semaphore(4)
+    acquired = _handle_voicevox_tts._semaphore.acquire(blocking=False)
+    if not acquired:
+        return _bad(handler, "VOICEVOX busy — too many concurrent TTS requests", 503)
     try:
+        voicevox_provider = os.environ.get(
+            "VOICEVOX_PROVIDER_PATH",
+            "/opt/hermes/scripts/voicevox_tts_provider.py",
+        )
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", delete=False, encoding="utf-8"
         ) as tf:
             tf.write(text)
             input_path = tf.name
 
-        wav_path = input_path.replace(".txt", ".wav")
-        mp3_path = input_path.replace(".txt", ".mp3")
+        base = os.path.splitext(input_path)[0]
+        wav_path = base + ".wav"
+        mp3_path = base + ".mp3"
 
-        cmd_str = voicevox_cmd.replace("{input_path}", shlex.quote(input_path))
-        cmd_str = cmd_str.replace("{output_path}", shlex.quote(wav_path))
+        cmd = [
+            "python3", voicevox_provider,
+            "--input", input_path,
+            "--output", wav_path,
+        ]
 
         env = os.environ.copy()
         if voice and voice.isdigit():
             env["VOICEVOX_STYLE_ID"] = voice
 
         result = subprocess.run(
-            cmd_str, shell=True, capture_output=True, text=True,
-            timeout=120, env=env,
+            cmd, capture_output=True, text=True,
+            timeout=30, env=env,
         )
 
         if result.returncode != 0 or not os.path.exists(wav_path):
@@ -10378,9 +10388,16 @@ def _handle_voicevox_tts(handler, text, voice):
         except (BrokenPipeError, ConnectionResetError):
             pass
         return True
+    except subprocess.TimeoutExpired:
+        return _bad(handler, "VOICEVOX synthesis timed out", 504)
+    except FileNotFoundError as e:
+        logger.error("VOICEVOX TTS missing dependency: %s", e)
+        return _bad(handler, f"TTS dependency not found: {e.filename}", 500)
     except Exception:
         logger.exception("VOICEVOX TTS failed")
         return _bad(handler, "VOICEVOX TTS failed", 500)
+    finally:
+        _handle_voicevox_tts._semaphore.release()
 
 
 def _normalize_tts_prosody(value, *, unit: str) -> str | None:
@@ -10413,7 +10430,7 @@ def _handle_tts(handler, parsed):
     async API at that time.
     """
     text = ""
-    voice = "ja-JP-NanamiNeural"
+    voice = "zh-CN-XiaoxiaoNeural"
     rate_str = ""
     pitch_str = ""
 
@@ -10445,10 +10462,6 @@ def _handle_tts(handler, parsed):
     if len(text) > 5000:
         from api.helpers import bad as _bad
         return _bad(handler, "text too long (max 5000 characters)", 400)
-
-    # ── VOICEVOX engine ─────────────────────────────────────────────────
-    if engine == "voicevox":
-        return _handle_voicevox_tts(handler, text, voice)
 
     from api.auth import is_auth_enabled, parse_cookie, verify_session
     cv = None
@@ -10503,6 +10516,10 @@ def _handle_tts(handler, parsed):
         logger.warning("TTS rate limit hit for client=%s", limiter._get_client_key(handler))
         from api.helpers import bad as _bad
         return _bad(handler, "rate limit exceeded — please wait", 429)
+
+    # ── VOICEVOX engine ─────────────────────────────────────────────────
+    if engine == "voicevox":
+        return _handle_voicevox_tts(handler, text, voice)
 
     allowed = {
         "ja-JP-NanamiNeural", "ja-JP-KeitaNeural",

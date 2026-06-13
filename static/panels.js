@@ -6799,8 +6799,8 @@ async function loadSettingsPanel(){
       const current=localStorage.getItem('hermes-tts-voice')||'';
       if(engine==='edge'){
         const edgeVoices=[
-          {value:'ja-JP-NanamiNeural',label:'Nanami (日本語, 女性)'},
-          {value:'ja-JP-KeitaNeural',label:'Keita (日本語, 男性)'},
+          {value:'ja-JP-NanamiNeural',label:'Nanami (Japanese, Female)'},
+          {value:'ja-JP-KeitaNeural',label:'Keita (Japanese, Male)'},
           {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
           {value:'zh-CN-XiaoyiNeural',label:'Xiaoyi (Chinese, Female)'},
           {value:'zh-CN-YunxiNeural',label:'Yunxi (Chinese, Male)'},
@@ -6809,7 +6809,7 @@ async function loadSettingsPanel(){
           {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
           {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
         ];
-        ttsVoiceSel.innerHTML='<option value="">Default (Nanami)</option>';
+        ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
         edgeVoices.forEach(v=>{
           const opt=document.createElement('option');
           opt.value=v.value;opt.textContent=v.label;

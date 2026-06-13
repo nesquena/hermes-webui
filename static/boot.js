@@ -1035,8 +1035,8 @@ window._micPendingSend=window._micPendingSend||false;
     if(!clean){ _startListening(); return; }
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
     if(engine==="edge"){
-      var voice=localStorage.getItem("hermes-tts-voice")||"ja-JP-NanamiNeural";
-      if(/^\d+$/.test(voice)) voice="ja-JP-NanamiNeural";
+      var voice=localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural";
+      if(/^\d+$/.test(voice)) voice="zh-CN-XiaoxiaoNeural";
       const savedRate=parseFloat(localStorage.getItem("hermes-tts-rate"));
       const savedPitch=parseFloat(localStorage.getItem("hermes-tts-pitch"));
       let rate='', pitch='';
