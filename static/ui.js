@@ -9236,6 +9236,7 @@ function renderMessages(options){
     seg.dataset.rawText=String(content).trim();
     if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
     if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
+    if(isTurnFinalAssistant) seg.setAttribute('data-turn-final-assistant','1');
     const messageBelongsInWorklog=!S.busy&&isCompactWorklogMode()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});
     if(messageBelongsInWorklog){
       seg.classList.add('assistant-segment-worklog-source');
@@ -9630,6 +9631,20 @@ function renderMessages(options){
       const entry=ensureActivityBucket(key,aIdx,segmentSeq,burstId);
       entry.includeAnchorReason=true;
     }
+    for(const [aIdx,seg] of assistantSegments){
+      if(!seg||!seg.classList) continue;
+      if(seg.classList.contains('assistant-segment-worklog-source')) continue;
+      if(seg.getAttribute('data-turn-final-assistant')==='1') continue;
+      const segmentSeq=seg.getAttribute('data-live-segment-seq')||'';
+      const burstId=seg.getAttribute('data-activity-burst-id')||'';
+      if(!segmentSeq&&!burstId) continue;
+      const body=seg.querySelector&&seg.querySelector('.msg-body');
+      const raw=(seg.dataset&&seg.dataset.rawText)||(body&&body.textContent)||'';
+      if(!String(raw).trim()) continue;
+      const key=segmentSeq?`segment:${segmentSeq}`:`burst:${burstId}`;
+      const textEntry={key,aIdx,segmentSeq,burstId,type:'text',segment:seg,cards:[],thinkingIdx:null,includeAnchorReason:false};
+      activityOrder.push(textEntry);
+    }
     activityOrder.sort((a,b)=>{
       const anchorA=_assistantAnchorForActivity(a.aIdx,a.segmentSeq,a.burstId);
       const anchorB=_assistantAnchorForActivity(b.aIdx,b.segmentSeq,b.burstId);
@@ -9724,6 +9739,18 @@ function renderMessages(options){
           if(anchorRow&&anchorRow.parentElement===blocks) blocks.insertBefore(row,anchorRow);
           else blocks.appendChild(row);
         };
+        if(event.type==='text'){
+          const textSeg=event.segment;
+          if(textSeg&&textSeg.getAttribute('data-turn-final-assistant')!=='1'&&textSeg!==anchorRow){
+            const textIdx=Number(textSeg.dataset&&textSeg.dataset.msgIdx);
+            const anchorIdx=Number(anchorRow.dataset&&anchorRow.dataset.msgIdx);
+            if(Number.isFinite(textIdx)&&Number.isFinite(anchorIdx)&&textIdx<anchorIdx){
+              insertBeforeAnchor(textSeg);
+            }
+          }
+          _syncTransparentEventControls(turn);
+          continue;
+        }
         if(event.thinkingText){
           const _thinkKey=typeof _normalizeThinkingEchoCompare==='function'
             ? _normalizeThinkingEchoCompare(event.thinkingText)

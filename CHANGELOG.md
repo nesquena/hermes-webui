@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Transparent Stream now relocates real assistant progress-text segments chronologically on settled refresh/reload instead of duplicating them (#4096).** Progress prose carrying `activitySegmentSeq` / `activityBurstId` participates as first-class `type:'text'` activity entries and the existing `.assistant-segment` node is moved into order with thinking/tool rows, preserving one canonical prose node. Turn-final answer segments are not relocated; shared-burst anchor resolution only moves earlier progress text before a later anchor, avoiding reorder regressions. Plain final-answer segments without sequence/burst metadata remain normal prose bubbles. Compact Worklog is unaffected. (#4096)
+
 ## [v0.51.394] — 2026-06-13 — Release NG (document-title attention badge for pending prompts, #4121)
 
 ### Added

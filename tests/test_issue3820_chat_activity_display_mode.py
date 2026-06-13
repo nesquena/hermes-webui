@@ -639,3 +639,73 @@ def test_transparent_entrance_animation_is_live_turn_only():
     """The entrance animation must be scoped to the live turn so it doesn't
     replay across the whole transcript on every renderMessages. (Trifecta V9.)"""
     assert "#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter" in STYLE_CSS
+
+
+# ── Issue #4096: transparent settled prose is relocated, not duplicated ─────
+
+
+def test_4096_transparent_progress_text_is_first_class_activity_entry():
+    """Progress prose segments with segment/burst metadata are first-class
+    activityOrder entries so they sort among thinking/tool rows chronologically.
+    Plain final-answer segments without sequence/burst metadata stay normal prose."""
+    marker = "const activityOrder = [];"
+    assert marker in UI_JS
+    start = UI_JS.index(marker)
+    end_marker = "activityOrder.sort((a,b)=>{"
+    assert end_marker in UI_JS[start:]
+    body = UI_JS[start:UI_JS.index(end_marker, start)]
+
+    assert "type:'text'" in body
+    assert "cards:[]" in body
+    assert "thinkingIdx:null" in body
+    assert "segment:${segmentSeq}" in body
+    assert "burst:${burstId}" in body
+    assert "assistant-segment-worklog-source" in body
+    assert "if(!segmentSeq&&!burstId) continue" in body
+    assert "activityOrder.push(textEntry)" in body
+
+
+def test_4096_turn_final_segments_stamped_at_render():
+    """Turn-final assistant segments are stamped so relocation logic can skip them."""
+    assert "data-turn-final-assistant" in UI_JS
+    assert "isTurnFinalAssistant) seg.setAttribute('data-turn-final-assistant'" in UI_JS
+
+
+def test_4096_transparent_text_relocation_skips_turn_final_and_later_segments():
+    """Shared-burst anchor resolution must not move turn-final answers or later
+    progress segments before earlier ones (gpt/kimi review HIGH)."""
+    marker = "// ── transparent_stream path: individual expandable event rows ──"
+    assert marker in UI_JS
+    start = UI_JS.index(marker)
+    end_marker = "// Render per-turn duration"
+    assert end_marker in UI_JS[start:]
+    body = UI_JS[start:UI_JS.index(end_marker, start)]
+
+    assert "data-turn-final-assistant" in body
+    assert "textSeg!==anchorRow" in body
+    assert "textIdx<anchorIdx" in body
+    assert "insertBeforeAnchor(textSeg)" in body
+
+
+def test_4096_transparent_settled_relocates_existing_segments_not_marker_rows():
+    """The settled transparent branch must move the actual assistant segment into
+    chronological position. Creating a new transparent-text-event marker row
+    double-renders the same prose and is a regression."""
+    marker = "// ── transparent_stream path: individual expandable event rows ──"
+    assert marker in UI_JS
+    start = UI_JS.index(marker)
+    end_marker = "// Render per-turn duration"
+    assert end_marker in UI_JS[start:]
+    body = UI_JS[start:UI_JS.index(end_marker, start)]
+
+    assert "event.type==='text'" in body
+    assert "event.segment" in body
+    assert "insertBeforeAnchor(textSeg)" in body
+    assert "document.createElement('div')" not in body
+    assert "transparent-text-event" not in body
+
+
+def test_4096_no_transparent_text_event_css_marker_rows():
+    """No duplicate text-marker CSS should remain; text is the original segment."""
+    assert "transparent-text-event" not in STYLE_CSS
+    assert "transparent-event-text-preview" not in STYLE_CSS
