@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Local pytest runs now use a supported repo-managed Python environment.** `scripts/test.sh` creates or uses `.venv` on Python 3.11-3.13, installs `requirements-dev.txt` when test dependencies are missing, and `tests/conftest.py` fails fast with a clear message if pytest is launched under an unsupported interpreter such as Python 3.9. This prevents local runs from dying during collection on newer type syntax before reaching the intended regression tests.
+
 ## [v0.51.382] — 2026-06-13 — Release MU (Stable Assistant Turn Anchors: activity-scene projection, inert, #4093)
 
 ### Added
