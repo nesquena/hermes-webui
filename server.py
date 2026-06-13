@@ -142,6 +142,7 @@ from api.helpers import (
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
 )
+from api.host_guard import enforce_host_guard
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
 from api.startup import auto_install_agent_deps, fix_credential_permissions
@@ -303,6 +304,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._req_t0 = time.time()
+        # Host allowlist runs before everything else — a rebound Host means
+        # the request is from a hostname the operator has not trusted, even
+        # though the socket landed on loopback. See api/host_guard.py.
+        if not enforce_host_guard(self):
+            return
         # Per-request profile context from cookie (issue #798)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
@@ -334,6 +340,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time()
+        # Host allowlist runs before everything else — see do_GET note.
+        if not enforce_host_guard(self):
+            return
         # Per-request profile context from cookie (issue #798)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
@@ -383,6 +392,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         """Handle CORS preflight requests."""
         self._req_t0 = time.time()
+        # A rebound Host on a preflight is the first hop of the same attack
+        # the GET/POST guards reject — reject it here too rather than echoing
+        # a permissive CORS header back to an untrusted origin.
+        if not enforce_host_guard(self):
+            return
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
