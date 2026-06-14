@@ -3351,8 +3351,9 @@ def _configured_model_badges_from_static_catalog(
     def _norm_static_model_id(model_id: str) -> str:
         s = str(model_id or "").strip().lower()
         if s.startswith("@") and ":" in s:
-            parts = s.split(":")
-            s = parts[-1] or s
+            colon_idx = s.index(":", 1)
+            candidate = s[colon_idx + 1:]
+            s = candidate or s
         if "://" not in s and "/" in s:
             stripped = s.split("/", 1)[1]
             s = stripped or s
@@ -4577,8 +4578,11 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
             # Defensive: if the last segment is empty (trailing colon, malformed
             # config), keep the original to avoid collapsing distinct IDs to ''.
             if s.startswith("@") and ":" in s:
-                parts = s.split(":")
-                s = parts[-1] or s
+                # Strip @provider: prefix, preserving remaining hierarchy including
+                # colon-suffixed model IDs like provider/model:free (#3959).
+                colon_idx = s.index(":", 1)
+                candidate = s[colon_idx + 1:]
+                s = candidate or s
             # Skip slash-based stripping for URI-scheme IDs (e.g.
             # gpt://folder/model/latest) whose slashes are path separators,
             # not provider delimiters (#3429).

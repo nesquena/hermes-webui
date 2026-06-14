@@ -1658,10 +1658,10 @@ function _selectedModelOption(){
 
 function _normalizeConfiguredModelKey(modelId){
   let s=String(modelId||'').trim().toLowerCase();
-  // Strip @provider: prefix (e.g., @custom:jingdong:GLM-5 -> GLM-5).
+  // Strip @provider: prefix (e.g., @custom:jingdong:GLM-5 -> jingdong:GLM-5).
   // Defensive: trailing-colon / trailing-slash falls back to the original key
   // so malformed configs don't collapse distinct ids to '' (matches backend _norm_model_id).
-  if(s.startsWith('@')&&s.includes(':')){const last=s.split(':').pop();s=last||s;}
+  if(s.startsWith('@')&&s.includes(':')){const ci=s.indexOf(':',1);const cand=s.slice(ci+1);s=cand||s;}
   // Skip slash-based stripping for URI-scheme IDs (e.g. gpt://folder/model)
   // whose slashes are path separators, not provider delimiters (#3429).
   const _hasScheme=/^[a-z][a-z0-9+.-]*:\/\//i.test(s);
