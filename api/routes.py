@@ -7328,7 +7328,7 @@ def handle_get(handler, parsed) -> bool:
     return False  # 404
 
 
-# ── GET route helpers
+# ── POST auth helpers
 
 def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
     """Require an existing authenticated WebUI session before adding passkeys.
@@ -7342,7 +7342,7 @@ def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
     from api.auth import is_auth_enabled, parse_cookie, verify_session
 
     if not is_auth_enabled():
-        return False, "Authenticate with a password before registering a passkey.", 401
+        return False, "Authentication required", 401
     cookie_val = parse_cookie(handler)
     if not cookie_val or not verify_session(cookie_val):
         return False, "Authentication required", 401

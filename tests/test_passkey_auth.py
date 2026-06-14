@@ -240,7 +240,7 @@ def test_first_passkey_registration_options_requires_existing_auth(monkeypatch, 
     routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register/options"))
 
     assert handler.status == 401
-    assert "Authenticate" in json.loads(handler.wfile.getvalue())["error"]
+    assert json.loads(handler.wfile.getvalue())["error"] == "Authentication required"
 
 
 def test_first_passkey_registration_requires_existing_auth(monkeypatch, tmp_path):
@@ -256,7 +256,41 @@ def test_first_passkey_registration_requires_existing_auth(monkeypatch, tmp_path
     routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register"))
 
     assert handler.status == 401
-    assert "Authenticate" in json.loads(handler.wfile.getvalue())["error"]
+    assert json.loads(handler.wfile.getvalue())["error"] == "Authentication required"
+
+
+def test_passkey_registration_requires_valid_session_when_auth_is_enabled(monkeypatch):
+    import api.auth as auth
+    import api.passkeys as passkeys
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "parse_cookie", lambda handler: None)
+    monkeypatch.setattr(
+        auth,
+        "verify_session",
+        lambda cookie: (_ for _ in ()).throw(AssertionError("verify_session should not be called without a cookie")),
+    )
+    monkeypatch.setattr(
+        passkeys,
+        "registration_options",
+        lambda handler: (_ for _ in ()).throw(AssertionError("registration_options should not be reached")),
+    )
+    monkeypatch.setattr(
+        passkeys,
+        "finish_registration",
+        lambda body, handler: (_ for _ in ()).throw(AssertionError("finish_registration should not be reached")),
+    )
+
+    for path in ("/api/auth/passkey/register/options", "/api/auth/passkey/register"):
+        handler = RouteFakeHandler()
+        routes.handle_post(handler, SimpleNamespace(path=path))
+
+        assert handler.status == 401
+        assert json.loads(handler.wfile.getvalue())["error"] == "Authentication required"
+
 
 def test_auth_status_reports_passkey_availability_source_contract():
     src = open("api/routes.py", encoding="utf-8").read()
