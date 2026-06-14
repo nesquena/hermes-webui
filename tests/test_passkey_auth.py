@@ -212,6 +212,9 @@ def test_passkey_register_options_handles_base_passkey_errors(monkeypatch):
 
     monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
     monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "parse_cookie", lambda handler: "session")
+    monkeypatch.setattr(auth, "verify_session", lambda cookie: True)
 
     def raise_passkey_error(_handler):
         raise passkeys.PasskeyError("plain passkey error")
@@ -224,6 +227,36 @@ def test_passkey_register_options_handles_base_passkey_errors(monkeypatch):
     assert handler.status == 400
     assert json.loads(handler.wfile.getvalue())["error"] == "plain passkey error"
 
+def test_first_passkey_registration_options_requires_existing_auth(monkeypatch, tmp_path):
+    import api.auth as auth
+    import api.routes as routes
+
+    _set_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_PASSKEY", "1")
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(auth, "get_password_hash", lambda: None)
+
+    handler = RouteFakeHandler()
+    routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register/options"))
+
+    assert handler.status == 401
+    assert "Authenticate" in json.loads(handler.wfile.getvalue())["error"]
+
+
+def test_first_passkey_registration_requires_existing_auth(monkeypatch, tmp_path):
+    import api.auth as auth
+    import api.routes as routes
+
+    _set_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_PASSKEY", "1")
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(auth, "get_password_hash", lambda: None)
+
+    handler = RouteFakeHandler()
+    routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register"))
+
+    assert handler.status == 401
+    assert "Authenticate" in json.loads(handler.wfile.getvalue())["error"]
 
 def test_auth_status_reports_passkey_availability_source_contract():
     src = open("api/routes.py", encoding="utf-8").read()

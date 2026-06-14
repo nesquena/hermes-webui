@@ -7330,6 +7330,23 @@ def handle_get(handler, parsed) -> bool:
 
 # ── GET route helpers
 
+def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
+    """Require an existing authenticated WebUI session before adding passkeys.
+
+    Registering the first passkey is an auth-factor enrollment action, not a
+    login bootstrap.  In passkey-only first-run states (feature flag enabled, no
+    password hash, and zero credentials) there is no current factor to prove, so
+    unauthenticated registration must fail instead of silently creating the
+    first credential for whoever can reach the endpoint.
+    """
+    from api.auth import is_auth_enabled, parse_cookie, verify_session
+
+    if not is_auth_enabled():
+        return False, "Authenticate with a password before registering a passkey.", 401
+    cookie_val = parse_cookie(handler)
+    if not cookie_val or not verify_session(cookie_val):
+        return False, "Authentication required", 401
+    return True, "", 200
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
@@ -9302,6 +9319,9 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        ok, error, status = _require_passkey_registration_auth(handler)
+        if not ok:
+            return j(handler, {"error": error}, status=status)
         try:
             return j(handler, {"ok": True, "publicKey": registration_options(handler)})
         except PasskeyRateLimitError as e:
@@ -9315,6 +9335,9 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        ok, error, status = _require_passkey_registration_auth(handler)
+        if not ok:
+            return j(handler, {"error": error}, status=status)
         try:
             result = finish_registration(body, handler)
             result["credentials"] = registered_credentials()
