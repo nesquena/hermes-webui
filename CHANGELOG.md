@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.402] — 2026-06-13 — Release NO (proportional scroll restoration after render-window growth, opt-in, #4110)
+
+### Fixed
+
+- **Finishing a streamed reply in a long conversation no longer jumps the viewport to an earlier part of the chat — and the fix is now scoped so it can't disturb other callers.** When the render window grows by prepending earlier messages, `_restoreMessageScrollSnapshot` adjusts `scrollTop` by the DOM height delta — but only when the caller opts in via `adjustForTopGrowth`, so older-history paging (which already compensates) and bottom-growth live-compression restores (`_restoreMessageScrollSnapshotSameFrame`) are unaffected. Also guards `_programmaticScroll` across the `innerHTML` clear (reset on all exits) so the native scroll event during DOM replacement can't false-trigger sticky-unpin. (#4110)
+
 ## [v0.51.400] — 2026-06-13 — Release NM (skill bundles in WebUI slash commands, #4087)
 
 ### Fixed
