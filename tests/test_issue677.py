@@ -40,7 +40,7 @@ class TestScrollPinningFix:
             "unconditional scrollToBottom() overrides user scroll position (#677)"
         )
         # scrollIfPinned must be called through the renderMessages scroll policy (stream path)
-        assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in rm_body
+        assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot, _scrollOpts);" in rm_body
         assert "scrollIfPinned()" in helper_body, (
             "renderMessages() must call scrollIfPinned() during streaming (#677)"
         )
