@@ -168,9 +168,9 @@ def test_load_session_same_sid_noop_does_not_mask_pending_switch_back():
 def test_load_session_preserves_existing_worklog_content_without_destructive_fallback():
     """Switching back to an active stream with live Worklog content should be treated as restored.
 
-    If loadSession() sees .wl-reason or .tool-card-row already in #liveAssistantTurn,
-    the destructive fallback must not call clearLiveToolCards() and rebuild a blank
-    Running shell over the preserved timeline.
+    If loadSession() sees live Thinking, .wl-reason, or .tool-card-row already in
+    #liveAssistantTurn, the destructive fallback must not call clearLiveToolCards()
+    and rebuild a blank Running shell over the preserved timeline.
     """
     body = _function_body(SESSIONS_JS, "loadSession")
     content_pos = body.find("const hasCurrentWorklogContent=")
@@ -179,6 +179,10 @@ def test_load_session_preserves_existing_worklog_content_without_destructive_fal
     assert clear_pos != -1
     between = body[content_pos:clear_pos]
     compact = re.sub(r"\s+", "", between)
+    assert '.agent-activity-thinking[data-live-thinking="1"]' in between, (
+        "Live Thinking Cards must count as existing live Worklog content; otherwise "
+        "switch-back during a Thinking-only phase rebuilds a blank shell."
+    )
     assert "if(hasCurrentWorklogContent)restoredLiveTurn=true" in compact, (
         "Existing live Worklog content must mark the turn restored before the "
         "clearLiveToolCards() fallback runs."

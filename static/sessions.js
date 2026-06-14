@@ -1197,6 +1197,7 @@ async function loadSession(sid){
       }else{
         const liveTurn=document.getElementById('liveAssistantTurn');
         const hasCurrentWorklogContent=!!(liveTurn&&liveTurn.querySelector(
+          '.agent-activity-thinking[data-live-thinking="1"],'+
           '.live-worklog[data-live-worklog-shell="1"] .tool-card-row,'+
           '.live-worklog[data-live-worklog-shell="1"] .wl-reason,'+
           '.tool-call-group[data-live-tool-worklog-group="1"] .tool-card-row,'+
