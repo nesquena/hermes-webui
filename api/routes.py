@@ -7331,17 +7331,19 @@ def handle_get(handler, parsed) -> bool:
 # ── POST auth helpers
 
 def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
-    """Require an existing authenticated WebUI session before adding passkeys.
+    """Require auth, or the existing local-only first-run bootstrap gate.
 
-    Registering the first passkey is an auth-factor enrollment action, not a
-    login bootstrap.  In passkey-only first-run states (feature flag enabled, no
-    password hash, and zero credentials) there is no current factor to prove, so
-    unauthenticated registration must fail instead of silently creating the
-    first credential for whoever can reach the endpoint.
+    Registering additional passkeys is an auth-factor enrollment action and
+    requires a valid WebUI session.  The first passkey can still bootstrap a
+    passkey-only instance, but only through the same local/private-network
+    onboarding gate used for first password setup.
     """
     from api.auth import is_auth_enabled, parse_cookie, verify_session
 
-    if not is_auth_enabled():
+    auth_enabled = is_auth_enabled()
+    if not auth_enabled:
+        if _onboarding_gate_allows(handler, auth_enabled):
+            return True, "", 200
         return False, "Authentication required", 401
     cookie_val = parse_cookie(handler)
     if not cookie_val or not verify_session(cookie_val):

@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Passkey first-run bootstrap now matches the existing local-only onboarding gate.** With `HERMES_WEBUI_PASSKEY=1`, passwordless instances can enroll the first passkey only from loopback/private onboarding contexts (or with `HERMES_WEBUI_ONBOARDING_OPEN=1`), while remote/tunnel callers still receive `Authentication required` instead of being able to claim the first credential.
+
 ## [v0.51.409] — 2026-06-14 — Release NV (provider-gate title-gen reasoning extra_body, #4161/#2083)
 
 ### Fixed
