@@ -1616,10 +1616,7 @@ def _session_list_payload_to_response(payload: dict) -> dict:
     safe_merged = []
     runtime_rows = _session_list_cache_overlay_runtime_rows(payload.get("sessions", []) or [])
     for s in runtime_rows:
-        item = dict(s) if isinstance(s, dict) else {}
-        if isinstance(item.get("title"), str):
-            item["title"] = _redact_text(item["title"])
-        item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
+        item = _sidebar_session_response_item(s) if isinstance(s, dict) else {}
         safe_merged.append(item)
     return {
         "sessions": safe_merged,
@@ -4777,6 +4774,79 @@ def _session_attention_summary(session_id: str) -> dict | None:
     return None
 
 
+_SIDEBAR_SESSION_RESPONSE_FIELDS = {
+    "session_id",
+    "title",
+    "workspace",
+    "model",
+    "model_provider",
+    "message_count",
+    "user_message_count",
+    "created_at",
+    "updated_at",
+    "last_message_at",
+    "pinned",
+    "archived",
+    "project_id",
+    "profile",
+    "input_tokens",
+    "output_tokens",
+    "estimated_cost",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "cache_hit_percent",
+    "personality",
+    "context_length",
+    "config_context_length",
+    "window_usage_percent",
+    "source_tag",
+    "raw_source",
+    "session_source",
+    "source_label",
+    "is_cli_session",
+    "is_messaging_session",
+    "is_streaming",
+    "active_stream_id",
+    "has_pending_user_message",
+    "pending_started_at",
+    "default_hidden",
+    "worktree_path",
+    "parent_session_id",
+    "parent_title",
+    "parent_source",
+    "relationship_type",
+    "pre_compression_snapshot",
+    "_lineage_root_id",
+    "_lineage_tip_id",
+    "_compression_segment_count",
+    "_lineage_collapsed_count",
+    "_parent_lineage_root_id",
+    "_cross_surface_child_session",
+    "match_type",
+    "match_preview",
+}
+
+
+def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None = None) -> dict:
+    """Return the bounded /api/sessions row shape used by the sidebar.
+
+    Full session/detail fields such as messages, tool calls, compression
+    summaries, context-engine state, gateway routing history, drafts, and
+    pending user text are intentionally excluded from the list endpoint. Large
+    installs should not ship tens of KB of per-row detail just to render a
+    conversation title.
+    """
+    item = {
+        key: value
+        for key, value in dict(session).items()
+        if key in _SIDEBAR_SESSION_RESPONSE_FIELDS
+    }
+    if isinstance(item.get("title"), str):
+        item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
+    item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
+    return item
+
+
 # ── Login page locale strings ─────────────────────────────────────────────────
 # Add entries here to support more languages on the login page.
 # The key must match the 'language' setting value (from static/i18n.js LOCALES).
@@ -7153,7 +7223,7 @@ def handle_get(handler, parsed) -> bool:
                 diag=diag,
             )
             diag.stage("response_write")
-            return j(handler, _session_list_payload_to_response(payload))
+            return j(handler, _session_list_payload_to_response(payload), pretty=False)
         finally:
             diag.finish()
 
