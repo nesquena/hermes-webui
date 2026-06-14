@@ -67,10 +67,15 @@ def test_sessions_sidebar_response_item_drops_bulky_detail_fields(monkeypatch):
     row = {
         "session_id": "sid-heavy",
         "title": "Visible title",
+        "display_title": "State DB title",
+        "_state_db_title": "State DB title",
         "updated_at": 10,
         "last_message_at": 11,
         "message_count": 123,
         "user_message_count": 61,
+        "has_pending_user_message": True,
+        "worktree_path": "/tmp/worktree",
+        "worktree_branch": "feature/sidebar",
         "compression_anchor_summary": "X" * 50000,
         "compression_anchor_details": {"huge": True},
         "context_engine_state": {"expensive": True},
@@ -85,7 +90,12 @@ def test_sessions_sidebar_response_item_drops_bulky_detail_fields(monkeypatch):
 
     assert item["session_id"] == "sid-heavy"
     assert item["title"] == "Visible title"
+    assert item["display_title"] == "State DB title"
+    assert item["_state_db_title"] == "State DB title"
     assert item["message_count"] == 123
+    assert item["has_pending_user_message"] is True
+    assert item["worktree_path"] == "/tmp/worktree"
+    assert item["worktree_branch"] == "feature/sidebar"
     assert item["attention"] == {"kind": "none"}
     for key in (
         "compression_anchor_summary",
@@ -98,6 +108,37 @@ def test_sessions_sidebar_response_item_drops_bulky_detail_fields(monkeypatch):
         "messages",
     ):
         assert key not in item
+
+
+def test_sidebar_allowlist_preserves_fields_consumed_by_frontend():
+    from api import routes
+
+    required = {
+        "display_title",
+        "_state_db_title",
+        "has_pending_user_message",
+        "worktree_branch",
+    }
+
+    assert required <= routes._SIDEBAR_SESSION_RESPONSE_FIELDS
+    assert "pending_user_message" not in routes._SIDEBAR_SESSION_RESPONSE_FIELDS
+
+
+def test_session_list_error_path_uses_same_generation_guard_as_success_path():
+    src = _sessions_js()
+    block_start = src.find("async function _runRenderSessionListRefresh")
+    assert block_start > 0
+    block_end = src.find("async function _drainRenderSessionListQueue", block_start)
+    assert block_end > block_start
+    block = src[block_start:block_end]
+    catch_start = block.find("}catch(e){")
+    assert catch_start > 0
+    catch_block = block[catch_start:]
+
+    assert "if (_gen !== _renderSessionListGen) return;" in catch_block
+    assert catch_block.index("if (_gen !== _renderSessionListGen) return;") < catch_block.index(
+        "_showSessionListLoadError(e);"
+    )
 
 
 def test_json_helper_can_emit_compact_json_for_large_list_endpoints():

@@ -49,7 +49,7 @@ function _isRestorableNewChatDraftSession(session, requireDraft=false) {
   if (!session || !session.session_id) return false;
   const messageCount = Number(session.message_count || 0);
   if (messageCount !== 0) return false;
-  if (session.active_stream_id || session.pending_user_message || session.worktree_path) return false;
+  if (session.active_stream_id || session.pending_user_message || session.worktree_path || session.has_pending_user_message) return false;
   const title = session.title || 'Untitled';
   if (title !== 'Untitled' && title !== 'New Chat') return false;
   const activeProfile = S.activeProfile || 'default';
@@ -352,8 +352,12 @@ function _isSessionEffectivelyStreaming(s) {
   return Boolean(s && (s.is_streaming || _isSessionLocallyStreaming(s)));
 }
 
+function _hasPendingUserMessageSignal(s) {
+  return Boolean(s && (s.pending_user_message || s.has_pending_user_message));
+}
+
 function _isServerIdleSessionRow(s) {
-  return Boolean(s && s.session_id && !s.is_streaming && !s.active_stream_id && !s.pending_user_message);
+  return Boolean(s && s.session_id && !s.is_streaming && !s.active_stream_id && !s.pending_user_message && !s.has_pending_user_message);
 }
 
 function _reconcileActiveSessionIdleStateFromList(serverRows) {
@@ -3370,11 +3374,12 @@ function animateNextSessionListRefresh(options={}){
 function _isOptimisticFirstTurnSessionRow(s){
   if(!s||!s.session_id||s.archived) return false;
   const messageCount=Number(s.message_count||0);
-  if(messageCount<=0&&!s.pending_user_message) return false;
+  if(messageCount<=0&&!(s.pending_user_message||s.has_pending_user_message)) return false;
   return Boolean(
     s.is_streaming||
     s.active_stream_id||
     s.pending_user_message||
+    s.has_pending_user_message||
     s.pending_started_at||
     _isSessionLocallyStreaming(s)||
     _sessionStreamingById.get(s.session_id)===true
@@ -3387,7 +3392,7 @@ function _shouldKeepLocalOnlyOptimisticSessionRow(local){
   if(typeof _sendInProgress!=='undefined'&&_sendInProgress&&sid===_sendInProgressSid) return true;
   const activeSid=S&&S.session&&S.session.session_id;
   const isActive=Boolean(activeSid&&activeSid===sid);
-  const hasRuntimeConfirmation=Boolean(local.active_stream_id||local.pending_user_message||local.pending_started_at);
+  const hasRuntimeConfirmation=Boolean(local.active_stream_id||local.pending_user_message||local.has_pending_user_message||local.pending_started_at);
   if(isActive&&S.busy&&hasRuntimeConfirmation) return true;
   const localTs=Number(local.last_message_at||local.updated_at||0);
   const ageMs=localTs>0?Date.now()-(localTs*1000):Infinity;
@@ -3605,6 +3610,7 @@ async function _runRenderSessionListRefresh(opts, _gen){
     }
     _applySessionListPayload(sessData,projData);
   }catch(e){
+    if (_gen !== _renderSessionListGen) return;
     _showSessionListLoadError(e);
     renderSessionListFromCache();
   }
@@ -5031,6 +5037,7 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     _isSessionEffectivelyStreaming(s) ||
     !!s.active_stream_id ||
     !!s.pending_user_message ||
+    !!s.has_pending_user_message ||
     (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }

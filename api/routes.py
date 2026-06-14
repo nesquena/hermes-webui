@@ -4777,6 +4777,8 @@ def _session_attention_summary(session_id: str) -> dict | None:
 _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "session_id",
     "title",
+    "display_title",
+    "_state_db_title",
     "workspace",
     "model",
     "model_provider",
@@ -4811,6 +4813,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "pending_started_at",
     "default_hidden",
     "worktree_path",
+    "worktree_branch",
     "parent_session_id",
     "parent_title",
     "parent_source",
