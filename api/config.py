@@ -2743,7 +2743,26 @@ def _lmstudio_model_reasoning_options(
     api_key: str | None = None,
     timeout: float = 5.0,
 ) -> list[str]:
-    """Prefer hermes_cli, but keep WebUI reasoning probes working without it."""
+    """Prefer hermes_cli, but keep WebUI reasoning probes working without it.
+
+    SECURITY: when an ``api_key`` is being sent, always use the built-in
+    no-redirect fallback probe rather than ``hermes_cli``. The bundled CLI probe
+    uses a plain ``urllib.request.urlopen`` that follows redirects and re-sends
+    the ``Authorization`` header to the redirect target, which could leak the
+    configured LM Studio credential to another host. We can only guarantee
+    redirect safety for code we control, so credentialed probes go through
+    ``_lmstudio_reasoning_probe_options_fallback`` (no-redirect opener). Keyless
+    probes have no credential to leak, so they may use the richer CLI path.
+    (#3837 security review)
+    """
+    if api_key:
+        return _lmstudio_reasoning_probe_options_fallback(
+            model,
+            base_url,
+            api_key=api_key,
+            timeout=timeout,
+        )
+
     try:
         from hermes_cli.models import (
             lmstudio_model_reasoning_options as _cli_lmstudio_model_reasoning_options,

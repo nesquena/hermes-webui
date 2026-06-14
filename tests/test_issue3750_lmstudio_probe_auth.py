@@ -313,11 +313,15 @@ def test_onboarding_probe_remains_authorized_control(
     }
 
 
-def test_reasoning_probe_logs_signature_mismatch_before_fallback(
+def test_credentialed_probe_never_calls_hermes_cli(
     tmp_path,
     monkeypatch,
     lmstudio_probe_server,
 ):
+    """When a credential is configured, the probe must use the built-in
+    no-redirect fallback and NEVER the bundled hermes_cli probe (which follows
+    redirects and could forward the key). (#3837 security review)
+    """
     _write_config(
         tmp_path,
         monkeypatch,
@@ -329,6 +333,53 @@ model:
 providers:
   lmstudio:
     api_key: config-token
+agent:
+  reasoning_effort: medium
+display:
+  show_reasoning: true
+""",
+    )
+
+    cli_calls: list[tuple] = []
+
+    class _CliModule:
+        @staticmethod
+        def lmstudio_model_reasoning_options(model, base_url, api_key=None, timeout=5.0):
+            cli_calls.append((model, base_url, api_key))
+            return ["low", "medium", "high"]
+
+    monkeypatch.setitem(sys.modules, "hermes_cli", type("HermesCli", (), {})())
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", _CliModule)
+
+    status = config.get_reasoning_status()
+
+    assert status["supports_reasoning_effort"] is True
+    assert status["supported_efforts"] == ["low", "medium", "high"]
+    # The credential reached the configured endpoint via the built-in probe …
+    assert lmstudio_probe_server.requests[0] == {
+        "path": "/api/v1/models",
+        "authorization": "Bearer config-token",
+    }
+    # … and the redirect-following hermes_cli probe was never invoked.
+    assert cli_calls == [], "credentialed probe must bypass hermes_cli"
+
+
+def test_keyless_probe_logs_signature_mismatch_before_fallback(
+    tmp_path,
+    monkeypatch,
+    lmstudio_probe_server,
+):
+    """Keyless probes still prefer hermes_cli; an incompatible CLI signature
+    logs a warning and degrades to the built-in probe. (#3750)
+    """
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        f"""
+model:
+  provider: lmstudio
+  default: auth-model
+  base_url: {lmstudio_probe_server.base_v1}
 agent:
   reasoning_effort: medium
 display:
@@ -351,14 +402,14 @@ display:
         lambda msg, *args, **kwargs: captured.append((str(msg), bool(kwargs.get("exc_info")))),
     )
 
+    # No key configured -> CLI path is attempted, raises TypeError, warning is
+    # logged, then the built-in (keyless) probe runs against the auth-requiring
+    # test server, which 401s -> []. The point is the warning + degrade path.
     status = config.get_reasoning_status()
 
-    assert status["supports_reasoning_effort"] is True
-    assert status["supported_efforts"] == ["low", "medium", "high"]
-    assert lmstudio_probe_server.requests[0] == {
-        "path": "/api/v1/models",
-        "authorization": "Bearer config-token",
-    }
+    assert status["supports_reasoning_effort"] is False
+    assert status["supported_efforts"] == []
+    assert lmstudio_probe_server.requests[-1]["authorization"] is None
     assert captured, "TypeError fallback must log a warning before probing directly"
     assert "unexpected signature" in captured[0][0]
     assert captured[0][1] is True
@@ -469,4 +520,107 @@ def test_reasoning_probe_does_not_follow_redirects_with_credential(
     assert result == []
     hosts_hit = {c["host"] for c in captured}
     assert "target" not in hosts_hit, "redirect must not be followed"
+    assert all(c["host"] == "redirector" for c in captured)
+
+
+def test_credentialed_probe_does_not_follow_redirects_end_to_end(
+    tmp_path,
+    monkeypatch,
+):
+    """End-to-end through resolve_model_reasoning_efforts() with the REAL
+    hermes_cli importable: when the CONFIGURED LM Studio endpoint returns a 302,
+    the credentialed probe must not forward the key to the redirect target.
+    This is the production path (hermes_cli present) — credentialed probes route
+    through the built-in no-redirect probe, so the redirect is refused.
+    (#3837 security review)
+    """
+    captured: list[dict[str, str | None]] = []
+
+    class _Target(BaseHTTPRequestHandler):
+        def do_GET(self):
+            captured.append(
+                {"host": "target", "authorization": self.headers.get("Authorization")}
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "key": "auth-model",
+                                "capabilities": {
+                                    "reasoning": {"allowed_options": ["low", "high"]}
+                                },
+                            }
+                        ]
+                    }
+                ).encode()
+            )
+
+        def log_message(self, fmt, *args):
+            return None
+
+    class _Redirector(BaseHTTPRequestHandler):
+        def do_GET(self):
+            captured.append(
+                {"host": "redirector", "authorization": self.headers.get("Authorization")}
+            )
+            self.send_response(302)
+            self.send_header(
+                "Location", f"http://127.0.0.1:{target.server_address[1]}/api/v1/models"
+            )
+            self.end_headers()
+
+        def log_message(self, fmt, *args):
+            return None
+
+    target = HTTPServer(("127.0.0.1", 0), _Target)
+    target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+    target_thread.start()
+    redir = HTTPServer(("127.0.0.1", 0), _Redirector)
+    redir_thread = threading.Thread(target=redir.serve_forever, daemon=True)
+    redir_thread.start()
+
+    # Sanity: this test only proves the redirect guard if hermes_cli is
+    # importable (the production path). If it isn't, the keyless/credentialed
+    # split still routes credentialed probes through the no-redirect fallback,
+    # so the assertion holds either way.
+    redir_base = f"http://127.0.0.1:{redir.server_address[1]}/v1"
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        f"""
+model:
+  provider: lmstudio
+  default: auth-model
+  base_url: {redir_base}
+providers:
+  lmstudio:
+    api_key: secret-token
+agent:
+  reasoning_effort: medium
+display:
+  show_reasoning: true
+""",
+    )
+    try:
+        efforts = config.resolve_model_reasoning_efforts(
+            "auth-model",
+            provider_id="lmstudio",
+            base_url=redir_base,
+        )
+    finally:
+        redir.shutdown()
+        redir.server_close()
+        redir_thread.join(timeout=5)
+        target.shutdown()
+        target.server_close()
+        target_thread.join(timeout=5)
+
+    assert efforts == []
+    hosts_hit = {c["host"] for c in captured}
+    assert "target" not in hosts_hit, "credentialed redirect must not be followed"
+    # The credential only ever touched the configured (redirector) endpoint.
     assert all(c["host"] == "redirector" for c in captured)
