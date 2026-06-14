@@ -46,6 +46,7 @@ except ImportError:
 _approval_sse_subscribers: dict[str, list[queue.Queue]] = {}
 _GATEWAY_MIRROR_FLAG = "_gateway_mirror"
 _GATEWAY_MIRROR_TOKEN = "_gateway_mirror_token"
+_GATEWAY_ENTRY_DATA_TOKEN_KEY = "_webui_mirror_token"
 
 
 def _approval_sse_subscribe(session_id: str) -> queue.Queue:
@@ -108,16 +109,16 @@ def _approval_sse_notify(session_id: str, head: dict | None, total: int) -> None
 def _gateway_mirror_entry_token(entry) -> str:
     """Return a stable token for the current process lifetime of a gateway head.
 
-    Stamps a `_webui_mirror_token` key into the entry's `.data` dict so
+    Stamps a token key into the entry's `.data` dict so
     slotted objects like `_ApprovalEntry` work without attribute mutation
     and the token survives CPython `id()` reuse after GC.
     """
     data = getattr(entry, "data", None)
     if isinstance(data, dict):
-        token = data.get("_webui_mirror_token")
+        token = data.get(_GATEWAY_ENTRY_DATA_TOKEN_KEY)
         if not token:
             token = uuid.uuid4().hex
-            data["_webui_mirror_token"] = token
+            data[_GATEWAY_ENTRY_DATA_TOKEN_KEY] = token
         return token
     return uuid.uuid4().hex
 
