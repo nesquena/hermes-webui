@@ -4539,9 +4539,11 @@ function _sessionTitleIsDefaultWebUI(rawTitle){
   return title==='Hermes WebUI'||/^Hermes WebUI #\d+$/.test(title);
 }
 
+const SESSION_TAG_RE=/#[A-Za-z][\w-]*/g;
+
 function _sessionTitleTags(rawTitle){
   if(_sessionTitleIsDefaultWebUI(rawTitle)) return [];
-  return String(rawTitle||'').match(/#[\w-]+/g)||[];
+  return String(rawTitle||'').match(SESSION_TAG_RE)||[];
 }
 
 function _activeSessionIdForSidebar(){
@@ -5230,7 +5232,7 @@ function renderSessionListFromCache(){
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=_sessionDisplayTitle(s);
     const tags=_sessionTitleTags(rawTitle);
-    let cleanTitle=tags.length?rawTitle.replace(/#[\w-]+/g,'').trim():rawTitle;
+    let cleanTitle=tags.length?rawTitle.replace(SESSION_TAG_RE,'').trim():rawTitle;
     // Guard: system prompt content must never surface as a visible session title
     if(cleanTitle.startsWith('[SYSTEM:')){
       cleanTitle='Session';

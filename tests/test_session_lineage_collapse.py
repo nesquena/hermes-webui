@@ -863,6 +863,9 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+const tagReDecl = src.match(/const SESSION_TAG_RE=[^;]+;/);
+if (!tagReDecl) throw new Error('SESSION_TAG_RE not found');
+eval(tagReDecl[0].replace('const ', 'var '));
 eval(extractFunc('_sessionTitleIsDefaultWebUI'));
 eval(extractFunc('_sessionTitleTags'));
 console.log(JSON.stringify({{
@@ -871,3 +874,49 @@ console.log(JSON.stringify({{
 }}));
 """
     assert json.loads(_run_node(source)) == {"webui": [], "custom": ["#prod"]}
+
+
+def test_sidebar_session_tags_preserve_numeric_github_issue_refs():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const tagReDecl = src.match(/const SESSION_TAG_RE=[^;]+;/);
+if (!tagReDecl) throw new Error('SESSION_TAG_RE not found');
+eval(tagReDecl[0].replace('const ', 'var '));
+eval(extractFunc('_sessionTitleIsDefaultWebUI'));
+eval(extractFunc('_sessionTitleTags'));
+const cases = {{
+  spacedIssueRef:_sessionTitleTags('GH #3748 Bool Fix, Mermaid Rendering Expectations'),
+  inlineIssueRef:_sessionTitleTags('WebUI GH#4151: Multiple PWA Regression'),
+  mixedIssueAndTag:_sessionTitleTags('GH #3748 Bool Fix #project'),
+  wordTags:_sessionTitleTags('Deploy #bug #my-tag #v2'),
+}};
+console.log(JSON.stringify(cases));
+"""
+    assert json.loads(_run_node(source)) == {
+        "spacedIssueRef": [],
+        "inlineIssueRef": [],
+        "mixedIssueAndTag": ["#project"],
+        "wordTags": ["#bug", "#my-tag", "#v2"],
+    }
+
+
+def test_sidebar_session_title_tag_regex_is_shared_by_extract_and_strip():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    assert "const SESSION_TAG_RE=/#[A-Za-z][\\w-]*/g;" in js
+    assert "return String(rawTitle||'').match(SESSION_TAG_RE)||[];" in js
+    assert "rawTitle.replace(SESSION_TAG_RE,'').trim()" in js
+    assert "rawTitle.replace(/#[\\w-]+/g" not in js

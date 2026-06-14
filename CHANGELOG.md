@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sidebar session titles keep GitHub-style issue references visible (#4154).** Numeric `#NNNN` tokens are no longer treated as session tag chips, while alphabetic tags like `#bug` still render as filter chips.
+
 ## [v0.51.391] — 2026-06-13 — Release ND (Stable Assistant Turn Anchors renderer snapshot adapter, inert, #3926)
 
 ### Added
