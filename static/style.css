@@ -4531,7 +4531,11 @@ main.main > #mainPlugin{display:none;}
 .session-child-session-fork.swiping-right{background:color-mix(in srgb,var(--warning) 16%,var(--surface));box-shadow:0 0 0 1px color-mix(in srgb,var(--warning) 48%,transparent);}
 .session-child-session-fork.swiping-left{background:color-mix(in srgb,var(--error) 14%,var(--surface));box-shadow:0 0 0 1px color-mix(in srgb,var(--error) 48%,transparent);}
 .session-child-session-fork.swiping-right .session-swipe-affordance-right,.session-child-session-fork.swiping-left .session-swipe-affordance-left{opacity:var(--session-swipe-progress,0);}
+.session-child-session-fork.needs-attention{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
+.session-child-session-fork.attention-approval{box-shadow:inset 3px 0 0 var(--error);background:color-mix(in srgb,var(--error) 9%,transparent);}
+.session-child-session-fork.attention-clarify{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
 .session-child-session-fork.dragging{transition:background .15s,color .15s,box-shadow .15s ease;will-change:transform;}
+.session-child-session-fork.dragging:hover{background:transparent;color:var(--muted);}
 .session-child-session-fork.swipe-committed,.session-child-session-fork.swipe-removing{transition:background .15s,color .15s,transform .5s cubic-bezier(.22,.61,.36,1),box-shadow .15s ease;will-change:transform;}
 .session-child-session-fork.swipe-removing{overflow:hidden;}
 .session-child-session-fork.swipe-committed .session-swipe-affordance{transition:opacity .18s ease,transform .18s ease;}
