@@ -1643,7 +1643,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_isActiveSession()){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
-      renderMessages({preserveScroll:true,adjustForTopGrowth:true});
+      renderMessages({preserveScroll:true});
     }
     renderSessionList();
     _setActivePaneIdleIfOwner();
