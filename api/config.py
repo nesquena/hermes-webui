@@ -3157,13 +3157,23 @@ def _configured_model_badges_from_static_catalog(
 
     def _norm_static_model_id(model_id: str) -> str:
         s = str(model_id or "").strip().lower()
+        stripped_at_provider = False
         if s.startswith("@") and ":" in s:
             colon_idx = s.index(":", 1)
             candidate = s[colon_idx + 1:]
+            stripped_at_provider = bool(candidate)
             s = candidate or s
-        if "://" not in s and "/" in s:
-            stripped = s.split("/", 1)[1]
-            s = stripped or s
+        if "://" not in s:
+            if (
+                not stripped_at_provider
+                and "/" in s
+                and ":" in s
+                and s.index(":") < s.index("/")
+            ):
+                s = s[s.index("/") + 1 :] or s
+            if "/" in s:
+                stripped = s.split("/", 1)[1]
+                s = stripped or s
         return s.replace("-", ".")
 
     norm_lookup: dict[str, list[str]] = {}
@@ -4381,6 +4391,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
 
         def _norm_model_id(model_id: str) -> str:
             s = str(model_id or "").strip().lower()
+            stripped_at_provider = False
             # Strip @provider: prefix (e.g., @custom:jingdong:GLM-5 -> GLM-5).
             # Defensive: if the last segment is empty (trailing colon, malformed
             # config), keep the original to avoid collapsing distinct IDs to ''.
@@ -4389,11 +4400,19 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                 # colon-suffixed model IDs like provider/model:free (#3959).
                 colon_idx = s.index(":", 1)
                 candidate = s[colon_idx + 1:]
+                stripped_at_provider = bool(candidate)
                 s = candidate or s
             # Skip slash-based stripping for URI-scheme IDs (e.g.
             # gpt://folder/model/latest) whose slashes are path separators,
             # not provider delimiters (#3429).
             if "://" not in s:
+                if (
+                    not stripped_at_provider
+                    and "/" in s
+                    and ":" in s
+                    and s.index(":") < s.index("/")
+                ):
+                    s = s[s.index("/") + 1 :] or s
                 # Strip only the first slash-segment (provider prefix), preserving
                 # any remaining vendor hierarchy.  Using parts[-1] here previously
                 # discarded ALL segments except the last, collapsing distinct

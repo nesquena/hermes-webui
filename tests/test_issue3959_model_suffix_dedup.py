@@ -17,10 +17,7 @@ UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
-def _exec_norm():
-    """Re-execute the _norm_model_id closure body via a synthetic def."""
-    start_marker = "def _norm_model_id(model_id: str) -> str:"
-    end_marker = "def _build_configured_model_badges"
+def _exec_nested_fn(start_marker: str, end_marker: str, fn_name: str):
     s = CONFIG_PY.find(start_marker)
     e = CONFIG_PY.find(end_marker, s)
     assert s != -1 and e != -1
@@ -34,7 +31,25 @@ def _exec_norm():
     dedented = "\n".join(ln[indent:] if len(ln) >= indent else ln for ln in lines)
     ns = {}
     exec(dedented, ns)
-    return ns["_norm_model_id"]
+    return ns[fn_name]
+
+
+def _exec_norm():
+    """Re-execute the _norm_model_id closure body via a synthetic def."""
+    return _exec_nested_fn(
+        "def _norm_model_id(model_id: str) -> str:",
+        "def _build_configured_model_badges",
+        "_norm_model_id",
+    )
+
+
+def _exec_static_norm():
+    """Re-execute the _norm_static_model_id helper via a synthetic def."""
+    return _exec_nested_fn(
+        "def _norm_static_model_id(model_id: str) -> str:",
+        "norm_lookup: dict[str, list[str]] = {}",
+        "_norm_static_model_id",
+    )
 
 
 def test_colon_suffix_model_preserves_suffix():
@@ -80,18 +95,23 @@ def test_ui_js_uses_indexof_not_split_pop():
     assert "s.split(':').pop()" not in UI_JS, (
         "ui.js still uses the buggy split(':').pop() pattern"
     )
+    assert "strippedAtProvider=!!cand" in UI_JS
+
+
+def test_colon_before_slash_prefix_matches_backend_paths():
+    """The non-@ colon-before-slash strip must match both backend helpers."""
+    norm = _exec_norm()
+    static_norm = _exec_static_norm()
+    model_id = "custom:llm-proxy/opencode_go/deepseek-v4-pro"
+    assert norm(model_id) == "deepseek.v4.pro"
+    assert static_norm(model_id) == "deepseek.v4.pro"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not in PATH")
 def test_backend_frontend_parity_complex_aggregator_proxy():
-    """Python and JS normalizers must agree on the inputs our fix affects.
-
-    Note: complex multi-colon+slash IDs like @custom:llm-proxy:kilo/nvidia/model:free
-    have a pre-existing parity gap (JS strips colon-before-slash segments, Python doesn't).
-    This test verifies parity for the simpler @provider:model and @provider:vendor:model
-    forms where our fix changes behavior.
-    """
+    """Python and JS normalizers must stay byte-for-byte aligned."""
     py_norm = _exec_norm()
+    static_norm = _exec_static_norm()
     import re
     js_match = re.search(
         r"function _normalizeConfiguredModelKey\([^)]*\)\{(.+?)\n\}",
@@ -106,9 +126,11 @@ def test_backend_frontend_parity_complex_aggregator_proxy():
     import subprocess, json, tempfile, os
     test_ids = [
         "@custom:jingdong:GLM-5",
-        "openai/gpt-5.5",
-        "gpt-4",
-        "@custom:vendor:model-name",
+        "@custom:llm-proxy:kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "@custom:proxy:nvidia/model:free",
+        "@custom:host:8080:model",
+        "openrouter/deepseek:free",
+        "custom:llm-proxy/opencode_go/deepseek-v4-pro",
     ]
     js_code = js_fn + "\n" + f"console.log(JSON.stringify({json.dumps(test_ids)}.map(id => [id, _normalizeConfiguredModelKey(id)])))"
     with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False) as f:
@@ -125,8 +147,9 @@ def test_backend_frontend_parity_complex_aggregator_proxy():
         os.unlink(tmp)
     for model_id in test_ids:
         py_result = py_norm(model_id)
+        static_result = static_norm(model_id)
         js_result = js_map[model_id]
-        assert py_result == js_result, (
+        assert py_result == static_result == js_result, (
             f"Parity mismatch for {model_id!r}: "
-            f"Python={py_result!r}, JS={js_result!r}"
+            f"Python={py_result!r}, static={static_result!r}, JS={js_result!r}"
         )
