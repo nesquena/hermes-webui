@@ -10,6 +10,7 @@ ROOT = Path(__file__).parent.parent
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+STREAMING_PY = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 
 
 class TestAuxiliaryModelsHTML:
@@ -88,6 +89,8 @@ class TestAuxiliaryModelsJS:
             "_mainAdvancedConfig=null",
             "btn.disabled=_mainAdvancedConfig===null",
             "if(_mainAdvancedConfig!==null)",
+            "Object.prototype.hasOwnProperty.call(auxData,'main')",
+            "_mainAdvancedConfig=null;",
             "auxAdvancedOverlay",
             "auxAdvancedBaseUrl",
             "auxAdvancedTimeout",
@@ -99,6 +102,36 @@ class TestAuxiliaryModelsJS:
             "Object.keys(cfg.extra_body).length",
         ):
             assert marker in PANELS_JS
+
+    def test_main_advanced_modal_hides_unsupported_timing_fields_but_keeps_request_body(self):
+        """Main-model modal should not advertise timing knobs that the chat agent cannot apply."""
+        open_idx = PANELS_JS.find("function _openAuxAdvancedOptions")
+        assert open_idx >= 0
+        modal_body = PANELS_JS[open_idx:open_idx + 3200]
+        assert "const timingFields=isMain?'':(" in modal_body
+        assert "auxAdvancedExtraBody" in modal_body
+        assert "auxAdvancedBaseUrl" in modal_body
+
+    def test_main_advanced_save_omits_unsupported_timing_keys(self):
+        """Saving main-model options must not send blank timing keys that backend treats as clears."""
+        save_idx = PANELS_JS.find("const advanced={")
+        assert save_idx >= 0
+        save_body = PANELS_JS[save_idx:save_idx + 900]
+        object_literal = save_body[:save_body.find("};") + 2]
+        assert "timeout:" not in object_literal
+        assert "download_timeout:" not in object_literal
+        assert "max_concurrency:" not in object_literal
+        assert "if(!isMain){" in save_body
+        assert "advanced.timeout=$('auxAdvancedTimeout')?.value||''" in save_body
+        assert "advanced.download_timeout=$('auxAdvancedDownloadTimeout')?.value||''" in save_body
+        assert "advanced.max_concurrency=$('auxAdvancedMaxConcurrency')?.value||''" in save_body
+
+    def test_main_extra_body_flows_to_agent_request_overrides(self):
+        """Persisted main extra_body must be passed to AIAgent, not only shown in Settings."""
+        assert "_main_model_request_overrides" in STREAMING_PY
+        assert "'request_overrides' in _agent_params" in STREAMING_PY
+        assert "_agent_kwargs['request_overrides'] = _main_request_overrides" in STREAMING_PY
+        assert "_main_request_overrides or {}" in STREAMING_PY
 
     def test_advanced_modal_uses_defined_theme_tokens_and_inline_button_styles(self):
         """The modal is appended outside #mainSettings, so scoped button CSS must not be required."""
@@ -472,6 +505,49 @@ class TestAuxiliaryModelsBackend:
         assert "max_concurrency: 2" in text
         assert "reasoning_effort: none" in text
         assert "DUMMY_KEY_DO_NOT_PRINT" in text
+
+    def test_set_auxiliary_model_explicit_advanced_base_url_wins_over_custom_resolution(self, monkeypatch, tmp_path):
+        """Custom-provider auto-resolution must not clobber an explicit gear base_url."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("auxiliary:\n  vision:\n    provider: auto\n    model: ''\n", encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(
+            config,
+            "resolve_model_provider",
+            lambda model: (model, "custom:demo", "https://resolved.invalid/v1"),
+        )
+
+        result = config.set_auxiliary_model(
+            "vision",
+            "custom:demo",
+            "demo/model",
+            advanced={"base_url": "https://manual.invalid/v1/"},
+        )
+
+        assert result["ok"] is True
+        text = config_path.read_text(encoding="utf-8")
+        assert "https://manual.invalid/v1" in text
+        assert "https://resolved.invalid/v1" not in text
+
+    def test_main_extra_body_becomes_runtime_request_overrides(self):
+        """The main-model extra_body option is live only if it reaches request_overrides."""
+        from api import config
+
+        cfg = {
+            "model": {
+                "provider": "openai",
+                "default": "gpt-5.5",
+                "extra_body": {"reasoning_effort": "none"},
+            }
+        }
+
+        overrides = config._main_model_request_overrides(cfg)
+
+        assert overrides == {"extra_body": {"reasoning_effort": "none"}}
+        assert overrides["extra_body"] is not cfg["model"]["extra_body"]
 
 
 

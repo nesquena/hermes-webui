@@ -3070,6 +3070,20 @@ def _public_advanced_model_options(model_cfg: dict) -> dict:
     }
 
 
+def _main_model_request_overrides(config_data: dict) -> dict:
+    """Return supported runtime request overrides for the main chat model."""
+    if not isinstance(config_data, dict):
+        return {}
+    model_cfg = config_data.get("model", {})
+    if not isinstance(model_cfg, dict):
+        return {}
+    overrides = {}
+    extra_body = model_cfg.get("extra_body")
+    if isinstance(extra_body, dict) and extra_body:
+        overrides["extra_body"] = copy.deepcopy(extra_body)
+    return overrides
+
+
 def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> None:
     """Apply supported advanced model options to a config block in-place."""
     if advanced is None:
@@ -3303,12 +3317,6 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 slot_cfg = {}
             slot_cfg["provider"] = provider or "auto"
             slot_cfg["model"] = model or ""
-            if advanced is not None:
-                try:
-                    _apply_advanced_model_options(slot_cfg, advanced)
-                except ValueError as exc:
-                    msg = str(exc).replace("advanced model options", "advanced auxiliary options")
-                    raise ValueError(msg) from exc
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 try:
                     _, _, resolved_base_url = resolve_model_provider(model)
@@ -3316,6 +3324,12 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                         slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
                 except Exception:
                     pass
+            if advanced is not None:
+                try:
+                    _apply_advanced_model_options(slot_cfg, advanced)
+                except ValueError as exc:
+                    msg = str(exc).replace("advanced model options", "advanced auxiliary options")
+                    raise ValueError(msg) from exc
             aux_cfg[task] = slot_cfg
             config_data["auxiliary"] = aux_cfg
 
