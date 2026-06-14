@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Streaming completion payloads now report a message count that matches the embedded transcript.** Settled `done`/error SSE payloads no longer reuse stale compact metadata when they include the full `messages` array, preventing completion/reconcile code from mistaking a full transcript for a short stale window.
+
 ## [v0.51.415] — 2026-06-14 — Release OB (keep complete sidebar metadata on the index fastpath, #4166)
 
 ### Fixed
