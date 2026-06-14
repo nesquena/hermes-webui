@@ -89,15 +89,6 @@ def _restart_blocker_snapshot() -> dict:
     }
 
 
-def _active_stream_count() -> int:
-    """Return the current in-memory chat stream count.
-
-    Kept for compatibility with older tests/helpers; restart safety should use
-    ``_restart_blocker_snapshot()`` so detached worker runs also block updates.
-    """
-    return int(_restart_blocker_snapshot().get('active_streams') or 0)
-
-
 def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict:
     if isinstance(blocker_snapshot, int):
         blocker_snapshot = {
@@ -1264,9 +1255,9 @@ def apply_rebase_update(target: str) -> dict:
     Returns diverged/conflict info when the rebase cannot complete cleanly so
     the caller can surface actionable messages to the user.
     """
-    active_streams = _active_stream_count()
-    if active_streams:
-        return _restart_blocked_response(target, active_streams)
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response(target, blocker_snapshot)
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
