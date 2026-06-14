@@ -92,6 +92,12 @@ class TestParseAllowedHosts:
     def test_strips_trailing_slash(self):
         assert parse_allowed_hosts("https://x.com/") == {"x.com"}
 
+    def test_strips_path_component(self):
+        # A pasted URL with a path must reduce to the bare host, not an
+        # unmatchable ``host/path`` token that silently never matches.
+        assert parse_allowed_hosts("https://webui.example.com/path") == {"webui.example.com"}
+        assert parse_allowed_hosts("x.com/a/b,y.com:8000/c") == {"x.com", "y.com"}
+
     def test_strips_port(self):
         assert parse_allowed_hosts("x.com:8000,y.com:9000") == {"x.com", "y.com"}
 

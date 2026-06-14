@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- **The WebUI now validates the `Host` header against an allowlist before any auth, CSRF, or route logic, closing a DNS-rebinding vector.** The server binds to `127.0.0.1` with password auth off by default, but the loopback bind is not a trust boundary against DNS rebinding — a hostname the operator is tricked into loading can rebind to `127.0.0.1` and then drive the WebUI with same-origin JavaScript, which the existing `_check_csrf` same-origin check does not catch (the rebound Origin and Host reference the same hostile hostname). A new `api/host_guard.py` rejects any request whose `Host` is not in the allowlist with a `400`, wired at the top of `do_GET`, `_handle_write`, and `do_OPTIONS` (also gating the CORS preflight). Loopback, private LAN (RFC1918), IPv4/IPv6 link-local, IPv6 ULA, and Tailscale CGN (`100.64/10`) are always allowed, so every documented deploy works with no operator action; public reverse-proxy hostnames opt in via the new `HERMES_WEBUI_ALLOWED_HOSTS` env var (comma/whitespace-separated; scheme, port, and path components are stripped to the bare host). (#3495)
+
 ## [v0.51.587] — 2026-06-22 — Release UT (running-first session ordering in sidebar)
 
 ### Fixed

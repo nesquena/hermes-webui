@@ -129,7 +129,12 @@ def parse_allowed_hosts(env_value: str | None) -> set[str]:
         if not entry:
             continue
         entry = re.sub(r"^https?://", "", entry)
-        entry = entry.rstrip("/")
+        # Drop any path component (and trailing slash) so a pasted URL like
+        # ``https://webui.example.com/path`` reduces to the bare host instead
+        # of an unmatchable ``webui.example.com/path`` token. Splitting at the
+        # first "/" subsumes the trailing-slash case; bracketed IPv6 and
+        # ``host:port`` forms contain no "/" so they pass through untouched.
+        entry = entry.split("/", 1)[0]
         stripped = _strip_port(entry)
         if stripped:
             out.add(stripped)
