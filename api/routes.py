@@ -11968,7 +11968,36 @@ def _handle_cron_recent(handler, parsed):
 
 
 _PROJECT_CONTEXT_HERMES_NAMES = (".hermes.md", "HERMES.md")
-_PROJECT_CONTEXT_CWD_NAMES = ("AGENTS.md", "CLAUDE.md", ".cursorrules")
+# Mirror the agent's lowercase filename variants (agents.md / claude.md) so the
+# tab does not under-report on case-sensitive filesystems.
+_PROJECT_CONTEXT_CWD_NAMES = (
+    "AGENTS.md",
+    "agents.md",
+    "CLAUDE.md",
+    "claude.md",
+    ".cursorrules",
+)
+# Modern Cursor rules live in a directory of .mdc files, which the agent also loads.
+_PROJECT_CONTEXT_CURSOR_RULES_GLOB = ".cursor/rules/*.mdc"
+_PROJECT_CONTEXT_MAX_BYTES = 20_000
+
+
+def _strip_project_context_frontmatter(content: str) -> str:
+    """Strip a leading YAML frontmatter block, mirroring the agent's loader.
+
+    The agent removes a leading ``---\\n ... \\n---`` block before injecting a
+    context file. Without this the tab would display frontmatter the agent never
+    sends to the model.
+    """
+    if not content.startswith("---"):
+        return content
+    lines = content.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return content
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() in ("---", "..."):
+            return "".join(lines[idx + 1:]).lstrip("\n")
+    return content
 
 
 def _project_context_git_root(start: Path) -> Path | None:
@@ -11994,6 +12023,14 @@ def _project_context_candidates(workspace: Path) -> list[Path]:
 
     for name in _PROJECT_CONTEXT_CWD_NAMES:
         candidates.append(cwd / name)
+
+    # Modern Cursor rules: the agent reads .cursor/rules/*.mdc in addition to
+    # the legacy .cursorrules file. Sort for deterministic ordering.
+    try:
+        candidates.extend(sorted(cwd.glob(_PROJECT_CONTEXT_CURSOR_RULES_GLOB)))
+    except OSError:
+        pass
+
     return candidates
 
 
@@ -12002,7 +12039,14 @@ def _memory_project_context_workspace(parsed) -> Path | None:
     sid = qs.get("session_id", [""])[0]
     if sid:
         try:
-            return Path(get_session(sid).workspace).expanduser().resolve()
+            # A blank session workspace (freshly-created/draft sessions) must not
+            # fall through to Path("").resolve(), which returns the server's own
+            # CWD and would surface the install's AGENTS.md/HERMES.md as if it
+            # were the user's project context.
+            ws = (get_session(sid).workspace or "").strip()
+            if not ws:
+                return None
+            return Path(ws).expanduser().resolve()
         except Exception:
             return None
 
@@ -12044,6 +12088,12 @@ def _read_active_project_context(workspace: Path | None) -> dict:
                 continue
             seen.add(key)
             content = resolved.read_text(encoding="utf-8", errors="replace")
+            # Mirror what the agent actually injects: strip YAML frontmatter and
+            # cap each source, so the tab reports the effective context rather
+            # than raw file bytes the agent never sends to the model.
+            content = _strip_project_context_frontmatter(content)
+            if len(content) > _PROJECT_CONTEXT_MAX_BYTES:
+                content = content[:_PROJECT_CONTEXT_MAX_BYTES]
             if not content.strip():
                 continue
             readable.append(

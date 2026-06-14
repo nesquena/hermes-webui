@@ -127,3 +127,43 @@ def test_memory_panel_defines_read_only_project_context_section():
     assert "readOnly: true" in panels
     assert "project_context_shadowed" in panels
     assert "/api/memory?session_id=" in panels
+
+
+def test_blank_session_workspace_does_not_resolve_to_server_cwd(monkeypatch):
+    # Regression for the empty-workspace guard: a session with a blank workspace
+    # (freshly-created/draft sessions) must return None rather than letting
+    # Path("").resolve() surface the server's own CWD as project context.
+    monkeypatch.setattr(routes, "get_session", lambda _sid: SimpleNamespace(workspace=""))
+    parsed = SimpleNamespace(query="session_id=draft-session")
+
+    assert routes._memory_project_context_workspace(parsed) is None
+
+
+def test_project_context_reads_lowercase_agents_md(tmp_path):
+    # Parity with the agent, which matches lowercase filename variants.
+    workspace = tmp_path / "lowercase"
+    workspace.mkdir()
+    (workspace / "agents.md").write_text("# lower agents\n\nlowercase loads.", encoding="utf-8")
+
+    data = project_context_for(workspace)
+
+    # On case-insensitive filesystems the resolved name may normalize to the
+    # uppercase candidate; the point of the fix is that the content loads at all
+    # (on case-sensitive Linux CI, only the lowercase candidate matches).
+    assert "lowercase loads." in data["content"]
+    assert data["path"].lower().endswith("agents.md")
+
+
+def test_project_context_strips_yaml_frontmatter(tmp_path):
+    # Parity with the agent, which strips frontmatter before injecting context.
+    workspace = tmp_path / "frontmatter"
+    workspace.mkdir()
+    (workspace / "AGENTS.md").write_text(
+        "---\ntitle: Rules\nowner: me\n---\n\nActual body the agent injects.",
+        encoding="utf-8",
+    )
+
+    data = project_context_for(workspace)
+
+    assert "Actual body the agent injects." in data["content"]
+    assert "title: Rules" not in data["content"]
