@@ -3,9 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.420] — 2026-06-14 — Release OG (LM Studio reasoning-probe auth, #3750/#3837)
+
 ### Fixed
 
-- **LM Studio reasoning-effort probes now keep their auth and work without the bundled CLI.** When the active model is an LM Studio provider, the WebUI reasoning-effort probe now resolves an LM Studio API key (active model key → `providers.lmstudio.api_key` → `LM_API_KEY` → `LMSTUDIO_API_KEY`) and forwards it as a Bearer token, so authenticated LM Studio servers no longer 401 the probe and silently report "no reasoning support." If `hermes_cli` is unavailable (or its `lmstudio_model_reasoning_options` signature changes), the probe falls back to a built-in HTTP query of the LM Studio `/api/v1/models` capabilities endpoint instead of skipping reasoning detection entirely. (#3750, #3837)
+- **LM Studio reasoning-effort probes now keep their auth and work without the bundled CLI.** When the active model is an LM Studio provider, the WebUI reasoning-effort probe now resolves an LM Studio API key (active model key → `providers.lmstudio.api_key` → `LM_API_KEY` → `LMSTUDIO_API_KEY`) and forwards it as a Bearer token, so authenticated LM Studio servers no longer 401 the probe and silently report "no reasoning support." If `hermes_cli` is unavailable (or its `lmstudio_model_reasoning_options` signature changes), the probe falls back to a built-in HTTP query of the LM Studio `/api/v1/models` capabilities endpoint instead of skipping reasoning detection entirely. The configured LM Studio credential is only ever sent to the configured LM Studio endpoint (a caller-supplied `base_url` that does not match is probed without the key), and the probe refuses HTTP redirects so the credential can never be forwarded to another host. (#3750, #3837)
 
 ## [v0.51.419] — 2026-06-14 — Release OF (settled-stream message-count consistency, #4192)
 
