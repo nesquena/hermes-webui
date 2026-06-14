@@ -2770,13 +2770,26 @@ def _row_may_need_sidecar_metadata_refresh(
         # so only true continuations are eligible.
         if str(session.get('session_source') or '').strip().lower() == 'fork':
             return False
+        if session.get('message_count') is None or session.get('last_message_at') is None:
+            return True
+        # Lineage fields are enriched from state.db in a batched pass later in
+        # all_sessions(). A complete indexed lineage row must not be reloaded
+        # from its sidecar merely because the filesystem mtime is newer than the
+        # logical message timestamp; that pattern is common after compression
+        # and turns each /api/sessions poll into hundreds of JSON prefix scans.
+        # Keep the mtime repair path only for rows whose counters are known bad
+        # or incomplete enough that the index cannot be trusted.
         lineage_shaped = bool(
             session.get('parent_session_id')
             or session.get('_lineage_root_id')
             or session.get('_compression_segment_count')
         )
-        needs_mtime_check = lineage_shaped or (
-            sid and _looks_like_stale_zero_message_row(session)
+        needs_mtime_check = bool(
+            sid
+            and (
+                _looks_like_stale_zero_message_row(session)
+                or (lineage_shaped and session.get('user_message_count') is None)
+            )
         )
         if needs_mtime_check and _sidecar_mtime_after_index_timestamp(session):
             return True
@@ -2842,6 +2855,19 @@ def _stale_snapshot_metadata_refresh_ids(sessions: list[dict]) -> set[str]:
             if not sid:
                 continue
             if _sidebar_message_count(snapshot) > best_visible_count:
+                continue
+            # Modern index rows already carry enough sidebar summary data to
+            # decide snapshot visibility. Only legacy/incomplete rows need the
+            # sidecar mtime rescue; otherwise every historical snapshot whose
+            # file mtime is newer than its logical timestamp is re-read on every
+            # sidebar poll. Treat stale-zero-message rows as incomplete even
+            # when user_message_count/last_message_at are present; their sidecar
+            # may hold the real count that makes the snapshot visible.
+            if (
+                snapshot.get('user_message_count') is not None
+                and int(snapshot.get('message_count') or 0) > 0
+                and snapshot.get('last_message_at') is not None
+            ):
                 continue
             if _sidecar_mtime_after_index_timestamp(snapshot):
                 refresh_ids.add(sid)
@@ -3473,6 +3499,15 @@ CLAUDE_CODE_MAX_MESSAGES_PER_FILE = 1000
 CLAUDE_CODE_MAX_CONTENT_CHARS = 200_000
 
 
+def _normalize_cli_session_source_filter(source_filter) -> str | None:
+    normalized = str(source_filter or '').strip().lower()
+    if not normalized or normalized in {'all', 'any', '*'}:
+        return None
+    if normalized == 'claude-code':
+        return CLAUDE_CODE_SOURCE
+    return normalized
+
+
 def _default_claude_code_projects_dir() -> Path | None:
     """Resolve the Claude Code projects directory without touching real home in tests."""
     override = os.getenv('HERMES_WEBUI_CLAUDE_PROJECTS_DIR')
@@ -3733,7 +3768,7 @@ def _sqlite_file_stat_cache_key(db_path: Path):
     )
 
 
-def _resolve_cli_sessions_context():
+def _resolve_cli_sessions_context(source_filter=None):
     # Use the active WebUI profile's HERMES_HOME to find state.db.
     # The active profile is determined by what the user has selected in the UI
     # (stored in the server's runtime config). This means:
@@ -3760,6 +3795,7 @@ def _resolve_cli_sessions_context():
         str(hermes_home),
         str(cli_profile or ''),
         str(db_path),
+        str(source_filter or ''),
         _sqlite_file_stat_cache_key(db_path),
         _path_cache_key(projects_dir),
         _path_stat_cache_key(projects_dir),
@@ -3768,12 +3804,21 @@ def _resolve_cli_sessions_context():
     return hermes_home, db_path, cli_profile, cache_key
 
 
-def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) -> list:
+def _load_cli_sessions_uncached(
+    hermes_home: Path,
+    db_path: Path,
+    _cli_profile,
+    source_filter=None,
+) -> list:
     cli_sessions = []
-    try:
-        cli_sessions.extend(get_claude_code_sessions())
-    except Exception:
-        logger.debug("Claude Code session scan failed", exc_info=True)
+    if source_filter in (None, CLAUDE_CODE_SOURCE):
+        try:
+            cli_sessions.extend(get_claude_code_sessions())
+        except Exception:
+            logger.debug("Claude Code session scan failed", exc_info=True)
+
+    if source_filter == CLAUDE_CODE_SOURCE:
+        return cli_sessions
 
     if not db_path.exists():
         return cli_sessions
@@ -3789,9 +3834,10 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
 
     for row in read_importable_agent_session_rows(
         db_path,
-        limit=CLI_VISIBLE_SESSION_LIMIT,
+        limit=CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron' else CLI_VISIBLE_SESSION_LIMIT,
         log=logger,
-        exclude_sources=("cron",),
+        exclude_sources=("cron",) if source_filter is None else None,
+        include_sources=None if source_filter is None else (source_filter,),
     ):
         sid = row['id']
         raw_ts = row['last_activity'] or row['started_at']
@@ -3865,6 +3911,9 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
             'is_cli_session': is_cli_session_row(row),
         })
 
+    if source_filter is not None:
+        return cli_sessions
+
     # --- Second pass: fetch cron sessions that may have been squeezed out
     # of the default window by more-recent non-cron sessions.
     # The normal sidebar query caps at CLI_VISIBLE_SESSION_LIMIT (20) rows;
@@ -3874,14 +3923,12 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
     # stay addressable under their project chip.
     existing_sids = {s['session_id'] for s in cli_sessions}
     try:
-        cron_excluded = tuple(
-            s for s in ('webui', 'claude-code')  # keep only 'cron'
-        )
         for row in read_importable_agent_session_rows(
             db_path,
             limit=CRON_PROJECT_CHIP_LIMIT,
             log=logger,
-            exclude_sources=cron_excluded,
+            exclude_sources=None,
+            include_sources=("cron",),
         ):
             sid = row['id']
             if sid in existing_sids:
@@ -3955,14 +4002,15 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
     return cli_sessions
 
 
-def get_cli_sessions() -> list:
+def get_cli_sessions(source_filter=None) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
 
     Returns empty list if the SQLite DB is missing or any error occurs -- the
     bridge is purely additive and never crashes the WebUI.
     """
-    hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context()
+    source_filter = _normalize_cli_session_source_filter(source_filter)
+    hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context(source_filter)
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
 
@@ -3975,7 +4023,12 @@ def get_cli_sessions() -> list:
                     return _copy_cli_sessions(cached_sessions)
                 _CLI_SESSIONS_CACHE.pop(cache_key, None)
             try:
-                sessions = _load_cli_sessions_uncached(hermes_home, db_path, cli_profile)
+                sessions = _load_cli_sessions_uncached(
+                    hermes_home,
+                    db_path,
+                    cli_profile,
+                    source_filter=source_filter,
+                )
             except Exception as _cli_err:
                 logger.warning(
                     "get_cli_sessions() failed — check state.db schema or path (%s): %s",
@@ -3989,7 +4042,12 @@ def get_cli_sessions() -> list:
             return _copy_cli_sessions(sessions)
 
     try:
-        return _load_cli_sessions_uncached(hermes_home, db_path, cli_profile)
+        return _load_cli_sessions_uncached(
+            hermes_home,
+            db_path,
+            cli_profile,
+            source_filter=source_filter,
+        )
     except Exception as _cli_err:
         logger.warning(
             "get_cli_sessions() failed — check state.db schema or path (%s): %s",

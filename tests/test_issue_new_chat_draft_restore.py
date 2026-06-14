@@ -76,7 +76,9 @@ def test_pre_switch_draft_flush_rechecks_stale_loading_guard():
     (Codex pre-release CORE catch, #3471)."""
     start = SESSIONS_JS.find("async function loadSession(")
     assert start != -1, "loadSession not found"
-    body = SESSIONS_JS[start:start + 4000]
+    # Window widened to 6500: #3899's idle-reset + live-turn-snapshot blocks pushed
+    # the destructive S.messages clear past the old 4000-char window.
+    body = SESSIONS_JS[start:start + 6500]
     await_idx = body.find("await _saveComposerDraftNow(currentSid")
     guard_idx = body.find("if (_loadingSessionId !== sid) return;", await_idx)
     clear_idx = body.find("S.messages = [];", await_idx)

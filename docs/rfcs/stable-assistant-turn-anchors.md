@@ -301,10 +301,6 @@ AssistantTurnAnchor
   artifacts[]
   side_effects[]
   usage
-  presentation_state
-    compact_worklog expansion state
-    transparent_stream expansion state
-    scroll/follow hints
 ```
 
 The anchor is not a backend schema requirement. It is the frontend model that
@@ -334,6 +330,12 @@ renderers consume the anchor
 
 In the target model, stream `done` should not need to "make a different turn."
 It should complete the existing turn.
+
+Renderer-only preferences are deliberately outside the semantic anchor. Compact
+Worklog expansion, Transparent Stream expansion, copy-button visibility, and
+scroll-follow preferences may live in renderer state or a per-session UI
+preference store, but replay and settlement must not persist those choices as
+assistant-turn facts.
 
 ## Anchor Creation And Identity
 
@@ -525,8 +527,8 @@ existing anchor:
 
 1. verify that `session_id`, `run_id`, or `stream_id` still belongs to the
    anchor,
-2. write the final assistant answer into `anchor.final_answer` or bind
-   `anchor.final_message_ref`,
+2. bind `anchor.content.final_message_ref` to the settled assistant message and
+   write `anchor.content.final_answer` as a derived render snapshot,
 3. attach terminal state and usage metadata,
 4. merge settled reasoning/tool/artifact metadata into existing activity events,
 5. mark live-only events as settled or drop them if they were purely transient,
@@ -541,6 +543,13 @@ the same turn.
 Terminal state is separate from final answer text. A turn can have partial
 process prose, tool cards, reasoning, artifacts, or usage metadata and still
 fail to produce a normal final answer.
+
+`content.final_message_ref` is the durable transcript reference when settled
+message identity exists. `content.final_answer` is not an independent semantic
+owner; it is a projection cache copied from the settled assistant message so
+early renderers can avoid chasing `S.messages` during every paint. If settlement
+later rewrites the transcript message, the anchor must be refreshed from that
+message instead of allowing the two copies to drift silently.
 
 ## Replay, Reload, And Reconstruction
 
@@ -568,6 +577,17 @@ Reconstruction is not the normal creation path. The normal path creates an
 anchor after `/api/chat/start` succeeds and returns `stream_id`. Reconstruction
 is for reload, reconnect, session switch, SSE replay, and recovery cases where
 the local anchor is missing or incomplete.
+
+During migration, `INFLIGHT` remains a recovery cache until an anchor-backed
+field takes over. The handoff order should be:
+
+| Current `INFLIGHT` field family | Anchor destination | Fallback rule |
+| --- | --- | --- |
+| `lastRunJournalSeq` / replay cursor | anchor event dedupe index plus run-journal cursor metadata | Prefer run journal replay; read `INFLIGHT` only to resume a missing browser cursor. |
+| `activityBurstAnchors` / live row anchors | `activity_events[]` identity and grouping metadata | Preserve DOM hints as renderer cache; do not let them outrank normalized events. |
+| `currentLiveSegmentSeq` / local live order | anchor-local source order when no Event Envelope exists | Use only as browser fallback identity; never dedupe by visible text. |
+| `streamId` / active transport key | `identity.stream_id` fallback below `run_id` | Do not hard-bind ownership to `stream_id` once `run_id` is known. |
+| cached assistant text / reasoning / tool state | `activity_events[]` and derived render rows | Use for reconstruction gaps only after journal and settled transcript evidence. |
 
 `stream_end` deserves special care. It is a transport close signal and may
 trigger recovery. It must not be treated as proof that the turn completed.
@@ -650,6 +670,11 @@ Compact Worklog may show terminal state as a status card or final-answer
 replacement when no final answer exists. Transparent Stream should show the same
 terminal truth as the final chronological event. The two display modes must not
 disagree about the outcome.
+
+Implementation code should expose the terminal states as constants rather than
+spread string literals across settlement, replay, and renderer code. Source
+aliases such as `done`, `cancel`, `apperror`, and runtime-specific error labels
+should normalize into this enum before renderer consumption.
 
 ## Artifacts And Side Effects
 
@@ -765,6 +790,18 @@ changes should remain independently reviewable.
 - Keep Compact Worklog as the only visible renderer.
 - Add coverage proving all current event names have an explicit classification.
 
+### Phase 2.5: Anchor contract hardening
+
+- Keep renderer presentation state out of the semantic anchor seed.
+- Export terminal-state constants and normalize source aliases before Phase 3
+  writes settlement outcomes.
+- Document which `INFLIGHT` fields become anchor-owned, which remain fallback
+  cache, and which are renderer-only hints.
+- Define `final_message_ref` as the settled transcript authority and
+  `final_answer` as a derived render snapshot.
+- Add order-invariance coverage for live + replay + settlement observations of
+  the same run.
+
 ### Phase 3: Settlement through anchor
 
 - Reconcile `done` into the existing anchor.
@@ -832,7 +869,11 @@ An implementation should eventually satisfy:
   transport, or explicitly excluded,
 - replay/reconnect of one run is idempotent at the existing
   `(session_id, event_id)` dedupe ring: no activity event is dropped or
-  duplicated when the same run is observed live and then replayed.
+  duplicated when the same run is observed live and then replayed,
+- replay/reconnect and settlement are order-invariant for one run: whether
+  replay events arrive before or after the settled assistant message, the anchor
+  reaches the same final answer reference, terminal state, usage metadata, and
+  activity event list.
 
 ## Review Checklist For Implementation PRs
 

@@ -30,7 +30,7 @@ const COMMANDS=[
   {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
-  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
+  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
   {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
 ];
@@ -76,11 +76,6 @@ function getMatchingCommands(prefix){
     });
     seen.add(name);
   }
-  for(const skill of _skillCommandCache){
-    if(!skill.name.startsWith(q)||seen.has(skill.name)||reserved.has(skill.name))continue;
-    matches.push(skill);
-    seen.add(skill.name);
-  }
   // Include agent/plugin commands from /api/commands metadata
   for(const cmd of (_agentCommandCache||[])){
     const name=String(cmd&&cmd.name||'').toLowerCase();
@@ -93,6 +88,18 @@ function getMatchingCommands(prefix){
     });
     seen.add(name);
   }
+  if(_agentCommandCacheReady){
+    for(const bundle of _bundleCommandCache){
+      if(!bundle.name.startsWith(q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
+      matches.push(bundle);
+      seen.add(bundle.name);
+    }
+  }
+  for(const skill of _skillCommandCache){
+    if(!skill.name.startsWith(q)||seen.has(skill.name)||reserved.has(skill.name))continue;
+    matches.push(skill);
+    seen.add(skill.name);
+  }
   return matches;
 }
 
@@ -101,6 +108,11 @@ let _slashModelCache=null;
 let _slashModelCachePromise=null;
 let _slashPersonalityCache=null;
 let _slashPersonalityCachePromise=null;
+let _bundleCommandCache=[];
+let _bundleCommandLoadPromise=null;
+let _bundleCommandCacheReady=false;
+let _slashSkillCache=null;
+let _slashSkillCachePromise=null;
 let _agentCommandCache=null;
 let _agentCommandCachePromise=null;
 
@@ -118,6 +130,7 @@ function _invalidateSlashModelCache(){
 // define a window global — see tests/test_cli_only_slash_commands.py.
 if(typeof window!=='undefined'){
   window._invalidateSlashModelCache=_invalidateSlashModelCache;
+  window.invalidateSlashSkillCaches=invalidateSlashSkillCaches;
 }
 
 function _normalizeSlashSubArg(value){
@@ -199,10 +212,43 @@ async function _loadSlashPersonalitySubArgs(force=false){
   return _slashPersonalityCachePromise;
 }
 
+async function _loadSlashSkillSubArgs(force=false){
+  if(_slashSkillCache&&!force) return _slashSkillCache;
+  if(_slashSkillCachePromise&&!force) return _slashSkillCachePromise;
+  _slashSkillCachePromise=(async()=>{
+    try{
+      const data=await api('/api/skills');
+      const values=[];
+      for(const skill of (data&&data.skills)||[]){
+        const name=_normalizeSlashSubArg(skill&&skill.name);
+        if(name) values.push(name);
+      }
+      const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      _slashSkillCache=deduped;
+      return deduped;
+    }catch(_){
+      _slashSkillCache=null;
+      return [];
+    }finally{
+      _slashSkillCachePromise=null;
+    }
+  })();
+  return _slashSkillCachePromise;
+}
+
+function invalidateSlashSkillCaches(){
+  _slashSkillCache=null;
+  _slashSkillCachePromise=null;
+  _skillCommandCache=[];
+  _skillCommandCacheReady=false;
+  _skillCommandLoadPromise=null;
+}
+
 function _getSlashSubArgOptions(spec){
   if(Array.isArray(spec)) return Promise.resolve(spec.slice());
   if(spec==='models') return _loadSlashModelSubArgs();
   if(spec==='personalities') return _loadSlashPersonalitySubArgs();
+  if(spec==='skills') return _loadSlashSkillSubArgs();
   return Promise.resolve([]);
 }
 
@@ -264,9 +310,41 @@ async function _runAgentCommandTransport(text,_meta){
   return String(data&&data.output||'(no output)');
 }
 
+async function resolveBundleCommand(text,_meta){
+  const command=String(text||'').trim();
+  if(!command) throw new Error('command is required');
+  return api('/api/commands/bundles/resolve',{
+    method:'POST',
+    body:JSON.stringify({command})
+  });
+}
+
+function _activeSlashCommandOffset(text){
+  // Find the offset of the slash that begins the active command token.
+  // A command token starts with / at the beginning of the line or after
+  // whitespace.  Excludes ~/ path tokens and mid-word slashes (URLs,
+  // provider/model IDs like openrouter/deepseek).
+  if(!text||text.indexOf('\n')!==-1) return -1;
+  // Scan for / at a token-initial position
+  for(let i=0;i<text.length;i++){
+    if(text[i]==='/'){
+      // Start of line = token-initial
+      if(i===0) return i;
+      // After whitespace = token-initial
+      if(/\s/.test(text[i-1])){
+        // Exclude ~/ path tokens
+        if(i+1<text.length&&text[i+1]==='~') continue;
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
 function _parseSlashAutocomplete(text){
-  if(!text.startsWith('/')||text.indexOf('\n')!==-1) return null;
-  const raw=text.slice(1);
+  const slashIdx=_activeSlashCommandOffset(text);
+  if(slashIdx<0) return null;
+  const raw=text.slice(slashIdx+1);
   const hasSpace=/\s/.test(raw);
   const parts=raw.split(/\s+/);
   const cmdName=(parts[0]||'').toLowerCase();
@@ -949,8 +1027,11 @@ async function cmdUse(args){
       }
       return;
     }
-    const directive = `[USER OVERRIDE] You MUST consult skill '${match.name}' via skill_view before responding to the next message.`;
-    resolve(directive);
+    const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}`);
+    const skillContent = detail&&typeof detail.content==='string' ? detail.content.trim() : '';
+    if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
+    const directive = `[USER OVERRIDE] You MUST follow the skill '${match.name}' content provided below before responding to the next message.`;
+    resolve({name:match.name,directive,content:skillContent});
     if(isCurrentSession()){
       S.messages.push({role:'assistant', content:`Next turn: skill \`${match.name}\` will be forced.`});
       renderMessages();
@@ -1344,13 +1425,14 @@ function cmdReasoning(args){
   const arg=(args||'').trim().toLowerCase();
   const BRAIN='\uD83E\uDDE0';
   // Matches hermes_constants.VALID_REASONING_EFFORTS + 'none' (CLI parity).
-  const EFFORTS=['none','minimal','low','medium','high','xhigh','max'];
+  // Keep this WebUI effort list in sync with hermes-agent#29248.
+  const EFFORTS=['none','minimal','low','medium','high','xhigh'];
   // Shared status renderer used by the no-args branch and as a fallback.
   function _fmtStatus(st){
     const vis=(st && st.show_reasoning===false)?'off':'on';
     const eff=(st && st.reasoning_effort)||'default';
     return BRAIN+' Reasoning effort: '+eff+' \u00B7 display: '+vis
-      +'  |  /reasoning show|hide|none|minimal|low|medium|high|xhigh|max';
+      +'  |  /reasoning show|hide|none|minimal|low|medium|high|xhigh';
   }
   if(!arg){
     // Status — read from the same config.yaml keys the CLI uses.
@@ -1363,6 +1445,7 @@ function cmdReasoning(args){
     const on=(arg==='show'||arg==='on');
     // Update the UI render gate immediately for responsiveness.
     window._showThinking=on;
+    if(!on&&typeof removeThinking==='function') removeThinking();
     if(typeof renderMessages==='function') renderMessages();
     // Persist via /api/reasoning → config.yaml display.show_reasoning
     // (CLI reads the same key).  Also mirror into WebUI settings.json
@@ -1494,7 +1577,6 @@ function _skillCommandSlug(name){
 function _getReservedSlashCommandSlugs(){
   const reserved=new Set(COMMANDS.map(c=>String(c&&c.name||'').trim().toLowerCase()).filter(Boolean));
   for(const cmd of (_agentCommandCache||[])){
-    if(!(cmd&&cmd.cli_only)) continue;
     const names=[cmd.name].concat(Array.isArray(cmd&&cmd.aliases)?cmd.aliases:[]);
     for(const name of names){
       const slug=_skillCommandSlug(name);
@@ -1509,6 +1591,18 @@ function _buildSkillCommandEntry(skill){
   if(!slug)return null;
   if(_getReservedSlashCommandSlugs().has(slug)) return null;
   return{name:slug,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
+}
+function _buildBundleCommandEntry(bundle){
+  const slug=_skillCommandSlug(bundle&&bundle.name);
+  if(!slug)return null;
+  if(_getReservedSlashCommandSlugs().has(slug)) return null;
+  const skillCount=Number(bundle&&bundle.skill_count||0);
+  return{
+    name:slug,
+    desc:String(bundle&&bundle.description||'').trim()||'Skill bundle',
+    source:'bundle',
+    skillCount:Number.isFinite(skillCount)?skillCount:0,
+  };
 }
 async function loadSkillCommands(force=false){
   if(_skillCommandCacheReady&&!force)return _skillCommandCache;
@@ -1525,10 +1619,32 @@ async function loadSkillCommands(force=false){
   })();
   return _skillCommandLoadPromise;
 }
+async function loadBundleCommands(force=false){
+  if(_bundleCommandCacheReady&&!force)return _bundleCommandCache;
+  if(_bundleCommandLoadPromise&&!force)return _bundleCommandLoadPromise;
+  _bundleCommandLoadPromise=(async()=>{
+    try{
+      await loadAgentCommandMetadata();
+      const data=await api('/api/commands/bundles');
+      const deduped=new Map();
+      for(const bundle of (data&&data.bundles)||[]){const entry=_buildBundleCommandEntry(bundle);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
+      _bundleCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
+    }catch(_){_bundleCommandCache=[];}
+    finally{_bundleCommandCacheReady=true;_bundleCommandLoadPromise=null;}
+    return _bundleCommandCache;
+  })();
+  return _bundleCommandLoadPromise;
+}
+async function getBundleCommandMetadata(name){
+  const needle=String(name||'').trim().toLowerCase();
+  if(!needle) return null;
+  const bundles=await loadBundleCommands();
+  return bundles.find(bundle=>String(bundle&&bundle.name||'').toLowerCase()===needle)||null;
+}
 function refreshSlashCommandDropdown(){
   const ta=$('msg');if(!ta)return;
   const text=ta.value||'';
-  if(!text.startsWith('/')||text.indexOf('\n')!==-1){hideCmdDropdown();return;}
+  if(text.indexOf('\n')!==-1||_activeSlashCommandOffset(text)<0){hideCmdDropdown();return;}
   getSlashAutocompleteMatches(text).then(matches=>{
     if(($('msg').value||'')!==text) return;
     if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
@@ -1537,6 +1653,9 @@ function refreshSlashCommandDropdown(){
 function ensureSkillCommandsLoadedForAutocomplete(){
   if(_skillCommandCacheReady||_skillCommandLoadPromise)return;
   loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+  if(!_bundleCommandCacheReady&&!_bundleCommandLoadPromise){
+    loadBundleCommands().then(()=>{refreshSlashCommandDropdown();});
+  }
   // Also preload agent/plugin command metadata for autocomplete
   if(!_agentCommandCacheReady&&!_agentCommandCachePromise){
     loadAgentCommandMetadata().then(()=>{refreshSlashCommandDropdown();});
@@ -1561,7 +1680,11 @@ function showCmdDropdown(matches){
     const isSubArg=c.source==='subarg';
     const isPath=c.source==='path';
     const usage=(!isSubArg&&c.arg)?` <span class="cmd-item-arg">${esc(c.arg)}</span>`:'';
-    const badge=c.source==='skill'?`<span class="cmd-item-badge cmd-item-badge-skill">${esc(t('slash_skill_badge'))}</span>`:'';
+    const badge=c.source==='skill'
+      ? ` <span class="cmd-item-badge cmd-item-badge-skill">${esc(t('slash_skill_badge'))}</span>`
+      : c.source==='bundle'
+      ? ' <span class="cmd-item-badge">Bundle</span>'
+      : '';
     if(c.source==='skill') el.classList.add('cmd-item-skill');
     if(isPath) el.classList.add('cmd-item-path');
     const nameHtml=isPath
@@ -1590,10 +1713,14 @@ function showCmdDropdown(matches){
         hideCmdDropdown();
         return;
       }
-      const nextValue=isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':''));
-      $('msg').value=nextValue;
-      $('msg').focus();
-      if(!isSubArg&&c.source!=='skill'&&nextValue.endsWith(' ')&&typeof getSlashAutocompleteMatches==='function'){
+      const _ta=$('msg');
+      const _cur=String(_ta&&_ta.value||'');
+      const _slashIdx=_activeSlashCommandOffset(_cur);
+      const _prefix=_slashIdx>=0?_cur.slice(0,_slashIdx):'';
+      const nextValue=_prefix+(isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':'')));
+      if(_ta)_ta.value=nextValue;
+      if(_ta)_ta.focus();
+      if(!isSubArg&&c.source!=='skill'&&c.source!=='bundle'&&nextValue.endsWith(' ')&&typeof getSlashAutocompleteMatches==='function'){
         getSlashAutocompleteMatches(nextValue).then(matches=>{
           if(($('msg').value||'')!==nextValue) return;
           if(matches.length) showCmdDropdown(matches);

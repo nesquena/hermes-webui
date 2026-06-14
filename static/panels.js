@@ -72,6 +72,10 @@ function syncAppTitlebar() {
   if (_renamingAppTitlebar) return;
 
   titleEl.textContent = mainText;
+  if (panel !== 'chat') {
+    const bot = typeof assistantDisplayName === 'function' ? assistantDisplayName() : '';
+    document.title = bot ? mainText + ' \u2014 ' + bot : mainText;
+  }
   if (subEl) {
     if (subText) {
       subEl.textContent = subText;
@@ -272,7 +276,8 @@ async function switchPanel(name, opts = {}) {
     if (overlay) overlay.classList.add('visible');
   }
   _resyncChatSidebarAfterPanelSwitch();
-  syncAppTitlebar();
+  if (nextPanel === 'chat' && typeof syncTopbar === 'function') syncTopbar();
+  else syncAppTitlebar();
   return true;
 }
 
@@ -3914,6 +3919,7 @@ async function toggleSkill(name, currentlyEnabled) {
         const skill = _skillsData.find(s => s.name === name);
         if (skill) skill.disabled = !newEnabled;
       }
+      if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
       renderSkills(_skillsData || []);
     } else {
       setStatus((result && result.error) || t('skill_toggle_failed'));
@@ -4168,6 +4174,7 @@ async function saveSkillForm() {
     showToast(_editingSkillName ? t('skill_updated') : t('skill_created'));
     _skillsData = null;
     _cronSkillsCache = null;
+    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     _editingSkillName = null;
     _skillPreFormDetail = null;
     await loadSkills();
@@ -4207,6 +4214,7 @@ async function deleteCurrentSkill() {
     _skillPreFormDetail = null;
     _skillsData = null;
     _cronSkillsCache = null;
+    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     _skillMode = 'empty';
     const body = $('skillDetailBody');
     const empty = $('skillDetailEmpty');
@@ -4228,13 +4236,14 @@ let _notesSelectedSource = 'joplin';
 let _notesPreviewNote = null;
 let _notesSearchError = '';
 let _notesSearchLoading = false;
-let _currentMemorySection = null; // 'memory' | 'user' | 'soul' | 'external_notes'
+let _currentMemorySection = null; // 'memory' | 'user' | 'soul' | 'project_context' | 'external_notes'
 let _memoryMode = 'empty'; // 'empty' | 'read' | 'edit'
 
 const MEMORY_SECTIONS = [
   { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
   { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
   { key: 'soul',   labelKey: 'agent_soul', emptyKey: 'no_soul_yet', iconKey: 'sparkles' },
+  { key: 'project_context', label: 'Project Context', empty: 'No project context file found for this workspace.', iconKey: 'file-text', readOnly: true },
   { key: 'external_notes', labelKey: 'external_notes_sources', emptyKey: 'external_notes_empty', iconKey: 'book-open' },
 ];
 
@@ -4242,10 +4251,21 @@ function _memorySectionMeta(key) {
   return MEMORY_SECTIONS.find(s => s.key === key) || MEMORY_SECTIONS[0];
 }
 
+function _memorySectionLabel(meta) {
+  if (meta.label) return meta.label;
+  return t(meta.labelKey);
+}
+
+function _memorySectionEmpty(meta) {
+  if (meta.empty) return meta.empty;
+  return t(meta.emptyKey);
+}
+
 function _memorySectionContent(key) {
   if (!_memoryData) return '';
   if (key === 'user') return _memoryData.user || '';
   if (key === 'soul') return _memoryData.soul || '';
+  if (key === 'project_context') return _memoryData.project_context || '';
   return _memoryData.memory || '';
 }
 
@@ -4253,6 +4273,7 @@ function _memorySectionMtime(key) {
   if (!_memoryData) return 0;
   if (key === 'user') return _memoryData.user_mtime || 0;
   if (key === 'soul') return _memoryData.soul_mtime || 0;
+  if (key === 'project_context') return _memoryData.project_context_mtime || 0;
   return _memoryData.memory_mtime || 0;
 }
 
@@ -4262,7 +4283,8 @@ function _setMemoryHeaderButtons(mode) {
   const editBtn = $('btnEditMemoryDetail');
   const cancelBtn = $('btnCancelMemoryDetail');
   const saveBtn = $('btnSaveMemoryDetail');
-  if (mode === 'read' && _currentMemorySection !== 'external_notes') { show(editBtn); hide(cancelBtn); hide(saveBtn); }
+  const meta = _memorySectionMeta(_currentMemorySection);
+  if (mode === 'read' && _currentMemorySection !== 'external_notes' && !meta.readOnly) { show(editBtn); hide(cancelBtn); hide(saveBtn); }
   else if (mode === 'edit') { hide(editBtn); show(cancelBtn); show(saveBtn); }
   else { hide(editBtn); hide(cancelBtn); hide(saveBtn); }
 }
@@ -4345,15 +4367,24 @@ function _renderMemoryDetail(section) {
   const body = $('memoryDetailBody');
   const empty = $('memoryDetailEmpty');
   if (!title || !body) return;
-  title.textContent = t(meta.labelKey);
+  title.textContent = _memorySectionLabel(meta);
   const content = _memorySectionContent(section);
   const mtime = _memorySectionMtime(section);
   const mtimeStr = mtime ? new Date(mtime * 1000).toLocaleString() : '';
   const mtimeHtml = mtimeStr ? `<div class="memory-detail-mtime">${esc(mtimeStr)}</div>` : '';
+  const path = section === 'project_context' && _memoryData ? (_memoryData.project_context_path || '') : '';
+  const fileName = section === 'project_context' && _memoryData ? (_memoryData.project_context_name || (path.split(/[\\/]/).pop() || '')) : '';
+  const pathHtml = path ? `<div class="memory-detail-mtime">${esc(fileName)} · ${esc(path)}</div>` : '';
+  const shadowed = section === 'project_context' && _memoryData && Array.isArray(_memoryData.project_context_shadowed)
+    ? _memoryData.project_context_shadowed
+    : [];
+  const shadowedHtml = shadowed.length
+    ? `<div class="memory-detail-mtime">${esc(shadowed.map(item => `${item.name || 'Context file'} present, shadowed by ${item.shadowed_by || fileName || 'active context'}`).join('; '))}</div>`
+    : '';
   const inner = content
     ? `<div class="memory-content preview-md">${renderMd(content)}</div>`
-    : `<div class="memory-empty">${esc(t(meta.emptyKey))}</div>`;
-  body.innerHTML = `<div class="main-view-content">${mtimeHtml}${inner}</div>`;
+    : `<div class="memory-empty">${esc(_memorySectionEmpty(meta))}</div>`;
+  body.innerHTML = `<div class="main-view-content">${pathHtml}${mtimeHtml}${shadowedHtml}${inner}</div>`;
   body.style.display = '';
   if (empty) empty.style.display = 'none';
   _memoryMode = 'read';
@@ -4366,7 +4397,7 @@ function _renderMemoryEdit(section) {
   const body = $('memoryDetailBody');
   const empty = $('memoryDetailEmpty');
   if (!title || !body) return;
-  title.textContent = t(meta.labelKey);
+  title.textContent = _memorySectionLabel(meta);
   const content = _memorySectionContent(section);
   body.innerHTML = `
     <div class="main-view-content">
@@ -4457,7 +4488,8 @@ async function openMemorySection(section, el) {
 }
 
 function editCurrentMemory() {
-  if (!_currentMemorySection || _currentMemorySection === 'external_notes') return;
+  const meta = _memorySectionMeta(_currentMemorySection);
+  if (!_currentMemorySection || _currentMemorySection === 'external_notes' || meta.readOnly) return;
   _renderMemoryEdit(_currentMemorySection);
 }
 
@@ -4472,6 +4504,7 @@ function closeMemoryEdit() { cancelMemoryEdit(); }
 
 async function submitMemorySave() {
   if (!_currentMemorySection) return;
+  if (_memorySectionMeta(_currentMemorySection).readOnly) return;
   const ta = $('memEditContent');
   const errEl = $('memEditError');
   if (!ta) return;
@@ -5259,6 +5292,7 @@ async function switchToWorkspace(path,name){
     S._profileSwitchWorkspace=null;
     syncTopbar();
     await loadDir('.');
+    if (_currentPanel === 'memory') await loadMemory(true);
     showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
   }catch(e){setStatus(t('switch_failed')+e.message);}
 }
@@ -5855,7 +5889,10 @@ async function deleteProfile(name) {
 async function loadMemory(force) {
   const panel = $('memoryPanel');
   try {
-    const data = await api('/api/memory');
+    const memoryUrl = S.session && S.session.session_id
+      ? `/api/memory?session_id=${encodeURIComponent(S.session.session_id)}`
+      : '/api/memory';
+    const data = await api(memoryUrl);
     _memoryData = data;
     if (_currentMemorySection === 'external_notes' && !data.external_notes_enabled) {
       _currentMemorySection = null;
@@ -5871,7 +5908,7 @@ async function loadMemory(force) {
         el.type = 'button';
         el.className = 'side-menu-item';
         if (_currentMemorySection === s.key) el.classList.add('active');
-        el.innerHTML = `${li(s.iconKey,16)}<span>${esc(t(s.labelKey))}</span>`;
+        el.innerHTML = `${li(s.iconKey,16)}<span>${esc(_memorySectionLabel(s))}</span>`;
         el.onclick = () => openMemorySection(s.key, el);
         panel.appendChild(el);
       }
@@ -6258,18 +6295,42 @@ function _applyTtsEnabled(enabled){
 
 function _appearancePayloadFromUi(){
   const worklogDetailsExpanded=!!($('settingsWorklogDetailsExpandedDefault')||{}).checked;
+  const chatActivityModeSel=$('settingsChatActivityDisplayMode');
   return {
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
+    chat_activity_display_mode: chatActivityModeSel&&chatActivityModeSel.value==='transparent_stream'?'transparent_stream':'compact_worklog',
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
+    auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
     worklog_details_expanded_default: worklogDetailsExpanded,
     activity_feed_expanded_default: worklogDetailsExpanded,
     hidden_tabs: _getHiddenTabs(),
     tab_order: _getTabOrder(),
   };
 }
+
+function _syncChatActivityDisplayModeControl(mode){
+  const next=mode==='transparent_stream'?'transparent_stream':'compact_worklog';
+  const select=$('settingsChatActivityDisplayMode');
+  if(select) select.value=next;
+  document.querySelectorAll('[data-chat-activity-mode]').forEach(btn=>{
+    const active=btn.getAttribute('data-chat-activity-mode')===next;
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-pressed',active?'true':'false');
+  });
+  window._chatActivityDisplayMode=next;
+  window._transparentStream=next==='transparent_stream';
+}
+
+function _pickChatActivityDisplayMode(mode){
+  _syncChatActivityDisplayModeControl(mode);
+  if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+  if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  _scheduleAppearanceAutosave();
+}
+if(typeof window!=='undefined') window._pickChatActivityDisplayMode=_pickChatActivityDisplayMode;
 
 function _setAppearanceAutosaveStatus(state){
   const el=$('settingsAppearanceAutosaveStatus');
@@ -6317,9 +6378,18 @@ async function _autosaveAppearanceSettings(payload){
     }
     if(saved){
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
+      if(Object.prototype.hasOwnProperty.call(saved,'chat_activity_display_mode')){
+        const beforeMode=window._chatActivityDisplayMode;
+        _syncChatActivityDisplayModeControl(saved.chat_activity_display_mode);
+        if(window._chatActivityDisplayMode!==beforeMode){
+          if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+          if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+        }
+      }
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
+    window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
     if(saved&&payload&&Object.prototype.hasOwnProperty.call(payload,'worklog_details_expanded_default')&&(
       Object.prototype.hasOwnProperty.call(saved,'worklog_details_expanded_default') ||
       Object.prototype.hasOwnProperty.call(saved,'activity_feed_expanded_default')
@@ -6554,7 +6624,23 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
+    const autoScrollFollowCb=$('settingsAutoScrollFollow');
+    if(autoScrollFollowCb){
+      autoScrollFollowCb.checked=settings.auto_scroll_follow!==false;
+      window._autoScrollFollow=autoScrollFollowCb.checked;
+      autoScrollFollowCb.onchange=function(){
+        window._autoScrollFollow=this.checked;
+        _scheduleAppearanceAutosave();
+      };
+    }
     const worklogDetailsExpandedCb=$('settingsWorklogDetailsExpandedDefault');
+    const chatActivityModeSel=$('settingsChatActivityDisplayMode');
+    if(chatActivityModeSel){
+      _syncChatActivityDisplayModeControl(settings.chat_activity_display_mode);
+      chatActivityModeSel.addEventListener('change',()=>{
+        _pickChatActivityDisplayMode(chatActivityModeSel.value);
+      },{once:false});
+    }
     if(worklogDetailsExpandedCb){
       const worklogDetailsExpanded=Object.prototype.hasOwnProperty.call(settings,'worklog_details_expanded_default')
         ? settings.worklog_details_expanded_default
@@ -6702,7 +6788,14 @@ async function loadSettingsPanel(){
       pinnedLimitField.addEventListener('input',()=>{window._pinnedSessionsLimit=parseInt(pinnedLimitField.value,10)||3;_schedulePreferencesAutosave();},{once:false});
     }
     const fadeTextCb=$('settingsFadeTextEffect');
-    if(fadeTextCb){fadeTextCb.checked=!!settings.fade_text_effect;window._fadeTextEffect=fadeTextCb.checked;fadeTextCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    if(fadeTextCb){
+      fadeTextCb.checked=!!settings.fade_text_effect;
+      window._fadeTextEffect=fadeTextCb.checked;
+      fadeTextCb.addEventListener('change',()=>{
+        window._fadeTextEffect=fadeTextCb.checked;
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
     const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
     if(terminalAutoExpandCb){terminalAutoExpandCb.checked=!!settings.terminal_auto_expand_on_output;window._terminalAutoExpandOnOutput=terminalAutoExpandCb.checked;terminalAutoExpandCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const apiRedactCb=$('settingsApiRedact');
@@ -7817,12 +7910,14 @@ function _applySavedSettingsUi(saved, body, opts){
   window._whatsNewSummaryEnabled=!!body.whats_new_summary_enabled;
   window._showThinking=body.show_thinking!==false;
   window._simplifiedToolCalling=true;
+  _syncChatActivityDisplayModeControl(body.chat_activity_display_mode);
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._busyInputMode=body.busy_input_mode||'queue';
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
+  window._autoScrollFollow=body.auto_scroll_follow!==false;
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
@@ -8154,6 +8249,8 @@ async function saveSettings(andClose){
   body.font_size=fontSize;
   body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
+  body.chat_activity_display_mode=(($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')?'transparent_stream':'compact_worklog';
+  body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
   body.language=language;
   body.show_token_usage=showTokenUsage;
   body.show_quota_chip=showQuotaChip===true;

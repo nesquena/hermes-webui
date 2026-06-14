@@ -86,7 +86,7 @@ def test_settled_thinking_renders_through_worklog_item_path():
     assert "_appendWorklogStep(state.group, anchorRow, cards, thinkingText" in body, (
         "Settled Thinking should render through the #3401 Worklog item path."
     )
-    assert "_thinkingActivityNode(thinkingText, false)" in UI_JS, (
+    assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey)" in UI_JS, (
         "Thinking should remain a dedicated Worklog Thinking Card node."
     )
     assert "data-worklog-thinking-card" in UI_JS, (

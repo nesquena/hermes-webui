@@ -396,6 +396,7 @@ def read_importable_agent_session_rows(
     limit: int | None = 200,
     log=None,
     exclude_sources: tuple[str, ...] | None = ("cron", "webui"),
+    include_sources: tuple[str, ...] | None = None,
 ) -> list[dict]:
     """Return agent sessions projected as importable conversations.
 
@@ -409,7 +410,9 @@ def read_importable_agent_session_rows(
     sidebar. This mirrors Hermes Agent CLI's session-list behaviour: interactive
     views should stay focused on user-facing conversations, while callers that
     need a source-specific diagnostic view can opt out by passing
-    ``exclude_sources=None``.
+    ``exclude_sources=None``. ``include_sources`` is an additional narrowing
+    filter; callers that want an include-only query should explicitly pass
+    ``exclude_sources=None`` so the default exclusions do not also apply.
     """
     db_path = Path(db_path)
     if not db_path.exists():
@@ -517,6 +520,12 @@ def read_importable_agent_session_rows(
 
         where_clauses = ["s.source IS NOT NULL"]
         params: list[object] = []
+        if include_sources:
+            included = tuple(str(source) for source in include_sources if source)
+            if included:
+                placeholders = ", ".join("?" for _ in included)
+                where_clauses.append(f"s.source IN ({placeholders})")
+                params.extend(included)
         if exclude_sources:
             excluded = tuple(str(source) for source in exclude_sources if source)
             if excluded:

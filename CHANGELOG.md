@@ -3,12 +3,315 @@
 
 ## [Unreleased]
 
+## [v0.51.418] — 2026-06-14 — Release OE (slash-command autocomplete after non-ASCII prefix + multiple slashes, #3924)
+
+### Fixed
+
+- **Slash-command autocomplete now works after a non-ASCII (e.g. CJK) prefix and when the line already contains a slash (#3924).** A new shared helper finds the slash that begins the active command token — only at the start of the line or after whitespace — and is used consistently for detection, parsing, and replacement. Prose containing a mid-word slash (URLs, `provider/model` IDs) no longer opens the command dropdown or blocks sending, `~/` workspace-path autocomplete is no longer shadowed, and `/model openrouter/deepseek`-style commands parse their sub-arguments from the leading command slash instead of a slash inside the argument. (#3924)
+
+## [v0.51.417] — 2026-06-14 — Release OD (sidebar issue-number + external-refresh fixes, #4154/#3916)
+
+### Fixed
+
+- **GitHub issue numbers in session titles are no longer stripped from the sidebar (#4154).** The sidebar tag extractor treated any `#word` as an attention tag and removed it from the displayed title, so a title like "Fix #1234" lost its issue reference. Purely-numeric `#NNNN` patterns are now preserved while real attention tags (`#approval`, `#clarify`, …) still extract. (#4154)
+- **The 30-second external-refresh poll no longer fires for non-external sessions (#3916).** `refreshActiveSessionIfExternallyUpdated` now early-returns for WebUI-native sessions, which don't need the external-update reconciliation, avoiding needless reload churn. (#3916)
+
+## [v0.51.416] — 2026-06-14 — Release OC (cache + single-flight /api/sessions payloads, #3791)
+
+### Fixed
+
+- **The session sidebar list is now cached and single-flighted, so multi-tab and polling churn no longer recompute it on every request.** Concurrent identical `/api/sessions` requests coalesce onto one computation, and the computed payload is cached with a key that includes the active profile, the `all_profiles` flag, the session-source toggles (CLI / previous-messaging / cron), and the source filter — so no cache entry is shared across profiles or settings. Mutations invalidate the matching profile plus aggregate caches (and attention/import events clear all caches), and live stream / pending / attention fields are overlaid at response time so unread and live state stay fresh. (#3791)
+
+## [v0.51.415] — 2026-06-14 — Release OB (keep complete sidebar metadata on the index fastpath, #4166)
+
+### Fixed
+
+- **The session sidebar no longer re-reads every session's sidecar file on each `/api/sessions` poll.** A complete `_index.json` row (one that carries `message_count`, `user_message_count`, and `last_message_at`) now stays on the index fastpath even when the sidecar file's mtime is newer than the row's logical timestamp — a pattern that is common after compression and previously turned each sidebar poll into hundreds of per-sidecar JSON prefix scans. The mtime "rescue" reload is kept for incomplete, legacy, and stale-zero-message rows whose counters can't be trusted, so sidebar correctness is unchanged while the steady-state poll cost drops. (#4166)
+
+## [v0.51.414] — 2026-06-14 — Release OA (fix misleading regenerate-title error message, #4186)
+
+### Fixed
+
+- **The read-only error for the regenerate-title action now reads correctly.** Attempting to regenerate a title on a read-only imported session returned "Read-only imported sessions cannot be renamed" (copy-pasted from the rename handler); it now says "cannot regenerate titles" to match the actual action. (#4186)
+
+## [v0.51.413] — 2026-06-14 — Release NZ (restore approval pending-fallback reliability, #4107)
+
+### Fixed
+
+- **Approval cards no longer get stuck when the live SSE notification is missed (#4107).** The approval pending-fallback (the polling path that recovers an approval prompt when the SSE event doesn't arrive) was unreliable: the gateway mirror token couldn't persist on the in-memory approval entry, so a fresh `approval_id` was minted on every poll and the client's resolve never matched; and a stale explicit `approval_id` could resolve a different live gateway entry through the no-id fallback. The mirror token is now stored on the entry's `data` dict so `approval_id` stays stable across reconciles, and the `_gateway_queues` fallback only fires when no explicit `approval_id` was supplied (preserving the legacy no-id client path). (#4107)
+
+## [v0.51.412] — 2026-06-14 — Release NY (gateway reasoning previews + regenerate-title for CLI/TUI sessions, #4146/#4183)
+
+### Fixed
+
+- **Gateway-routed chat now surfaces reasoning/thinking previews in the WebUI (#4146).** When chat is routed through a running Hermes Gateway, reasoning fragments streamed by reasoning-capable models (`delta.reasoning_content`) now appear as a thinking preview, matching the non-gateway streaming path. Only string reasoning fragments are forwarded (structured payloads are never stringified into the browser), inter-delta whitespace is preserved, and the accumulated reasoning is persisted onto the saved assistant message so it survives a transcript reload. (#4146)
+- **Regenerating a title now works for CLI/TUI sessions that exist only in `state.db` (#4183).** The `/api/session/title/regenerate` endpoint previously used a sidecar-only lookup, so CLI/TUI sessions without a materialized sidecar JSON returned "Session not found". It now materializes a writable sidecar from `state.db` (the same pattern rename and archive use) and returns a clear 403 for read-only imported sessions. (#4183)
+
+## [v0.51.411] — 2026-06-14 — Release NX (offline recovery verifies unreliable browser offline reports via /health probe, #4170)
+
+### Fixed
+
+- **Offline recovery now verifies unreliable browser offline reports with the existing `/health` probe before showing or sticking on the browser-reason banner.** `navigator.onLine` is treated as a hint for the banner reason, while server reachability remains the source of truth, so browsers that incorrectly report offline can recover without a page reload or permanent connection-lost state. The health probe is bounded by a 3s `AbortController` timeout so a black-hole network can't delay the banner. (#4170)
+
+## [v0.51.410] — 2026-06-14 — Release NW (chat Mermaid lightbox + workspace CSV table preview, #4075/#4025)
+
+### Added
+
+- **Rendered Mermaid diagrams can now be enlarged in chat (#4075).** Clicking a Mermaid diagram opens it in the existing fullscreen lightbox so larger graphs are readable without leaving the conversation. (#4075)
+- **CSV files now preview as formatted tables in the workspace (#4025).** The workspace file preview reuses the existing chat CSV table renderer (with a 256 KB cap and clear error states for oversized/empty/malformed files) instead of showing raw comma-separated text, matching how CSVs already render inline in messages. (#4025)
+
+## [v0.51.409] — 2026-06-14 — Release NV (provider-gate title-gen reasoning extra_body, #4161/#2083)
+
+### Fixed
+
+- **Auto-title generation no longer sends an unsupported `reasoning` parameter to providers that reject it, restoring LLM-quality titles (#4161).** To suppress thinking on reasoning models (#2083), title generation injects `extra_body={"reasoning": {"enabled": false}}` — but OpenAI Chat Completions and Azure OpenAI reject unknown top-level params with a 400, so every new session silently fell back to a low-quality heuristic title for users on those providers. The reasoning-disable is now gated: the auxiliary title path skips it for reject-listed routes (OpenAI / Azure) while keeping it for local endpoints, OpenRouter, and other reasoning-aware providers; and the agent title path gates it behind the agent's canonical `_supports_reasoning_extra_body()` route check, which also excludes OpenRouter Anthropic mandatory-reasoning models (Claude Sonnet 4.6 / Opus 4.8) that are reasoning-capable but reject a disable. MiniMax keeps its existing `reasoning_split` handling. (#4161, #2083)
+
+## [v0.51.408] — 2026-06-14 — Release NU (reasoning selector for nested Gemini custom-provider routes, #3431)
+
+### Fixed
+
+- **Custom provider model ids with nested Gemini gateway routes (e.g. `vertex/gemini-2.5-…`, `gemini_cli/gemini-2.5-…`) now expose the reasoning effort selector when the underlying model supports thinking.** Extends the heuristic fallback used for bare and dot-separated custom names; embedding and image-only Gemini routes stay excluded, and the allow is version-gated to the reasoning-capable families (Gemini 2.5 series and 3-era) so pre-2.5 routes like `vertex/gemini-1.5-pro` — which have no thinking controls — don't get a selector that would fail on send. OpenRouter-style `x-ai/…` ids continue to use the existing slash-prefix list. (#3431)
+
+## [v0.51.407] — 2026-06-14 — Release NT (nest forked sessions under their parent in the sidebar, #3224)
+
+### Added
+
+- **Forked sessions now nest under their parent in the sidebar (#3224).** A session that was forked from another shows a "N children" badge on the parent row; clicking it expands the forks nested directly beneath, indented and collapsible (default collapsed, so the sidebar stays uncluttered when you have no forks). Nested forks keep their full action surface — three-dot menu, rename, swipe archive/delete — and a live state indicator, while read-only/subagent child sessions keep their existing click-to-open behavior. Batch-select reaches expanded forks, and a streaming fork no longer marks its parent as falsely unread when it finishes. (#3224)
+
+## [v0.51.406] — 2026-06-14 — Release NS (project-context file in the Memory tab, #3866)
+
+### Added
+
+- **The Memory tab now shows the active workspace's project-context file (AGENTS.md / HERMES.md / CLAUDE.md / .cursorrules) read-only (#3866).** A new "Project Context" section surfaces whatever context file the agent actually loads for the current workspace, with the filename and path shown. It mirrors the agent's own discovery logic — case variants, `.cursor/rules/*.mdc`, YAML-frontmatter stripping, and the 20k per-source cap — so what you see matches what the agent injects, rather than raw file bytes. A blank/draft session workspace correctly shows no context (it does not fall back to the server's working directory). The section is read-only (no edit affordance). (#3866)
+
+## [v0.51.405] — 2026-06-14 — Release NR (Transparent Stream live prose stays chronological, #4096)
+
+### Fixed
+
+- **Transparent Stream: assistant prose no longer bunches at the top of a live multi-round turn (#4096).** During a streaming turn that alternates prose with tool calls (narrate → tools → narrate → tools …), every round's prose visually stacked at the top of the turn while all tool/thinking rows clustered below it; the transcript only re-interleaved correctly once the turn settled. Root cause: `_syncLiveWorklogReasonsForAnchor()` runs on every live segment render and unconditionally built the top-anchored Worklog rail — mirroring each round's prose into a `wl-reason` row there and hiding the real, chronologically-placed inline `assistant-segment` (`assistant-segment-worklog-source` → `display:none`). That prose-folding is the **Compact Worklog** presentation (#3401) and must not run in **Transparent Stream** mode, where prose is meant to stay as visible inline segments interleaved with tool rows. The helper is now gated on `isCompactWorklogMode()`, so Transparent Stream keeps prose in chronological position live (matching the already-correct settled render), while Compact Worklog folding is unchanged. (#4096)
+
+## [v0.51.404] — 2026-06-14 — Release NQ (PWA multi-window connection-pool saturation fix, #4151)
+
+### Fixed
+
+- **Multiple PWA windows no longer saturate the connection pool and cycle "Request timed out" toasts (#4151).** The idle-SSE close added in #3992/#3996 keyed off the Page Visibility API (`visibilitychange` / `document.hidden`), but a PWA *standalone* window does not reliably fire `visibilitychange` when it loses focus to another window of the same app — `document.hidden` only flips on minimize. So two side-by-side PWA windows both stayed `visible`, each held its two global sidebar SSE streams open (session-events + gateway), and 2×3 = 6 connections hit the browser's per-origin HTTP/1.1 limit; subsequent `fetch()` calls (the 30s background polls) queued behind the saturated pool and timed out. The two global sidebar streams now also close on a sustained window `blur` (gated on `document.hasFocus()`, the signal `visibilitychange` misses) and reopen — catching up the session list — on `focus`. The per-session live stream is intentionally left visibility-only so an unfocused-but-visible window still receives live `bg_task_complete` / `server_turn_started` events. (#4151)
+
+## [v0.51.403] — 2026-06-13 — Release NP (notification click reuses the existing chat tab, #4109)
+
+### Fixed
+
+- **Clicking a notification now focuses (and navigates) the existing chat tab instead of opening a new one (#4109).** The service-worker `notificationclick` handler still focuses an exact-path tab when one is open; when the notification points at a different session, it now reuses a same-origin focusable/navigable client (`navigate(targetUrl)` then `focus()`) rather than spawning a duplicate window, and only falls back to `openWindow` if no reusable tab exists. The new `sameOrigin` guard prevents navigating an unrelated cross-origin window. (#4109)
+
+## [v0.51.400] — 2026-06-13 — Release NM (skill bundles in WebUI slash commands, #4087)
+
+### Fixed
+
+- **Skill bundles now appear in the WebUI slash-command autocomplete and dispatch, without shadowing existing commands (#4087).** Bundle-backed `/commands` (from the agent's `skill_bundles` registry) are surfaced alongside skills/plugins, restoring CLI↔WebUI parity. Command resolution keeps strict precedence: built-in → CLI-only → runtime/plugin (`getAgentCommandMetadata` / `_AGENT_COMMANDS_RUN_ON_WEBUI`) → **then** bundle (gated on no agent command claiming the name) → plain skill, so a bundle whose slug collides with `reload-skills`/`codex-runtime`/a plugin can't hijack dispatch. Autocomplete mirrors that order via `_getReservedSlashCommandSlugs()` (built-ins + all agent/runtime/plugin names + aliases reserved before bundles). Bundle execution runs through the same profile-scoped trusted path as skills. (#4087)
+
+## [v0.51.399] — 2026-06-13 — Release NL (per-home provider probe-worker pool, #3787)
+
+### Fixed
+
+- **Concurrent provider-usage probes for the same home no longer spawn O(N) cold subprocesses, and the worker pool is race-safe (#3787).** `_AccountUsageProbeWorker` previously cold-spawned a fresh subprocess whenever its single worker was busy; it now uses a per-home worker pool. Critically, `_get_account_usage_probe_worker()` claims a worker **with its lock already held, inside the pool lock**, eliminating the TOCTOU window where a worker could be popped/closed by cache invalidation between the pool read and the claim (which previously relaunched an untracked subprocess). Cache invalidation flushes workers scoped to the active home (the status cache clears across all homes — an intentional, commented asymmetry). (#3787)
+
+## [v0.51.398] — 2026-06-13 — Release NK (auto-generate titles for imported CLI sessions, #3987)
+
+### Fixed
+
+- **Imported CLI/external sessions now get a generated title instead of a raw id or placeholder (#3987).** When a session is imported without a WebUI title, the backend runs the existing `generate_session_title` path (reusing `_looks_like_default_cli_title` detection). The async title persist re-resolves the **latest** canonical session under `_get_session_agent_lock(sid)` immediately before saving (preferring `SESSIONS[sid]`, else `Session.load(sid)`) and re-checks the default-title guard on that latest object — so a WebUI reply that lands while title generation is in flight is never clobbered by a stale pre-generation snapshot. Manual regenerate still works. (#3987)
+
+## [v0.51.397] — 2026-06-13 — Release NJ (wire /credits through WebUI command dispatch, #4071)
+
+### Fixed
+
+- **The `/credits` slash command now works in the WebUI, not just the CLI (#4071).** `/credits` is added to the allowed-agent-command set and rendered via the shared `agent.account_usage.build_credits_view`, so the browser shows the same Nous credit balance view. It degrades gracefully — a logged-out user gets a "Not logged into Nous" hint, and an import/build failure returns "Couldn't fetch credits right now." instead of erroring. (#4071)
+
+## [v0.51.396] — 2026-06-13 — Release NI (longer timeout for full-history session loads, #4139)
+
+### Fixed
+
+- **Full-history session loads now use an extended client timeout.** Actions that intentionally fetch the entire transcript (fork/export/start-jump helpers) can legitimately take longer than the default API timeout on very large sessions; the WebUI now gives that path up to 120 seconds instead of showing a premature "Request timed out" toast while the backend is still working. (#4139)
+
+## [v0.51.395] — 2026-06-13 — Release NH (push source filters into agent session scans, #3930)
+
+### Fixed
+
+- **The sidebar source filter (WebUI / CLI / cron) is now applied inside the session scan instead of projecting every row and filtering after (#3930).** A `claude_code`-only or `cron`-only filter now early-returns out of the unrelated side scans (Claude-Code import scan / cron-session scan) rather than building the full cross-source list and discarding most of it, cutting work on installs with large CLI or cron histories. The filter pushdown is correctness-preserving — no source's sessions are wrongly dropped from the list. (#3930)
+
+## [v0.51.394] — 2026-06-13 — Release NG (document-title attention badge for pending prompts, #4121)
+
+### Added
+
+- **Desktop/PWA wrappers can now detect approval/clarify attention from the document title without stealing chat-title ownership (#4121).** An active chat tab prepends a `● ` marker only while the current session has a pending approval or clarification prompt; the badge clears on prompt dismissal or session switch. It composes on top of the #4086 title-owner model — `syncTopbar()` still owns the underlying `"<session> — <assistant>"` format and the badge is layered in front of it. (#4121)
+
+## [v0.51.393] — 2026-06-13 — Release NF (run /yolo immediately while the agent is busy)
+
+### Fixed
+
+- **`/yolo` now takes effect immediately when sent during a running turn, instead of being queued behind it.** The busy-send fast path already ran `/steer`, `/interrupt`, `/queue`, `/terminal`, and `/goal` immediately; `/yolo` (session-scoped approval bypass) is now in that allowlist too, so toggling YOLO mid-turn applies to the in-flight approvals rather than only the next turn. (#467 follow-up)
+
+## [v0.51.392] — 2026-06-13 — Release NE (align WebUI reasoning efforts to the agent's accepted set, drop "max")
+
+### Fixed
+
+- **The WebUI no longer offers a "Max" reasoning effort the agent never accepted.** `VALID_REASONING_EFFORTS` is now `minimal/low/medium/high/xhigh` — matching `hermes-agent`'s own `VALID_REASONING_EFFORTS` (which has no `max`) — and the reasoning picker, `/reasoning` slash-command args, and help text drop the stale `Max` option. A previously-saved `reasoning_effort: max` is migrated to `xhigh` at resolve time (instead of becoming parser-invalid and silently dropping reasoning), so existing configs keep working. This is the "only expose what the model/agent actually supports" cleanup. (#3505 review follow-up)
+
+## [v0.51.391] — 2026-06-13 — Release ND (Stable Assistant Turn Anchors renderer snapshot adapter, inert, #3926)
+
+### Added
+
+- **Stable Assistant Turn Anchors renderer snapshot adapter (#3926).** Adds `createAssistantTurnAnchorRendererSnapshot()` and `reconcileAssistantTurnAnchorRendererSnapshot()` so current Compact Worklog / Transparent Stream row hooks can be summarized as `renderer_snapshot_v1` and compared with the anchor-owned `activity_scene_v1` through the Slice 7 dual-run reconciler. Still an inert migration harness: no current `renderMessages()`, live SSE, `S.messages`, `INFLIGHT`, Compact Worklog, Transparent Stream, or DOM path invokes it automatically. (Slice 8 of the live-to-final unification; absorbs the #4120 reconciler review feedback.)
+
+## [v0.51.390] — 2026-06-13 — Release NC (don't snap long final answers to bottom on PWA refresh, #4123)
+
+### Fixed
+
+- **Long final answers no longer snap back to the bottom while you are reading them in PWA/mobile mode (#4123).** Same-session background refreshes now treat a preserved scroll snapshot whose viewport is clearly away from the bottom (>250px) as an active reading position and restore it before any follow-to-bottom path runs, re-mark restored mid-answer positions as unpinned so later refreshes keep respecting the reader, and no longer reset the scroll-direction tracker on same-session force refreshes (that reset stays scoped to real session switches). (#4123)
+
+## [v0.51.389] — 2026-06-13 — Release NB (surface dirty-install state in update check, #4085)
+
+### Fixed
+
+- **A dirty install no longer reports "Up to date" with no way to recover (#4085).** The update-check payload now carries a `dirty: bool` reflecting the working-tree state vs HEAD, so the Settings update panel can surface a "Local changes detected" state with an apply-latest action (wired to the existing destructive-reset endpoint) when the install is dirty and at-or-past the latest release tag. (#4085)
+
+## [v0.51.388] — 2026-06-13 — Release NA (Stable Assistant Turn Anchors dual-run reconciler, inert, #3926)
+
+### Added
+
+- **Stable Assistant Turn Anchors dual-run reconciler (#3926).** Adds `reconcileAssistantTurnAnchorActivityScene()` to compare an anchor-owned `activity_scene_v1` projection against current renderer-row snapshots before visible renderer replacement. The helper reports row-count, missing/extra row, order, and field mismatch diagnostics for Compact Worklog / Transparent Stream shadow runs while staying inert: no current `renderMessages()`, live SSE, `S.messages`, `INFLIGHT`, Compact Worklog, Transparent Stream, or DOM path consumes it yet. (Slice 7 of the live-to-final unification.)
+
+## [v0.51.387] — 2026-06-13 — Release MZ (Stable Assistant Turn Anchors live shadow feed, inert, #3926)
+
+### Added
+
+- **Stable Assistant Turn Anchors live shadow feed (#3926).** `attachLiveStream()` now creates a per-stream anchor registry and shadow-feeds non-token live activity boundaries into the existing `HermesAssistantTurnAnchors` owner, including aggregate reasoning, tools, control events, compression lifecycle, app errors, cancel, and a slim `done` payload. The feed is still renderer-neutral: Compact Worklog, Transparent Stream, `renderMessages()`, `S.messages`, `INFLIGHT`, and DOM continuity do not consume the live registry yet; token events and EventSource network `error` remain outside the shadow feed. Settled active assistant messages are stamped with `_anchor_stream_id` for the next reconciliation slice, and that ephemeral stamp is carried forward across session refreshes. Every feed call is wrapped in a guarded helper (`_applyToAnchor`) that no-ops if the anchor API is unavailable and swallows any error (warn-once), so a shadow-feed fault can never break the live stream. (#3926)
+
+## [v0.51.386] — 2026-06-13 — Release MY (voice mode survives a dropped speechSynthesis onend, #3983)
+
+### Fixed
+
+- **Hands-free voice mode no longer dead-ends after the first browser-TTS reply (#3983).** Chromium intermittently drops the `speechSynthesis` utterance's `onend` event, which left voice mode stuck "speaking" and never re-armed listening. A watchdog now forces a return to listening if `onend` never fires, with the recovery handles cleared on normal completion and on deactivation. The fix is scoped to the browser `speechSynthesis` path — the Edge `Audio` branch (which has a reliable `onended`) is untouched. (#3983)
+
+## [v0.51.385] — 2026-06-13 — Release MX (profile-cookie env var aligned to HERMES_WEBUI_ prefix, #803)
+
+### Changed
+
+- **The profile-cookie name env var now uses the standard `HERMES_WEBUI_` prefix (#803).** Set the per-instance session-profile cookie name via `HERMES_WEBUI_PROFILE_COOKIE_NAME`, matching every other WebUI setting's prefix; the original `WEBUI_PROFILE_COOKIE_NAME` keeps working as a deprecated fallback (warned once per process). Lets multiple WebUI instances on the same host+port disambiguate their profile cookies without env-var-naming surprises. (#803)
+
+## [v0.51.384] — 2026-06-13 — Release MW (no false streaming / activity-timer reset on session switch, #3900)
+
+### Fixed
+
+- **An idle session no longer shows streaming chrome (Stop/spinner/thinking) right after a sidebar switch, and switching back to a live stream no longer resets its activity timer (#3900).** `loadSession` now clears `S.busy` / `S.activeStreamId` as soon as the session metadata confirms there is no `active_stream_id` — before the async message-load gap — so the previous session's busy flag can't bleed onto an idle chat. On switch-away it snapshots the live-turn DOM before replacing the message pane (seeding an `INFLIGHT` bucket if needed) and restores that HTML on the active-stream return path instead of rebuilding the worklog shell from scratch, so the elapsed timer and live trace survive the round-trip. (#3900)
+
+## [v0.51.383] — 2026-06-13 — Release MV (desktop tab title keeps active session name on bot-name refresh, #4086)
+
+### Fixed
+
+- **Desktop tab titles keep the active session name when profile/settings boot paths refresh the assistant name (#4086).** `applyBotName()` now leaves `document.title` alone while a chat session is active, so `syncTopbar()` remains the owner of the per-session `"<session> — <assistant>"` title and desktop tabs no longer collapse to the same fallback name. (#4086)
+
+## [v0.51.382] — 2026-06-13 — Release MU (Stable Assistant Turn Anchors: activity-scene projection, inert, #4093)
+
+### Added
+
+- **Stable Assistant Turn Anchors activity-scene projection (#4093, #3926).** Adds `projectAssistantTurnAnchorActivityScene` to the frozen `HermesAssistantTurnAnchors` surface — a renderer-neutral projection that turns the anchor owner's classified events into ordered activity-scene rows for the future Transparent Stream / Compact Worklog convergence. This slice is **inert**: no render path consumes the scene projection yet (the only live anchor consumer remains the #4092 settled final-answer projection, which still receives a pre-flattened string), so there is zero rendering change in this release. (#4093)
+
+## [v0.51.381] — 2026-06-13 — Release MT (Stable Assistant Turn Anchors: settled final-answer projection, #4092)
+
+### Changed
+
+- **Settled assistant final answers now route through the Stable Assistant Turn Anchor owner (#4092, #3926).** As the first RFC Phase 3 wiring slice, `renderMessages()` derives each *settled* assistant message's final-answer text via `projectAssistantTurnAnchorSettledMessageFinalAnswer` (the anchor registry's settled-message projection) instead of reading the raw content directly. The projection is a faithful identity transform for normal string content (verified by unit echo across plain/markdown/inline-think/unicode/whitespace/code, a real-transcript A/B render that was byte-identical to master, and a live-build `applied:true` echo check), is wrapped in a try/catch that falls back to the original content on any error, and only applies when it produces a usable string — so there is no visible rendering change today; it moves the settled-final derivation onto the single anchor owner that live/replay/settled sources will converge on. Live (`_live`) turns and non-string content are untouched. (#4092)
+
+## [v0.51.380] — 2026-06-13 — Release MS (tool-iteration-limit stops surfaced explicitly, #3821)
+
+### Fixed
+
+- **Tool iteration-limit stops are now surfaced explicitly instead of looking like a normal user turn (#3821).** When Hermes Agent stops a turn at the max tool-calling iteration budget, WebUI filters the agent's synthetic max-iteration summary prompt out of both the visible transcript and the model-facing context (so it isn't persisted or replayed as if the human typed it), marks a usable final answer with a `tool_limit_reached` terminal state, and shows a no-final terminal error when the limit fires before any assistant answer is available. Detection reads current-turn result metadata only (not conversation history), and the status annotation is gated behind the terminal-failure check so a genuine failure still takes the error path. (#3821)
+
+## [v0.51.379] — 2026-06-13 — Release MR (Worklog detail collapse survives live refresh, #4062)
+
+### Fixed
+
+- **Manual Thinking/Tool detail collapse choices now survive live transcript refreshes (#4062).** `renderMessages()` captures the open/closed disclosure state of Worklog Thinking cards, Tool cards, and multi-tool detail groups before rebuilding the transcript, then restores it afterward — keyed on stable render-time row attributes (`data-thinking-key` / tool id) rather than streaming body text — so new streaming results no longer reset every detail row back to the global Worklog-details default. (Reported via Discord; #4062)
+
+## [v0.51.378] — 2026-06-13 — Release MQ (don't yank the viewport while reading; auto-follow toggle, #4006)
+
+### Fixed
+
+- **Streaming no longer snaps you to the bottom when you've scrolled up to read (#4006).** Two pin-hysteresis bugs are fixed: `_scrollAfterMessageRender` now honors `_messageUserUnpinned` (so a forced follow can't override a deliberate scroll-up after the 250px near-bottom counter re-pins), and `_finishDone`'s completion scroll is gated on an actual near-bottom check instead of firing unconditionally. (#4006)
+
+### Added
+
+- **Auto-follow toggle (Settings → Appearance).** A new "Auto-follow new content" setting controls whether the transcript follows new output to the bottom while streaming. It defaults **on** — a Codex/Claude-Code-style sticky bottom: you stay pinned to the latest output until you scroll up, at which point you're left where you are. Turn it off to always manage the scroll position yourself. (#4006)
+
+## [v0.51.377] — 2026-06-13 — Release MP (Firefox post-stream scroll jitter, #3920)
+
+### Fixed
+
+- **Firefox no longer jitters/steps the chat scroll after a streamed turn settles (#3920).** The post-stream bottom-settle replaced its `setTimeout` fan-out + double-`requestAnimationFrame` `scrollHeight` polling (which forced a reflow per frame on Firefox) with a single synchronous write plus a `ResizeObserver` that re-anchors once per frame as late layout (Prism/KaTeX/Mermaid/images) grows, disconnecting after 300ms of quiet. A 2s top-level fallback covers fully-static responses that never resize, and the deliberate Firefox session-sidebar `overflow-anchor:none` fix is preserved. (#3920)
+
+## [v0.51.376] — 2026-06-13 — Release MO (Hide Thinking also hides Worklog reasoning, #3903)
+
+### Fixed
+
+- **Hiding Thinking now also hides Worklog reasoning rows, without hiding tool activity (#3903).** When reasoning/thinking display is turned off, the Worklog reasoning rows (`.wl-reason`) are now suppressed on both the live streaming path and the settled/reloaded render path, and any already-rendered reasoning rows are pruned when Thinking is toggled off — while tool cards and ordinary Worklog anchor/progress rows are preserved. (Previously the gate sat on an unused helper, so reasoning rows kept rendering even with Thinking off.) (#3903)
+
+## [v0.51.375] — 2026-06-13 — Release MN (Transparent Stream activity display, #3820)
+
+### Added
+
+- **Transparent Stream activity display mode (opt-in).** Settings → Appearance now includes a chat activity display mode that renders each Thinking/tool event as its own chronological expandable row — restoring the transparent reasoning/tool-call stream for power users — with live tool completion updating the same row and settled/reloaded transcripts preserving the same event shape and order. Compact Worklog remains the default. The rows are styled as quiet inline assistant-turn metadata (flat, theme-adaptive, prose stays the primary reading object) across light/dark and all skins; failed tools are clearly marked, args render compactly, and tool output reads as one quiet zone. (#3820)
+- **Transparent Stream turn-level collapse + recency fade + per-turn footer.** Clicking the assistant role label collapses the entire event stack into a compact "output only" view with an animated chevron. On the live turn, older event rows fade progressively (recency cue, readable floor) and restore on hover; settled history stays full-opacity. A bottom-of-turn footer mirrors the live run-status line for settled turns (elapsed time, TTFT, token usage, final status). (#3820)
+
+## [v0.51.374] — 2026-06-12 — Release MM (custom-provider context-length probes carry the API key)
+
+### Fixed
+
+- **Custom provider context-length probes now include the provider API key during session hydration and streaming fallbacks (#4059).** Static session loads and fallback usage/session-save paths now reuse the matched custom provider credentials when querying `/v1/models`, so authenticated custom endpoints do not fall back to the default 256K window and clobber a larger persisted context length / compression threshold. (#4059)
+
+## [v0.51.373] — 2026-06-12 — Release ML (sidebar lineage + source-count fixes)
+
+### Fixed
+
+- **Expanded lineage segments no longer collapse when the session list refreshes mid-stream (#4005).** While a turn was streaming, each sidebar refresh wiped the lineage-report cache and re-collapsed any expanded lineage row. The cache is now pruned to only the rows that left the visible set (kept for still-visible rows), the in-flight report request is identity-guarded so a stale response can't overwrite a newer one, and an expanded row that still needs its report fetches and re-renders in place. (#4005)
+- **The sidebar source-filter counts (WebUI / CLI) now match the number of rows actually shown (#3966).** The chip counts were computed from pre-collapse session totals, so they could disagree with the collapsed/grouped rows rendered in the list. Counts are now derived from the same collapse-and-attach pass used to render each source's rows. (#3966)
+
+## [v0.51.372] — 2026-06-12 — Release MK (markdown link-label inline code, /use skill autocomplete, mobile Worklog overflow)
+
+### Fixed
+
+- **Inline code (and bold/italic/strikethrough) inside a markdown link label now renders correctly (#4001).** A link like `` [`abc123`](https://…) `` previously showed the literal `` `abc123` `` backticks (or escaped `&lt;code&gt;`) instead of a code span. The renderer now preserves `code`/`strong`/`em`/`del` formatting inside link labels while still escaping everything else and running the result through the existing tag/attribute sanitizer. (#4001)
+- **`/use` now autocompletes installed skill names (#3968).** Typing `/use ` offers the available skills, matching how `/model` and `/personality` already autocomplete their arguments. The suggestion list refreshes when skills are enabled, disabled, saved, or deleted. (#3968)
+- **The Worklog summary no longer causes sideways panning on narrow mobile viewports (#4064).** A long single-line Worklog label could widen the chat column past the screen on Android; the summary row is now bounded to the available width and truncates with an ellipsis instead. (#4064)
+
+## [v0.51.371] — 2026-06-12 — Release MJ (low-risk batch: approval polling, composer/titlebar polish, slash-command parity, skill categories, French TTS)
+
+### Fixed
+
+- **Tool-approval prompts no longer disappear during brief idle gaps (#4041).** The HTTP approval poll used to tear itself down — force-hiding the approval card past its visibility guard before the server had confirmed the approval was gone — on any transient busy=false dip. It now keeps polling across busy dips and stops only on a true session switch or a confirmed-idle state with no pending approvals. (#4041)
+- **Typing in the composer is smoother on long sessions (#4042).** The composer auto-resize ran a synchronous layout read on every keystroke; it's now coalesced into a single animation-frame update. (#4042)
+- **The desktop window title stays correct when switching to non-chat panels (#4039).** Switching to Settings/Tasks/etc. now stamps `document.title`, and returning to chat restores the chat title. (#4039)
+- **The Tauri desktop app's local IPC is no longer blocked by the Content-Security-Policy (#4040).** `http://ipc.localhost` is now part of the default `connect-src` allowlist. (#4040)
+- **`bootstrap.py` is tracked with its executable bit (#3914)** so direct POSIX execution keeps working after a fresh clone.
+- **`/reload-skills` now works from the WebUI (#4043).** It's routed through the same narrow WebUI agent-command allowlist as `/reload-mcp`, re-scans the installed skills and reports what changed. (#4043)
+- **`/use <skill>` now injects the actual skill content for the next turn (#4044).** Instead of only telling the agent to consult a skill, the selected skill's body is fetched and carried through to the next message as forced context. (#4044)
+- **Flat external skill directories are now categorized in the Skills tab (#4053).** Skills directly under an external skills root use that root's directory name as their category, while flat skills under the local skills root stay uncategorized. (#4053)
+
+### Added
+
+- **French Edge TTS voices (#4058).** Seven `fr-CA` / `fr-FR` neural voices are now in the Edge TTS allowlist, so French-speaking users who enable Edge TTS no longer get a 400 on every utterance.
+
+## [v0.51.370] — 2026-06-12 — Release MI (model picker shows real providers when /api/models rebuild times out)
+
+### Fixed
+
+- **The model picker no longer collapses to a single "Default" entry when the live model-catalog rebuild exceeds its time budget (#3928).** On the first cold open after a restart, `/api/models` rebuilds the provider catalog by probing each configured provider; on a slow network (or behind a corporate proxy) that probe can blow the bounded rebuild budget. The over-budget fallback previously served an emergency one-model catalog, so the picker showed only "Default" until a later request rebuilt successfully. It now serves a richer **network-free** catalog assembled from local config and the auth store — the active provider and its default model, configured `providers.*` entries, credential-pool providers (excluding ambient `gh` CLI tokens), known providers that have a key, declared fallback providers, and custom providers — with the active provider listed first. The 4-second guardrail is unchanged, the real catalog still refreshes out-of-band for the next caller, nothing is written to the 24-hour disk cache from this path, and the build safely degrades to the minimal one-model catalog if anything goes wrong. (#3928)
+
 ## [v0.51.369] — 2026-06-12 — Release MH (WebUI streaming honors runtime target model/base_url)
 
 ### Fixed
 
 - **Provider OpenCode-Go (and similar pooled providers) no longer 404 with "model not found" when selected via the WebUI model picker (#3895).** WebUI streaming used the *configured* provider base URL instead of the runtime provider's per-model-normalized URL, which duplicated a `/v1` path segment for OpenCode-Go and produced a 404. The target model is now threaded into runtime provider resolution (including the 401 credential self-heal retries), and the runtime-normalized base URL is preferred — but only when it points at the same scheme+host+port as the configured one, so an explicit `providers.<id>.base_url` override at a different endpoint (e.g. an LM Studio LAN address or an OpenRouter mirror) is still honored. (#3895)
-
 ## [v0.51.368] — 2026-06-12 — Release MG (bind active-profile cookie to auth session)
 
 ### Security
@@ -65,7 +368,6 @@
 ### Fixed
 
 - **Idle background tabs no longer exhaust the browser's connection pool and cause "Request timed out" toasts (#3992).** Each WebUI window opened three persistent SSE connections (session-events, gateway stream, per-session stream); with two windows open that reached the browser's six-connection per-origin HTTP/1.1 limit, so any subsequent request queued behind the saturated pool and timed out. The gateway and per-session streams now follow the same Page Visibility pattern the session-events stream already used: they close while the tab is hidden (freeing pool slots) and reopen when it becomes visible again. The per-session stream correctly reattaches on re-show — including for a session that was loaded or restored while the tab was already hidden — so live `bg_task_complete` / `server_turn_started` events are not missed. (#3996)
-
 ## [v0.51.359] — 2026-06-11 — Release LW (assistant turn anchor phase 0 scaffold)
 
 ### Added
@@ -163,6 +465,7 @@
 ### Changed
 
 - **Worklog details settings now align with the live-to-final model.** The old "Activity expanded by default" setting is renamed to **Worklog details** (default folded), the legacy "Compact tool activity" preference is deprecated, and the Worklog renderer stays enabled for older installs that had saved `simplified_tool_calling=false`. (#3400, #3820)
+
 
 ## [v0.51.346] — 2026-06-09 — Release LJ (PWA notification controls)
 

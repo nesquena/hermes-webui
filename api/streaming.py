@@ -1020,6 +1020,86 @@ def _provider_error_payload(message: str, err_type: str, hint: str = '') -> dict
     return payload
 
 
+_MAX_ITERATION_SUMMARY_REQUEST = (
+    "You've reached the maximum number of tool-calling iterations allowed. "
+    "Please provide a final response summarizing what you've found and accomplished "
+    "so far, without calling any more tools."
+)
+
+
+def _is_synthetic_max_iteration_summary_request(message) -> bool:
+    """Return True for Hermes Agent's internal max-iteration summary prompt."""
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    text = " ".join(_message_text(message.get('content', '')).split())
+    expected = " ".join(_MAX_ITERATION_SUMMARY_REQUEST.split())
+    return text == expected
+
+
+def _drop_synthetic_max_iteration_summary_requests(messages, *, enabled: bool = True):
+    """Remove Agent-internal max-iteration summary prompts from WebUI state."""
+    if not enabled:
+        return list(messages or [])
+    return [
+        msg
+        for msg in list(messages or [])
+        if not _is_synthetic_max_iteration_summary_request(msg)
+    ]
+
+
+def _agent_result_tool_limit_reached(result) -> bool:
+    """Return True when current-turn metadata says the tool iteration cap fired."""
+    if not isinstance(result, dict):
+        return False
+    fields = [
+        result.get('turn_exit_reason'),
+        result.get('terminal_reason'),
+        result.get('status'),
+        result.get('state'),
+        result.get('error'),
+    ]
+    haystack = " ".join(str(value or '') for value in fields).lower()
+    if (
+        'max_iterations_reached' in haystack
+        or 'maximum number of tool-calling iterations' in haystack
+        or ('tool-calling iterations' in haystack and 'maximum' in haystack)
+    ):
+        return True
+    return False
+
+
+def _mark_latest_assistant_tool_limit_status(messages) -> bool:
+    """Annotate the latest usable assistant final answer as limit-stopped."""
+    for msg in reversed(list(messages or [])):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get('_error') or msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content')
+        if isinstance(content, list):
+            text = '\n'.join(
+                str(part.get('text') or part.get('content') or '')
+                for part in content
+                if isinstance(part, dict)
+            )
+        else:
+            text = str(content or '')
+        if msg.get('tool_calls') or not text.strip():
+            continue
+        msg['_terminal_state'] = 'tool_limit_reached'
+        msg['_terminal_reason'] = 'max_iterations'
+        msg.setdefault('_statusCard', {
+            'title': 'Tool iteration limit reached',
+            'subtitle': 'Stopped because the tool iteration limit was reached.',
+            'rows': [
+                {'label': 'State', 'value': 'Limit reached'},
+                {'label': 'Next step', 'value': 'Start a new turn to continue.'},
+            ],
+        })
+        return True
+    return False
+
+
 def _session_has_cancel_marker(session) -> bool:
     """Return True if a visible cancel/interrupted marker is already persisted."""
     for msg in reversed(getattr(session, 'messages', None) or []):
@@ -2333,6 +2413,48 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
     return 'minimax' in text or 'minimaxi.com' in text
 
 
+def _route_rejects_reasoning_extra(provider: str = '', model: str = '', base_url: str = '') -> bool:
+    """Routes known to reject an ``extra_body`` ``reasoning`` parameter with HTTP 400.
+
+    Title generation injects ``extra_body={"reasoning": {"enabled": False}}`` to
+    suppress thinking on reasoning-capable models (#2083). But OpenAI Chat
+    Completions (and Azure OpenAI) reject unknown top-level params with a 400, so
+    that inject silently fails the title call and falls back to a low-quality
+    heuristic title (#4161). Skip the inject for those routes.
+
+    OpenRouter Anthropic mandatory-reasoning models (Claude Sonnet 4.6 / Opus 4.8)
+    are reasoning-capable but reject a reasoning *disable* — title gen only needs
+    reasoning off, so skip the inject for them too rather than risk the same 400.
+    """
+    provider_lower = str(provider or '').strip().lower()
+    model_lower = str(model or '').strip().lower()
+    # Hostname-based match (not substring) so a proxy URL that merely *contains*
+    # one of these strings in a path segment isn't mis-classified.
+    host = ''
+    try:
+        from urllib.parse import urlsplit
+        host = (urlsplit(str(base_url or '').strip()).hostname or '').lower()
+    except Exception:
+        host = ''
+    if host == 'api.openai.com' or host.endswith('.openai.azure.com'):
+        return True
+    # Azure AI Foundry chat-completions hosts (also reject the reasoning param).
+    if host.endswith('.services.ai.azure.com') or host.endswith('.cognitiveservices.azure.com'):
+        return True
+    if provider_lower in ('openai', 'openai-api', 'openai-codex'):
+        return True
+    if (
+        provider_lower in ('azure', 'azure-foundry', 'azure-ai-foundry', 'azure-ai')
+        or provider_lower.startswith('azure/')
+        or provider_lower.startswith('azure-')
+    ):
+        return True
+    if (host == 'openrouter.ai' or host.endswith('.openrouter.ai')) and model_lower.startswith('anthropic/'):
+        # Anthropic on OpenRouter: mandatory-reasoning families reject a disable.
+        return True
+    return False
+
+
 def _get_aux_title_config() -> dict:
     """Return title_generation auxiliary config, or an empty dict on errors."""
     try:
@@ -2514,7 +2636,9 @@ def generate_title_raw_via_aux(
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
-    reasoning_extra = {"reasoning": {"enabled": False}}
+    reasoning_extra = {}
+    if not _route_rejects_reasoning_extra(provider, model, base_url):
+        reasoning_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
         reasoning_extra["reasoning_split"] = True
     try:
@@ -2539,7 +2663,7 @@ def generate_title_raw_via_aux(
                         max_tokens=max_tokens,
                         temperature=0.2,
                         timeout=_timeout,
-                        extra_body=reasoning_extra,
+                        extra_body=reasoning_extra or None,
                     )
                     raw, empty_status = _extract_title_response(resp, aux=True)
                     if raw:
@@ -2627,10 +2751,22 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         api_kwargs.pop('tools', None)
                         api_kwargs['temperature'] = 0.1
                         api_kwargs['timeout'] = 15.0
+                        # Reasoning suppression for title gen is already handled
+                        # route-correctly by `_build_api_kwargs()` from the
+                        # `agent.reasoning_config = {"enabled": False}` set above —
+                        # each provider profile applies (or deliberately omits) the
+                        # disable in the form its endpoint accepts (OpenAI/Nous omit
+                        # the field; LM Studio uses top-level reasoning_effort;
+                        # OpenRouter Anthropic mandatory-reasoning is omitted). Do NOT
+                        # re-inject a generic `reasoning:{enabled:False}` here — that
+                        # re-adds a 400-rejected param on top of the profile output
+                        # (#4161). MiniMax still needs reasoning_split, which the
+                        # profile path does not add.
+                        _tg_extra = dict(api_kwargs.get('extra_body') or {})
                         if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
-                            extra_body = dict(api_kwargs.get('extra_body') or {})
-                            extra_body['reasoning_split'] = True
-                            api_kwargs['extra_body'] = extra_body
+                            _tg_extra['reasoning_split'] = True
+                        if _tg_extra:
+                            api_kwargs['extra_body'] = _tg_extra
                         if 'max_completion_tokens' in api_kwargs:
                             api_kwargs['max_completion_tokens'] = max_tokens
                         else:
@@ -5474,12 +5610,32 @@ def _run_agent_streaming(
         # the chat stuck in "Thinking…" forever.
         _approval_registered = False
         _unreg_notify = None
+        _cleanup_gateway_pending_mirror = None
         try:
+            try:
+                from api.route_approvals import (
+                    submit_gateway_pending_mirror as _submit_pending_for_polling,
+                    reconcile_gateway_pending_mirror_locked as _reconcile_gateway_pending_mirror_locked,
+                    _approval_sse_notify_locked as _approval_sse_notify_locked,
+                    _lock as _approval_lock,
+                )
+                def _cleanup_gateway_pending_mirror():
+                    with _approval_lock:
+                        head, total, _changed = _reconcile_gateway_pending_mirror_locked(session_id)
+                        _approval_sse_notify_locked(session_id, head, total)
+            except ImportError:
+                _submit_pending_for_polling = None
+                _cleanup_gateway_pending_mirror = None
             from tools.approval import (
                 register_gateway_notify as _reg_notify,
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
+                if _submit_pending_for_polling is not None:
+                    try:
+                        _submit_pending_for_polling(session_id, approval_data)
+                    except Exception:
+                        logger.warning("Failed to mirror approval into WebUI polling state", exc_info=True)
                 put('approval', approval_data)
             _reg_notify(session_id, _approval_notify_cb)
             _approval_registered = True
@@ -5777,10 +5933,30 @@ def _run_agent_streaming(
                     # Fallback: poll for pending approval in case notify_cb wasn't
                     # registered (e.g. older approval module without gateway support).
                     try:
-                        from tools.approval import has_pending as _has_pending, _pending, _lock
-                        if _has_pending(session_id):
-                            with _lock:
-                                p = dict(_pending.get(session_id, {}))
+                        from api.route_approvals import (
+                            _gateway_queues as _approval_gateway_queues,
+                            _lock as _approval_lock,
+                            _pending as _approval_pending,
+                            reconcile_gateway_pending_mirror_locked as _reconcile_gateway_pending_mirror_locked,
+                        )
+                        from tools.approval import has_blocking_approval as _has_blocking_approval
+                        if _has_blocking_approval(session_id):
+                            p = None
+                            with _approval_lock:
+                                _reconcile_gateway_pending_mirror_locked(session_id)
+                                queue = _approval_pending.get(session_id)
+                                if isinstance(queue, list):
+                                    p = dict(queue[0]) if queue else None
+                                elif queue:
+                                    p = dict(queue)
+                                if p is None:
+                                    gw_queue = _approval_gateway_queues.get(session_id) or []
+                                    if gw_queue:
+                                        raw = getattr(gw_queue[0], 'data', None) or {}
+                                        if raw:
+                                            p = dict(raw)
+                                        else:
+                                            logger.warning("Gateway queue entry for %s has no .data attribute", session_id)
                             if p:
                                 put('approval', p)
                     except ImportError:
@@ -6599,7 +6775,12 @@ def _run_agent_streaming(
                             getattr(s, 'active_stream_id', None),
                         )
                         return
+                _tool_limit_reached = _agent_result_tool_limit_reached(result)
                 _result_messages = result.get('messages') or _previous_context_messages
+                _result_messages = _drop_synthetic_max_iteration_summary_requests(
+                    _result_messages,
+                    enabled=_tool_limit_reached,
+                )
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
@@ -6647,7 +6828,6 @@ def _run_agent_streaming(
                             for _part in _raw_content:
                                 if isinstance(_part, dict) and isinstance(_part.get('text'), str):
                                     _part['text'] = _strip_xml_tool_calls(_part['text'])
-
                 # ── Handle context compression side effects ──
                 # If compression fired inside run_conversation, the agent may have
                 # rotated its session_id. Detect and fix the mismatch before any
@@ -6791,12 +6971,18 @@ def _run_agent_streaming(
                 _terminal_failure = (
                     _agent_result_terminal_failure(result)
                     or (
+                        _tool_limit_reached
+                        and _session_lacks_final_assistant_answer(_all_result_messages)
+                    )
+                    or (
                         not _token_sent
                         and _session_lacks_final_assistant_answer(_all_result_messages)
                     )
                 )
                 if _terminal_failure:
                     _assistant_added = False
+                elif _tool_limit_reached and not _session_lacks_final_assistant_answer(s.messages):
+                    _mark_latest_assistant_tool_limit_status(s.messages)
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if _terminal_failure or (not _assistant_added and not _token_sent):
                     if cancel_event.is_set():
@@ -6898,6 +7084,10 @@ def _run_agent_streaming(
                                 # Since we're in a flat block, directly run the
                                 # post-result merge logic here.
                                 _result_messages = result.get('messages') or _previous_context_messages
+                                _result_messages = _drop_synthetic_max_iteration_summary_requests(
+                                    _result_messages,
+                                    enabled=_agent_result_tool_limit_reached(result),
+                                )
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages,
                                     _result_messages,
@@ -6934,6 +7124,17 @@ def _run_agent_streaming(
                             'The selected model may not be supported by your configured provider or '
                             'your API key is invalid. Run `hermes model` in your terminal to '
                             'update credentials, then restart the WebUI.'
+                        )
+                    elif _tool_limit_reached:
+                        _err_label = 'Tool iteration limit reached'
+                        _err_type = 'tool_limit_reached'
+                        _err_hint = (
+                            'The agent reached its configured tool iteration limit before producing '
+                            'a final answer. Start a narrower follow-up or increase agent.max_turns.'
+                        )
+                        _err_str = (
+                            'The agent reached its configured tool iteration limit before producing '
+                            'a final answer.'
                         )
                     else:
                         _err_label = _classification['label']
@@ -6972,6 +7173,8 @@ def _run_agent_streaming(
                             _error_message['provider_details_label'] = 'Cancellation details'
                         elif _err_type == 'interrupted':
                             _error_message['provider_details_label'] = 'Interruption details'
+                        elif _err_type == 'tool_limit_reached':
+                            _error_message['provider_details_label'] = 'Terminal state details'
                         s.messages.append(_error_message)
                         try:
                             s.save()
@@ -6985,6 +7188,9 @@ def _run_agent_streaming(
                         if _compression_continuation_session_id is not None:
                             _error_payload['new_session_id'] = _compression_continuation_session_id
                             _error_payload['continuation_session_id'] = _compression_continuation_session_id
+                        if _err_type == 'tool_limit_reached':
+                            _error_payload['terminal_state'] = 'tool_limit_reached'
+                            _error_payload['terminal_reason'] = 'max_iterations'
                         put('apperror', _error_payload)
                         # Legacy #373 source tests and clients look for the
                         # no_response type; #1765 keeps that type but improves
@@ -7294,11 +7500,13 @@ def _run_agent_streaming(
                         )
                         _cfg_ctx_len = _ctx_lookup.config_context_length
                         _cfg_custom_providers = _ctx_lookup.custom_providers
+                        _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
                         _cfg_base_url = _ctx_lookup.base_url or _cfg_base_url
                         _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                         _resolved_cl = get_model_context_length(
                             getattr(agent, 'model', resolved_model or '') or '',
                             _cfg_base_url,
+                            api_key=_cfg_api_key,
                             config_context_length=_cfg_ctx_len,
                             provider=_cfg_provider,
                             custom_providers=_cfg_custom_providers,
@@ -7552,12 +7760,14 @@ def _run_agent_streaming(
                     )
                     _cfg_ctx_len = _ctx_lookup.config_context_length
                     _cfg_custom_providers = _ctx_lookup.custom_providers
+                    _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
                     _cfg_base_url = _ctx_lookup.base_url
                     _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                     try:
                         _fb_cl = _get_cl(
                             getattr(agent, 'model', resolved_model or '') or '',
                             _cfg_base_url,
+                            api_key=_cfg_api_key,
                             config_context_length=_cfg_ctx_len,
                             provider=_cfg_provider,
                             custom_providers=_cfg_custom_providers,
@@ -7675,7 +7885,11 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
-            put('done', {'session': redact_session_data(raw_session), 'usage': usage})
+            _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+            if _tool_limit_reached:
+                _done_payload['terminal_state'] = 'tool_limit_reached'
+                _done_payload['terminal_reason'] = 'max_iterations'
+            put('done', _done_payload)
             # Emit one last metering packet for the live message-header TPS label.
             meter_stats = meter().get_stats()
             meter_stats['session_id'] = session_id
@@ -7707,6 +7921,11 @@ def _run_agent_streaming(
                     _unreg_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister approval callback")
+            if _cleanup_gateway_pending_mirror is not None:
+                try:
+                    _cleanup_gateway_pending_mirror()
+                except Exception:
+                    logger.debug("Failed to reconcile gateway approval mirror")
             if _clarify_registered and _unreg_clarify_notify is not None:
                 try:
                     _unreg_clarify_notify(session_id)

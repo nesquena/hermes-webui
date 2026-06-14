@@ -182,6 +182,9 @@ self.addEventListener('notificationclick', (event) => {
   const samePath = (clientUrl) => {
     try { return new URL(clientUrl).pathname === targetPath; } catch (_e) { return false; }
   };
+  const sameOrigin = (clientUrl) => {
+    try { return new URL(clientUrl).origin === self.location.origin; } catch (_e) { return false; }
+  };
   event.waitUntil(
     self.clients.matchAll({type: 'window', includeUncontrolled: true}).then((clientList) => {
       // Match on pathname, not the full href: _sessionUrlForSid copies the
@@ -190,13 +193,17 @@ self.addEventListener('notificationclick', (event) => {
       // duplicate window.
       const targetClient = clientList.find((client) => samePath(client.url) && 'focus' in client);
       if (targetClient) return targetClient.focus();
-      if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
-      const focusableClient = clientList.find((client) => 'focus' in client);
+
+      const openNotificationWindow = () => (
+        self.clients.openWindow ? self.clients.openWindow(targetUrl) : undefined
+      );
+      const focusableClient = clientList.find((client) => sameOrigin(client.url) && 'focus' in client && 'navigate' in client);
       if (focusableClient && 'navigate' in focusableClient) {
         return focusableClient.navigate(targetUrl)
           .then((client) => (client && 'focus' in client ? client.focus() : focusableClient.focus()))
           .catch(() => focusableClient.focus());
       }
+      return openNotificationWindow();
     })
   );
 });

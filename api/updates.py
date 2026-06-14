@@ -644,7 +644,14 @@ def _check_repo_branch(path, name, *, fetch=True):
 
 
 def _check_repo(path, name):
-    """Check if a git repo is behind its latest release. Returns dict or None."""
+    """Check if a git repo is behind its latest release. Returns dict or None.
+
+    The returned dict (when not None) always carries a ``dirty: bool`` reflecting
+    the working-tree state vs HEAD. A dirty install at-or-past the latest release
+    tag used to silently report "Up to date" with no remediation affordance, so
+    the Settings panel reads this flag to offer ``apply_force_update`` (issue
+    #4085).
+    """
     if path is None or not (path / '.git').exists():
         return None
 
@@ -667,19 +674,43 @@ def _check_repo(path, name):
             release_info = dict(release_info)
             release_info['error'] = message
             release_info['stale_check'] = True
+            release_info['dirty'] = _is_dirty(path)
             return release_info
         return {
             'name': name,
             'behind': None,
             'error': message,
             'stale_check': True,
+            'dirty': _is_dirty(path),
         }
 
     release_info = _check_repo_release(path, name)
     if release_info is not None:
+        release_info = dict(release_info)
+        release_info['dirty'] = _is_dirty(path)
         return release_info
 
-    return _check_repo_branch(path, name, fetch=False)
+    branch_info = _check_repo_branch(path, name, fetch=False)
+    if branch_info is not None:
+        branch_info = dict(branch_info)
+        branch_info['dirty'] = _is_dirty(path)
+        return branch_info
+    return None
+
+
+def _is_dirty(path: Path, timeout: int = 1) -> bool:
+    """Return True when the working tree has uncommitted changes vs HEAD.
+
+    Same primitive as ``_dirty_suffix`` (issue #4085): ``git diff-index
+    --quiet HEAD --`` exits 0 on a clean tree and 1 on a dirty tree (not an
+    error). Real errors (timeout, missing git, fatal) are conservatively
+    reported as clean so a transient probe failure never produces a false-
+    positive "local changes" alert.
+    """
+    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    if ok:
+        return False
+    return not out or out.startswith('git exited with status ')
 
 
 def _ignored_agent_update_info() -> dict:
