@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in Settings → Server controls restart action. Instances can expose it by setting `HERMES_WEBUI_RESTART_COMMAND`; the browser sees only semantic availability/status fields, blocks active work before starting, and polls localized restart status without exposing local supervisor commands.
+
 ## [v0.51.434] — 2026-06-15 — Release OU (reject symlinked skill files on save)
 
 ### Fixed
