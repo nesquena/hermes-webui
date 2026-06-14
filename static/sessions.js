@@ -2331,7 +2331,10 @@ async function _loadOlderMessages() {
     // we'd get by stitching pages, but without client-side index bookkeeping.
     // Cumulative growth: each "load more" asks for currentLoaded + 30, and the
     // newly exposed head is what we expose to the user.
-    const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
+    // Size from the loaded VISIBLE/renderable count, not raw S.messages.length:
+    // the backend now interprets msg_limit as visible rows, so a tool-heavy tail
+    // (many hidden role=tool rows) must not inflate the next request. (Codex #4110.)
+    const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, _currentLoadedRenderableMessageCount() + _INITIAL_MSG_LIMIT);
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`);
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) { _loadingOlder = false; return; }
