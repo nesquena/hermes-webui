@@ -2625,6 +2625,20 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
     return None
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """urllib redirect handler that refuses to follow any redirect.
+
+    Used by the LM Studio reasoning probe so a 3xx from the probe URL can never
+    forward the ``Authorization`` header (the configured LM Studio key) to a
+    redirected, possibly attacker-controlled host. ``redirect_request``
+    returning ``None`` makes urllib raise the original 3xx as an ``HTTPError``,
+    which the probe swallows. (#3837 security review)
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _get_lmstudio_reasoning_probe_api_key() -> str | None:
     """Resolve the LM Studio key for reasoning probes with WebUI precedence."""
     config_data = cfg
@@ -2680,8 +2694,14 @@ def _lmstudio_reasoning_probe_options_fallback(
         headers=headers,
         method="GET",
     )
+    # SECURITY: never follow redirects on this probe. urllib re-sends request
+    # headers (including Authorization: Bearer <lmstudio key>) to the redirect
+    # target, so a 3xx from the probe URL could exfiltrate the configured
+    # LM Studio credential to an attacker-controlled host. A no-redirect opener
+    # turns any 3xx into an HTTPError we swallow below. (#3837 security review)
+    opener = urllib.request.build_opener(_NoRedirectHandler)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
+        with opener.open(request, timeout=timeout) as response:  # nosec B310
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as exc:
         logger.debug(
@@ -2801,11 +2821,25 @@ def resolve_model_reasoning_efforts(
         )
 
     if provider == "lmstudio":
-        probe_base = resolved_base_url or _get_provider_base_url(provider)
+        configured_base = _get_provider_base_url(provider)
+        probe_base = resolved_base_url or configured_base
+        # SECURITY: only forward the configured LM Studio credential when the
+        # probe target is the configured LM Studio endpoint. /api/reasoning
+        # accepts a caller-supplied base_url, so a request could otherwise point
+        # the probe at an arbitrary host and harvest the stored key. When the
+        # caller supplies a base_url that does not normalize to the configured
+        # one, probe it WITHOUT a key. (#3837 security review)
+        probe_key: str | None = None
+        if not resolved_base_url or (
+            configured_base
+            and _normalize_base_url_for_match(probe_base)
+            == _normalize_base_url_for_match(configured_base)
+        ):
+            probe_key = _get_lmstudio_reasoning_probe_api_key()
         opts = _lmstudio_model_reasoning_options(
             hinted_model,
             probe_base,
-            api_key=_get_lmstudio_reasoning_probe_api_key(),
+            api_key=probe_key,
         )
         normalized = [str(opt).strip().lower() for opt in opts if str(opt).strip()]
         if not normalized or set(normalized).issubset({"off"}):

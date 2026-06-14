@@ -362,3 +362,111 @@ display:
     assert captured, "TypeError fallback must log a warning before probing directly"
     assert "unexpected signature" in captured[0][0]
     assert captured[0][1] is True
+
+
+def test_reasoning_probe_drops_key_for_caller_supplied_base_url(
+    tmp_path,
+    monkeypatch,
+    lmstudio_probe_server,
+):
+    """A caller-supplied base_url that is NOT the configured LM Studio endpoint
+    must be probed WITHOUT the stored credential. /api/reasoning takes a
+    base_url query param, so attaching the key to an arbitrary host would leak
+    it. (#3837 security review)
+    """
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        f"""
+model:
+  provider: lmstudio
+  default: auth-model
+  base_url: {lmstudio_probe_server.base_v1}
+providers:
+  lmstudio:
+    api_key: config-token
+agent:
+  reasoning_effort: medium
+display:
+  show_reasoning: true
+""",
+    )
+
+    # Point the probe at the SAME server but via an unconfigured base_url. The
+    # configured base_url is the only one allowed to carry the key. The probe
+    # server returns 401 without auth, so reasoning is reported unsupported and,
+    # crucially, no Bearer token reaches the caller-supplied URL.
+    efforts = config.resolve_model_reasoning_efforts(
+        "auth-model",
+        provider_id="lmstudio",
+        base_url=lmstudio_probe_server.base_v1.replace("127.0.0.1", "localhost"),
+    )
+
+    assert efforts == []
+    assert lmstudio_probe_server.requests, "probe should still be attempted keyless"
+    assert lmstudio_probe_server.requests[0]["authorization"] is None
+
+
+def test_reasoning_probe_does_not_follow_redirects_with_credential(
+    tmp_path,
+    monkeypatch,
+):
+    """A 3xx from the configured probe URL must NOT forward the Authorization
+    header to the redirect target. urllib re-sends request headers across
+    redirects, so the probe uses a no-redirect opener. (#3837 security review)
+    """
+    captured: list[dict[str, str | None]] = []
+
+    class _Target(BaseHTTPRequestHandler):
+        def do_GET(self):
+            captured.append(
+                {"host": "target", "authorization": self.headers.get("Authorization")}
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"models": []}).encode())
+
+        def log_message(self, fmt, *args):
+            return None
+
+    class _Redirector(BaseHTTPRequestHandler):
+        def do_GET(self):
+            captured.append(
+                {"host": "redirector", "authorization": self.headers.get("Authorization")}
+            )
+            self.send_response(302)
+            self.send_header(
+                "Location", f"http://127.0.0.1:{target.server_address[1]}/api/v1/models"
+            )
+            self.end_headers()
+
+        def log_message(self, fmt, *args):
+            return None
+
+    target = HTTPServer(("127.0.0.1", 0), _Target)
+    target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+    target_thread.start()
+    redir = HTTPServer(("127.0.0.1", 0), _Redirector)
+    redir_thread = threading.Thread(target=redir.serve_forever, daemon=True)
+    redir_thread.start()
+    try:
+        result = config._lmstudio_reasoning_probe_options_fallback(
+            "auth-model",
+            f"http://127.0.0.1:{redir.server_address[1]}/v1",
+            api_key="secret-token",
+        )
+    finally:
+        redir.shutdown()
+        redir.server_close()
+        redir_thread.join(timeout=5)
+        target.shutdown()
+        target.server_close()
+        target_thread.join(timeout=5)
+
+    # The probe stops at the redirector (no-redirect opener) and never reaches
+    # the redirect target, so the credential is never forwarded onward.
+    assert result == []
+    hosts_hit = {c["host"] for c in captured}
+    assert "target" not in hosts_hit, "redirect must not be followed"
+    assert all(c["host"] == "redirector" for c in captured)
