@@ -55,3 +55,25 @@ jobs:
           build-args: HERMES_VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # ─── Docker image security scan (trivy) ──────────────────────────────
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          timeout: '10m'
+        if: steps.meta.outputs.version != ''
+
+      - name: Run Trivy on Dockerfile (config scan)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: .
+          scanners: 'misconfig'
+          format: 'table'
+          exit-code: '0'
+          severity: 'HIGH,MEDIUM'
+          timeout: '5m'

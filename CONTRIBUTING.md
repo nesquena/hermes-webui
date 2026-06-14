@@ -203,3 +203,23 @@ Want the smoothest review?
 - [SPRINTS.md](SPRINTS.md)
 
 Questions are best raised early, before a large change is finished.
+
+## Branch Protection
+
+The `master` branch is protected to enforce quality gates. Required checks:
+
+| Check | Workflow / Job | Purpose |
+|-------|---------------|---------|
+| `Tests / lint` | `.github/workflows/tests.yml` | Ruff Python lint + ESLint JS runtime guards |
+| `Tests / test` | `.github/workflows/tests.yml` | Full test suite (3 Python versions × 3 shards) |
+| `Browser smoke` | `.github/workflows/browser-smoke.yml` | Headless browser page-load smoke tests |
+| `Dependency Audit` | `.github/workflows/dep-audit.yml` | pip-audit + npm audit + semgrep |
+| `Security Scan` | `.github/workflows/security-scan.yml` | gitleaks + bandit + safety + ruff format |
+| `Lint configs` | `.github/workflows/lint-configs.yml` | yamllint + hadolint |
+| `Post-merge feature checks` | `.github/workflows/feature-checks.yml` | Live server feature validation |
+
+Review requirements:
+- **CODEOWNERS** auto-assigns reviewers for sensitive paths (see `.github/CODEOWNERS`)
+- All required status checks must pass before merging
+- At least one approving review is required (unless exempt by CODEOWNERS)
+
