@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.parantoux.hermes-webui</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jinwoo/hermes-webui/bootstrap.py</string>
+        <string>--no-browser</string>
+        <string>--foreground</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>8788</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jinwoo/.hermes/webui.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/jinwoo/.hermes/webui.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/jinwoo/hermes-webui</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HERMES_HOME</key>
+        <string>/Users/jinwoo/.hermes</string>
+        <key>HERMES_WEBUI_HOST</key>
+        <string>127.0.0.1</string>
+        <key>HERMES_WEBUI_PORT</key>
+        <string>8788</string>
+        <key>HERMES_WEBUI_STATE_DIR</key>
+        <string>/Users/jinwoo/.hermes/webui</string>
+        <key>HERMES_WEBUI_LOG_FILE</key>
+        <string>/Users/jinwoo/.hermes/webui.log</string>
+        <key>HERMES_WEBUI_PID_FILE</key>
+        <string>/Users/jinwoo/.hermes/webui.pid</string>
+        <key>HERMES_WEBUI_PRESERVE_ENV</key>
+        <string>1</string>
+        <key>HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
