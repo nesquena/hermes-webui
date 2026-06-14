@@ -248,3 +248,38 @@ def test_deepseek_non_reasoning_variants_excluded(model_id):
     )
 
 
+# ── custom provider nested Gemini routes (vertex/, gemini_cli/) ───────────────
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "vertex/gemini-3.1-pro-preview",
+        "vertex/gemini-3-pro-preview",
+        "gemini_cli/gemini-3-pro-preview",
+    ],
+)
+def test_custom_nested_gemini_routes_expose_reasoning(model_id):
+    efforts = cfg.resolve_model_reasoning_efforts(
+        model_id,
+        provider_id="custom:newapi",
+    )
+    assert set(efforts) >= {"low", "medium", "high"}, (
+        f"{model_id} via custom:newapi should expose reasoning efforts"
+    )
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "vertex/gemini-embedding-001",
+        "vertex/gemini-3-pro-image-preview",
+    ],
+)
+def test_custom_nested_gemini_routes_exclude_non_reasoning(model_id):
+    assert cfg.resolve_model_reasoning_efforts(
+        model_id,
+        provider_id="custom:newapi",
+    ) == [], f"{model_id} must not expose reasoning efforts"
+
+
