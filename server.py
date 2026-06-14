@@ -273,6 +273,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
 
+    @staticmethod
+    def _safe_webui_print(message: str) -> None:
+        """Emit a request log line without letting logging break responses."""
+        try:
+            print(message, flush=True)
+        except Exception:
+            # Agent/tool code can redirect or close process-wide stdout/stderr
+            # in another thread. HTTP response handling must not depend on
+            # those global streams remaining writable.
+            pass
+
     def log_request(self, code: str='-', size: str='-') -> None:
         """Structured JSON logs for each request."""
         import json as _json
@@ -299,7 +310,7 @@ class Handler(BaseHTTPRequestHandler):
         if forwarded_for:
             record_data['forwarded_for'] = forwarded_for
         record = _json.dumps(record_data)
-        print(f'[webui] {record}', flush=True)
+        self._safe_webui_print(f'[webui] {record}')
 
     def do_GET(self) -> None:
         self._req_t0 = time.time()
@@ -319,7 +330,7 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception:
-            print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
+            self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
@@ -328,7 +339,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 # Unexpected failure while sending the error response itself.
                 # Log it so we know something is wrong with our error handler.
-                traceback.print_exc()
+                self._safe_webui_print(traceback.format_exc())
         finally:
             clear_request_profile()
 
@@ -358,7 +369,7 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception:
-            print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
+            self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
@@ -367,7 +378,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 # Unexpected failure while sending the error response itself.
                 # Log it so we know something is wrong with our error handler.
-                traceback.print_exc()
+                self._safe_webui_print(traceback.format_exc())
         finally:
             clear_request_profile()
 
