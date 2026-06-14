@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.421] — 2026-06-14 — Release OH (preserve colon-suffixed model IDs in normalization, #3959)
+
+### Fixed
+
+- **Model-ID normalization no longer drops a variant suffix like `:free` or `:thinking`, and configured-model dedup keys now match between the backend and the picker.** A model id such as `deepseek-r1:free` keeps its `:free` variant instead of collapsing to the base model, and `@custom:vendor:model` ids now strip only the `@provider:` prefix while preserving the vendor hierarchy (e.g. `@custom:jingdong:GLM-5` → `jingdong:glm.5`), so distinct vendors no longer collide. The same normalization rules are applied consistently across both backend normalizers and the `static/ui.js` configured-model mirror so badge dedup and the model picker agree byte-for-byte. (#3959)
+
 ## [v0.51.420] — 2026-06-14 — Release OG (LM Studio reasoning-probe auth, #3750/#3837)
 
 ### Fixed
