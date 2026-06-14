@@ -85,7 +85,7 @@ def test_preserve_scroll_restores_reader_away_from_bottom_before_following():
 
     reader_idx = compact.index("constreaderAwayFromBottom=")
     follow_idx = compact.index("if(!readerAwayFromBottom&&!_messageUserUnpinned&&_followMessagesAfterDomReplace())return;")
-    restore_idx = compact.index("_restoreMessageScrollSnapshot(scrollSnapshot);")
+    restore_idx = compact.index("_restoreMessageScrollSnapshot(scrollSnapshot,opts);")
 
     assert "Number(scrollSnapshot.bottom)>250" in compact
     assert reader_idx < follow_idx < restore_idx
