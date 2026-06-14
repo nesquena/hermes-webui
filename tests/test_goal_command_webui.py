@@ -408,7 +408,7 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "goal'" in MESSAGES_JS
     assert "source.addEventListener('goal'" in MESSAGES_JS
     assert "source.addEventListener('goal_continue'" in MESSAGES_JS
-    assert "['steer','interrupt','queue','terminal','goal'].includes(_pc.name)" in MESSAGES_JS
+    assert "['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)" in MESSAGES_JS
     assert "queueSessionMessage" in MESSAGES_JS
 
 

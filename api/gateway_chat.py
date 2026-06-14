@@ -131,6 +131,24 @@ def _gateway_sse_delta(payload: dict) -> str:
         return ""
 
 
+def _gateway_sse_reasoning_delta(payload: dict) -> str:
+    """Extract reasoning text from OpenAI-compatible streaming chunks."""
+    try:
+        choices = payload.get("choices") or []
+        if not choices:
+            return ""
+        choice = choices[0] or {}
+        delta = choice.get("delta") or {}
+        reasoning = delta.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning
+        message = choice.get("message") or {}
+        reasoning = message.get("reasoning_content")
+        return reasoning if isinstance(reasoning, str) and reasoning.strip() else ""
+    except Exception:
+        return ""
+
+
 def _gateway_stream_usage(payload: dict) -> dict:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
@@ -142,12 +160,29 @@ def _gateway_stream_usage(payload: dict) -> dict:
     }
 
 
+def _gateway_reasoning_delta(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("text", "preview", "delta", "content"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
 def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     """Translate Hermes Gateway tool-progress SSE payloads to WebUI events."""
     if not isinstance(payload, dict):
         return None
     name = str(payload.get("tool") or payload.get("name") or payload.get("function_name") or "").strip()
-    if not name or name.startswith("_"):
+    if not name:
+        return None
+    if name == "_thinking":
+        reason_delta = _gateway_reasoning_delta(payload)
+        if not reason_delta:
+            return None
+        return "reasoning", {"text": reason_delta}
+    if name.startswith("_"):
         return None
     status = str(payload.get("status") or "running").strip().lower()
     tid = payload.get("toolCallId") or payload.get("tool_call_id") or payload.get("id")
@@ -353,7 +388,11 @@ def _run_gateway_chat_streaming(
                     translated = _gateway_tool_progress_event(payload)
                     if translated:
                         event_name, event_payload = translated
-                        if stream_id in STREAM_LIVE_TOOL_CALLS:
+                        if event_name == "reasoning":
+                            reason_delta = event_payload.get("text")
+                            if reason_delta and stream_id in STREAM_REASONING_TEXT:
+                                STREAM_REASONING_TEXT[stream_id] += reason_delta
+                        elif stream_id in STREAM_LIVE_TOOL_CALLS:
                             if event_name == "tool":
                                 STREAM_LIVE_TOOL_CALLS[stream_id].append({
                                     "name": event_payload.get("name"),
@@ -372,10 +411,24 @@ def _run_gateway_chat_streaming(
                                         shared_tc["is_error"] = bool(event_payload.get("is_error"))
                                         break
                         put_gateway_event(event_name, event_payload)
-                        update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
+                        if event_name != "reasoning":
+                            update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
+                    sse_event = "message"
+                    continue
+                if sse_event == "reasoning.available":
+                    reason_delta = _gateway_reasoning_delta(payload)
+                    if reason_delta:
+                        if stream_id in STREAM_REASONING_TEXT:
+                            STREAM_REASONING_TEXT[stream_id] += reason_delta
+                        put_gateway_event("reasoning", {"text": reason_delta})
                     sse_event = "message"
                     continue
                 last_payload = payload
+                reasoning_delta = _gateway_sse_reasoning_delta(payload)
+                if reasoning_delta:
+                    if stream_id in STREAM_REASONING_TEXT:
+                        STREAM_REASONING_TEXT[stream_id] += reasoning_delta
+                    put_gateway_event("reasoning", {"text": reasoning_delta})
                 delta = _gateway_sse_delta(payload)
                 if delta:
                     final_text += delta
@@ -407,6 +460,9 @@ def _run_gateway_chat_streaming(
             if attachments:
                 user_msg["attachments"] = list(attachments)
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
+            saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
+            if saved_reasoning:
+                assistant_msg["reasoning"] = saved_reasoning
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
             s.context_messages = previous_context + [user_msg, assistant_msg]
             try:

@@ -4182,13 +4182,14 @@ let _notesSelectedSource = 'joplin';
 let _notesPreviewNote = null;
 let _notesSearchError = '';
 let _notesSearchLoading = false;
-let _currentMemorySection = null; // 'memory' | 'user' | 'soul' | 'external_notes'
+let _currentMemorySection = null; // 'memory' | 'user' | 'soul' | 'project_context' | 'external_notes'
 let _memoryMode = 'empty'; // 'empty' | 'read' | 'edit'
 
 const MEMORY_SECTIONS = [
   { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
   { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
   { key: 'soul',   labelKey: 'agent_soul', emptyKey: 'no_soul_yet', iconKey: 'sparkles' },
+  { key: 'project_context', label: 'Project Context', empty: 'No project context file found for this workspace.', iconKey: 'file-text', readOnly: true },
   { key: 'external_notes', labelKey: 'external_notes_sources', emptyKey: 'external_notes_empty', iconKey: 'book-open' },
 ];
 
@@ -4196,10 +4197,21 @@ function _memorySectionMeta(key) {
   return MEMORY_SECTIONS.find(s => s.key === key) || MEMORY_SECTIONS[0];
 }
 
+function _memorySectionLabel(meta) {
+  if (meta.label) return meta.label;
+  return t(meta.labelKey);
+}
+
+function _memorySectionEmpty(meta) {
+  if (meta.empty) return meta.empty;
+  return t(meta.emptyKey);
+}
+
 function _memorySectionContent(key) {
   if (!_memoryData) return '';
   if (key === 'user') return _memoryData.user || '';
   if (key === 'soul') return _memoryData.soul || '';
+  if (key === 'project_context') return _memoryData.project_context || '';
   return _memoryData.memory || '';
 }
 
@@ -4207,6 +4219,7 @@ function _memorySectionMtime(key) {
   if (!_memoryData) return 0;
   if (key === 'user') return _memoryData.user_mtime || 0;
   if (key === 'soul') return _memoryData.soul_mtime || 0;
+  if (key === 'project_context') return _memoryData.project_context_mtime || 0;
   return _memoryData.memory_mtime || 0;
 }
 
@@ -4216,7 +4229,8 @@ function _setMemoryHeaderButtons(mode) {
   const editBtn = $('btnEditMemoryDetail');
   const cancelBtn = $('btnCancelMemoryDetail');
   const saveBtn = $('btnSaveMemoryDetail');
-  if (mode === 'read' && _currentMemorySection !== 'external_notes') { show(editBtn); hide(cancelBtn); hide(saveBtn); }
+  const meta = _memorySectionMeta(_currentMemorySection);
+  if (mode === 'read' && _currentMemorySection !== 'external_notes' && !meta.readOnly) { show(editBtn); hide(cancelBtn); hide(saveBtn); }
   else if (mode === 'edit') { hide(editBtn); show(cancelBtn); show(saveBtn); }
   else { hide(editBtn); hide(cancelBtn); hide(saveBtn); }
 }
@@ -4299,15 +4313,24 @@ function _renderMemoryDetail(section) {
   const body = $('memoryDetailBody');
   const empty = $('memoryDetailEmpty');
   if (!title || !body) return;
-  title.textContent = t(meta.labelKey);
+  title.textContent = _memorySectionLabel(meta);
   const content = _memorySectionContent(section);
   const mtime = _memorySectionMtime(section);
   const mtimeStr = mtime ? new Date(mtime * 1000).toLocaleString() : '';
   const mtimeHtml = mtimeStr ? `<div class="memory-detail-mtime">${esc(mtimeStr)}</div>` : '';
+  const path = section === 'project_context' && _memoryData ? (_memoryData.project_context_path || '') : '';
+  const fileName = section === 'project_context' && _memoryData ? (_memoryData.project_context_name || (path.split(/[\\/]/).pop() || '')) : '';
+  const pathHtml = path ? `<div class="memory-detail-mtime">${esc(fileName)} · ${esc(path)}</div>` : '';
+  const shadowed = section === 'project_context' && _memoryData && Array.isArray(_memoryData.project_context_shadowed)
+    ? _memoryData.project_context_shadowed
+    : [];
+  const shadowedHtml = shadowed.length
+    ? `<div class="memory-detail-mtime">${esc(shadowed.map(item => `${item.name || 'Context file'} present, shadowed by ${item.shadowed_by || fileName || 'active context'}`).join('; '))}</div>`
+    : '';
   const inner = content
     ? `<div class="memory-content preview-md">${renderMd(content)}</div>`
-    : `<div class="memory-empty">${esc(t(meta.emptyKey))}</div>`;
-  body.innerHTML = `<div class="main-view-content">${mtimeHtml}${inner}</div>`;
+    : `<div class="memory-empty">${esc(_memorySectionEmpty(meta))}</div>`;
+  body.innerHTML = `<div class="main-view-content">${pathHtml}${mtimeHtml}${shadowedHtml}${inner}</div>`;
   body.style.display = '';
   if (empty) empty.style.display = 'none';
   _memoryMode = 'read';
@@ -4320,7 +4343,7 @@ function _renderMemoryEdit(section) {
   const body = $('memoryDetailBody');
   const empty = $('memoryDetailEmpty');
   if (!title || !body) return;
-  title.textContent = t(meta.labelKey);
+  title.textContent = _memorySectionLabel(meta);
   const content = _memorySectionContent(section);
   body.innerHTML = `
     <div class="main-view-content">
@@ -4411,7 +4434,8 @@ async function openMemorySection(section, el) {
 }
 
 function editCurrentMemory() {
-  if (!_currentMemorySection || _currentMemorySection === 'external_notes') return;
+  const meta = _memorySectionMeta(_currentMemorySection);
+  if (!_currentMemorySection || _currentMemorySection === 'external_notes' || meta.readOnly) return;
   _renderMemoryEdit(_currentMemorySection);
 }
 
@@ -4426,6 +4450,7 @@ function closeMemoryEdit() { cancelMemoryEdit(); }
 
 async function submitMemorySave() {
   if (!_currentMemorySection) return;
+  if (_memorySectionMeta(_currentMemorySection).readOnly) return;
   const ta = $('memEditContent');
   const errEl = $('memEditError');
   if (!ta) return;
@@ -5213,6 +5238,7 @@ async function switchToWorkspace(path,name){
     S._profileSwitchWorkspace=null;
     syncTopbar();
     await loadDir('.');
+    if (_currentPanel === 'memory') await loadMemory(true);
     showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
   }catch(e){setStatus(t('switch_failed')+e.message);}
 }
@@ -5809,7 +5835,10 @@ async function deleteProfile(name) {
 async function loadMemory(force) {
   const panel = $('memoryPanel');
   try {
-    const data = await api('/api/memory');
+    const memoryUrl = S.session && S.session.session_id
+      ? `/api/memory?session_id=${encodeURIComponent(S.session.session_id)}`
+      : '/api/memory';
+    const data = await api(memoryUrl);
     _memoryData = data;
     if (_currentMemorySection === 'external_notes' && !data.external_notes_enabled) {
       _currentMemorySection = null;
@@ -5825,7 +5854,7 @@ async function loadMemory(force) {
         el.type = 'button';
         el.className = 'side-menu-item';
         if (_currentMemorySection === s.key) el.classList.add('active');
-        el.innerHTML = `${li(s.iconKey,16)}<span>${esc(t(s.labelKey))}</span>`;
+        el.innerHTML = `${li(s.iconKey,16)}<span>${esc(_memorySectionLabel(s))}</span>`;
         el.onclick = () => openMemorySection(s.key, el);
         panel.appendChild(el);
       }

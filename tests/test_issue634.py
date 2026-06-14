@@ -20,6 +20,14 @@ agent_src = AGENT_SESSIONS_PY.read_text(encoding='utf-8')
 combined_src = src + "\n" + agent_src
 
 
+def _get_cli_sessions_source() -> str:
+    match = re.search(r"^def get_cli_sessions\(", src, re.M)
+    assert match is not None, "get_cli_sessions() definition not found"
+    func_start = match.start()
+    func_end = src.find("\ndef ", func_start + 1)
+    return src[func_start:func_end] if func_end != -1 else src[func_start:]
+
+
 class TestCliSessionsErrorSurface:
     """get_cli_sessions() must log warnings instead of silently returning []."""
 
@@ -38,18 +46,13 @@ class TestCliSessionsErrorSurface:
 
     def test_exception_path_logs_warning(self):
         """The except clause must call logger.warning, not silently pass."""
-        # Find the exception handler in get_cli_sessions
-        func_start = src.find("def get_cli_sessions()")
-        func_end = src.find("\ndef ", func_start + 1)
-        func_body = src[func_start:func_end] if func_end != -1 else src[func_start:]
+        func_body = _get_cli_sessions_source()
         assert "warning(" in func_body, \
             "get_cli_sessions() exception handler must call logging.warning()"
 
     def test_exception_path_includes_db_path(self):
         """The warning must include the db_path for diagnosability."""
-        func_start = src.find("def get_cli_sessions()")
-        func_end = src.find("\ndef ", func_start + 1)
-        func_body = src[func_start:func_end] if func_end != -1 else src[func_start:]
+        func_body = _get_cli_sessions_source()
         # db_path should appear in the warning call
         warning_pos = func_body.find("warning(")
         warning_block = func_body[warning_pos:warning_pos + 300]
@@ -59,9 +62,7 @@ class TestCliSessionsErrorSurface:
     def test_still_returns_empty_on_error(self):
         """Function must still return [] after logging (graceful degradation)."""
         # After the warning, it should return cli_sessions (the empty list) not raise
-        func_start = src.find("def get_cli_sessions()")
-        func_end = src.find("\ndef ", func_start + 1)
-        func_body = src[func_start:func_end] if func_end != -1 else src[func_start:]
+        func_body = _get_cli_sessions_source()
         # Must have a 'return' after the warning call
         warning_pos = func_body.find("_cli_err:")
         after_warning = func_body[warning_pos:warning_pos + 400]

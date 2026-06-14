@@ -5,6 +5,7 @@ If hermes-agent is unavailable the endpoint degrades to an empty list
 so the frontend can still load with WEBUI_ONLY commands.
 """
 from __future__ import annotations
+from contextlib import nullcontext
 import logging
 import threading
 from typing import Any
@@ -27,7 +28,7 @@ _AGENT_COMMAND_ALIASES = {
     'reload_skills': 'reload-skills',
     'codex_runtime': 'codex-runtime',
 }
-_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime'})
+_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime', 'credits'})
 _RELOAD_MCP_LOCK = threading.Lock()
 _RELOAD_SKILLS_LOCK = threading.Lock()
 _CODEX_RUNTIME_LOCK = threading.Lock()
@@ -35,6 +36,13 @@ _CODEX_RUNTIME_LOCK = threading.Lock()
 
 def _parse_agent_command(command: str) -> tuple[str, str]:
     """Return ``(canonical_name, arg_string)`` from slash-command text."""
+
+    cmd_base, arg_string = _parse_slash_command(command)
+    return _AGENT_COMMAND_ALIASES.get(cmd_base, cmd_base), arg_string
+
+
+def _parse_slash_command(command: str) -> tuple[str, str]:
+    """Return ``(command_name, arg_string)`` from slash-command text."""
 
     raw = str(command or "").strip()
     if not raw:
@@ -46,7 +54,17 @@ def _parse_agent_command(command: str) -> tuple[str, str]:
     if not cmd_base:
         raise ValueError("command is required")
 
-    return _AGENT_COMMAND_ALIASES.get(cmd_base, cmd_base), cmd_parts[1] if len(cmd_parts) > 1 else ""
+    return cmd_base, cmd_parts[1] if len(cmd_parts) > 1 else ""
+
+
+def _bundle_profile_context(purpose: str):
+    """Resolve the active-profile env wrapper used by bundle APIs."""
+
+    try:
+        from api.profiles import profile_env_for_active_request
+    except ImportError:
+        return nullcontext()
+    return profile_env_for_active_request(purpose, logger_override=logger)
 
 
 def _normalize_agent_command_name(command: str) -> str:
@@ -113,6 +131,79 @@ def list_commands(_registry=None) -> list[dict[str, Any]]:
     return out
 
 
+def list_command_bundles() -> list[dict[str, Any]]:
+    """Return installed skill bundles for the active WebUI profile."""
+
+    try:
+        from agent.skill_bundles import list_bundles as _list_bundles
+    except ImportError:
+        logger.debug("agent.skill_bundles not importable -- /api/commands/bundles returns []")
+        return []
+
+    try:
+        with _bundle_profile_context("/api/commands/bundles"):
+            bundles = _list_bundles() or []
+    except Exception:
+        logger.warning("Failed to list skill bundles", exc_info=True)
+        return []
+
+    out: list[dict[str, Any]] = []
+    for bundle in bundles:
+        slug = str((bundle or {}).get("slug", "")).strip().lower()
+        if not slug:
+            continue
+        skills = list((bundle or {}).get("skills") or [])
+        out.append({
+            "name": slug,
+            "description": str((bundle or {}).get("description") or "").strip() or "Skill bundle",
+            "skill_count": len(skills),
+            "source": "bundle",
+        })
+    return out
+
+
+def resolve_bundle_command(command: str) -> dict[str, Any]:
+    """Expand a bundle slash command into the backend invocation payload."""
+
+    bundle_name, user_instruction = _parse_slash_command(command)
+    try:
+        from agent.skill_bundles import (
+            build_bundle_invocation_message,
+            resolve_bundle_command_key,
+        )
+    except ImportError as exc:
+        logger.warning("Skill bundle runtime unavailable", exc_info=True)
+        raise RuntimeError("Skill bundle runtime unavailable") from exc
+
+    try:
+        with _bundle_profile_context("/api/commands/bundles/resolve"):
+            bundle_key = resolve_bundle_command_key(bundle_name)
+            if bundle_key is None:
+                raise KeyError(bundle_name)
+            bundle_result = build_bundle_invocation_message(bundle_key, user_instruction)
+    except (KeyError, ValueError, RuntimeError):
+        raise
+    except Exception as exc:
+        logger.warning("Failed to resolve skill bundle command", exc_info=True)
+        raise RuntimeError("Skill bundle command unavailable") from exc
+
+    if not bundle_result:
+        raise RuntimeError("Bundle command returned no invocation text")
+
+    message, loaded_skills, missing_skills = bundle_result
+    resolved_message = str(message or "").strip()
+    if not resolved_message:
+        raise RuntimeError("Bundle command returned no invocation text")
+
+    return {
+        "name": bundle_key.lstrip("/"),
+        "source": "bundle",
+        "message": resolved_message,
+        "loaded_skills": list(loaded_skills or []),
+        "missing_skills": list(missing_skills or []),
+    }
+
+
 def execute_agent_command(command: str) -> str:
     """Execute a narrow allowlist of agent-side runtime commands."""
 
@@ -126,6 +217,8 @@ def execute_agent_command(command: str) -> str:
         return _run_reload_skills_command()
     if canonical == 'codex-runtime':
         return _run_codex_runtime_command(arg_string)
+    if canonical == 'credits':
+        return _run_credits_command()
 
     raise KeyError(canonical)
 
@@ -253,6 +346,42 @@ def _run_reload_skills_command() -> str:
         lines.append(f"Added skills: {', '.join(sorted(added_names))}")
     if removed_names:
         lines.append(f"Removed skills: {', '.join(sorted(removed_names))}")
+    return "\n".join(lines)
+
+
+def _run_credits_command() -> str:
+    """Render Hermes' shared credits view for the WebUI slash-command path."""
+    try:
+        from agent.account_usage import build_credits_view
+    except Exception:
+        logger.warning("Failed to import credits view runtime", exc_info=True)
+        return "Couldn't fetch credits right now."
+
+    try:
+        view = build_credits_view(markdown=True)
+    except Exception:
+        logger.warning("Failed to build /credits view", exc_info=True)
+        return "Couldn't fetch credits right now."
+
+    if not getattr(view, "logged_in", False):
+        return "Not logged into Nous. Run `hermes auth login nous` in Hermes CLI, then try /credits again."
+
+    lines = ["💳 **Nous credits**"]
+    for line in tuple(getattr(view, "balance_lines", ()) or ()):
+        if str(line).lstrip().startswith("📈"):
+            continue
+        lines.append(str(line))
+
+    identity_line = str(getattr(view, "identity_line", "") or "").strip()
+    if identity_line:
+        lines.append("")
+        lines.append(identity_line)
+
+    topup_url = str(getattr(view, "topup_url", "") or "").strip()
+    if topup_url:
+        lines.append("")
+        lines.append(f"Top up: {topup_url}")
+        lines.append("Complete your top-up in the browser; credits will appear in /credits shortly.")
     return "\n".join(lines)
 
 

@@ -2,10 +2,14 @@
 
 import queue
 import threading
+import logging
+
+logger = logging.getLogger(__name__)
 
 _SESSION_EVENTS_LOCK = threading.Lock()
 _SESSION_EVENTS_SUBSCRIBERS: set[queue.Queue] = set()
 _SESSION_EVENTS_VERSION = 0
+_SESSION_LIST_CHANGED_LISTENERS: set[callable] = set()
 
 
 def _profile_is_root_alias(profile: str | None) -> bool:
@@ -80,6 +84,7 @@ def publish_session_list_changed(
             profile=profile,
         )
         subscribers = list(_SESSION_EVENTS_SUBSCRIBERS)
+        listeners = list(_SESSION_LIST_CHANGED_LISTENERS)
     for q in subscribers:
         try:
             q.put_nowait(payload)
@@ -93,6 +98,25 @@ def publish_session_list_changed(
                 q.put_nowait(_coalesced_sessions_changed_payload(pending, payload))
             except queue.Full:
                 pass
+    for listener in listeners:
+        try:
+            listener(profile)
+        except Exception:
+            logger.debug("Session-list changed listener failed", exc_info=True)
+
+
+def add_session_list_changed_listener(listener) -> None:
+    """Register a callback for /api/sessions cache invalidation hooks."""
+    if not callable(listener):
+        return
+    with _SESSION_EVENTS_LOCK:
+        _SESSION_LIST_CHANGED_LISTENERS.add(listener)
+
+
+def remove_session_list_changed_listener(listener) -> None:
+    """Unregister a callback previously added for session cache invalidation."""
+    with _SESSION_EVENTS_LOCK:
+        _SESSION_LIST_CHANGED_LISTENERS.discard(listener)
 
 
 def subscribe_session_events() -> queue.Queue:

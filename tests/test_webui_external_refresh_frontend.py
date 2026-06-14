@@ -47,7 +47,10 @@ def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     assert "ensureSessionEventsSSE();" in SESSIONS_JS
     assert "document._hermesSessionEventsVisibilityHook" in SESSIONS_JS
     ensure_fn = SESSIONS_JS[SESSIONS_JS.find("function ensureSessionEventsSSE()") :]
-    assert ensure_fn.find("document._hermesSessionEventsVisibilityHook") < ensure_fn.find("document.hidden) return")
+    # The visibility hook must be installed before the open-guard early-return.
+    # #4151 replaced the `document.hidden) return` open guard with the focus-aware
+    # `_sidebarSseBackgrounded()) return` predicate (which also covers PWA blur).
+    assert ensure_fn.find("document._hermesSessionEventsVisibilityHook") < ensure_fn.find("_sidebarSseBackgrounded()) return")
     assert "_sessionListExternalRefreshMs" not in SESSIONS_JS
     assert "addEventListener('sessions_changed', (ev) => {" in ensure_fn
     assert "const activeProfile = S.activeProfile || 'default';" in ensure_fn

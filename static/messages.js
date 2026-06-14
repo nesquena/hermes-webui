@@ -792,7 +792,7 @@ const _sessionTitleProvisionalBySid = new Map();
 // their canonical command is registered on the backend (for example
 // /reload-mcp). Keep this intentionally narrow and include underscore variants
 // observed by users so typing either form still routes through executeAgentCommand.
-const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'reload-skills', 'reload_skills', 'codex-runtime', 'codex_runtime']);
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'reload-skills', 'reload_skills', 'codex-runtime', 'codex_runtime', 'credits']);
 
 function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   if(!S||!S.busy||compressionRunning) return false;
@@ -892,7 +892,7 @@ async function send(){
   }
   _sendInProgress = true;
   try{
-  const text=$('msg').value.trim();
+  let text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
@@ -910,13 +910,14 @@ async function send(){
       if(!S.session){await newSession();await renderSessionList();}
       // Busy-control slash commands must be intercepted HERE, before the
       // busyMode routing block, so the user can always type /steer, /interrupt,
-      // or /queue while the agent is running and have them execute immediately.
+      // /queue, /terminal, /goal, or /yolo while the agent is running and have
+      // them execute immediately.
       // Without this intercept they fall through to the queue and execute after
       // the current turn ends — by which point there is no active stream and
       // cmdSteer / cmdInterrupt say "No active task to stop."
       if(text.startsWith('/')){
         const _pc=typeof parseCommand==='function'&&parseCommand(text);
-        if(_pc&&['steer','interrupt','queue','terminal','goal'].includes(_pc.name)){
+        if(_pc&&['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)){
           const _bc=COMMANDS.find(c=>c.name===_pc.name);
           if(_bc){
             $('msg').value='';autoResize();
@@ -969,6 +970,7 @@ async function send(){
     if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
     return;
   }
+  let _slashDisplayTextOverride=null;
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1039,6 +1041,26 @@ async function send(){
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
+      const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
+        ? await getBundleCommandMetadata(_parsedCmd.name)
+        : null;
+      if(_bundleCmd){
+        try{
+          const _bundleResolved=typeof resolveBundleCommand==='function'
+            ? await resolveBundleCommand(text,_bundleCmd)
+            : null;
+          const _bundleMessage=String(_bundleResolved&&_bundleResolved.message||'').trim();
+          if(!_bundleMessage) throw new Error('Bundle command runtime returned no invocation text.');
+          _slashDisplayTextOverride=text;
+          text=_bundleMessage;
+        }catch(e){
+          if(!S.session){await newSession();await renderSessionList();}
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
+          renderMessages();
+          $('msg').value='';autoResize();hideCmdDropdown();return;
+        }
+      }
     }
   }
   if(!S.session){await newSession();await renderSessionList();}
@@ -1087,7 +1109,7 @@ async function send(){
   $('msg').value='';autoResize();
   // Clear persisted composer draft since message was sent.
   if (activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);
-  const displayText=text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
+  const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
@@ -4126,6 +4148,14 @@ function _approvalPromptBelongsToActiveSession(sid) {
   return !!(sid && _promptActiveSessionId() === sid);
 }
 
+function activeSessionHasPendingPromptAttention() {
+  const sid = _promptActiveSessionId();
+  return !!(sid && (
+    _approvalPendingBySession.has(sid) ||
+    _clarifyPendingBySession.has(sid)
+  ));
+}
+
 function _rememberApprovalPending(pending, pendingCount) {
   if (!pending) return null;
   const sid = pending._session_id || _promptActiveSessionId();
@@ -4136,7 +4166,10 @@ function _rememberApprovalPending(pending, pendingCount) {
 }
 
 function _clearApprovalPendingForSession(sid) {
-  if (sid) _approvalPendingBySession.delete(sid);
+  if (sid) {
+    _approvalPendingBySession.delete(sid);
+    if (typeof syncTopbar === 'function') syncTopbar();
+  }
 }
 
 function _hideApprovalCardIfOwner(sid, force=false) {
@@ -4204,6 +4237,7 @@ function showApprovalCard(pending, pendingCount) {
   if (onceBtn && document.activeElement !== $('msg')) {
     setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
   }
+  if (typeof syncTopbar === 'function') syncTopbar();
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -4590,7 +4624,10 @@ function _rememberClarifyPending(pending) {
 }
 
 function _clearClarifyPendingForSession(sid) {
-  if (sid) _clarifyPendingBySession.delete(sid);
+  if (sid) {
+    _clarifyPendingBySession.delete(sid);
+    if (typeof syncTopbar === 'function') syncTopbar();
+  }
 }
 
 function _hideClarifyCardIfOwner(sid, force=false, reason="dismissed") {
@@ -4612,8 +4649,15 @@ function showClarifyForSession(sid, pending) {
 }
 
 function _renderPendingPromptsForActiveSession() {
+  const sid = _promptActiveSessionId();
   _renderPendingApprovalForActiveSession();
   _renderPendingClarifyForActiveSession();
+  if (
+    sid &&
+    typeof activeSessionHasPendingPromptAttention === 'function' &&
+    activeSessionHasPendingPromptAttention()
+  ) return;
+  if (typeof syncTopbar === 'function') syncTopbar();
 }
 
 function _ensureClarifyCardDom() {
@@ -4966,6 +5010,7 @@ function showClarifyCard(pending) {
   if (input && !sameClarify && document.activeElement !== $('msg')) {
     input.focus({preventScroll: true});
   }
+  if (typeof syncTopbar === 'function') syncTopbar();
 }
 
 async function respondClarify(response) {

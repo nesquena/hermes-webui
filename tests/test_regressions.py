@@ -134,17 +134,16 @@ def test_session_with_tool_calls_in_json_loads_ok(cleanup_test_sessions):
     cleanup_test_sessions.clear()
 
 
-# ── R4: has_pending not imported in streaming.py (Sprint 10 split regression) ─
+# ── R4: approval check not imported in streaming.py (Sprint 10 split regression) ─
 
 def test_streaming_py_imports_has_pending(cleanup_test_sessions):
-    """R4: api/streaming.py must import or define has_pending.
+    """R4: api/streaming.py must import an approval-check function.
     When missing, the approval check mid-stream caused NameError.
     """
     src = (REPO_ROOT / "api/streaming.py").read_text()
-    assert "has_pending" in src, "has_pending not found in api/streaming.py"
-    # Verify it's imported (not just used)
-    assert "import" in src and "has_pending" in src, \
-        "has_pending must be imported in api/streaming.py"
+    assert "has_blocking_approval" in src, "has_blocking_approval not found in api/streaming.py"
+    assert "import" in src and "has_blocking_approval" in src, \
+        "has_blocking_approval must be imported in api/streaming.py"
 
 
 def test_aiagent_imported_in_streaming(cleanup_test_sessions):
