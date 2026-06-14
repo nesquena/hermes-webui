@@ -3855,6 +3855,301 @@ def _lookup_cli_session_metadata(session_id: str) -> dict:
     return {}
 
 
+def _session_index_marks_was_webui(sid: str) -> bool:
+    """Return True iff ``sid`` is in the WebUI session index as a WebUI- or
+    fork-origin row whose sidecar is now gone.
+
+    The WebUI session index (``SESSION_INDEX_FILE``) is the canonical registry
+    of sessions the WebUI ever owned. A row there tagged with ``webui`` or
+    ``fork`` means the session once had a sidecar that has since been deleted
+    (or never materialised on this profile). Returning 404 to the client on
+    these ids is what lets the browser self-heal: strip the stale
+    ``/session/<id>`` URL and clear localStorage instead of silently
+    re-attaching to a now-empty session (#2782).
+
+    Foreign-origin rows (CLI, TUI, Desktop, claude_code, gateway, telegram,
+    etc.) — those with explicit non-webui source tags, OR blank sources with
+    ``is_cli_session``/``read_only`` markers — are NOT treated as deleted
+    WebUI sessions, even when the sidecar is absent.
+    """
+    if not SESSION_INDEX_FILE.exists():
+        return False
+    try:
+        entries = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    for entry in entries if isinstance(entries, list) else []:
+        if entry.get("session_id") != sid:
+            continue
+        # Classify per source field, not on a collapsed `a or b or c` — a
+        # legacy CLI/imported row can carry is_cli_session:true with BLANK
+        # source fields, and collapsing-then-defaulting-to-WebUI would wrongly
+        # 404 it (it should keep its read-only CLI stub).
+        srcs = [
+            str(entry.get("source_tag") or "").strip().lower(),
+            str(entry.get("raw_source") or "").strip().lower(),
+            str(entry.get("session_source") or "").strip().lower(),
+        ]
+        explicit = [s for s in srcs if s]
+        if any(s in ("webui", "fork") for s in explicit):
+            # Explicit WebUI-origin (incl. forks, which /api/session/branch
+            # stamps session_source="fork") — a deleted sidecar bricks
+            # identically. 404.
+            return True
+        if explicit:
+            # Explicit non-WebUI source (cli, telegram, claude_code, ...) —
+            # genuine foreign session, keep the existing CLI/read-only stub.
+            return False
+        # All source fields blank: WebUI-origin UNLESS the row is a legacy
+        # CLI/imported session marked only by is_cli_session / read_only.
+        is_cli = entry.get("is_cli_session") is True
+        is_read_only = bool(entry.get("read_only") or entry.get("is_read_only"))
+        return not (is_cli or is_read_only)
+    return False
+
+
+def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple[bool, str]:
+    """Decide whether a foreign-origin session is safe to claim writeable
+    in WebUI. Returns ``(claimable, reason_if_not)``.
+
+    Policy mirrors ``/api/session/import_cli`` (api/routes.py:~15626):
+    sessions explicitly marked ``read_only`` in their foreign store are
+    surfaced as read-only stubs but never materialised as writable
+    WebUI sidecars. We extend that with a denylist of foreign-source
+    families whose ownership belongs to a non-WebUI process
+    (messaging channels, external agents, Claude Code, scheduled
+    cron runs, and platformless gateway fallbacks), so a WebUI POST
+    cannot accidentally turn them into writable sidecars and violate
+    their ownership boundary (#4911 review + the residual
+    gateway/unknown gap flagged in the follow-up + the cron-claim
+    policy flagged in the Greptile 4/5 review).
+
+    The check is denylist-based: if a source is in any of the
+    refused families below, it is non-claimable. Everything else
+    (CLI, TUI, Desktop, plus future local agent sources) is allowed.
+    TUI/Desktop sessions whose cli_meta is empty (they don't appear
+    in ``get_cli_sessions()`` due to the CLI cap) fall through to
+    ``state_db_source``; state.db has a ``source`` column with values
+    like ``tui``, ``desktop``, ``cli``, ``cron``, ``claude_code``,
+    ``messaging``, ``external_agent``, ``gateway`` (platform-tagged
+    gateways land in ``_MESSAGING_RAW_SOURCES`` and are caught by
+    the messaging check above; bare ``"gateway"`` / ``"unknown"``
+    literals are caught here).
+    """
+    cm = cli_meta or {}
+    if bool(cm.get("read_only")):
+        return False, "explicit_readonly"
+    session_source = (cm.get("session_source") or "").strip().lower()
+    if session_source in {"messaging", "external_agent"}:
+        return False, f"session_source={session_source}"
+    # Track cli_meta-sourced and state.db-sourced source_tag values
+    # separately so the diagnostic reason string never mislabels a
+    # cli_meta-sourced denial as a state.db-sourced one (Greptile P2,
+    # #4911 follow-up).  The reason is currently discarded by the
+    # caller, but it is exported in the return tuple and may surface
+    # in a future log / user-visible diagnostic.
+    cli_meta_source_tag = (cm.get("source_tag") or cm.get("raw_source") or "").strip().lower()
+    if cli_meta_source_tag in {"claude_code", "cron", "external_agent",
+                                "gateway", "messaging", "unknown"}:
+        # gateway/unknown are the platformless gateway fallbacks
+        # (gateway/run.py:3461, gateway/slash_commands.py:2640,2454)
+        # — they own the conversation in the gateway, not in WebUI.
+        # cron sessions are scheduled and owned by the cron runner
+        # process; claiming them into a writable WebUI sidecar would
+        # let a stray POST break the next scheduled run.
+        # messaging / external_agent can be supplied by the foreign
+        # store directly in source_tag (in addition to the
+        # session_source / messaging-record checks above), and they
+        # need the same provenance-correct refusal.
+        return False, f"cli_meta_source={cli_meta_source_tag}"
+    if _is_messaging_session_record(cm):
+        return False, "messaging_record"
+    # Empty cli_meta is the common case for TUI/Desktop; fall through
+    # to state.db's source column.  Refuse known-foreign state.db sources.
+    if not cli_meta_source_tag and state_db_source:
+        state_db_source_tag = state_db_source.strip().lower()
+        if state_db_source_tag in {"claude_code", "cron", "messaging",
+                                    "external_agent", "gateway", "unknown"}:
+            return False, f"state_db_source={state_db_source_tag}"
+    return True, ""
+
+
+def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
+    """Resolve a session_id that has no WebUI sidecar.
+
+    Returns ``(session_or_None, reason)``. Reasons:
+
+      ``'materialized'``
+        A state.db row with messages exists AND the foreign source is
+        claimable per :func:`_is_claimable_cli_source` (CLI / TUI /
+        Desktop, no explicit read_only, not a messaging / claude_code
+        session). ``session`` is a fully populated
+        :class:`api.models.Session` ready for writeable use; the caller
+        MUST call ``session.save()`` to persist a WebUI-owned sidecar
+        before the first write.  The Session carries the source-tag
+        metadata from the CLI/state.db lookup (``is_cli_session=True``,
+        ``read_only=False``) so the sidebar still renders the original
+        source badge.
+
+      ``'not_claimable'``
+        The sid has recoverable state.db messages but the foreign
+        source is owned by a non-WebUI process (messaging channel,
+        claude_code, external_agent, or explicit read_only). ``session``
+        is still returned, but with ``read_only=True`` preserved and
+        the foreign source tag intact, so the GET stub continues to
+        render the original badge and the read-only banner. The POST
+        path must return 403 (not 404) so the user sees a clear
+        refusal instead of the empty-state self-heal that the 404
+        handler triggers (#4911 review).
+
+      ``'was_webui'``
+        The sid is in the WebUI session index as a webui/fork origin row but
+        its sidecar is gone.  Callers MUST return 404 so the browser clears
+        its stale ``/session/<id>`` URL and localStorage instead of silently
+        re-attaching to a now-empty session (#2782).
+
+      ``'no_foreign_state'``
+        The sid has no WebUI sidecar AND no recoverable messages in
+        state.db.  Callers MUST return 404.
+
+      ``'invalid_sid'``
+        ``sid`` failed :func:`is_safe_session_id`.  Callers MUST return 404.
+
+    ``cli_meta`` is an optional pass-through.  Callers that already
+    computed ``_lookup_cli_session_metadata(sid)`` (e.g. the GET path
+    building a sidebar dict) can pass it in to avoid the redundant
+    lookup; callers without it (POST path, tests) pass nothing and the
+    helper does the lookup itself.
+
+    Closing the GET-vs-POST asymmetry for foreign-origin sessions: GET
+    ``/api/session`` and POST ``/api/chat/start`` both call this helper
+    on a missing-sidecar KeyError, so a TUI/Desktop/CLI session can be
+    loaded read-only AND continued writeable from the WebUI.
+    """
+    def build_workspace(sid, cli_meta):
+        """Coalesce workspace with sane fallbacks so _start_run doesn't
+        trip on a missing field. state.db's cwd is the canonical workspace for
+        agent sessions; CLI metadata is the fallback (handles Telegram/etc).
+        """
+        workspace = (cli_meta or {}).get("workspace") or (cli_meta or {}).get("cwd")
+        if not workspace:
+            try:
+                from api.workspace import get_last_workspace
+                workspace = get_last_workspace()
+            except Exception:
+                workspace = None
+        if not workspace:
+            try:
+                from api.models import DEFAULT_WORKSPACE
+                workspace = DEFAULT_WORKSPACE
+            except Exception:
+                workspace = "/"
+        return workspace
+
+    def build_session(sid, cli_meta, msgs, read_only_flag):
+        return Session(
+            session_id=sid,
+            title=(cli_meta or {}).get("title") or "CLI Session",
+            workspace=build_workspace(sid, cli_meta),
+            model=(cli_meta or {}).get("model") or "unknown",
+            model_provider=(cli_meta or {}).get("model_provider"),
+            messages=msgs,
+            created_at=(cli_meta or {}).get("created_at") or 0,
+            updated_at=(cli_meta or {}).get("updated_at") or 0,
+            profile=(cli_meta or {}).get("profile"),
+            is_cli_session=True,
+            source_tag=(cli_meta or {}).get("source_tag"),
+            raw_source=(cli_meta or {}).get("raw_source"),
+            session_source=(cli_meta or {}).get("session_source"),
+            source_label=(cli_meta or {}).get("source_label"),
+            # ``read_only_flag`` is True for not_claimable sources (foreign
+            # store marked them read-only / messaging / claude_code) and
+            # False for genuine CLI / TUI / Desktop sessions.  Only the
+            # POST claim path with a verified-claimable source can
+            # actually write; the GET stub always reflects whatever the
+            # helper returns so the read-only banner stays accurate.
+            read_only=read_only_flag,
+        )
+
+    if not is_safe_session_id(sid):
+        return None, "invalid_sid"
+    if _session_index_marks_was_webui(sid):
+        return None, "was_webui"
+    if cli_meta is None:
+        cli_meta = _lookup_cli_session_metadata(sid) or {}
+    msgs = get_cli_session_messages(sid)
+    if not msgs:
+        return None, "no_foreign_state"
+    # TUI/Desktop sessions often have empty cli_meta (they don't appear in
+    # get_cli_sessions() because of the cap).  Fall back to the state.db
+    # ``source`` column to make the claim-eligibility check robust and to
+    # populate the Session's source-tag metadata so the sidebar still
+    # renders the correct badge for these sessions.
+    state_db_source = ""
+    state_db_row = None
+    try:
+        from api.models import _active_state_db_path
+        db_path = _active_state_db_path()
+        if db_path and Path(db_path).exists():
+            import sqlite3 as _sqlite
+            with closing(_sqlite.connect(str(db_path))) as _conn:
+                _conn.row_factory = _sqlite.Row
+                _row = _conn.execute(
+                    "SELECT source, title, model, cwd, started_at, ended_at "
+                    "FROM sessions WHERE id = ?", (sid,)
+                ).fetchone()
+                if _row is not None:
+                    state_db_row = dict(_row)
+                    state_db_source = str(_row["source"] or "").strip().lower()
+    except Exception:
+        state_db_source = ""
+    # Populate source metadata from state.db when cli_meta is empty so the
+    # synthesized Session carries the right source_tag/source_label.  Only
+    # fill fields that are actually missing from cli_meta; the foreign store
+    # always wins when both are present.
+    #
+    # No-mutation contract (Greptile #4911 follow-up): the GET path passes
+    # a pre-computed cli_meta dict and expects it to be unchanged after
+    # this helper returns.  We use a single copy-on-write rebind at the
+    # top of the block and then plain subscript assignment so the
+    # caller's dict is never touched in place.
+    if state_db_row:
+        cli_meta = dict(cli_meta or {})
+        if not cli_meta.get("source_tag") and state_db_source:
+            cli_meta["source_tag"] = state_db_source
+        if not cli_meta.get("raw_source") and state_db_source:
+            cli_meta["raw_source"] = state_db_source
+        if not cli_meta.get("title") and state_db_row.get("title"):
+            cli_meta["title"] = state_db_row["title"]
+        if not cli_meta.get("model") and state_db_row.get("model"):
+            cli_meta["model"] = state_db_row["model"]
+        if not cli_meta.get("workspace") and state_db_row.get("cwd"):
+            cli_meta["workspace"] = state_db_row["cwd"]
+        # Map state.db timestamps to created_at/updated_at on the
+        # synthesized Session.  Without this, the first POST writes
+        # epoch (0) timestamps into the permanent sidecar and the
+        # sidebar sorts/dates the session as "Jan 1 1970" (Greptile
+        # #4911 follow-up, P1).  updated_at prefers ended_at (last
+        # activity) and falls back to started_at; created_at always
+        # comes from started_at.
+        if not cli_meta.get("created_at") and state_db_row.get("started_at"):
+            cli_meta["created_at"] = state_db_row["started_at"]
+        if not cli_meta.get("updated_at"):
+            _ended = state_db_row.get("ended_at")
+            _started = state_db_row.get("started_at")
+            if _ended or _started:
+                cli_meta["updated_at"] = _ended or _started
+    claimable, _reason = _is_claimable_cli_source(cli_meta, state_db_source)
+    if not claimable:
+        # The session is real and viewable, but the foreign source forbids
+        # the WebUI from taking write ownership.  Build the Session with
+        # readonly=True so the GET stub keeps rendering the original
+        # read-only badge, and return 'not_claimable' so the POST path
+        # 403s instead of bare-404ing.
+        return build_session(sid, cli_meta, msgs, read_only_flag=True), "not_claimable"
+    return build_session(sid, cli_meta, msgs, read_only_flag=False), "materialized"
+
+
 def _messaging_session_identity(session: dict, raw_source: str) -> str:
     metadata = _lookup_gateway_session_identity(session.get("session_id"))
     session_key = _safe_first(
@@ -7074,86 +7369,60 @@ def handle_get(handler, parsed) -> bool:
                 )
             return resp
         except KeyError:
-            # Not a WebUI session -- try CLI store.
-            # Before synthesising a read-only CLI stub, verify the id was not a
-            # deleted WebUI session. _index.json is the canonical WebUI session
-            # registry; an entry there with a webui, fork, or empty source means the
-            # session once had a sidecar that is now gone. Returning 404 lets the
-            # client self-heal: strip the stale /session/<id> URL and clear
-            # localStorage. Otherwise GET would keep returning 200 from the CLI
-            # stub while POST /api/session/draft and /api/chat/start 404, leaving
-            # the UI bricked (#2782). Genuine CLI-origin sessions (absent from the
-            # index, or tagged with a non-webui source) keep the existing 200 path.
-            _was_webui_session = False
-            if SESSION_INDEX_FILE.exists():
-                try:
-                    _index_entries = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
-                    for _ie in _index_entries if isinstance(_index_entries, list) else []:
-                        if _ie.get("session_id") == sid:
-                            # Classify PER source field, not on a collapsed
-                            # `a or b or c` — a legacy CLI/imported row can carry
-                            # is_cli_session:true with BLANK source fields, and
-                            # collapsing-then-defaulting-to-WebUI would wrongly
-                            # 404 it (it should keep its read-only CLI stub).
-                            _srcs = [
-                                str(_ie.get("source_tag") or "").strip().lower(),
-                                str(_ie.get("raw_source") or "").strip().lower(),
-                                str(_ie.get("session_source") or "").strip().lower(),
-                            ]
-                            _explicit = [s for s in _srcs if s]
-                            if any(s in ("webui", "fork") for s in _explicit):
-                                # Explicit WebUI-origin (incl. forks, which
-                                # /api/session/branch stamps session_source="fork")
-                                # — a deleted sidecar bricks identically. 404.
-                                _was_webui_session = True
-                            elif _explicit:
-                                # Explicit non-WebUI source (cli, telegram,
-                                # claude_code, ...) — a genuine foreign session.
-                                # Keep the existing 200 CLI/read-only stub path.
-                                _was_webui_session = False
-                            else:
-                                # All source fields blank: WebUI-origin UNLESS the
-                                # row is a legacy CLI/imported session marked only
-                                # by is_cli_session / read_only.
-                                _is_cli = _ie.get("is_cli_session") is True
-                                _ro = bool(_ie.get("read_only") or _ie.get("is_read_only"))
-                                _was_webui_session = not (_is_cli or _ro)
-                            break
-                except Exception:
-                    pass
-            if _was_webui_session:
-                return bad(handler, "Session not found", 404)
+            # No WebUI sidecar. Delegate to the shared foreign-session
+            # synthesizer so GET and POST have symmetric writeable/read-only
+            # behaviour for CLI/TUI/Desktop sessions.
             cli_meta = _lookup_cli_session_metadata(sid)
-            msgs = get_cli_session_messages(sid)
-            if msgs:
-                sess = {
-                    "session_id": sid,
-                    "title": (cli_meta or {}).get("title", "CLI Session"),
-                    "workspace": (cli_meta or {}).get("workspace", ""),
-                    "model": (cli_meta or {}).get("model", "unknown"),
-                    "message_count": len(msgs),
-                    "created_at": (cli_meta or {}).get("created_at", 0),
-                    "updated_at": (cli_meta or {}).get("updated_at", 0),
-                    "last_message_at": (cli_meta or {}).get("last_message_at")
+            synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta or {})
+            if reason == "was_webui":
+                # Deleted WebUI session: 404 so the client self-heals
+                # (clears stale /session/<id> URL and localStorage).
+                return bad(handler, "Session not found", 404)
+            if synth is None:
+                return bad(handler, "Session not found", 404)
+            # Build the legacy dict response from the synthesized Session so
+            # the wire shape stays byte-equivalent to the previous inline
+            # synthesis (the frontend has been reading these exact keys).
+            msgs = list(synth.messages or [])
+            sess = {
+                "session_id": synth.session_id,
+                "title": synth.title,
+                "workspace": synth.workspace,
+                "model": synth.model,
+                "message_count": len(msgs),
+                "created_at": synth.created_at,
+                "updated_at": synth.updated_at,
+                "last_message_at": (
+                    (cli_meta or {}).get("last_message_at")
                     or (cli_meta or {}).get("updated_at", 0)
-                    or (msgs[-1] if msgs else {"timestamp": 0}).get("timestamp", 0),
-                    "pinned": False,
-                    "archived": False,
-                    "project_id": None,
-                    "profile": (cli_meta or {}).get("profile"),
-                    "is_cli_session": True,
-                    "source_tag": (cli_meta or {}).get("source_tag"),
-                    "raw_source": (cli_meta or {}).get("raw_source"),
-                    "session_source": (cli_meta or {}).get("session_source"),
-                    "source_label": (cli_meta or {}).get("source_label"),
-                    "read_only": bool((cli_meta or {}).get("read_only")),
-                    "messages": msgs,
-                    "tool_calls": [],
-                }
-                attach_todo_state(sess, msgs)
-                sess = _merge_cli_sidebar_metadata(sess, cli_meta)
-                return j(handler, {"session": redact_session_data(sess)})
-            return bad(handler, "Session not found", 404)
+                    or ((msgs or [{}])[-1].get("timestamp", 0))
+                ),
+                "pinned": bool(getattr(synth, "pinned", False)),
+                "archived": bool(getattr(synth, "archived", False)),
+                "project_id": getattr(synth, "project_id", None),
+                "profile": synth.profile,
+                "is_cli_session": True,
+                "source_tag": synth.source_tag,
+                "raw_source": synth.raw_source,
+                "session_source": synth.session_source,
+                "source_label": synth.source_label,
+                # Greptile #4911 follow-up: read read_only from the
+                # synthesized Session, NOT from cli_meta directly.
+                # The helper sets synth.read_only=True for BOTH
+                # explicit read_only=True cli_meta AND source-refused
+                # sessions (messaging / claude_code / external_agent).
+                # cli_meta.get("read_only") is only populated for the
+                # explicit case, so reading it from there causes the
+                # frontend to render the composer for source-refused
+                # sessions and the user only discovers the block at
+                # POST time with a confusing 403.
+                "read_only": bool(getattr(synth, "read_only", False)),
+                "messages": msgs,
+                "tool_calls": [],
+            }
+            attach_todo_state(sess, msgs)
+            sess = _merge_cli_sidebar_metadata(sess, cli_meta)
+            return j(handler, {"session": redact_session_data(sess)})
 
     if parsed.path == "/api/session/lineage/report":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
@@ -13930,7 +14199,67 @@ def _handle_chat_start(handler, body, diag=None):
         try:
             s = _get_or_materialize_session(body["session_id"])
         except KeyError:
-            return bad(handler, "Session not found", 404)
+            # No WebUI sidecar. If this is a foreign-origin session (CLI,
+            # TUI, Desktop, claude_code, gateway) with recoverable state.db
+            # messages, claim it by materialising a WebUI-owned Session and
+            # persisting it as a sidecar. This closes the GET-vs-POST
+            # asymmetry where a TUI/Desktop session loads read-only via
+            # GET /api/session but 404s on the first POST /api/chat/start,
+            # making the typed message disappear into the empty state.
+            synth, reason = _claim_or_synthesize_cli_session(body["session_id"])
+            if synth is None:
+                # 'was_webui' (deleted WebUI session, client should self-heal
+                # via the existing 404 path), 'no_foreign_state' (sid has
+                # no recoverable state anywhere), or 'invalid_sid' (path
+                # safety violation). All collapse to 404 — the client only
+                # knows the right thing to do for "this session is gone".
+                return bad(handler, "Session not found", 404)
+            if reason == "not_claimable":
+                # Foreign store says this session is read-only / owned by
+                # a non-WebUI process (messaging, claude_code,
+                # external_agent, or explicit read_only flag). The
+                # session is real and viewable, but the WebUI must not
+                # take write ownership of it — that would be an
+                # ownership-boundary violation (#4911 review).  403
+                # (not 404) because 404 triggers the frontend's
+                # empty-state self-heal handler (messages.js:1236) which
+                # strips the URL and clears localStorage; for a
+                # legitimately-listed read-only session the user
+                # should keep their URL and see a refusal, not have
+                # their session vanish.
+                return bad(
+                    handler,
+                    "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
+                    403,
+                )
+            try:
+                synth.save()
+            except Exception as _save_err:
+                # Persisting the sidecar failed: surface a generic 500 to
+                # the client (paths sanitised, see _sanitize_error) and log
+                # the full exception server-side. Returning the raw str(exc)
+                # would leak /root/.hermes/webui/sessions/<sid>.json or any
+                # other absolute filesystem path the OSError happened to
+                # carry — #4911 review feedback (Greptile, 2026-06-09).
+                logger.exception(
+                    "failed to persist materialised sidecar for foreign session %s",
+                    body["session_id"],
+                )
+                return bad(
+                    handler,
+                    f"failed to claim session: {_sanitize_error(_save_err)}",
+                    500,
+                )
+            s = synth
+            try:
+                with LOCK:
+                    SESSIONS[s.session_id] = s
+                    SESSIONS.move_to_end(s.session_id)
+            except Exception:
+                # If the in-memory LRU refuses the new session, fall through
+                # with the just-persisted sidecar; _start_run will load it
+                # from disk if needed.
+                pass
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
         diag.stage("validate_profile") if diag else None
@@ -16962,7 +17291,14 @@ def _handle_session_import_cli(handler, body):
                 | {
                     "messages": existing.messages,
                     "is_cli_session": True,
-                    "read_only": bool((cli_meta or {}).get("read_only")),
+                    # Greptile #4911 follow-up: read read_only from
+                    # the persisted Session, NOT from cli_meta.  This
+                    # refresh path is for an already-WebUI-owned
+                    # session; the WebUI's persisted view is the
+                    # source of truth for the response, not the
+                    # foreign store's current value.  (Mirrors the
+                    # GET /api/session fix at line ~6043.)
+                    "read_only": bool(getattr(existing, "read_only", False)),
                 },
                 "imported": False,
             },
