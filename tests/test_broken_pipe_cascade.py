@@ -10,6 +10,7 @@ The fix:
 - helpers._safe_write() catches _CLIENT_DISCONNECT_ERRORS (including ssl.SSLError)
 - server.py exception handlers wrap their 500-response j() calls in try/except
 """
+import io
 import ssl
 import unittest
 from unittest.mock import MagicMock
@@ -255,6 +256,52 @@ class TestServerDisconnectHandling(unittest.TestCase):
             _server_mod.check_auth = orig_check_auth
 
         handler.send_response.assert_not_called()
+
+    def test_log_request_ignores_closed_stdout(self):
+        """A poisoned stdout stream must not break send_response()."""
+        from server import Handler
+        handler = Handler.__new__(Handler)
+        handler.command = "GET"
+        handler.path = "/health"
+        handler._req_t0 = 0.0
+        handler.headers = {}
+        handler.client_address = ("127.0.0.1", 12345)
+
+        closed_stdout = io.StringIO()
+        closed_stdout.close()
+        original_stdout = sys.stdout
+        sys.stdout = closed_stdout
+        try:
+            Handler.log_request(handler, 200)
+        finally:
+            sys.stdout = original_stdout
+
+    def test_do_get_sends_500_when_stdout_closed(self):
+        """Route errors should still produce a 500 if stdout was closed."""
+        from server import Handler
+        handler = self._make_handler(route_raises=ValueError("real bug"))
+
+        def _fake_handle_get(self, parsed):
+            raise self._route_raises
+
+        import server as _server_mod
+        orig_handle_get = _server_mod.handle_get
+        orig_check_auth = _server_mod.check_auth
+        _server_mod.handle_get = _fake_handle_get
+        _server_mod.check_auth = lambda h, p: True
+
+        closed_stdout = io.StringIO()
+        closed_stdout.close()
+        original_stdout = sys.stdout
+        sys.stdout = closed_stdout
+        try:
+            Handler.do_GET(handler)
+        finally:
+            sys.stdout = original_stdout
+            _server_mod.handle_get = orig_handle_get
+            _server_mod.check_auth = orig_check_auth
+
+        handler.send_response.assert_called_once_with(500)
 
     def test_do_get_sends_500_on_real_error(self):
         from server import Handler
