@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **LM Studio reasoning-effort probes now keep their auth and work without the bundled CLI.** When the active model is an LM Studio provider, the WebUI reasoning-effort probe now resolves an LM Studio API key (active model key → `providers.lmstudio.api_key` → `LM_API_KEY` → `LMSTUDIO_API_KEY`) and forwards it as a Bearer token, so authenticated LM Studio servers no longer 401 the probe and silently report "no reasoning support." If `hermes_cli` is unavailable (or its `lmstudio_model_reasoning_options` signature changes), the probe falls back to a built-in HTTP query of the LM Studio `/api/v1/models` capabilities endpoint instead of skipping reasoning detection entirely. (#3750, #3837)
+
 ## [v0.51.419] — 2026-06-14 — Release OF (settled-stream message-count consistency, #4192)
 
 ### Fixed
