@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.428] — 2026-06-15 — Release OO (bound non-git project-context file walk, #4164)
+
+### Fixed
+
+- **The Project Context tab no longer surfaces `AGENTS.md` / `HERMES.md` / `CLAUDE.md` files from ABOVE a non-git workspace.** When a workspace isn't a git repo, the context-file walk had no stop boundary and climbed to the filesystem root, so a file in a parent directory (e.g. `/tmp/HERMES.md` or one in your home dir) could appear in the tab even though it's outside the workspace. The walk is now bounded at the workspace root when there's no git root (the cwd is still scanned, preserving in-workspace context files). A matching bound on the agent-side walk is a tracked follow-up; until then the WebUI may under-report context files that live above a non-git workspace, which is strictly safer than over-reporting them. (#4164)
+
 ## [v0.51.427] — 2026-06-15 — Release ON (CLI sessions on by default for new installs #3988 + symlink delete/rename guard #4217)
 
 ### Changed
