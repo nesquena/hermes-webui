@@ -5245,13 +5245,27 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     _named_custom_groups[_slug] = (_cp_name, [])
 
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
-                if _slug and _cp_base_url:
-                    _cp_api_key = str(_cp.get("api_key") or "").strip()
-                    if not _cp_api_key:
-                        _cp_key_env = str(_cp.get("key_env") or "").strip()
-                        if _cp_key_env:
-                            _cp_api_key = str(os.getenv(_cp_key_env) or "").strip()
+                _cp_api_key = str(_cp.get("api_key") or "").strip()
+                if not _cp_api_key:
+                    _cp_key_env = str(_cp.get("key_env") or "").strip()
+                    if _cp_key_env:
+                        _cp_api_key = str(os.getenv(_cp_key_env) or "").strip()
+                # Fallback: check credential pool for both api_key and base_url
+                if (not _cp_api_key or not _cp_base_url) and _slug:
+                    try:
+                        from agent.credential_pool import load_pool
+                        _pool = load_pool(_slug)
+                        if _pool and _pool.has_credentials():
+                            _entry = _pool.select()
+                            if _entry:
+                                if not _cp_api_key:
+                                    _cp_api_key = _entry.runtime_api_key
+                                if not _cp_base_url:
+                                    _cp_base_url = str(getattr(_entry, "base_url", "") or "").strip()
+                    except Exception:
+                        pass
 
+                if _slug and _cp_base_url:
                     # Check if user has configured models in config.yaml —
                     # configured models take priority over live /v1/models
                     # discovery (same as hermes-agent model_switch.py Section 4

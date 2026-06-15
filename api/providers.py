@@ -983,6 +983,13 @@ def _provider_has_key(provider_id: str) -> bool:
         env_value = os.getenv(env_var)
         if _provider_value_counts_as_api_key(provider_id, env_value):
             return True
+        try:
+           from agent.credential_pool import load_pool
+           pool = load_pool(provider_id)   # provider_id == "custom:bothub" for custom
+           if pool and pool.has_credentials():
+               return True
+        except Exception:
+           pass
         # Fall back to legacy env-var aliases (e.g. lmstudio's pre-#1500
         # LMSTUDIO_API_KEY name) so existing users don't lose detection
         # after an env-var rename.  See _PROVIDER_ENV_VAR_ALIASES.
@@ -991,7 +998,7 @@ def _provider_has_key(provider_id: str) -> bool:
                 return True
             if _provider_value_counts_as_api_key(provider_id, os.getenv(alias)):
                 return True
-
+    
     cfg = get_config()
     # Check model.api_key — only match if this provider is the active one.
     # Previously this checked globally, causing all providers to show
@@ -1068,6 +1075,18 @@ def _get_provider_api_key(provider_id: str) -> str | None:
                     return os.getenv(cp_key[2:-1], "").strip() or None
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
+    # Fallback: try credential pool (e.g. bothub key stored via auth.json)
+    try:
+        from agent.credential_pool import load_pool
+        pool = load_pool(provider_id)
+        if pool and pool.has_credentials():
+            entry = pool.peek()
+            if entry:
+                key = getattr(entry, "access_token", "") or getattr(entry, "runtime_api_key", "")
+                if key:
+                    return key
+    except Exception:
+        pass
     return None
 
 
@@ -2343,6 +2362,15 @@ def get_providers() -> dict[str, Any]:
             if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
                 env_var = cp_api_key[2:-1]
                 cp_has_key = bool(os.getenv(env_var, "").strip())
+            # Fallback: check credential pool (key added via hermes auth add)
+            if not cp_has_key:
+                try:
+                    from agent.credential_pool import load_pool
+                    pool = load_pool(cp_id)
+                    if pool and pool.has_credentials():
+                        cp_has_key = True
+                except Exception:
+                    pass
             providers.append({
                 "id": cp_id,
                 "display_name": cp_name,
