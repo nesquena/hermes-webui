@@ -3,7 +3,11 @@
 
 ## [Unreleased]
 
-## [v0.51.435] — 2026-06-15 — Release OV (supported local pytest runner)
+## [v0.51.436] — 2026-06-15 — Release OW (cron sessions mark unread on new runs)
+
+### Fixed
+
+- **Cron sessions in the sidebar now mark unread when a new run lands, attributed to the correct job.** When a scheduled job finished, the sidebar's unread resolver matched a session id against `cron_<jobid>_` prefixes built only from the just-completed jobs, so a job whose id is a prefix of another's (e.g. `backup` vs `backup_full`) could steal the other's session (`cron_backup_full_…` resolving to `backup`). The resolver now considers all known job ids and attributes each session to the longest matching job-id prefix, which is provably unambiguous (the matching prefixes of a single session id are nested, so the longest is unique). The lookup is a read-only `state.db` scan that only runs when a cron actually completed, degrades gracefully on contention, and filters in Python rather than via SQL `LIKE`. (#3460)
 
 ### Added
 
