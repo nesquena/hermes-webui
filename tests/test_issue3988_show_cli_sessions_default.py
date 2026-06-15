@@ -23,7 +23,6 @@ Combines + supersedes the approaches in #3997 (rodboev) and #4222 (Sanjays2402).
 
 import json
 import pathlib
-import re
 
 import pytest
 

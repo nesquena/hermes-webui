@@ -1,8 +1,5 @@
 """Regression tests for #4217 — symlink guards on /api/file/delete and /api/file/rename."""
 import os
-import shutil
-import tempfile
-from pathlib import Path
 
 import pytest
 
