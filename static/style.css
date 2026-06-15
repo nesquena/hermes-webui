@@ -652,6 +652,87 @@
   :root[data-skin="geist-contrast"] textarea#msg{scrollbar-width:none;overflow-y:auto;}
   :root[data-skin="geist-contrast"] textarea#msg::-webkit-scrollbar{display:none;}
 
+  /* ── Skin: EXCRTX (Exocórtex.IA) ──
+     Deep navy surfaces with electric blue accent, derived from the EXCRTX.IA
+     logo palette (#03123f primary, #1376ed accent). Light mode uses cool gray
+     surfaces; dark mode uses near-black navy. Monospace font stack stays
+     pragmatic, not playful. Opt-in via Settings → Skin picker. */
+  :root[data-skin="excrtx"]{
+    color-scheme:light;
+    --bg:#f4f5f8;--sidebar:#e8ecf2;--surface:#ffffff;--surface-subtle:#f0f2f6;--surface-subtle-hover:#e4e8ef;
+    --main-bg:#f4f5f8;--topbar-bg:rgba(244,245,248,.96);
+    --border:#d2d6e3;--border2:#bcc1ce;--border-subtle:#e0e4ec;--border-muted:#c5cad6;
+    --text:#03123f;--strong:#010a28;--muted:#8f8a91;--em:#1a3c86;
+    --accent:#1376ed;--accent-hover:#0e5fd6;--accent-bg:rgba(19,118,237,.08);--accent-bg-strong:rgba(19,118,237,.16);--accent-text:#0e5fd6;
+    --blue:#1376ed;--gold:#1a3c86;--focus-ring:rgba(19,118,237,.3);--focus-glow:rgba(19,118,237,.1);
+    --input-bg:#ffffff;--hover-bg:#e8ecf2;--code-bg:#f0f2f6;--code-inline-bg:#e4e8ef;--code-text:#03123f;--pre-text:#03123f;
+    --error:#E53E3E;--success:#38A169;--warning:#D69E2E;--info:#1376ed;
+    --radius-sm:4px;--radius-md:8px;--radius-card:8px;--radius-lg:12px;
+    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    --user-bubble-bg:#e8ecf2;--user-bubble-border:#d2d6e3;--user-bubble-text:#03123f;--user-bubble-placeholder:#8f8a91;
+    --user-selection-bg:rgba(19,118,237,.22);--user-selection-text:#03123f;
+  }
+  :root.dark[data-skin="excrtx"]{
+    color-scheme:dark;
+    --bg:#181f30;--sidebar:#1d2539;--surface:#222c42;--surface-subtle:#263148;--surface-subtle-hover:#2c3852;
+    --main-bg:#181f30;--topbar-bg:rgba(24,31,48,.96);
+    --border:#2a3652;--border2:#334062;--border-subtle:#232d47;--border-muted:#2a3652;
+    --text:#c8d2e2;--strong:#e8ecf2;--muted:#6e7a94;--em:#99a8c2;
+    --accent:#3b8af0;--accent-hover:#5c9ff4;--accent-bg:rgba(59,138,240,.12);--accent-bg-strong:rgba(59,138,240,.2);--accent-text:#6baaf6;
+    --blue:#3b8af0;--gold:#6baaf6;--focus-ring:rgba(59,138,240,.28);--focus-glow:rgba(59,138,240,.08);
+    --input-bg:#1d2539;--hover-bg:rgba(59,138,240,.08);--code-bg:#181f30;--code-inline-bg:rgba(59,138,240,.1);--code-text:#99a8c2;--pre-text:#c8d2e2;
+    --error:#F07178;--success:#7EC98C;--warning:#E6B86E;--info:#3b8af0;
+    --user-bubble-bg:#263148;--user-bubble-border:#334062;--user-bubble-text:#c8d2e2;--user-bubble-placeholder:#6e7a94;
+    --user-selection-bg:rgba(59,138,240,.28);--user-selection-text:#e8ecf2;
+  }
+  /* EXCRTX skin: component-level overrides */
+  :root[data-skin="excrtx"],:root[data-skin="excrtx"] body{background:var(--bg)!important;}
+  :root[data-skin="excrtx"] .app-titlebar,
+  :root[data-skin="excrtx"] .rail,
+  :root[data-skin="excrtx"] .sidebar,
+  :root[data-skin="excrtx"] .rightpanel,
+  :root[data-skin="excrtx"] .topbar,
+  :root[data-skin="excrtx"] .composer-wrap{background:var(--sidebar)!important;border-color:var(--border)!important;box-shadow:none!important;}
+  :root[data-skin="excrtx"] .main,
+  :root[data-skin="excrtx"] .chat,
+  :root[data-skin="excrtx"] .panel-view{background:var(--bg)!important;}
+  /* New chat / send buttons: electric blue solid */
+  :root[data-skin="excrtx"]:not(.dark) .new-chat-btn,
+  :root.dark[data-skin="excrtx"] .new-chat-btn,
+  :root[data-skin="excrtx"] button.send-btn:not(:disabled),
+  :root[data-skin="excrtx"] .btn.primary,
+  :root[data-skin="excrtx"] .update-primary,
+  :root[data-skin="excrtx"] .clarify-submit{background:var(--accent)!important;border-color:var(--accent)!important;color:#fff!important;font-weight:600!important;box-shadow:0 1px 3px rgba(19,118,237,.28)!important;}
+  :root[data-skin="excrtx"]:not(.dark) .new-chat-btn:hover,
+  :root.dark[data-skin="excrtx"] .new-chat-btn:hover,
+  :root[data-skin="excrtx"] button.send-btn:not(:disabled):hover,
+  :root[data-skin="excrtx"] .btn.primary:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;box-shadow:0 2px 8px rgba(19,118,237,.45)!important;}
+  /* Active session: left accent bar */
+  :root[data-skin="excrtx"] .session-item.active{border-left:2px solid var(--accent);}
+  :root[data-skin="excrtx"] .session-item.active .session-title,
+  :root[data-skin="excrtx"] .session-item.active .session-meta{color:var(--accent-text)!important;}
+  /* Tool cards: navy tint */
+  :root[data-skin="excrtx"] .tool-card{background:var(--surface-subtle)!important;border-color:var(--border)!important;}
+  :root[data-skin="excrtx"] .tool-card:hover{border-color:var(--border2)!important;}
+  :root[data-skin="excrtx"] .tool-card-running{background:var(--accent-bg)!important;border-color:var(--accent-bg-strong)!important;}
+  :root[data-skin="excrtx"] .tool-arg-key,
+  :root[data-skin="excrtx"] .tool-card-more{color:var(--accent-text)!important;}
+  :root[data-skin="excrtx"] .tool-card-running-dot{background:var(--accent)!important;}
+  /* User bubble: soft navy tint */
+  :root[data-skin="excrtx"] .msg-row[data-role="user"] .msg-body{background:var(--user-bubble-bg)!important;border:1px solid var(--user-bubble-border)!important;border-radius:12px!important;color:var(--user-bubble-text)!important;}
+  /* Composer: clean focus ring */
+  :root[data-skin="excrtx"] .composer-box{border-radius:12px!important;}
+  :root[data-skin="excrtx"] .composer-box:focus-within{border-color:var(--accent)!important;box-shadow:0 0 0 3px var(--focus-ring)!important;}
+  /* Logo: electric blue gradient */
+  :root[data-skin="excrtx"] .logo{background:linear-gradient(145deg,var(--accent-hover),var(--accent))!important;box-shadow:0 2px 10px var(--accent-bg-strong)!important;}
+  /* Links & accent elements */
+  :root[data-skin="excrtx"] .msg-body a,
+  :root[data-skin="excrtx"] .preview-md a{color:var(--accent-text)!important;}
+  :root[data-skin="excrtx"] ::selection{background:var(--accent-bg-strong);}
+  /* Scrollbar: navy tint */
+  :root[data-skin="excrtx"]::-webkit-scrollbar-thumb{background:var(--border2)!important;}
+  :root[data-skin="excrtx"]::-webkit-scrollbar-thumb:hover{background:var(--accent-bg-strong)!important;}
+
   /* ── Skin: Zeus ──
      OLED-near-black skin: replaces the default dark-blue/navy surfaces with warm
      near-blacks while keeping the gold accent unchanged. Borders are gold-tinted
