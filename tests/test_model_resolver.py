@@ -709,3 +709,42 @@ def test_custom_endpoint_slash_model_routes_to_custom_not_openrouter():
     assert model_or == 'google/gemma-4-26b-a4b', (
         "Model name should be preserved for openrouter, got '{}'.".format(model_or)
     )
+
+
+# ── #4210: custom provider (no base_url) must not be hijacked to openrouter
+#    when the model id has a known-provider prefix (sibling of #3872, which
+#    only covered the base_url-set variant). Bug-report case 1.
+
+def test_custom_provider_no_base_url_with_known_prefix_keeps_custom_and_full_id_4210():
+    """#4210: provider=custom:llm-proxy (no base_url) + 'x-ai/grok-2' must NOT
+    be redirected to openrouter. The prefix is intrinsic to the custom proxy's
+    routing; the user did not pick anything from the OpenRouter dropdown."""
+    model, provider, base_url = _resolve_with_config(
+        'x-ai/grok-2',
+        provider='custom:llm-proxy',
+        default='x-ai/grok-2',
+    )
+    assert provider == 'custom:llm-proxy', (
+        "Custom provider must not be hijacked to openrouter when no base_url is "
+        "set; got provider={!r} model={!r}".format(provider, model)
+    )
+    assert model == 'x-ai/grok-2', (
+        "Custom provider must preserve the full model id; got model={!r}".format(model)
+    )
+    assert base_url is None
+
+
+def test_bare_custom_provider_no_base_url_with_known_prefix_keeps_custom_and_full_id_4210():
+    """#4210 sibling: bare 'custom' (no 'custom:<slug>') with no base_url
+    must also not be hijacked to openrouter for a known-prefix model id."""
+    model, provider, base_url = _resolve_with_config(
+        'google/gemma-2-9b',
+        provider='custom',
+        default='google/gemma-2-9b',
+    )
+    assert provider == 'custom', (
+        "Bare 'custom' provider must not be hijacked to openrouter when no "
+        "base_url is set; got provider={!r}".format(provider)
+    )
+    assert model == 'google/gemma-2-9b'
+    assert base_url is None
