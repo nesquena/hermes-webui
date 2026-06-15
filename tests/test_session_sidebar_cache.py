@@ -292,6 +292,70 @@ def test_session_list_cache_rebuild_retries_after_invalidation():
     assert calls == ["build", "build"]
 
 
+def test_session_list_cache_source_stamp_tracks_state_db_wal(tmp_path, monkeypatch):
+    state_db = tmp_path / "state.db"
+    state_db.write_text("db", encoding="utf-8")
+    state_db_wal = tmp_path / "state.db-wal"
+    state_db_wal.write_text("wal-1", encoding="utf-8")
+    gateway = tmp_path / "gateway-sessions.json"
+    gateway.write_text("{}", encoding="utf-8")
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / "_index.json").write_text("{}", encoding="utf-8")
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: str(state_db))
+    monkeypatch.setattr(routes, "_gateway_session_metadata_path", lambda: gateway)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SETTINGS_FILE", settings_file)
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+
+    before = routes._session_list_cache_source_stamp(key)
+    state_db_wal.write_text("wal-2-more", encoding="utf-8")
+    after = routes._session_list_cache_source_stamp(key)
+
+    assert after != before
+
+
+def test_session_list_cache_source_stamp_tracks_settings_file(tmp_path, monkeypatch):
+    state_db = tmp_path / "state.db"
+    state_db.write_text("db", encoding="utf-8")
+    gateway = tmp_path / "gateway-sessions.json"
+    gateway.write_text("{}", encoding="utf-8")
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / "_index.json").write_text("{}", encoding="utf-8")
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text('{"show_cli_sessions": false}', encoding="utf-8")
+
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: str(state_db))
+    monkeypatch.setattr(routes, "_gateway_session_metadata_path", lambda: gateway)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SETTINGS_FILE", settings_file)
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+
+    before = routes._session_list_cache_source_stamp(key)
+    settings_file.write_text('{"show_cli_sessions": true}', encoding="utf-8")
+    after = routes._session_list_cache_source_stamp(key)
+
+    assert after != before
+
+
 def test_session_list_payload_to_response_overlays_live_stream_runtime(monkeypatch):
     payload = {
         "sessions": [
