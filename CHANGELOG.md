@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Session sidebar discoverability now preserves multi-row imported/CLI lineages when a fuller pre-compression snapshot exists.** The sidebar may still expose the fuller snapshot, but it no longer suppresses multiple messageful non-snapshot rows from the same imported/CLI lineage as if they were a single inactive continuation. (#498, #3418)
+
 ## [v0.51.424] — 2026-06-15 — Release OK (visible-message tail pagination, #4069)
 
 ### Fixed
