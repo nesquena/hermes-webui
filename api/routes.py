@@ -43,17 +43,28 @@ from api.session_events import (
 logger = logging.getLogger(__name__)
 
 
-def _publish_session_list_changed(reason: str, *, profile: str | None = None) -> None:
-    """Publish profile-scoped session changes while tolerating legacy test doubles."""
-    if not profile:
+def _publish_session_list_changed(
+    reason: str,
+    *,
+    profile: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    """Publish scoped session changes while tolerating legacy test doubles."""
+    if not profile and not session_id:
         publish_session_list_changed(reason)
         return
     try:
-        publish_session_list_changed(reason, profile=profile)
+        publish_session_list_changed(reason, profile=profile, session_id=session_id)
     except TypeError:
         # Some focused tests monkeypatch the route-level publisher with the
-        # historical one-argument shape. Preserve the old signal instead of
+        # historical one-argument or profile-only shape. Preserve the old signal instead of
         # turning unrelated session mutations into 500s.
+        if profile:
+            try:
+                publish_session_list_changed(reason, profile=profile)
+                return
+            except TypeError:
+                pass
         publish_session_list_changed(reason)
 
 
@@ -126,7 +137,11 @@ def _persist_generated_session_title(
             while len(SESSIONS) > SESSIONS_MAX:
                 SESSIONS.popitem(last=False)
     _sync_session_title_to_insights(session)
-    _publish_session_list_changed(event_reason, profile=getattr(session, "profile", None))
+    _publish_session_list_changed(
+        event_reason,
+        profile=getattr(session, "profile", None),
+        session_id=sid,
+    )
     if original_session is not session:
         original_session.title = session.title
         original_session.llm_title_generated = session.llm_title_generated
@@ -8005,7 +8020,11 @@ def handle_post(handler, parsed) -> bool:
             worktree_info=worktree_info,
         )
         if worktree_info:
-            publish_session_list_changed("session_new", profile=getattr(s, "profile", None))
+            publish_session_list_changed(
+                "session_new",
+                profile=getattr(s, "profile", None),
+                session_id=getattr(s, "session_id", None),
+            )
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
     if parsed.path == "/api/session/duplicate":
@@ -8087,7 +8106,11 @@ def handle_post(handler, parsed) -> bool:
             # Without this explicit save, the duplicate is in-memory only — if the user
             # refreshes before sending a turn, the duplicate vanishes.
             copied_session.save()
-            publish_session_list_changed("session_duplicate", profile=getattr(copied_session, "profile", None))
+            publish_session_list_changed(
+                "session_duplicate",
+                profile=getattr(copied_session, "profile", None),
+                session_id=getattr(copied_session, "session_id", None),
+            )
 
             return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
         except Exception as e:
@@ -8222,7 +8245,11 @@ def handle_post(handler, parsed) -> bool:
             apply_session_title_rename(s, body["title"])
             s.save()
         _sync_session_title_to_insights(s)
-        publish_session_list_changed("session_rename", profile=getattr(s, "profile", None))
+        publish_session_list_changed(
+            "session_rename",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", body["session_id"]),
+        )
         return j(handler, {"session": s.compact()})
 
 
@@ -8718,7 +8745,11 @@ def handle_post(handler, parsed) -> bool:
         # Persist only if there are messages (matches new_session pattern)
         if forked_messages:
             branch.save()
-            publish_session_list_changed("session_branch", profile=getattr(branch, "profile", None))
+            publish_session_list_changed(
+                "session_branch",
+                profile=getattr(branch, "profile", None),
+                session_id=getattr(branch, "session_id", None),
+            )
 
         return j(handler, {
             "session_id": branch.session_id,
@@ -9310,7 +9341,11 @@ def handle_post(handler, parsed) -> bool:
             with _get_session_agent_lock(body["session_id"]):
                 s.pinned = pin_requested
                 s.save()
-        publish_session_list_changed("session_pin", profile=getattr(s, "profile", None))
+        publish_session_list_changed(
+            "session_pin",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", body["session_id"]),
+        )
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Session archive (POST) ──
@@ -9387,7 +9422,11 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
-        publish_session_list_changed("session_archive", profile=getattr(s, "profile", None))
+        publish_session_list_changed(
+            "session_archive",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", sid),
+        )
         return j(handler, {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)})
 
     # ── Session move to project (POST) ──
@@ -9441,7 +9480,11 @@ def handle_post(handler, parsed) -> bool:
             s.save()
         finally:
             _move_lock.release()
-        publish_session_list_changed("session_move", profile=getattr(s, "profile", None))
+        publish_session_list_changed(
+            "session_move",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", body["session_id"]),
+        )
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Project CRUD (POST) ──
@@ -13263,7 +13306,11 @@ def _start_chat_stream_for_session(
                     "_status": 409,
                 }
     if was_hidden_empty_session:
-        publish_session_list_changed("session_new", profile=getattr(s, "profile", None))
+        publish_session_list_changed(
+            "session_new",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", None),
+        )
     diag.stage("turn_journal_submitted") if diag else None
     journal_event = {}
     try:

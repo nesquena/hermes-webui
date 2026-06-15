@@ -7,6 +7,12 @@
 
 - **TUI-origin Hermes Agent sessions now stay discoverable in the CLI/agent sidebar view.** State-db rows with `source='tui'` are normalized as CLI-like rows, legacy browser payloads also treat raw `tui` as CLI-like for destructive-action gating, and TUI continuation chains display the latest tip title instead of an older parent title. (#3986, #3988, #3418)
 
+## [v0.51.430] — 2026-06-15 — Release OQ (session-list-changed events carry the changed session id)
+
+### Changed
+
+- **Session-list invalidation events can now carry the specific `session_id` that changed.** `publish_session_list_changed(...)` and the `/api/sessions/events` SSE payload gained an optional `session_id` (defaulting to none, so the broad-refresh behavior is unchanged and backward-compatible). The frontend uses it to tell whether an event targets the currently-open session, refining the refresh signal instead of always doing a broad sidebar refresh. Profile scoping and the legacy one-argument publish shape are preserved. (#4221)
+
 ## [v0.51.429] — 2026-06-15 — Release OP (preserve multiple messageful imported/CLI sessions in the sidebar)
 
 ### Fixed
