@@ -365,7 +365,7 @@ def test_redact_session_data_non_sensitive_unchanged():
 
 
 # ── API-level tests (require running test server started by conftest.py) ─────
-# Run via `start.sh && pytest tests/test_security_redaction.py -v`
+# Run via `./scripts/test.sh tests/test_security_redaction.py -v`
 
 def _create_session_with_credentials() -> str:
     """Write a session file with credential-containing messages directly to disk.

@@ -6,7 +6,7 @@ across index.html, style.css, and i18n.js — replacing native title="" attribut
 with a faster, CSS-driven tooltip system.
 
 Run:
-    /root/hermes-agent/venv/bin/python -m pytest tests/test_css_tooltips.py -v
+    ./scripts/test.sh tests/test_css_tooltips.py -v
 """
 
 import os

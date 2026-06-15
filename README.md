@@ -473,17 +473,30 @@ For the deep dive on each of these, see [`docs/docker.md`](docs/docker.md).
 ## Running tests
 
 Tests discover the repo and the Hermes agent dynamically -- no hardcoded paths.
+Use the repo test runner so local runs do not accidentally use an unsupported
+system Python. It creates/uses `.venv` with Python 3.11, 3.12, or 3.13 and
+installs the dev test dependencies from `requirements-dev.txt` when missing.
 
 ```bash
 cd hermes-webui
-pytest tests/ -v --timeout=60
+./scripts/test.sh
 ```
 
-Or using the agent venv explicitly:
+Pass normal pytest arguments after the script for focused runs:
 
 ```bash
-/path/to/hermes-agent/venv/bin/python -m pytest tests/ -v
+./scripts/test.sh tests/test_regressions.py -v
 ```
+
+Or seed the repo `.venv` from an explicit supported base interpreter:
+
+```bash
+HERMES_WEBUI_TEST_PYTHON=/path/to/python3.12 ./scripts/test.sh tests/ -v
+```
+
+The override selects the Python used to create or rebuild `.venv`; dependencies
+are still installed into the repo-local virtual environment, not into the
+system/Homebrew interpreter.
 
 Tests run against an isolated server with a separate state directory.
 Production data and real cron jobs are never touched. Current snapshot:
