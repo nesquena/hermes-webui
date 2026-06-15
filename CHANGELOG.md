@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **TUI-origin Hermes Agent sessions now stay discoverable in the CLI/agent sidebar view.** State-db rows with `source='tui'` are normalized as CLI-like rows, legacy browser payloads also treat raw `tui` as CLI-like for destructive-action gating, and TUI continuation chains display the latest tip title instead of an older parent title. (#3986, #3988, #3418)
+
 ## [v0.51.422] — 2026-06-14 — Release OI (optional Todos tab in workspace panel, #3564)
 
 ### Added
