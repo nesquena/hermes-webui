@@ -60,6 +60,7 @@ def _invoke(session, query=None):
     with patch("api.routes.get_session", return_value=session), \
          patch("api.routes._clear_stale_stream_state", return_value=False), \
          patch("api.routes._lookup_cli_session_metadata", return_value={}), \
+         patch("api.routes.get_state_db_session_messages", return_value=[]), \
          patch("api.routes.redact_session_data", side_effect=lambda raw: raw), \
          patch("api.routes.j", side_effect=fake_j):
         routes.handle_get(SimpleNamespace(), parsed)
@@ -144,3 +145,135 @@ def test_msg_before_window_keeps_only_that_page_session_tool_calls():
     assert session.tool_calls[0]["assistant_msg_idx"] == 1
     assert session.tool_calls[1]["assistant_msg_idx"] == 2
     assert payload["_messages_offset"] == 1
+
+
+def test_msg_limit_tail_does_not_run_heavy_webui_lineage_merge():
+    session = _FakeSession([
+        {"role": "user", "content": "older"},
+        {"role": "assistant", "content": "visible"},
+    ])
+    session.parent_session_id = "parent"
+    session.session_source = "webui"
+
+    with patch(
+        "api.routes._merged_webui_lineage_messages_for_display",
+        side_effect=AssertionError("limited loads must not merge parent sidecars"),
+    ), patch(
+        "api.routes.Session.load",
+        return_value=None,
+    ):
+        payload = _invoke(session)
+
+    assert payload["messages"] == [session.messages[-1]]
+    assert payload["message_count"] == 2
+    assert payload["_messages_truncated"] is True
+
+
+def test_msg_limit_tail_keeps_pre_compression_snapshot_parent_reachable():
+    parent = _FakeSession([
+        {"role": "user", "content": "archived question", "timestamp": 1.0},
+        {"role": "assistant", "content": "archived answer", "timestamp": 2.0},
+    ])
+    parent.session_id = "snapshot_parent"
+    parent.pre_compression_snapshot = True
+
+    child = _FakeSession([
+        {"role": "user", "content": "continuation question", "timestamp": 3.0},
+        {"role": "assistant", "content": "continuation answer", "timestamp": 4.0},
+    ])
+    child.parent_session_id = "snapshot_parent"
+    child.pre_compression_snapshot = False
+    child.session_source = "webui"
+
+    with patch("api.routes.Session.load", return_value=parent):
+        payload = _invoke(
+            child,
+            query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=30",
+        )
+
+    assert [m["content"] for m in payload["messages"]] == [
+        "archived question",
+        "archived answer",
+        "continuation question",
+        "continuation answer",
+    ]
+    assert payload["_messages_offset"] == 0
+    assert payload["_messages_truncated"] is False
+
+
+def test_msg_limit_tail_truncates_large_hidden_tool_results():
+    huge_tool_output = "x" * 20_000
+    session = _FakeSession([
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_1", "function": {"name": "vision", "arguments": "{}"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": huge_tool_output,
+        },
+        {"role": "assistant", "content": "done"},
+    ])
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=2",
+    )
+
+    tool_msg = payload["messages"][1]
+    assert tool_msg["role"] == "tool"
+    assert tool_msg["_content_truncated"] is True
+    assert tool_msg["_content_original_chars"] == len(huge_tool_output)
+    assert len(tool_msg["content"]) < len(huge_tool_output)
+    assert "Tool output truncated" in tool_msg["content"]
+
+
+def test_msg_limit_tail_does_not_signal_truncated_for_trailing_hidden_tool_rows():
+    session = _FakeSession([
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+    ] + [
+        {"role": "tool", "content": f"hidden tool row {idx}"}
+        for idx in range(40)
+    ])
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=30",
+    )
+
+    assert [m["role"] for m in payload["messages"]] == ["user", "assistant"]
+    assert payload["_messages_offset"] == 0
+    assert payload["_messages_truncated"] is False
+
+
+def test_msg_limit_tail_preserves_list_tool_content_type_when_truncated():
+    large_list_content = [{"type": "text", "text": "x" * 20_000}]
+    session = _FakeSession([
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_1", "function": {"name": "vision", "arguments": "{}"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": large_list_content,
+        },
+        {"role": "assistant", "content": "done"},
+    ])
+
+    payload = _invoke(
+        session,
+        query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=2",
+    )
+
+    tool_msg = payload["messages"][1]
+    assert tool_msg["role"] == "tool"
+    assert tool_msg["_content_truncated"] is True
+    assert isinstance(tool_msg["content"], list)
+    assert not isinstance(tool_msg["content"], str)
+    assert tool_msg["content"][0]["type"] == "text"
+    assert "Tool output truncated" in tool_msg["content"][0]["text"]

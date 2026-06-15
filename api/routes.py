@@ -3940,15 +3940,53 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     return bool(role and role != "tool")
 
 
+def _tool_call_ids_in_messages(messages) -> set:
+    """Collect tool-call IDs declared on renderable rows (assistant tool_calls /
+    partial tool_calls / Anthropic tool_use content blocks) so trailing
+    tool-result rows can be matched back to a call present in the window."""
+    ids = set()
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        for key in ("tool_calls", "_partial_tool_calls"):
+            for call in msg.get(key) or []:
+                if isinstance(call, dict):
+                    cid = call.get("id") or call.get("tool_call_id")
+                    if cid:
+                        ids.add(str(cid))
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "tool_use":
+                    cid = part.get("id")
+                    if cid:
+                        ids.add(str(cid))
+    return ids
+
+
+def _tool_result_matches_call_ids(message, call_ids) -> bool:
+    """Return True if a role:tool row's tool_call_id/tool_use_id is in ``call_ids``."""
+    if not call_ids or not isinstance(message, dict):
+        return False
+    if str(message.get("role") or "").lower() != "tool":
+        return False
+    tid = message.get("tool_call_id") or message.get("tool_use_id") or ""
+    return bool(tid) and str(tid) in call_ids
+
+
 def _message_window_for_display(messages, msg_limit=None, msg_before=None, expand_renderable=False) -> tuple[list, int]:
     """Return a paginated message window plus its offset in ``messages``.
 
-    The normal fast path is a raw tail window. If that window contains no
-    renderable transcript rows because state.db appended hidden tool rows after
-    the visible assistant tail, shift the window end back to the newest
-    renderable row. This preserves the raw index cursor while avoiding the
-    WebUI blank-transcript trap.
+    ``msg_limit`` is a visible transcript limit, not a raw storage-row cap.
+    Tool result rows are hidden or folded into assistant tool cards, so they
+    should not consume the user's "load N messages" budget. Return the smallest
+    suffix containing the last ``msg_limit`` renderable user/assistant rows, plus
+    any intervening tool rows needed for card snippets.
+
+    ``expand_renderable`` is accepted for compatibility with older frontend
+    callers. Visible-row expansion is now the default for every limited window.
     """
+    _ = expand_renderable
     messages = list(messages or [])
     if msg_before is not None:
         before_idx = max(0, min(int(msg_before), len(messages)))
@@ -3961,43 +3999,113 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
         return source, 0
     limit = max(1, int(msg_limit))
     end_idx = len(source)
-    start_idx = max(0, end_idx - limit)
+    last_renderable_idx = None
+    for idx in range(end_idx - 1, -1, -1):
+        if _message_counts_as_renderable_for_window(source[idx]):
+            last_renderable_idx = idx
+            break
+    if last_renderable_idx is None:
+        start_idx = max(0, end_idx - limit)
+        return source[start_idx:end_idx], start_idx
+    # Keep the last renderable row, plus any immediately-following tool-result
+    # rows whose tool_call_id matches a tool-call on a renderable row already in
+    # the window. The renderer rebuilds tool cards (CLI-origin / empty
+    # S.toolCalls path) from role:"tool" rows indexed by tool_call_id
+    # (static/ui.js resultsByTid), so dropping the result row that follows the
+    # newest assistant tool-call would leave that card without its snippet.
+    # Orphan trailing tool-only rows (no matching call in the window) are still
+    # skipped, preserving the visible-row budget. (#4070 ship-review)
+    end_idx = last_renderable_idx + 1
+    window_tool_call_ids = _tool_call_ids_in_messages(source[: last_renderable_idx + 1])
+    while end_idx < len(source) and not _message_counts_as_renderable_for_window(
+        source[end_idx]
+    ):
+        if _tool_result_matches_call_ids(source[end_idx], window_tool_call_ids):
+            end_idx += 1
+        else:
+            break
+    start_idx = 0
+    renderable_count = 0
+    for idx in range(last_renderable_idx, -1, -1):
+        if not _message_counts_as_renderable_for_window(source[idx]):
+            continue
+        renderable_count += 1
+        if renderable_count >= limit:
+            start_idx = idx
+            break
     window = source[start_idx:end_idx]
-    if window and not any(_message_counts_as_renderable_for_window(msg) for msg in window):
-        for idx in range(end_idx - 1, -1, -1):
-            if _message_counts_as_renderable_for_window(source[idx]):
-                end_idx = idx + 1
-                start_idx = max(0, end_idx - limit)
-                window = source[start_idx:end_idx]
-                break
-    if limit > 1 and window and expand_renderable:
-        # ``msg_limit`` is a raw-message transport cap, but the WebUI renders a
-        # filtered transcript: role=tool rows, empty separator assistants, and
-        # compression markers can all disappear. A long tool-heavy tail can
-        # therefore produce a cold reload that visibly contains only one or two
-        # messages plus a huge "Load earlier" button. Expand the raw window
-        # backwards until it contains roughly ``limit`` renderable transcript
-        # rows, while keeping the raw offset cursor honest.
-        #
-        # Gated behind the explicit ``expand_renderable`` flag, which the
-        # frontend sends ONLY on the initial cold-load fetch. It must NOT apply
-        # to the "Load earlier" cumulative path (which re-requests with a larger
-        # msg_limit and no msg_before) nor the msg_before fallback page — those
-        # keep the raw transport cap so one scroll-up can't pull a whole
-        # tool-heavy transcript back in a single response. Cold loads are the
-        # only place the "1-2 visible messages" cliff happens.
-        renderable_count = sum(1 for msg in window if _message_counts_as_renderable_for_window(msg))
-        if renderable_count < limit:
-            target_renderable = min(
-                limit,
-                sum(1 for msg in source if _message_counts_as_renderable_for_window(msg)),
-            )
-            while start_idx > 0 and renderable_count < target_renderable:
-                start_idx -= 1
-                if _message_counts_as_renderable_for_window(source[start_idx]):
-                    renderable_count += 1
-            window = source[start_idx:end_idx]
     return window, start_idx
+
+
+_LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
+_LIMITED_TOOL_CONTENT_NOTICE = (
+    "\n\n[Tool output truncated in paginated session response; "
+    "load the full transcript to inspect the complete result.]"
+)
+
+
+def _tool_message_for_limited_payload(message):
+    """Return a bounded copy of large hidden tool-result rows for paginated loads."""
+    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
+        return message
+    content = message.get("content")
+    if content in (None, ""):
+        return message
+    if isinstance(content, str):
+        text = content
+    else:
+        try:
+            text = json.dumps(content, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(content)
+    if len(text) <= _LIMITED_TOOL_CONTENT_MAX_CHARS:
+        return message
+    clipped = dict(message)
+    preview = text[:_LIMITED_TOOL_CONTENT_MAX_CHARS] + _LIMITED_TOOL_CONTENT_NOTICE
+    if isinstance(content, str):
+        clipped["content"] = preview
+    elif isinstance(content, list):
+        clipped["content"] = [{"type": "text", "text": preview}]
+    elif isinstance(content, dict):
+        clipped["content"] = {"_truncated": True, "preview": preview}
+    else:
+        clipped["content"] = preview
+    clipped["_content_truncated"] = True
+    clipped["_content_original_chars"] = len(text)
+    return clipped
+
+
+def _messages_for_limited_payload(messages) -> list:
+    """Bound hidden tool-result payloads before sending a msg_limit response."""
+    return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
+
+
+def _limited_webui_messages_for_display(session, state_db_messages) -> list:
+    """Return the display sidecar plus only necessary state.db rows for msg_limit.
+
+    Paginated session loads are latency-sensitive and should not stitch every
+    lineage segment before slicing the tail. Keep the lightweight
+    pre-compression snapshot stitch so continuation sessions can still reveal
+    archived history, then merge only newer state.db rows that have not reached
+    the sidecar yet.
+    """
+    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    state_db_messages = list(state_db_messages or [])
+    if not state_db_messages:
+        return sidecar_messages
+    # NOTE: do not short-circuit to the sidecar when state.db has no strictly
+    # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
+    # newest (recovery / edited-in-place / missing-timestamp cases) is still
+    # absent from the sidecar and must be reconciled — dropping it would render
+    # a tail that differs from the full merge path (silent wrong-transcript on
+    # the paginated load). The append-only merge is O(n) over already-bounded
+    # in-memory lists; the real latency win here is skipping the lineage-parent
+    # DISK load above, which we still skip. (#4070 ship-review)
+    return merge_session_messages_append_only(
+        sidecar_messages,
+        state_db_messages,
+        truncation_watermark=getattr(session, "truncation_watermark", None),
+    )
 
 
 def _messages_start_with_visible_prefix(messages, prefix) -> bool:
@@ -6592,10 +6700,10 @@ def handle_get(handler, parsed) -> bool:
         load_messages = query.get("messages", ["1"])[0] != "0"
         resolve_model_default = "1" if load_messages else "0"
         resolve_model = query.get("resolve_model", [resolve_model_default])[0] != "0"
-        # ?msg_limit=N returns only the last N messages (tail window).
-        # Used by the frontend for fast session switching — avoids serialising
-        # and sending hundreds of messages when the user only sees the most
-        # recent exchange.  Older messages are loaded on-demand via scrolling.
+        # ?msg_limit=N returns a tail window containing the last N visible
+        # transcript rows. Hidden tool-result rows do not consume the budget;
+        # they are included only when they sit inside the selected window and
+        # are bounded before serialization. Older rows load on-demand.
         _msg_limit = query.get("msg_limit", [None])[0]
         try:
             msg_limit = max(1, int(_msg_limit)) if _msg_limit else None
@@ -6609,12 +6717,9 @@ def handle_get(handler, parsed) -> bool:
             msg_before = int(_msg_before) if _msg_before else None
         except (ValueError, TypeError):
             msg_before = None
-        # ?expand_renderable=1 — sent ONLY by the initial cold-load fetch. When
-        # set, the tail window is expanded backward until it holds ~msg_limit
-        # *renderable* rows (tool/separator/compression rows are UI-filtered) so
-        # a tool-heavy session doesn't cold-load showing 1-2 visible messages.
-        # The "Load earlier" cumulative path and msg_before pages do NOT send it,
-        # keeping their raw transport cap (#3790).
+        # ?expand_renderable=1 is retained for compatibility with older
+        # frontends. msg_limit now counts visible transcript rows by default, so
+        # the flag no longer changes the server-side pagination semantics.
         _expand_renderable = query.get("expand_renderable", [None])[0]
         expand_renderable = str(_expand_renderable).strip() in ("1", "true", "True")
         try:
@@ -6661,13 +6766,15 @@ def handle_get(handler, parsed) -> bool:
                     # different slices of the same stitched conversation, merge
                     # them chronologically and dedupe exact repeats.
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
+                elif msg_limit is not None:
+                    _all_msgs = _limited_webui_messages_for_display(s, state_db_messages)
                 else:
                     _all_msgs = merge_session_messages_append_only(
                         _webui_sidecar_lineage_messages_for_display(s),
                         state_db_messages,
                         truncation_watermark=getattr(s, "truncation_watermark", None),
                     )
-                _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
+                    _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
             else:
                 if is_messaging_session and cli_messages:
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
@@ -6704,9 +6811,8 @@ def handle_get(handler, parsed) -> bool:
                     msg_before=msg_before,
                     expand_renderable=expand_renderable,
                 )
-                if msg_before is not None:
-                    _before_idx = max(0, min(int(msg_before), len(_all_msgs)))
-                    _slice = _all_msgs[:_before_idx]
+                if msg_limit is not None:
+                    _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
             else:
                 _truncated_msgs = []
                 _messages_offset = 0
@@ -6839,14 +6945,10 @@ def handle_get(handler, parsed) -> bool:
                 # keep the raw count available as ``actual_message_count`` but
                 # do not let it make the frontend expect phantom messages.
                 raw["message_count"] = _merged_message_count
-            # Signal to the frontend that older messages were omitted.
-            # For msg_before paging, compare against the filtered set,
-            # not the full list — otherwise we signal truncation even when
-            # all older messages were returned.
-            if msg_before is not None:
-                _truncated = load_messages and msg_limit is not None and len(_slice) > msg_limit
-            else:
-                _truncated = load_messages and msg_limit is not None and len(_all_msgs) > msg_limit
+            # Signal to the frontend that older messages were omitted. The
+            # message window cursor already reflects visible-row pagination and
+            # avoids false positives when raw hidden tool rows exceed msg_limit.
+            _truncated = load_messages and msg_limit is not None and _messages_offset > 0
             raw["_messages_truncated"] = _truncated
             raw["_messages_offset"] = _messages_offset
             _t4 = _time.monotonic()
