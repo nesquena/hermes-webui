@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Session-change SSE events can now carry the specific session id that changed.** The event bus preserves optional `session_id` metadata for targeted mutations and safely widens coalesced events back to a profile/all-session refresh when multiple sessions or profiles are involved, giving the browser a precise signal without narrowing legacy refresh behavior. (#2361, #272)
+
 ## [v0.51.426] — 2026-06-15 — Release OM (custom-provider model-prefix routing fix, #4210)
 
 ### Fixed

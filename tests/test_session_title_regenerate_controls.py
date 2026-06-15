@@ -65,7 +65,8 @@ def test_regenerate_helper_persists_generated_title_and_publishes_sidebar_refres
     assert "mark_session_title_generated(session)" in helper_block
     assert "session.save(touch_updated_at=False)" in helper_block
     assert "_sync_session_title_to_insights(session)" in helper_block
-    assert '_publish_session_list_changed(event_reason, profile=getattr(session, "profile", None))' in helper_block
+    assert "_publish_session_list_changed(" in helper_block
+    assert "session_id=sid" in helper_block
 
 
 def test_regenerate_endpoint_syncs_title_to_state_db_when_enabled():
