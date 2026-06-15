@@ -75,8 +75,47 @@ def test_edge_audio_branch_stays_separate():
     )
     assert edge_match, "Edge audio branch must exist"
     edge_body = edge_match.group(1)
-    assert "const audio = new Audio(url);" in edge_body
-    assert "audio.onended = () => {" in edge_body
+    # After refactor: boot.js delegates to _playEdgeTts() instead of inline Audio()
+    assert "_playEdgeTts(" in edge_body, (
+        "Edge branch must delegate to _playEdgeTts()"
+    )
     assert "_armBrowserTtsRecovery" not in edge_body, (
-        "The browser speechSynthesis workaround must not be injected into the Edge audio branch."
+        "Browser speechSynthesis workaround must not leak into Edge branch."
+    )
+
+    # Verify _playEdgeTts() itself is clean (the actual audio code moved to ui.js)
+    ui_src = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    play_edge_body = _extract_function(ui_src, "_playEdgeTts")
+    assert "_playServerTts(" in play_edge_body, (
+        "_playEdgeTts() must delegate to _playServerTts()"
+    )
+    assert "_armBrowserTtsRecovery" not in play_edge_body, (
+        "Browser speechSynthesis workaround must not leak into _playEdgeTts()."
+    )
+
+
+def test_voicevox_audio_branch_stays_separate():
+    """VOICEVOX server-side audio must not trigger browser SpeechSynthesis workarounds."""
+    src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    vv_match = re.search(
+        r'if\(engine==="voicevox"\)\{(.*?)\n\s+return;\n\s+\}',
+        src, re.DOTALL,
+    )
+    assert vv_match, "VOICEVOX audio branch must exist"
+    vv_body = vv_match.group(1)
+    assert "_playVoicevoxTts(" in vv_body, (
+        "VOICEVOX branch must delegate to _playVoicevoxTts()"
+    )
+    assert "_armBrowserTtsRecovery" not in vv_body, (
+        "Browser speechSynthesis workaround must not leak into VOICEVOX branch"
+    )
+
+    # Verify _playVoicevoxTts() itself is clean
+    ui_src = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    play_vv_body = _extract_function(ui_src, "_playVoicevoxTts")
+    assert "_armBrowserTtsRecovery" not in play_vv_body, (
+        "Browser speechSynthesis workaround must not leak into _playVoicevoxTts()"
+    )
+    assert "_playServerTts(" in play_vv_body, (
+        "_playVoicevoxTts() must delegate to _playServerTts()"
     )

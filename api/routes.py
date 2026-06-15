@@ -10298,10 +10298,13 @@ def _handle_vv_voices(handler, parsed=None):
                 return _bad(handler, "unauthorized", 401)
 
         try:
-            import requests
-            resp = requests.get("http://127.0.0.1:50021/speakers", timeout=5)
-            resp.raise_for_status()
-            speakers = resp.json()
+            import urllib.request
+            engine_url = os.environ.get(
+                "VOICEVOX_ENGINE_URL", "http://127.0.0.1:50021"
+            )
+            req = urllib.request.Request(f"{engine_url}/speakers")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                speakers = json.loads(resp.read().decode("utf-8"))
             voices = []
             for s in speakers:
                 for style in s.get("styles", []):
