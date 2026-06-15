@@ -5591,6 +5591,14 @@ async function switchToProfile(name) {
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
 
+    // Reconnect the gateway SSE to the NEW profile's watcher. The backend watcher
+    // registry is now profile-keyed (#3629), but this tab's existing EventSource is
+    // still subscribed to the PREVIOUS profile's watcher — and the probe-based
+    // reattach is gated on `!_gatewaySSE`, which can't fire while the old stream is
+    // open. startGatewaySSE() closes the old ES (stopGatewaySSE) and reconnects with
+    // the new profile cookie; it self-gates on window._showCliSessions internally.
+    if (typeof startGatewaySSE === 'function') startGatewaySSE();
+
     // Update composer placeholder and title bar while the core profile-switch
     // state is still close to the profile API response.
     if (typeof applyBotName === 'function') applyBotName();
