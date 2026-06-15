@@ -10285,7 +10285,11 @@ def _handle_vv_voices(handler, parsed=None):
     # flooding the endpoint and DoS-ing the local VOICEVOX process.
     import threading as _threading
     if not hasattr(_handle_vv_voices, "_limiter"):
-        _handle_vv_voices._limiter = _threading.Semaphore(2)
+        if not hasattr(_handle_vv_voices, "_vv_init_lock"):
+            _handle_vv_voices._vv_init_lock = _threading.Lock()
+        with _handle_vv_voices._vv_init_lock:
+            if not hasattr(_handle_vv_voices, "_limiter"):
+                _handle_vv_voices._limiter = _threading.Semaphore(2)
     if not _handle_vv_voices._limiter.acquire(blocking=False):
         from api.helpers import bad as _bad
         return _bad(handler, "too many concurrent voice list requests", 429)
