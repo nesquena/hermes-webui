@@ -2716,6 +2716,13 @@ def _prefer_fuller_snapshots_for_sidebar(sessions: list[dict]) -> list[dict]:
         if newest_visible_ts > snapshot_ts:
             continue
 
+        messageful_visible = [
+            session for session in visible
+            if _sidebar_message_count(session) > 0
+        ]
+        if len(messageful_visible) > 1:
+            continue
+
         continuation_ids_to_hide.update(
             str(session.get('session_id'))
             for session in visible
