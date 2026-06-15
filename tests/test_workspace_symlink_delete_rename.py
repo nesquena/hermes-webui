@@ -138,6 +138,51 @@ def test_rename_workspace_symlink_to_file_rejected(workspace):
 
 # ── Non-symlink operations still work ───────────────────────────────────
 
+def test_save_workspace_symlink_to_file_rejected(workspace):
+    real_file = workspace / "real_file.txt"
+    real_file.write_text("important")
+    link = workspace / "link_to_file.txt"
+    try:
+        os.symlink(str(real_file), str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("platform does not support symlinks")
+
+    cap, orig = _patch_routes(workspace)
+    try:
+        routes._handle_file_save(
+            _FakeHandler(),
+            {"session_id": "x", "path": "link_to_file.txt", "content": "changed"},
+        )
+    finally:
+        _restore_routes(orig)
+
+    assert "bad" in cap, f"expected 400, got {cap}"
+    assert cap["bad"][1] == 400
+    assert "Cannot save to a symlinked entry" in cap["bad"][0]
+    assert real_file.read_text() == "important"
+
+
+def test_save_dangling_symlink_rejected_not_404(workspace):
+    link = workspace / "dangling_save"
+    try:
+        os.symlink(str(workspace / "gone_target"), str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("platform does not support symlinks")
+
+    cap, orig = _patch_routes(workspace)
+    try:
+        routes._handle_file_save(
+            _FakeHandler(),
+            {"session_id": "x", "path": "dangling_save", "content": "changed"},
+        )
+    finally:
+        _restore_routes(orig)
+
+    assert "bad" in cap, f"expected 400, got {cap}"
+    assert cap["bad"][1] == 400
+    assert "Cannot save to a symlinked entry" in cap["bad"][0]
+
+
 def test_delete_real_dir_still_works(workspace):
     real_dir = workspace / "deleteme"
     real_dir.mkdir()
@@ -177,6 +222,25 @@ def test_rename_real_file_still_works(workspace):
 
 
 # ── Existing move guard pinned ──────────────────────────────────────────
+
+def test_save_real_file_still_works(workspace):
+    real_file = workspace / "save_me.txt"
+    real_file.write_text("old")
+
+    cap, orig = _patch_routes(workspace)
+    try:
+        routes._handle_file_save(
+            _FakeHandler(),
+            {"session_id": "x", "path": "save_me.txt", "content": "new"},
+        )
+    finally:
+        _restore_routes(orig)
+
+    assert "ok" in cap, f"expected success, got {cap}"
+    assert cap["ok"]["ok"] is True
+    assert cap["ok"]["size"] == len("new")
+    assert real_file.read_text() == "new"
+
 
 def test_move_workspace_symlink_still_rejected(workspace):
     real_file = workspace / "real.txt"

@@ -14824,6 +14824,8 @@ def _handle_file_save(handler, body):
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
+        if (ws_root / body["path"]).is_symlink():
+            return bad(handler, "Cannot save to a symlinked entry")
         if not target.exists():
             return bad(handler, "File not found", 404)
         if target.is_dir():
