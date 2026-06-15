@@ -2185,14 +2185,9 @@ function renderModelDropdown(){
     }
     return 500;
   };
-  // Collapsible group state — persists across _filterModels calls
-  const _groupOpenState={};
   // Filter function (defined AFTER _searchRow and _cust* are created)
   const _filterModels=(term)=>{
     term=term.trim().toLowerCase();
-    const hasSearch=!!term;
-    // On a fresh search, expand all groups (#collapse)
-    if(hasSearch) for(const k in _groupOpenState) _groupOpenState[k]=true;
     const found=new Set();
     for(const m of _modelData){
       const name=m.name.toLowerCase();
@@ -2290,7 +2285,6 @@ function renderModelDropdown(){
       hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
       dd.appendChild(hint);
     };
-    _groupWrappers={};
     for(const m of _modelData){
       if(configuredIds.has(m.value)||!matches(m)) continue;
       if(m.group&&m.group!==_lastGroup){
@@ -2300,39 +2294,17 @@ function renderModelDropdown(){
         heading.textContent=count>1?`${m.group} (${count})`:m.group;
         dd.appendChild(heading);
         _renderProviderEndpointHint(m.group);
-        const wrapper=document.createElement('div');
-        wrapper.className='model-group-body';
-        wrapper.dataset.group=m.group;
-        if(Object.keys(_groupOpenState).length>0) _groupOpenState[m.group]=false;
-        else _groupOpenState[m.group]=true;
-        if(!_groupOpenState[m.group]) wrapper.style.display='none';
-        else heading.classList.add('open');
-        dd.appendChild(wrapper);
-        _groupWrappers[m.group]=wrapper;
-        heading.style.cursor='pointer';
-        heading.addEventListener('click',(e)=>{
-          e.stopPropagation();
-          const w=dd.querySelector(`.model-group-body[data-group="${CSS.escape(m.group)}"]`);
-          if(!w) return;
-          const closed=w.style.display==='none';
-          w.style.display=closed?'':'none';
-          _groupOpenState[m.group]=closed;
-          heading.classList.toggle('open',closed);
-        });
         _lastGroup=m.group;
       }
       if(m.endpointErrorOnly) continue;
       const row=document.createElement('div');
       row.className='model-opt'+(m.value===sel.value?' active':'');
       const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+      // Inline provider chip on every row that has a group (#1425)
       const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
       row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
       row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
-      if(m.group&&_groupWrappers[m.group]){
-        _groupWrappers[m.group].appendChild(row);
-      }else{
-        dd.appendChild(row);
-      }
+      dd.appendChild(row);
     }
     // Show "No results" if filtered and nothing matched
     if(term&&found.size===0){
