@@ -249,6 +249,95 @@ _CLIENT_EVENT_ALLOWED_FIELDS = {
 }
 
 
+def _normalize_cron_job_ids(job_ids) -> list[str]:
+    seen = set()
+    normalized = []
+    for job_id in job_ids or []:
+        jid = str(job_id or "").strip()
+        if not jid or jid in seen:
+            continue
+        seen.add(jid)
+        normalized.append(jid)
+    return normalized
+
+
+def _latest_cron_session_info_for_jobs(
+    job_ids, completed_job_ids=None
+) -> dict[str, dict[str, int | str | None]]:
+    """Return newest persisted cron session info keyed by completed cron job id."""
+    normalized = _normalize_cron_job_ids(job_ids)
+    requested = _normalize_cron_job_ids(completed_job_ids if completed_job_ids is not None else job_ids)
+    if not requested:
+        return {}
+    if not normalized:
+        return {jid: {"session_id": "", "message_count": None} for jid in requested}
+    db_path = _active_state_db_path()
+    if not db_path or not Path(db_path).exists():
+        return {jid: {"session_id": "", "message_count": None} for jid in requested}
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {row[1] for row in cur.fetchall()}
+            if "id" not in session_cols or "source" not in session_cols:
+                return {jid: {"session_id": "", "message_count": None} for jid in requested}
+            select_message_count = (
+                "s.message_count AS message_count"
+                if "message_count" in session_cols
+                else "NULL AS message_count"
+            )
+            if "started_at" in session_cols:
+                query = f"""
+                    SELECT s.id,
+                           {select_message_count}
+                    FROM sessions s
+                    WHERE LOWER(COALESCE(s.source, '')) = 'cron'
+                    ORDER BY COALESCE(s.started_at, 0) DESC, s.id DESC  -- newest start, not last activity
+                """
+            else:
+                query = f"""
+                    SELECT s.id,
+                           {select_message_count}
+                    FROM sessions s
+                    WHERE LOWER(COALESCE(s.source, '')) = 'cron'
+                    ORDER BY s.id DESC
+                """
+            cur.execute(query)
+            results = {
+                jid: {"session_id": "", "message_count": None} for jid in requested
+            }
+            requested_ids = set(requested)
+            prefixes = {jid: f"cron_{jid}_" for jid in normalized}
+            for row in cur.fetchall():
+                sid = str(row["id"] or "")
+                if not sid:
+                    continue
+                matches = [
+                    jid
+                    for jid in normalized
+                    if sid.startswith(prefixes[jid])
+                ]
+                if matches:
+                    jid = max(matches, key=len)
+                    if jid not in requested_ids or results[jid]["session_id"]:
+                        continue
+                    results[jid] = {
+                        "session_id": sid,
+                        "message_count": (
+                            int(row["message_count"])
+                            if row["message_count"] is not None
+                            else None
+                        ),
+                    }
+                if all(info["session_id"] for info in results.values()):
+                    break
+            return results
+    except sqlite3.Error:
+        return {jid: {"session_id": "", "message_count": None} for jid in requested}
+
+
+
 def _session_field(session, field, default=None):
     if isinstance(session, dict):
         return session.get(field, default)
@@ -12596,6 +12685,7 @@ def _handle_cron_recent(handler, parsed):
         jobs = list_jobs(include_disabled=True)
         completions = []
         for job in jobs:
+            job_id = str(job.get("id", "") or "")
             last_run = job.get("last_run_at")
             if not last_run:
                 continue
@@ -12611,13 +12701,22 @@ def _handle_cron_recent(handler, parsed):
             if ts > since:
                 completions.append(
                     {
-                        "job_id": job.get("id", ""),
+                        "job_id": job_id,
                         "name": job.get("name", "Unknown"),
                         "status": job.get("last_status", "unknown"),
                         "completed_at": ts,
                         "toast_notifications": job.get("toast_notifications") is not False,
                     }
                 )
+        latest_session_info = _latest_cron_session_info_for_jobs(
+            [job.get("id", "") for job in jobs],
+            [c["job_id"] for c in completions],
+        )
+        for completion in completions:
+            info = latest_session_info.get(str(completion.get("job_id", "") or ""), {})
+            completion["session_id"] = str(info.get("session_id", "") or "")
+            if info.get("message_count") is not None:
+                completion["message_count"] = int(info["message_count"])
         return j(handler, {"completions": completions, "since": since})
     except ImportError:
         return j(handler, {"completions": [], "since": since})
