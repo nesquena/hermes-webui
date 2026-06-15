@@ -12623,15 +12623,37 @@ def _project_context_git_root(start: Path) -> Path | None:
 
 
 def _project_context_candidates(workspace: Path) -> list[Path]:
-    """Mirror the agent's first-match project context file priority."""
+    """Mirror the agent's first-match project context file priority.
+
+    #4164: in a non-git workspace the agent's ``_find_hermes_md`` walks all
+    the way up to filesystem root because its ``stop_at = git_root`` is
+    ``None`` — so a workspace at ``/tmp/x/project/subdir`` could surface
+    ``/tmp/x/HERMES.md`` (a file *outside* the user's workspace) in the
+    Project Context tab.
+
+    The WebUI tab is a read-only mirror of what the agent injects, so the
+    safest bound that does not over-promise is: when there is no git root,
+    treat the workspace itself as the stop boundary. The cwd is still
+    scanned (preserving the in-workspace AGENTS.md / HERMES.md behavior),
+    but we no longer walk into the user's home directory or ``/tmp``.
+
+    The agent-side walk in ``agent/prompt_builder._find_hermes_md`` should
+    be bounded the same way for full parity; until that ships the WebUI
+    will under-report context files that live *above* a non-git workspace,
+    which is strictly less surprising than over-reporting them.
+    """
     cwd = workspace.resolve()
     candidates: list[Path] = []
-    stop_at = _project_context_git_root(cwd)
+    git_root = _project_context_git_root(cwd)
+    # When inside a git tree, walk up to the git root as before. When not,
+    # bound the walk at the workspace itself so we never surface files
+    # above the user's workspace.
+    stop_at = git_root if git_root is not None else cwd
 
     for directory in [cwd, *cwd.parents]:
         for name in _PROJECT_CONTEXT_HERMES_NAMES:
             candidates.append(directory / name)
-        if stop_at and directory == stop_at:
+        if directory == stop_at:
             break
 
     for name in _PROJECT_CONTEXT_CWD_NAMES:
@@ -14723,6 +14745,13 @@ def _handle_file_delete(handler, body):
     try:
         ws_root = Path(s.workspace)
         target = safe_resolve(ws_root, body["path"])
+        # Reject a symlinked entry BEFORE the follow-based exists() check: a
+        # dangling symlink resolves to a missing target, so an exists()-first
+        # order would misclassify it as 404 "File not found" and leave it
+        # permanently undeletable. is_symlink() is a no-follow lstat on the
+        # lexically-requested path, so it catches both live and dangling links.
+        if (ws_root / body["path"]).is_symlink():
+            return bad(handler, "Cannot delete a symlinked entry")
         if not target.exists():
             return bad(handler, "File not found", 404)
         if target.is_dir():
@@ -14803,6 +14832,11 @@ def _handle_file_rename(handler, body):
         ws_root = Path(s.workspace)
         ws_root_resolved = ws_root.resolve()
         source = safe_resolve(ws_root, body["path"])
+        # Reject a symlinked entry BEFORE the follow-based exists() check (see
+        # _handle_file_delete): a dangling symlink would otherwise 404 and stay
+        # unrenameable. is_symlink() is a no-follow lstat on the requested path.
+        if (ws_root / body["path"]).is_symlink():
+            return bad(handler, "Cannot rename a symlinked entry")
         if not source.exists():
             return bad(handler, "File not found", 404)
         new_name = body["new_name"].strip()
@@ -14838,15 +14872,18 @@ def _handle_file_move(handler, body):
         # returning a confusing 400 for a move that actually happened.
         ws_root_resolved = ws_root.resolve()
         source = safe_resolve(ws_root, body["path"])
-        if not source.exists():
-            return bad(handler, "File not found", 404)
-        # Reject a symlinked SOURCE entry. safe_resolve() follows the final
-        # symlink, so source.name/source.parent would point at the link's
-        # TARGET, not the dragged entry — moving link.txt would silently move
-        # dir/real.txt and leave link.txt dangling. Detect the symlink on the
-        # lexically-requested final component (lstat, no-follow) and refuse.
+        # Reject a symlinked SOURCE entry BEFORE the follow-based exists() check.
+        # safe_resolve() follows the final symlink, so source.name/source.parent
+        # would point at the link's TARGET, not the dragged entry — moving
+        # link.txt would silently move dir/real.txt and leave link.txt dangling.
+        # Detect the symlink on the lexically-requested final component (lstat,
+        # no-follow) and refuse; running this before exists() also means a
+        # dangling symlink is rejected (400) rather than misclassified as 404
+        # (matches the delete/rename ordering).
         if (ws_root / body["path"]).is_symlink():
             return bad(handler, "Cannot move a symlinked entry")
+        if not source.exists():
+            return bad(handler, "File not found", 404)
         dest_dir_raw = (body.get("dest_dir") or ".").strip()
         if not dest_dir_raw:
             dest_dir_raw = "."
