@@ -1959,7 +1959,7 @@ function applyBotName(){
     applyEmptyStateSuggestionPref();
     window._showTps=false;
     window._fadeTextEffect=false;
-    window._showCliSessions=false;
+    window._showCliSessions=true;  // settings-load failed: mirror the True config default (#3988)
     window._soundEnabled=false;
     window._notificationsEnabled=false;
     window._whatsNewSummaryEnabled=false;

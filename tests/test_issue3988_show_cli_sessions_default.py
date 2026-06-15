@@ -134,6 +134,18 @@ def test_boot_hydration_defaults_true_when_setting_absent():
     )
 
 
+def test_boot_settings_load_failure_fallback_defaults_true():
+    """The settings-load-FAILED catch block must also default _showCliSessions
+    True, mirroring the config default — otherwise a transient settings-read
+    error silently hides CLI sessions (the #4006 catch-block-fallback class the
+    autoScrollFollow fix pinned)."""
+    src = _read("static/boot.js")
+    assert "window._showCliSessions=false" not in src, (
+        "the settings-load-failure fallback must not hardcode _showCliSessions "
+        "false — it should mirror the True default"
+    )
+
+
 def test_settings_checkbox_renders_checked_by_default():
     src = _read("static/panels.js")
     assert "showCliCb.checked=settings.show_cli_sessions!==false" in src, (

@@ -201,3 +201,52 @@ def test_move_workspace_symlink_still_rejected(workspace):
     assert "bad" in cap, f"expected 400, got {cap}"
     assert cap["bad"][1] == 400
     assert "Cannot move a symlinked entry" in cap["bad"][0]
+
+
+# ── Dangling symlinks: guard must fire BEFORE the exists() 404 (#4230 review) ──
+
+def test_delete_dangling_symlink_rejected_not_404(workspace):
+    """A dangling workspace symlink (target removed) must be rejected by the
+    symlink guard (400), not misclassified as 404 'File not found' and left
+    permanently undeletable. The is_symlink() check must precede exists()."""
+    link = workspace / "dangling_del"
+    try:
+        os.symlink(str(workspace / "gone_target"), str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("platform does not support symlinks")
+
+    cap, orig = _patch_routes(workspace)
+    try:
+        routes._handle_file_delete(
+            _FakeHandler(),
+            {"session_id": "x", "path": "dangling_del", "recursive": True},
+        )
+    finally:
+        _restore_routes(orig)
+
+    assert "bad" in cap, f"expected 400, got {cap}"
+    assert cap["bad"][1] == 400
+    assert "Cannot delete a symlinked entry" in cap["bad"][0]
+
+
+def test_rename_dangling_symlink_rejected_not_404(workspace):
+    """A dangling workspace symlink must be rejected by the rename guard (400),
+    not 404'd before the guard fires."""
+    link = workspace / "dangling_ren"
+    try:
+        os.symlink(str(workspace / "gone_target"), str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("platform does not support symlinks")
+
+    cap, orig = _patch_routes(workspace)
+    try:
+        routes._handle_file_rename(
+            _FakeHandler(),
+            {"session_id": "x", "path": "dangling_ren", "new_name": "renamed"},
+        )
+    finally:
+        _restore_routes(orig)
+
+    assert "bad" in cap, f"expected 400, got {cap}"
+    assert cap["bad"][1] == 400
+    assert "Cannot rename a symlinked entry" in cap["bad"][0]
