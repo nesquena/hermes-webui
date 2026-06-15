@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.433] — 2026-06-15 — Release OT (reject symlinked entries in /api/file/save, #4234)
+
+### Fixed
+
+- **Saving to a workspace symlink no longer writes through to the symlink's target.** `/api/file/save` resolved the final symlink before writing, so saving to a workspace symlink `link.txt → real.txt` overwrote `real.txt` instead of the link. It now rejects a symlinked path with a 400 (checked before the existence probe, so dangling symlinks are caught too) — completing the symlink hardening from #4217 (delete/rename/move) for the write path. `safe_resolve` already blocked out-of-workspace targets, so this closes the in-workspace overwrite-through-symlink case. (#4234)
+
 ## [v0.51.432] — 2026-06-15 — Release OS (TUI sessions discoverable in the sidebar)
 
 ### Fixed
