@@ -1425,7 +1425,7 @@ $('msg').addEventListener('keydown',e=>{
     if(e.key==='ArrowUp'){e.preventDefault();navigateCmdDropdown(-1);return;}
     if(e.key==='ArrowDown'){e.preventDefault();navigateCmdDropdown(1);return;}
     if(e.key==='Tab'){e.preventDefault();selectCmdDropdownItem();return;}
-    if(e.key==='Escape'){e.preventDefault();hideCmdDropdown();return;}
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();return;}
     if(e.key==='Enter'&&!e.shiftKey){
       if(_isImeEnter(e)){return;}
       e.preventDefault();
@@ -1520,6 +1520,12 @@ document.addEventListener('keydown',async e=>{
     if(editArea){
       const bar=editArea.closest('.msg-row')&&editArea.closest('.msg-row').querySelector('.msg-edit-bar');
       if(bar){const cancel=bar.querySelector('.msg-edit-cancel');if(cancel)cancel.click();}
+    }
+    // Blur composer to enable j/k message navigation.
+    // Skip while an IME candidate window is composing — Escape there should
+    // dismiss the candidate, not blur the composer (CJK input).
+    if(document.activeElement===$('msg') && !e.isComposing && !_imeComposing){
+      $('msg').blur();
     }
   }
 });
