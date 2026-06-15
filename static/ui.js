@@ -2126,9 +2126,26 @@ function _readModelOverflowData(group){
 
 function _appendOverflowOptionsToGroup(group, extraModels){
   if(!group||!Array.isArray(extraModels)||!extraModels.length) return 0;
+  // The selected model may already have been injected into the <select> (e.g. a
+  // hidden overflow model picked from search via _ensureModelOptionInDropdown).
+  // Appending it again here would create a duplicate row once the group expands,
+  // so reuse/move any existing option with the same value instead of re-creating it. (#3691)
+  const parentSelect=(group.parentNode&&group.parentNode.tagName==='SELECT')?group.parentNode:null;
+  const existingByValue=new Map();
+  if(parentSelect){
+    for(const opt of Array.from(parentSelect.querySelectorAll('option'))){
+      if(opt&&typeof opt.value==='string') existingByValue.set(opt.value,opt);
+    }
+  }
   let appended=0;
   for(const m of extraModels){
     if(!m||!m.id) continue;
+    const existing=existingByValue.get(m.id);
+    if(existing){
+      // Move the already-present option into this group rather than duplicating it.
+      if(existing.parentNode!==group) group.appendChild(existing);
+      continue;
+    }
     const opt=document.createElement('option');
     opt.value=m.id;
     opt.textContent=m.label||m.id;
