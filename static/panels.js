@@ -8672,10 +8672,16 @@ function toggleMcpServer(name, enabled){
     method:'PATCH',
     body:JSON.stringify({enabled:enabled}),
   }).then(r=>{
-    if(r&&r.ok) showToast(t(enabled?'mcp_enabled_toast':'mcp_disabled_toast',name));
+    if(r&&r.ok){
+      _refreshMcpToolsetsCatalog();
+      showToast(t(enabled?'mcp_enabled_toast':'mcp_disabled_toast',name));
+    }
     else showToast(t('mcp_toggle_failed'),'error');
     loadMcpServers();
   }).catch(()=>{showToast(t('mcp_toggle_failed'),'error');loadMcpServers();});
+}
+function _refreshMcpToolsetsCatalog(payload){
+  if(typeof window.invalidateToolsetsCatalog==='function') window.invalidateToolsetsCatalog(payload);
 }
 function loadMcpServers(){
   const list=$('mcpServerList');
@@ -8683,6 +8689,7 @@ function loadMcpServers(){
   list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('loading'))}</div>`;
   api('/api/mcp/servers').then(r=>{
     if(!r||!Array.isArray(r.servers)) return;
+    _refreshMcpToolsetsCatalog(r);
     if(!r.servers.length){
       list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_no_servers'))}</div>`;
       return;

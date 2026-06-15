@@ -2742,7 +2742,8 @@ document.addEventListener('click',function(e){
 });
 
 // ── Session toolsets chip (#493) ───────────────────────────────────────────
-let _currentSessionToolsets = null; // null = global, array = custom list
+let _currentSessionToolsets = null; // null = active profile defaults, array = custom list
+let _toolsetsCatalog = null;
 
 function _applyToolsetsChip(toolsets) {
   _currentSessionToolsets = toolsets;
@@ -2764,9 +2765,9 @@ function _applyToolsetsChip(toolsets) {
     chip.classList.add('has-custom');
     chip.title = t('session_toolsets') + ': ' + toolsets.join(', ');
   } else {
-    label.textContent = t('session_toolsets_global');
+    label.textContent = t('session_toolsets_profile_defaults');
     chip.classList.remove('has-custom');
-    chip.title = t('session_toolsets');
+    chip.title = t('session_toolsets') + ': ' + t('session_toolsets_profile_defaults');
   }
 }
 
@@ -2782,6 +2783,115 @@ function syncToolsetsChip() {
   _syncToolsetsChip();
 }
 
+function _normalizeToolsetsCatalog(payload) {
+  const servers = payload && Array.isArray(payload.servers) ? payload.servers : [];
+  const seen = new Set();
+  const names = [];
+  servers.forEach(function(server) {
+    const name = String((server && server.name) || '').trim();
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    names.push(name);
+  });
+  return names;
+}
+
+function _loadToolsetsCatalog() {
+  if (Array.isArray(_toolsetsCatalog)) return Promise.resolve(_toolsetsCatalog);
+  return api('/api/mcp/servers')
+    .then(function(payload) {
+      _toolsetsCatalog = _normalizeToolsetsCatalog(payload);
+      return _toolsetsCatalog;
+    })
+    .catch(function() {
+      _toolsetsCatalog = false;
+      return [];
+    });
+}
+
+function invalidateToolsetsCatalog(payload) {
+  _toolsetsCatalog = payload && Array.isArray(payload.servers) ? _normalizeToolsetsCatalog(payload) : null;
+}
+if (typeof window !== 'undefined') window.invalidateToolsetsCatalog = invalidateToolsetsCatalog;
+
+function _toolsetsInputList(input) {
+  if (!input) return [];
+  return input.value.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function _ensureToolsetsPresetSection() {
+  const dd = $('composerToolsetsDropdown');
+  if (!dd) return null;
+  let section = $('toolsetsPresetSections');
+  if (section) return section;
+  section = document.createElement('div');
+  section.id = 'toolsetsPresetSections';
+  section.className = 'toolsets-preset-sections';
+  const inputRow = dd.querySelector('.toolsets-dropdown-input-row');
+  if (inputRow) dd.insertBefore(section, inputRow);
+  else dd.appendChild(section);
+  return section;
+}
+
+function _appendToolsetsLabel(section, text) {
+  const label = document.createElement('div');
+  label.className = 'toolsets-dropdown-desc';
+  label.textContent = text;
+  section.appendChild(label);
+}
+
+function _renderToolsetsPresetSections(opts) {
+  const state = opts && opts.state;
+  const input = opts && opts.input;
+  const section = _ensureToolsetsPresetSection();
+  if (!section || !state || !input) return;
+  const selected = _toolsetsInputList(input);
+  const selectedSet = new Set(selected);
+  const hasCustom = selected.length > 0;
+  state.textContent = hasCustom
+    ? '🔧 ' + selected.join(', ')
+    : '👤 ' + t('session_toolsets_profile_defaults');
+
+  section.innerHTML = '';
+  const defaultsBtn = document.createElement('button');
+  defaultsBtn.type = 'button';
+  defaultsBtn.id = 'toolsetsProfileDefaultsBtn';
+  defaultsBtn.className = 'toolsets-action-btn toolsets-clear-btn';
+  defaultsBtn.textContent = t('session_toolsets_use_profile_defaults');
+  section.appendChild(defaultsBtn);
+
+  _appendToolsetsLabel(section, t('session_toolsets_configured_servers'));
+  if (_toolsetsCatalog === null) {
+    _appendToolsetsLabel(section, t('session_toolsets_loading_servers'));
+    return;
+  }
+  if (_toolsetsCatalog === false) {
+    _appendToolsetsLabel(section, t('mcp_load_failed'));
+    return;
+  }
+  if (!Array.isArray(_toolsetsCatalog) || !_toolsetsCatalog.length) {
+    _appendToolsetsLabel(section, t('session_toolsets_no_configured_servers'));
+    return;
+  }
+  _toolsetsCatalog.forEach(function(name) {
+    const row = document.createElement('label');
+    row.className = 'toolsets-server-option';
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '6px';
+    row.style.margin = '4px 0';
+    row.style.fontSize = '12px';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'toolsets-server-checkbox';
+    checkbox.value = name;
+    checkbox.checked = selectedSet.has(name);
+    row.appendChild(checkbox);
+    row.appendChild(document.createTextNode(name));
+    section.appendChild(row);
+  });
+}
+
 function _populateToolsetsDropdown() {
   const desc = $('toolsetsDropdownDesc');
   const state = $('toolsetsDropdownState');
@@ -2795,14 +2905,14 @@ function _populateToolsetsDropdown() {
   input.placeholder = t('session_toolsets_placeholder');
   // Escape key handler for toolsets input
   input.onkeydown = function(e) { if(e.key === 'Escape') closeToolsetsDropdown(); };
+  input.oninput = function() { _renderToolsetsPresetSections({ state, input }); };
   const hasCustom = Array.isArray(_currentSessionToolsets) && _currentSessionToolsets.length > 0;
   if (hasCustom) {
-    state.textContent = '🔧 ' + _currentSessionToolsets.join(', ');
     input.value = _currentSessionToolsets.join(', ');
   } else {
-    state.textContent = '🌍 ' + t('session_toolsets_global');
     input.value = '';
   }
+  _renderToolsetsPresetSections({ state, input });
 }
 
 function _positionToolsetsDropdown() {
@@ -2838,6 +2948,14 @@ function toggleToolsetsDropdown() {
   if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
   _syncToolsetsChip();
   _populateToolsetsDropdown();
+  _loadToolsetsCatalog().then(function() {
+    const stillOpen = dd && dd.classList.contains('open');
+    if (stillOpen) {
+      const state = $('toolsetsDropdownState');
+      const input = $('toolsetsInput');
+      _renderToolsetsPresetSections({ state, input });
+    }
+  });
   dd.classList.add('open');
   _positionToolsetsDropdown();
   chip.classList.add('active');
@@ -2883,6 +3001,12 @@ document.addEventListener('click', function(e) {
     !e.target.closest('#composerToolsetsChip') &&
     !e.target.closest('#composerToolsetsDropdown')
   ) closeToolsetsDropdown();
+  // Active profile defaults button
+  if (e.target.closest('#toolsetsProfileDefaultsBtn')) {
+    _applySessionToolsets(null);
+    closeToolsetsDropdown();
+    return;
+  }
   // Apply button
   if (e.target.closest('#toolsetsApplyBtn')) {
     const input = $('toolsetsInput');
@@ -2905,6 +3029,21 @@ document.addEventListener('click', function(e) {
     _applySessionToolsets(null);
     closeToolsetsDropdown();
   }
+});
+
+document.addEventListener('change', function(e) {
+  if (!e.target.closest('#toolsetsPresetSections')) return;
+  if (!e.target.classList.contains('toolsets-server-checkbox')) return;
+  const input = $('toolsetsInput');
+  const state = $('toolsetsDropdownState');
+  if (!input) return;
+  const checked = Array.from(document.querySelectorAll('#toolsetsPresetSections .toolsets-server-checkbox:checked'))
+    .map(el => String(el.value || '').trim())
+    .filter(Boolean);
+  const catalogSet = new Set(Array.isArray(_toolsetsCatalog) ? _toolsetsCatalog : []);
+  const manual = _toolsetsInputList(input).filter(name => !catalogSet.has(name));
+  input.value = checked.concat(manual).join(', ');
+  _renderToolsetsPresetSections({ state, input });
 });
 
 // Position toolsets dropdown on resize, OR close it if the chip is no longer

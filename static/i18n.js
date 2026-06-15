@@ -358,14 +358,19 @@ const LOCALES = {
     usage_personality_none:'none',
     // Session toolsets (#493)
     session_toolsets:'Session Toolsets',
-    session_toolsets_desc:'Restrict available tools for this session (blank = use global config)',
-    session_toolsets_global:'Global (default)',
-    session_toolsets_custom:'Custom',
+    session_toolsets_desc:'Use active profile defaults or choose a custom toolset list for this session',
+    session_toolsets_global:'Active profile defaults',
+    session_toolsets_profile_defaults:'Active profile defaults',
+    session_toolsets_custom:'Custom override',
+    session_toolsets_use_profile_defaults:'Use active profile defaults',
+    session_toolsets_configured_servers:'Configured MCP servers',
+    session_toolsets_loading_servers:'Loading configured servers...',
+    session_toolsets_no_configured_servers:'No configured MCP servers',
     session_toolsets_placeholder:'tool1, tool2, …',
     session_toolsets_apply:'Apply',
-    session_toolsets_clear:'Clear (use global)',
+    session_toolsets_clear:'Use defaults',
     session_toolsets_applied:'Toolsets updated',
-    session_toolsets_cleared:'Toolsets cleared — using global config',
+    session_toolsets_cleared:'Using active profile defaults',
     session_toolsets_failed:'Failed to update toolsets: ',
   untitled:'Untitled',
     no_personalities: 'No personalities found (add them to ~/.hermes/personalities/)',
@@ -1837,14 +1842,19 @@ const LOCALES = {
     usage_personality_none:'nessuna',
     // Session toolsets (#493)
     session_toolsets:'Strumenti Sessione',
-    session_toolsets_desc:'Limita gli strumenti disponibili per questa sessione (vuoto = usa config globale)',
-    session_toolsets_global:'Globale (predefinito)',
-    session_toolsets_custom:'Personalizzato',
+    session_toolsets_desc:'Usa i valori predefiniti del profilo attivo o scegli un elenco di strumenti personalizzato per questa sessione',
+    session_toolsets_global:'Valori predefiniti del profilo attivo',
+    session_toolsets_profile_defaults:'Valori predefiniti del profilo attivo',
+    session_toolsets_custom:'Sostituzione personalizzata',
+    session_toolsets_use_profile_defaults:'Usa valori predefiniti del profilo attivo',
+    session_toolsets_configured_servers:'Server MCP configurati',
+    session_toolsets_loading_servers:'Caricamento server configurati...',
+    session_toolsets_no_configured_servers:'Nessun server MCP configurato',
     session_toolsets_placeholder:'strumento1, strumento2, …',
     session_toolsets_apply:'Applica',
-    session_toolsets_clear:'Pulisci (usa globale)',
+    session_toolsets_clear:'Usa predefiniti',
     session_toolsets_applied:'Strumenti aggiornati',
-    session_toolsets_cleared:'Strumenti azzerati — uso config globale',
+    session_toolsets_cleared:'Uso i valori predefiniti del profilo attivo',
     session_toolsets_failed:'Aggiornamento strumenti fallito: ',
   untitled:'Senza titolo',
     no_personalities: 'Nessuna personalità trovata (aggiungile in ~/.hermes/personalities/)',
@@ -3307,14 +3317,19 @@ const LOCALES = {
     usage_personality_none:'なし',
     // Session toolsets (#493)
     session_toolsets:'セッションツールセット',
-    session_toolsets_desc:'このセッションで利用可能なツールを制限 (空欄=グローバル設定を使用)',
-    session_toolsets_global:'グローバル (デフォルト)',
-    session_toolsets_custom:'カスタム',
+    session_toolsets_desc:'アクティブなプロファイルのデフォルトを使うか、このセッション用のカスタムツールセットを選択します',
+    session_toolsets_global:'アクティブプロファイルのデフォルト',
+    session_toolsets_profile_defaults:'アクティブプロファイルのデフォルト',
+    session_toolsets_custom:'カスタム上書き',
+    session_toolsets_use_profile_defaults:'アクティブプロファイルのデフォルトを使用',
+    session_toolsets_configured_servers:'設定済みMCPサーバー',
+    session_toolsets_loading_servers:'設定済みサーバーを読み込み中...',
+    session_toolsets_no_configured_servers:'設定済みMCPサーバーはありません',
     session_toolsets_placeholder:'tool1, tool2, …',
     session_toolsets_apply:'適用',
-    session_toolsets_clear:'クリア (グローバルを使用)',
+    session_toolsets_clear:'デフォルトを使用',
     session_toolsets_applied:'ツールセットを更新しました',
-    session_toolsets_cleared:'ツールセットをクリアしました — グローバル設定を使用',
+    session_toolsets_cleared:'アクティブプロファイルのデフォルトを使用しています',
     session_toolsets_failed:'ツールセット更新失敗: ',
   untitled:'無題',
     no_personalities: 'パーソナリティが見つかりません (~/.hermes/personalities/ に追加してください)',
@@ -4694,14 +4709,19 @@ const LOCALES = {
     model_search_placeholder: 'Поиск моделей…',
     model_scope_advisory: 'Применяется к этой беседе со следующего сообщения.',
     session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
-    session_toolsets_global: 'Global (default)', // TODO: translate
-    session_toolsets_custom: 'Custom', // TODO: translate
+    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
+    session_toolsets_global: 'Active profile defaults', // TODO: translate
+    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
+    session_toolsets_custom: 'Custom override', // TODO: translate
+    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
+    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
+    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
+    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
     session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
     session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Clear (use global)', // TODO: translate
+    session_toolsets_clear: 'Use defaults', // TODO: translate
     session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Toolsets cleared — using global config', // TODO: translate
+    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
     session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
     model_scope_toast: 'Применяется к этой беседе со следующего сообщения.',
     reference_only_label: 'Только справка',
@@ -6008,14 +6028,19 @@ const LOCALES = {
     workspace_worktree_failed: 'Error al crear worktree: ',
     session_worktree_badge: 'Worktree',
     session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
-    session_toolsets_global: 'Global (default)', // TODO: translate
-    session_toolsets_custom: 'Custom', // TODO: translate
+    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
+    session_toolsets_global: 'Active profile defaults', // TODO: translate
+    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
+    session_toolsets_custom: 'Custom override', // TODO: translate
+    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
+    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
+    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
+    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
     session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
     session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Clear (use global)', // TODO: translate
+    session_toolsets_clear: 'Use defaults', // TODO: translate
     session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Toolsets cleared — using global config', // TODO: translate
+    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
     session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
     model_scope_advisory: 'Se aplica a esta conversación desde tu próximo mensaje.',
     model_scope_toast: 'Se aplica a esta conversación desde tu próximo mensaje.',
@@ -8236,14 +8261,19 @@ const LOCALES = {
     workspace_worktree_failed: 'Worktree-Erstellung fehlgeschlagen: ',
     session_worktree_badge: 'Worktree',
     session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
-    session_toolsets_global: 'Global (default)', // TODO: translate
-    session_toolsets_custom: 'Custom', // TODO: translate
+    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
+    session_toolsets_global: 'Active profile defaults', // TODO: translate
+    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
+    session_toolsets_custom: 'Custom override', // TODO: translate
+    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
+    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
+    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
+    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
     session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
     session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Clear (use global)', // TODO: translate
+    session_toolsets_clear: 'Use defaults', // TODO: translate
     session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Toolsets cleared — using global config', // TODO: translate
+    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
     session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
     session_time_unknown: 'Unbekannt',
     session_time_minutes_ago: (n) => `Vor ${n} Minuten`,
@@ -8824,14 +8854,19 @@ const LOCALES = {
     workspace_worktree_failed: 'Worktree 创建失败：',
     session_worktree_badge: 'Worktree',
     session_toolsets: 'Session 工具集',
-    session_toolsets_desc: '限制此会话可用工具（留空 = 使用全局配置）',
-    session_toolsets_global: '全局（默认）',
-    session_toolsets_custom: '自定义',
+    session_toolsets_desc: '使用当前配置档默认工具，或为此会话选择自定义工具集',
+    session_toolsets_global: '当前配置档默认',
+    session_toolsets_profile_defaults: '当前配置档默认',
+    session_toolsets_custom: '自定义覆盖',
+    session_toolsets_use_profile_defaults: '使用当前配置档默认',
+    session_toolsets_configured_servers: '已配置 MCP 服务器',
+    session_toolsets_loading_servers: '正在加载已配置服务器...',
+    session_toolsets_no_configured_servers: '没有已配置的 MCP 服务器',
     session_toolsets_placeholder: 'tool1, tool2, …', // 保持英文——这是占位符示例
     session_toolsets_apply: '应用',
-    session_toolsets_clear: '清除（使用全局）',
+    session_toolsets_clear: '使用默认',
     session_toolsets_applied: '工具集已更新',
-    session_toolsets_cleared: '工具集已清除 — 使用全局配置',
+    session_toolsets_cleared: '正在使用当前配置档默认',
     session_toolsets_failed: '更新工具集失败：',
     model_scope_advisory: '从下一条消息起应用于当前对话。',
     model_scope_toast: '从下一条消息起应用于当前对话。',
@@ -10414,14 +10449,19 @@ const LOCALES = {
     usage_personality_none: '無',
     // Session toolsets (#493)
     session_toolsets: '對話工具集',
-    session_toolsets_desc: '限制此對話可用的工具（留空即使用全域設定）',
-    session_toolsets_global: '全域（預設）',
-    session_toolsets_custom: '自訂',
+    session_toolsets_desc: '使用目前設定檔預設工具，或為此對話選擇自訂工具集',
+    session_toolsets_global: '目前設定檔預設',
+    session_toolsets_profile_defaults: '目前設定檔預設',
+    session_toolsets_custom: '自訂覆寫',
+    session_toolsets_use_profile_defaults: '使用目前設定檔預設',
+    session_toolsets_configured_servers: '已設定 MCP 伺服器',
+    session_toolsets_loading_servers: '正在載入已設定伺服器...',
+    session_toolsets_no_configured_servers: '沒有已設定的 MCP 伺服器',
     session_toolsets_placeholder: 'tool1, tool2, …',
     session_toolsets_apply: '套用',
-    session_toolsets_clear: '清除（使用全域）',
+    session_toolsets_clear: '使用預設',
     session_toolsets_applied: '工具集已更新',
-    session_toolsets_cleared: '工具集已清除，改用全域設定',
+    session_toolsets_cleared: '正在使用目前設定檔預設',
     session_toolsets_failed: '更新工具集失敗：',
     untitled: '未命名',
     no_personalities: '找不到角色（可新增至 ~/.hermes/personalities/）',
@@ -11630,14 +11670,19 @@ const LOCALES = {
     model_show_all_models: 'Mostrar todos os {0} modelos',
     model_search_placeholder: 'Buscar modelos…',
     session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
-    session_toolsets_global: 'Global (default)', // TODO: translate
-    session_toolsets_custom: 'Custom', // TODO: translate
+    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
+    session_toolsets_global: 'Active profile defaults', // TODO: translate
+    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
+    session_toolsets_custom: 'Custom override', // TODO: translate
+    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
+    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
+    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
+    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
     session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
     session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Clear (use global)', // TODO: translate
+    session_toolsets_clear: 'Use defaults', // TODO: translate
     session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Toolsets cleared — using global config', // TODO: translate
+    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
     session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
     model_search_no_results: 'Nenhum modelo encontrado',
     model_group_configured: 'Configurados',
@@ -12978,14 +13023,19 @@ const LOCALES = {
     model_show_all_models: '{0}개 모델 모두 보기',
     model_search_placeholder: 'Search models…',
     session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
-    session_toolsets_global: 'Global (default)', // TODO: translate
-    session_toolsets_custom: 'Custom', // TODO: translate
+    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
+    session_toolsets_global: 'Active profile defaults', // TODO: translate
+    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
+    session_toolsets_custom: 'Custom override', // TODO: translate
+    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
+    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
+    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
+    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
     session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
     session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Clear (use global)', // TODO: translate
+    session_toolsets_clear: 'Use defaults', // TODO: translate
     session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Toolsets cleared — using global config', // TODO: translate
+    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
     session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
     model_search_no_results: 'No models found',
     model_group_configured: '구성됨',
@@ -14546,14 +14596,19 @@ const LOCALES = {
     status_unknown: 'Inconnu',
     usage_personality_none: 'aucun',
     session_toolsets: 'Ensembles d\'outils de session',
-    session_toolsets_desc: 'Restreindre les outils disponibles pour cette session (vide = utiliser la configuration globale)',
-    session_toolsets_global: 'Global (par défaut)',
-    session_toolsets_custom: 'Coutume',
+    session_toolsets_desc: 'Utiliser les valeurs par défaut du profil actif ou choisir une liste personnalisée pour cette session',
+    session_toolsets_global: 'Valeurs par défaut du profil actif',
+    session_toolsets_profile_defaults: 'Valeurs par défaut du profil actif',
+    session_toolsets_custom: 'Remplacement personnalisé',
+    session_toolsets_use_profile_defaults: 'Utiliser les valeurs par défaut du profil actif',
+    session_toolsets_configured_servers: 'Serveurs MCP configurés',
+    session_toolsets_loading_servers: 'Chargement des serveurs configurés...',
+    session_toolsets_no_configured_servers: 'Aucun serveur MCP configuré',
     session_toolsets_placeholder: 'outil1, outil2, …',
     session_toolsets_apply: 'Appliquer',
-    session_toolsets_clear: 'Effacer (utiliser global)',
+    session_toolsets_clear: 'Utiliser les valeurs par défaut',
     session_toolsets_applied: 'Ensembles d\'outils mis à jour',
-    session_toolsets_cleared: 'Ensembles d\'outils effacés - à l\'aide de la configuration globale',
+    session_toolsets_cleared: 'Utilisation des valeurs par défaut du profil actif',
     session_toolsets_failed: 'Échec de la mise à jour des ensembles d\'outils :',
     no_personalities: 'Aucune personnalité trouvée (ajoutez-les à ~/.hermes/personalities/)',
     available_personalities: 'Personnalités disponibles :',
@@ -15857,14 +15912,19 @@ const LOCALES = {
     model_show_all_models: '{0} modelin tümünü göster',
     model_search_placeholder: 'Modelleri ara\u2026',
     session_toolsets: 'Oturum araç setleri',
-    session_toolsets_desc: 'Bu oturum için kullanılabilir araçları kısıtlayın (boş = genel yapılandırma)',
-    session_toolsets_global: 'Genel (varsayılan)',
-    session_toolsets_custom: 'Özel',
+    session_toolsets_desc: 'Etkin profil varsayılanlarını kullanın veya bu oturum için özel araç seti listesi seçin',
+    session_toolsets_global: 'Etkin profil varsayılanları',
+    session_toolsets_profile_defaults: 'Etkin profil varsayılanları',
+    session_toolsets_custom: 'Özel geçersiz kılma',
+    session_toolsets_use_profile_defaults: 'Etkin profil varsayılanlarını kullan',
+    session_toolsets_configured_servers: 'Yapılandırılmış MCP sunucuları',
+    session_toolsets_loading_servers: 'Yapılandırılmış sunucular yükleniyor...',
+    session_toolsets_no_configured_servers: 'Yapılandırılmış MCP sunucusu yok',
     session_toolsets_placeholder: 'araç1, araç2, \u2026',
     session_toolsets_apply: 'Uygula',
-    session_toolsets_clear: 'Temizle (geneli kullan)',
+    session_toolsets_clear: 'Varsayılanları kullan',
     session_toolsets_applied: 'Araç setleri güncellendi',
-    session_toolsets_cleared: 'Araç setleri temizlendi — genel yapılandırma kullanılıyor',
+    session_toolsets_cleared: 'Etkin profil varsayılanları kullanılıyor',
     session_toolsets_failed: 'Araç setleri güncellenemedi: ',
     model_search_no_results: 'Hiçbir model bulunamadı',
     model_group_configured: 'Yapılandırılmış',
@@ -17441,6 +17501,11 @@ const LOCALES = {
     forked_from: 'Rozgałęzione z',
     subagent_children: 'Sesje subagentów',
     model_show_all_models: 'Pokaż wszystkie {0} modele',
+    session_toolsets_profile_defaults: 'Domyślne ustawienia aktywnego profilu',
+    session_toolsets_use_profile_defaults: 'Użyj domyślnych ustawień aktywnego profilu',
+    session_toolsets_configured_servers: 'Skonfigurowane serwery MCP',
+    session_toolsets_loading_servers: 'Ładowanie skonfigurowanych serwerów...',
+    session_toolsets_no_configured_servers: 'Brak skonfigurowanych serwerów MCP',
     insights_model_health_title: 'Porównanie kondycji modeli',
     insights_model_health_provider: 'Dostawca',
     insights_model_health_replacement: 'Przewodnik zastąpienia',
