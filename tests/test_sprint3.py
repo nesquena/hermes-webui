@@ -1,11 +1,10 @@
 """Sprint 3 tests: cron API, skills API, memory API, input validation."""
-import json, pathlib, shutil, tempfile, uuid, urllib.request, urllib.error
+import json, pathlib, shutil, tempfile, urllib.request, urllib.error
 
 from tests._pytest_port import BASE
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-OUTSIDE_TRUSTED_ROOT = REPO_ROOT / ".tmp-outside-trusted"
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
@@ -22,8 +21,12 @@ def post(path, body=None):
 
 
 def make_outside_trusted_dir(prefix):
-    OUTSIDE_TRUSTED_ROOT.mkdir(exist_ok=True)
-    return pathlib.Path(tempfile.mkdtemp(prefix=f"{prefix}-", dir=OUTSIDE_TRUSTED_ROOT))
+    home_root = pathlib.Path.home().resolve()
+    temp_root = pathlib.Path(tempfile.gettempdir()).resolve()
+    base_root = temp_root if temp_root != home_root and home_root not in (temp_root, *temp_root.parents) else REPO_ROOT
+    outside_root = base_root / ".tmp-outside-trusted"
+    outside_root.mkdir(exist_ok=True)
+    return pathlib.Path(tempfile.mkdtemp(prefix=f"{prefix}-", dir=outside_root))
 
 def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
