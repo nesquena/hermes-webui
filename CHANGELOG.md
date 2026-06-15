@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.429] — 2026-06-15 — Release OP (preserve multiple messageful imported/CLI sessions in the sidebar)
+
+### Fixed
+
+- **Multiple imported / CLI sessions that share a lineage with a fuller pre-compression snapshot are no longer collapsed out of the sidebar.** The sidebar's "prefer the fuller snapshot" grouping would hide continuation rows behind a single snapshot even when several of those rows actually have their own messages — making real sessions undiscoverable. Now, when more than one messageful session shares the lineage, the continuations are kept visible; the single-inactive-continuation replacement and the fuller-snapshot preference (when only one row has messages) are unchanged. (#4218)
+
 ## [v0.51.428] — 2026-06-15 — Release OO (bound non-git project-context file walk, #4164)
 
 ### Fixed
