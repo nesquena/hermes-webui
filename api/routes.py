@@ -12623,15 +12623,37 @@ def _project_context_git_root(start: Path) -> Path | None:
 
 
 def _project_context_candidates(workspace: Path) -> list[Path]:
-    """Mirror the agent's first-match project context file priority."""
+    """Mirror the agent's first-match project context file priority.
+
+    #4164: in a non-git workspace the agent's ``_find_hermes_md`` walks all
+    the way up to filesystem root because its ``stop_at = git_root`` is
+    ``None`` — so a workspace at ``/tmp/x/project/subdir`` could surface
+    ``/tmp/x/HERMES.md`` (a file *outside* the user's workspace) in the
+    Project Context tab.
+
+    The WebUI tab is a read-only mirror of what the agent injects, so the
+    safest bound that does not over-promise is: when there is no git root,
+    treat the workspace itself as the stop boundary. The cwd is still
+    scanned (preserving the in-workspace AGENTS.md / HERMES.md behavior),
+    but we no longer walk into the user's home directory or ``/tmp``.
+
+    The agent-side walk in ``agent/prompt_builder._find_hermes_md`` should
+    be bounded the same way for full parity; until that ships the WebUI
+    will under-report context files that live *above* a non-git workspace,
+    which is strictly less surprising than over-reporting them.
+    """
     cwd = workspace.resolve()
     candidates: list[Path] = []
-    stop_at = _project_context_git_root(cwd)
+    git_root = _project_context_git_root(cwd)
+    # When inside a git tree, walk up to the git root as before. When not,
+    # bound the walk at the workspace itself so we never surface files
+    # above the user's workspace.
+    stop_at = git_root if git_root is not None else cwd
 
     for directory in [cwd, *cwd.parents]:
         for name in _PROJECT_CONTEXT_HERMES_NAMES:
             candidates.append(directory / name)
-        if stop_at and directory == stop_at:
+        if directory == stop_at:
             break
 
     for name in _PROJECT_CONTEXT_CWD_NAMES:
