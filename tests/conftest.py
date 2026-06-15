@@ -85,6 +85,9 @@ def _isolate_hermes_config_path():
     os.environ['HERMES_CONFIG_PATH'] = isolated_config_path
 
 
+_MISSING = object()  # sentinel: api.profiles module not loaded pre-test
+
+
 @pytest.fixture(autouse=True)
 def _restore_profile_home_globals():
     """Restore HERMES_HOME / HERMES_BASE_HOME after every test.
@@ -102,6 +105,19 @@ def _restore_profile_home_globals():
     """
     saved_home = os.environ.get('HERMES_HOME')
     saved_base = os.environ.get('HERMES_BASE_HOME')
+    # Snapshot the process-global active-profile name too. Several tests call
+    # switch_profile() (process_wide=True), which mutates api.profiles._active_profile
+    # in place and never restores it. In a sequential run the next test usually
+    # re-establishes its own profile so the leak is masked, but a test that only
+    # patches a profile-scoped *path* (e.g. config._models_cache_path) without
+    # setting an active profile then resolves the LEAKED profile — e.g.
+    # _get_models_cache_path() returns models_cache.<leaked>.json instead of the
+    # patched default path. Restoring the name here fixes the whole class.
+    prof_mod_pre = sys.modules.get('api.profiles')
+    # Use a sentinel so we restore whenever the module was importable pre-test,
+    # independent of the value (covers a hypothetical None, though _active_profile
+    # defaults to 'default'). _MISSING means "module wasn't loaded" → skip restore.
+    saved_active_profile = getattr(prof_mod_pre, '_active_profile', _MISSING) if prof_mod_pre else _MISSING
     # Re-derive the cached base-home global BEFORE the test runs too: a prior
     # test's teardown ordering (monkeypatch restoring sys.modules['api.profiles']
     # after this fixture's teardown) can leave the live module's
@@ -114,6 +130,14 @@ def _restore_profile_home_globals():
             os.environ.pop(key, None)
         else:
             os.environ[key] = val
+    prof_mod_post = sys.modules.get('api.profiles')
+    if prof_mod_post is not None and saved_active_profile is not _MISSING:
+        prof_mod_post._active_profile = saved_active_profile
+        # Also clear any leaked per-request thread-local profile (issue #798).
+        try:
+            prof_mod_post.clear_request_profile()
+        except Exception:
+            pass
     _rederive_default_hermes_home()
 
 
@@ -212,6 +236,19 @@ requires_agent_modules = pytest.mark.skipif(
 def pytest_configure(config):
     config.addinivalue_line("markers", "requires_agent: skip when hermes-agent dir is not found")
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_report_collectionfinish(config, items):
+    """Avoid pytest-shard's giant nodeid dump on sharded `-v` CI runs."""
+    verbose = getattr(config.option, "verbose", 0)
+    shard_total = getattr(config.option, "num_shards", 1)
+    if shard_total > 1 and verbose > 0:
+        config.option.verbose = 0
+    try:
+        yield
+    finally:
+        config.option.verbose = verbose
 
 
 # ── Disable AWS IMDS probing for the pytest session ────────────────────────
@@ -494,16 +531,66 @@ def _post(base, path, body=None):
             return {}
 
 
-def _wait_for_server(base, timeout=20):
+def _wait_for_server(base, timeout=45, proc=None, log_path=None):
+    """Poll ``base/health`` until the server reports ready, or fail fast.
+
+    Returns ``(True, "")`` once ``/health`` returns ``status == "ok"``.
+
+    Returns ``(False, reason)`` when the server does not come up. ``reason`` is a
+    human-readable diagnostic that, crucially, includes WHY when we can tell:
+
+    * If ``proc`` is supplied and the subprocess has already exited, we stop
+      polling immediately (no point waiting out the full timeout for a process
+      that is already dead) and surface its exit code.
+    * If ``log_path`` is supplied, the tail of the captured server stdout/stderr
+      is included so an import error / bind failure / traceback is visible
+      instead of a bare "did not start" message.
+
+    The previous implementation polled for the whole timeout regardless of
+    whether the process had died, and the server's output was discarded to
+    ``DEVNULL`` — so a boot failure produced a generic timeout with no clue as
+    to the cause, and every HTTP-dependent test then cascaded with
+    ConnectionRefused. Capturing output + early-exit detection turns that opaque
+    cascade into a single actionable failure.
+    """
     deadline = time.time() + timeout
+    last_err = "no successful /health response"
     while time.time() < deadline:
+        # Fail fast if the server subprocess has already died — don't wait out
+        # the full timeout polling a port nothing is listening on.
+        if proc is not None and proc.poll() is not None:
+            return False, _server_boot_diagnostic(
+                f"server process exited early with code {proc.returncode}",
+                log_path,
+            )
         try:
             with urllib.request.urlopen(base + "/health", timeout=2) as r:
                 if json.loads(r.read()).get("status") == "ok":
-                    return True
-        except Exception:
+                    return True, ""
+                last_err = "/health responded but status != 'ok'"
+        except Exception as e:  # noqa: BLE001 — diagnostic capture, re-raised as text
+            last_err = f"{type(e).__name__}: {e}"
             time.sleep(0.3)
-    return False
+    return False, _server_boot_diagnostic(
+        f"timed out after {timeout}s waiting for /health (last: {last_err})",
+        log_path,
+    )
+
+
+def _server_boot_diagnostic(headline, log_path):
+    """Build a boot-failure message, appending the captured server log tail."""
+    parts = [headline]
+    if log_path is not None:
+        try:
+            text = pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace")
+            tail = "".join(text.splitlines(keepends=True)[-40:]).strip()
+            if tail:
+                parts.append("---- server output (last 40 lines) ----\n" + tail)
+            else:
+                parts.append("(server produced no output)")
+        except Exception as e:  # noqa: BLE001
+            parts.append(f"(could not read server log {log_path}: {e})")
+    return "\n".join(parts)
 
 
 # ── Session-scoped test server ────────────────────────────────────────────────
@@ -630,22 +717,60 @@ def test_server():
     if HERMES_AGENT:
         env["HERMES_WEBUI_AGENT_DIR"] = str(HERMES_AGENT)
 
-    proc = subprocess.Popen(
-        [VENV_PYTHON, str(SERVER_SCRIPT)],
-        cwd=WORKDIR,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    # Capture server stdout/stderr to a temp log instead of DEVNULL so a boot
+    # failure (import error, port-bind race, traceback) is diagnosable. Without
+    # this, _wait_for_server could only report a bare "did not start" timeout
+    # and every HTTP-dependent test then cascaded with ConnectionRefused —
+    # hundreds of opaque failures from a single root cause.
+    import tempfile as _tempfile
+    _server_log = pathlib.Path(_tempfile.gettempdir()) / f"hermes-webui-test-server-{TEST_PORT}.log"
 
-    if not _wait_for_server(TEST_BASE, timeout=20):
-        proc.kill()
+    # Boot the server, retrying once if it dies early or fails to bind. Boot
+    # failures here are most often transient (a port not yet released by a prior
+    # session, a momentary import hiccup under load), so one clean retry with a
+    # fresh port-kill turns an intermittent cascade into a reliable start.
+    proc = None
+    boot_attempts = 2
+    last_reason = ""
+    for _attempt in range(1, boot_attempts + 1):
+        with open(_server_log, "w", encoding="utf-8") as _logf:
+            proc = subprocess.Popen(
+                [VENV_PYTHON, str(SERVER_SCRIPT)],
+                cwd=WORKDIR,
+                env=env,
+                stdout=_logf,
+                stderr=subprocess.STDOUT,
+                **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
+            )
+        # 45s (up from 20s): server.py imports the full hermes-agent, which is
+        # import-heavy and can exceed 20s on a loaded runner — the old timeout
+        # turned a slow-but-fine boot into a whole-suite failure.
+        ok, reason = _wait_for_server(TEST_BASE, timeout=45, proc=proc, log_path=_server_log)
+        if ok:
+            break
+        last_reason = reason
+        # Tear down the failed attempt and free the port before retrying.
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        if _attempt < boot_attempts:
+            try:
+                import subprocess as _sp2
+                _sp2.run(['fuser', '-k', f'{TEST_PORT}/tcp'], capture_output=True, timeout=5)
+            except Exception:
+                pass
+            time.sleep(1.0)
+    else:
         pytest.fail(
-            f"Test server on port {TEST_PORT} did not start within 20s.\n"
+            f"Test server on port {TEST_PORT} did not start after {boot_attempts} attempts.\n"
+            f"  reason    : {last_reason}\n"
             f"  server.py : {SERVER_SCRIPT}\n"
             f"  python    : {VENV_PYTHON}\n"
             f"  agent dir : {HERMES_AGENT}\n"
             f"  workdir   : {WORKDIR}\n"
+            f"  log       : {_server_log}\n"
         )
 
     yield proc

@@ -24,6 +24,11 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(REPO_ROOT))
 
 ROUTES_SRC = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+# Approval SSE state and helpers live in route_approvals after the #1907
+# extraction; combine both files so structural assertions below still pass.
+_ROUTE_APPROVALS = REPO_ROOT / "api" / "route_approvals.py"
+APPROVAL_SRC = _ROUTE_APPROVALS.read_text(encoding="utf-8") if _ROUTE_APPROVALS.exists() else ""
+ROUTES_SRC_FULL = ROUTES_SRC + APPROVAL_SRC
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
@@ -46,17 +51,17 @@ class TestSSEStaticAnalysis:
 
     def test_subscribe_function_exists(self):
         """_approval_sse_subscribe must exist and use a Queue."""
-        assert "def _approval_sse_subscribe(" in ROUTES_SRC, \
+        assert "def _approval_sse_subscribe(" in ROUTES_SRC_FULL, \
             "_approval_sse_subscribe must be defined"
 
     def test_unsubscribe_function_exists(self):
         """_approval_sse_unsubscribe must exist and clean up empty lists."""
-        assert "def _approval_sse_unsubscribe(" in ROUTES_SRC, \
+        assert "def _approval_sse_unsubscribe(" in ROUTES_SRC_FULL, \
             "_approval_sse_unsubscribe must be defined"
 
     def test_notify_function_exists(self):
         """_approval_sse_notify must exist and push to subscriber queues."""
-        assert "def _approval_sse_notify(" in ROUTES_SRC, \
+        assert "def _approval_sse_notify(" in ROUTES_SRC_FULL, \
             "_approval_sse_notify must be defined"
 
     def test_sse_subscribers_dict_exists(self):
@@ -95,10 +100,23 @@ class TestSSEStaticAnalysis:
         # block as the queue mutation so two parallel submit_pending calls can't
         # deliver out-of-order with stale pending_count. Tracks the v0.50.248
         # MUST-FIX A fix.
-        assert "_approval_sse_notify_locked(session_key, head, total)" in ROUTES_SRC, \
+        assert "_approval_sse_notify_locked(session_key, head, total)" in ROUTES_SRC_FULL, \
             ("submit_pending() must call _approval_sse_notify_locked(session_key, head, total) "
              "from inside the `with _lock:` block — not the unlocked _approval_sse_notify wrapper, "
              "and head must be queue_list[0] (the head, not the just-appended entry).")
+
+    def test_streaming_notify_callback_mirrors_pending_before_sse_push(self):
+        """Gateway notify callback must repopulate polling state before relying on SSE."""
+        stream_start = ROUTES_SRC.find("def _handle_sse_stream(")
+        assert stream_start != -1, "_handle_sse_stream must exist"
+        streaming_src = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+        cb_start = streaming_src.find("def _approval_notify_cb(approval_data):")
+        cb_end = streaming_src.find("_reg_notify(session_id, _approval_notify_cb)", cb_start)
+        cb_body = streaming_src[cb_start:cb_end]
+        assert "_submit_pending_for_polling(session_id, approval_data)" in cb_body, \
+            "_approval_notify_cb must mirror approval data into polling state before SSE"
+        assert "put('approval', approval_data)" in cb_body, \
+            "_approval_notify_cb must still emit the approval SSE event"
 
     def test_unsubscribe_in_finally(self):
         """SSE handler must unsubscribe in a finally block."""
@@ -119,78 +137,77 @@ class TestSSEStaticAnalysis:
     def test_notify_drops_on_full(self):
         """_approval_sse_notify must silently drop events when subscriber is slow."""
         # The queue.Full exception handler
-        assert "queue.Full" in ROUTES_SRC, \
+        assert "queue.Full" in ROUTES_SRC_FULL, \
             "_approval_sse_notify must handle queue.Full to drop events for slow subscribers"
 
     def test_subscribe_uses_shared_lock(self):
         """subscribe/unsubscribe/notify must all use the same _lock."""
-        # All three functions must use _lock
+        # All three functions must use _lock; search the combined corpus since the
+        # helpers live in api.route_approvals after the #1907 extraction.
         for func in ["_approval_sse_subscribe", "_approval_sse_unsubscribe", "_approval_sse_notify"]:
             # Find the function and verify it uses "with _lock"
-            func_start = ROUTES_SRC.find(f"def {func}(")
+            func_start = ROUTES_SRC_FULL.find(f"def {func}(")
             assert func_start != -1, f"{func} must exist"
             # Find the next function definition after this one
-            next_func = ROUTES_SRC.find("\ndef ", func_start + 1)
-            func_body = ROUTES_SRC[func_start:next_func] if next_func != -1 else ROUTES_SRC[func_start:]
+            next_func = ROUTES_SRC_FULL.find("\ndef ", func_start + 1)
+            func_body = ROUTES_SRC_FULL[func_start:next_func] if next_func != -1 else ROUTES_SRC_FULL[func_start:]
             assert "with _lock:" in func_body, \
                 f"{func} must use 'with _lock:' for thread safety"
 
     def test_unsubscribe_cleans_empty_session(self):
         """Unsubscribe must remove empty session keys from the dict."""
-        assert "_approval_sse_subscribers.pop(session_id, None)" in ROUTES_SRC, \
+        assert "_approval_sse_subscribers.pop(session_id, None)" in ROUTES_SRC_FULL, \
             "_approval_sse_unsubscribe must pop session_id when subscriber list is empty"
 
 
 class TestFrontendSSEImplementation:
-    """Verify the frontend JavaScript SSE implementation."""
+    """Verify the frontend approval prompt transport.
 
-    def test_eventsource_used(self):
-        """Frontend must use EventSource for SSE connection."""
-        assert "new EventSource(" in MESSAGES_JS, \
-            "startApprovalPolling must create an EventSource for SSE"
+    As of #3913 the frontend no longer opens an approval-stream EventSource:
+    six persistent SSE connections exhausted the browser's 6-per-origin
+    HTTP/1.1 pool, hanging the approval POST itself ("Request timed out").
+    ``startApprovalPolling`` now routes straight to the HTTP fallback poller.
+    The backend SSE route remains for compatibility (its tests are above);
+    these assertions pin the poll-only frontend so the regression can't return.
+    """
 
-    def test_sse_url_matches_backend(self):
-        """Frontend SSE URL must match backend approval stream route."""
-        assert "api/approval/stream" in MESSAGES_JS, \
-            "EventSource must connect to the approval stream endpoint"
+    def _approval_polling_body(self):
+        start = MESSAGES_JS.index("function startApprovalPolling(")
+        end = MESSAGES_JS.index("\nfunction ", start + 1)
+        return MESSAGES_JS[start:end]
+
+    def test_frontend_does_not_open_approval_stream(self):
+        """startApprovalPolling must NOT create an approval-stream EventSource (#3913)."""
+        body = self._approval_polling_body()
+        assert "api/approval/stream" not in body, \
+            "Frontend must not open the approval-stream EventSource (browser conn-pool exhaustion, #3913)"
+        assert "new EventSource(" not in body, \
+            "startApprovalPolling must not construct an EventSource — it polls over HTTP now"
+
+    def test_routes_directly_to_fallback_poll(self):
+        """startApprovalPolling must call _startApprovalFallbackPoll directly."""
+        body = self._approval_polling_body()
+        assert "_startApprovalFallbackPoll(sid)" in body, \
+            "startApprovalPolling must route to the HTTP fallback poller"
+
+    def test_fallback_poll_hits_pending_endpoint(self):
+        """The fallback poller must GET the approval/pending endpoint relative to the mount."""
+        assert 'api("/api/approval/pending?session_id="' in MESSAGES_JS, \
+            "Fallback poll must query /api/approval/pending"
         assert "EventSource('/api/approval/stream" not in MESSAGES_JS, \
-            "EventSource URL must stay relative for subpath mounts"
-
-    def test_initial_event_listener(self):
-        """Frontend must listen for 'initial' SSE events."""
-        assert "'initial'" in MESSAGES_JS or '"initial"' in MESSAGES_JS, \
-            "Frontend must addEventListener for 'initial' SSE events"
-
-    def test_approval_event_listener(self):
-        """Frontend must listen for 'approval' SSE events."""
-        assert "'approval'" in MESSAGES_JS or '"approval"' in MESSAGES_JS, \
-            "Frontend must addEventListener for 'approval' SSE events"
-
-    def test_onerror_fallback_to_polling(self):
-        """onerror must fall back to HTTP polling."""
-        assert "_startApprovalFallbackPoll" in MESSAGES_JS, \
-            "SSE onerror handler must call _startApprovalFallbackPoll"
+            "No root-absolute approval EventSource may remain (subpath-mount safety)"
 
     def test_fallback_poll_interval(self):
-        """Fallback polling interval must match v0.50.247's 1500ms cadence."""
+        """Approval fallback polling interval must keep the 1500ms cadence."""
         assert "1500" in MESSAGES_JS, \
-            "Fallback polling interval must be 1500ms to match degraded-mode parity with v0.50.247"
+            "Approval fallback polling interval must be 1500ms (degraded-mode parity with v0.50.247)"
 
-    def test_fallback_closes_eventsource(self):
-        """onerror handler must close the EventSource before falling back."""
-        # The onerror handler should call es.close()
-        assert "es.close()" in MESSAGES_JS, \
-            "onerror handler must close the EventSource before falling back"
-
-    def test_stop_closes_eventsource(self):
-        """stopApprovalPolling must close EventSource."""
-        assert "_approvalEventSource.close()" in MESSAGES_JS, \
-            "stopApprovalPolling must close _approvalEventSource"
-
-    def test_health_timer_cleanup(self):
-        """stopApprovalPolling must clear the SSE health timer."""
-        assert "_approvalSSEHealthTimer" in MESSAGES_JS, \
-            "SSE health timer must be tracked and cleared in stopApprovalPolling"
+    def test_stop_defensively_closes_any_eventsource(self):
+        """stopApprovalPolling must still defensively close a lingering EventSource handle."""
+        # The _approvalEventSource var stays declared (always null now) and the
+        # null-guarded close() remains so any future re-introduction stays safe.
+        assert "_approvalEventSource" in MESSAGES_JS, \
+            "stopApprovalPolling must keep the defensive _approvalEventSource cleanup"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -406,6 +423,52 @@ class TestSSENotifyFromSubmitPending:
                 assert payload["pending_count"] == expected_count, \
                     f"Expected pending_count={expected_count}, got {payload['pending_count']}"
         finally:
+            r._approval_sse_unsubscribe(sid, q)
+
+    def test_gateway_mirror_reconcile_tags_live_head_and_purges_stale_copy(self):
+        """Gateway mirrors must track the live head and disappear when the queue does."""
+        from api import routes as r
+
+        sid = f"sse-gateway-mirror-{uuid.uuid4().hex[:8]}"
+        approval = {
+            "command": "rm -rf /tmp/test",
+            "pattern_key": "recursive delete",
+            "pattern_keys": ["recursive delete"],
+            "description": "recursive delete",
+        }
+
+        class _GatewayEntry:
+            def __init__(self, data):
+                self.data = data
+
+        q = r._approval_sse_subscribe(sid)
+        try:
+            with r._lock:
+                r._pending.pop(sid, None)
+                r._gateway_queues[sid] = [_GatewayEntry(approval)]
+            r.submit_gateway_pending_mirror(sid, approval)
+
+            mirrored = q.get(timeout=1)
+            assert mirrored["pending"]["command"] == approval["command"]
+            assert mirrored["pending"]["_gateway_mirror"] is True
+            assert mirrored["pending_count"] == 1
+
+            with r._lock:
+                assert r._pending[sid][0]["_gateway_mirror"] is True
+                r._gateway_queues.pop(sid, None)
+                head, total, changed = r.reconcile_gateway_pending_mirror_locked(sid)
+                r._approval_sse_notify_locked(sid, head, total)
+            assert changed is True
+
+            cleared = q.get(timeout=1)
+            assert cleared["pending"] is None
+            assert cleared["pending_count"] == 0
+            with r._lock:
+                assert sid not in r._pending
+        finally:
+            with r._lock:
+                r._pending.pop(sid, None)
+                r._gateway_queues.pop(sid, None)
             r._approval_sse_unsubscribe(sid, q)
 
 

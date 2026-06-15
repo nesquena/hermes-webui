@@ -22,7 +22,7 @@ let _loadingSessionId = null;
 // clears them on a force-reload of the active session. Consumed by
 // _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
 // ephemeral fields (_turnUsage, _turnDuration, _turnTps, _gatewayRouting,
-// _statusCard) survive the wholesale replace. null when there is nothing
+// _statusCard, _anchor_stream_id) survive the wholesale replace. null when there is nothing
 // to carry forward (initial load, switch-to-different-session, etc.).
 let _pendingCarryForwardSnapshot = null;
 
@@ -375,8 +375,23 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   }
   _sessionStreamingById.set(sid, false);
   _forgetObservedStreamingSession(sid);
+  if (typeof hideApprovalCard==='function') hideApprovalCard(true);
+  if (typeof hideLiveRunStatus==='function') hideLiveRunStatus(sid);
+  if (typeof clearLiveToolCards==='function') clearLiveToolCards();
   if (changed&&typeof updateSendBtn==='function') updateSendBtn();
+  if (changed&&typeof _scheduleActiveSessionIdleReload==='function') _scheduleActiveSessionIdleReload(sid);
   return changed;
+}
+
+function _scheduleActiveSessionIdleReload(sid) {
+  if(!sid) return;
+  setTimeout(async () => {
+    if(!S||!S.session||S.session.session_id !== sid) return;
+    if(S.busy || S.activeStreamId) return;
+    try{
+      await loadSession(sid, {force:true, externalRefreshReason:'idle-reconcile'});
+    }catch(_){}
+  },0);
 }
 
 function _purgeStaleInflightEntries() {
@@ -418,6 +433,82 @@ function _rememberRenderedStreamingState(s, isStreaming) {
   if (!s || !s.session_id || !isStreaming) return;
   _sessionStreamingById.set(s.session_id, true);
   _rememberObservedStreamingSession(s);
+}
+
+function _inflightHasVisibleLiveState(inflight) {
+  if (!inflight || typeof inflight !== 'object') return false;
+  if (String(inflight.lastAssistantText || '').trim()) return true;
+  if (String(inflight.lastReasoningText || '').trim()) return true;
+  if (String(inflight.liveTurnHtml || '').trim()) return true;
+  if (Array.isArray(inflight.toolCalls) && inflight.toolCalls.length) return true;
+  if (Array.isArray(inflight.activityBurstAnchors) && inflight.activityBurstAnchors.length) return true;
+  if (Array.isArray(inflight.messages)) {
+    return inflight.messages.some((msg) => {
+      if (!msg || msg.role !== 'assistant') return false;
+      const content = msg.content;
+      if (typeof content === 'string') return content.trim();
+      if (Array.isArray(content)) return content.length > 0;
+      return Boolean(content);
+    });
+  }
+  return false;
+}
+
+function _serverLiveSnapshotToolId(tc){
+  return String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
+}
+
+function _serverLiveSnapshotInflight(snapshot, uploaded){
+  if(!snapshot||typeof snapshot!=='object') return null;
+  const rawMessages=Array.isArray(snapshot.messages)?snapshot.messages:[];
+  const messages=rawMessages
+    .filter(m=>m&&m.role)
+    .map(m=>({...m,_live:m._live!==false,_journal_snapshot:true}));
+  const rawToolCalls=Array.isArray(snapshot.tool_calls)?snapshot.tool_calls:[];
+  const toolCalls=rawToolCalls
+    .filter(tc=>tc&&tc.name)
+    .map(tc=>{
+      const next={...tc,_live:true,_journal_snapshot:true};
+      const tid=_serverLiveSnapshotToolId(next);
+      if(tid&&!next.tid) next.tid=tid;
+      return next;
+    });
+  let lastAssistantText=String(snapshot.last_assistant_text||snapshot.lastAssistantText||'');
+  let lastReasoningText=String(snapshot.last_reasoning_text||snapshot.lastReasoningText||'');
+  const lastLiveAssistant=[...messages].reverse().find(m=>m&&m.role==='assistant'&&m._live);
+  if(lastLiveAssistant){
+    if(!lastAssistantText&&typeof lastLiveAssistant.content==='string') lastAssistantText=lastLiveAssistant.content;
+    if(!lastReasoningText&&typeof lastLiveAssistant.reasoning==='string') lastReasoningText=lastLiveAssistant.reasoning;
+  }
+  if((lastAssistantText||lastReasoningText)&&!lastLiveAssistant){
+    messages.push({
+      role:'assistant',
+      content:lastAssistantText,
+      reasoning:lastReasoningText||undefined,
+      _live:true,
+      _journal_snapshot:true,
+    });
+  }
+  if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText) return null;
+  const replayAfterSeq=Number(snapshot.last_seq||0);
+  const activityBurstAnchors=Array.isArray(snapshot.activity_burst_anchors)
+    ? snapshot.activity_burst_anchors
+    : (Array.isArray(snapshot.activityBurstAnchors)?snapshot.activityBurstAnchors:[]);
+  return {
+    messages,
+    uploaded:Array.isArray(uploaded)?[...uploaded]:[],
+    toolCalls,
+    todos:null,
+    todoStateMeta:null,
+    reattach:true,
+    journalSnapshot:true,
+    lastAssistantText,
+    lastReasoningText,
+    lastRunJournalSeq:Number.isFinite(replayAfterSeq)?Math.max(0,replayAfterSeq):0,
+    currentActivityBurstId:Number(snapshot.current_activity_burst_id||snapshot.currentActivityBurstId||0)||0,
+    currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
+    activityBurstAnchors,
+  };
 }
 
 function _rememberRenderedSessionSnapshot(s) {
@@ -528,8 +619,10 @@ function _markPollingCompletionUnreadTransitions(sessions) {
 let _newSessionInFlight=null;
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
 function _setNewSessionPending(pending){
-  const btn=$('btnNewChat');
-  if(btn){
+  const ids=['btnNewChat','btnTitlebarNewChat'];
+  for (let i=0;i<ids.length;i++){
+    const btn=$(ids[i]);
+    if(!btn) continue;
     btn.disabled=!!pending;
     btn.setAttribute('aria-busy',pending?'true':'false');
   }
@@ -616,8 +709,9 @@ async function newSession(flash, options={}){
         if(s.startsWith('openai'))return 'openai';if(s.startsWith('anthropic')||s.startsWith('claude'))return 'anthropic';
         if(s.startsWith('google')||s.startsWith('gemini'))return 'google';return s;};
       const _familyMismatch=_familyProvider&&_fallbackProvider&&_normProv(_fallbackProvider)!==_familyProvider;
+      const _fallbackIsNamedCustom=String(_fallbackProvider||'').toLowerCase().startsWith('custom:');
       reqBody.model_provider=newModelState.model_provider
-        ||((_bareModel&&!_familyMismatch)?(_fallbackProvider||null):null)
+        ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
@@ -629,6 +723,7 @@ async function newSession(flash, options={}){
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
+    if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
     _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
     // Sync chat-header dropdown to the session's model/provider so the UI reflects
     // the default route the server actually used (#872). Compare provider state too:
@@ -694,6 +789,52 @@ async function newSession(flash, options={}){
   }
 }
 
+/**
+ * Self-heal: clear the stuck session ID from localStorage and URL when a
+ * loadSession() call failed during boot (no currentSid). This prevents the
+ * browser from retrying the same dead session on every refresh.
+ *
+ * Called from loadSession() after 401 redirect (undefined data) or any
+ * non-404 error (400, 403, 500, network). The 404 path has its own
+ * inline self-heal; this helper consolidates the non-404 cases.
+ *
+ * Only clears when !currentSid — no session is active on screen, so
+ * the stored ID is definitely stale. When currentSid is set (already
+ * viewing a session), a non-404 failure could be a transient server error
+ * and the session may still exist on the server; wiping localStorage in
+ * that case is unnecessarily destructive (#4028 follow-up).
+ *
+ * A click into a *different* dead session (currentSid && currentSid!==sid)
+ * must not run it: localStorage and the URL still point at the live session
+ * (both are only updated on a successful load), so wiping them would log
+ * the user out of a healthy session (#2782).
+ */
+function _clearStuckSessionOnBoot(sid, currentSid){
+  if(!currentSid){
+    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
+  }
+}
+
+// #2971 (Greptile P1 r3377162160): loadSession() tears down the live
+// per-session SSE at the top via stopSessionStream() (line ~754), but only the
+// success path re-arms it via startSessionStream() (line ~875). Every
+// early-return exit (fetch error, auth-redirect undefined) — and the
+// same-session no-op guard, which returns BEFORE the teardown — could leave
+// the session the user actually remains on with a permanently null
+// EventSource, silently dropping bg_task_complete delivery until a full page
+// reload or a forced loadSession. This helper re-arms the stream for whatever
+// session is currently on screen (S.session). startSessionStream() is
+// idempotent — it no-ops when already live for that sid (top guard
+// `_sessionStreamSessionId === sid && _sessionEventSource`) — so this never
+// double-arms the success path, which arms the *newly assigned* S.session
+// only after this point.
+function _rearmActiveSessionStream(){
+  if(typeof startSessionStream!=='function') return;
+  const activeSid = S.session ? S.session.session_id : null;
+  if(activeSid) startSessionStream(activeSid);
+}
+
 async function loadSession(sid){
   const opts = arguments[1] || {};
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
@@ -707,12 +848,18 @@ async function loadSession(sid){
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
   // refresh paths pass {force:true} when external state.db changes arrive.
-  // Legacy invariant kept for static regression tests: if(currentSid===sid) return
-  if(currentSid===sid && !forceReload) return;
+  // Do not no-op a same-session click while another load is in flight: the
+  // previous transcript may already have been cleared for the pending switch.
+  // Static force-reload invariant: if(currentSid===sid && !forceReload) return;
+  // #2971: idempotent re-arm before the no-op guard revives a stream a prior
+  // failed loadSession killed; no-ops on real switches.
+  _rearmActiveSessionStream();
+  if(currentSid===sid && !forceReload && !_loadingSessionId) return;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
   stopApprovalPolling();hideApprovalCard(forceReload);
+  if(typeof stopSessionStream==='function') stopSessionStream();
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
@@ -731,13 +878,29 @@ async function loadSession(sid){
     // close streams for the session the user actually landed on (#1060 guard,
     // extended to cover the new pre-switch await).
     if (_loadingSessionId !== sid) return;
+    // Snapshot the live turn before msgInner is replaced. Preserves the activity
+    // timer, partial response, and tool cards so switching back does not rebuild
+    // the stream UI from scratch.
+    if(
+      (S.busy||S.activeStreamId||(INFLIGHT&&INFLIGHT[currentSid]))&&
+      typeof snapshotLiveTurnHtmlForSession==='function'
+    ){
+      if(!INFLIGHT[currentSid]){
+        INFLIGHT[currentSid]={
+          messages:Array.isArray(S.messages)?[...S.messages]:[],
+          uploaded:[],
+          toolCalls:Array.isArray(S.toolCalls)?[...S.toolCalls]:[],
+        };
+      }
+      snapshotLiveTurnHtmlForSession(currentSid);
+    }
   }
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
     // poll triggering a refresh), snapshot the existing messages BEFORE we
     // clear them. _ensureMessagesLoaded() runs the ephemeral-field
     // carry-forward (_turnUsage, _turnDuration, _turnTps, _gatewayRouting,
-    // _statusCard) against S.messages, but by the time the API fetch returns
+    // _statusCard, _anchor_stream_id) against S.messages, but by the time the API fetch returns
     // S.messages has already been reset to [] here and the carry-forward is a
     // no-op. The visible symptom is the token-usage badge vanishing ~10s
     // after each assistant turn completes. Stash the snapshot so the
@@ -774,6 +937,17 @@ async function loadSession(sid){
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const _msgInner = $('msgInner');
+    // Stale-load guard (Codex): a newer loadSession() may have started while this
+    // request was awaiting (e.g. the user clicked a healthy session during a
+    // boot-time restore). currentSid was snapshotted before the await, so without
+    // this guard a failed superseded load could self-heal (wipe localStorage/URL)
+    // for the session the user actually navigated to. If we no longer own the
+    // load, re-arm the active session's stream and bail before any DOM mutation
+    // or self-heal.
+    if (_loadingSessionId !== sid) {
+      _rearmActiveSessionStream();
+      return;
+    }
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
@@ -797,31 +971,80 @@ async function loadSession(sid){
           }
         }
       } else {
-        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';
+        // Non-404, non-401 failure (400, 403, 500, network): 401 is handled
+        // via the if(!data) guard below since api() returns undefined on 401
+        // rather than throwing. Clear the stuck session ID only during boot
+        // (!currentSid) so the next boot doesn't retry the same dead session.
+        // When currentSid is set, a 500/network error may be transient — the
+        // session might still exist on the server (#4028 follow-up).
+        _clearStuckSessionOnBoot(sid, currentSid);
+        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }
     }
     _clearSameSessionForceReloadHint(sid);
+    // Capture whether this failure self-healed away the current session (a
+    // 404 on the *current* session whose sidecar was deleted server-side).
+    // In that case there is no live session left to stream for, so we must
+    // NOT restart — doing so would spin the SSE reconnect loop against a dead
+    // session_id.
+    const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
+    // The session stream was stopped unconditionally at the top of this load
+    // (mirroring stopApprovalPolling). On the happy path it's restarted ~120
+    // lines below, but this failure exit never reaches that point — leaving
+    // the session still on screen permanently silenced. bg_task_complete
+    // events (the new feature's primary delivery path) would be dropped until
+    // the user explicitly navigates to a session again. Restart the stream for
+    // the session that remains on screen. Skip when a newer load is already in
+    // flight (_loadingSessionId !== null after the reset above): that load owns
+    // the stream and starts its own. Skip the self-healed-current case (no live
+    // session to stream).
+    // #2971: this fetch-error path keeps its bespoke guarded restart (rather
+    // than the shared _rearmActiveSessionStream helper used on the other
+    // early-returns) because only here can the current session have just
+    // self-healed away — re-arming a 404'd/deleted session_id would spin the
+    // SSE reconnect loop against a dead session.
+    if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
+        && typeof startSessionStream === 'function') {
+      startSessionStream(currentSid);
+    }
     return;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
   // the browser is already navigating away, so abort the rest of this flow.
+  // No self-heal: 401 is transient auth expiry — the session still exists
+  // server-side. Clearing localStorage would wipe the saved session id and
+  // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
+    // #2971: re-arm the still-displayed session's stream (defensive — harmless
+    // if the 401 redirect is already tearing the page down). Idempotent.
+    _rearmActiveSessionStream();
     return;
   }
   // Stale response? A newer loadSession() call has already started (#1060).
-  if (_loadingSessionId !== sid) return;
+  if (_loadingSessionId !== sid) {
+    // #2971: a newer in-flight load owns the final stream arming, but until it
+    // assigns S.session and reaches startSessionStream() the currently-shown
+    // session must not be left stream-dead by our top-of-function teardown.
+    // Re-arm the genuinely-displayed S.session (idempotent — no-ops once the
+    // newer load arms its own sid).
+    _rearmActiveSessionStream();
+    return;
+  }
   S.session=data.session;
   if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
-  // Reset scroll-direction tracker on session switch so the new chat's
-  // first scroll doesn't compare against the previous chat's scrollTop
+  // Reset scroll-direction tracker only on real session switches so the new
+  // chat's first scroll doesn't compare against the previous chat's scrollTop
   // and false-trigger an unpin (#1731 follow-up — Opus stage-302 SHOULD-FIX).
-  if (typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
+  // Same-session force refreshes reuse the current transcript viewport; clearing
+  // the sticky-unpin state here makes preserveScroll treat a reader mid-answer
+  // as pinned and snap them back to the bottom on the next render.
+  if (currentSid !== sid && typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
     try { window._resetScrollDirectionTracker(); } catch (_) {}
   }
   if(typeof _applyPendingSessionModelForSession==='function') _applyPendingSessionModelForSession(sid);
@@ -833,16 +1056,24 @@ async function loadSession(sid){
   _clearSessionCompletionUnread(S.session.session_id);
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
+  if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;
-  // If the server says the session is idle, discard any browser-side inflight
-  // cache left behind by a crashed/restarted stream. Otherwise the UI can keep
-  // showing a permanent thinking/running state even though active_streams=0.
-  if(!activeStreamId&&INFLIGHT[sid]){
-    delete INFLIGHT[sid];
-    if(typeof clearInflightState==='function') clearInflightState(sid);
+  // If the server says the session is idle, reset browser-side streaming flags
+  // NOW — before the async _ensureMessagesLoaded gap below. Without this,
+  // S.busy can remain true from a still-running stream in the PREVIOUS session
+  // while S.session.session_id has already advanced to the new one.
+  // _isSessionLocallyStreaming() checks (isActive && S.busy), so during the
+  // async window the new session would appear locally-streaming (sidebar spinner,
+  // Stop button, thinking state on an idle chat). Also clears stale INFLIGHT
+  // entries left behind by a crashed/restarted stream.
+  if(!activeStreamId){
     S.activeStreamId=null;
     S.busy=false;
+    if(INFLIGHT[sid]){
+      delete INFLIGHT[sid];
+      if(typeof clearInflightState==='function') clearInflightState(sid);
+    }
   }
 
   function _mergePendingSessionMessage(session,messages){
@@ -875,22 +1106,53 @@ async function loadSession(sid){
         todos:Array.isArray(stored.todos)?stored.todos:null,
         todoStateMeta:stored.todoStateMeta||null,
         reattach:true,
+        lastAssistantText:String(stored.lastAssistantText||''),
+        lastReasoningText:String(stored.lastReasoningText||''),
+        lastRunJournalSeq:Number(stored.lastRunJournalSeq||0)||0,
+        journalReplayFromStart:!!stored.journalReplayFromStart,
+        currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
+        currentLiveSegmentSeq:Number(stored.currentLiveSegmentSeq||0)||0,
+        activityBurstAnchors:Array.isArray(stored.activityBurstAnchors)?stored.activityBurstAnchors:[],
       };
     }
   }
 
+  if(INFLIGHT[sid]&&INFLIGHT[sid].journalReplayFromStart&&activeStreamId){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+
+  if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid])){
+    // A stale cursor-only INFLIGHT entry is worse than no cache: replay would
+    // resume after lastRunJournalSeq while the pane has no prose/tool DOM to
+    // preserve, making a session switch look like the live turn vanished.
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+
+  const serverLiveSnapshot=activeStreamId
+    ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
+    : null;
+  if(serverLiveSnapshot&&(!INFLIGHT[sid]||!_inflightHasVisibleLiveState(INFLIGHT[sid]))){
+    INFLIGHT[sid]=serverLiveSnapshot;
+  }
+
   if(INFLIGHT[sid]){
-    const inflightMessages=INFLIGHT[sid].messages||[];
-    S.messages=[];
+    _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
+    const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
     S.toolCalls=[];
     try {
       await _ensureMessagesLoaded(sid);
     } catch(e) {
       S.messages=inflightMessages;
     }
+    const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
+    if(liveTailPrepared){
+      S.messages=_dropCurrentTurnAssistantMessages(S.messages);
+    }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
-    if(_mergePendingSessionMessage(S.session,S.messages)){
+    if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
     }
     // Refresh todos from cold-load or persisted INFLIGHT before painting.
@@ -900,26 +1162,71 @@ async function loadSession(sid){
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
+    const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
+    const replayPersistedLiveToolCards=(opts)=>{
+      const liveToolCalls=Array.isArray(S.toolCalls)
+        ? S.toolCalls
+        : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);
+      const skipUnkeyedRestoredDuplicates=!!(opts&&opts.skipUnkeyedRestoredDuplicates);
+      const restoredLiveTurn=skipUnkeyedRestoredDuplicates?document.getElementById('liveAssistantTurn'):null;
+      const hasRestoredLiveToolRows=!!(restoredLiveTurn&&restoredLiveTurn.querySelector('.tool-card-row'));
+      for(const tc of (liveToolCalls||[])){
+        if(skipUnkeyedRestoredDuplicates&&hasRestoredLiveToolRows&&!liveToolReplayId(tc)) continue;
+        if(tc&&tc.name) appendLiveToolCard(tc,{sessionId:sid,streamId:activeStreamId});
+      }
+    };
+    let didReconnect=false;
+    if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
+      INFLIGHT[sid].reattach=false;
+      if (_loadingSessionId !== sid) return;
+      didReconnect=true;
+      attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
+    }
     syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
-    const restoredLiveTurn=typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
+    if(typeof ensureRunActivityForCurrentTurn==='function') ensureRunActivityForCurrentTurn();
+    const hasStructuredLiveState=!!(INFLIGHT[sid]&&(
+      String(INFLIGHT[sid].lastAssistantText||'').trim()||
+      String(INFLIGHT[sid].lastReasoningText||'').trim()||
+      (Array.isArray(INFLIGHT[sid].activityBurstAnchors)&&INFLIGHT[sid].activityBurstAnchors.length)||
+      (Array.isArray(INFLIGHT[sid].toolCalls)&&INFLIGHT[sid].toolCalls.length)
+    ));
+    let restoredLiveTurn=false;
+    if(typeof restoreLiveTurnHtmlForSession==='function'){
+      if(!hasStructuredLiveState){
+        restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+      }else{
+        const liveTurn=document.getElementById('liveAssistantTurn');
+        const hasCurrentWorklogContent=!!(liveTurn&&liveTurn.querySelector(
+          '.live-worklog[data-live-worklog-shell="1"] .tool-card-row,'+
+          '.live-worklog[data-live-worklog-shell="1"] .wl-reason,'+
+          '.tool-call-group[data-live-tool-worklog-group="1"] .tool-card-row,'+
+          '.tool-call-group[data-live-tool-worklog-group="1"] .wl-reason,'+
+          '.tool-call-group[data-live-tool-call-group="1"] .tool-card-row,'+
+          '.tool-call-group[data-live-tool-call-group="1"] .wl-reason'
+        ));
+        if(hasCurrentWorklogContent) restoredLiveTurn=true;
+        else restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+      }
+    }
+    if(restoredLiveTurn&&didReconnect){
+      replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});
+    }
     if(!restoredLiveTurn){
-      appendThinking();
       clearLiveToolCards();
       if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
-      for(const tc of (S.toolCalls||[])){
-        if(tc&&tc.name) appendLiveToolCard(tc);
-      }
+      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+      else appendThinking();
+      replayPersistedLiveToolCards();
+    }
+    if(typeof ensureLiveWorklogShell==='function'){
+      const liveTurn=document.getElementById('liveAssistantTurn');
+      if(!liveTurn||!liveTurn.querySelector('.tool-call-group[data-tool-worklog-group="1"]')) ensureLiveWorklogShell();
     }
     loadDir('.');
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
     if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
-    if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
-      INFLIGHT[sid].reattach=false;
-      if (_loadingSessionId !== sid) return;
-      attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
-    }
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
@@ -941,34 +1248,29 @@ async function loadSession(sid){
     // Stale? A newer loadSession() call has already started (#1060).
     if (_loadingSessionId !== sid) return;
 
-    // Restore any queued message that survived page refresh via sessionStorage.
+    // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
       try{
-        const _storedQ=sessionStorage.getItem('hermes-queue-'+sid);
-        if(_storedQ){
-          const _entries=JSON.parse(_storedQ);
-          if(Array.isArray(_entries)&&_entries.length){
-            const _lastMsg=S.messages.slice().reverse()
-              .find(m=>m&&m.role==='assistant');
-            const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
-            const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
-            if(_fresh.length){
-              const _first=_fresh[0];
-              const _msg=$&&$('msg');
-              if(_msg&&_first.text&&!_msg.value){
-                _msg.value=_first.text||'';
-                if(typeof autoResize==='function') autoResize();
-                if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
-              }
-              sessionStorage.removeItem('hermes-queue-'+sid);
-            } else {
-              sessionStorage.removeItem('hermes-queue-'+sid);
+        const _entries=typeof _readPersistedSessionQueue==='function'
+          ? _readPersistedSessionQueue(sid)
+          : [];
+        if(Array.isArray(_entries)&&_entries.length){
+          const _lastMsg=S.messages.slice().reverse()
+            .find(m=>m&&m.role==='assistant');
+          const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
+          const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
+          if(_fresh.length){
+            const _first=_fresh[0];
+            const _msg=$&&$('msg');
+            if(_msg&&_first.text&&!_msg.value){
+              _msg.value=_first.text||'';
+              if(typeof autoResize==='function') autoResize();
+              if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
             }
-          } else {
-            sessionStorage.removeItem('hermes-queue-'+sid);
           }
+          if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
         }
-      }catch(_){sessionStorage.removeItem('hermes-queue-'+sid);}
+      }catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}
     }
 
     // Reconstruct tool calls from message metadata, or fall back to session-level summary.
@@ -981,16 +1283,25 @@ async function loadSession(sid){
     if(activeStreamId){
       S.busy=true;
       S.activeStreamId=activeStreamId;
+      if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
+      else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
       updateSendBtn();
       setStatus('');
       setComposerStatus('');
-      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);appendThinking();loadDir('.');
+      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      let restoredLiveTurn=false;
+      if(typeof restoreLiveTurnHtmlForSession==='function'){
+        restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+      }
+      if(!restoredLiveTurn){
+        if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+        else appendThinking();
+      }
+      loadDir('.');
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
       if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
-      if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
-      else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
     }else{
       S.busy=false;
       S.activeStreamId=null;
@@ -1013,6 +1324,7 @@ async function loadSession(sid){
   if(_s&&typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
     const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
+    const _pickPositive=(latest,stored,dflt=0)=>Number(latest)>0?latest:(Number(stored)>0?stored:dflt);
     _syncCtxIndicator({
       input_tokens:      _pick(u.input_tokens,      _s.input_tokens),
       output_tokens:     _pick(u.output_tokens,     _s.output_tokens),
@@ -1020,7 +1332,7 @@ async function loadSession(sid){
       cache_read_tokens: _pick(u.cache_read_tokens, _s.cache_read_tokens),
       cache_write_tokens:_pick(u.cache_write_tokens,_s.cache_write_tokens),
       cache_hit_percent: _pick(u.cache_hit_percent, _s.cache_hit_percent, null),
-      context_length:    _pick(_s.context_length,    u.context_length),
+      context_length:    _pickPositive(u.context_length, _s.context_length),
       last_prompt_tokens:_pick(u.last_prompt_tokens,_s.last_prompt_tokens),
       threshold_tokens:  _pick(_s.threshold_tokens,  u.threshold_tokens),
     });
@@ -1056,13 +1368,15 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
   discord: 'Discord',
   slack: 'Slack',
   email: 'Email',
+  wecom: 'WeCom',
+  wecom_callback: 'WeCom Callback',
 };
 
 function _isMessagingSession(session) {
@@ -1450,7 +1764,8 @@ function _resolveSessionModelForDisplaySoon(sid){
       if(!model||!S.session||S.session.session_id!==sid) return;
       S.session.model=model;
       S.session.model_provider=provider||null;
-      S.session.context_length=data.session.context_length||0;
+      const resolvedContextLength=data.session.context_length||S.session.context_length||0;
+      S.session.context_length=resolvedContextLength;
       S.session.threshold_tokens=data.session.threshold_tokens||0;
       S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
       S.session._modelResolutionDeferred=false;
@@ -1465,7 +1780,7 @@ function _resolveSessionModelForDisplaySoon(sid){
           cache_read_tokens:_pick(u.cache_read_tokens,S.session.cache_read_tokens),
           cache_write_tokens:_pick(u.cache_write_tokens,S.session.cache_write_tokens),
           cache_hit_percent:_pick(u.cache_hit_percent,S.session.cache_hit_percent,null),
-          context_length:data.session.context_length||0,
+          context_length:resolvedContextLength||u.context_length||0,
           last_prompt_tokens:_pick(u.last_prompt_tokens,S.session.last_prompt_tokens),
           threshold_tokens:data.session.threshold_tokens||0,
         });
@@ -1485,7 +1800,9 @@ let _messagesTruncated = false;
 // Called after loadSession fetches metadata (messages=0).
 // Idempotent: if messages are already in S.messages, resolves immediately.
 // Handles streaming sessions specially: restores from INFLIGHT cache or API.
-// msg_limit (default 30): only fetch the last N messages for fast switching.
+// msg_limit (default 30): fetch a tail window with roughly N visible
+// user/assistant rows for fast switching. Tool rows inside the window are
+// server-bounded and do not consume the visible-message budget.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
 let _sameSessionForceReloadHint = null;
@@ -1542,6 +1859,9 @@ function _messageReloadLimitForSession(sid){
 
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   const msgs=Array.isArray(messages)?messages:[];
+  // During active streaming, skip — clearing S.toolCalls would lose Activity
+  // and the renderMessages fallback is blocked by S.busy=true.
+  if(S.busy||S.activeStreamId) return;
   const hasMessageToolMetadata=msgs.some(m=>{
     if(!m) return false;
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -1568,9 +1888,13 @@ async function _ensureMessagesLoaded(sid) {
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
   const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';
+  // Older frontends used expand_renderable=1 to request visible-row expansion.
+  // The server now counts msg_limit by visible transcript rows by default; keep
+  // the flag for compatibility with mixed-version deployments.
+  const expandParam = reloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}`);
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`);
   } finally {
     _clearSameSessionForceReloadHint(sid);
   }
@@ -1584,10 +1908,16 @@ async function _ensureMessagesLoaded(sid) {
   // toast on every mobile message (SSE/visibility events trigger this reload path
   // more aggressively on mobile).
   let msgs = (data.session.messages || []).filter(m => m && m.role);
-  _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
+  // Skip _syncToolCalls when INFLIGHT exists — the INFLIGHT restore path
+  // (loadSession line ~871) will overwrite S.toolCalls from INFLIGHT[sid].toolCalls.
+  // Clearing here and then overwriting is wasteful, and if S.busy becomes true
+  // before the next render, the fallback can't re-derive from messages.
+  if(!(typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[sid])){
+    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
+  }
   clearLiveToolCards();
   // #3018: preserve client-side ephemeral turn fields (_turnUsage, _turnDuration,
-  // _turnTps, _gatewayRouting, _statusCard) across the loadSession replace.
+  // _turnTps, _gatewayRouting, _statusCard, _anchor_stream_id) across the loadSession replace.
   if(typeof window._carryForwardEphemeralTurnFields==='function'){
     // #3306: Prefer the pre-clear snapshot stashed by loadSession() on a
     // force-reload of the active session; S.messages was reset to [] there
@@ -1600,6 +1930,11 @@ async function _ensureMessagesLoaded(sid) {
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
   S.messages = msgs;
+  // Expand render window to cover all loaded messages so the next
+  // renderMessages() doesn't hide most of them behind a tiny window.
+  if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
+    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(), _messageRenderableMessageCount());
+  }
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
@@ -1628,6 +1963,7 @@ async function _ensureMessagesLoaded(sid) {
       scheduleTodosRefresh();
     }
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
+    if(typeof syncTopbar==='function') syncTopbar();
   }
 }
 
@@ -1657,21 +1993,300 @@ function _sameTranscriptMessage(a,b){
   return false;
 }
 
+function _currentTurnAssistantText(messages){
+  const list=Array.isArray(messages)?messages:[];
+  let start=-1;
+  for(let i=list.length-1;i>=0;i--){
+    if(list[i]&&list[i].role==='user'){start=i;break;}
+  }
+  const parts=[];
+  for(let i=start+1;i<list.length;i++){
+    const msg=list[i];
+    if(!msg||msg.role!=='assistant'||msg._live) continue;
+    const text=_messageComparableText(msg);
+    if(text) parts.push(text);
+  }
+  return parts.join('\n\n').trim();
+}
+
+function _compactTranscriptText(text){
+  return String(text||'').replace(/\s+/g,' ').trim();
+}
+
+function _dropCurrentTurnAssistantMessages(messages){
+  const list=Array.isArray(messages)?messages:[];
+  let start=-1;
+  for(let i=list.length-1;i>=0;i--){
+    if(list[i]&&list[i].role==='user'){start=i;break;}
+  }
+  if(start<0) return list;
+  return list.filter((msg,idx)=>idx<=start||!(msg&&msg.role==='assistant'));
+}
+
+function _ensureInflightLiveAssistantMessage(inflight){
+  if(!inflight) return false;
+  const text=String(inflight.lastAssistantText||'').trim();
+  const reasoning=String(inflight.lastReasoningText||'').trim();
+  if(!text&&!reasoning) return false;
+  if(!Array.isArray(inflight.messages)) inflight.messages=[];
+  let live=null;
+  for(let i=inflight.messages.length-1;i>=0;i--){
+    const msg=inflight.messages[i];
+    if(msg&&msg.role==='assistant'&&msg._live){live=msg;break;}
+  }
+  if(live){
+    const liveText=_messageComparableText(live);
+    if(text&&(!liveText||text.startsWith(liveText)||text.length>liveText.length)){
+      live.content=text;
+    }
+    if(reasoning&&!live.reasoning) live.reasoning=reasoning;
+    return true;
+  }
+  inflight.messages.push({
+    role:'assistant',
+    content:text,
+    reasoning:reasoning||undefined,
+    _live:true,
+    _ts:Date.now()/1000,
+  });
+  return true;
+}
+
+function _projectInflightMessagesForActivityBursts(inflight){
+  const messages=Array.isArray(inflight&&inflight.messages)?inflight.messages:[];
+  const anchors=Array.isArray(inflight&&inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[];
+  if(!anchors.length) return messages;
+  let liveIdx=-1;
+  for(let i=messages.length-1;i>=0;i--){
+    const msg=messages[i];
+    if(msg&&msg.role==='assistant'&&msg._live){liveIdx=i;break;}
+  }
+  if(liveIdx<0) return messages;
+  let liveTailStartIdx=liveIdx;
+  while(liveTailStartIdx>0){
+    const prev=messages[liveTailStartIdx-1];
+    if(!(prev&&prev.role==='assistant'&&prev._live)) break;
+    liveTailStartIdx-=1;
+  }
+  const live=messages[liveIdx];
+  const text=_messageComparableText(live);
+  if(!text) return messages;
+  const priorLiveTexts=messages.slice(liveTailStartIdx,liveIdx)
+    .filter(m=>m&&m.role==='assistant'&&m._live)
+    .map(m=>_messageComparableText(m))
+    .filter(Boolean);
+  const liveTailIsAccumulator=priorLiveTexts.length>0&&priorLiveTexts.every(part=>
+    _compactTranscriptText(text).includes(_compactTranscriptText(part))
+  );
+  const replaceStartIdx=liveTailIsAccumulator?liveTailStartIdx:liveIdx;
+  if(priorLiveTexts.length&&!liveTailIsAccumulator) return messages;
+  const cleanAnchors=anchors
+    .map(a=>({id:Number(a&&a.id),textEnd:Number(a&&a.textEnd)}))
+    .filter(a=>Number.isFinite(a.id)&&Number.isFinite(a.textEnd)&&a.textEnd>0)
+    .sort((a,b)=>a.textEnd-b.textEnd||a.id-b.id);
+  const aliasBurstIds=new Map();
+  const fallbackBurstId = Number(inflight.currentActivityBurstId||0)||0;
+  aliasBurstIds.set(0,fallbackBurstId);
+  let lastVisibleBurstId=null;
+  let lastVisibleTextEnd=0;
+  const visibleAnchors=[];
+  for(const anchor of cleanAnchors){
+    const end=Math.min(text.length,anchor.textEnd);
+    if(end<=lastVisibleTextEnd){
+      if(lastVisibleBurstId!==null) aliasBurstIds.set(anchor.id,lastVisibleBurstId);
+      continue;
+    }
+    visibleAnchors.push(anchor);
+    lastVisibleBurstId=anchor.id;
+    lastVisibleTextEnd=end;
+  }
+
+  if(visibleAnchors.length&&Number.isFinite(visibleAnchors[0].id)) aliasBurstIds.set(0,visibleAnchors[0].id);
+  if(!visibleAnchors.length){
+    const firstVisibleBurstId=Number(cleanAnchors[0]&&cleanAnchors[0].id);
+    const fallbackAnchorId=Number.isFinite(firstVisibleBurstId)?firstVisibleBurstId:fallbackBurstId;
+    if(fallbackAnchorId!==fallbackBurstId) aliasBurstIds.set(0,fallbackAnchorId);
+    const projected=[{...live,content:text,_activityBurstId:fallbackAnchorId}];
+
+    const baselineSeq=Number(inflight.currentLiveSegmentSeq);
+    const existingSeqs=messages
+      .filter(m=>m&&m._live&&Number.isFinite(Number(m._liveSegmentSeq)))
+      .map(m=>Number(m._liveSegmentSeq));
+    const baseFromMessages=existingSeqs.length
+      ? existingSeqs.reduce((acc,n)=>Math.max(acc,n),-Infinity)
+      : 0;
+    const firstSeq=(Number.isFinite(baselineSeq)&&baselineSeq>0)
+      ? baselineSeq
+      : (Number.isFinite(baseFromMessages)&&baseFromMessages>0)
+        ? baseFromMessages
+        : 1;
+    projected.forEach((seg,i)=>{
+      seg._liveSegmentSeq=i===0?firstSeq:1+i;
+    });
+    if(Array.isArray(inflight.toolCalls)){
+      const segmentSeqByBurstId=new Map();
+      segmentSeqByBurstId.set(String(fallbackAnchorId),firstSeq);
+      projected.forEach(seg=>{
+        const bid=Number(seg&&seg._activityBurstId);
+        const seq=Number(seg&&seg._liveSegmentSeq);
+        if(!Number.isFinite(bid)||!Number.isFinite(seq)) return;
+        const key=String(bid);
+        const current=segmentSeqByBurstId.get(key);
+        if(current===undefined||seq>current) segmentSeqByBurstId.set(key,seq);
+      });
+
+      const validSeqs=new Set(segmentSeqByBurstId.values());
+      const canonicalBurstId=(value)=>{
+        const bid=Number(value);
+        if(!Number.isFinite(bid)) return null;
+        if(aliasBurstIds.has(bid)) return aliasBurstIds.get(bid);
+        return bid;
+      };
+
+      inflight.toolCalls.forEach(tc=>{
+        if(!tc) return;
+        if(tc.activityBurstId!==undefined&&tc.activityBurstId!==null){
+          const current=Number(tc.activityBurstId);
+          if(aliasBurstIds.has(current)) tc.activityBurstId=aliasBurstIds.get(current);
+        }
+        const segSeq=Number(tc.activitySegmentSeq);
+        if(Number.isFinite(segSeq)&&validSeqs.has(segSeq)) return;
+        const canonical=canonicalBurstId(tc.activityBurstId);
+        if(!Number.isFinite(canonical)){
+          if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+          return;
+        }
+        const mappedSeq=segmentSeqByBurstId.get(String(canonical));
+        if(Number.isFinite(mappedSeq)) tc.activitySegmentSeq=mappedSeq;
+        else if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+      });
+    }
+    return [...messages.slice(0,replaceStartIdx),...projected,...messages.slice(liveIdx+1)];
+  }
+  const projected=[];
+  let prev=0;
+  for(let i=0;i<visibleAnchors.length;i++){
+    const anchor=visibleAnchors[i];
+    const end=Math.max(prev,Math.min(text.length,anchor.textEnd));
+    const part=text.slice(prev,end).trim();
+    if(part) projected.push({...live,content:part,_activityBurstId:anchor.id});
+    else{
+      const fallbackAnchor = visibleAnchors[i+1] || visibleAnchors[i-1];
+      if(fallbackAnchor && Number.isFinite(anchor.id)&&Number.isFinite(fallbackAnchor.id)){
+        aliasBurstIds.set(anchor.id,fallbackAnchor.id);
+      }
+    }
+    prev=end;
+  }
+  const tail=text.slice(prev).trim();
+  if(tail) projected.push({...live,content:tail,_activityBurstId:Number(inflight.currentActivityBurstId||0)||0});
+  if(!projected.length) return messages;
+
+  const baselineSeq=Number(inflight.currentLiveSegmentSeq);
+  const existingSeqs=messages
+    .filter(m=>m&&m._live&&Number.isFinite(Number(m._liveSegmentSeq)))
+    .map(m=>Number(m._liveSegmentSeq));
+  const baseFromMessages=existingSeqs.length
+    ? existingSeqs.reduce((acc,n)=>Math.max(acc,n),-Infinity)
+    : 0;
+  const endSeq=(Number.isFinite(baselineSeq)&&baselineSeq>0)
+    ? baselineSeq
+    : (Number.isFinite(baseFromMessages)&&baseFromMessages>0)
+      ? baseFromMessages
+      : projected.length;
+  let firstSeq=endSeq-projected.length+1;
+  if(!Number.isFinite(firstSeq)||firstSeq<1) firstSeq=1;
+  projected.forEach((seg,i)=>{
+    const seq=firstSeq+i;
+    seg._liveSegmentSeq=seq;
+  });
+  if(Number.isFinite(firstSeq) && projected.length){
+    inflight.currentLiveSegmentSeq=projected[projected.length-1]._liveSegmentSeq;
+  }
+
+  const segmentSeqByBurstId=new Map();
+  projected.forEach(seg=>{
+    const bid=Number(seg&&seg._activityBurstId);
+    const seq=Number(seg&&seg._liveSegmentSeq);
+    if(!Number.isFinite(bid)||!Number.isFinite(seq)) return;
+    const key=String(bid);
+    const current=segmentSeqByBurstId.get(key);
+    if(current===undefined||seq>current) segmentSeqByBurstId.set(key,seq);
+  });
+
+  const canonicalBurstId = (value)=>{
+    const bid=Number(value);
+    if(!Number.isFinite(bid)) return null;
+    if(aliasBurstIds.has(bid)) return aliasBurstIds.get(bid);
+    return bid;
+  };
+
+  const validSeqs=new Set(segmentSeqByBurstId.values());
+
+  if(Array.isArray(inflight.toolCalls)){
+    inflight.toolCalls.forEach(tc=>{
+      if(!tc) return;
+      if(tc.activityBurstId!==undefined&&tc.activityBurstId!==null){
+        const current=Number(tc.activityBurstId);
+        if(aliasBurstIds.has(current)) tc.activityBurstId=aliasBurstIds.get(current);
+      }
+      const segSeq=Number(tc.activitySegmentSeq);
+      if(Number.isFinite(segSeq)&&validSeqs.has(segSeq)) return;
+      const canonical=canonicalBurstId(tc.activityBurstId);
+      if(!Number.isFinite(canonical)){
+        if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+        return;
+      }
+      const mappedSeq=segmentSeqByBurstId.get(String(canonical));
+      if(Number.isFinite(mappedSeq)) tc.activitySegmentSeq=mappedSeq;
+      else if(Number.isFinite(segSeq)) tc.activitySegmentSeq=undefined;
+    });
+  }
+  return [...messages.slice(0,replaceStartIdx),...projected,...messages.slice(liveIdx+1)];
+}
+
+function _prepareRunningLiveTail(baseMessages,inflightMessages){
+  const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
+  const liveMessages=inflight.filter(m=>m&&m.role==='assistant'&&m._live);
+  if(liveMessages.length>1) return liveMessages.some(m=>!!_messageComparableText(m));
+  const live=liveMessages[0]||null;
+  if(!live) return false;
+  const liveText=_messageComparableText(live);
+  const persistedText=_currentTurnAssistantText(baseMessages);
+  if(persistedText){
+    const compactPersisted=_compactTranscriptText(persistedText);
+    const compactLive=_compactTranscriptText(liveText);
+    if(!liveText || persistedText.startsWith(liveText)){
+      live.content=persistedText;
+    }else if(liveText.startsWith(persistedText)){
+      const extra=liveText.slice(persistedText.length).trim();
+      if(extra&&compactPersisted.includes(_compactTranscriptText(extra))){
+        live.content=persistedText;
+      }
+    }else if(compactPersisted===compactLive){
+      live.content=persistedText;
+    }
+  }
+  return !!_messageComparableText(live);
+}
+
 function _mergeInflightTailMessages(baseMessages, inflightMessages){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
-  let liveIdx=-1;
-  for(let i=inflight.length-1;i>=0;i--){
-    if(inflight[i]&&inflight[i]._live){liveIdx=i;break;}
+  let firstLiveIdx=-1;
+  for(let i=0;i<inflight.length;i++){
+    if(inflight[i]&&inflight[i]._live){firstLiveIdx=i;break;}
   }
-  if(liveIdx<0) return base;
-  let start=liveIdx;
-  if(liveIdx>0&&inflight[liveIdx-1]&&inflight[liveIdx-1].role==='user') start=liveIdx-1;
+  if(firstLiveIdx<0) return base;
+  let start=firstLiveIdx;
+  if(firstLiveIdx>0&&inflight[firstLiveIdx-1]&&inflight[firstLiveIdx-1].role==='user') start=firstLiveIdx-1;
   const tail=inflight.slice(start).filter(m=>m&&m.role);
   const merged=[...base];
   for(const msg of tail){
-    const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,msg));
-    if(!duplicate) merged.push(msg);
+    let candidate=msg;
+    if(!candidate) continue;
+    const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
+    if(!duplicate) merged.push(candidate);
   }
   return merged;
 }
@@ -1778,8 +2393,12 @@ async function _loadOlderMessages() {
     // Use $('messages') — the scrollable container (#msgInner is not scrollable).
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
+    const oldTop = container ? container.scrollTop : 0;
+    const viewportAnchor = (container && typeof _captureMessageViewportAnchor === 'function')
+      ? _captureMessageViewportAnchor()
+      : null;
     // Carry forward ephemeral turn fields (_turnUsage/_turnDuration/_turnTps/
-    // _gatewayRouting/_statusCard) before the wholesale replace so the badge
+    // _gatewayRouting/_statusCard/_anchor_stream_id) before the wholesale replace so the badge
     // does not briefly appear and disappear during older-message expansion.
     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
       nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
@@ -1789,28 +2408,42 @@ async function _loadOlderMessages() {
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
     // hidden and the "hidden" counter rises while the viewport appears stuck.
-    // Count roughly by the same visible-message rules used by renderMessages().
+    // Count by the same visible-message rules used by renderMessages(); the
+    // virtual fallback below uses this as a pixel-height prefix length.
     const addedRenderable = olderMsgs.filter(m=>{
+      if(typeof _messageIsRenderable==='function') return _messageIsRenderable(m);
       if(!m||!m.role||m.role==='tool') return false;
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m)) return false;
       if(typeof _isPreservedCompressionTaskListMessage==='function'&&_isPreservedCompressionTaskListMessage(m)) return false;
+      if(typeof _isRecoveryControlMessage==='function'&&_isRecoveryControlMessage(m)) return false;
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m)))));
+      const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+      return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m))||(typeof _assistantMessageHasVisibleContent==='function'&&_assistantMessageHasVisibleContent(m)))));
     }).length;
     _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
     renderMessages({ preserveScroll: true });
     if (container) {
-      // Prepending older messages must not teleport the reader. Preserve the
-      // currently visible viewport by adding the inserted height to scrollTop.
-      const oldTop = container.scrollTop;
-      const newScrollH = container.scrollHeight;
-      const addedHeight = Math.max(0, newScrollH - prevScrollH);
-      _programmaticScroll = true;
-      container.scrollTop = oldTop + addedHeight;
-      requestAnimationFrame(()=>{ _programmaticScroll = false; });
+      // Prepending older messages must not teleport the reader. Anchor to the
+      // first visible rendered row and restore that row's top offset after the
+      // prepend so synthetic virtual spacer heights cannot skew the delta.
+      const restoredViaAnchor = (viewportAnchor && typeof _restoreMessageViewportAnchor === 'function')
+        ? _restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)
+        : false;
+      if (!restoredViaAnchor) {
+        const virtualAddedHeight = (typeof _messageVirtualPrependedHeightDelta === 'function')
+          ? _messageVirtualPrependedHeightDelta(addedRenderable)
+          : null;
+        const newScrollH = container.scrollHeight;
+        const addedHeight = Number.isFinite(virtualAddedHeight)
+          ? virtualAddedHeight
+          : Math.max(0, newScrollH - prevScrollH);
+        _programmaticScroll = true;
+        container.scrollTop = oldTop + addedHeight;
+        requestAnimationFrame(()=>{ _programmaticScroll = false; });
+      }
     }
     _scrollPinned = false;
   } catch(e) {
@@ -1855,7 +2488,7 @@ async function _ensureAllMessagesLoaded() {
   _loadingOlder = true;
   try {
     const sid = S.session.session_id;
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) return;
     // Session may have been switched while we awaited. Bail rather than
@@ -1870,7 +2503,7 @@ async function _ensureAllMessagesLoaded() {
     // #3306: Same ephemeral-field carry-forward as _ensureMessagesLoaded.
     // Loading older messages also does a wholesale replace of S.messages
     // and would otherwise drop _turnUsage/_turnDuration/_turnTps/
-    // _gatewayRouting/_statusCard on the existing turns.
+    // _gatewayRouting/_statusCard/_anchor_stream_id on the existing turns.
     let _msgsToAssign = msgs;
     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
       _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
@@ -2124,7 +2757,7 @@ function toggleSessionSelect(sid){
   else _selectedSessions.add(sid);
   _updateBatchActionBar();
   const cb=document.querySelector('.session-select-cb[data-sid="'+sid+'"]');
-  const item=cb?cb.closest('.session-item'):null;
+  const item=cb?cb.closest('.session-item,.session-child-session-fork'):null;
   if(item){item.classList.toggle('selected',_selectedSessions.has(sid));if(cb)cb.checked=_selectedSessions.has(sid);}
 }
 function setSessionSelected(sid, selected){
@@ -2132,7 +2765,7 @@ function setSessionSelected(sid, selected){
   else _selectedSessions.delete(sid);
   _updateBatchActionBar();
   const cb=document.querySelector('.session-select-cb[data-sid="'+sid+'"]');
-  const item=cb?cb.closest('.session-item'):null;
+  const item=cb?cb.closest('.session-item,.session-child-session-fork'):null;
   if(item){item.classList.toggle('selected',_selectedSessions.has(sid));if(cb)cb.checked=_selectedSessions.has(sid);}
 }
 function selectAllSessions(){
@@ -2143,13 +2776,13 @@ function selectAllSessions(){
   ids.forEach(sid=>_selectedSessions.add(sid));
   document.querySelectorAll('.session-select-cb').forEach(cb=>{
     const sid=cb.dataset.sid;
-    if(sid){cb.checked=_selectedSessions.has(sid);const item=cb.closest('.session-item');if(item)item.classList.toggle('selected',_selectedSessions.has(sid));}
+    if(sid){cb.checked=_selectedSessions.has(sid);const item=cb.closest('.session-item,.session-child-session-fork');if(item)item.classList.toggle('selected',_selectedSessions.has(sid));}
   });
   _updateBatchActionBar();
 }
 function deselectAllSessions(){
   _selectedSessions.clear();
-  document.querySelectorAll('.session-select-cb').forEach(cb=>{cb.checked=false;const item=cb.closest('.session-item');if(item)item.classList.remove('selected');});
+  document.querySelectorAll('.session-select-cb').forEach(cb=>{cb.checked=false;const item=cb.closest('.session-item,.session-child-session-fork');if(item)item.classList.remove('selected');});
   _updateBatchActionBar();
 }
 function _updateBatchActionBar(){
@@ -2256,7 +2889,7 @@ function closeSessionActionMenu(){
     if(_sessionActionAnchor.classList&&_sessionActionAnchor.classList.contains('session-actions-trigger')){
       _sessionActionAnchor.classList.remove('active');
     }
-    const row=_sessionActionAnchor.closest('.session-item');
+    const row=_sessionActionAnchor.closest('.session-item,.session-child-session');
     if(row) row.classList.remove('menu-open','long-pressing');
     _sessionActionAnchor = null;
   }
@@ -2375,10 +3008,87 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   _sessionActionAnchor = anchorEl;
   _sessionActionSessionId = session.session_id;
   if(anchorEl.classList&&anchorEl.classList.contains('session-actions-trigger')) anchorEl.classList.add('active');
-  const row=anchorEl.closest('.session-item');
+  const row=anchorEl.closest('.session-item,.session-child-session');
   if(row) row.classList.add('menu-open');
   _positionSessionActionMenu(anchorEl);
   _playSessionActionMenuEntrance(menu);
+}
+
+function _findSessionRenameRow(sessionId){
+  const sid=String(sessionId||'');
+  if(!sid) return null;
+  return document.querySelector('.session-item[data-sid="'+sid+'"], .session-child-session[data-sid="'+sid+'"]');
+}
+
+function _buildSessionRenameStarter(session, displayEl, renderDisplay){
+  return ()=>{
+    if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be renamed.',3000); return; }
+    if(_loadingSessionId&&_loadingSessionId!==session.session_id) return;
+
+    closeSessionActionMenu();
+    _renamingSid=session.session_id;
+    const oldTitle=_sessionDisplayTitle(session)||'Untitled';
+    const inp=document.createElement('input');
+    inp.className='session-title-input';
+    inp.value=oldTitle;
+    ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
+      inp.addEventListener(ev, e2=>e2.stopPropagation())
+    );
+    const applyLocalTitle=(target, nextTitle)=>{
+      if(!target) return;
+      target.title=nextTitle;
+      target.display_title=nextTitle;
+      target._state_db_title=nextTitle;
+    };
+    const applyTitle=(nextTitle, updateDom=true)=>{
+      applyLocalTitle(session, nextTitle);
+      const cached=_allSessions.find(item=>item&&item.session_id===session.session_id);
+      applyLocalTitle(cached, nextTitle);
+      if(S.session&&S.session.session_id===session.session_id){applyLocalTitle(S.session, nextTitle);syncTopbar();}
+      if(updateDom) renderDisplay(_sessionDisplayTitle(session), session);
+    };
+    let finishDone=false;
+    const finish=async(save)=>{
+      if(finishDone) return;
+      finishDone=true;
+      const releaseRename=()=>{
+        _renamingSid=null;
+        if(inp.isConnected) inp.replaceWith(displayEl);
+        setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
+      };
+      if(!save){
+        applyTitle(oldTitle,false);
+        releaseRename();
+        return;
+      }
+      const newTitle=inp.value.trim()||'Untitled';
+      try{
+        if(newTitle!==oldTitle){
+          await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:session.session_id,title:newTitle})});
+        }
+        applyTitle(newTitle);
+      }catch(err){
+        applyTitle(oldTitle,false);
+        const msg='Rename failed: '+(err&&err.message?err.message:String(err));
+        setStatus(msg);
+        if(typeof showToast==='function') showToast(msg,3000,'error');
+      }finally{
+        releaseRename();
+      }
+    };
+    inp.onkeydown=e2=>{
+      if(e2.key==='Enter'){
+        if(window._isImeEnter&&window._isImeEnter(e2)){return;}
+        e2.preventDefault();
+        e2.stopPropagation();
+        finish(true);
+      }
+      if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
+    };
+    inp.onblur=()=>{ if(_renamingSid===session.session_id) finish(true); };
+    displayEl.replaceWith(inp);
+    setTimeout(()=>{inp.focus();inp.select();},10);
+  };
 }
 
 function _appendSessionCopyLinkAction(menu, session){
@@ -2487,7 +3197,7 @@ function _openSessionActionMenu(session, anchorEl){
         // Falls back to a no-op toast if the row isn't currently rendered
         // (e.g. archived-and-hidden) — extremely rare since the menu only
         // opens from a visible row's three-dot button.
-        const row=document.querySelector('.session-item[data-sid="'+session.session_id+'"]');
+        const row=_findSessionRenameRow(session.session_id);
         if(row && typeof row._startRename === 'function'){
           row._startRename();
         } else if(typeof showToast==='function'){
@@ -2566,39 +3276,33 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
-  // Title regeneration matches the backend guard (api/routes.py rejects
-  // read_only OR is_imported with 403). read_only sessions already bailed at
-  // the isReadOnly early-return above; skip imported sessions here so the
-  // action is hidden rather than failing with a 403 toast. This keeps the
-  // is_imported gate scoped to regenerate instead of broadening the shared
-  // _isReadOnlySession() helper (which gates rename/pin/archive/etc.).
-  if(!session.is_imported){
-    menu.appendChild(_buildSessionAction(
-      t('session_title_regenerate'),
-      t('session_title_regenerate_desc'),
-      ICONS.spark,
-      async()=>{
-        closeSessionActionMenu();
-        try{
-          if(typeof showToast==='function') showToast(t('session_title_regenerating'), 1600);
-          const response=await api('/api/session/title/regenerate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
-          const nextTitle=(response&&response.title)||(response&&response.session&&response.session.title)||'';
-          if(nextTitle){
-            session.title=nextTitle;
-            const cached=(_allSessions||[]).find(item=>item&&item.session_id===session.session_id);
-            if(cached) cached.title=nextTitle;
-            if(S.session&&S.session.session_id===session.session_id){S.session.title=nextTitle;syncTopbar();}
-            renderSessionListFromCache();
-          }
-          if(typeof showToast==='function') showToast(t('session_title_regenerated', nextTitle||t('untitled')), 2400);
-        }catch(err){
-          const msg=t('session_title_regenerate_failed')+(err&&err.message?err.message:String(err));
-          setStatus(msg);
-          if(typeof showToast==='function') showToast(msg,3000,'error');
+  // Title regeneration stays available for writable imported sessions.
+  // Read-only sessions return earlier through the shared action-menu guard.
+  menu.appendChild(_buildSessionAction(
+    t('session_title_regenerate'),
+    t('session_title_regenerate_desc'),
+    ICONS.spark,
+    async()=>{
+      closeSessionActionMenu();
+      try{
+        if(typeof showToast==='function') showToast(t('session_title_regenerating'), 1600);
+        const response=await api('/api/session/title/regenerate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
+        const nextTitle=(response&&response.title)||(response&&response.session&&response.session.title)||'';
+        if(nextTitle){
+          session.title=nextTitle;
+          const cached=(_allSessions||[]).find(item=>item&&item.session_id===session.session_id);
+          if(cached) cached.title=nextTitle;
+          if(S.session&&S.session.session_id===session.session_id){S.session.title=nextTitle;syncTopbar();}
+          renderSessionListFromCache();
         }
+        if(typeof showToast==='function') showToast(t('session_title_regenerated', nextTitle||t('untitled')), 2400);
+      }catch(err){
+        const msg=t('session_title_regenerate_failed')+(err&&err.message?err.message:String(err));
+        setStatus(msg);
+        if(typeof showToast==='function') showToast(msg,3000,'error');
       }
-    ));
-  }
+    }
+  ));
   if(!isExternalSession){
     if(session.worktree_path){
       menu.appendChild(_buildSessionAction(
@@ -2824,7 +3528,7 @@ function _applySessionListPayload(sessData, projData){
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
   _syncSessionAttentionSoundState(_allSessions);
-  _clearLineageReportCache();
+  _pruneLineageReportCacheToVisibleSessions(_allSessions);
   _allProjects = projData.projects||[];
   _markPollingCompletionUnreadTransitions(_allSessions);
   const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
@@ -2964,6 +3668,11 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   if(_activeSessionExternalRefreshInFlight) return;
   if(!S.session || !S.session.session_id) return;
   if(S.busy || S.activeStreamId) return;
+  if(!_isExternalSession(S.session)) return;
+  // Cooldown: don't force-reload immediately after streaming ends — the
+  // "done" event already delivered the final messages. Reloading here would
+  // clear S.toolCalls and lose Activity.
+  if(typeof window !== 'undefined' && window._streamJustFinished) return;
   if(typeof document !== 'undefined' && document.hidden) return;
   const sid = S.session.session_id;
   const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
@@ -3032,6 +3741,69 @@ function _scheduleSessionEventsRefresh(reason){
   }, 300);
 }
 
+// ── #4151: focus-aware close for the two GLOBAL sidebar SSE streams ──────────
+// Each WebUI window holds up to three persistent SSE connections (session-events
+// + gateway + the per-session stream). #3992/#3996 close them on the Page
+// Visibility API (`visibilitychange` / `document.hidden`) so a hidden tab frees
+// HTTP/1.1 pool slots. But a PWA *standalone* window does NOT reliably fire
+// `visibilitychange` when it merely loses focus to another window of the same
+// app — `document.hidden` only flips on minimize. So two side-by-side PWA windows
+// both stay `visibilityState==='visible'`, each keeps its sidebar streams open,
+// and 2x3 = 6 = the per-origin HTTP/1.1 connection limit; every later fetch()
+// (the 30s polls) queues behind the saturated pool and times out (#4151).
+// `document.hasFocus()` is the signal `visibilitychange` misses — only one window
+// holds focus at a time.
+//
+// Scope: ONLY the two global sidebar streams (session-events + gateway). The
+// per-session live stream (messages.js `startSessionStream`) deliberately stays
+// visibility-only — it carries live `bg_task_complete` toasts and
+// `server_turn_started` live-view that an unfocused-but-VISIBLE window must still
+// receive (the OS-notification path is gated on `document.hidden`, so the in-app
+// toast is the only completion signal a visible-unfocused window gets). Closing
+// it on blur would regress the multi-window live-view UX.
+function _sidebarSseBackgrounded(){
+  if(typeof document === 'undefined') return false;
+  if(document.hidden) return true;
+  if(typeof document.hasFocus === 'function' && !document.hasFocus()) return true;
+  return false;
+}
+
+let _sidebarSseBlurCloseTimer = 0;
+// Debounce the blur-close so a transient blur (native dialog, quick alt-tab and
+// back) doesn't thrash the streams; a sustained blur frees the pool slots.
+const _SIDEBAR_SSE_BLUR_CLOSE_MS = 1000;
+
+function _installSidebarSseFocusHook(){
+  if(typeof window === 'undefined' || typeof document === 'undefined') return;
+  if(document._hermesSidebarSseFocusHook) return;
+  document._hermesSidebarSseFocusHook = true;
+  window.addEventListener('blur', () => {
+    if(_sidebarSseBlurCloseTimer) return;
+    _sidebarSseBlurCloseTimer = setTimeout(() => {
+      _sidebarSseBlurCloseTimer = 0;
+      // Re-check at fire time — focus may have returned during the debounce.
+      if(_sidebarSseBackgrounded()){
+        _closeSessionEventsSSE();
+        stopGatewaySSE();
+      }
+    }, _SIDEBAR_SSE_BLUR_CLOSE_MS);
+  });
+  window.addEventListener('focus', () => {
+    if(_sidebarSseBlurCloseTimer){ clearTimeout(_sidebarSseBlurCloseTimer); _sidebarSseBlurCloseTimer = 0; }
+    // Reopen and catch up on anything missed while blurred. ensureSessionEventsSSE()
+    // is idempotent (`if(_sessionEventsSSE) return`), but startGatewaySSE() is NOT — it
+    // begins with an unconditional stopGatewaySSE(). So only reopen the gateway when it
+    // was actually closed; otherwise a transient blur shorter than the debounce (where
+    // the blur-close timer was cleared and the stream was never torn down) would
+    // drop+reconnect the live gateway on every window switch, cancelling its poll
+    // fallback and resetting probe/warning state — the exact thrash the debounce exists
+    // to prevent, in the multi-window scenario this fix targets (#4151).
+    ensureSessionEventsSSE();
+    if(!_gatewaySSE) startGatewaySSE();
+    void refreshSessionList('focus');
+  });
+}
+
 function _closeSessionEventsSSE(){
   if(_sessionEventsSSE){
     _sessionEventsSSE.close();
@@ -3051,8 +3823,9 @@ function ensureSessionEventsSSE(){
     });
     document._hermesSessionEventsVisibilityHook = true;
   }
+  _installSidebarSseFocusHook();
   if(typeof EventSource==='undefined') return;
-  if(typeof document !== 'undefined' && document.hidden) return;
+  if(_sidebarSseBackgrounded()) return;
   if(_sessionEventsSSE) return;
   try{
     // Same-origin relative URL preserves subpath mounts and normal WebUI cookies.
@@ -3164,6 +3937,21 @@ async function probeGatewaySSEStatus(){
 function startGatewaySSE(){
   stopGatewaySSE();
   if(!window._showCliSessions) return;
+  // Visibility hook (install once) — mirror ensureSessionEventsSSE() pattern
+  if(typeof document !== 'undefined' && !document._hermesGatewaySSEVisibilityHook){
+    document.addEventListener('visibilitychange', () => {
+      if(document.hidden){
+        stopGatewaySSE();
+      }else{
+        void startGatewaySSE();
+      }
+    });
+    document._hermesGatewaySSEVisibilityHook = true;
+  }
+  _installSidebarSseFocusHook();
+  // Don't open when tab is hidden OR the window has lost focus (PWA blur) —
+  // saves connection pool slots (#4151).
+  if(_sidebarSseBackgrounded()) return;
   try{
     _gatewaySSE = new EventSource('api/sessions/gateway/stream');
     _gatewaySSE.addEventListener('sessions_changed', (ev) => {
@@ -3194,7 +3982,8 @@ function startGatewaySSE(){
                     if (next.length < prev) return;
                     if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;
                     // Carry forward ephemeral turn fields (_turnUsage/
-                    // _turnDuration/_turnTps/_gatewayRouting/_statusCard) so
+                    // _turnDuration/_turnTps/_gatewayRouting/_statusCard/
+                    // _anchor_stream_id) so
                     // gateway-driven CLI refreshes do not drop the badge.
                     let _nextToAssign = next;
                     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
@@ -3558,6 +4347,10 @@ function _isChildSession(s){
   return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');
 }
 
+function _isForkWithResolvableParent(s, sessionIdsInList){
+  return !!(s&&s.session_source==='fork'&&s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(s.parent_session_id));
+}
+
 function _sessionLineageKey(s, sessionIdsInList, sessionsById){
   if(!s||!s.session_id) return null;
   if(_isChildSession(s)) return null;
@@ -3605,7 +4398,7 @@ function _resolveSessionIdFromSidebarLineage(sid){
   const candidates=[];
   for(const row of visibleRows){
     if(!row||!row.session_id) continue;
-    if(row.session_source==='fork'||row.relationship_type==='child_session') continue;
+    if(row.relationship_type==='child_session') continue;
     const lineageLike=!!(
       row._lineage_key||row._lineage_root_id||row.lineage_root_id||
       row._compression_segment_count||row.pre_compression_snapshot||
@@ -3644,6 +4437,35 @@ function _clearLineageReportCache(){
   _lineageReportCache.clear();
   _lineageReportInflight.clear();
   _lineageReportCacheGeneration++;
+}
+
+function _pruneLineageReportCacheToVisibleSessions(sessions){
+  const visibleKeys=new Set();
+  const rows=Array.isArray(sessions)?sessions:[];
+  for(const s of rows){
+    const key=_sidebarLineageKeyForRow(s);
+    if(key) visibleKeys.add(key);
+  }
+  // Also retain the cache keys derived from the COLLAPSED/rendered rows. The
+  // render loop keys the lineage-report cache by _sidebarLineageKeyForRow on
+  // the COLLAPSED row (see renderSessionListFromCache), and collapse can merge
+  // segments so a collapsed row's key differs from any single raw input row's
+  // key. Mirroring the precedent in _resolveSessionIdFromSidebarLineage, fold
+  // the collapsed rows' keys in so a still-visible expanded row is never evicted
+  // (and re-fetched every payload) on a chain the raw keys alone wouldn't cover.
+  try{
+    for(const row of _collapseSessionLineageForSidebar(rows)){
+      if(!row||_isChildSession(row)) continue;
+      const key=_lineageReportCacheKey(row,_sidebarLineageKeyForRow(row));
+      if(key) visibleKeys.add(key);
+    }
+  }catch(_){ /* defensive: never let a prune-key derivation break list apply */ }
+  for(const key of Array.from(_lineageReportCache.keys())){
+    if(!visibleKeys.has(key)) _lineageReportCache.delete(key);
+  }
+  for(const key of Array.from(_lineageReportInflight.keys())){
+    if(!visibleKeys.has(key)) _lineageReportInflight.delete(key);
+  }
 }
 
 function _lineageReportCacheKey(s,lineageKey){
@@ -3690,14 +4512,16 @@ function _fetchLineageReportForRow(s,lineageKey){
   let request;
   request=api('/api/session/lineage/report?session_id='+encodeURIComponent(s.session_id))
     .then(report=>{
-      if(generation===_lineageReportCacheGeneration){
+      if(generation===_lineageReportCacheGeneration&&_lineageReportInflight.get(key)===request){
         _lineageReportCache.set(key,(report&&report.found!==false)?report:{error:true});
       }
       return report;
     })
     .catch(err=>{
       console.warn('lineage report',err);
-      if(generation===_lineageReportCacheGeneration) _lineageReportCache.set(key,{error:true});
+      if(generation===_lineageReportCacheGeneration&&_lineageReportInflight.get(key)===request){
+        _lineageReportCache.set(key,{error:true});
+      }
       return null;
     })
     .finally(()=>{
@@ -3709,6 +4533,7 @@ function _fetchLineageReportForRow(s,lineageKey){
 
 function _sidebarLineageKeyForRow(s){
   if(!s) return null;
+  if(s.session_source==='fork') return s.session_id||s.parent_session_id||null;
   return s._lineage_key||s._lineage_root_id||s.lineage_root_id||s.parent_session_id||s.session_id||null;
 }
 
@@ -3767,10 +4592,49 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
 }
 
 function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
-  const rows=(collapsedRows||[]).filter(s=>!_isChildSession(s)).map(s=>({...s}));
+  const sessionIdsInList=new Set((rawSessions||[]).map(s=>s&&s.session_id).filter(Boolean));
+  const rawSessionsById=new Map((rawSessions||[]).filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
+  const rows=(collapsedRows||[])
+    .filter(s=>!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList)))
+    .map(s=>({...s}));
+  const isChildStreaming=(childRow)=>typeof _isSessionEffectivelyStreaming==='function'
+    ? _isSessionEffectivelyStreaming(childRow)
+    : !!(childRow&&(childRow.active_stream_id||childRow.pending_user_message));
+  const childHasUnread=(childRow)=>typeof _hasUnreadForSession==='function'
+    ? _hasUnreadForSession(childRow)
+    : !!(childRow&&childRow.has_unread);
+  const bubbleSidebarState=(parentRow, childRow)=>{
+    if(isChildStreaming(childRow)) parentRow._child_session_streaming=true;
+    if(childHasUnread(childRow)) parentRow._child_session_has_unread=true;
+    const childAttention=childRow&&childRow.attention&&typeof childRow.attention==='object'?childRow.attention:null;
+    if(!childAttention||!childAttention.kind||!Number.isFinite(Number(childAttention.count))||Number(childAttention.count)<=0) return;
+    const priorityFor=(kind)=>kind==='approval'?3:(kind==='clarify'?2:1);
+    const current=parentRow._child_session_attention&&typeof parentRow._child_session_attention==='object'
+      ? parentRow._child_session_attention
+      : null;
+    const nextPriority=priorityFor(String(childAttention.kind));
+    const currentPriority=current?priorityFor(String(current.kind)):0;
+    if(!current||nextPriority>currentPriority||(nextPriority===currentPriority&&Number(childAttention.count||0)>Number(current.count||0))){
+      parentRow._child_session_attention={...childAttention};
+    }
+  };
   const visibleBySid=new Map();
   const visibleBySegmentSid=new Map();
   const visibleByLineageKey=new Map();
+  const attachDepthCache=new Map();
+  const attachDepthFor=(session, seen=new Set())=>{
+    if(!session||!session.session_id) return 0;
+    if(attachDepthCache.has(session.session_id)) return attachDepthCache.get(session.session_id);
+    if(seen.has(session.session_id)) return 0;
+    seen.add(session.session_id);
+    const parent=session.parent_session_id&&rawSessionsById.get(session.parent_session_id);
+    let depth=0;
+    if(parent&&(_isChildSession(session)||(_isForkWithResolvableParent(session, sessionIdsInList)&&!(session&&session.pinned)))){
+      depth=1+attachDepthFor(parent, seen);
+    }
+    attachDepthCache.set(session.session_id, depth);
+    return depth;
+  };
   for(const row of rows){
     if(row&&row.session_id) visibleBySid.set(row.session_id,row);
     const lineageKey=_sidebarLineageKeyForRow(row);
@@ -3780,9 +4644,11 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
     }
   }
   const orphans=[];
-  for(const child of rawSessions||[]){
-    if(!_isChildSession(child)) continue;
-    if(child._cross_surface_child_session){
+  const attachQueue=[...(rawSessions||[])].sort((a,b)=>attachDepthFor(a)-attachDepthFor(b));
+  for(const child of attachQueue){
+    const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList)&&!(child&&child.pinned);
+    if(!_isChildSession(child)&&!isForkChild) continue;
+    if(!isForkChild&&child._cross_surface_child_session){
       orphans.push({...child,_orphan_child_session:true});
       continue;
     }
@@ -3806,6 +4672,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
       }
       parentRow._child_sessions.push(childCopy);
       parentRow._child_session_count=parentRow._child_sessions.length;
+      bubbleSidebarState(parentRow, childCopy);
+      visibleBySegmentSid.set(childCopy.session_id,{row: parentRow, seg: childCopy});
     } else {
       orphans.push({...child,_orphan_child_session:true});
     }
@@ -3877,7 +4745,7 @@ function _sessionTitleIsDefaultWebUI(rawTitle){
 
 function _sessionTitleTags(rawTitle){
   if(_sessionTitleIsDefaultWebUI(rawTitle)) return [];
-  return String(rawTitle||'').match(/#[\w-]+/g)||[];
+  return String(rawTitle||'').match(/#(?!\d+\b)[\w-]+/g)||[];
 }
 
 function _activeSessionIdForSidebar(){
@@ -4093,6 +4961,90 @@ function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtual
   });
 }
 
+// Top-level so BOTH the sidebar visibility predicate (_sidebarRowHasVisibleMessages,
+// reached via renderSessionListFromCache -> _partitionSidebarSessionRows) and the
+// per-row renderer (_renderOneSession, nested in renderSessionListFromCache) can call
+// it. It was previously declared INSIDE renderSessionListFromCache and relied on
+// function hoisting — but hoisting is scoped to the enclosing function, so the
+// top-level _sidebarRowHasVisibleMessages threw "ReferenceError: _sessionAttentionState
+// is not defined" on every cache render, crashing the sidebar (#3696, regressed in
+// #3672 when _sidebarRowHasVisibleMessages was extracted to top level). Pure function
+// (only its arg `s` plus the i18n global `t`), so hoisting it is safe.
+function _sessionAttentionState(s){
+  const attention=s&&s.attention&&typeof s.attention==='object'?s.attention:null;
+  if(!attention||!attention.kind||!Number.isFinite(Number(attention.count))||Number(attention.count)<=0)return null;
+  const kind=String(attention.kind)==='approval'?'approval':(String(attention.kind)==='clarify'?'clarify':'attention');
+  const count=Math.max(1,Number(attention.count)||1);
+  const labelKey=kind==='approval'?'session_attention_approval':(kind==='clarify'?'session_attention_clarify':'session_attention_generic');
+  const titleKey=kind==='approval'?'session_attention_approval_title':(kind==='clarify'?'session_attention_clarify_title':'session_attention_generic_title');
+  const fallback=kind==='approval'?(count===1?'Approval':`${count} approvals`):(kind==='clarify'?(count===1?'Question':`${count} questions`):(count===1?'Attention':`${count} items`));
+  const titleFallback=kind==='approval'?'Waiting for permission decision':(kind==='clarify'?'Waiting for your answer':'Waiting for user action');
+  const label=(typeof t==='function')?t(labelKey,count):fallback;
+  const title=(typeof t==='function')?t(titleKey,count):titleFallback;
+  return {kind,count,severity:String(attention.severity||''),label,title};
+}
+
+function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
+  return (s.message_count||0)>0 ||
+    _sessionAttentionState(s) ||
+    _isSessionEffectivelyStreaming(s) ||
+    !!s.active_stream_id ||
+    !!s.pending_user_message ||
+    (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
+    (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
+}
+
+function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
+  let cliSessionCount=0;
+  const webuiProfileFiltered=[];
+  const cliProfileFiltered=[];
+  const webuiSessionsRaw=[];
+  const cliSessionsRaw=[];
+  let webuiArchivedCount=0;
+  let cliArchivedCount=0;
+  for(const s of allMatched){
+    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
+    const isCli=_isCliSession(s);
+    if(isCli) cliSessionCount++;
+    if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
+    const profileFiltered=isCli ? cliProfileFiltered : webuiProfileFiltered;
+    const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;
+    profileFiltered.push(s);
+    if(_activeProject===NO_PROJECT_FILTER){
+      if(s.project_id) continue;
+    } else if(_activeProject){
+      if(s.project_id!==_activeProject) continue;
+    }
+    if(s.archived){
+      if(isCli) cliArchivedCount++;
+      else webuiArchivedCount++;
+    }
+    if(!_showArchived&&s.archived) continue;
+    sessionsRaw.push(s);
+  }
+  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
+    _sessionSourceFilter='webui';
+  }
+  const showCliOnly=_sessionSourceFilter==='cli';
+  return {
+    cliSessionCount,
+    profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered,
+    sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw,
+    archivedCount: showCliOnly ? cliArchivedCount : webuiArchivedCount,
+    webuiSessionsRaw,
+    cliSessionsRaw,
+  };
+}
+
+function _renderSidebarRowsFromRawSessions(sessionsRaw){
+  return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
+}
+
+function _countRenderedSidebarRowsFromRawSessions(sessionsRaw){
+  // Keep inactive-tab chip counts on the exact same top-level row path as render.
+  return _renderSidebarRowsFromRawSessions(sessionsRaw).length;
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -4115,49 +5067,22 @@ function renderSessionListFromCache(){
   // session id into another conversation, that content hit should still appear.
   const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
   const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
-  // Keep inactive ephemeral 0-message sessions out of the sidebar — they only
-  // become real once the first message is sent. The server already filters them.
-  // Exception: the active freshly-created chat is injected above so it remains
-  // visible/selected until the user sends the first turn or switches away.
-  const withMessages=allMatched.filter(s=>
-    (s.message_count||0)>0 ||
-    _sessionAttentionState(s) ||
-    _isSessionEffectivelyStreaming(s) ||
-    !!s.active_stream_id ||
-    !!s.pending_user_message ||
-    (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
-    (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0)
-  );
-  const webuiSessionCount = withMessages.filter(s=>!_isCliSession(s)).length;
-  const cliSessionCount = withMessages.filter(s=>_isCliSession(s)).length;
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
-    _sessionSourceFilter='webui';
-  }
-  const sourceFiltered = _sessionSourceFilter==='cli'
-    ? withMessages.filter(s=>_isCliSession(s))
-    : withMessages.filter(s=>!_isCliSession(s));
-  // The server is authoritative for profile scoping (#1611): it filters by
-  // active profile when no query param is set, and returns the aggregate when
-  // we send ?all_profiles=1. The renamed-root cross-alias (a row tagged
-  // 'default' matching active 'kinni' when kinni.is_default) lives server-side
-  // in _profiles_match, and a strict-equality client filter would reject those
-  // rows incorrectly. So we trust the wire data and skip the redundant client
-  // filter entirely.
-  const profileFiltered=sourceFiltered.filter(s=>
-    !s.default_hidden||(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)
-  );
-  // Filter by active project. NO_PROJECT_FILTER sentinel asks for sessions
-  // with no project_id; otherwise filter to the matching project_id, or
-  // pass through when no filter is active.
-  const projectFiltered=
-    _activeProject===NO_PROJECT_FILTER
-      ?profileFiltered.filter(s=>!s.project_id)
-      :(_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered);
-  // Filter archived unless toggle is on
-  const sessionsRaw=_showArchived?projectFiltered:projectFiltered.filter(s=>!s.archived);
-  const sessions=_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
+  const {
+    cliSessionCount,
+    profileFiltered,
+    sessionsRaw,
+    archivedCount,
+    webuiSessionsRaw,
+    cliSessionsRaw,
+  }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw);
+  const renderedWebuiSessionCount=_sessionSourceFilter==='webui'
+    ? sessions.length
+    : _countRenderedSidebarRowsFromRawSessions(webuiSessionsRaw);
+  const renderedCliSessionCount=_sessionSourceFilter==='cli'
+    ? sessions.length
+    : _countRenderedSidebarRowsFromRawSessions(cliSessionsRaw);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
-  const archivedCount=projectFiltered.filter(s=>s.archived).length;
   const list=$('sessionList');
   const animateRefresh=_sessionListRefreshAnimationPending;
   _sessionListRefreshAnimationPending=false;
@@ -4191,7 +5116,7 @@ function renderSessionListFromCache(){
     const sourceTabs=document.createElement('div');
     sourceTabs.className='session-source-tabs';
     for(const filter of ['webui','cli']){
-      const count=filter==='cli'?cliSessionCount:webuiSessionCount;
+      const count=filter==='cli'?renderedCliSessionCount:renderedWebuiSessionCount;
       const btn=document.createElement('button');
       btn.type='button';
       btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
@@ -4245,6 +5170,50 @@ function renderSessionListFromCache(){
       };
       chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
       chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
+      // Touch long-press → context menu (mobile UX: project chips can only be
+      // deleted via the right-click menu, which has no touch equivalent).
+      let _lpTimer=null;
+      let _lpHandled=false;
+      let _lpStartX=0,_lpStartY=0;
+      chip.addEventListener('touchstart',(e)=>{
+        const t=e.changedTouches&&e.changedTouches[0];
+        if(!t) return;
+        // Clear any in-flight timer before scheduling a new one, mirroring the
+        // session-item long-press path (_clearLongPressTimer). Without this a
+        // second finger / stray touchstart orphans the prior timer, which then
+        // fires unsuppressed ~500ms later and pops the menu after the gesture
+        // was cancelled.
+        if(_lpTimer){clearTimeout(_lpTimer);_lpTimer=null;}
+        _lpHandled=false;_lpStartX=t.clientX;_lpStartY=t.clientY;
+        chip.classList.add('long-pressing');
+        _lpTimer=setTimeout(()=>{
+          _lpTimer=null;
+          if(_lpHandled) return;  // already consumed by another gesture — stale fire is a no-op
+          _lpHandled=true;
+          chip.classList.remove('long-pressing');
+          clearTimeout(_pClickTimer);_pClickTimer=null;
+          const syn={clientX:t.clientX,clientY:t.clientY,preventDefault:()=>{}};
+          _showProjectContextMenu(syn,p,chip);
+        },500);
+      },{passive:true});
+      chip.addEventListener('touchmove',(e)=>{
+        if(!_lpTimer) return;
+        const t=e.changedTouches&&e.changedTouches[0];
+        if(!t) return;
+        if(Math.abs(t.clientX-_lpStartX)>10||Math.abs(t.clientY-_lpStartY)>10){
+          clearTimeout(_lpTimer);_lpTimer=null;
+          chip.classList.remove('long-pressing');
+        }
+      },{passive:true});
+      chip.addEventListener('touchend',(e)=>{
+        clearTimeout(_lpTimer);_lpTimer=null;
+        chip.classList.remove('long-pressing');
+        if(_lpHandled){e.preventDefault();e.stopPropagation();}
+      },{passive:false});
+      chip.addEventListener('touchcancel',()=>{
+        clearTimeout(_lpTimer);_lpTimer=null;_lpHandled=false;
+        chip.classList.remove('long-pressing');
+      },{passive:true});
       bar.appendChild(chip);
     }
     // Create button
@@ -4324,6 +5293,17 @@ function renderSessionListFromCache(){
     for(const s of g.items){ flatSessionRows.push({group:g,session:s}); }
   }
   _sessionVisibleSidebarIds=flatSessionRows.map(row=>row.session&&row.session.session_id).filter(Boolean);
+  for(const row of flatSessionRows){
+    const s=row.session;
+    if(!s||!Array.isArray(s._child_sessions)) continue;
+    const key=_sidebarLineageKeyForRow(s);
+    if(!_expandedChildSessionKeys.has(key)&&!searchQueryRaw) continue;
+    for(const child of s._child_sessions){
+      if(child&&child.session_source==='fork'&&child.session_id&&!_isReadOnlySession(child)){
+        _sessionVisibleSidebarIds.push(child.session_id);
+      }
+    }
+  }
   _ensureSessionVirtualScrollHandler(list);
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
   const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
@@ -4431,29 +5411,16 @@ function renderSessionListFromCache(){
   const reflowTimeout=animateRefresh?SESSION_LIST_FLIP_TIMEOUT_MS:SESSION_REFLOW_TIMEOUT_MS;
   _pendingSessionReflowPositions=null;
   _playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);
-  // Note: declared after the groups loop but available via function hoisting.
-  function _sessionAttentionState(s){
-    const attention=s&&s.attention&&typeof s.attention==='object'?s.attention:null;
-    if(!attention||!attention.kind||!Number.isFinite(Number(attention.count))||Number(attention.count)<=0)return null;
-    const kind=String(attention.kind)==='approval'?'approval':(String(attention.kind)==='clarify'?'clarify':'attention');
-    const count=Math.max(1,Number(attention.count)||1);
-    const labelKey=kind==='approval'?'session_attention_approval':(kind==='clarify'?'session_attention_clarify':'session_attention_generic');
-    const titleKey=kind==='approval'?'session_attention_approval_title':(kind==='clarify'?'session_attention_clarify_title':'session_attention_generic_title');
-    const fallback=kind==='approval'?(count===1?'Approval':`${count} approvals`):(kind==='clarify'?(count===1?'Question':`${count} questions`):(count===1?'Attention':`${count} items`));
-    const titleFallback=kind==='approval'?'Waiting for permission decision':(kind==='clarify'?'Waiting for your answer':'Waiting for user action');
-    const label=(typeof t==='function')?t(labelKey,count):fallback;
-    const title=(typeof t==='function')?t(titleKey,count):titleFallback;
-    return {kind,count,severity:String(attention.severity||''),label,title};
-  }
 
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
-    const isStreaming=_isSessionEffectivelyStreaming(s);
-    _rememberRenderedStreamingState(s, isStreaming);
+    const ownStreaming=_isSessionEffectivelyStreaming(s);
+    const isStreaming=ownStreaming||!!s._child_session_streaming;
+    _rememberRenderedStreamingState(s, ownStreaming);
     _rememberRenderedSessionSnapshot(s);
-    const hasUnread=_hasUnreadForSession(s)&&!isActive;
-    const attention=_sessionAttentionState(s);
+    const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
+    const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
@@ -4479,7 +5446,7 @@ function renderSessionListFromCache(){
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=_sessionDisplayTitle(s);
     const tags=_sessionTitleTags(rawTitle);
-    let cleanTitle=tags.length?rawTitle.replace(/#[\w-]+/g,'').trim():rawTitle;
+    let cleanTitle=tags.length?rawTitle.replace(/#(?!\d+\b)[\w-]+/g,'').trim():rawTitle;
     // Guard: system prompt content must never surface as a visible session title
     if(cleanTitle.startsWith('[SYSTEM:')){
       cleanTitle='Session';
@@ -4562,6 +5529,9 @@ function renderSessionListFromCache(){
     const lineageReportKey=showLineageMetadata?_lineageReportCacheKey(s,lineageKey):null;
     const canExpandLineageSegments=showLineageMetadata&&Boolean(lineageKey&&segmentCount>1&&(lineageSegments.length>0||needsLineageReport||_lineageReportInflight.has(lineageReportKey)));
     const lineageSegmentsExpanded=canExpandLineageSegments&&_expandedLineageKeys.has(lineageKey);
+    if(lineageSegmentsExpanded&&needsLineageReport){
+      _fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache());
+    }
     if(segmentCount>0){
       const segmentCountEl=document.createElement('span');
       segmentCountEl.className='session-lineage-count'+(canExpandLineageSegments?' expandable':'');
@@ -4663,35 +5633,319 @@ function renderSessionListFromCache(){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:seg.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
-          await loadSession(seg.session_id);
+          await loadSession(seg.session_id, {skipLineageResolve:true});
           renderSessionListFromCache();
         };
         lineageList.appendChild(row);
       }
       sessionText.appendChild(lineageList);
     }
-    if(childCount>0&&Array.isArray(s._child_sessions)&&_expandedChildSessionKeys.has(lineageKey)){
+    if(childCount>0&&Array.isArray(s._child_sessions)&&(_expandedChildSessionKeys.has(lineageKey)||!!searchQueryRaw)){
       const childList=document.createElement('div');
       childList.className='session-child-sessions';
-      ['pointerdown','pointerup','click'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
+      ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
-      for(const child of sortedChildren){
-        const row=document.createElement('button');
-        row.type='button';
-        row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+      const openChildSession=async(childSession)=>{
+        if(_isExternalSession(childSession)){
+          try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:childSession.session_id})});}
+          catch(_e){ /* read-only fallback */ }
+        }
+        await loadSession(childSession.session_id, {skipLineageResolve:true});
+        renderSessionListFromCache();
+      };
+      const childLabelFor=(child)=>{
         const childTitle=_sessionDisplayTitle(child)||'Untitled child session';
         const childTime=_formatRelativeSessionTime(_sessionTimestampMs(child));
         const parentNote=child._parent_segment_title?` via ${child._parent_segment_title}`:'';
-        row.textContent=`-> ${childTitle}${parentNote} - ${childTime}`;
+        return `-> ${childTitle}${parentNote} - ${childTime}`;
+      };
+      const installForkChildSwipe=(rowEl, childSession, actionsEl)=>{
+        let _pointerDownX=0;
+        let _pointerDownY=0;
+        let _pointerX=0;
+        let _pointerY=0;
+        let _gestureState='idle';
+        let _swipeTracking=false;
+        let _gesturePointerType='';
+        let _clearDragTimer=null;
+        let _longPressTimer=null;
+        let _longPressMenuOpened=false;
+        const _isForkSwipeTarget=()=>_gesturePointerType!=='mouse'&&!_sessionSelectMode;
+        const _isForkActionTarget=(target)=>!!(actionsEl&&target&&actionsEl.contains(target));
+        const _clearForkLongPressTimer=()=>{
+          if(_longPressTimer){clearTimeout(_longPressTimer);_longPressTimer=null;}
+          if(!_longPressMenuOpened) rowEl.classList.remove('long-pressing');
+        };
+        const _beginForkGesture=(clientX,clientY,pointerType='')=>{
+          _gesturePointerType=pointerType;
+          _pointerDownX=clientX;
+          _pointerDownY=clientY;
+          _pointerX=clientX;
+          _pointerY=clientY;
+          _gestureState='pressing';
+          _swipeTracking=false;
+          _longPressMenuOpened=false;
+          if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+          rowEl.classList.remove('dragging','swipe-committed','swipe-removing');
+          rowEl.style.removeProperty('height');
+          rowEl.style.removeProperty('min-height');
+        };
+        const _scheduleForkLongPressMenu=()=>{
+          _clearForkLongPressTimer();
+          rowEl.classList.add('long-pressing');
+          _longPressTimer=setTimeout(()=>{
+            if(_gestureState!=='pressing'||_renamingSid||_sessionSelectMode) return;
+            _longPressMenuOpened=true;
+            rowEl._skipNextChildOpen=true;
+            _openSessionActionMenu(childSession, rowEl);
+          },SESSION_LONG_PRESS_DELAY_MS);
+        };
+        const _paintForkSwipe=(signedDx)=>{
+          const rawOffset=signedDx*.55;
+          const revealedOffset=Math.max(-72,Math.min(72,rawOffset));
+          const overshoot=Math.max(0,Math.abs(rawOffset)-72);
+          const offset=Math.sign(rawOffset)*(Math.abs(revealedOffset)+Math.sqrt(overshoot)*5);
+          const progress=Math.min(1,Math.abs(revealedOffset)/72);
+          const reveal=Math.abs(offset);
+          const actionRevealScale=1.15;
+          const iconScale=Math.min(1,Math.max(.01,progress*actionRevealScale));
+          const badgeSize=34*iconScale;
+          const iconSize=18*iconScale;
+          const labelScale=Math.min(1,Math.max(.01,progress*actionRevealScale));
+          const actionOpacity=Math.min(1,Math.max(.01,progress*actionRevealScale));
+          const actionInset=6;
+          const tileGap=6;
+          const stretchStart=72/actionRevealScale;
+          const stretchProgress=Math.max(0,reveal-stretchStart);
+          const badgeStretch=Math.min(Math.max(0,reveal-34),stretchProgress*1.15,Math.max(0,reveal-badgeSize-actionInset-tileGap));
+          rowEl.style.setProperty('--session-swipe-offset',offset+'px');
+          rowEl.style.setProperty('--session-swipe-reveal',reveal+'px');
+          rowEl.style.setProperty('--session-swipe-badge-size',badgeSize+'px');
+          rowEl.style.setProperty('--session-swipe-icon-size',iconSize+'px');
+          rowEl.style.setProperty('--session-swipe-label-scale',labelScale);
+          rowEl.style.setProperty('--session-swipe-badge-stretch',badgeStretch+'px');
+          rowEl.style.setProperty('--session-swipe-progress',actionOpacity);
+          rowEl.classList.toggle('swiping-right',offset>0);
+          rowEl.classList.toggle('swiping-left',offset<0);
+        };
+        const _clearForkSwipePaint=()=>{
+          rowEl.style.removeProperty('--session-swipe-offset');
+          rowEl.style.removeProperty('--session-swipe-reveal');
+          rowEl.style.removeProperty('--session-swipe-badge-size');
+          rowEl.style.removeProperty('--session-swipe-icon-size');
+          rowEl.style.removeProperty('--session-swipe-label-scale');
+          rowEl.style.removeProperty('--session-swipe-badge-stretch');
+          rowEl.style.removeProperty('--session-swipe-progress');
+          rowEl.style.removeProperty('height');
+          rowEl.style.removeProperty('min-height');
+          rowEl.classList.remove('swiping-right','swiping-left','swipe-committed','swipe-removing');
+        };
+        const _settleForkSwipePaint=()=>{
+          rowEl.classList.remove('dragging');
+          requestAnimationFrame(()=>requestAnimationFrame(_clearForkSwipePaint));
+        };
+        const _completeForkSwipePaint=(signedDx)=>{
+          rowEl.classList.remove('dragging');
+          rowEl.classList.add('swipe-committed');
+          rowEl.style.setProperty('--session-swipe-progress','0');
+          rowEl.style.setProperty('--session-swipe-offset',(signedDx>0?1:-1)*window.innerWidth+'px');
+          const rect=rowEl.getBoundingClientRect();
+          rowEl.style.height=rect.height+'px';
+          rowEl.style.minHeight=rect.height+'px';
+          requestAnimationFrame(()=>rowEl.classList.add('swipe-removing'));
+        };
+        const _canSwipeDeleteFork=()=>_isForkSwipeTarget()&&!_isMessagingSession(childSession)&&!_isCliSession(childSession);
+        const _handleForkSwipe=(signedDx,signedDy)=>{
+          if(_gestureState==='committed'||!_isForkSwipeTarget()) return false;
+          const actionThreshold=signedDx>0?SESSION_ARCHIVE_SWIPE_THRESHOLD_PX:SESSION_DELETE_SWIPE_THRESHOLD_PX;
+          if(Math.abs(signedDx)<actionThreshold) return false;
+          if(Math.abs(signedDy)>Math.abs(signedDx)*SESSION_SWIPE_CANCEL_RATIO) return false;
+          _gestureState='committed';
+          closeSessionActionMenu();
+          if(signedDx>0){
+            if(childSession.archived){
+              _settleForkSwipePaint();
+              _archiveSession(childSession,false,()=>_waitForSessionMotion(committedSwipeDuration)).then((restored)=>{
+                if(!restored) _settleForkSwipePaint();
+              });
+            }else if(_showArchived){
+              _settleForkSwipePaint();
+              _archiveSession(childSession,true,()=>_waitForSessionMotion(committedSwipeDuration)).then((archived)=>{
+                if(!archived) _settleForkSwipePaint();
+              });
+            }else{
+              _completeForkSwipePaint(signedDx);
+              _archiveSession(childSession,true,()=>_waitForSessionMotion(committedSwipeReflowDelay)).then((archived)=>{
+                if(!archived) _settleForkSwipePaint();
+              });
+            }
+          }else if(_canSwipeDeleteFork()){
+            rowEl.classList.remove('dragging');
+            deleteSession(childSession.session_id,async()=>{
+              _completeForkSwipePaint(signedDx);
+              await _waitForSessionMotion(committedSwipeReflowDelay);
+            }).then((deleted)=>{
+              if(!deleted) _settleForkSwipePaint();
+            });
+          }else if(typeof showToast==='function'){
+            showToast('Imported sessions cannot be deleted here.',3000);
+            _gestureState='dragging';
+            _settleForkSwipePaint();
+          }
+          return true;
+        };
+        const _clearForkPointerState=()=>{
+          _clearForkLongPressTimer();
+          const wasDragging=_gestureState==='dragging'||_swipeTracking;
+          _gestureState='idle';
+          if(wasDragging){
+            if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+            _clearDragTimer=setTimeout(()=>{_settleForkSwipePaint();_clearDragTimer=null;},50);
+          }
+        };
+        rowEl.onpointerdown=(e)=>{
+          if(e.pointerType==='mouse'||e.button!==0||_isForkActionTarget(e.target)) return;
+          _beginForkGesture(e.clientX,e.clientY,e.pointerType||'');
+          if(e.pointerType==='touch'||e.pointerType==='pen') _scheduleForkLongPressMenu();
+        };
+        rowEl.onpointermove=(e)=>{
+          if(e.pointerType==='mouse'||_gestureState==='idle') return;
+          _pointerX=e.clientX;
+          _pointerY=e.clientY;
+          const signedDx=e.clientX-_pointerDownX;
+          const signedDy=e.clientY-_pointerDownY;
+          const dx=Math.abs(signedDx);
+          const dy=Math.abs(signedDy);
+          if(dx>8&&dx>dy*1.1) _swipeTracking=true;
+          if(_gestureState==='pressing'&&(dx>5||dy>5)){
+            _clearForkLongPressTimer();
+            _gestureState='dragging';
+            rowEl.classList.add('dragging');
+          }
+          if(_isForkSwipeTarget()&&(_swipeTracking||dx>dy)) _paintForkSwipe(signedDx);
+        };
+        rowEl.onpointerup=(e)=>{
+          if(e.pointerType==='mouse'||e.button!==0) return;
+          if(_gestureState==='idle') return;
+          if(_longPressMenuOpened){_gestureState='idle';return;}
+          if(_isForkActionTarget(e.target)){_gestureState='idle';return;}
+          _pointerX=e.clientX;
+          _pointerY=e.clientY;
+          if(_handleForkSwipe(_pointerX-_pointerDownX,_pointerY-_pointerDownY)){
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+          _clearForkPointerState();
+        };
+        rowEl.onpointercancel=()=>_clearForkPointerState();
+        rowEl.onpointerleave=()=>{
+          if(_gesturePointerType!=='mouse'&&_gestureState!=='idle') _clearForkPointerState();
+        };
+      };
+      for(const child of sortedChildren){
+        if(child.session_source==='fork'){
+          const childIsActive=!!(activeSidForSidebar&&child.session_id===activeSidForSidebar);
+          const childStreaming=_isSessionEffectivelyStreaming(child);
+          const childHasUnread=_hasUnreadForSession(child)&&!childIsActive;
+          const childAttention=_sessionAttentionState(child);
+          const childAttentionClass=childAttention?(childAttention.kind==='approval'?' attention-approval':(childAttention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
+          const row=document.createElement('div');
+          row.className='session-child-session session-child-session-fork'
+            +(childIsActive?' active':'')
+            +(childStreaming?' streaming':'')
+            +(childHasUnread?' unread':'')
+            +(childAttention?' needs-attention':'')
+            +childAttentionClass;
+          row.dataset.sid=child.session_id;
+          if(_sessionSelectMode&&!_isReadOnlySession(child)){
+            const cbW=document.createElement('label');cbW.className='session-select-cb-wrapper';
+            const cb=document.createElement('input');cb.type='checkbox';cb.className='session-select-cb';
+            cb.dataset.sid=child.session_id;cb.checked=_selectedSessions.has(child.session_id);
+            cb.onchange=(e)=>{e.stopPropagation();setSessionSelected(child.session_id,cb.checked);};
+            cb.onclick=(e)=>{e.stopPropagation();};
+            cb.onpointerup=(e)=>{e.stopPropagation();};
+            cbW.onpointerup=(e)=>{e.stopPropagation();};
+            cbW.onclick=(e)=>{e.stopPropagation();};
+            cbW.appendChild(cb);
+            row.classList.toggle('selected',_selectedSessions.has(child.session_id));
+            row.appendChild(cbW);
+          }
+          const mainBtn=document.createElement('button');
+          mainBtn.type='button';
+          mainBtn.className='session-child-session-main'+(childIsActive?' active':'');
+          mainBtn.textContent=childLabelFor(child);
+          mainBtn.title='Open forked session';
+          mainBtn.onclick=async(e)=>{
+            if(row._skipNextChildOpen){
+              row._skipNextChildOpen=false;
+              e.stopPropagation();
+              e.preventDefault();
+              return;
+            }
+            e.stopPropagation();
+            await openChildSession(child);
+          };
+          row._startRename=_buildSessionRenameStarter(child, mainBtn, ()=>{
+            mainBtn.textContent=childLabelFor(child);
+          });
+          row.appendChild(mainBtn);
+          const state=document.createElement('span');
+          state.className='session-state-indicator session-child-session-state'
+            +(childStreaming?' is-streaming':'')
+            +(childHasUnread?' is-unread':'')
+            +(childAttention?(childAttention.kind==='approval'?' is-attention-approval':(childAttention.kind==='clarify'?' is-attention-clarify':' is-attention-generic')):'');
+          state.setAttribute('aria-hidden','true');
+          const childStateTip=_sessionStateTooltip({isStreaming:childStreaming,hasUnread:childHasUnread});
+          if(childAttention&&childAttention.title) state.title=childAttention.title;
+          else if(childStateTip) state.title=childStateTip;
+          row.appendChild(state);
+          const readOnlyChild=_isReadOnlySession(child);
+          let actions=null;
+          if(!readOnlyChild){
+            actions=document.createElement('div');
+            actions.className='session-actions';
+            const menuBtn=document.createElement('button');
+            menuBtn.type='button';
+            menuBtn.className='session-actions-trigger';
+            menuBtn.title='Conversation actions';
+            menuBtn.setAttribute('aria-haspopup','menu');
+            menuBtn.setAttribute('aria-label','Conversation actions');
+            menuBtn.innerHTML=ICONS.more;
+            const stopMenuPointer=(e)=>e.stopPropagation();
+            menuBtn.onpointerdown=stopMenuPointer;
+            menuBtn.onpointerup=stopMenuPointer;
+            menuBtn.onclick=(e)=>{
+              e.stopPropagation();
+              e.preventDefault();
+              _openSessionActionMenu(child, menuBtn);
+            };
+            actions.appendChild(menuBtn);
+            row.appendChild(actions);
+            row.append(
+              _makeSessionSwipeAffordance('right',child.archived?'undo':'archive',child.archived?'Restore':t('session_batch_archive')),
+              _makeSessionSwipeAffordance('left','trash-2',t('session_batch_delete')),
+            );
+            installForkChildSwipe(row, child, actions);
+          }
+          row.oncontextmenu=(e)=>{
+            if(readOnlyChild) return;
+            e.preventDefault();
+            if(e.pointerType==='touch'||e.pointerType==='pen') return;
+            e.stopPropagation();
+            _openSessionActionMenu(child, actions||row);
+          };
+          childList.appendChild(row);
+          continue;
+        }
+        const row=document.createElement('button');
+        row.type='button';
+        row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
+        row.textContent=childLabelFor(child);
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
-          if(_isExternalSession(child)){
-            try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:child.session_id})});}
-            catch(_e){ /* read-only fallback */ }
-          }
-          await loadSession(child.session_id);
-          renderSessionListFromCache();
+          await openChildSession(child);
         };
         childList.appendChild(row);
       }
@@ -4712,71 +5966,14 @@ function renderSessionListFromCache(){
     }
 
     // Rename: called directly when we confirm it's a double-click
-    const startRename=()=>{
-      if(_isReadOnlySession(s)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be renamed.',3000); return; }
-      // Guard: prevent renaming if session is currently being loaded
-      if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
-
-      closeSessionActionMenu();
-      _renamingSid = s.session_id;
-      const oldTitle=s.title||'Untitled';
-      const inp=document.createElement('input');
-      inp.className='session-title-input';
-      inp.value=oldTitle;
-      ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
-        inp.addEventListener(ev, e2=>e2.stopPropagation())
-      );
-      const applyTitle=(nextTitle, updateDom=true)=>{
-        if(updateDom) title.textContent=nextTitle;
-        s.title=nextTitle;
-        const cached=_allSessions.find(item=>item&&item.session_id===s.session_id);
-        if(cached) cached.title=nextTitle;
-        if(S.session&&S.session.session_id===s.session_id){S.session.title=nextTitle;syncTopbar();}
-      };
-      let finishDone=false;
-      const finish=async(save)=>{
-        if(finishDone) return;
-        finishDone=true;
-        const releaseRename=()=>{
-          _renamingSid = null;
-          if(inp.isConnected) inp.replaceWith(title);
-          // Allow list re-renders again after DOM cleanup has completed.
-          setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
-        };
-        if(!save){
-          applyTitle(oldTitle,false);
-          releaseRename();
-          return;
-        }
-        const newTitle=inp.value.trim()||'Untitled';
-        try{
-          if(newTitle!==oldTitle){
-            await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});
-          }
-          applyTitle(newTitle);
-        }catch(err){
-          applyTitle(oldTitle,false);
-          const msg='Rename failed: '+(err&&err.message?err.message:String(err));
-          setStatus(msg);
-          if(typeof showToast==='function') showToast(msg,3000,'error');
-        }finally{
-          releaseRename();
-        }
-      };
-      inp.onkeydown=e2=>{
-        if(e2.key==='Enter'){
-          if(window._isImeEnter&&window._isImeEnter(e2)){return;}
-          e2.preventDefault();
-          e2.stopPropagation();
-          finish(true);
-        }
-        if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
-      };
-      // onblur: cancel only -- no accidental saves
-      inp.onblur=()=>{ if(_renamingSid===s.session_id) finish(false); };
-      title.replaceWith(inp);
-      setTimeout(()=>{inp.focus();inp.select();},10);
-    };
+    const startRename=_buildSessionRenameStarter(
+      s,
+      title,
+      (nextTitle)=>{
+        title.textContent=nextTitle;
+        title.title=_sessionFullTitleTooltip(nextTitle,nextTitle,s);
+      }
+    );
     // Expose the rename closure on the row so the three-dot action menu
     // (`_openSessionActionMenu`, defined elsewhere) can trigger it without
     // needing a separate DOM hunt or a duplicate copy of all this state
@@ -5288,6 +6485,7 @@ async function deleteSession(sid, beforeDelete=null){
     return false;
   }
   const response=deleteResult&&deleteResult.response;
+  if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;
     _optimisticallyRemoveSessionFromList(sid);
@@ -5407,11 +6605,17 @@ function _showProjectPicker(session, anchorEl){
     const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:name.trim(),color,profile})});
     if(res.project){
       _allProjects.push(res.project);
-      // Now move session into it
-      await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:res.project.project_id})});
-      session.project_id=res.project.project_id;
-      await renderSessionList();
-      showToast('Created "'+res.project.name+'" and moved session');
+      // Guard the move so a 503 (session busy/streaming, #3746) shows a toast
+      // instead of an unhandled rejection. Keep the authoritative refetch (#2551).
+      try{
+        await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:res.project.project_id})});
+        session.project_id=res.project.project_id;
+        await renderSessionList();
+        showToast('Created "'+res.project.name+'" and moved session');
+      }catch(e){
+        await renderSessionList();
+        showToast('Created "'+res.project.name+'" but move failed: '+(e&&e.message||'try again'));
+      }
     }
   };
   picker.appendChild(createItem);
@@ -5464,10 +6668,19 @@ function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.placeholder='Project name';
+  let _finishDone=false;
   const finish=async(save)=>{
+    if(_finishDone) return;
+    _finishDone=true;
     if(save&&inp.value.trim()){
       const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
-      await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
+      try{
+        await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
+      }catch(e){
+        _finishDone=false;
+        showToast('Project create failed: '+(e.message||e));
+        return;
+      }
       await renderSessionList();
       showToast('Project created');
     }else{
@@ -5482,7 +6695,7 @@ function _startProjectCreate(bar, addBtn){
     }
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
-  inp.onblur=()=>finish(false);
+  inp.onblur=()=>finish(true);
   inp.addEventListener('input',()=>_resizeProjectInput(inp));
   addBtn.replaceWith(inp);
   _resizeProjectInput(inp);
@@ -5493,13 +6706,17 @@ function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.value=proj.name;
+  let _finishDone=false;
   const finish=async(save)=>{
+    if(_finishDone) return;
+    _finishDone=true;
     if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
       try {
         await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
         await renderSessionList();
         showToast('Project renamed');
       } catch(e) {
+        _finishDone=false;
         showToast('Rename failed: '+(e.message||e));
       }
     }else{
@@ -5514,7 +6731,7 @@ function _startProjectRename(proj, chip){
     }
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
-  inp.onblur=()=>finish(false);
+  inp.onblur=()=>finish(true);
   inp.onclick=(e)=>e.stopPropagation();
   inp.addEventListener('input',()=>_resizeProjectInput(inp));
   chip.replaceWith(inp);
@@ -5601,4 +6818,23 @@ async function _confirmDeleteProject(proj){
 // Global Escape handler for batch select mode
 document.addEventListener('keydown',(e)=>{
   if(e.key==='Escape'&&_sessionSelectMode) exitSessionSelectMode();
+});
+
+// Keyboard session navigation — J/K bindings
+function navigateSession(dir){
+  const rows=[...document.querySelectorAll('.session-item[data-sid]')];
+  const sids=rows.map(r=>r.dataset.sid);
+  const cur=S.session&&S.session.session_id;
+  const i=sids.indexOf(cur);
+  if(i<0||!sids.length)return;
+  const next=sids[Math.min(Math.max(i+dir,0),sids.length-1)];
+  if(next&&next!==cur) loadSession(next);
+}
+
+document.addEventListener('keydown',(e)=>{
+  if(e.key!=='j'&&e.key!=='k') return;
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  if(typeof _isInteractiveSwipeTarget==='function'&&_isInteractiveSwipeTarget(e.target)) return;
+  e.preventDefault();
+  navigateSession(e.key==='j'?1:-1);
 });

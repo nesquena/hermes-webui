@@ -608,6 +608,17 @@ class TestClarifyCardTimerLogic:
         assert '\\n\\n${draft}' in body, \
             'preserved clarify drafts should be separated from existing composer text'
 
+    def test_stash_clarify_draft_skips_while_submit_in_flight(self):
+        src = self._get_js().read_text()
+        m = re.search(r'function _stashClarifyDraft.*?(?=\nfunction |\nasync function |\Z)',
+                      src, re.DOTALL)
+        assert m, '_stashClarifyDraft function not found'
+        body = m.group(0)
+        assert 'classList.contains("loading")' in body, \
+            'must not stash draft while a clarify submit is in flight (#3651)'
+        assert body.index('classList.contains("loading")') < body.index('clarifyInput'), \
+            'loading guard must short-circuit before reading the draft'
+
     def test_cancel_stream_does_not_preserve_clarify_draft(self):
         src = self._get_js().read_text()
         m = re.search(r"source\.addEventListener\('cancel'.*?\n    \}\);",

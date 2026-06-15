@@ -18,10 +18,15 @@ def test_sidebar_has_separate_webui_and_cli_session_source_tabs():
 
 def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    assert "const webuiSessionCount = withMessages.filter(s=>!_isCliSession(s)).length" in src
-    assert "const cliSessionCount = withMessages.filter(s=>_isCliSession(s)).length" in src
-    assert "? withMessages.filter(s=>_isCliSession(s))" in src
-    assert ": withMessages.filter(s=>!_isCliSession(s))" in src
+    assert "function _partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in src
+    assert "cliSessionCount" in src
+    assert "const showCliOnly=_sessionSourceFilter==='cli';" in src
+    assert "const webuiProfileFiltered=[];" in src
+    assert "const cliProfileFiltered=[];" in src
+    assert "const webuiSessionsRaw=[];" in src
+    assert "const cliSessionsRaw=[];" in src
+    assert "profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered," in src
+    assert "sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw," in src
 
 
 def test_session_source_tabs_have_dedicated_sidebar_styles():

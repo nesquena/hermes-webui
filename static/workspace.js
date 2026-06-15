@@ -145,10 +145,11 @@ if(typeof document !== 'undefined'){
 }
 
 function switchWorkspacePanelTab(tab){
-  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : 'files';
+  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : tab === 'todos' ? 'todos' : 'files';
   _setWorkspacePanelTabDataset();
   const filesTab = $('workspaceFilesTab');
   const artifactsTab = $('workspaceArtifactsTab');
+  const todosTab = $('workspaceTodosTab');
   if(filesTab){
     filesTab.classList.toggle('active', _workspacePanelActiveTab === 'files');
     filesTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'files' ? 'true' : 'false');
@@ -157,9 +158,55 @@ function switchWorkspacePanelTab(tab){
     artifactsTab.classList.toggle('active', _workspacePanelActiveTab === 'artifacts');
     artifactsTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'artifacts' ? 'true' : 'false');
   }
+  if(todosTab){
+    todosTab.classList.toggle('active', _workspacePanelActiveTab === 'todos');
+    todosTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'todos' ? 'true' : 'false');
+  }
   const artifacts = $('workspaceArtifacts');
   if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
+  const todosPanel = $('workspaceTodosPanel');
+  if(todosPanel) todosPanel.hidden = _workspacePanelActiveTab !== 'todos';
   if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
+  if(_workspacePanelActiveTab === 'todos') _loadWorkspacePanelTodos();
+}
+
+function _loadWorkspacePanelTodos(){
+  const panel = $('workspaceTodosPanel');
+  if(!panel) return;
+  let todos = [];
+  try{
+    if(S && Array.isArray(S.todos)){
+      todos = S.todos;
+    } else if(S && S.session && S.session.todo_state && Array.isArray(S.session.todo_state.todos)){
+      todos = S.session.todo_state.todos;
+    } else if(typeof _legacyTodosFromMessages === 'function'){
+      todos = _legacyTodosFromMessages() || [];
+    }
+  }catch(e){ todos = []; }
+  if(!todos.length){
+    panel.innerHTML = '<div style="padding:24px 12px;text-align:center;color:var(--muted);font-size:12px">No active tasks</div>';
+    return;
+  }
+  const statusIcon = (s) => {
+    if(s === 'completed') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+    if(s === 'in_progress') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+    if(s === 'cancelled') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+    // pending
+    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/></svg>';
+  };
+  const items = todos.map(t => {
+    const s = t.status || 'pending';
+    const isDone = s === 'completed' || s === 'cancelled';
+    return `<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">`+
+      `<span style="flex-shrink:0;margin-top:2px">${statusIcon(s)}</span>`+
+      `<span style="font-size:12px;color:${isDone?'var(--muted)':'var(--text)'};text-decoration:${s==='cancelled'?'line-through':'none'}">${_escHtml(t.content||t.text||'')}</span>`+
+      `</div>`;
+  }).join('');
+  panel.innerHTML = `<div style="padding:4px 0">${items}</div>`;
+}
+
+function _escHtml(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
@@ -368,12 +415,13 @@ async function openArtifactPath(path){
 
 async function loadDir(path, opts={}){
   const preservePreview=!!(opts&&opts.preservePreview);
+  const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
   const sessionId=S.session.session_id;
   try{
-    if(!path||path==='.'){
+    if(!path||path==='.'||refreshExpanded){
       S._dirCache={};
-      _restoreExpandedDirs();  // restore per-workspace expanded state on root load
+      _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
     S.currentDir=path||'.';
     const data=await api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}`);
@@ -383,7 +431,7 @@ async function loadDir(path, opts={}){
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
-    if(!path||path==='.'){
+    if(!path||path==='.'||refreshExpanded){
       const expanded=S._expandedDirs||new Set();
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
       if(pending.length){
@@ -409,6 +457,12 @@ async function loadDir(path, opts={}){
     // Fetch git info for workspace root (non-blocking)
     if(!path||path==='.') _refreshGitBadge();
   }catch(e){console.warn('loadDir',e);}
+}
+
+function refreshWorkspacePanel(){
+  if(!S.session)return;
+  const targetDir = S.currentDir || '.';
+  loadDir(targetDir,{refreshExpanded:true});
 }
 
 async function _refreshGitBadge(){
@@ -500,6 +554,51 @@ function renderMarkdownPreviewContent(data){
   requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
 }
 
+function renderCodePreviewContent(path, content){
+  showPreview('code');
+  const codeEl=document.createElement('code');
+  codeEl.textContent=content;
+  const lang=_prismLanguageForPath(path);
+  if(lang) codeEl.className='language-'+lang;
+  const pre=$('previewCode');
+  pre.textContent='';
+  // Prism.highlightElement() propagates the language-* class onto the
+  // parent <pre>, so a previously-previewed code file leaves e.g.
+  // "language-css" on #previewCode. A subsequent plain-text file builds a
+  // class-less <code>, and Prism walks up to that stale ancestor class and
+  // mis-highlights prose. Strip any inherited language-* token from the
+  // <pre> before each render so highlighting never leaks across files.
+  pre.className=pre.className.replace(/\blanguage-\S+/g,'').replace(/\s+/g,' ').trim();
+  pre.appendChild(codeEl);
+  // Only invoke Prism when we actually assigned a language; otherwise the
+  // class-less <code> would inherit any ancestor language-* class.
+  if(lang&&typeof Prism!=='undefined'&&typeof Prism.highlightElement==='function'){
+    Prism.highlightElement(codeEl);
+  }
+}
+
+function renderCsvPreviewContent(path, content){
+  if(typeof buildCsvTablePreview!=='function') return false;
+  const preview=buildCsvTablePreview(path, content);
+  if(!preview) return false;
+  showPreview('csv');
+  // Preserve the raw CSV text so the Edit flow can repopulate the textarea and
+  // a save can re-render the table from the edited source (#4025 review, Codex).
+  if(typeof content==='string'){
+    _previewRawContent = content;
+    _previewRawContentPath = path;
+  }
+  if(preview.html){
+    $('previewMd').innerHTML=preview.html;
+    return true;
+  }
+  if(preview.errorKey&&typeof _csvPreviewErrorHtml==='function'){
+    $('previewMd').innerHTML=_csvPreviewErrorHtml(path, preview.errorKey);
+    return true;
+  }
+  return false;
+}
+
 function forceRenderMarkdownPreview(){
   // #3378 review (Codex): don't force-render from a dirty/open editor — the
   // cached raw content would not reflect the unsaved edit. Require a saved,
@@ -511,21 +610,21 @@ function forceRenderMarkdownPreview(){
 }
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
-let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
+let _previewCurrentMode = '';  // 'code' | 'csv' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
 let _previewDirty = false;     // true when edits are unsaved
 
 function showPreview(mode){
-  // mode: 'code' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
+  // mode: 'code' | 'csv' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
   $('previewCode').style.display     = mode==='code'  ? '' : 'none';
   $('previewImgWrap').style.display  = mode==='image' ? '' : 'none';
   const mediaWrap=$('previewMediaWrap'); if(mediaWrap) mediaWrap.style.display = (mode==='audio'||mode==='video') ? '' : 'none';
   const pdfWrap=$('previewPdfWrap'); if(pdfWrap) pdfWrap.style.display = mode==='pdf' ? '' : 'none';
-  $('previewMd').style.display       = mode==='md'    ? '' : 'none';
+  $('previewMd').style.display       = (mode==='md'||mode==='csv') ? '' : 'none';
   $('previewHtmlWrap').style.display = mode==='html'  ? '' : 'none';
   $('previewEditArea').style.display = 'none';  // start in read-only
   const badge=$('previewBadge');
   badge.className='preview-badge '+mode;
-  badge.textContent = mode==='image'?'image':mode==='audio'?'audio':mode==='video'?'video':mode==='pdf'?'pdf':mode==='md'?'md':mode==='html'?'html':fileExt($('previewPathText').textContent)||'text';
+  badge.textContent = mode==='image'?'image':mode==='audio'?'audio':mode==='video'?'video':mode==='pdf'?'pdf':mode==='csv'?'csv':mode==='md'?'md':mode==='html'?'html':fileExt($('previewPathText').textContent)||'text';
   _previewCurrentMode = mode;
   _previewDirty = false;
   updateEditBtn();
@@ -538,7 +637,7 @@ function showPreview(mode){
 function updateEditBtn(){
   const btn=$('btnEditFile');
   if(!btn)return;
-  const editable = _previewCurrentMode==='code'||_previewCurrentMode==='md';
+  const editable = _previewCurrentMode==='code'||_previewCurrentMode==='md'||_previewCurrentMode==='csv';
   btn.style.display = editable?'':'none';
   const editing = $('previewEditArea').style.display!=='none';
   btn.innerHTML = editing ? `&#128190; ${t('save')}` : `&#9998; ${t('edit')}`;
@@ -564,6 +663,7 @@ async function toggleEditMode(){
       _previewRawContent = content;
       _previewRawContentPath = _previewCurrentPath;
       if(_previewCurrentMode==='code') $('previewCode').textContent=content;
+      else if(_previewCurrentMode==='csv') renderCsvPreviewContent(_previewCurrentPath, content);
       else renderMarkdownPreviewContent({content});
       $('previewEditArea').style.display='none';
       if(_previewCurrentMode==='code') $('previewCode').style.display='';
@@ -718,6 +818,18 @@ async function openFile(path, opts={}){
       iframe.src=''; // clear first to avoid stale content
       iframe.src=url;
     }
+  } else if(ext==='.csv'){
+    try{
+      const data=await api(`/api/file?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
+      if(data.binary){
+        downloadFile(path);
+        return;
+      }
+      if(renderCsvPreviewContent(path, data.content)) return;
+      renderCodePreviewContent(path, data.content);
+    }catch(e){
+      downloadFile(path);
+    }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
     try{
@@ -727,27 +839,7 @@ async function openFile(path, opts={}){
         downloadFile(path);
         return;
       }
-      showPreview('code');
-      // Syntax highlighting with Prism.js (already loaded on the page).
-      const codeEl=document.createElement('code');
-      codeEl.textContent=data.content;
-      const lang=_prismLanguageForPath(path);
-      if(lang) codeEl.className='language-'+lang;
-      const pre=$('previewCode');
-      pre.textContent='';
-      // Prism.highlightElement() propagates the language-* class onto the
-      // parent <pre>, so a previously-previewed code file leaves e.g.
-      // "language-css" on #previewCode. A subsequent plain-text file builds a
-      // class-less <code>, and Prism walks up to that stale ancestor class and
-      // mis-highlights prose. Strip any inherited language-* token from the
-      // <pre> before each render so highlighting never leaks across files.
-      pre.className=pre.className.replace(/\blanguage-\S+/g,'').replace(/\s+/g,' ').trim();
-      pre.appendChild(codeEl);
-      // Only invoke Prism when we actually assigned a language; otherwise the
-      // class-less <code> would inherit any ancestor language-* class.
-      if(lang&&typeof Prism!=='undefined'&&typeof Prism.highlightElement==='function'){
-        Prism.highlightElement(codeEl);
-      }
+      renderCodePreviewContent(path, data.content);
     }catch(e){
       // If it's a 400/too-large error, offer download instead
       downloadFile(path);

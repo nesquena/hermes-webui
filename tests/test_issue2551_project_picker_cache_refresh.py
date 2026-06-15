@@ -133,10 +133,19 @@ def test_new_project_branch_still_uses_authoritative_refetch():
     """The '+ New project' path was already correct: it calls
     `await renderSessionList()` (a full /api/sessions refetch) after
     creating the project. The minimal fix must not change that.
+
+    #3746 wrapped the move call in try/catch (so a 503 from a streaming
+    session shows a toast instead of an unhandled rejection); the refetch is
+    preserved in BOTH the success and the catch path. We scope to the
+    create-branch block (up to the next picker item) rather than a fixed byte
+    window so the assertion tracks intent, not exact offsets.
     """
     create_idx = PICKER_BODY.find("'+ New project'")
     assert create_idx != -1, "'+ New project' branch not located"
-    window = PICKER_BODY[create_idx: create_idx + 900]
+    # Bound the window at the end of the create handler (the picker.appendChild
+    # that follows the createItem.onclick), falling back to a generous slice.
+    end_idx = PICKER_BODY.find("picker.appendChild(createItem)", create_idx)
+    window = PICKER_BODY[create_idx: end_idx if end_idx != -1 else create_idx + 1600]
     assert "await renderSessionList()" in window, (
         "'+ New project' branch must keep its authoritative refetch — the "
         "new project_id is only known to the server until /api/sessions is "

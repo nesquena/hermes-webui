@@ -27,6 +27,26 @@ def test_run_journal_appends_monotonic_seq_and_reads_after_cursor(tmp_path):
     assert [event["event"] for event in journal["events"]] == ["done"]
 
 
+def test_run_journal_reads_bounded_replay_window(tmp_path):
+    writer = RunJournalWriter("session_1", "run_1", session_dir=tmp_path)
+
+    writer.append_sse_event("token", {"text": "one"})
+    writer.append_sse_event("token", {"text": "two"})
+    writer.append_sse_event("token", {"text": "three"})
+    writer.append_sse_event("token", {"text": "four"})
+
+    journal = read_run_events(
+        "session_1",
+        "run_1",
+        after_seq=1,
+        max_seq=3,
+        session_dir=tmp_path,
+    )
+
+    assert [event["seq"] for event in journal["events"]] == [2, 3]
+    assert [event["payload"]["text"] for event in journal["events"]] == ["two", "three"]
+
+
 def test_run_journal_default_fsyncs_terminal_events_only(tmp_path, monkeypatch):
     path = tmp_path / "_run_journal" / "session_1" / "run_1.jsonl"
     path.parent.mkdir(parents=True)
@@ -88,11 +108,17 @@ def test_terminal_state_classification_distinguishes_crash_from_user_cancel(tmp_
     append_run_event("session_1", "run_cancelled", "cancel", {"message": "Cancelled by user"}, session_dir=tmp_path)
     append_run_event("session_1", "run_crashed", "apperror", {"type": "interrupted"}, session_dir=tmp_path)
     append_run_event("session_1", "run_failed", "apperror", {"type": "auth_mismatch"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_tool_limit", "apperror", {"type": "tool_limit_reached"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_tool_limit_done", "done", {"terminal_state": "tool_limit_reached"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_unknown_done", "done", {"terminal_state": "future_unknown_state"}, session_dir=tmp_path)
     append_run_event("session_1", "run_done", "done", {"session": {}}, session_dir=tmp_path)
 
     assert latest_run_summary("session_1", "run_cancelled", session_dir=tmp_path)["terminal_state"] == "interrupted-by-user"
     assert latest_run_summary("session_1", "run_crashed", session_dir=tmp_path)["terminal_state"] == "interrupted-by-crash"
     assert latest_run_summary("session_1", "run_failed", session_dir=tmp_path)["terminal_state"] == "errored"
+    assert latest_run_summary("session_1", "run_tool_limit", session_dir=tmp_path)["terminal_state"] == "tool_limit_reached"
+    assert latest_run_summary("session_1", "run_tool_limit_done", session_dir=tmp_path)["terminal_state"] == "tool_limit_reached"
+    assert latest_run_summary("session_1", "run_unknown_done", session_dir=tmp_path)["terminal_state"] == "completed"
     assert latest_run_summary("session_1", "run_done", session_dir=tmp_path)["terminal_state"] == "completed"
 
 

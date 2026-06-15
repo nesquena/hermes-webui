@@ -26,12 +26,15 @@ SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 def _load_session_clear_block() -> str:
     """The if(currentSid!==sid||forceReload){...} block in loadSession()."""
     start = SESSIONS_JS.index("async function loadSession(sid)")
-    return SESSIONS_JS[start: start + 4000]
+    # Window widened to 6500: #3899's idle-reset + live-turn-snapshot blocks added
+    # code earlier in loadSession, pushing the carry-forward snapshot past the old
+    # 4000-char window.
+    return SESSIONS_JS[start: start + 6500]
 
 
 def _ensure_messages_loaded_body() -> str:
     start = SESSIONS_JS.index("async function _ensureMessagesLoaded")
-    return SESSIONS_JS[start: start + 2500]
+    return SESSIONS_JS[start: start + 3000]
 
 
 def test_pending_carry_forward_snapshot_declared_at_module_scope():

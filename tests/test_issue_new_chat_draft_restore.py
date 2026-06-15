@@ -76,7 +76,9 @@ def test_pre_switch_draft_flush_rechecks_stale_loading_guard():
     (Codex pre-release CORE catch, #3471)."""
     start = SESSIONS_JS.find("async function loadSession(")
     assert start != -1, "loadSession not found"
-    body = SESSIONS_JS[start:start + 4000]
+    # Window widened to 6500: #3899's idle-reset + live-turn-snapshot blocks pushed
+    # the destructive S.messages clear past the old 4000-char window.
+    body = SESSIONS_JS[start:start + 6500]
     await_idx = body.find("await _saveComposerDraftNow(currentSid")
     guard_idx = body.find("if (_loadingSessionId !== sid) return;", await_idx)
     clear_idx = body.find("S.messages = [];", await_idx)
@@ -109,4 +111,20 @@ def test_clear_composer_draft_forgets_same_new_chat_candidate():
     body = SESSIONS_JS[start:end]
     assert "_clearRememberedNewChatDraftSession(sid);" in body, (
         "sending a draft must stop New Chat from restoring that now-cleared candidate"
+    )
+
+
+def test_boot_restore_preserves_zero_message_session_with_composer_draft():
+    """A hard refresh should not discard a zero-message session that owns unsent draft text/files."""
+    marker = "const _restoredInFlight = S.session && ("
+    start = BOOT_JS.find(marker)
+    end = BOOT_JS.find("// Restore the panel from localStorage", start)
+    assert start != -1 and end != -1, "boot restored-session cleanup block not found"
+    body = BOOT_JS[start:end]
+    assert "const _restoredDraft = (S.session && S.session.composer_draft) || {};" in body
+    assert "const _restoredDraftText = String(_restoredDraft.text||'').trim();" in body
+    assert "const _restoredDraftFiles = Array.isArray(_restoredDraft.files)" in body
+    assert "const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles.length);" in body
+    assert "&& !_restoredInFlight && !_restoredHasDraft" in body, (
+        "zero-message restored sessions should only be dropped when they have no draft"
     )

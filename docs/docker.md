@@ -11,6 +11,14 @@ This is the comprehensive Docker reference. For a 5-minute quickstart, see the [
 | **Three-container** | Two-container PLUS the dashboard for monitoring. | `docker-compose.three-container.yml` |
 | **All-in-one image** (community fork — third-party, not maintained by us) | Podman 3.4 / multi-arch / supervisord-style preference. | [sunnysktsang/hermes-suite](https://github.com/sunnysktsang/hermes-suite) — see [#1399](https://github.com/nesquena/hermes-webui/issues/1399) for the original discussion |
 
+> **Note (v0.14+):** If you use `docker-compose.three-container.yml`, both
+> `hermes-agent` and `hermes-dashboard` initialise from the same image and write
+> to the same `hermes-home` volume simultaneously. This can cause overlapping lock
+> files and stale `gateway_state.json` entries. The unified pattern described in
+> [Three-service unified setup (v0.14+)](#three-service-unified-setup-v014) below
+> avoids this by running a single `hermes-agent` process that serves both the
+> gateway and the dashboard.
+
 If something stops working, **start with the single-container setup** — it's the simplest path and fixes most permission/UID/path-mismatch issues by construction.
 
 ## Production image security model
@@ -66,6 +74,80 @@ isolated Hermes home and follow
 > for a one-off root run, use `sudo -E docker compose up -d` and verify the
 > rendered mount with `docker compose config` first.
 
+## Optional GPU runtime image
+
+The default Hermes WebUI Docker image stays CPU-only. GPU user-space packages
+are installed only when you build a custom image with the opt-in build arg:
+
+```bash
+docker build --build-arg INSTALL_GPU_LIBS=1 -t hermes-webui:gpu .
+```
+
+That build path installs VA-API basics (`libva2`, `vainfo`), AMD Mesa VA-API
+drivers (`mesa-va-drivers`), and the Intel non-free media driver when that
+package is available from the configured Debian repositories. NVIDIA host
+runtime tooling is not installed into the app image; use the NVIDIA Container
+Toolkit on the host and pass GPUs through at runtime.
+
+GPU passthrough still depends on host drivers, Docker runtime support, and
+device mappings. The commands below are configuration guidance for a suitable
+Linux Docker host; they are not a claim that native GPU passthrough was verified
+in this workspace.
+
+### Intel and AMD VA-API
+
+Expose the host render devices and add the runtime user to the common video and
+render groups:
+
+```bash
+docker run --rm \
+  --device /dev/dri:/dev/dri \
+  --group-add video \
+  --group-add render \
+  hermes-webui:gpu vainfo
+```
+
+For Compose, add the same mapping to a custom service definition:
+
+```yaml
+services:
+  hermes-webui:
+    image: hermes-webui:gpu
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+```
+
+`vainfo` should list the VA-API driver and supported profiles when the host
+driver stack and container permissions are correct. The container entrypoint
+preserves Docker-provided supplemental groups before it drops privileges to the
+`hermeswebui` runtime user, so the WebUI process keeps access to `/dev/dri`.
+
+### NVIDIA
+
+Install and configure the NVIDIA Container Toolkit on the host first, then use
+Docker's GPU runtime flag:
+
+```bash
+docker run --rm --gpus all hermes-webui:gpu nvidia-smi
+```
+
+For Compose, use a custom service with GPU access enabled:
+
+```yaml
+services:
+  hermes-webui:
+    image: hermes-webui:gpu
+    gpus: all
+```
+
+If `nvidia-smi` is unavailable or reports no devices, fix the host NVIDIA driver
+and container toolkit setup before debugging Hermes WebUI. The container image
+only supplies the WebUI plus optional user-space media libraries; it cannot
+provide host kernel drivers or the NVIDIA runtime.
+
 ## Scheduled jobs and the gateway daemon
 
 **Symptom**: Cron jobs created in the Tasks panel never fire. System Settings or Tasks shows:
@@ -99,6 +181,87 @@ If the service name differs in your compose file, `docker compose -f docker-comp
 For container-to-container diagnostics, set one of `HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` in the WebUI environment when using gateway chat mode (`HERMES_WEBUI_CHAT_BACKEND=gateway`), then restart WebUI.
 
 Refs #2785.
+
+## Three-service unified setup (v0.14+)
+
+Since v0.14, `hermes-agent` can serve the gateway API and the built-in dashboard
+from the same process by setting `HERMES_DASHBOARD_HOST` and
+`HERMES_DASHBOARD_PORT`. Running agent and dashboard in one container means a
+single writer to `hermes-home`, eliminating the concurrent-init write conflicts
+that occur when `hermes-agent` and `hermes-dashboard` both start from the same
+image against the same volume.
+
+The three-service pattern uses two containers:
+
+| Service | Image | Ports |
+|---|---|---|
+| `hermes-agent` | `nousresearch/hermes-agent:latest` | 8642 (gateway), 9119 (dashboard) |
+| `hermes-webui` | `ghcr.io/nesquena/hermes-webui:latest` | 8787 (chat UI) |
+
+Example compose snippet (save as `docker-compose.three-service.yml` or inline into your own file):
+
+```yaml
+services:
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    command: gateway run
+    ports:
+      - "127.0.0.1:8642:8642"
+      - "127.0.0.1:9119:9119"
+    volumes:
+      - hermes-home:/home/hermes/.hermes
+      - hermes-agent-src:/opt/hermes
+    environment:
+      - HERMES_HOME=/home/hermes/.hermes
+      - HERMES_UID=${UID:-1000}
+      - HERMES_GID=${GID:-1000}
+      - HERMES_DASHBOARD_HOST=0.0.0.0
+      - HERMES_DASHBOARD_PORT=9119
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+  hermes-webui:
+    image: ghcr.io/nesquena/hermes-webui:latest
+    container_name: hermes-webui
+    depends_on:
+      - hermes-agent
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - hermes-home:/home/hermeswebui/.hermes
+      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro
+      - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
+      - WANTED_UID=${UID:-1000}
+      - WANTED_GID=${GID:-1000}
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+networks:
+  hermes-net:
+    driver: bridge
+
+volumes:
+  hermes-home:
+  hermes-agent-src:
+```
+
+Open http://localhost:8787 for chat and http://localhost:9119 for the dashboard.
+Check `hermes gateway run --help` for the exact flag names for your agent release —
+the env-var equivalents shown above (`HERMES_DASHBOARD_HOST`, `HERMES_DASHBOARD_PORT`)
+are available in recent releases alongside the CLI flags.
+
+If you need the separate dashboard container (e.g. resource limits per service),
+`docker-compose.three-container.yml` still works. Add a `depends_on` from
+`hermes-dashboard` to `hermes-agent` with a `condition: service_healthy` healthcheck
+so the dashboard waits for the gateway to finish initialising agent-home before it
+starts its own init pass.
 
 ## What goes wrong (and how to fix it)
 
@@ -347,6 +510,7 @@ volumes:
 - #1399 — UID alignment in compose files (fixed in v0.50.260 via PR #1428 + this guide)
 - #3012 — host `localhost` API URLs fail from Docker containers (use `host.docker.internal` / `host.containers.internal`)
 - #3006 — `sudo docker compose` can mount `/root/.hermes` instead of the user's Hermes home
+- #3243 — optional GPU runtime image/docs for containerized acceleration workloads
 - #858 — two-container `/opt/hermes` path confusion
 - #681 — tools running in WebUI container, not agent container (architectural)
 - #668 — auto-detect UID/GID from mounted volume

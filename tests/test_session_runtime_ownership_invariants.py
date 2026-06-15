@@ -125,12 +125,15 @@ class TestSessionOwnedRuntimeInvariants:
         assert "_clarifyPollingSessionId = sid || null" in fallback, (
             "Any clarify fallback poller should retain its owner session id."
         )
-        onerror_idx = start_clarify.index("_clarifyEventSource.onerror")
-        onerror_body = start_clarify[onerror_idx:start_clarify.index("};", onerror_idx)]
-        assert "stopClarifyPolling();" not in onerror_body, (
-            "SSE fallback must not clear _clarifyPollingSessionId before starting the fallback poller."
+        # As of #3913 the clarify transport is poll-only (no SSE onerror path):
+        # startClarifyPolling must route directly to the owner-keyed fallback
+        # poller, and must not clear the polling session id before doing so.
+        assert "_startClarifyFallbackPoll(sid)" in start_clarify, (
+            "startClarifyPolling must hand off to the owner-keyed fallback poller."
         )
-        assert "_startClarifyFallbackPoll(sid)" in onerror_body
+        assert "_clarifyEventSource.onerror" not in start_clarify, (
+            "SSE onerror path was removed in #3913 — startClarifyPolling polls over HTTP now."
+        )
 
     def test_live_stream_transport_and_inflight_state_remain_session_keyed(self):
         messages = read("static/messages.js")

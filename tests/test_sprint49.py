@@ -63,6 +63,7 @@ def test_last_assistant_keeps_usage_visible_and_reveals_time_and_actions_on_hove
     assert (
         "targetFoot.insertBefore(usage, targetFoot.firstChild);" in UI_JS
         or "targetFoot.insertBefore(fragments[i], targetFoot.firstChild);" in UI_JS
+        or "targetFoot.insertBefore(fragments[i], firstChild);" in UI_JS
     )
     assert ".assistant-turn .msg-foot-with-usage," in UI_CSS
     assert ".msg-row[data-role=\"assistant\"] .msg-foot-with-usage {\n  opacity: 1;" in UI_CSS

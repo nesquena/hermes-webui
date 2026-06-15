@@ -201,7 +201,7 @@ def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(monkeypatch, tmp_path
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
-        lambda model, provider: (model, provider, False),
+        lambda model, provider, **_: (model, provider, False),
     )
     started = []
 
@@ -316,7 +316,7 @@ def test_goal_endpoint_adapter_keeps_full_set_text_and_legacy_payload_status(mon
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
-        lambda model, provider: (model, provider, False),
+        lambda model, provider, **_: (model, provider, False),
     )
     monkeypatch.setattr(
         routes,
@@ -408,7 +408,7 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "goal'" in MESSAGES_JS
     assert "source.addEventListener('goal'" in MESSAGES_JS
     assert "source.addEventListener('goal_continue'" in MESSAGES_JS
-    assert "['steer','interrupt','queue','terminal','goal'].includes(_pc.name)" in MESSAGES_JS
+    assert "['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)" in MESSAGES_JS
     assert "queueSessionMessage" in MESSAGES_JS
 
 

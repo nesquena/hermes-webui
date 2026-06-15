@@ -8,9 +8,10 @@ import json
 import os
 import ssl
 import subprocess
+import sys
+import tempfile
 import textwrap
 import time
-import tempfile
 import unittest
 from contextlib import suppress
 from pathlib import Path
@@ -79,6 +80,7 @@ def _start_server(port: int, cert: str = None, key: str = None) -> subprocess.Po
         [os.sys.executable, str(ROOT / "server.py")],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True,
+        **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
     )
     return proc
 

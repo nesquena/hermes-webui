@@ -49,6 +49,15 @@ def test_mobile_session_menu_opens_from_long_press_and_hides_dots():
     assert ".session-item:focus-within,.session-item.menu-open{padding-right:6px;}" in mobile_touch
 
 
+def test_nested_fork_mobile_menu_uses_long_press_fallback():
+    assert "const _scheduleForkLongPressMenu=()=>{" in SESSIONS_JS
+    assert "rowEl.classList.add('long-pressing')" in SESSIONS_JS
+    assert "_openSessionActionMenu(childSession, rowEl);" in SESSIONS_JS
+    assert "rowEl._skipNextChildOpen=true;" in SESSIONS_JS
+    assert "if(row._skipNextChildOpen){" in SESSIONS_JS
+    assert ".session-child-session-fork.long-pressing{" in STYLE_CSS
+
+
 def test_open_session_menu_consumes_next_row_activation():
     context_menu = _sessions_block("el.oncontextmenu=(e)=>{", "// Use release events")
     assert SESSIONS_JS.count("el.oncontextmenu=(e)=>{") == 1

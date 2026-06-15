@@ -16,8 +16,9 @@ SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 def _ensure_messages_loaded_body() -> str:
     start = SESSIONS_JS.index("async function _ensureMessagesLoaded")
     # Window widened (#3326 added reload-width-hint handling inside this function,
-    # pushing the carry-forward reassignment further down).
-    return SESSIONS_JS[start: start + 2600]
+    # pushing the carry-forward reassignment further down; #3790 added the
+    # cold-load expand_renderable param + comment, pushing it further still).
+    return SESSIONS_JS[start: start + 3000]
 
 
 def test_ensure_messages_loaded_declares_msgs_with_let():

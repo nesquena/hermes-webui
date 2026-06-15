@@ -27,7 +27,8 @@ def test_ui_rejects_recovery_control_as_visible_assistant_content():
     assert "function _isRecoveryControlMessageText" in UI_JS
     assert "function _assistantMessageHasVisibleContent" in UI_JS
     assert "if(_isRecoveryControlMessage(m)) return false;" in UI_JS
-    assert "if(_isRecoveryControlMessage(m)){ri++;continue;}" in UI_JS
+    assert "function _messageIsRenderable(m)" in UI_JS
+    assert "if(_isRecoveryControlMessage(m)) return false;" in UI_JS[UI_JS.index("function _messageIsRenderable(m)"):]
     assert "_assistantMessageHasVisibleContent(m)" in UI_JS
 
 
@@ -36,8 +37,6 @@ def test_recovery_control_detection_is_not_broad_phrase_matching():
     assert "|| /continue exactly where you left off/i.test(normalized)" not in MESSAGES_JS
     assert "const systemRecovery=/^\\[System:/i.test(normalized)" in UI_JS
     assert "const backendRecovery=/^the live worker stopped before this run finished\\.?$/i.test(normalized)" in UI_JS
-
-
 def test_recovery_control_does_not_filter_genuine_interruption_card():
     """A real 'Response interrupted' card carries provider_details_label
     'Interruption details' but is NOT a recovery-control row — it must stay

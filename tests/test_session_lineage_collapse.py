@@ -22,6 +22,7 @@ def _run_node(source: str) -> str:
         input=source,
         cwd=str(REPO_ROOT),
         capture_output=True,
+        encoding="utf-8",
         text=True,
         timeout=10,
     )
@@ -355,6 +356,7 @@ function extractFunc(name) {{
 }}
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
@@ -392,6 +394,7 @@ function extractFunc(name) {{
   return src.slice(start, i);
 }}
 eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const collapsed = [{{session_id:'telegram_parent', title:'Telegram parent', source_label:'Telegram'}}];
@@ -416,6 +419,249 @@ console.log(JSON.stringify(rows));
     assert [row["session_id"] for row in rows] == ["telegram_parent", "webui_tip"]
     assert rows[1].get("_orphan_child_session") is True
     assert "_child_sessions" not in rows[0]
+
+
+def test_fork_child_with_visible_parent_is_nested_once():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parent = {{session_id:'parent', title:'Parent', updated_at:10, last_message_at:10}};
+const fork = {{session_id:'fork1', title:'Fork', session_source:'fork', parent_session_id:'parent', updated_at:20, last_message_at:20}};
+const rows = _attachChildSessionsToSidebarRows([parent, fork], [parent, fork]);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert [row["session_id"] for row in rows] == ["parent"]
+    assert rows[0]["_child_session_count"] == 1
+    assert [child["session_id"] for child in rows[0]["_child_sessions"]] == ["fork1"]
+
+
+def test_fork_child_without_visible_parent_stays_top_level():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const fork = {{session_id:'fork1', title:'Fork', session_source:'fork', parent_session_id:'missing', updated_at:20, last_message_at:20}};
+const rows = _attachChildSessionsToSidebarRows([fork], [fork]);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert [row["session_id"] for row in rows] == ["fork1"]
+    assert "_child_sessions" not in rows[0]
+
+
+def test_pinned_fork_with_visible_parent_stays_top_level():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parent = {{session_id:'parent', title:'Parent', updated_at:10, last_message_at:10}};
+const fork = {{session_id:'fork1', title:'Fork', session_source:'fork', parent_session_id:'parent', pinned:true, updated_at:20, last_message_at:20}};
+const rows = _attachChildSessionsToSidebarRows([parent, fork], [parent, fork]);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert [row["session_id"] for row in rows] == ["parent", "fork1"]
+    assert "_child_sessions" not in rows[0]
+
+
+def test_nested_fork_keeps_parent_timestamp_for_sorting():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parent = {{session_id:'parent', title:'Parent', updated_at:10, last_message_at:10}};
+const fork = {{session_id:'fork1', title:'Fork', session_source:'fork', parent_session_id:'parent', updated_at:20, last_message_at:20}};
+const rows = _attachChildSessionsToSidebarRows([parent, fork], [parent, fork]);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert rows[0]["session_id"] == "parent"
+    assert rows[0]["last_message_at"] == 10
+
+
+def test_nested_fork_bubbles_parent_attention_state():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isSessionEffectivelyStreaming(session) {{
+  return !!(session && session.active_stream_id);
+}}
+function _hasUnreadForSession(session) {{
+  return !!(session && session.has_unread);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parent = {{session_id:'parent', title:'Parent', updated_at:10, last_message_at:10}};
+const fork = {{
+  session_id:'fork1',
+  title:'Fork',
+  session_source:'fork',
+  parent_session_id:'parent',
+  updated_at:20,
+  last_message_at:20,
+  has_unread:true,
+  attention:{{kind:'approval', count:2}},
+  active_stream_id:'stream-1'
+}};
+const rows = _attachChildSessionsToSidebarRows([parent, fork], [parent, fork]);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert rows[0]["_child_session_has_unread"] is True
+    assert rows[0]["_child_session_streaming"] is True
+    assert rows[0]["_child_session_attention"]["kind"] == "approval"
+
+
+def test_fork_chain_stays_attached_under_visible_root():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const root = {{session_id:'root', title:'Root', updated_at:10, last_message_at:10}};
+const fork1 = {{session_id:'fork1', title:'Fork 1', session_source:'fork', parent_session_id:'root', updated_at:20, last_message_at:20}};
+const fork2 = {{session_id:'fork2', title:'Fork 2', session_source:'fork', parent_session_id:'fork1', updated_at:30, last_message_at:30}};
+const rows = _attachChildSessionsToSidebarRows([fork2, fork1, root], [fork2, fork1, root]);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert [row["session_id"] for row in rows] == ["root"]
+    assert [child["session_id"] for child in rows[0]["_child_sessions"]] == ["fork1", "fork2"]
+    assert rows[0]["_child_sessions"][1]["_parent_segment_id"] == "fork1"
+
+
+def test_sidebar_lineage_key_uses_session_id_for_fork_rows():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sidebarLineageKeyForRow'));
+const root = {{session_id:'root', parent_session_id:null}};
+const pinnedFork = {{session_id:'fork1', session_source:'fork', parent_session_id:'root', pinned:true}};
+console.log(JSON.stringify({{
+  rootKey:_sidebarLineageKeyForRow(root),
+  forkKey:_sidebarLineageKeyForRow(pinnedFork),
+}}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["rootKey"] == "root"
+    assert result["forkKey"] == "fork1"
 
 
 def test_session_segment_count_prefers_visible_collapsed_backend_and_materialized_counts():
@@ -469,19 +715,24 @@ def test_lineage_segment_expansion_static_contract():
     assert "const _expandedLineageKeys = new Set();" in js
     assert "const _lineageReportCache = new Map();" in js
     assert "const _lineageReportInflight = new Map();" in js
+    assert "_pruneLineageReportCacheToVisibleSessions(_allSessions);" in js
     assert "session-lineage-count,.session-lineage-segments,.session-lineage-segment" in js
     assert "segmentCountEl.setAttribute('aria-expanded'" in js
     assert "_expandedLineageKeys.has(lineageKey)" in js
     assert "_expandedLineageKeys.add(lineageKey)" in js
     assert "_expandedLineageKeys.delete(lineageKey)" in js
     assert "_fetchLineageReportForRow(s,lineageKey).then" in js
+    assert js.count("_fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache());") == 2
     assert "'/api/session/lineage/report?session_id='" in js
     assert "encodeURIComponent(s.session_id)" in js
     assert "className='session-lineage-segments'" in js
     assert "className='session-lineage-segment'" in js
     assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
     assert "row.title=t('session_lineage_segment_open');" in js
-    assert "await loadSession(seg.session_id);" in js
+    assert "await loadSession(seg.session_id, {skipLineageResolve:true});" in js
+    assert "const openChildSession=async(childSession)=>{" in js
+    assert "await loadSession(childSession.session_id, {skipLineageResolve:true});" in js
+    assert "if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){" in js
     assert ".session-lineage-count.expandable{" in css
     assert ".session-lineage-count.expandable:hover" in css
     assert ".session-lineage-segments{" in css
@@ -615,6 +866,98 @@ eval(extractFunc('_fetchLineageReportForRow'));
     }
 
 
+def test_lineage_refresh_cache_prune_keeps_visible_keys_and_drops_missing_ones():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+const _lineageReportInflight = new Map();
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_pruneLineageReportCacheToVisibleSessions'));
+const visibleRequest = Promise.resolve({{found:true}});
+const staleRequest = Promise.resolve({{found:true}});
+_lineageReportCache.set('root', {{segments:[{{session_id:'root'}}]}});
+_lineageReportCache.set('stale', {{segments:[{{session_id:'stale'}}]}});
+_lineageReportInflight.set('root', visibleRequest);
+_lineageReportInflight.set('stale', staleRequest);
+_pruneLineageReportCacheToVisibleSessions([
+  {{session_id:'tip', _lineage_key:'root'}},
+  {{session_id:'child', parent_session_id:'root'}},
+]);
+console.log(JSON.stringify({{
+  cacheKeys:Array.from(_lineageReportCache.keys()),
+  inflightKeys:Array.from(_lineageReportInflight.keys()),
+}}));
+"""
+    assert json.loads(_run_node(source)) == {
+        "cacheKeys": ["root"],
+        "inflightKeys": ["root"],
+    }
+
+
+def test_pruned_lineage_inflight_request_cannot_repopulate_cache():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+const _lineageReportInflight = new Map();
+let _lineageReportCacheGeneration = 0;
+let resolveApi;
+function api(path) {{
+  return new Promise(resolve => {{
+    resolveApi = () => resolve({{found:true, path, segments:[{{session_id:'stale'}}]}});
+  }});
+}}
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_pruneLineageReportCacheToVisibleSessions'));
+eval(extractFunc('_fetchLineageReportForRow'));
+(async()=>{{
+  const staleRow = {{session_id:'stale-tip', _lineage_key:'stale'}};
+  const request = _fetchLineageReportForRow(staleRow, 'stale');
+  _pruneLineageReportCacheToVisibleSessions([{{session_id:'tip', _lineage_key:'root'}}]);
+  resolveApi();
+  await request;
+  console.log(JSON.stringify({{
+    staleCached:_lineageReportCache.has('stale'),
+    staleInflight:_lineageReportInflight.has('stale'),
+    visibleCached:_lineageReportCache.has('root'),
+  }}));
+}})().catch(err=>{{console.error(err); process.exit(1);}});
+"""
+    assert json.loads(_run_node(source)) == {
+        "staleCached": False,
+        "staleInflight": False,
+        "visibleCached": False,
+    }
+
+
 def test_active_hidden_lineage_segment_auto_expands_parent():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
@@ -723,6 +1066,7 @@ function extractFunc(name) {{
   return src.slice(start, i);
 }}
 eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_sessionDisplayTitle'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
@@ -775,3 +1119,38 @@ console.log(JSON.stringify({{
 }}));
 """
     assert json.loads(_run_node(source)) == {"webui": [], "custom": ["#prod"]}
+
+
+def test_streaming_state_recorded_from_own_state_not_bubbled_child():
+    """_rememberRenderedStreamingState must receive the parent's own streaming
+    state, not the composite own||child value.  Otherwise the parent gets
+    marked unread/completed when a nested fork stops streaming."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    # The pattern we need: ownStreaming used for remember, isStreaming used
+    # for rendering (includes child).
+    assert "const ownStreaming=_isSessionEffectivelyStreaming(s);" in js
+    assert "const isStreaming=ownStreaming||!!s._child_session_streaming;" in js
+    assert "_rememberRenderedStreamingState(s, ownStreaming);" in js
+    # The old buggy pattern must not exist.
+    assert "_rememberRenderedStreamingState(s, isStreaming);" not in js
+
+
+def test_nested_fork_rows_included_in_visible_sidebar_ids():
+    """Expanded writable fork children must appear in _sessionVisibleSidebarIds
+    so they participate in batch-select (select-all / shift-select)."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    assert "child.session_source==='fork'" in js
+    # The _sessionVisibleSidebarIds builder must push fork children.
+    assert "_sessionVisibleSidebarIds.push(child.session_id)" in js
+
+
+def test_nested_fork_rows_render_select_checkbox():
+    """The session-child-session-fork render path must include a batch-select
+    checkbox when _sessionSelectMode is active and the child is writable."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    render_marker = "row.className='session-child-session session-child-session-fork'"
+    fork_render_start = js.find(render_marker)
+    assert fork_render_start > 0
+    fork_render_block = js[fork_render_start:fork_render_start + 2000]
+    assert "session-select-cb" in fork_render_block
+    assert "_sessionSelectMode" in fork_render_block

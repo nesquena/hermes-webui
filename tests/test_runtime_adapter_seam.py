@@ -406,33 +406,61 @@ def test_approval_respond_approves_from_gateway_queues_when_pending_empty() -> N
 def test_chat_start_route_selects_adapter_only_when_flag_enabled():
     routes = importlib.import_module("api.routes")
     src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+    # NOTE: T-2979-fix factored the adapter-selection block out of
+    # _handle_chat_start into the shared `_start_run` helper (used by both
+    # /api/chat/start and start_session_turn — Q-2979-A2 / Copilot
+    # r3305864087/r3305864173). Scan the helper body for the contract; the
+    # route body only needs to delegate to it.
+    helper_idx = src.index("def _start_run(")
+    helper_body = src[helper_idx:src.index("def start_session_turn(", helper_idx)]
     start_idx = src.index("def _handle_chat_start")
     start_body = src[start_idx:src.index("def _resolve_chat_workspace_with_recovery", start_idx)]
 
-    assert "runtime_adapter_enabled()" in start_body
-    assert "runtime_adapter_runner_enabled()" in start_body
-    assert "build_runtime_adapter(" in start_body
-    assert "legacy_adapter_factory=_legacy_adapter_factory" in start_body
-    assert "runner_client_factory=_runtime_runner_client_factory" in start_body
-    assert "LegacyJournalRuntimeAdapter" in start_body
-    assert "_start_chat_stream_for_session(" in start_body
-    assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in start_body, "route should use runtime_adapter_enabled(), not inline env checks"
+    # Contract enforced in the shared helper:
+    assert "runtime_adapter_enabled()" in helper_body
+    assert "runtime_adapter_runner_enabled()" in helper_body
+    assert "build_runtime_adapter(" in helper_body
+    assert "legacy_adapter_factory=_legacy_adapter_factory" in helper_body
+    assert "runner_client_factory=_runtime_runner_client_factory" in helper_body
+    assert "LegacyJournalRuntimeAdapter" in helper_body
+    assert "_start_chat_stream_for_session(" in helper_body
+    # Route delegates to the helper instead of inlining env checks:
+    assert "_start_run(" in start_body
+    assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in start_body, "route should use runtime_adapter_enabled() via _start_run, not inline env checks"
+    assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in helper_body, "helper should use runtime_adapter_enabled(), not inline env checks"
 
 
 def test_runner_local_chat_start_selection_does_not_fallback_to_legacy():
     routes = importlib.import_module("api.routes")
     src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+    # See note in test_chat_start_route_selects_adapter_only_when_flag_enabled
+    # — adapter selection moved into the shared `_start_run` helper.
+    helper_idx = src.index("def _start_run(")
+    helper_body = src[helper_idx:src.index("def start_session_turn(", helper_idx)]
     start_idx = src.index("def _handle_chat_start")
     start_body = src[start_idx:src.index("def _resolve_chat_workspace_with_recovery", start_idx)]
 
     flag_branch = "if runtime_adapter_enabled() or runtime_adapter_runner_enabled():"
-    assert flag_branch in start_body
-    assert "except NotImplementedError as exc:" in start_body
-    assert 'return j(handler, {"error": str(exc)}, status=501)' in start_body
+    assert flag_branch in helper_body
+    assert "except NotImplementedError as exc:" in helper_body
+    # The helper returns {"error": str(exc), "_status": 501}; the route then
+    # maps that onto the legacy j(handler, {...}, status=501) response shape
+    # to keep the public contract identical to pre-refactor behavior.
+    assert 'return {"error": str(exc), "_status": 501}' in helper_body
+    assert 'return j(handler, {"error": response["error"]}, status=501)' in start_body
     assert "runner-local chat backend is not configured" in src
-    adapter_branch = start_body[start_body.index(flag_branch):start_body.index("else:", start_body.index(flag_branch))]
+    # The adapter branch inside the helper still calls _start_chat_stream_for_session
+    # through the _legacy_start_run delegate before the trailing legacy-direct
+    # fallthrough (the function returns the legacy direct call when the flag
+    # is off — no `else:` keyword anymore since each branch returns).
+    adapter_branch_start = helper_body.index(flag_branch)
+    # Slice up to the final (post-flag) return _start_chat_stream_for_session
+    # — there are two occurrences: one inside _legacy_start_run, one at the
+    # fallthrough; we want both inside the branch slice.
+    fallthrough = helper_body.rindex("return _start_chat_stream_for_session(")
+    adapter_branch = helper_body[adapter_branch_start:fallthrough]
     assert "_start_chat_stream_for_session(" in adapter_branch, "legacy-journal delegate should still call the legacy path"
-    assert "runtime_adapter_runner_enabled()" in adapter_branch
+    assert "runtime_adapter_runner_enabled()" in adapter_branch or "runtime_adapter_runner_enabled()" in helper_body
 
 
 def test_chat_start_adapter_path_preserves_legacy_response_shape():

@@ -284,7 +284,7 @@ class TestSendBusyBranchDispatch:
 
 
     def test_slash_commands_intercepted_before_busymode_routing(self):
-        """The three busy-control slash commands (/steer /interrupt /queue) must be
+        """Busy-control slash commands (/steer /interrupt /queue /yolo) must be
         intercepted at the TOP of the busy block — before the busyMode routing — so
         they execute immediately while the agent is running.
 
@@ -298,22 +298,26 @@ class TestSendBusyBranchDispatch:
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
         assert busy_start >= 0, "busy block not found"
         # The intercept must appear BEFORE the busyMode assignment
-        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue'", busy_start)
+        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
         assert intercept_idx >= 0, (
-            "send() must intercept /steer /interrupt /queue before the busyMode "
+            "send() must intercept /steer /interrupt /queue /terminal /goal /yolo before the busyMode "
             "routing block — otherwise they queue instead of executing immediately"
         )
         assert intercept_idx < busymode_idx, (
             "The slash-command intercept must come BEFORE the busyMode routing "
             "so /steer executes while the agent is running, not after the turn ends"
         )
+        intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
+        assert "'yolo'" in intercept_block, (
+            "The busy-mode slash-command allowlist must include /yolo"
+        )
 
     def test_steer_intercept_calls_handler_directly(self):
         """The busy-intercept must dispatch via _bc.fn(_pc.args), not queue the text."""
         send_idx = MESSAGES_JS.find("async function send(")
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
-        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue'", busy_start)
+        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         assert intercept_idx >= 0
         # Get the intercept block (up to the next busyMode assignment)
         busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
@@ -335,7 +339,7 @@ class TestSendBusyBranchDispatch:
         """
         send_idx = MESSAGES_JS.find("async function send(")
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
-        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue'", busy_start)
+        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
         intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
         clear_idx = intercept_block.find("$('msg').value=''")

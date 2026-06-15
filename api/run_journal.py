@@ -84,11 +84,17 @@ def _next_seq(path: Path) -> int:
 def _terminal_state_for_event(event_name: str, payload) -> str | None:
     name = str(event_name or "")
     if name == "done" or name == "stream_end":
+        if isinstance(payload, dict):
+            explicit_state = str(payload.get("terminal_state") or "").strip().lower()
+            if explicit_state in {"tool_limit_reached"}:
+                return explicit_state
         return "completed"
     if name == "cancel":
         return "interrupted-by-user"
     if name in {"apperror", "error"}:
         err_type = str((payload or {}).get("type") or "").strip().lower() if isinstance(payload, dict) else ""
+        if err_type == "tool_limit_reached":
+            return "tool_limit_reached"
         if err_type in {"cancelled", "canceled"}:
             return "interrupted-by-user"
         if err_type == "interrupted":
@@ -199,12 +205,15 @@ def read_run_events(
     run_id: str,
     *,
     after_seq: int | None = None,
+    max_seq: int | None = None,
     session_dir: Path | None = None,
 ) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
     events, malformed = _read_jsonl(path)
     if after_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
+    if max_seq is not None:
+        events = [event for event in events if int(event.get("seq") or 0) <= int(max_seq)]
     return {
         "session_id": str(session_id),
         "run_id": str(run_id),
@@ -251,6 +260,32 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
         summary["path"] = str(path)
         return summary
     return None
+
+
+def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> bool:
+    """Remove the entire per-session run-journal directory (``_run_journal/{sid}/``).
+
+    The run journal stores one directory per session containing a ``{rid}.jsonl``
+    file per run, so removing the session's directory clears every run's full
+    request/response payloads. Invalid/empty ids and a missing directory are a
+    no-op so callers can invoke this unconditionally on delete. Returns ``True``
+    if a directory was removed, ``False`` otherwise.
+    """
+    import shutil
+
+    sid = str(session_id or "").strip()
+    # Reject path-traversal ids: the regex below permits dots, so a bare "." or
+    # ".." would resolve `root / RUN_JOURNAL_DIR_NAME / sid` to the journal ROOT
+    # (or its parent) and rmtree the wrong directory. The route call site only
+    # passes real sids, but this is a public helper — guard it directly.
+    if sid in (".", "..") or not sid or "/" in sid or "\\" in sid or not _SAFE_ID_RE.fullmatch(sid):
+        return False
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    session_journal_dir = root / RUN_JOURNAL_DIR_NAME / sid
+    if not session_journal_dir.exists():
+        return False
+    shutil.rmtree(session_journal_dir, ignore_errors=True)
+    return not session_journal_dir.exists()
 
 
 def stale_interrupted_event(session_id: str, run_id: str, *, after_seq: int | None = None) -> dict | None:

@@ -211,7 +211,7 @@ def test_update_flows_keep_explicit_longer_timeouts():
     """Legitimately long update flows should not inherit the generic 30s guard."""
     src = _source(UI_JS)
     panels = _source(PANELS_JS)
-    assert "api('/api/updates/check?force=1',{timeoutMs:60000})" in panels
+    assert "api('/api/updates/check',{method:'POST',body:JSON.stringify({force:true}),timeoutMs:60000})" in panels
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
     assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000})" in src
     assert "api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000})" in src

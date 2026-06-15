@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import stat
 import subprocess
 import concurrent.futures
@@ -92,6 +93,8 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
         return None
     candidate = Path(raw).expanduser().resolve()
     base = Path(cwd).expanduser().resolve()
+    if _is_blocked_workspace_path(candidate, raw) or _is_blocked_workspace_path(base, cwd):
+        return None
     if candidate == base or _is_within(candidate, base):
         return candidate
     return None
@@ -931,6 +934,116 @@ def make_anchored_dir(root: Path, dest: Path) -> None:
             os.close(fd)
         except OSError:
             pass
+
+
+def open_anchored_write_fd(root: Path, target: Path) -> int:
+    """Open existing ``target`` for truncating writes anchored under ``root``."""
+    root_resolved = root.resolve()
+    target_resolved = target.resolve()
+    try:
+        rel_parts = target_resolved.relative_to(root_resolved).parts
+    except ValueError:
+        raise ValueError(f"Path traversal blocked: {target}") from None
+    if not rel_parts:
+        raise ValueError(f"Invalid target: {target}")
+
+    flags = os.O_WRONLY | os.O_TRUNC | _O_NOFOLLOW
+    if not _DIR_FD_OK:
+        return os.open(str(target_resolved), flags)
+
+    parent_fd = open_anchored_fd(root_resolved, target_resolved.parent, want_dir=True)
+    try:
+        return os.open(rel_parts[-1], flags, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def unlink_anchored(root: Path, target: Path) -> None:
+    """Unlink an existing file anchored under ``root``."""
+    root_resolved = root.resolve()
+    target_resolved = target.resolve()
+    try:
+        rel_parts = target_resolved.relative_to(root_resolved).parts
+    except ValueError:
+        raise ValueError(f"Path traversal blocked: {target}") from None
+    if not rel_parts:
+        raise ValueError(f"Invalid target: {target}")
+
+    if not _DIR_FD_OK:
+        target_resolved.unlink()
+        return
+
+    parent_fd = open_anchored_fd(root_resolved, target_resolved.parent, want_dir=True)
+    try:
+        os.unlink(rel_parts[-1], dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def rmtree_anchored(root: Path, target: Path) -> None:
+    """Remove a directory tree anchored under ``root`` without following symlink swaps."""
+    root_resolved = root.resolve()
+    target_resolved = target.resolve()
+    try:
+        rel_parts = target_resolved.relative_to(root_resolved).parts
+    except ValueError:
+        raise ValueError(f"Path traversal blocked: {target}") from None
+    if not rel_parts:
+        raise ValueError(f"Invalid target: {target}")
+
+    if not _DIR_FD_OK:
+        shutil.rmtree(target_resolved)
+        return
+
+    parent_fd = open_anchored_fd(root_resolved, target_resolved.parent, want_dir=True)
+    try:
+        shutil.rmtree(rel_parts[-1], dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def rename_anchored(root: Path, source: Path, dest: Path) -> None:
+    """Rename ``source`` to ``dest`` using anchored parent directory fds."""
+    root_resolved = root.resolve()
+    source_resolved = source.resolve()
+    dest_parent_resolved = dest.parent.resolve()
+    try:
+        source_parts = source_resolved.relative_to(root_resolved).parts
+    except ValueError:
+        raise ValueError(f"Path traversal blocked: {source}") from None
+    try:
+        dest_parent_resolved.relative_to(root_resolved)
+    except ValueError:
+        raise ValueError(f"Path traversal blocked: {dest}") from None
+    if not source_parts:
+        raise ValueError(f"Invalid source: {source}")
+    dest_leaf = dest.name
+    if not dest_leaf:
+        raise ValueError(f"Invalid destination: {dest}")
+
+    if not _DIR_FD_OK:
+        source_resolved.rename(dest)
+        return
+
+    src_parent_fd = open_anchored_fd(root_resolved, source_resolved.parent, want_dir=True)
+    try:
+        dst_parent_fd = open_anchored_fd(root_resolved, dest_parent_resolved, want_dir=True)
+        try:
+            try:
+                os.stat(dest_leaf, dir_fd=dst_parent_fd, follow_symlinks=False)
+                raise FileExistsError(dest_leaf)
+            except FileNotFoundError:
+                pass
+            os.rename(
+                source_parts[-1],
+                dest_leaf,
+                src_dir_fd=src_parent_fd,
+                dst_dir_fd=dst_parent_fd,
+            )
+        finally:
+            os.close(dst_parent_fd)
+    finally:
+        os.close(src_parent_fd)
 
 
 def list_dir(workspace: Path, rel: str='.'):

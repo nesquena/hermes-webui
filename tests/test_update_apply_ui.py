@@ -31,6 +31,41 @@ def test_update_apply_structured_server_errors_still_use_json_message_path():
     assert "const msg='Update failed ('+target+'): '+(res.message||'unknown error');" in src
 
 
+def test_update_apply_successful_stash_conflict_displays_recovery_message():
+    """ok=True stash conflicts must show the server recovery message before restarting."""
+    src = _ui_js()
+    apply_start = src.index("async function applyUpdates()")
+    next_fn = src.index("function _showUpdateError", apply_start)
+    body = src[apply_start:next_fn]
+
+    messages_decl = body.index("const stashConflictMessages=[];")
+    stash_branch = body.index("if(res.stash_conflict)")
+    message_push = body.index("stashConflictMessages.push('Update applied ('+target+'):", stash_branch)
+    persistent_display = body.index("errEl.textContent=stashConflictMessages.join('\\n\\n')", message_push)
+    message_join = body.index("const stashConflictMessage=stashConflictMessages.join('\\n\\n');", persistent_display)
+    restart_wait = body.index("_waitForServerThenReload", message_join)
+
+    assert messages_decl < stash_branch < message_push < persistent_display < message_join < restart_wait
+    assert "showToast(stashConflictMessage||'Update applied" in body
+    assert "stashConflictMessages.length?10000" in body
+
+
+def test_update_apply_multiple_stash_conflicts_are_aggregated_not_overwritten():
+    """Multiple ok=True stash conflicts must preserve every target recovery message."""
+    src = _ui_js()
+    apply_start = src.index("async function applyUpdates()")
+    next_fn = src.index("function _showUpdateError", apply_start)
+    body = src[apply_start:next_fn]
+
+    assert "let stashConflictMessage='';" not in body
+    assert "stashConflictMessage='Update applied ('+target+'):" not in body
+    assert "const stashConflictMessages=[];" in body
+    assert "stashConflictMessages.push('Update applied ('+target+'): " in body
+    assert "errEl.textContent=stashConflictMessages.join('\\n\\n')" in body
+    assert "const stashConflictMessage=stashConflictMessages.join('\\n\\n');" in body
+    assert "showToast(stashConflictMessage||'Update applied" in body
+
+
 def test_update_apply_network_error_classifier_ignores_http_status_errors():
     """HTTP response errors should not be classified as interrupted transport failures."""
     src = _ui_js()

@@ -290,9 +290,16 @@ class TestProviderListFilter:
             "This excludes ALL OAuth providers (openai-codex, nous, copilot) from the "
             "Settings → Providers panel. The filter must be 'filter(p=>p.configurable||p.is_oauth)'."
         )
-        fixed_filter_idx = self.JS.find("filter(p=>p.configurable||p.is_oauth)")
-        extended_filter_idx = self.JS.find("filter(p=>p.configurable||p.is_oauth||p.is_custom)")
-        assert fixed_filter_idx != -1 or extended_filter_idx != -1, (
+        assert "p.is_oauth" in self.JS, (
             "The provider filter must include p.is_oauth in panels.js. "
             "OAuth providers will not appear in Settings → Providers."
+        )
+        # Current filter also includes is_custom and is_plugin_provider; require
+        # the full expression so partial regressions are caught.
+        assert (
+            "filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider)"
+            in self.JS
+        ), (
+            "Settings → Providers filter must keep OAuth, custom, and plugin "
+            "model-provider entries visible."
         )

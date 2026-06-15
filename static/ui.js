@@ -77,24 +77,44 @@ async function _probeOfflineRecovery(){
   if(_offlineHealthProbePromise)return _offlineHealthProbePromise;
   _offlineHealthProbePromise=(async()=>{
     const fetcher=_offlineRawFetch||window.fetch.bind(window);
+    // Bound the probe so a black-hole network (connected, server hung, packets
+    // dropped) can't delay the banner past a few seconds — the probe now gates
+    // the initial banner display on the offline-event/startup paths.
+    let ctrl=null,timer=null;
+    try{ctrl=(typeof AbortController!=='undefined')?new AbortController():null;}catch(_){ctrl=null;}
+    if(ctrl)timer=setTimeout(()=>{try{ctrl.abort();}catch(_){}},3000);
     try{
-      const res=await fetcher(_offlineHealthUrl(),{cache:'no-store',credentials:'include'});
+      const opts={cache:'no-store',credentials:'include'};
+      if(ctrl)opts.signal=ctrl.signal;
+      const res=await fetcher(_offlineHealthUrl(),opts);
       return !!(res&&res.ok);
     }catch(_){return false;}
+    finally{if(timer)clearTimeout(timer);}
   })();
   try{return await _offlineHealthProbePromise;}
   finally{_offlineHealthProbePromise=null;}
+}
+async function _showOfflineBannerIfProbeFails(reason){
+  const visibleAtStart=_offlineVisible;
+  if(visibleAtStart)_setOfflineChecking(true);
+  const ok=await _probeOfflineRecovery();
+  if(visibleAtStart)_setOfflineChecking(false);
+  if(ok){
+    if(_offlineVisible){_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();}
+    return true;
+  }
+  showOfflineBanner(reason||(_browserReportsOnline()?'network':'browser'));
+  return false;
 }
 async function checkOfflineRecoveryNow(){
   if(_offlineProbePromise)return _offlineProbePromise;
   _offlineProbePromise=(async()=>{
     if(!_offlineVisible)return false;
-    if(!_browserReportsOnline()){showOfflineBanner('browser');return false;}
     _setOfflineChecking(true);
     const ok=await _probeOfflineRecovery();
     _setOfflineChecking(false);
-    if(ok){_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();return true;}
-    showOfflineBanner('network');
+    if(ok){if(!_offlineVisible)return true;_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();return true;}
+    showOfflineBanner(_browserReportsOnline()?'network':'browser');
     return false;
   })();
   try{return await _offlineProbePromise;}
@@ -124,6 +144,19 @@ async function _recoverFromOfflineSoftly(){
     if(S.session && typeof refreshSession==='function'){
       await refreshSession();
     }
+    // After refreshSession() sets S.activeStreamId, reattach if a stream is live.
+    // The server buffers events while no subscriber is attached (#2307/#3863).
+    const sid=S.session&&S.session.session_id;
+    const streamId=S.session&&S.session.active_stream_id;
+    if(sid&&streamId&&typeof attachLiveStream==='function'){
+      let status=null;
+      try{
+        status=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+      }catch(_){/* stream status check failed — leave session refreshed but don't reattach */}
+      // Outside the probe's catch so an attachLiveStream throw reaches the
+      // outer fallback (hard reload) instead of being silently swallowed.
+      if(status&&status.active) attachLiveStream(sid,streamId,S.session.pending_attachments||[],{reconnecting:true});
+    }
     return true;
   }catch(_){
     // Soft reattach failed (server mid-restart, session gone, etc.) — fall
@@ -140,17 +173,18 @@ function _patchOfflineFetch(){
   window.fetch=async function(...args){
     try{return await _offlineRawFetch(...args);}
     catch(e){
-      if(!_browserReportsOnline())showOfflineBanner('browser');
-      else if(e instanceof TypeError&&!_isAbortError(e))void _probeOfflineRecovery().then(ok=>{if(!ok)showOfflineBanner('network');});
+      if(!_isAbortError(e)&&(e instanceof TypeError||!_browserReportsOnline())){
+        void _showOfflineBannerIfProbeFails(_browserReportsOnline()?'network':'browser');
+      }
       throw e;
     }
   };
 }
 function initOfflineMonitor(){
   _patchOfflineFetch();
-  window.addEventListener('offline',()=>showOfflineBanner('browser'));
+  window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser');});
   window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();});
-  if(!_browserReportsOnline())showOfflineBanner('browser');
+  if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser');
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initOfflineMonitor,{once:true});
 else initOfflineMonitor();
@@ -163,14 +197,52 @@ function _getSessionQueue(sid, create=false){
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
   return SESSION_QUEUES[sid]||[];
 }
+function _queueStorageKey(sid){
+  return 'hermes-queue-'+sid;
+}
+function _clearPersistedSessionQueue(sid){
+  if(!sid) return;
+  const key=_queueStorageKey(sid);
+  try{sessionStorage.removeItem(key);}catch(_){}
+  try{localStorage.removeItem(key);}catch(_){}
+}
+function _persistSessionQueueStorage(sid, queue){
+  if(!sid) return;
+  const q=Array.isArray(queue)?queue:[];
+  if(!q.length){_clearPersistedSessionQueue(sid);return;}
+  const key=_queueStorageKey(sid);
+  let payload='[]';
+  try{payload=JSON.stringify(q);}catch(_){return;}
+  try{sessionStorage.setItem(key,payload);}catch(_){}
+  try{localStorage.setItem(key,payload);}catch(_){}
+}
+function _readPersistedSessionQueue(sid){
+  if(!sid) return [];
+  const key=_queueStorageKey(sid);
+  const read=(store)=>{
+    try{
+      const raw=store&&store.getItem?store.getItem(key):null;
+      if(!raw) return null;
+      const parsed=JSON.parse(raw);
+      return Array.isArray(parsed)?parsed:null;
+    }catch(_){return null;}
+  };
+  const sessionValue=read(sessionStorage);
+  if(sessionValue&&sessionValue.length) return sessionValue;
+  const localValue=read(localStorage);
+  if(localValue&&localValue.length){
+    try{sessionStorage.setItem(key,JSON.stringify(localValue));}catch(_){}
+    return localValue;
+  }
+  return [];
+}
 function queueSessionMessage(sid, payload){
   if(!sid||!payload) return 0;
   const q=_getSessionQueue(sid,true);
   // Stamp created_at so the restore path can detect stale entries (agent already responded)
   const entry={...payload, _queued_at: Date.now()};
   q.push(entry);
-  // Persist to sessionStorage so the queue survives page refresh
-  try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
+  _persistSessionQueueStorage(sid,q);
   return q.length;
 }
 function shiftQueuedSessionMessage(sid){
@@ -179,9 +251,9 @@ function shiftQueuedSessionMessage(sid){
   const next=q.shift();
   if(!q.length){
     delete SESSION_QUEUES[sid];
-    try{ sessionStorage.removeItem('hermes-queue-'+sid); }catch(_){}
+    _clearPersistedSessionQueue(sid);
   } else {
-    try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
+    _persistSessionQueueStorage(sid,q);
   }
   return next;
 }
@@ -302,20 +374,385 @@ function _statusCardHtml(card){
 }
 
 const MESSAGE_RENDER_WINDOW_DEFAULT=50;
+const MESSAGE_VIRTUAL_THRESHOLD_ROWS=80;
+const MESSAGE_VIRTUAL_BUFFER_PX=900;
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT=140;
+const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+let _messageVirtualHeightCache=[];
+let _messageVirtualHeightCacheEntries=[];
+let _messageVirtualHeightCacheLen=0;
+let _messageVirtualHeightCacheSrc=null;
+let _messageVirtualEstimatedRowHeight=MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
+let _messageVirtualScrollRaf=0;
+let _messageVirtualWindowKey='';
+let _messageVirtualMeasurementCycleKey='';
+let _messageVirtualMeasurementRetryCount=0;
 // Cached visWithIdx array — invalidated when S.messages.length changes.
 let _visWithIdxCache=null;
 let _visWithIdxCacheLen=0;
+let _visWithIdxCacheSrc=null;  // S.messages reference — detects wholesale replacement with same length
 function clearVisibleMessageRowCache(){
   _visWithIdxCache=null;
   _visWithIdxCacheLen=0;
+  _visWithIdxCacheSrc=null;
+}
+function _clearMessageVirtualHeightCache(){
+  _messageVirtualHeightCache=[];
+  _messageVirtualHeightCacheEntries=[];
+  _messageVirtualHeightCacheLen=0;
+  _messageVirtualHeightCacheSrc=null;
+  _messageVirtualEstimatedRowHeight=MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
+  _messageVirtualWindowKey='';
+  _messageVirtualMeasurementCycleKey='';
+  _messageVirtualMeasurementRetryCount=0;
 }
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
   _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+  _cancelMessageVirtualizedRender();
   _clearRenderCache();
   clearVisibleMessageRowCache();
+  _clearMessageVirtualHeightCache();
+}
+function _cancelMessageVirtualizedRender(){
+  if(_messageVirtualScrollRaf){
+    cancelAnimationFrame(_messageVirtualScrollRaf);
+    _messageVirtualScrollRaf=0;
+  }
+}
+function _messageIsRenderable(m){
+  if(!m||!m.role||m.role==='tool') return false;
+  if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
+  if(_isRecoveryControlMessage(m)) return false;
+  const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+  const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+  const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+  const hasReasoningAnchor=hasTc||hasTu||_messageHasReasoningPayload(m);
+  const hasAssistantVisibleAnchor=hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m);
+  return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasReasoningAnchor||hasAssistantVisibleAnchor)));
+}
+function _getVisibleMessagesWithIdx(){
+  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
+    const rebuilt=[];
+    let rawIdx=0;
+    for(const m of (S.messages||[])){
+      if(_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
+      rawIdx++;
+    }
+    _visWithIdxCache=rebuilt;
+    _visWithIdxCacheLen=S.messages.length;
+    _visWithIdxCacheSrc=S.messages;
+  }
+  return _visWithIdxCache;
+}
+function _messageVirtualWindow(opts){
+  const total=Math.max(0, Number(opts&&opts.total)||0);
+  const threshold=Math.max(1, Number(opts&&opts.threshold)||MESSAGE_VIRTUAL_THRESHOLD_ROWS);
+  const defaultHeight=Math.max(1, Number(opts&&opts.defaultHeight)||MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT);
+  const bufferPx=Math.max(0, Number(opts&&opts.bufferPx)||MESSAGE_VIRTUAL_BUFFER_PX);
+  const viewportHeight=Math.max(defaultHeight, Number(opts&&opts.viewportHeight)||defaultHeight*6);
+  const keepTailCount=Math.max(0, Number(opts&&opts.keepTailCount)||0);
+  const tailStart=Math.max(0, total-keepTailCount);
+  const heights=Array.isArray(opts&&opts.heights)?opts.heights:[];
+  const rowHeightFor=(idx)=>{
+    const cached=Number(heights[idx]);
+    return Number.isFinite(cached)&&cached>0?cached:defaultHeight;
+  };
+  if(total<=Math.max(threshold, keepTailCount)){
+    return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
+  }
+  const scrollTop=Math.max(0, Number(opts&&opts.scrollTop)||0);
+  const targetTop=Math.max(0, scrollTop-bufferPx);
+  const targetBottom=scrollTop+viewportHeight+bufferPx;
+  let start=0;
+  let offset=0;
+  while(start<tailStart&&offset+rowHeightFor(start)<=targetTop){
+    offset+=rowHeightFor(start);
+    start++;
+  }
+  if(start>=tailStart){
+    return {virtualized:true,start:tailStart,end:tailStart,topPad:offset,bottomPad:0,total,tailStart};
+  }
+  let end=start;
+  let cursor=offset;
+  while(end<tailStart&&cursor<targetBottom){
+    cursor+=rowHeightFor(end);
+    end++;
+  }
+  if(end<=start) end=Math.min(total, start+1);
+  let bottomPad=0;
+  for(let i=end;i<tailStart;i++) bottomPad+=rowHeightFor(i);
+  return {
+    virtualized:true,
+    start,
+    end,
+    topPad:offset,
+    bottomPad,
+    total,
+    tailStart,
+  };
+}
+function _messageVirtualSpacer(height, where){
+  const spacer=document.createElement('div');
+  spacer.className='message-virtual-spacer';
+  spacer.dataset.virtualSpacer=where||'gap';
+  spacer.setAttribute('aria-hidden','true');
+  spacer.style.height=Math.max(0,Math.round(height||0))+'px';
+  spacer.style.flex='0 0 auto';
+  return spacer;
+}
+function _messageVirtualWindowKeyFor(windowMetrics){
+  if(!windowMetrics) return '';
+  return [
+    windowMetrics.virtualized?1:0,
+    windowMetrics.start,
+    windowMetrics.end,
+    Math.round(windowMetrics.topPad||0),
+    Math.round(windowMetrics.bottomPad||0),
+    windowMetrics.tailStart||0,
+  ].join(':');
+}
+function _messageVirtualMeasurementCycleKeyFor(windowMetrics){
+  if(!windowMetrics) return '';
+  return [
+    windowMetrics.virtualized?1:0,
+    windowMetrics.start,
+    windowMetrics.end,
+    windowMetrics.tailStart||0,
+  ].join(':');
+}
+function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
+  const cycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
+  if(_messageVirtualMeasurementCycleKey!==cycleKey){
+    _messageVirtualMeasurementCycleKey=cycleKey;
+    _messageVirtualMeasurementRetryCount=0;
+  }
+  if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS) return;
+  _messageVirtualMeasurementRetryCount++;
+  requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true); });
+}
+function _markMessageVirtualMeasurementsSettled(windowMetrics){
+  _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
+  _messageVirtualMeasurementRetryCount=0;
+}
+function _messageVirtualHeightEntryMatches(previousEntry, nextEntry){
+  return !!(
+    previousEntry&&nextEntry&&
+    previousEntry.m===nextEntry.m
+  );
+}
+function _messageVirtualHeightPrefixEntryMatches(previousEntry, nextEntry){
+  return !!(
+    previousEntry&&nextEntry&&
+    previousEntry.rawIdx===nextEntry.rawIdx&&
+    _messageVirtualHeightEntryMatches(previousEntry, nextEntry)
+  );
+}
+function _syncMessageVirtualHeightCache(visWithIdx){
+  const nextEntries=Array.isArray(visWithIdx)
+    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
+    : [];
+  if(
+    _messageVirtualHeightCacheLen===S.messages.length &&
+    _messageVirtualHeightCacheSrc===S.messages &&
+    _messageVirtualHeightCacheEntries.length===nextEntries.length
+  ) return;
+  const previousEntries=Array.isArray(_messageVirtualHeightCacheEntries)?_messageVirtualHeightCacheEntries:[];
+  const previousHeights=Array.isArray(_messageVirtualHeightCache)?_messageVirtualHeightCache.slice():[];
+  let nextHeights=null;
+  if(!previousEntries.length){
+    nextHeights=new Array(nextEntries.length);
+  }else if(!nextEntries.length){
+    _clearMessageVirtualHeightCache();
+    _messageVirtualHeightCacheLen=S.messages.length;
+    _messageVirtualHeightCacheSrc=S.messages;
+    return;
+  }else{
+    const sharedPrefix=Math.min(previousEntries.length,nextEntries.length);
+    let prefixMatches=true;
+    for(let i=0;i<sharedPrefix;i++){
+      if(!_messageVirtualHeightPrefixEntryMatches(previousEntries[i], nextEntries[i])){
+        prefixMatches=false;
+        break;
+      }
+    }
+    if(prefixMatches){
+      nextHeights=previousHeights.slice(0, sharedPrefix);
+      nextHeights.length=nextEntries.length;
+    }else if(nextEntries.length>=previousEntries.length){
+      const prependedCount=nextEntries.length-previousEntries.length;
+      let suffixMatches=true;
+      for(let i=0;i<previousEntries.length;i++){
+        if(!_messageVirtualHeightEntryMatches(previousEntries[i], nextEntries[i+prependedCount])){
+          suffixMatches=false;
+          break;
+        }
+      }
+      if(suffixMatches){
+        nextHeights=new Array(nextEntries.length);
+        for(let i=0;i<previousEntries.length;i++){
+          nextHeights[prependedCount+i]=previousHeights[i];
+        }
+      }
+    }
+  }
+  if(nextHeights===null){
+    _clearMessageVirtualHeightCache();
+    _messageVirtualHeightCache=new Array(nextEntries.length);
+  }else{
+    _messageVirtualHeightCache=nextHeights;
+    _messageVirtualWindowKey='';
+  }
+  _messageVirtualHeightCacheEntries=nextEntries;
+  _messageVirtualHeightCacheLen=S.messages.length;
+  _messageVirtualHeightCacheSrc=S.messages;
+}
+function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
+  _syncMessageVirtualHeightCache(visWithIdx);
+  const container=$('messages');
+  return _messageVirtualWindow({
+    total:visWithIdx.length,
+    scrollTop:container?container.scrollTop:0,
+    viewportHeight:container?container.clientHeight:(_messageVirtualEstimatedRowHeight*6),
+    heights:_messageVirtualHeightCache,
+    defaultHeight:_messageVirtualEstimatedRowHeight,
+    keepTailCount,
+  });
+}
+function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
+  const count=Math.max(0, Number(prependedRenderableCount)||0);
+  if(count<=0) return null;
+  const visWithIdx=_getVisibleMessagesWithIdx();
+  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
+  if(!virtualWindow||!virtualWindow.virtualized) return null;
+  const limit=Math.min(count,_messageVirtualHeightCache.length);
+  let total=0;
+  for(let i=0;i<limit;i++){
+    const cached=Number(_messageVirtualHeightCache[i]);
+    total+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualEstimatedRowHeight;
+  }
+  return Math.max(0,Math.round(total));
+}
+function _messageVisibleIndexForRawIdx(rawIdx, visWithIdx){
+  const list=Array.isArray(visWithIdx)?visWithIdx:_getVisibleMessagesWithIdx();
+  for(let i=0;i<list.length;i++){
+    if(list[i]&&list[i].rawIdx===rawIdx) return i;
+  }
+  return -1;
+}
+function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container){
+  const idx=Math.max(0,Number(visibleIdx)||0);
+  _syncMessageVirtualHeightCache(visWithIdx);
+  const limit=Math.min(idx,_messageVirtualHeightCache.length);
+  let offset=0;
+  for(let i=0;i<limit;i++){
+    const cached=Number(_messageVirtualHeightCache[i]);
+    offset+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualEstimatedRowHeight;
+  }
+  const viewport=container?Math.max(0,Number(container.clientHeight)||0):0;
+  return Math.max(0,Math.round(offset-(viewport*0.35)));
+}
+function _messageVirtualKeepTailCount(){
+  return Math.min(_currentMessageRenderWindowSize(), MESSAGE_RENDER_WINDOW_DEFAULT);
+}
+function _captureMessageViewportAnchor(){
+  const container=$('messages');
+  if(!container) return null;
+  const containerRect=container.getBoundingClientRect();
+  const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
+  for(const row of rows){
+    const rawIdx=Number(row&&row.dataset&&row.dataset.msgIdx);
+    if(!Number.isFinite(rawIdx)) continue;
+    const rect=row.getBoundingClientRect();
+    if(rect.bottom>containerRect.top+1){
+      return {rawIdx, topOffset:rect.top-containerRect.top};
+    }
+  }
+  return null;
+}
+function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
+  const container=$('messages');
+  if(!container||!anchor) return false;
+  const targetIdx=Number(anchor.rawIdx)+Number(rawIdxDelta||0);
+  if(!Number.isFinite(targetIdx)) return false;
+  const row=container.querySelector(`[data-msg-idx="${targetIdx}"]`);
+  if(!row) return false;
+  const containerRect=container.getBoundingClientRect();
+  const rect=row.getBoundingClientRect();
+  const targetTop=Number(anchor.topOffset)||0;
+  _programmaticScroll=true;
+  container.scrollTop+=(rect.top-containerRect.top)-targetTop;
+  requestAnimationFrame(()=>{ _programmaticScroll=false; });
+  return true;
+}
+function _measureMessageVirtualRow(inner, entry){
+  if(!inner||!entry) return 0;
+  const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
+  if(!primary) return 0;
+  let totalHeight=Math.max(0, primary.getBoundingClientRect().height||0);
+  if(primary.classList.contains('assistant-segment')){
+    let sibling=primary.nextElementSibling;
+    while(sibling){
+      if(sibling.hasAttribute('data-msg-idx')) break;
+      if(!(sibling.matches&&sibling.matches('.tool-call-group,.tool-card-row,.agent-activity-thinking,.thinking-card-row'))) break;
+      totalHeight+=Math.max(0, sibling.getBoundingClientRect().height||0);
+      sibling=sibling.nextElementSibling;
+    }
+  }
+  return totalHeight;
+}
+function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow){
+  const inner=$('msgInner');
+  if(!inner||!virtualWindow||!virtualWindow.virtualized||!renderVisWithIdx.length) return;
+  let changed=false;
+  let measuredCount=0;
+  let measuredTotal=0;
+  for(let vi=0;vi<renderVisWithIdx.length;vi++){
+    const entry=renderVisWithIdx[vi];
+    if(!entry) continue;
+    const totalHeight=_measureMessageVirtualRow(inner, entry);
+    if(totalHeight<=0) continue;
+    const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
+    if(!Number.isFinite(visibleIdx)) continue;
+    if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
+      _messageVirtualHeightCache[visibleIdx]=totalHeight;
+      changed=true;
+    }
+    measuredTotal+=totalHeight;
+    measuredCount++;
+  }
+  if(measuredCount>0){
+    _messageVirtualEstimatedRowHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
+  }
+  if(changed){
+    _scheduleMessageVirtualMeasurementRefresh(virtualWindow);
+  }else{
+    _markMessageVirtualMeasurementsSettled(virtualWindow);
+  }
+}
+function _scheduleMessageVirtualizedRender(force){
+  const container=$('messages');
+  const inner=$('msgInner');
+  if(!container||!inner) return;
+  const visWithIdx=_getVisibleMessagesWithIdx();
+  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
+  const nextKey=_messageVirtualWindowKeyFor(virtualWindow);
+  if(!force&&nextKey===_messageVirtualWindowKey) return;
+  if(!virtualWindow.virtualized){
+    _messageVirtualWindowKey=nextKey;
+    return;
+  }
+  if(_messageVirtualScrollRaf) return;
+  _messageVirtualScrollRaf=requestAnimationFrame(()=>{
+    _messageVirtualScrollRaf=0;
+    const liveVisWithIdx=_getVisibleMessagesWithIdx();
+    const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_messageVirtualKeepTailCount());
+    const liveKey=_messageVirtualWindowKeyFor(liveWindow);
+    if(!force&&liveKey===_messageVirtualWindowKey) return;
+    renderMessages({ preserveScroll:true });
+  });
 }
 
 // ── renderMd / _renderUserFencedBlocks cache ──────────────────────────────
@@ -351,15 +788,7 @@ function _currentMessageRenderWindowSize(){
   );
 }
 function _messageRenderableMessageCount(){
-  let count=0;
-  for(const m of (S.messages||[])){
-    if(!m||!m.role||m.role==='tool') continue;
-    if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) continue;
-    const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-    const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) count++;
-  }
-  return count;
+  return _getVisibleMessagesWithIdx().length;
 }
 function _messageHiddenBeforeCount(){
   return Math.max(0,_messageRenderableMessageCount()-_currentMessageRenderWindowSize());
@@ -371,21 +800,8 @@ function _wireMessageWindowLoadEarlierButton(){
   const indicator=$('loadOlderIndicator');
   if(!indicator) return;
   indicator.onclick=()=>{
-    if(_messageHiddenBeforeCount()>0) _showEarlierRenderedMessages();
-    else if(typeof _loadOlderMessages==='function') _loadOlderMessages();
+    if(typeof _loadOlderMessages==='function') _loadOlderMessages();
   };
-}
-function _showEarlierRenderedMessages(){
-  const container=$('messages');
-  const prevScrollH=container?container.scrollHeight:0;
-  const prevScrollTop=container?container.scrollTop:0;
-  _messageRenderWindowSize=_currentMessageRenderWindowSize()+MESSAGE_RENDER_WINDOW_DEFAULT;
-  renderMessages();
-  if(container){
-    const newScrollH=container.scrollHeight;
-    container.scrollTop=prevScrollTop+(newScrollH-prevScrollH);
-  }
-  _scrollPinned=false;
 }
 function _isSessionJumpButtonsEnabled(){
   return window._sessionJumpButtonsEnabled===true;
@@ -416,9 +832,20 @@ async function jumpToSessionStart(){
   _messageUserUnpinned=true;
   _programmaticScroll=true;
   try{
-    if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+    // During active streaming, skip full message load — API response won't
+    // include live messages from the current turn, and replacing S.messages
+    // would lose user/assistant/tool messages.
+    if(!(S.busy||S.activeStreamId)){
+      if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+    }
     _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
-    renderMessages({ preserveScroll:true });
+    container.scrollTop=0;
+    _messageVirtualWindowKey='';
+    // During streaming, skip renderMessages — it rebuilds the DOM but tool card
+    // insertion is blocked by !S.busy, losing Activity until "done" fires.
+    if(!(S.busy||S.activeStreamId)){
+      renderMessages({ preserveScroll:true });
+    }
     requestAnimationFrame(()=>{
       container.scrollTop=0;
       _updateSessionStartJumpButton();
@@ -434,11 +861,12 @@ function _userMessageDomId(rawIdx){
   return `msg-user-${rawIdx}`;
 }
 
-function _questionJumpButtonHtml(questionRawIdx){
+function _questionJumpButtonHtml(questionRawIdx, assistantRawIdx){
   if(typeof questionRawIdx!=='number'||questionRawIdx<0) return '';
-  const label=t('jump_to_question')||'Question';
-  const title=t('jump_to_question_label')||'Jump to the question for this response';
-  return `<button class="msg-question-jump-btn" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
+  const label=t('jump_to_question')||'Response';
+  const title=t('jump_to_question_label')||'Jump to the start of this response';
+  const aIdx=(typeof assistantRawIdx==='number'&&assistantRawIdx>=0)?assistantRawIdx:-1;
+  return `<button class="msg-question-jump-btn" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx},${aIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
 }
 
 function _highlightQuestionRow(row){
@@ -449,10 +877,25 @@ function _highlightQuestionRow(row){
   window.setTimeout(()=>row.classList.remove('msg-question-highlight'),1800);
 }
 
-async function jumpToTurnQuestion(questionRawIdx){
+async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
   const container=$('messages');
   if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
   const scrollToTarget=()=>{
+    const hasAssistant=typeof assistantRawIdx==='number'&&assistantRawIdx>=0;
+    if(hasAssistant){
+      // A single assistant rawIdx can render multiple segment nodes — some hidden
+      // (assistant-segment-worklog-source / assistant-segment-anchor are display:none).
+      // scrollIntoView() on a hidden node silently no-ops, so only treat a VISIBLE
+      // segment (getClientRects().length>0) as a successful target; otherwise fall
+      // through to the question-row fallback rather than suppressing it. (#3934)
+      const segs=container.querySelectorAll('[data-msg-idx="'+assistantRawIdx+'"]');
+      for(const seg of segs){
+        if(seg.getClientRects().length>0){
+          seg.scrollIntoView({block:'start',behavior:'smooth'});
+          return true;
+        }
+      }
+    }
     const row=document.getElementById(_userMessageDomId(questionRawIdx));
     if(!row) return false;
     row.scrollIntoView({block:'center',behavior:'smooth'});
@@ -460,8 +903,29 @@ async function jumpToTurnQuestion(questionRawIdx){
     return true;
   };
   if(scrollToTarget()) return;
+  const visWithIdx=_getVisibleMessagesWithIdx();
+  const visibleIdx=_messageVisibleIndexForRawIdx(questionRawIdx, visWithIdx);
+  if(visibleIdx>=0){
+    _scrollPinned=false;
+    _messageUserUnpinned=true;
+    _programmaticScroll=true;
+    container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container);
+    _messageVirtualWindowKey='';
+    renderMessages({ preserveScroll:true });
+    requestAnimationFrame(()=>{
+      if(!scrollToTarget()&&_messageHiddenBeforeCount()>0){
+        _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+        _messageVirtualWindowKey='';
+        renderMessages({ preserveScroll:true });
+        requestAnimationFrame(scrollToTarget);
+      }
+      requestAnimationFrame(()=>{ _programmaticScroll=false; });
+    });
+    return;
+  }
   if(_messageHiddenBeforeCount()>0){
     _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+    _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
     requestAnimationFrame(scrollToTarget);
   }
@@ -596,10 +1060,70 @@ function _openImgLightbox(imgEl) {
   }
   _openImgLightboxWithNav(src, alt, allImages, startIndex);
 }
+function _openMermaidLightbox(svgEl) {
+  if(!svgEl) return;
+  const lb = document.createElement('div');
+  lb.className = 'img-lightbox';
+  lb.setAttribute('role', 'dialog');
+  lb.setAttribute('aria-modal', 'true');
+  lb.setAttribute('aria-label', 'Mermaid diagram');
+  const clone = svgEl.cloneNode(true);
+  const idMap = new Map();
+  const idPrefix = 'mermaid-lightbox-'+Math.random().toString(36).slice(2,10)+'-';
+  const idNodes = [clone, ...clone.querySelectorAll('[id]')].filter(el => el.id);
+  idNodes.forEach(el => {
+    const nextId = idPrefix + el.id;
+    idMap.set(el.id, nextId);
+    el.id = nextId;
+  });
+  if(idMap.size){
+    const refAttrs = ['href','xlink:href','fill','stroke','filter','clip-path','mask','marker-start','marker-mid','marker-end','aria-labelledby','aria-describedby'];
+    [clone, ...clone.querySelectorAll('*')].forEach(el => {
+      refAttrs.forEach(attr => {
+        const value = el.getAttribute(attr);
+        if(!value) return;
+        let nextValue = value.replace(/url\(#([^)]+)\)/g, (match, refId) => idMap.has(refId) ? `url(#${idMap.get(refId)})` : match);
+        if(nextValue.startsWith('#') && idMap.has(nextValue.slice(1))){
+          nextValue = '#'+idMap.get(nextValue.slice(1));
+        }
+        if(nextValue !== value){
+          el.setAttribute(attr, nextValue);
+        }
+      });
+    });
+    clone.querySelectorAll('style').forEach(styleEl => {
+      let styleText = styleEl.textContent || '';
+      idMap.forEach((nextId, originalId) => {
+        const escapedId = originalId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        styleText = styleText.replace(new RegExp(`url\\(#${escapedId}\\)`, 'g'), `url(#${nextId})`);
+        styleText = styleText.replace(new RegExp(`(^|[^\\w-])#${escapedId}(?=$|[^\\w-])`, 'g'), (match, prefix) => `${prefix}#${nextId}`);
+      });
+      styleEl.textContent = styleText;
+    });
+  }
+  clone.classList.add('mermaid-lightbox-svg');
+  clone.removeAttribute('width');
+  clone.removeAttribute('height');
+  clone.onclick = e => e.stopPropagation();
+  const cls = document.createElement('button');
+  cls.className = 'img-lightbox-close';
+  cls.setAttribute('aria-label', 'Close');
+  cls.textContent = '×';
+  cls.onclick = () => _closeImgLightbox(lb);
+  lb.appendChild(clone);
+  lb.appendChild(cls);
+  lb.onclick = () => _closeImgLightbox(lb);
+  lb._keyHandler = e => {
+    if(e.key==='Escape') _closeImgLightbox(lb);
+  };
+  document.body.appendChild(lb);
+  document.addEventListener('keydown', lb._keyHandler);
+}
 function _openImgLightboxWithNav(src, alt, images, index) {
   const lb = document.createElement('div');
   lb.className = 'img-lightbox';
   lb.setAttribute('role', 'dialog');
+  lb.setAttribute('aria-modal', 'true');
   lb.setAttribute('aria-label', alt || 'Image');
   const img = document.createElement('img');
   img.src = src;
@@ -693,6 +1217,8 @@ document.addEventListener('click', e => {
   // Message-attached images (already wired since v0.50.x).
   let img = e.target.closest('.msg-media-img');
   if(img){ _openImgLightbox(img); return; }
+  const mermaidSvg = e.target.closest('.mermaid-rendered svg');
+  if(mermaidSvg){ _openMermaidLightbox(mermaidSvg); return; }
   // Composer attach-tray image thumbnails — click any pasted/dropped image
   // chip to lightbox-zoom it before sending. Excludes audio/video chips,
   // which keep their inline media controls. SVG thumbnails (.attach-thumb--svg)
@@ -1376,13 +1902,13 @@ function _addLiveModelsToSelect(provider, models, sel){
   if(!providerGroup){
     providerGroup=document.createElement('optgroup');
     providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
+    providerGroup.dataset.provider=provider;
     sel.appendChild(providerGroup);
+  }else if(!providerGroup.dataset.provider){
+    providerGroup.dataset.provider=provider;
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
-  // Normalized dedup: strip @provider: prefix and namespace so
-  // 'minimax/minimax-m2.7' matches '@nous:minimax/minimax-m2.7' (#907).
-  // Named custom IDs (@custom:name:model) have a known two-segment prefix
-  // and must strip both to dedup against bare model IDs (#3478).
+  // Normalized dedup strips provider/custom prefixes and namespaces (#907, #3478).
   const _normId=id=>{
     let s=String(id||'');
     if(s.startsWith('@')&&s.includes(':')){
@@ -1412,6 +1938,7 @@ function _addLiveModelsToSelect(provider, models, sel){
     opt.value=mid;
     opt.textContent=m.label||m.id;
     opt.title='Live model — fetched from provider';
+    opt.dataset.provider=provider;
     providerGroup.appendChild(opt);
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
@@ -1495,10 +2022,11 @@ function _selectedModelOption(){
 
 function _normalizeConfiguredModelKey(modelId){
   let s=String(modelId||'').trim().toLowerCase();
-  // Strip @provider: prefix (e.g., @custom:jingdong:GLM-5 -> GLM-5).
+  let strippedAtProvider=false;
+  // Strip @provider: prefix (e.g., @custom:jingdong:GLM-5 -> jingdong:GLM-5).
   // Defensive: trailing-colon / trailing-slash falls back to the original key
   // so malformed configs don't collapse distinct ids to '' (matches backend _norm_model_id).
-  if(s.startsWith('@')&&s.includes(':')){const last=s.split(':').pop();s=last||s;}
+  if(s.startsWith('@')&&s.includes(':')){const ci=s.indexOf(':',1);const cand=s.slice(ci+1);strippedAtProvider=!!cand;s=cand||s;}
   // Skip slash-based stripping for URI-scheme IDs (e.g. gpt://folder/model)
   // whose slashes are path separators, not provider delimiters (#3429).
   const _hasScheme=/^[a-z][a-z0-9+.-]*:\/\//i.test(s);
@@ -1508,7 +2036,7 @@ function _normalizeConfiguredModelKey(modelId){
     // key variants like 'custom:llm-proxy/opencode_go/deepseek-v4-pro' and the
     // bare 'opencode_go/deepseek-v4-pro' produce different normalized keys and
     // aren't deduped in the configured section (#3360).
-    if(s.includes('/')&&s.indexOf(':')!==-1&&s.indexOf(':')<s.indexOf('/')){
+    if(!strippedAtProvider&&s.includes('/')&&s.indexOf(':')!==-1&&s.indexOf(':')<s.indexOf('/')){
       s=s.slice(s.indexOf('/')+1)||s;
     }
     // Strip only the first slash-segment (provider prefix), preserving any
@@ -1793,7 +2321,31 @@ function renderModelDropdown(){
   };
   // Event handlers for search input
   _si.addEventListener('input',()=>_filterModels(_si.value));
-  _si.addEventListener('keydown',e=>{if(e.key==='Enter') {e.preventDefault();}if(e.key==='Escape') {closeModelDropdown();}});
+  // Keyboard navigation through filtered model rows (#2791).
+  const _visibleModelRows=()=>Array.from(dd.querySelectorAll('.model-opt'));
+  const _activeRowIndex=(rows)=>rows.findIndex(r=>r.classList.contains('is-highlighted'));
+  const _highlightRow=(rows,idx)=>{
+    for(const r of rows) r.classList.remove('is-highlighted');
+    if(idx<0||idx>=rows.length) return;
+    const row=rows[idx];
+    row.classList.add('is-highlighted');
+    if(typeof row.scrollIntoView==='function') row.scrollIntoView({block:'nearest'});
+  };
+  _si.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){closeModelDropdown();return;}
+    if(e.key==='ArrowDown'||e.key==='ArrowUp'||e.key==='Enter'){
+      const rows=_visibleModelRows();
+      if(!rows.length){if(e.key==='Enter') e.preventDefault();return;}
+      const cur=_activeRowIndex(rows);
+      if(e.key==='ArrowDown'){e.preventDefault();_highlightRow(rows,cur<0?0:Math.min(rows.length-1,cur+1));return;}
+      if(e.key==='ArrowUp'){e.preventDefault();_highlightRow(rows,cur<=0?rows.length-1:cur-1);return;}
+      if(e.key==='Enter'){
+        e.preventDefault();
+        const pick=cur>=0?rows[cur]:rows[0];
+        if(pick) pick.click();
+      }
+    }
+  });
   _si.addEventListener('click',e=>e.stopPropagation());
   // Event handlers for clear button
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
@@ -1900,16 +2452,21 @@ function _formatReasoningEffortLabel(effort){
   return effort;
 }
 
-function _reasoningEffortQuery(){
+function _reasoningEffortContext(){
   const sel=$('modelSelect');
   const model=(S&&S.session&&S.session.model)||(sel&&sel.value)||'';
   let provider=(S&&S.session&&S.session.model_provider)||'';
   if(!provider&&sel&&model&&typeof _modelStateForSelect==='function'){
     provider=_modelStateForSelect(sel, model).model_provider||'';
   }
-  const params=new URLSearchParams();
-  if(model) params.set('model', model);
-  if(provider) params.set('provider', provider);
+  const ctx={};
+  if(model) ctx.model=model;
+  if(provider) ctx.provider=provider;
+  return ctx;
+}
+
+function _reasoningEffortQuery(){
+  const params=new URLSearchParams(_reasoningEffortContext());
   const qs=params.toString();
   return qs?('?'+qs):'';
 }
@@ -2042,7 +2599,8 @@ document.addEventListener('click',function(e){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
     if(effort){
-      api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
+      const payload=Object.assign({effort:effort},_reasoningEffortContext());
+      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
@@ -2315,9 +2873,14 @@ let _lastScrollTop=null;
 let _lastNonMessageScrollIntentMs=-Infinity;
 let _messageUserUnpinned=false;
 let _bottomSettleToken=0;
+let _settleRAF=0;
+let _settleRO=null;
+let _settleTimer=0;
+let _settleFinalTimer=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
 let _touchStartY=null;
-function _cancelBottomSettle(){ _bottomSettleToken++; }
+let _newMessageCueVisible=false;
+function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
   const target=e&&e.target;
@@ -2347,6 +2910,46 @@ function _recordNonMessageScrollIntent(e){
 function _recentNonMessageScrollIntent(){
   return performance.now()-_lastNonMessageScrollIntentMs<NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS;
 }
+function _setScrollToBottomCueText(btn, textKey, labelKey){
+  if(!btn) return;
+  const label=btn.querySelector('.session-jump-btn__text');
+  if(label){
+    label.setAttribute('data-i18n',textKey);
+    label.textContent=(typeof t==='function')?t(textKey):label.textContent;
+  }
+  btn.setAttribute('data-i18n-aria-label',labelKey);
+  btn.setAttribute('data-i18n-title',labelKey);
+  const accessible=(typeof t==='function')?t(labelKey):btn.getAttribute('aria-label')||'';
+  if(accessible){
+    btn.setAttribute('aria-label',accessible);
+    btn.setAttribute('title',accessible);
+  }
+}
+function _syncScrollToBottomCue(show, opts){
+  const btn=$('scrollToBottomBtn');
+  if(!btn) return;
+  const newMessage=!!(opts&&opts.newMessage);
+  btn.classList.toggle('scroll-to-bottom-btn--new-message',newMessage);
+  if(newMessage) _setScrollToBottomCueText(btn,'session_new_message','session_new_message_label');
+  else _setScrollToBottomCueText(btn,'session_jump_end','session_jump_end_label');
+  btn.style.display=show?'flex':'none';
+}
+function _showNewMessageScrollCue(){
+  _newMessageCueVisible=true;
+  _syncScrollToBottomCue(true,{newMessage:true});
+}
+function _clearNewMessageScrollCue(){
+  _newMessageCueVisible=false;
+  _syncScrollToBottomCue(false,{newMessage:false});
+}
+function _maybeShowNewMessageScrollCue(scrollSnapshot){
+  const el=document.getElementById('messages');
+  if(!el||!scrollSnapshot) return;
+  const previousHeight=Number(scrollSnapshot.scrollHeight)||0;
+  const distance=el.scrollHeight-el.scrollTop-el.clientHeight;
+  if(el.scrollHeight>previousHeight+24 && distance>80) _showNewMessageScrollCue();
+  else _syncScrollToBottomCue(distance>80,{newMessage:_newMessageCueVisible});
+}
 if(typeof document!=='undefined'){
   document.addEventListener('wheel',_recordNonMessageScrollIntent,{capture:true,passive:true});
   document.addEventListener('touchmove',_recordNonMessageScrollIntent,{capture:true,passive:true});
@@ -2360,6 +2963,7 @@ if(typeof document!=='undefined'){
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
 function _resetScrollDirectionTracker(){
+  _clearNewMessageScrollCue();
   _lastScrollTop=null;
   _messageUserUnpinned=false;
   _scrollPinned=true;
@@ -2367,6 +2971,7 @@ function _resetScrollDirectionTracker(){
   _touchStartY=null;
 }
 function _resetStreamScrollFollow(){
+  _clearNewMessageScrollCue();
   _messageUserUnpinned=false;
   _scrollPinned=true;
   _nearBottomCount=0;
@@ -2482,10 +3087,11 @@ if(typeof window!=='undefined'){
         _nearBottomCount=0;
         _scrollPinned=false;
       }
-      const btn=$('scrollToBottomBtn');
+      if(nearBottom) _clearNewMessageScrollCue();
       const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
-      if(btn) btn.style.display=showBottomButton?'flex':'none';
+      _syncScrollToBottomCue(showBottomButton,{newMessage:_newMessageCueVisible});
       if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+      _scheduleMessageVirtualizedRender();
       // Prefetch older messages before the reader hits the hard top. Prepending
       // then preserving scrollTop is seamless only if there is runway left for
       // the user's continued upward wheel/touch movement.
@@ -2507,6 +3113,12 @@ function _formatTurnDuration(seconds){
   const s=total%60;
   if(h)return`${h}h ${m}m`;
   return`${m}m ${s}s`;
+}
+function _formatFirstToken(ms){
+  const n=Number(ms);
+  if(!Number.isFinite(n)||n<0)return'';
+  if(n<1000)return`${Math.round(n)}ms`;
+  return`${(n/1000).toFixed(2)}s`;
 }
 function _formatActiveElapsedTimer(seconds){
   const n=Number(seconds);
@@ -2536,16 +3148,7 @@ function _compressionLiveCardState(){
 }
 function _updateCompressionElapsedCards(state){
   if(!state)return false;
-  const preview=_autoCompressionPreviewText(state), detail=_autoCompressionDetailText(state);
-  let updated=false;
-  document.querySelectorAll('.tool-card-compress-auto.tool-card-compress-running').forEach(card=>{
-    const previewEl=card.querySelector('.tool-card-preview');
-    const detailEl=card.querySelector('.tool-card-result pre');
-    if(previewEl) previewEl.textContent=preview;
-    if(detailEl) detailEl.textContent=detail;
-    updated=true;
-  });
-  return updated;
+  return false;
 }
 function _updateCompressionElapsedTimer(){
   const state=_compressionStateForCurrentSession()||_compressionLiveCardState();
@@ -2559,6 +3162,9 @@ function _clearCompressionElapsedTimer(){if(_compressionElapsedTimer){clearInter
 let _activityElapsedTimer=null;
 let _activityElapsedTimerGroup=null;
 function _activityNowSeconds(){return Date.now()/1000;}
+function _isActivityTimerGroup(group){
+  return !!(group&&group.getAttribute('data-run-activity-group')==='1');
+}
 function _activityElapsedStartedAt(group){
   if(!group)return null;
   const raw=(group.dataset&&group.dataset.turnStartedAt!==undefined&&group.dataset.turnStartedAt!=='')
@@ -2752,6 +3358,30 @@ function _syncMobileCtxDisplay(state){
   _setCtxCompressButton(compressBtn,state.compressText||'');
 }
 
+function _mergeUsageForCtxIndicator(latest, fallback){
+  const latestObj=(latest&&typeof latest==='object')?latest:{};
+  const fallbackObj=(fallback&&typeof fallback==='object')?fallback:{};
+  const merged={...latestObj};
+  for(const field of [
+    'input_tokens','output_tokens','estimated_cost',
+    'cache_read_tokens','cache_write_tokens','cache_hit_percent',
+    'turn_cache_hit_percent','duration_seconds','tps','gateway_routing',
+  ]){
+    if(merged[field]==null&&fallbackObj[field]!=null){
+      merged[field]=fallbackObj[field];
+    }
+  }
+  if(!(Number(latestObj.context_length)>0)&&Number(fallbackObj.context_length)>0){
+    merged.context_length=fallbackObj.context_length;
+  }
+  for(const field of ['threshold_tokens','last_prompt_tokens']){
+    if(latestObj[field]==null&&fallbackObj[field]!=null){
+      merged[field]=fallbackObj[field];
+    }
+  }
+  return merged;
+}
+
 // Context usage indicator in composer footer
 function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
@@ -2922,31 +3552,109 @@ function _shouldFollowMessagesOnDomReplace(){
   // following only for users who are still pinned or effectively at the tail.
   // A broad near-bottom window causes long answers/mobile readers who scroll up
   // a little to read mid-stream to get snapped back to the bottom on completion.
-  return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(120));
+  return _autoScrollFollow && !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(120));
 }
-function _settleMessageScrollToBottom(force){
-  // Markdown post-processing (Prism, tables, Mermaid/KaTeX/PDF placeholders)
+function _followMessagesAfterDomReplace(){
+  if(_shouldFollowMessagesOnDomReplace()){
+    scrollToBottom();
+    return true;
+  }
+  return false;
+}
+function _settleMessageScrollToBottom(force, explicit){
+  // `explicit` = a user-invoked scroll-to-bottom (End button / scrollToBottom()).
+  // When explicit, late-layout settling runs even if Auto-follow is OFF — the
+  // setting only suppresses AUTOMATIC streaming follow, not a deliberate jump
+  // to the bottom. (Codex #4006 r3.)
   // can grow the transcript after the first scroll write. Re-apply the bottom
-  // position across a few frames while pinned so late layout does not leave the
-  // viewport a few lines above the real end. User scroll increments
-  // _bottomSettleToken and cancels the delayed passes.
+  // position when content settles so late layout does not leave the viewport
+  // above the real end. User scroll increments _bottomSettleToken and cancels.
+  //
+  // Firefox paints each scrollTop write as a visible reflow step. The old
+  // rAF-polling approach read scrollHeight across frames — the read itself
+  // forced a reflow in Firefox, causing visible jitter.
+  //
+  // ResizeObserver approach: the browser notifies us when the container
+  // resizes (no scrollHeight polling needed). On each notification we write
+  // scrollTop once via rAF (batches multiple resize callbacks per frame into
+  // a single write). After 300ms of no resize events, the observer disconnects.
   const token=++_bottomSettleToken;
-  const passes=[0,16,80,180];
-  passes.forEach(delay=>setTimeout(()=>{
-    if(token!==_bottomSettleToken) return;
-    if(!force && (!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent())) return;
-    _setMessageScrollToBottom();
-  },delay));
-  requestAnimationFrame(()=>{
-    if(token!==_bottomSettleToken) return;
-    if(force || (_scrollPinned&&!_messageUserUnpinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
-    requestAnimationFrame(()=>{
+  cancelAnimationFrame(_settleRAF);
+  if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
+  clearTimeout(_settleTimer);
+  clearTimeout(_settleFinalTimer);
+
+  // Sync write anchors the viewport immediately.
+  _setMessageScrollToBottom();
+
+  if(force) return;
+
+  const el=document.getElementById('messages');
+  if(!el) return;
+  // Observe the GROWING content node, not the scroll container. #messages is the
+  // scroller but its box is fixed by the flex layout, so it never resizes — the
+  // transcript grows inside #msgInner (.messages-inner). Observing #messages
+  // would mean the callback never fires. (Codex review #2.)
+  const observed=document.getElementById('msgInner')||el;
+
+  // Instance-owned cleanup: close over THIS observer so a stale callback (from a
+  // superseded settle) only ever disconnects its own observer, never the newer
+  // active one that may now be in the global _settleRO. (Codex review #3.)
+  const ro=new ResizeObserver(()=>{
+    if(token!==_bottomSettleToken){ ro.disconnect(); if(_settleRO===ro) _settleRO=null; return; }
+    if((!_autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
+      ro.disconnect(); if(_settleRO===ro) _settleRO=null;
+      _programmaticScroll=false;
+      return;
+    }
+    // Write scrollTop once per frame — ResizeObserver batches multiple
+    // notifications per frame, so this is at most one write per frame.
+    cancelAnimationFrame(_settleRAF);
+    _settleRAF=requestAnimationFrame(()=>{
       if(token!==_bottomSettleToken) return;
-      if(force || (_scrollPinned&&!_messageUserUnpinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+      _setMessageScrollToBottom();
     });
+    // After 300ms of quiet, disconnect — layout is stable.
+    clearTimeout(_settleTimer);
+    _settleTimer=setTimeout(()=>{
+      if(token!==_bottomSettleToken) return;
+      ro.disconnect(); if(_settleRO===ro) _settleRO=null;
+      _setMessageScrollToBottom();
+    },300);
+  });
+  _settleRO=ro;
+  ro.observe(observed);
+
+  // Static-content safety net: a fully-static response (no Prism/KaTeX/Mermaid/
+  // late images) never resizes after the initial sync write, so the
+  // ResizeObserver callback above never fires and its 300ms quiet-timer is never
+  // armed. Arm a single 2s top-level fallback so a late settle still runs for
+  // that case. The token check inside _settleFinalScroll makes this a no-op if a
+  // newer settle started, and it self-skips if the user unpinned. (Review #2/#3.)
+  clearTimeout(_settleFinalTimer);
+  _settleFinalTimer=setTimeout(()=>{
+    if(token!==_bottomSettleToken) return;
+    ro.disconnect(); if(_settleRO===ro) _settleRO=null;
+    if((!_autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){ _programmaticScroll=false; return; }
+    _settleFinalScroll(token);
+  },2000);
+}
+
+function _settleFinalScroll(token){
+  if(token!==_bottomSettleToken) return;
+  const el=document.getElementById('messages');
+  if(!el){ _programmaticScroll=false; return; }
+  _programmaticScroll=true;
+  el.scrollTop=el.scrollHeight;
+  _lastScrollTop=el.scrollTop;
+  _nearBottomCount=2;
+  _scrollPinned=true;
+  requestAnimationFrame(()=>{
+    setTimeout(()=>{ _programmaticScroll=false; },0);
   });
 }
 function scrollIfPinned(){
+  if(!_autoScrollFollow) return;
   if(_messageUserUnpinned) return;
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
@@ -2954,16 +3662,17 @@ function scrollIfPinned(){
   _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
+  _clearNewMessageScrollCue();
   _scrollPinned=true;
   _messageUserUnpinned=false;
-  // Write the first bottom position synchronously. A final renderMessages()
-  // rebuild can queue a native scroll event from the temporary scrollTop=0
-  // layout state; if we only schedule delayed settles, that event can cancel
-  // them before the viewport ever reaches the bottom.
+  // Write scrollTop once synchronously to anchor the viewport, then let
+  // ResizeObserver settle handle any late layout growth (Prism, KaTeX,
+  // Mermaid, images).  Using force=false so the observer runs — force=true
+  // was skipping the observer and causing Firefox paint jumps when
+  // renderMessages({preserveScroll:true}) + scrollToBottom() fired back-to-back.
   _setMessageScrollToBottom();
-  _settleMessageScrollToBottom(true);
-  const btn=$('scrollToBottomBtn');
-  if(btn) btn.style.display='none';
+  _settleMessageScrollToBottom(false, true);
+  _syncScrollToBottomCue(false,{newMessage:false});
   if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
 }
 
@@ -3125,14 +3834,19 @@ function _sanitizeThinkingDisplayText(text){
   return stripped.trim();
 }
 
-function _stripVisibleAssistantEchoFromThinking(thinkingText, visibleText){
-  let out=String(thinkingText||'');
-  const visible=String(visibleText||'');
-  if(!out||!visible) return out.trim();
-  visible.split(/\n{2,}/).map(s=>s.trim()).filter(s=>s.length>=20).forEach(snippet=>{
-    out=out.split(snippet).join('');
-  });
-  return out.trim();
+function _normalizeThinkingEchoCompare(text){
+  return String(text||'').replace(/\s+/g,' ').trim();
+}
+
+function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
+  const clean=_sanitizeThinkingDisplayText(thinkingText);
+  const thinkingNorm=_normalizeThinkingEchoCompare(clean);
+  if(!thinkingNorm) return '';
+  for(const visibleText of visibleTexts){
+    const visibleNorm=_normalizeThinkingEchoCompare(visibleText);
+    if(visibleNorm&&visibleNorm===thinkingNorm) return '';
+  }
+  return clean;
 }
 
 function renderMd(raw){
@@ -3399,38 +4113,86 @@ function renderMd(raw){
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
   // fence_stash. The per-line passes below never see > prefixes.)
-  // B8: improved list handling supporting up to 2 levels of indentation
-  s=s.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,block=>{
-    const lines=block.trimEnd().split('\n');
-    let html='<ul>';
-    for(const l of lines){
-      const indent=/^ {2,}/.test(l);
-      const text=l.replace(/^ {0,4}[-*+] /,'');
-      let _ih;
-      if(/^\[x\] /i.test(text)) _ih='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
-      else if(/^\[ \] /.test(text)) _ih='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
-      else _ih=inlineMd(text);
-      if(indent) html+=`<li style="margin-left:16px">${_ih}</li>`;
-      else html+=`<li>${_ih}</li>`;
+  function _renderListBlock(lines, ordered){
+    const marker=ordered?'\\d+\\. ':'[-*+] ';
+    let html=ordered?'<ol>':'<ul>';
+    let item=null;
+    const flush=()=>{
+      if(!item) return;
+      const body=item.parts.join('\n').trim();
+      const text=body;
+      let inner;
+      if(!ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
+      else if(!ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
+      else inner=inlineMd(text);
+      const valueAttr=item.value!==null?` value="${item.value}"`:'';
+      const styleAttr=item.indent?` style="margin-left:16px"`:'';
+      html+=`<li${valueAttr}${styleAttr}>${inner}</li>`;
+      item=null;
+    };
+    for(const raw of lines){
+      const line=String(raw||'');
+      const nested=line.match(new RegExp(`^ {2,}(${marker})(.*)$`));
+      if(nested){
+        flush();
+        item={indent:true,value:ordered?parseInt(nested[1],10):null,parts:[nested[2]]};
+        continue;
+      }
+      const top=line.match(new RegExp(`^(?:  )?(${marker})(.*)$`));
+      if(top){
+        flush();
+        item={indent:false,value:ordered?parseInt(top[1],10):null,parts:[top[2]]};
+        continue;
+      }
+      if(!item) continue;
+      item.parts.push(line.replace(/^ {2,}/,'').trim());
     }
-    return html+'</ul>';
-  });
-  // Ordered lists: use value= on each <li> so the correct number is preserved
-  // even when blank lines between items cause the paragraph splitter to place
-  // each item in its own <ol> container — without value= every <ol> restarts
-  // at 1, producing "1. 1. 1." instead of "1. 2. 3." (#886).
-  s=s.replace(/((?:^(?:  )?\d+\. .+\n?)+)/gm,block=>{
-    const lines=block.trimEnd().split('\n');
-    let html='<ol>';
-    for(const l of lines){
-      const numMatch=l.match(/^\s*(\d+)\. /);
-      const num=numMatch?parseInt(numMatch[1],10):null;
-      const text=l.replace(/^ {0,4}\d+\. /,'');
-      const valAttr=num!==null?` value="${num}"`:'';
-      html+=`<li${valAttr}>${inlineMd(text)}</li>`;
+    flush();
+    return html+(ordered?'</ol>':'</ul>');
+  }
+  function _renderLists(src, ordered){
+    const lines=src.split('\n');
+    const out=[];
+    const topRe=ordered?/^(?:  )?\d+\. /:/^(?:  )?[-*+] /;
+    const nestedRe=ordered?/^ {2,}\d+\. /:/^ {2,}[-*+] /;
+    const contRe=/^ {2,}\S/;
+    let i=0;
+    while(i<lines.length){
+      if(!topRe.test(lines[i])){
+        out.push(lines[i]);
+        i++;
+        continue;
+      }
+      const block=[lines[i]];
+      i++;
+      while(i<lines.length){
+        const line=lines[i];
+        if(topRe.test(line)||nestedRe.test(line)||contRe.test(line)){
+          block.push(line);
+          i++;
+          continue;
+        }
+        if(!line.trim()){
+          const next=lines[i+1]||'';
+          if(topRe.test(next)||nestedRe.test(next)||contRe.test(next)){
+            i++;
+            continue;
+          }
+        }
+        break;
+      }
+      out.push(_renderListBlock(block,ordered));
     }
-    return html+'</ol>';
-  });
+    return out.join('\n');
+  }
+  // Preserve continuation lines, nested indentation, and LaTeX placeholder lines
+  // inside list items without changing the wider markdown pipeline.
+  s=_renderLists(s,false);
+  // Ordered-list parsing intentionally runs on the post-unordered string; the
+  // unordered pass emits <ul> HTML that cannot satisfy the ordered-item regex.
+  // Keep continuation lines attached to their item and preserve explicit
+  // numbering via value= even when blank lines split the markdown.
+  s=_renderLists(s,true);
   // Tables: | col | col | header row followed by | --- | --- | separator then data rows
   // NOTE: table pass runs BEFORE outer link pass so [label](url) in table cells
   // is handled by inlineMd() only — prevents double-linking.
@@ -3532,10 +4294,22 @@ function renderMd(raw){
       return false;
     }
   }
+  function _isSafeLabelInline(tag){
+    return /^<\/?(strong|em|del|code)([\s>]|$)/i.test(tag);
+  }
+  function _markdownLabelHtml(label){
+    const _label_stash=[];
+    const tokenized=String(label||'').replace(/<\/?[a-z][^>]*>/gi,tag=>{
+      if(!_isSafeLabelInline(tag)) return tag;
+      _label_stash.push(tag);
+      return `\x00H${_label_stash.length-1}\x00`;
+    });
+    return esc(tokenized).replace(/\x00H(\d+)\x00/g,(_,i)=>_label_stash[+i]);
+  }
   function _markdownAnchor(label,rawUrl){
     const href=_markdownHref(rawUrl);
     const internal=/^session:\/\//i.test(String(rawUrl||'')) || _isInternalSessionHref(href);
-    return `<a${internal?' class="session-link"':''} href="${href}"${internal?'':' target="_blank" rel="noopener"'}>${esc(label)}</a>`;
+    return `<a${internal?' class="session-link"':''} href="${href}"${internal?'':' target="_blank" rel="noopener"'}>${_markdownLabelHtml(label)}</a>`;
   }
   function _isSafeUrl(v, img){
     const raw=_safeAttrValue(v);
@@ -3797,6 +4571,7 @@ function setComposerStatus(t){
 }
 
 let _composerLockState=null;
+let _compressionPlaceholderSaved=null;
 
 function lockComposerForClarify(placeholderText){
   const input=$('msg');
@@ -3868,6 +4643,7 @@ function getComposerPrimaryAction(){
   if(!isBusy) return hasContent?'send':'disabled';
   if(!hasContent){
     if(S.activeStreamId&&typeof cancelStream==='function') return 'stop';
+    if(compressionRunning) return 'queue';
     return 'disabled';
   }
   const explicitAction=_getExplicitBusyCommandAction(msg&&msg.value);
@@ -3912,10 +4688,10 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    const _dcompr=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
     if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
-    else if(_dcompr) _btnTitle=_tt('composer_disabled_compression','Waiting for compression to finish');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
+  }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
+    _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
   }else{
     const _tmap={send:'Send message',queue:'Queue message',interrupt:'Interrupt and send',steer:'Steer current response',stop:'Stop generation'};
     _btnTitle=_tt('composer_'+action,_tmap[action]||'Send message');
@@ -4044,8 +4820,8 @@ function _renderQueueChips(sid){
 
   function _saveAndRefresh(){
     const liveQ=_getSessionQueue(sid,false);
-    if(!liveQ.length){delete SESSION_QUEUES[sid];try{sessionStorage.removeItem('hermes-queue-'+sid);}catch(_){}}
-    else{SESSION_QUEUES[sid]=[...liveQ];try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}}
+    if(!liveQ.length){delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
+    else{SESSION_QUEUES[sid]=[...liveQ];_persistSessionQueueStorage(sid,liveQ);}
     delete _queueRenderKeys[sid];
     updateQueueBadge(sid);
   }
@@ -4072,7 +4848,7 @@ function _renderQueueChips(sid){
         const firstFiles=(snapshot.find(e=>e&&Array.isArray(e.files)&&e.files.length)||{files:[]}).files;
         liveQ.length=0;liveQ.push({text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,_queued_at:Date.now()});
         SESSION_QUEUES[sid]=liveQ;
-        try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}
+        _persistSessionQueueStorage(sid,liveQ);
         delete _queueRenderKeys[sid];
         updateQueueBadge(sid);
       };
@@ -4152,7 +4928,7 @@ function _renderQueueChips(sid){
         const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
         if(idx!==-1){
           liveQ[idx]={...liveQ[idx],text:newText};
-          try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}
+          _persistSessionQueueStorage(sid,liveQ);
           delete _queueRenderKeys[sid];
           updateQueueBadge(sid);
         }
@@ -4191,8 +4967,8 @@ function _renderQueueChips(sid){
       const liveQ=_getSessionQueue(sid,false);
       const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
       if(idx!==-1) liveQ.splice(idx,1);
-      if(!liveQ.length){delete SESSION_QUEUES[sid];try{sessionStorage.removeItem('hermes-queue-'+sid);}catch(_){}}
-      else{SESSION_QUEUES[sid]=[...liveQ];try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}}
+      if(!liveQ.length){delete SESSION_QUEUES[sid];_clearPersistedSessionQueue(sid);}
+      else{SESSION_QUEUES[sid]=[...liveQ];_persistSessionQueueStorage(sid,liveQ);}
       delete _queueRenderKeys[sid];
       updateQueueBadge(sid);
     };
@@ -4266,6 +5042,12 @@ const TOAST_DEFAULT_MS=2800;
 const TOAST_ERROR_DEFAULT_MS=20000;
 function clearToastDismissTimer(el){if(!el)return;clearTimeout(el._t);el._t=null;}
 function setToastDismissTimer(el,duration){if(!el)return;clearToastDismissTimer(el);el._t=setTimeout(()=>{el.classList.remove('show');},duration);}
+function dismissToast(btnOrEl){
+  const el=btnOrEl&&btnOrEl.closest?btnOrEl.closest('#toast'):(btnOrEl&&btnOrEl.id==='toast'?btnOrEl:null);
+  if(!el)return;
+  clearToastDismissTimer(el);
+  el.classList.remove('show');
+}
 function copyToastText(btn){
   const el=btn&&btn.closest?btn.closest('#toast'):null;
   const text=el?(el.dataset.toastMessage||el.textContent||''):'';
@@ -4279,12 +5061,13 @@ function showToast(msg,ms,type){
   const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
   el.className='toast show '+t;
   el.dataset.toastMessage=s;
-  if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button>`;
+  if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button><button class="toast-dismiss" type="button" aria-label="Dismiss error toast" data-toast-dismiss="1" onclick="dismissToast(this);event.stopPropagation()">Dismiss</button>`;
   else el.textContent=s;
   el.onmouseenter=()=>clearToastDismissTimer(el);
   el.onmouseleave=()=>setToastDismissTimer(el,duration);
   el.onfocusin=()=>clearToastDismissTimer(el);
   el.onfocusout=()=>setToastDismissTimer(el,duration);
+  el.onclick=t==='error'?null:()=>dismissToast(el);
   setToastDismissTimer(el,duration);
 }
 
@@ -4816,6 +5599,13 @@ function _compactInflightState(state){
     messages,
     uploaded:Array.isArray(state.uploaded)?state.uploaded.slice(-20):[],
     toolCalls,
+    lastAssistantText:state.lastAssistantText||'',
+    lastReasoningText:state.lastReasoningText||'',
+    lastRunJournalSeq:state.lastRunJournalSeq||0,
+    journalReplayFromStart:!!state.journalReplayFromStart,
+    currentActivityBurstId:state.currentActivityBurstId||0,
+    currentLiveSegmentSeq:state.currentLiveSegmentSeq||0,
+    activityBurstAnchors:Array.isArray(state.activityBurstAnchors)?state.activityBurstAnchors.slice(-50):[],
     todos,
     todoStateMeta,
   }, limits.stringChars);
@@ -5081,6 +5871,15 @@ function restoreLiveTurnHtmlForSession(sid){
   _mergeRestoredLiveAssistantSegment(restored, existing);
   if(existing) existing.replaceWith(restored);
   else inner.appendChild(restored);
+  // Transparent Stream: liveTurnHtml is restored via template.innerHTML, which
+  // drops the property-bound onclick/onkeydown handlers wired by
+  // _wireTransparentHeaderToggle / _attachCopyButton / _syncTransparentEventControls /
+  // _wireTransparentTurnToggle. The settled cache fast-path re-runs the rehydrate;
+  // this active-session live-turn restore path must too, or row toggles, copy
+  // buttons, expand/collapse, and the turn chevron silently stop working after a
+  // session-switch/reconnect restore. (Codex trifecta finding C1.)
+  if(typeof _rehydrateTransparentStreamDom==='function') _rehydrateTransparentStreamDom(restored);
+  if(typeof normalizeLiveActivityGroupPlacement==='function') normalizeLiveActivityGroupPlacement(restored);
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
@@ -5607,6 +6406,8 @@ async function applyUpdates(){
     return;
   }
   try{
+    const stashConflictMessages=[];
+    const baselineServerIdentity = await _readHealthServerIdentity();
     for(const target of targets){
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
       if(!res.ok){
@@ -5614,11 +6415,16 @@ async function applyUpdates(){
         resetApplyButton(0);
         return;
       }
+      if(res.stash_conflict){
+        stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
+        if(errEl){errEl.textContent=stashConflictMessages.join('\n\n');errEl.style.display='block';}
+      }
     }
-    showToast('Update applied — restarting…');
+    const stashConflictMessage=stashConflictMessages.join('\n\n');
+    showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload();
+    _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
     const msg=_formatUpdateApplyExceptionMessage(e);
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -5642,6 +6448,36 @@ function _showUpdateError(target,res){
     forceBtn.style.display='inline-block';
   }
 }
+function _normalizeHealthServerIdentity(rawIdentity){
+  if(rawIdentity===undefined||rawIdentity===null) return null;
+  if(typeof rawIdentity==='string'){
+    const value=rawIdentity.trim();
+    return value ? value : null;
+  }
+  const numeric=Number(rawIdentity);
+  return Number.isFinite(numeric) ? String(numeric) : null;
+}
+
+function _healthResponseServerIdentity(data){
+  if(!data||typeof data!=='object') return null;
+  const serverStartedAt=_normalizeHealthServerIdentity(data.server_started_at);
+  const hasUptimeSeconds=data.uptime_seconds!==null&&data.uptime_seconds!==undefined;
+  const uptimeSeconds=hasUptimeSeconds?Number(data.uptime_seconds):NaN;
+  const normalizedUptime=Number.isFinite(uptimeSeconds)&&uptimeSeconds>=0 ? uptimeSeconds : null;
+  if(serverStartedAt===null&&normalizedUptime===null) return null;
+  return {serverStartedAt,uptimeSeconds:normalizedUptime};
+}
+
+async function _readHealthServerIdentity() {
+  try {
+    const r=await fetch(new URL('health', document.baseURI||location.href).href,{cache:'no-store'});
+    if(!r.ok) return null;
+    const data=await r.json();
+    return _healthResponseServerIdentity(data);
+  } catch (_) {
+    return null;
+  }
+}
 async function forceUpdate(btn){
   const target=btn&&btn.dataset.target;
   if(!target) return;
@@ -5657,6 +6493,7 @@ async function forceUpdate(btn){
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
+    const baselineServerIdentity = await _readHealthServerIdentity();
     const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
@@ -5666,7 +6503,7 @@ async function forceUpdate(btn){
     showToast('Force update applied — restarting…');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload();
+    _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
     if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
     btn.disabled=false;btn.textContent='Force update';
@@ -5681,12 +6518,36 @@ async function _waitForServerThenReload(opts){
   opts=opts||{};
   const interval=opts.interval||500;
   const maxMs=opts.maxMs||15000;
+  const baselineServerIdentity=(()=>{
+    const rawIdentity=opts.baselineServerIdentity;
+    if(!rawIdentity||typeof rawIdentity!=='object'){
+      const normalizedServerStartedAt=_normalizeHealthServerIdentity(rawIdentity);
+      return normalizedServerStartedAt===null ? null : {serverStartedAt:normalizedServerStartedAt,uptimeSeconds:null};
+    }
+    const normalizedIdentity={
+      serverStartedAt:_normalizeHealthServerIdentity(rawIdentity.serverStartedAt),
+      uptimeSeconds:Number.isFinite(Number(rawIdentity.uptimeSeconds))&&Number(rawIdentity.uptimeSeconds)>=0 ? Number(rawIdentity.uptimeSeconds) : null,
+    };
+    return normalizedIdentity.serverStartedAt===null&&normalizedIdentity.uptimeSeconds===null ? null : normalizedIdentity;
+  })();
   window._restartingForUpdate=true;
   const msgEl=$('reconnectMsg');
   const banner=$('reconnectBanner');
   if(msgEl) msgEl.textContent='⏳ Restarting… please wait';
   if(banner) banner.classList.add('visible');
   const deadline=Date.now()+maxMs;
+  // Track restart-outage evidence. An outage (failed or non-OK /health probes)
+  // followed by a healthy response is a reliable new-instance signal even when
+  // only uptime_seconds is comparable and the replacement's uptime is not strictly
+  // lower than the captured baseline (e.g. a deployment that strips
+  // server_started_at and whose baseline uptime was very low). We require at least
+  // TWO consecutive outage probes before trusting it, so a single transient network
+  // blip (with the OLD process still up and its uptime merely increasing) cannot
+  // trigger a premature reload onto the old server. Both thrown fetch errors AND
+  // non-OK responses (e.g. a reverse-proxy 502/503 during restart) count as outage
+  // evidence. (#3713 Codex catches)
+  let _consecutiveOutages=0;
+  const _restartOutageObserved=()=>_consecutiveOutages>=2;
   // Give the server a moment to actually begin its restart before the first
   // probe — otherwise the old process may still respond ok on the first poll.
   await new Promise(r=>setTimeout(r, interval));
@@ -5697,11 +6558,78 @@ async function _waitForServerThenReload(opts){
         let data={};
         try{ data=await r.json(); }catch(_){}
         if(data && data.status==='ok'){
-          location.reload();
-          return;
+          const nextServerIdentity=_healthResponseServerIdentity(data);
+          if (baselineServerIdentity===null){
+            location.reload();
+            return;
+          }
+          if(
+            nextServerIdentity===null &&
+            (
+              baselineServerIdentity.serverStartedAt!==null ||
+              baselineServerIdentity.uptimeSeconds!==null
+            )
+          ){
+            // If the replacement server comes back healthy without either
+            // identity field after the baseline exposed a comparable identity,
+            // treat that healthy response as the new server instead of timing
+            // out on an uncomparable identity shape.
+            location.reload();
+            return;
+          }
+          if(
+            nextServerIdentity!==null &&
+            baselineServerIdentity.serverStartedAt!==null &&
+            nextServerIdentity.serverStartedAt===null &&
+            nextServerIdentity.uptimeSeconds!==null
+          ){
+            // If the baseline exposed server_started_at but the replacement
+            // health response degrades to uptime-only, there is no longer a
+            // comparable started_at field. Treat the first healthy uptime-only
+            // response as the new server instead of timing out.
+            location.reload();
+            return;
+          }
+          if(
+            nextServerIdentity!==null&&(
+              (baselineServerIdentity.serverStartedAt===null&&nextServerIdentity.serverStartedAt!==null)||
+              (baselineServerIdentity.serverStartedAt!==null&&nextServerIdentity.serverStartedAt!==null&&nextServerIdentity.serverStartedAt!==baselineServerIdentity.serverStartedAt)||
+              (baselineServerIdentity.uptimeSeconds!==null&&nextServerIdentity.uptimeSeconds!==null&&nextServerIdentity.uptimeSeconds<baselineServerIdentity.uptimeSeconds)
+            )
+          ){
+            location.reload();
+            return;
+          }
+          if(
+            _restartOutageObserved() &&
+            nextServerIdentity!==null &&
+            baselineServerIdentity.serverStartedAt===null &&
+            nextServerIdentity.serverStartedAt===null &&
+            baselineServerIdentity.uptimeSeconds!==null &&
+            nextServerIdentity.uptimeSeconds!==null
+          ){
+            // Uptime-only on both sides AND we saw a sustained restart outage
+            // (>=2 consecutive failed/non-OK probes) before this healthy response:
+            // treat that outage as the restart, so reload even though the
+            // replacement uptime is not strictly lower than a very-low baseline.
+            location.reload();
+            return;
+          }
+          // Healthy response still describing the pre-restart process: this is the
+          // OLD server answering, so any earlier outage was a transient blip, not a
+          // restart — reset the outage evidence so it can't accumulate into a false
+          // positive across unrelated blips.
+          _consecutiveOutages=0;
+          // Keep polling while /health still describes the pre-restart process.
+        }else{
+          // Reachable but not status:ok (still starting up) — counts as outage.
+          _consecutiveOutages++;
         }
+      }else{
+        // Non-OK HTTP (e.g. reverse-proxy 502/503 during restart) — outage evidence.
+        _consecutiveOutages++;
       }
-    }catch(_){ /* socket closed during restart — retry */ }
+    }catch(_){ _consecutiveOutages++; /* socket closed during restart — retry */ }
     await new Promise(r=>setTimeout(r, interval));
   }
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
@@ -5796,6 +6724,9 @@ function syncTopbar(){
   const sessionTitle=S.session.title||t('untitled');
   const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
   document.title=sessionTitle+' \u2014 '+assistantDisplayName();
+  if(typeof activeSessionHasPendingPromptAttention==='function'&&activeSessionHasPendingPromptAttention()){
+    document.title='● '+document.title;
+  }
   const _topbarMeta=$('topbarMeta');
   if(_topbarMeta){
     let sourceLabel=(S.session&&(S.session.source_label||S.session.source_tag||S.session.raw_source))||'';
@@ -5942,7 +6873,17 @@ function _isRecoveryControlMessage(m){
 function _assistantMessageHasVisibleContent(m){
   if(!m||m.role!=='assistant') return false;
   if(_isRecoveryControlMessage(m)) return false;
-  return !!msgContent(m);
+  const content=m.content;
+  if(typeof content==='string') return !_isAssistantEmptyPlaceholderContent(m, content)&&!!content.trim();
+  if(!Array.isArray(content)) return false;
+  return content.some(part=>{
+    if(typeof part==='string') return !!part.trim();
+    if(!part||typeof part!=='object') return false;
+    if(part.type==='text'||part.type==='input_text'||part.type==='output_text'){
+      return !!String(part.text||part.content||'').trim();
+    }
+    return false;
+  });
 }
 
 function _fmtDateSep(d){
@@ -5959,9 +6900,18 @@ function _fmtDateSep(d){
 const _ERR_MSG_RE=/^(?:\*\*error\b|error:|connection lost|no response received)/i;
 function _messageHasReasoningPayload(m){
   if(!m||m.role!=='assistant') return false;
-  if(m.reasoning) return true;
+  if(m.reasoning||m.reasoning_content||m.thinking||m._reasoning) return true;
   if(Array.isArray(m.content)) return m.content.some(p=>p&&(p.type==='thinking'||p.type==='reasoning'));
+  if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
+    const split=window._extractInlineThinkingFromContentForRender(String(m.content||''),'');
+    return !!(split&&split.reasoning);
+  }
   return /^\s*(?:<think>[\s\S]*?<\/think>|<\|channel\|?>thought\n?[\s\S]*?<channel\|>|<\|turn\|>thinking\n[\s\S]*?<turn\|>)/.test(String(m.content||''));
+}
+function _isAssistantEmptyPlaceholderContent(m, content){
+  if(!m||m.role!=='assistant') return false;
+  if(String(content||'').trim()!=='(empty)') return false;
+  return _messageHasReasoningPayload(m);
 }
 function _formatTurnTps(value){
   const n=Number(value);
@@ -6006,20 +6956,837 @@ function _createAssistantTurn(tsTitle='', tpsText=''){
 function _assistantTurnBlocks(turn){
   return turn?turn.querySelector('.assistant-turn-blocks'):null;
 }
+function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, visibleContent, opts){
+  if(!m||m.role!=='assistant') return false;
+  const isTurnFinalAssistant=!!(opts&&opts.isTurnFinalAssistant);
+  const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
+  const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
+  if(m._live) return true;
+  if(hasVisibleText&&isTurnFinalAssistant) return false;
+  if(m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined) return true;
+  const hasToolMetadata=!!(
+    (toolCallAssistantIdxs&&toolCallAssistantIdxs.has(rawIdx))||
+    (Array.isArray(m.tool_calls)&&m.tool_calls.length)||
+    (Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use'))
+  );
+  if(hasVisibleText) return false;
+  if(hasToolMetadata) return true;
+  return false;
+}
+function _assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs){
+  return !!_assistantReasoningPayloadText(m)||_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs);
+}
+function _assistantReasoningPayloadText(m){
+  if(!m||m.role!=='assistant') return '';
+  const direct=m.reasoning_content||m.reasoning||m.thinking||m._reasoning||'';
+  if(String(direct||'').trim()) return String(direct).trim();
+  if(Array.isArray(m.content)){
+    const parts=m.content
+      .filter(p=>p&&typeof p==='object'&&(p.type==='thinking'||p.type==='reasoning'))
+      .map(p=>p.text||p.content||'')
+      .filter(text=>String(text||'').trim());
+    return parts.join('\n').trim();
+  }
+  const text=String(m.content||'');
+  if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
+    const split=window._extractInlineThinkingFromContentForRender(text,'');
+    if(split&&String(split.reasoning||'').trim()) return String(split.reasoning).trim();
+  }
+  // Extract a LEADING thinking block even when visible answer text follows it
+  // (e.g. "<think>…</think>4"). The matching display-content stripper
+  // (_stripLeadingAssistantThinkingMarkup) is non-anchored, so the extractor must
+  // be too — a trailing `$` anchor here dropped the reasoning whenever the turn
+  // also had a visible answer, hiding the Thinking card entirely (#3401 regression
+  // vs master, which used the non-anchored form). (#3709/#3592 family)
+  const thinkMatch=text.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
+  if(thinkMatch) return thinkMatch[1].trim();
+  const thoughtMatch=text.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
+  if(thoughtMatch) return thoughtMatch[1].trim();
+  const turnMatch=text.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
+  if(turnMatch) return turnMatch[1].trim();
+  return '';
+}
+function _stripLeadingAssistantThinkingMarkup(content){
+  let out=String(content||'');
+  const thinkMatch=out.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
+  if(thinkMatch) out=out.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'').trimStart();
+  const thoughtMatch=out.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
+  if(thoughtMatch) out=out.replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'').trimStart();
+  const turnMatch=out.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
+  if(turnMatch) out=out.replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trimStart();
+  return out;
+}
+function _assistantVisibleContentForReasoningCompare(m){
+  if(!m||m.role!=='assistant') return '';
+  let content=m.content||'';
+  if(Array.isArray(content)){
+    content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
+  }
+  if(typeof content==='string'){
+    if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
+      const split=window._extractInlineThinkingFromContentForRender(content,'');
+      content=split&&typeof split.content==='string'?split.content:_stripLeadingAssistantThinkingMarkup(content);
+    } else {
+      content=_stripLeadingAssistantThinkingMarkup(content);
+    }
+  }
+  if(_isMarkerOnlyAssistantCompressionMessage(m)){
+    content='**Error:** No response received after context compression. Please retry.';
+  }
+  if(_isAssistantEmptyPlaceholderContent(m, content)) return '';
+  return String(content||'');
+}
+function _assistantTurnFinalVisibleContentMap(visWithIdx){
+  const out=new Map();
+  let runIdxs=[];
+  let finalVisible='';
+  const flush=()=>{
+    for(const idx of runIdxs) out.set(idx, finalVisible);
+    runIdxs=[];
+    finalVisible='';
+  };
+  for(const entry of visWithIdx||[]){
+    const m=entry&&entry.m;
+    if(m&&m.role==='assistant'){
+      runIdxs.push(entry.rawIdx);
+      const visible=_assistantVisibleContentForReasoningCompare(m);
+      if(String(visible||'').trim()) finalVisible=visible;
+    }else{
+      flush();
+    }
+  }
+  flush();
+  return out;
+}
+function _assistantTurnVisibleContentMap(visWithIdx){
+  const out=new Map();
+  let runIdxs=[];
+  let visibleTexts=[];
+  const flush=()=>{
+    for(const idx of runIdxs) out.set(idx, visibleTexts.slice());
+    runIdxs=[];
+    visibleTexts=[];
+  };
+  for(const entry of visWithIdx||[]){
+    const m=entry&&entry.m;
+    if(m&&m.role==='assistant'){
+      runIdxs.push(entry.rawIdx);
+      const visible=_assistantVisibleContentForReasoningCompare(m);
+      if(String(visible||'').trim()) visibleTexts.push(visible);
+    }else{
+      flush();
+    }
+  }
+  flush();
+  return out;
+}
+function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visibleContent, turnFinalVisibleContent, turnVisibleContents){
+  const thinkingText=_assistantReasoningPayloadText(m);
+  const visibleTexts=Array.isArray(turnVisibleContents)?turnVisibleContents:[];
+  return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
+}
+function _worklogDetailsExpandedDefault(){
+  return window._worklogDetailsExpandedByDefault===true;
+}
+function _applyWorklogDetailsExpandedDefault(root){
+  const scope=root&&root.querySelectorAll?root:document;
+  const open=_worklogDetailsExpandedDefault();
+  scope.querySelectorAll('.thinking-card').forEach(card=>{
+    card.classList.toggle('open', open);
+  });
+  scope.querySelectorAll('.tool-card').forEach(card=>{
+    if(card.querySelector('.tool-card-detail')) card.classList.toggle('open', open);
+  });
+  scope.querySelectorAll('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group').forEach(group=>{
+    group.classList.toggle('open', open);
+    group.classList.toggle('tool-worklog-tool-group-collapsed', !open);
+    const summary=group.querySelector('.tool-group-head,.tool-worklog-tool-group-head');
+    if(summary) summary.setAttribute('aria-expanded', String(open));
+  });
+}
+const _worklogDetailDisclosureSelector='.thinking-card,.tool-card,.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group';
+function _worklogDetailTextKey(text, maxLen){
+  return String(text||'').replace(/\s+/g,' ').trim().slice(0,maxLen||160);
+}
+function _worklogDetailHashKey(value){
+  const s=String(value||'');
+  let hash=2166136261;
+  for(let i=0;i<s.length;i++){
+    hash^=s.charCodeAt(i);
+    hash=Math.imul(hash,16777619)>>>0;
+  }
+  return hash.toString(36);
+}
+function _worklogDetailBaseKey(el){
+  if(!el||!el.classList) return '';
+  const activity=el.closest&&el.closest('.agent-activity-group,.tool-worklog-group[data-tool-worklog-group="1"],.tool-call-group[data-tool-call-group="1"],.live-worklog[data-live-worklog-shell="1"]');
+  const scope=activity?[
+    activity.getAttribute('data-activity-disclosure-key')||'',
+    activity.getAttribute('data-tool-worklog-key')||'',
+    activity.getAttribute('data-live-segment-seq')||'',
+    activity.getAttribute('data-activity-burst-id')||'',
+  ].filter(Boolean).join('|'):'';
+  if(el.classList.contains('thinking-card')){
+    const row=el.closest('.agent-activity-thinking,.thinking-card-row');
+    const stable=row&&(
+      row.getAttribute('data-thinking-key')||
+      row.getAttribute('data-live-thinking-key')||
+      row.getAttribute('data-live-segment-seq')||
+      row.getAttribute('data-activity-burst-id')||
+      row.id||
+      ''
+    );
+    return `thinking:${scope}:${stable||'ordinal'}`;
+  }
+  if(el.classList.contains('tool-card')){
+    const row=el.closest('.tool-card-row');
+    const tid=row&&(
+      row.getAttribute('data-tool-disclosure-key')||
+      row.getAttribute('data-live-tid')||
+      row.getAttribute('data-tool-call-id')||
+      row.getAttribute('data-tool-id')||
+      ''
+    );
+    const label=row&&(row.dataset&&row.dataset.toolActionLabel)||'';
+    const name=el.querySelector('.tool-card-name');
+    return `tool:${scope}:${tid||label||_worklogDetailTextKey(name?name.textContent:'tool',80)}`;
+  }
+  if(el.matches&&el.matches('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group')){
+    const stable=
+      el.getAttribute('data-tool-group-disclosure-key')||
+      el.getAttribute('data-activity-disclosure-key')||
+      el.getAttribute('data-tool-worklog-key')||
+      el.getAttribute('data-live-segment-seq')||
+      el.getAttribute('data-activity-burst-id')||
+      'group';
+    return `tool-group:${scope}:${stable}`;
+  }
+  return '';
+}
+function _worklogDetailDisclosureIsOpen(el){
+  return !!(el&&el.classList&&el.classList.contains('open'));
+}
+function _setWorklogDetailDisclosureOpen(el, open){
+  if(!el||!el.classList) return;
+  el.classList.toggle('open', !!open);
+  if(el.matches&&el.matches('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group')){
+    el.classList.toggle('tool-worklog-tool-group-collapsed', !open);
+    const summary=el.querySelector('.tool-group-head,.tool-worklog-tool-group-head');
+    if(summary) summary.setAttribute('aria-expanded', String(!!open));
+  }
+}
+function _worklogDetailDisclosureKeyForElement(el, counts){
+  const base=_worklogDetailBaseKey(el);
+  if(!base) return '';
+  const idx=counts[base]||0;
+  counts[base]=idx+1;
+  return `${base}#${idx}`;
+}
+function _captureWorklogDetailDisclosureState(root){
+  const state=new Map();
+  if(!root||!root.querySelectorAll) return state;
+  // Stamp the capturing session so a restore can't replay one session's
+  // disclosure state onto another. Cross-session switches currently wipe
+  // #msgInner (sessions.js loading placeholder) so the capture is normally
+  // empty, but the ordinal/derived keys carry no session id — this stamp makes
+  // the isolation explicit instead of depending on that wipe invariant. (Opus #4063.)
+  try{ state._sid=S.session?S.session.session_id:null; }catch(_){ state._sid=null; }
+  const counts=Object.create(null);
+  root.querySelectorAll(_worklogDetailDisclosureSelector).forEach(el=>{
+    const key=_worklogDetailDisclosureKeyForElement(el, counts);
+    if(key) state.set(key, _worklogDetailDisclosureIsOpen(el));
+  });
+  return state;
+}
+function _restoreWorklogDetailDisclosureState(root, state){
+  if(!root||!root.querySelectorAll||!state||!state.size) return;
+  // Don't restore a snapshot captured under a different session.
+  try{ if(state._sid!==undefined && state._sid!==(S.session?S.session.session_id:null)) return; }catch(_){ /* fall through */ }
+  const counts=Object.create(null);
+  root.querySelectorAll(_worklogDetailDisclosureSelector).forEach(el=>{
+    const key=_worklogDetailDisclosureKeyForElement(el, counts);
+    if(!key||!state.has(key)) return;
+    _setWorklogDetailDisclosureOpen(el, state.get(key));
+  });
+}
 function _thinkingCardHtml(text, open){
   const clean=_sanitizeThinkingDisplayText(text);
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
-  const classes=`thinking-card${open?' open':''}`;
+  const shouldOpen=!!open||_worklogDetailsExpandedDefault();
+  const classes=`thinking-card${shouldOpen?' open':''}`;
   return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
 }
-function _thinkingActivityNode(text, open){
+function _thinkingActivityNode(text, open, disclosureKey){
   const row=document.createElement('div');
   row.className='agent-activity-thinking';
+  row.setAttribute('data-worklog-thinking-card','1');
+  if(disclosureKey) row.setAttribute('data-thinking-key', String(disclosureKey));
   row.innerHTML=_thinkingCardHtml(text, open);
+  _renderThinkingInto(row,text);
   return row;
+}
+function chatActivityMode(){
+  if(typeof window==='undefined') return 'compact_worklog';
+  return window._chatActivityDisplayMode || (window._transparentStream ? 'transparent_stream' : 'compact_worklog') || 'compact_worklog';
+}
+function isTransparentStream(){
+  return chatActivityMode()==='transparent_stream';
+}
+function isCompactWorklogMode(){
+  return isSimplifiedToolCalling()&&!isTransparentStream();
+}
+if(typeof window!=='undefined'){
+  window.chatActivityMode=chatActivityMode;
+  window.isTransparentStream=isTransparentStream;
+  window.isCompactWorklogMode=isCompactWorklogMode;
+}
+function _toolShortName(name){
+  const raw=String(name||'').trim();
+  if(!raw) return 'tool';
+  if(raw.startsWith('mcp__')){
+    const parts=raw.split('__').filter(Boolean);
+    if(parts.length>1) return parts.slice(1).join('/');
+  }
+  if(raw.startsWith('mcp.')){
+    const parts=raw.split('.').filter(Boolean);
+    if(parts.length>1) return parts.slice(1).join('/');
+  }
+  return raw;
+}
+function _transparentEventPreview(text){
+  const clean=_sanitizeThinkingDisplayText(String(text||'')).replace(/\s+/g,' ').trim();
+  if(!clean) return '';
+  return clean.length>180?`${clean.slice(0,177)}...`:clean;
+}
+function _transparentToolStatus(tc, settled){
+  if(tc&&tc.is_error) return 'Failed';
+  if(tc&&tc.done===false) return settled?'Interrupted':'Running';
+  return 'Completed';
+}
+function _copyEventToClipboard(row){
+  if(!row) return;
+  const type=row.getAttribute('data-event-type');
+  let text='';
+  let label='event';
+  if(type==='tool'){
+    const tc=row._tcData||{};
+    const fallbackName=row.getAttribute('data-event-name')||row.getAttribute('data-tool-name')||'tool';
+    label=`tool ${tc.name||fallbackName}`;
+    const parts=[`tool: ${tc.name||fallbackName}`];
+    if(tc.args&&Object.keys(tc.args).length) parts.push('args: '+JSON.stringify(tc.args,null,2));
+    if(tc.snippet) parts.push('output:\n'+String(tc.snippet));
+    if(parts.length===1){
+      const argsText=Array.from(row.querySelectorAll('.tool-card-args .tool-arg-pair'))
+        .map(pair=>String(pair.textContent||'').trim())
+        .filter(Boolean)
+        .join('\n');
+      const outputText=String((row.querySelector('.tool-card-result pre')||{}).textContent||'').trim();
+      if(argsText) parts.push('args:\n'+argsText);
+      if(outputText) parts.push('output:\n'+outputText);
+    }
+    text=parts.join('\n');
+  }else if(type==='thinking'){
+    const pre=row.querySelector('.thinking-card-body pre');
+    text=pre?pre.textContent:(row.textContent||'').replace(/^\s*Thinking\s*/i,'');
+    label='thinking';
+  }else{
+    text=row.textContent||'';
+  }
+  const fallback=()=>{
+    try{
+      const ta=document.createElement('textarea');
+      ta.value=text;
+      ta.setAttribute('readonly','');
+      ta.style.position='absolute';
+      ta.style.left='-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok=document.execCommand('copy');
+      document.body.removeChild(ta);
+      if(typeof showToast==='function') showToast(ok?(t('copied')||'Copied'):(t('copy_failed')||'Copy failed'),1600);
+    }catch(_){
+      if(typeof showToast==='function') showToast(t('copy_failed')||'Copy failed',2000,'error');
+    }
+  };
+  if(navigator&&navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(()=>{
+      if(typeof showToast==='function') showToast(`${t('copied')||'Copied'} ${label}`,1600);
+    }).catch(fallback);
+  }else{
+    fallback();
+  }
+}
+function _attachCopyButton(header){
+  if(!header) return null;
+  const bindCopyButton=(btn)=>{
+    if(!btn) return null;
+    btn.classList.add('transparent-event-copy');
+    btn.setAttribute('role','button');
+    btn.setAttribute('tabindex','0');
+    btn.setAttribute('aria-label',t('copy')||'Copy');
+    btn.setAttribute('data-transparent-copy','1');
+    btn.title=t('copy')||'Copy';
+    const handler=function(ev){
+      ev.stopPropagation();
+      ev.preventDefault();
+      _copyEventToClipboard(header.closest('.transparent-event-row'));
+    };
+    btn.onclick=handler;
+    btn.onkeydown=function(ev){
+      if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();handler(ev);}
+    };
+    return btn;
+  };
+  // Reuse ANY existing copy button (handles both .transparent-event-copy
+  // added by this function AND the legacy .thinking-copy-btn baked into the
+  // thinking-card template). Returning the existing one prevents the
+  // duplicate copy buttons that appeared in thinking boxes.
+  const existing=header.querySelector('.transparent-event-copy,.thinking-copy-btn');
+  if(existing){
+    // Normalise the class so CSS treats them identically.
+    return bindCopyButton(existing);
+  }
+  const btn=document.createElement('span');
+  btn.className='transparent-event-copy';
+  btn.innerHTML=`<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+  bindCopyButton(btn);
+  // Place the copy button at a FIXED flexbox position regardless of
+  // whether a toggle or status badge is present: always right before
+  // the toggle. The CSS uses flexbox order to keep it visually stable
+  // even if other elements are inserted between header and toggle.
+  const toggle=header.querySelector('.tool-card-toggle,.thinking-card-toggle');
+  if(toggle&&toggle.parentNode===header) header.insertBefore(btn,toggle);
+  else header.appendChild(btn);
+  return btn;
+}
+function _transparentEventCountLabel(toolCount){
+  return toolCount?`Trace: ${toolCount} ${toolCount===1?'tool':'tools'}`:'Trace';
+}
+function _setTransparentDetailMode(tab, mode){
+  const row=tab&&tab.closest?tab.closest('.transparent-event-row'):null;
+  const detail=row&&row.querySelector('.tool-card-detail');
+  if(!detail) return;
+  const next=mode==='output'?'output':'full';
+  detail.setAttribute('data-transparent-detail-mode',next);
+  detail.querySelectorAll('.transparent-detail-mode').forEach(el=>{
+    el.classList.toggle('active', el===tab || el.getAttribute('data-mode')===next);
+  });
+}
+function _setTransparentCardOpen(card, open){
+  if(!card) return;
+  const expanded=!!open;
+  card.classList.toggle('open',expanded);
+  const row=card.closest&&card.closest('.transparent-event-row');
+  if(row) row.setAttribute('data-expanded',expanded?'1':'0');
+  const header=card.querySelector('.tool-card-header,.thinking-card-header');
+  if(header) header.setAttribute('aria-expanded',expanded?'true':'false');
+}
+function _wireTransparentHeaderToggle(header){
+  if(!header) return;
+  header.setAttribute('data-transparent-toggle-bound','1');
+  header.onclick=function(ev){
+    const target=ev&&ev.target;
+    if(target&&target.closest&&target.closest('.transparent-event-copy,.transparent-detail-mode,.tool-card-more')) return;
+    const card=this.closest('.tool-card,.thinking-card');
+    _setTransparentCardOpen(card,!(card&&card.classList.contains('open')));
+  };
+  header.onkeydown=function(ev){
+    if(ev.key!=='Enter'&&ev.key!==' ') return;
+    ev.preventDefault();
+    const card=this.closest('.tool-card,.thinking-card');
+    _setTransparentCardOpen(card,!(card&&card.classList.contains('open')));
+  };
+  header.setAttribute('role','button');
+  header.setAttribute('tabindex','0');
+}
+function _transparentToolDetailHtml(tc, status){
+  const args=tc&&tc.args&&typeof tc.args==='object'?tc.args:{};
+  const argEntries=Object.entries(args);
+  // The tool name is already shown in the row header and the status is shown as
+  // a badge, so don't repeat them as pseudo-args in the body. Only surface a
+  // duration meta when present. (Trifecta finding V6 — reduce redundancy.)
+  const meta=[];
+  if(tc&&tc.duration!==undefined&&tc.duration!==null) meta.push(['duration', String(tc.duration)]);
+  const preview=String((tc&&(tc.snippet||tc.preview||tc.result||tc.output))||'').trim();
+  const argHtml=[...meta,...argEntries].map(([k,v])=>`<div class="tool-arg-pair"><span class="tool-arg-key">${esc(String(k))}</span><span class="tool-arg-val">${esc(typeof v==='string'?v:JSON.stringify(v,null,2))}</span></div>`).join('');
+  return `<div class="tool-card-detail" data-transparent-detail-mode="full"><div class="transparent-detail-modes" role="tablist"><span class="transparent-detail-mode active" role="tab" tabindex="0" data-mode="full" onclick="_setTransparentDetailMode(this,'full')">Full</span><span class="transparent-detail-mode" role="tab" tabindex="0" data-mode="output" onclick="_setTransparentDetailMode(this,'output')">Output</span></div><div class="tool-card-args">${argHtml}</div>${preview?`<div class="tool-card-result"><pre>${esc(preview)}</pre></div>`:''}</div>`;
+}
+function _syncTransparentEventControls(turn){
+  if(!turn||!isTransparentStream()) return;
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return;
+  const rows=Array.from(blocks.querySelectorAll(':scope > .transparent-event-row,[data-transparent-event-row="1"]'));
+  const toolCount=rows.filter(row=>row.getAttribute('data-event-type')==='tool').length;
+  let bar=blocks.querySelector(':scope > .transparent-event-controls');
+  if(!rows.length){
+    if(bar) bar.remove();
+    return;
+  }
+  if(!bar){
+    bar=document.createElement('div');
+    bar.className='transparent-event-controls';
+    const label=document.createElement('span');
+    label.className='transparent-event-controls-label';
+    label.setAttribute('data-transparent-tool-count','1');
+    const expand=document.createElement('span');
+    expand.className='transparent-event-control';
+    expand.setAttribute('role','button');
+    expand.setAttribute('tabindex','0');
+    expand.setAttribute('data-transparent-expand-all','1');
+    expand.textContent=t('expand_all')||'Expand all';
+    expand.onclick=function(ev){ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),true);};
+    expand.onkeydown=function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),true);}};
+    const collapse=document.createElement('span');
+    collapse.className='transparent-event-control';
+    collapse.setAttribute('role','button');
+    collapse.setAttribute('tabindex','0');
+    collapse.setAttribute('data-transparent-collapse-all','1');
+    collapse.textContent=t('collapse_all')||'Collapse all';
+    collapse.onclick=function(ev){ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),false);};
+    collapse.onkeydown=function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),false);}};
+    bar.appendChild(label);
+    bar.appendChild(expand);
+    bar.appendChild(collapse);
+    // Guard: firstChild may be null (empty blocks) or orphaned from a prior
+    // DOM rebuild. Only insertBefore when it is still a child of blocks.
+    if(blocks.firstChild&&blocks.firstChild.parentNode===blocks) blocks.insertBefore(bar, blocks.firstChild);
+    else blocks.appendChild(bar);
+  }
+  const expand=bar.querySelector('[data-transparent-expand-all]');
+  if(expand){
+    expand.onclick=function(ev){ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),true);};
+    expand.onkeydown=function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),true);}};
+  }
+  const collapse=bar.querySelector('[data-transparent-collapse-all]');
+  if(collapse){
+    collapse.onclick=function(ev){ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),false);};
+    collapse.onkeydown=function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_setTransparentRowsExpanded(this.closest('.assistant-turn'),false);}};
+  }
+  const label=bar.querySelector('.transparent-event-controls-label');
+  if(label){
+    label.textContent=_transparentEventCountLabel(toolCount);
+    label.setAttribute('data-transparent-tool-count',String(toolCount));
+  }
+  bar.setAttribute('data-tool-count',String(toolCount));
+  // Wire the Hermes chat name tag toggle for the live turn.
+  _wireTransparentTurnToggle(turn);
+  // Apply recency fade so the newest activity stands out while streaming. The
+  // fade helper is internally gated to the live turn, so this no-ops on settled
+  // turns — without this call the fade feature stayed dormant (only ever cleared
+  // from the settled render loop). (Trifecta r2 follow-up.)
+  _applyTransparentRowFading(turn);
+}
+function _rehydrateTransparentStreamDom(root){
+  if(!root||!isTransparentStream()) return;
+  // Handle BOTH a container root and a root that IS itself an assistant turn
+  // (the live-turn restore path passes the #liveAssistantTurn element directly,
+  // which querySelectorAll('.assistant-turn') would not match). (Trifecta C1 r2.)
+  const turns=[];
+  if(root.matches&&root.matches('.assistant-turn')) turns.push(root);
+  root.querySelectorAll('.assistant-turn').forEach(turn=>turns.push(turn));
+  turns.forEach(turn=>{
+    _wireTransparentTurnToggle(turn);
+    _syncTransparentEventControls(turn);
+  });
+  root.querySelectorAll('.transparent-event-row').forEach(row=>{
+    const card=row.querySelector('.tool-card,.thinking-card');
+    const header=row.querySelector('.tool-card-header,.thinking-card-header');
+    if(header){
+      _wireTransparentHeaderToggle(header);
+      _attachCopyButton(header);
+    }
+    if(card) _setTransparentCardOpen(card,card.classList.contains('open'));
+  });
+}
+function _decorateTransparentEventRow(row, opts){
+  if(!row) return row;
+  opts=opts||{};
+  const type=String(opts.type||row.getAttribute('data-event-type')||'event');
+  row.classList.add('transparent-event-row');
+  row.setAttribute('data-transparent-event-row','1');
+  row.setAttribute('data-transparent-stream','1');
+  row.setAttribute('data-event-type',type);
+  if(opts.name) row.setAttribute('data-event-name',String(opts.name));
+  if(opts.segmentSeq) row.setAttribute('data-live-segment-seq',String(opts.segmentSeq));
+  if(opts.burstId) row.setAttribute('data-activity-burst-id',String(opts.burstId));
+  if(type==='tool'){
+    const tc=opts.toolCall||row._tcData||{};
+    const name=String(opts.name||tc.name||'tool');
+    row.setAttribute('data-tool-name',name);
+    const status=String(opts.status||_transparentToolStatus(tc));
+    row.setAttribute('data-event-status',status);
+    const header=row.querySelector('.tool-card-header');
+    const card=row.querySelector('.tool-card');
+    if(card) card.classList.add('transparent-event-card');
+    if(header){
+      const nameEl=header.querySelector('.tool-card-name');
+      // The status badge (now legible per V2) already carries "Running", so don't
+      // also prefix the name with "Running:" — that's the same redundancy class
+      // V6 removed from the detail body. (Trifecta r2 #4.)
+      if(nameEl) nameEl.textContent=_toolShortName(name);
+      let statusEl=header.querySelector('.transparent-event-status');
+      if(!statusEl){
+        statusEl=document.createElement('span');
+        statusEl.className='transparent-event-status';
+        const toggle=header.querySelector('.tool-card-toggle');
+        // Guard against stale toggle (see thinking-preview fix above).
+        if(toggle&&toggle.parentNode===header) header.insertBefore(statusEl,toggle);
+        else header.appendChild(statusEl);
+      }
+      if(status==='Completed'){
+        statusEl.textContent='';
+        statusEl.removeAttribute('data-status');
+      }else{
+        statusEl.textContent=status;
+        statusEl.setAttribute('data-status',status.toLowerCase());
+      }
+      row.setAttribute('data-event-status',status);
+      // Update the 3D progress bar to reflect the new status.
+      const progress=card.querySelector('.transparent-event-progress');
+      if(progress){
+        if(status==='Completed'||status==='Failed'||status==='Interrupted'){
+          progress.removeAttribute('data-progress-running');
+          progress.setAttribute('data-progress-percent','100%');
+          progress.style.setProperty('--transparent-progress-percent','100%');
+        }else if(status==='Running'){
+          progress.setAttribute('data-progress-running','1');
+          progress.setAttribute('data-progress-percent','60%');
+          progress.style.setProperty('--transparent-progress-percent','60%');
+        }
+      }
+      let detail=row.querySelector('.tool-card-detail');
+      if(!detail&&card){
+        card.insertAdjacentHTML('beforeend',_transparentToolDetailHtml(tc,status));
+        detail=row.querySelector('.tool-card-detail');
+        if(!header.querySelector('.tool-card-toggle')){
+          const toggle=document.createElement('span');
+          toggle.className='tool-card-toggle';
+          toggle.innerHTML=li('chevron-right',12);
+          header.appendChild(toggle);
+        }
+      }
+      if(detail&&!detail.querySelector('.transparent-detail-modes')){
+        const modes=document.createElement('div');
+        modes.className='transparent-detail-modes';
+        modes.setAttribute('role','tablist');
+        modes.innerHTML=`<span class="transparent-detail-mode active" role="tab" tabindex="0" data-mode="full" onclick="_setTransparentDetailMode(this,'full')">Full</span><span class="transparent-detail-mode" role="tab" tabindex="0" data-mode="output" onclick="_setTransparentDetailMode(this,'output')">Output</span>`;
+        // Guard: firstChild may be orphaned from a prior DOM rebuild.
+        const firstChild=detail.firstChild;
+        if(firstChild&&firstChild.parentNode===detail) detail.insertBefore(modes, firstChild);
+        else detail.appendChild(modes);
+        detail.setAttribute('data-transparent-detail-mode','full');
+      }
+      _wireTransparentHeaderToggle(header);
+      _attachCopyButton(header);
+    }
+    // Attach the 3D progress bar BEFORE the early return so tool rows
+    // also get the bottom bar (the function used to return before
+    // reaching the bar attachment, which left tool rows bar-less).
+    _attachProgressBar(row, opts);
+    return row;
+  }
+  if(type==='thinking'){
+    row.classList.add('transparent-thinking-event');
+    row.setAttribute('data-event-name','thinking');
+    const card=row.querySelector('.thinking-card');
+    const header=row.querySelector('.thinking-card-header');
+    if(card) card.classList.add('transparent-event-card');
+    if(header){
+      const btnRow=header.querySelector('.thinking-card-btn-row');
+      const copy=header.querySelector('.thinking-copy-btn,.transparent-event-copy');
+      const toggle=header.querySelector('.thinking-card-toggle');
+      if(copy&&copy.parentNode!==header) header.appendChild(copy);
+      if(toggle&&toggle.parentNode!==header) header.appendChild(toggle);
+      if(btnRow&&btnRow.parentNode===header&&!btnRow.children.length) btnRow.remove();
+      header.style.flexDirection='row';
+      const label=header.querySelector('.thinking-card-label');
+      if(label) label.textContent='Thinking';
+      let preview=header.querySelector('.transparent-event-preview,.transparent-event-thinking-preview');
+      const previewText=_transparentEventPreview(opts.preview||opts.text||row.textContent||'');
+      if(previewText){
+        if(!preview){
+          preview=document.createElement('span');
+          preview.className='transparent-event-preview transparent-event-thinking-preview';
+          if(label&&label.parentNode===header&&label.nextSibling) header.insertBefore(preview,label.nextSibling);
+          else if(label&&label.parentNode===header) header.appendChild(preview);
+          else header.appendChild(preview);
+        }
+        preview.classList.add('transparent-event-thinking-preview');
+        preview.textContent=previewText;
+      }else if(preview){
+        preview.remove();
+      }
+      _wireTransparentHeaderToggle(header);
+      _attachCopyButton(header);
+    }
+    _attachProgressBar(row, opts);
+  }
+  return row;
+}
+// ── 3D progress bar (loading path / follow-up indicator) ───────────
+// Each transparent event card has a thin 3D bar at its bottom edge.
+// While the underlying tool is running (status === 'Running') the bar
+// shows a shimmer animation; once the tool completes the bar fills to
+// 100% and stops. The bar doubles as a visual step-break between rows
+// in the stack, so the eye reads the stream as discrete steps.
+function _attachProgressBar(row, opts){
+  if(!row) return;
+  opts=opts||{};
+  const card=row.querySelector('.tool-card,.thinking-card');
+  if(!card) return;
+  let bar=card.querySelector('.transparent-event-progress');
+  if(!bar){
+    bar=document.createElement('div');
+    bar.className='transparent-event-progress';
+    // Append to the card so it sits flush at the bottom edge.
+    card.appendChild(bar);
+  }
+  // Set the running state from opts or current status.
+  const status=String(opts.status||(row.getAttribute('data-event-status')||''));
+  const isRunning=(status==='Running'||status==='running');
+  const isCompleted=(status==='Completed'||status==='completed'||status==='Failed'||status==='failed'||status==='Interrupted'||status==='interrupted');
+  if(isRunning) bar.setAttribute('data-progress-running','1');
+  else bar.removeAttribute('data-progress-running');
+  if(isCompleted){
+    bar.setAttribute('data-progress-percent','100%');
+    bar.style.setProperty('--transparent-progress-percent','100%');
+  }else if(isRunning){
+    bar.setAttribute('data-progress-percent','60%');
+    bar.style.setProperty('--transparent-progress-percent','60%');
+  }else{
+    bar.removeAttribute('data-progress-percent');
+    bar.style.removeProperty('--transparent-progress-percent');
+  }
+}
+function _setTransparentRowsExpanded(root, expanded){
+  const scope=root||document;
+  scope.querySelectorAll('.transparent-event-row .tool-card,.transparent-event-row .thinking-card').forEach(card=>{
+    _setTransparentCardOpen(card,!!expanded);
+  });
+}
+// ── Transparent turn-level collapse (Hermes chat name tag) ───────────────
+// In transparent_stream mode the assistant role label is the turn's "name
+// tag". Clicking it collapses the entire event stack underneath so the
+// transcript shows only the final answer (Output only). A chevron on the
+// role telegraph the affordance; the blocks body animates with the same
+// max-height transition used by individual event cards. Persisted via
+// data-attribute only — the turn's render path reads it on rebuild.
+const _transparentTurnCollapsedStates={}; // key: `${sid}:${turnMsgIdx}` → boolean
+function _wireTransparentTurnToggle(turn){
+  if(!turn) return;
+  if(!isTransparentStream()) return;
+  const role=turn.querySelector('.msg-role.assistant');
+  if(!role) return;
+  turn.setAttribute('data-transparent-turn-toggle-bound','1');
+  // Add chevron if missing.
+  if(!role.querySelector('.transparent-turn-chevron')){
+    const chev=document.createElement('span');
+    chev.className='transparent-turn-chevron';
+    chev.innerHTML=li('chevron-down',10);
+    role.appendChild(chev);
+  }
+  role.setAttribute('role','button');
+  role.setAttribute('tabindex','0');
+  role.setAttribute('aria-expanded',turn.getAttribute('data-transparent-turn-collapsed')==='1'?'false':'true');
+  const toggle=function(ev){
+    if(ev&&ev.target&&ev.target.closest&&ev.target.closest('.msg-tps-inline')) return;
+    const collapsed=turn.getAttribute('data-transparent-turn-collapsed')==='1';
+    turn.setAttribute('data-transparent-turn-collapsed',collapsed?'0':'1');
+    role.setAttribute('aria-expanded',collapsed?'true':'false');
+    // Persist state across DOM rebuilds.
+    if(S.session){
+      const seg=turn.querySelector('.assistant-segment');
+      if(seg){
+        const mi=seg.getAttribute('data-msg-idx');
+        if(mi!=null) _transparentTurnCollapsedStates[`${S.session.session_id}:${mi}`]=!collapsed;
+      }
+    }
+  };
+  role.onclick=toggle;
+  role.onkeydown=function(ev){
+    if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();toggle(ev);}
+  };
+}
+// ── Transparent old-event fading (medium → low) ───────────────────────────
+// In long streams the earliest rows fade to a lower opacity so the user's
+// eye lands on the most recent activity. The fade is per-turn: the newest
+// event stays at full opacity, each earlier event drops one step. Floors
+// at 0.32 so labels stay readable.
+function _applyTransparentRowFading(turn){
+  if(!turn||!isTransparentStream()) return;
+  // Recency-fading only makes sense on the LIVE turn (draw the eye to the most
+  // recent activity). On settled/historical turns it permanently dims the trace
+  // below readable contrast (floor .32) — the opposite of a transparent record.
+  // So clear any fade on non-live turns and only fade the live turn.
+  // (Trifecta finding V8.)
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return;
+  const rows=Array.from(blocks.querySelectorAll(':scope > .transparent-event-row'));
+  const isLive=turn.id==='liveAssistantTurn'||turn.getAttribute('data-live-assistant-turn')==='1';
+  if(!isLive){
+    rows.forEach(row=>row.removeAttribute('data-transparent-fade'));
+    return;
+  }
+  const total=rows.length;
+  for(let i=0;i<total;i++){
+    const row=rows[i];
+    // Newest = full opacity; each step back drops by 1 (floors at 5).
+    const stepsFromEnd=total-1-i;
+    if(stepsFromEnd<=0){row.removeAttribute('data-transparent-fade');continue;}
+    const step=Math.min(5,stepsFromEnd);
+    row.setAttribute('data-transparent-fade',String(step));
+  }
+}
+// ── Transparent turn footer (elapsed · tokens · TTFT · status) ───────────
+// Mirrors the live run-status line for settled turns in transparent
+// mode. Shows duration, first-token time, token usage, and final status.
+// Only rendered for turns that have transparent event rows.
+function _transparentTurnFooterHtml(durationText, ttftText, tokensText, statusText){
+  const parts=[];
+  if(durationText) parts.push(`<span class="lf-time">${esc(durationText)}</span>`);
+  if(ttftText) parts.push(`<span class="lf-ttft" title="${esc(t('first_token_time')||'Time to first token')}">TTFT ${esc(ttftText)}</span>`);
+  if(tokensText) parts.push(`<span class="lf-tokens">${esc(tokensText)}</span>`);
+  if(statusText) parts.push(`<span class="lf-status">${esc(statusText)}</span>`);
+  if(!parts.length) return '';
+  return `<div class="transparent-turn-footer">${parts.join('<span class="lf-sep">·</span>')}</div>`;
+}
+function _renderTransparentTurnFooter(turn, opts){
+  if(!turn||!isTransparentStream()) return;
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return;
+  const hasRows=blocks.querySelector(':scope > .transparent-event-row');
+  if(!hasRows){
+    // No events → no footer (the answer itself carries the duration).
+    const existing=turn.querySelector('.transparent-turn-footer');
+    if(existing) existing.remove();
+    return;
+  }
+  const durationText=opts&&opts.durationText||'';
+  const ttftText=opts&&opts.ttftText||'';
+  const tokensText=opts&&opts.tokensText||'';
+  const statusText=opts&&opts.statusText||(t('done')||'Done');
+  const html=_transparentTurnFooterHtml(durationText, ttftText, tokensText, statusText);
+  let footer=turn.querySelector('.transparent-turn-footer');
+  if(!html){
+    if(footer) footer.remove();
+    return;
+  }
+  if(!footer){
+    footer=document.createElement('div');
+    footer.className='transparent-turn-footer';
+    const blocks=turn.querySelector('.assistant-turn-blocks');
+    // Guard: nextSibling may be null (blocks is last child) or orphaned from
+    // a prior DOM rebuild. Only insertBefore when it is still a child of turn.
+    if(blocks&&blocks.nextSibling&&blocks.nextSibling.parentNode===turn){
+      turn.insertBefore(footer, blocks.nextSibling);
+    }else{
+      turn.appendChild(footer);
+    }
+  }
+  footer.innerHTML=html.replace(/^<div class="transparent-turn-footer">|<\/div>$/g,'');
 }
 // ── Activity-group user expand intent (#1298) ──────────────────────────────
 // When the user manually expands the live "Activity" dropdown during streaming,
@@ -6068,12 +7835,270 @@ function _onLiveActivityToggle(group){
   _liveActivityUserExpanded = !group.classList.contains('tool-call-group-collapsed');
 }
 function _toggleActivityGroup(summary){
-  const group=summary&&summary.closest?summary.closest('.tool-call-group'):null;
+  const group=summary&&summary.closest?summary.closest('.agent-activity-group,.tool-call-group'):null;
   if(!group) return;
   const collapsed=group.classList.toggle('tool-call-group-collapsed');
+  group.classList.toggle('open',!collapsed);
   summary.setAttribute('aria-expanded',String(!collapsed));
   _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
   if(typeof _onLiveActivityToggle==='function') _onLiveActivityToggle(group);
+}
+function _toggleToolWorklogGroup(summary){
+  const group=summary&&summary.closest?summary.closest('.tool-worklog-tool-group,.tool-group'):null;
+  if(group){
+    const collapsed=group.classList.toggle('tool-worklog-tool-group-collapsed');
+    group.classList.toggle('open',!collapsed);
+    summary.setAttribute('aria-expanded',String(!collapsed));
+    return;
+  }
+  return _toggleActivityGroup(summary);
+}
+function _worklogReasonHtmlFromAnchor(anchor, textOverride){
+  if(!anchor||!anchor.matches||!anchor.matches('.assistant-segment')) return '';
+  const body=anchor.querySelector&&anchor.querySelector('.msg-body');
+  const hasOverride=arguments.length>1;
+  const text=hasOverride?String(textOverride||''):((body?body.textContent:anchor.textContent)||'');
+  if(!String(text||'').trim()) return '';
+  if(String(text||'').trim()==='(empty)') return '';
+  if(hasOverride) return _worklogReasonHtmlFromText(text);
+  return body?body.innerHTML:esc(String(text||'').trim());
+}
+function _worklogReasonHtmlFromText(text){
+  const clean=_sanitizeThinkingDisplayText(text);
+  if(!String(clean||'').trim()) return '';
+  if(String(clean||'').trim()==='(empty)') return '';
+  return renderMd?renderMd(clean):esc(clean);
+}
+function _renderWorklogReasonInto(row, text){
+  if(!row) return;
+  const html=_worklogReasonHtmlFromText(text);
+  row.innerHTML=html;
+}
+function _worklogReasonNodeFromText(text, attrs){
+  if(window._showThinking===false) return null;
+  const html=_worklogReasonHtmlFromText(text);
+  if(!html) return null;
+  const row=document.createElement('div');
+  row.className='wl-reason';
+  row.setAttribute('data-worklog-reason-source','reasoning');
+  if(attrs&&attrs.active) row.setAttribute('data-worklog-reason-active','1');
+  row.innerHTML=html;
+  return row;
+}
+let _worklogAnchorKeySeq=0;
+function _worklogReasonAnchorKey(anchor){
+  if(!anchor||!anchor.dataset) return '';
+  if(anchor.dataset.worklogAnchorKey) return anchor.dataset.worklogAnchorKey;
+  const segmentSeq=anchor.getAttribute('data-live-segment-seq')||'';
+  const burstId=anchor.getAttribute('data-activity-burst-id')||'';
+  const msgIdx=anchor.getAttribute('data-msg-idx')||'';
+  const raw=String(anchor.getAttribute('data-raw-text')||anchor.textContent||'').trim().slice(0,80);
+  const key=segmentSeq
+    ? `segment:${segmentSeq}`
+    : msgIdx
+    ? `msg:${msgIdx}`
+    : burstId&&raw
+    ? `burst:${burstId}:${raw}`
+    : burstId
+    ? `burst:${burstId}`
+    : `node:${++_worklogAnchorKeySeq}`;
+  anchor.dataset.worklogAnchorKey=key;
+  return key;
+}
+function _syncWorklogReasonFromAnchor(group, anchor, displayTextOverride){
+  const list=_toolWorklogListEl(group);
+  if(!group||!list) return;
+  const anchorKey=_worklogReasonAnchorKey(anchor);
+  const selector=anchorKey?`:scope > .wl-reason[data-worklog-anchor-key="${CSS.escape(anchorKey)}"]`:':scope > .wl-reason[data-worklog-anchor-reason="1"]';
+  // When reasoning/thinking display is turned off (#3903), do not render Worklog
+  // reasoning rows on the live OR settled path — remove any existing one and bail
+  // before building. (The gate must live here, in the actual render path, not in
+  // the unused _worklogReasonNodeFromText helper.)
+  if(window._showThinking===false){
+    const existing=list.querySelector(selector);
+    if(existing) existing.remove();
+    return;
+  }
+  const html=arguments.length>2
+    ? _worklogReasonHtmlFromAnchor(anchor, displayTextOverride)
+    : _worklogReasonHtmlFromAnchor(anchor);
+  let reason=list.querySelector(selector);
+  if(!html){
+    if(reason) reason.remove();
+    return;
+  }
+  if(!reason){
+    reason=document.createElement('div');
+    reason.className='wl-reason';
+    reason.setAttribute('data-worklog-anchor-reason','1');
+    if(anchorKey) reason.setAttribute('data-worklog-anchor-key',anchorKey);
+    list.appendChild(reason);
+  }
+  reason.innerHTML=html;
+  if(anchor){
+    anchor.classList.add('assistant-segment-worklog-source');
+    anchor.setAttribute('aria-hidden','true');
+  }
+}
+function ensureLiveWorklogContainer(blocks, opts){
+  opts=opts||{};
+  if(!blocks) return null;
+  const activityKey=opts.activityKey||_activityKeyForLiveTurn();
+  let worklog=activityKey
+    ? blocks.querySelector(`.live-worklog[data-live-worklog-shell="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`)
+    : null;
+  if(!worklog) worklog=blocks.querySelector('.live-worklog[data-live-worklog-shell="1"][data-live-activity-current="1"]');
+  if(!worklog){
+    worklog=document.createElement('div');
+    worklog.className='live-worklog worklog';
+    worklog.setAttribute('data-live-worklog-shell','1');
+    worklog.setAttribute('data-live-tool-worklog-group','1');
+    worklog.setAttribute('data-live-tool-call-group','1');
+    worklog.setAttribute('data-live-activity-current','1');
+    worklog.setAttribute('data-tool-worklog-group','1');
+    worklog.setAttribute('data-tool-worklog-key',activityKey||'');
+    worklog.innerHTML='<div class="tool-worklog-list"></div>';
+    const anchor=opts.anchor||null;
+    const footer=blocks.querySelector('#liveRunStatus');
+    if(anchor&&anchor.parentElement===blocks) anchor.insertAdjacentElement('afterend',worklog);
+    else if(footer&&footer.parentElement===blocks) blocks.insertBefore(worklog,footer);
+    else blocks.appendChild(worklog);
+  }else if(activityKey&&!worklog.getAttribute('data-tool-worklog-key')){
+    worklog.setAttribute('data-tool-worklog-key',activityKey);
+  }
+  if(opts.anchor) _syncWorklogReasonFromAnchor(worklog, opts.anchor);
+  _migrateLegacyLiveActivityGroupsToWorklog(blocks, worklog);
+  _syncToolCallGroupSummary(worklog);
+  return worklog;
+}
+function _migrateLegacyLiveActivityGroupsToWorklog(blocks, worklog){
+  if(!blocks||!worklog) return;
+  const list=_toolWorklogListEl(worklog);
+  if(!list) return;
+  const legacy=Array.from(blocks.querySelectorAll('.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"]'))
+    .filter(group=>group!==worklog && !group.classList.contains('live-worklog'));
+  for(const group of legacy){
+    const oldList=_toolWorklogListEl(group);
+    if(oldList){
+      while(oldList.firstChild) list.appendChild(oldList.firstChild);
+    }
+    group.remove();
+  }
+}
+function _appendWorklogReason(list, anchor){
+  if(!list) return null;
+  // Reasoning display off (#3903): never append a Worklog reasoning row.
+  if(window._showThinking===false) return null;
+  const html=_worklogReasonHtmlFromAnchor(anchor);
+  if(!html) return null;
+  const reason=document.createElement('div');
+  reason.className='wl-reason';
+  reason.setAttribute('data-worklog-anchor-reason','1');
+  const anchorKey=_worklogReasonAnchorKey(anchor);
+  if(anchorKey) reason.setAttribute('data-worklog-anchor-key',anchorKey);
+  reason.innerHTML=html;
+  list.appendChild(reason);
+  if(anchor){
+    anchor.classList.add('assistant-segment-worklog-source');
+    anchor.setAttribute('aria-hidden','true');
+  }
+  return reason;
+}
+function _toolIdentity(tc){
+  if(!tc) return '';
+  const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
+  if(tid) return `id:${tid}`;
+  const args=tc.args&&typeof tc.args==='object'?tc.args:{};
+  return [
+    tc.assistant_msg_idx!==undefined?`a:${tc.assistant_msg_idx}`:'',
+    tc.name||'tool',
+    JSON.stringify(args),
+    String(tc.snippet||tc.preview||'').slice(0,160),
+  ].join('|');
+}
+function _toolDisclosureIdentity(tc){
+  if(!tc) return '';
+  const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
+  if(tid) return `id:${tid}`;
+  const stable=[
+    tc.assistant_msg_idx!==undefined?`a:${tc.assistant_msg_idx}`:'',
+    tc.name||'tool',
+  ].join('\x1f');
+  return stable.trim()?`derived:${_worklogDetailHashKey(stable)}`:'';
+}
+function _filterNewWorklogTools(cards, seenTools){
+  const out=[];
+  for(const tc of Array.from(cards||[]).filter(Boolean)){
+    const key=_toolIdentity(tc);
+    if(key&&seenTools&&seenTools.has(key)) continue;
+    if(key&&seenTools) seenTools.add(key);
+    out.push(tc);
+  }
+  return out;
+}
+function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
+  const list=_toolWorklogListEl(group);
+  if(!group||!list) return;
+  let wroteProse=false;
+  const seenReasons=opts&&opts.seenReasons;
+  if(!opts||opts.includeAnchorReason!==false){
+    const anchorKey=anchor&&anchor.dataset&&anchor.dataset.msgIdx?`anchor:${anchor.dataset.msgIdx}`:'';
+    if(!anchorKey||!seenReasons||!seenReasons.has(anchorKey)){
+      const reason=_appendWorklogReason(list, anchor);
+      if(reason){
+        wroteProse=true;
+        if(anchorKey&&seenReasons) seenReasons.add(anchorKey);
+      }
+    }
+  }
+  if(thinkingText){
+    const thinkingKey=(opts&&opts.thinkingKey)||`reason:${String(thinkingText).trim()}`;
+    const thinkingDisclosureKey=(opts&&opts.thinkingDisclosureKey)||thinkingKey;
+    if(!seenReasons||!seenReasons.has(thinkingKey)){
+      const thinking=_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey);
+      if(thinking){
+        list.appendChild(thinking);
+        wroteProse=true;
+        if(seenReasons) seenReasons.add(thinkingKey);
+      }
+    }
+  }
+  const toolCards=_filterNewWorklogTools(cards, opts&&opts.seenTools);
+  if(toolCards.length){
+    const last=list.lastElementChild;
+    let tools=(!wroteProse&&last&&last.classList&&last.classList.contains('wl-step-tools')&&last.getAttribute('data-worklog-tools')==='1')
+      ? last
+      : null;
+    if(!tools){
+      tools=document.createElement('div');
+      tools.className='wl-step-tools tool-worklog-tools';
+      tools.setAttribute('data-worklog-tools','1');
+      list.appendChild(tools);
+    }
+    for(const tc of toolCards) tools.appendChild(buildToolCard(tc));
+    _syncToolRowsContainer(tools, !!(opts&&opts.live));
+  }
+}
+function _syncLiveWorklogReasonsForAnchor(anchor, displayTextOverride){
+  // Worklog reason-mirroring (folding intermediate prose into a top Worklog rail
+  // and hiding the inline `assistant-segment` via `assistant-segment-worklog-source`
+  // → display:none) is the Compact Worklog presentation (#3401). In Transparent
+  // Stream mode prose must stay as visible, chronologically-placed inline segments
+  // interleaved with tool rows — so do NOT build the worklog rail or hide the
+  // inline segment here. Without this gate every round's prose mirror piles into
+  // the single top rail while tool rows append at the bottom, so all prose bunches
+  // above all tools during a live multi-round turn (#4096); it only self-heals when
+  // the turn settles and renderMessages() rebuilds with the compact-only
+  // `messageBelongsInWorklog` gate (which is already isCompactWorklogMode()-only).
+  if(typeof isCompactWorklogMode==='function' && !isCompactWorklogMode()) return;
+  if(!anchor||!anchor.matches||!anchor.matches('[data-live-assistant="1"]')) return;
+  const blocks=anchor.parentElement;
+  if(!blocks) return;
+  const group=ensureLiveWorklogContainer(blocks,{
+    activityKey:_activityKeyForLiveTurn(),
+    anchor,
+  });
+  if(group) _syncWorklogReasonFromAnchor(group, anchor, displayTextOverride);
 }
 function _clearLiveActivityUserIntent(){
   _liveActivityUserExpanded = undefined;
@@ -6083,12 +8108,63 @@ function ensureActivityGroup(inner, opts){
   if(!inner) return null;
   const live=!!opts.live;
   const activityKey=opts.activityKey||(live?_activityKeyForLiveTurn():null);
-  const selector=live?'.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]':'.tool-call-group[data-agent-activity-group="1"]';
-  let group=inner.querySelector(selector);
+  const burstId=opts.burstId!==undefined&&opts.burstId!==null?String(opts.burstId):'';
+  const segmentSeq=opts.segmentSeq!==undefined&&opts.segmentSeq!==null?String(opts.segmentSeq):'';
+  const liveSelectors=segmentSeq
+    ? [
+      `.tool-worklog-group[data-live-tool-worklog-group="1"][data-live-segment-seq="${CSS.escape(segmentSeq)}"]`,
+      `.tool-call-group[data-live-tool-worklog-group="1"][data-live-segment-seq="${CSS.escape(segmentSeq)}"]`,
+      `.tool-call-group[data-live-tool-call-group="1"][data-live-segment-seq="${CSS.escape(segmentSeq)}"]`,
+    ]
+    : burstId
+    ? [
+      `.tool-worklog-group[data-live-tool-worklog-group="1"][data-activity-burst-id="${CSS.escape(burstId)}"]`,
+      `.tool-call-group[data-live-tool-worklog-group="1"][data-activity-burst-id="${CSS.escape(burstId)}"]`,
+      `.tool-call-group[data-live-tool-call-group="1"][data-activity-burst-id="${CSS.escape(burstId)}"]`,
+    ]
+    : [
+      '.tool-worklog-group[data-live-tool-worklog-group="1"][data-live-activity-current="1"]',
+      '.tool-call-group[data-live-tool-worklog-group="1"][data-live-activity-current="1"]',
+      '.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]',
+    ];
+  let group;
+  if(live){
+    if(activityKey){
+      group=inner.querySelector(`.tool-worklog-group[data-tool-worklog-key="${CSS.escape(activityKey)}"],.tool-call-group[data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+    }
+    if(!group){
+      for(const sel of liveSelectors){
+        group=inner.querySelector(sel);
+        if(group) break;
+      }
+    }
+  }else{
+    if(activityKey){
+      group=inner.querySelector(`.tool-worklog-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"],.tool-call-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+    }
+    if(!group&&segmentSeq){
+      group=inner.querySelector(`.tool-worklog-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-live-segment-seq="${CSS.escape(segmentSeq)}"],.tool-call-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-live-segment-seq="${CSS.escape(segmentSeq)}"]`);
+    }
+    if(!group&&burstId){
+      group=inner.querySelector(`.tool-worklog-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-activity-burst-id="${CSS.escape(burstId)}"],.tool-call-group[data-agent-activity-group="1"][data-tool-worklog-group="1"][data-activity-burst-id="${CSS.escape(burstId)}"]`);
+    }
+    if(!group&&activityKey){
+      group=inner.querySelector(`.tool-worklog-group[data-tool-worklog-key="${CSS.escape(activityKey)}"],.tool-call-group[data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+    }
+    if(!group&&!activityKey){
+      group=inner.querySelector('.tool-worklog-group[data-agent-activity-group="1"][data-tool-worklog-group="1"],.tool-call-group[data-agent-activity-group="1"][data-tool-worklog-group="1"],.tool-call-group[data-agent-activity-group="1"]:not([data-run-activity-group="1"])');
+    }
+  }
+  if(!group && !activityKey && segmentSeq==="" && burstId){
+    const candidates=live
+      ? Array.from(inner.querySelectorAll('.tool-worklog-group[data-live-tool-worklog-group="1"],.tool-call-group[data-live-tool-worklog-group="1"],.tool-call-group[data-live-tool-call-group="1"]'))
+      : Array.from(inner.querySelectorAll('.tool-worklog-group[data-agent-activity-group="1"],.tool-call-group[data-agent-activity-group="1"]:not([data-run-activity-group="1"])'));
+    group=candidates.filter(el=>el.isConnected!==false).pop() || null;
+  }
   if(!group){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
-    if(window._activityFeedExpandedDefault===true) collapsed=false;
+    if(window._worklogDetailsExpandedByDefault===true) collapsed=false;
     const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
@@ -6097,35 +8173,222 @@ function ensureActivityGroup(inner, opts){
     // explicitly collapsed.
     if(live && _liveActivityUserExpanded === true) collapsed=false;
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
-    if(savedState==='open') collapsed=false;
-    else if(savedState==='closed') collapsed=true;
-    group.className='tool-call-group agent-activity-group'+(collapsed?' tool-call-group-collapsed':'');
+    if(live && savedState==='open') collapsed=false;
+    else if(live && savedState==='closed') collapsed=true;
+    group.className='agent-activity-group tool-worklog-group activity'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
+    group.setAttribute('data-tool-worklog-group','1');
+    group.setAttribute('data-tool-worklog-key',activityKey||'');
     if(activityKey) group.setAttribute('data-activity-disclosure-key',activityKey);
     if(live){
+      group.setAttribute('data-live-tool-worklog-group','1');
       group.setAttribute('data-live-tool-call-group','1');
       group.setAttribute('data-live-activity-current','1');
     }
-    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="_toggleActivityGroup(this)"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-duration"></span></button><div class="tool-call-group-body"></div>`;
+    if(burstId) group.setAttribute('data-activity-burst-id',burstId);
+    if(segmentSeq) group.setAttribute('data-live-segment-seq',segmentSeq);
+    group.classList.toggle('open',!collapsed);
+    group.innerHTML=`<button type="button" class="tool-call-group-summary tool-worklog-summary activity-summary" aria-expanded="${collapsed?'false':'true'}" onclick="_toggleActivityGroup(this)"><span class="as-dot"></span><span class="tool-call-group-label tool-worklog-label as-text">Running</span><span class="tool-call-group-duration"></span><span class="tool-call-group-chevron as-caret">${li('chevron-right',12)}</span></button><div class="tool-call-group-body tool-worklog-body activity-body"><div class="worklog"><div class="tool-worklog-list"></div></div></div>`;
     const anchor=opts.anchor||null;
-    if(anchor&&anchor.parentElement===inner) anchor.insertAdjacentElement('afterend', group);
+    if(anchor&&anchor.parentElement===inner){
+      if(opts.beforeAnchor) inner.insertBefore(group, anchor);
+      else anchor.insertAdjacentElement('afterend', group);
+    }
     else inner.appendChild(group);
   }else if(activityKey&&!group.getAttribute('data-activity-disclosure-key')){
     group.setAttribute('data-activity-disclosure-key',activityKey);
   }
-  if(live){
-    _setActivityElapsedStartedAt(group);
-    _ensureLiveActivityBaseline(group);
+  if(burstId&&!group.getAttribute('data-activity-burst-id')) group.setAttribute('data-activity-burst-id',burstId);
+  if(segmentSeq&&!group.getAttribute('data-live-segment-seq')) group.setAttribute('data-live-segment-seq',segmentSeq);
+  if(!group.getAttribute('data-tool-worklog-key')&&activityKey) group.setAttribute('data-tool-worklog-key',activityKey);
+  if(opts.turnDuration!==undefined&&opts.turnDuration!==null) group.setAttribute('data-turn-duration',String(opts.turnDuration));
+  if(opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
+  const anchor=opts.anchor||null;
+  if(anchor&&anchor.parentElement===inner&&group.parentElement===inner){
+    if(opts.beforeAnchor){
+      if(group.nextElementSibling!==anchor) inner.insertBefore(group,anchor);
+    }else if(group.previousElementSibling!==anchor){
+      anchor.insertAdjacentElement('afterend',group);
+    }
   }
+  if(anchor&&opts.syncAnchorReason!==false) _syncWorklogReasonFromAnchor(group, anchor);
   _syncToolCallGroupSummary(group);
-  if(live) _startActivityElapsedTimer(group);
   return group;
+}
+function normalizeLiveActivityGroupPlacement(turn){
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return;
+  // Compact Worklog only: this reorders `.tool-call-group`/`.tool-worklog-group`
+  // containers, which exist solely on the Compact Worklog live path. Transparent
+  // Stream renders tool rows as flat `.transparent-event-row`s and never builds
+  // these group containers (see appendLiveToolCard's transparent branch), and the
+  // worklog prose-rail is gated off in transparent mode (#4096), so the selector
+  // below matches nothing and this is a no-op there. Kept implicit (empty match)
+  // rather than an early return so reconnect/restore behavior is unchanged.
+  const groups=Array.from(
+    blocks.querySelectorAll('.tool-worklog-group[data-live-tool-worklog-group="1"],.tool-call-group[data-live-tool-worklog-group="1"],.tool-call-group[data-live-tool-call-group="1"]')
+  );
+  groups.sort((a,b)=>{
+    const as=Number(a.getAttribute('data-live-segment-seq'));
+    const bs=Number(b.getAttribute('data-live-segment-seq'));
+    if(Number.isFinite(as)&&Number.isFinite(bs)&&as!==bs) return as-bs;
+    const av=Number(a.getAttribute('data-activity-burst-id'));
+    const bv=Number(b.getAttribute('data-activity-burst-id'));
+    if(Number.isFinite(av)&&Number.isFinite(bv)&&av!==bv) return av-bv;
+    return 0;
+  });
+  for(const group of groups){
+    const burstId=group.getAttribute('data-activity-burst-id')||'';
+    const segmentSeq=group.getAttribute('data-live-segment-seq')||'';
+    const anchor=segmentSeq
+      ? _findLiveAssistantAnchorForSegment(blocks, segmentSeq)
+      : burstId
+      ? _findLatestVisibleLiveAssistantByBurst(blocks, burstId)
+      : _findLatestVisibleLiveAssistant(blocks);
+    if(!anchor) continue;
+    if(anchor&&group.previousElementSibling!==anchor) anchor.insertAdjacentElement('afterend',group);
+    _syncWorklogReasonFromAnchor(group, anchor);
+  }
+}
+function ensureRunActivityGroup(inner, opts){
+  opts=opts||{};
+  if(!inner) return null;
+  let group=inner.querySelector('.tool-call-group[data-run-activity-group="1"]');
+  if(!group){
+    group=document.createElement('div');
+    const collapsed=opts.collapsed!==false;
+    group.className='tool-call-group agent-activity-group run-activity-group'+(collapsed?' tool-call-group-collapsed':' open');
+    group.setAttribute('data-tool-call-group','1');
+    group.setAttribute('data-agent-activity-group','1');
+    group.setAttribute('data-run-activity-group','1');
+    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="_toggleActivityGroup(this)"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Running</span><span class="tool-call-group-duration"></span></button><div class="tool-call-group-body"></div>`;
+    if(inner.firstChild) inner.insertBefore(group, inner.firstChild);
+    else inner.appendChild(group);
+  }
+  if(opts.turnDuration!==undefined&&opts.turnDuration!==null) group.setAttribute('data-turn-duration',String(opts.turnDuration));
+  if(opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
+  _setActivityElapsedStartedAt(group);
+  _ensureLiveActivityBaseline(group);
+  _syncToolCallGroupSummary(group);
+  if(opts.live!==false) _startActivityElapsedTimer(group);
+  return group;
+}
+// ── LiveFooter timer (module-level singleton) ──────────────────────────────
+const _liveRunStatusTimers={};  // keyed by sessionId, max 1 active
+let _liveRunStatusTokens=null;
+let _liveRunStatusSessionId=null;
+function _formatRunElapsed(seconds){
+  const n=Number(seconds);
+  if(!Number.isFinite(n)||n<0)return'00:00';
+  const total=Math.max(0,Math.floor(n));
+  if(total>=3600){
+    const h=Math.floor(total/3600);
+    const m=Math.floor((total%3600)/60);
+    return h+'h '+String(m).padStart(2,'0')+'m';
+  }
+  const m=Math.floor(total/60);
+  const s=total%60;
+  return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+}
+function _moveLiveRunStatusToTurnEnd(el){
+  el=el||$('liveRunStatus');
+  if(!el) return null;
+  const turn=$('liveAssistantTurn');
+  const blocks=_assistantTurnBlocks(turn);
+  if(blocks&&el.parentElement===blocks&&blocks.lastElementChild!==el) blocks.appendChild(el);
+  return el;
+}
+function placeLiveRunStatusHost(){
+  let el=$('liveRunStatus');
+  if(!el){
+    el=document.createElement('div');
+    el.id='liveRunStatus';
+    el.hidden=true;
+  }
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    if(S.session) turn.dataset.sessionId=S.session.session_id;
+    const inner=$('msgInner');
+    if(inner) inner.appendChild(turn);
+  }
+  const blocks=_assistantTurnBlocks(turn);
+  if(blocks&&el.parentElement!==blocks) blocks.appendChild(el);
+  el.className='live-run-status live-footer';
+  return _moveLiveRunStatusToTurnEnd(el);
+}
+function showLiveRunStatus(sid,opts){
+  const el=placeLiveRunStatusHost();
+  if(!el)return;
+  _liveRunStatusSessionId=sid;
+  const startedAt=opts&&opts.startedAt||null;
+  _liveRunStatusTokens=opts&&opts.tokens||null;
+  el.hidden=false;
+  _renderLiveRunStatusContent(el,startedAt);
+  _startLiveRunStatusTimer(sid,startedAt);
+}
+function _renderLiveRunStatusContent(el,startedAt){
+  if(!el)return;
+  const now=Date.now()/1000;
+  const elapsed=startedAt?Math.max(0,now-startedAt):0;
+  const timeStr=_formatRunElapsed(elapsed);
+  const tokens=_liveRunStatusTokens;
+  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>`;
+}
+function updateLiveRunStatus(opts){
+  if(opts&&opts.tokens!==undefined)_liveRunStatusTokens=opts.tokens;
+  const el=$('liveRunStatus');
+  if(el&&!el.hidden){
+    _moveLiveRunStatusToTurnEnd(el);
+    const timer=_liveRunStatusTimers[_liveRunStatusSessionId];
+    const startedAt=timer&&timer.startedAt||null;
+    _renderLiveRunStatusContent(el,startedAt);
+  }
+}
+function _syncLiveRunStatusAfterRender(){
+  const sid=S.session&&S.session.session_id;
+  if(!sid||!S.activeStreamId||!S.busy) return;
+  const timer=_liveRunStatusTimers[sid];
+  const startedAt=(timer&&timer.startedAt)||((S.session&&S.session.pending_started_at)||Date.now()/1000);
+  const el=$('liveRunStatus');
+  if(el&&el.isConnected&&!el.hidden){
+    _moveLiveRunStatusToTurnEnd(el);
+    _renderLiveRunStatusContent(el,startedAt);
+    return;
+  }
+  showLiveRunStatus(sid,{startedAt,tokens:_liveRunStatusTokens});
+}
+function hideLiveRunStatus(sid){
+  const el=$('liveRunStatus');
+  if(el){el.hidden=true;el.innerHTML='';}
+  _clearLiveRunStatusTimer(sid||_liveRunStatusSessionId);
+  _liveRunStatusTokens=null;
+  _liveRunStatusSessionId=null;
+}
+function _startLiveRunStatusTimer(sid,startedAt){
+  if(!sid)return;
+  _clearLiveRunStatusTimer(sid);
+  _liveRunStatusTimers[sid]={startedAt,interval:setInterval(()=>{
+    const el=$('liveRunStatus');
+    if(!el||el.hidden){_clearLiveRunStatusTimer(sid);return;}
+    if(_liveRunStatusSessionId!==sid)return;
+    _renderLiveRunStatusContent(el,startedAt);
+  },1000)};
+}
+function _clearLiveRunStatusTimer(sid){
+  const t=_liveRunStatusTimers[sid];
+  if(t){clearInterval(t.interval);delete _liveRunStatusTimers[sid];}
+}
+function ensureRunActivityForCurrentTurn(){
+  // Phase C: disabled — top live run Activity card removed
+  return null;
 }
 function closeCurrentLiveActivityGroup(){
   const turn=$('liveAssistantTurn');
   if(!turn) return;
-  turn.querySelectorAll('.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
+  turn.querySelectorAll('.tool-worklog-group[data-live-tool-call-group="1"][data-live-activity-current="1"],.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
     group.removeAttribute('data-live-activity-current');
   });
 }
@@ -6139,10 +8402,22 @@ function isCompressionUiRunning(){
   const lock=_compressionSessionLock();
   return !!((state&&state.phase==='running') || (lock && S.session && lock===S.session.session_id));
 }
+// Restore the composer placeholder saved when auto-compaction started. Safe to
+// call whenever compression leaves the running state, from any path (clear,
+// non-running setCompressionUi, or a direct window._compressionUi=null in the
+// SSE handler) — it no-ops when nothing was saved. (#3512)
+function _restoreCompressionPlaceholder(){
+  const _input=$('msg');
+  if(_input&&typeof _compressionPlaceholderSaved==='string'){
+    _input.placeholder=_compressionPlaceholderSaved;
+  }
+  _compressionPlaceholderSaved=null;
+}
 function clearCompressionUi(){
   window._compressionUi=null;
   _clearCompressionElapsedTimer();
   _setCompressionSessionLock(null);
+  _restoreCompressionPlaceholder();
   renderCompressionUi();
 }
 function setCompressionUi(state){
@@ -6156,8 +8431,19 @@ function setCompressionUi(state){
   }
   window._compressionUi=nextState;
   if(nextState.sessionId) _setCompressionSessionLock(nextState.sessionId);
-  if(nextState.automatic&&nextState.phase==='running') _startCompressionElapsedTimer();
-  else _clearCompressionElapsedTimer();
+  if(nextState.automatic&&nextState.phase==='running'){
+    _startCompressionElapsedTimer();
+    const _input=$('msg');
+    if(_input&&_compressionPlaceholderSaved===null){
+      _compressionPlaceholderSaved=_input.placeholder;
+      _input.placeholder=typeof t==='function'?t('composer_compression_will_queue')||'Type a message — it will queue and send after compression':'Type a message — it will queue and send after compression';
+    }
+  } else {
+    _clearCompressionElapsedTimer();
+    // Leaving the running state (e.g. setCompressionUi(done)) must restore the
+    // placeholder too — not only clearCompressionUi(). (#3512 leak fix)
+    _restoreCompressionPlaceholder();
+  }
   renderCompressionUi();
 }
 function _compressionCardsHtml(state){
@@ -6224,47 +8510,47 @@ function _compressionCardsHtml(state){
     ${referenceHtml}`;
 }
 function _autoCompressionBaseDetail(state){
-  const fallback='Context auto-compressed to continue the conversation';
   const running=state&&state.phase==='running';
-  return running
-    ? (String(state.message||'Auto-compressing context...').trim()||'Auto-compressing context...')
-    : (String(state&&state.message||fallback).trim()||fallback);
+  if(running)return 'Compressing context';
+  if(state&&state.phase==='done')return 'Context auto-compressed';
+  return '';
 }
 function _autoCompressionPreviewText(state){
-  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
   const running=state&&state.phase==='running';
-  const detail=_autoCompressionBaseDetail(state);
-  if(!running) return (String(state&&state.summary?.headline||copy.preview||detail).trim()||detail);
-  const elapsedLabel=_compressionElapsedLabel(state);
-  return [detail, elapsedLabel].filter(Boolean).join(' · ');
+  if(running)return 'Compressing context';
+  if(state&&state.phase==='done')return 'Context auto-compressed';
+  return '';
 }
 function _autoCompressionDetailText(state){
   const running=state&&state.phase==='running';
-  const base=_autoCompressionBaseDetail(state);
-  const elapsedLabel=running?_compressionElapsedLabel(state):'';
-  if(running)return elapsedLabel?`Elapsed: ${elapsedLabel}`:base;
-  const continuation=String(state&&state.continuationSessionId||'').trim();
-  const handoff=continuation?`Continued in compressed session: ${continuation}`:'';
-  return [base,handoff].filter(Boolean).join('\n');
+  if(running)return '';
+  return '';
 }
 function _autoCompressionCardsHtml(state){
-  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
-  const running=state&&state.phase==='running';
   const preview=_autoCompressionPreviewText(state);
-  const cardDetail=_autoCompressionDetailText(state);
+  const done=state&&state.phase==='done';
   return `
-    <div class="tool-card-row compression-card-row" data-compression-card="1">
-      ${_compressionStatusCardHtml({
-        statusLabel: (String(state&&state.engine||'').toLowerCase()==='lcm'||String(state&&state.mode||'').toLowerCase()==='lossless_retrieval')?copy.label:t('auto_compress_label'),
-        previewText: preview,
-        detail: cardDetail,
-        icon: running ? '<span class="tool-card-running-dot"></span>' : li('check',13),
-        open: running,
-        variantClass: running
-          ? 'tool-card-compress-running tool-card-compress-auto'
-          : 'tool-card-compress-complete tool-card-compress-auto',
-      })}
+    <div class="tool-card-row compression-card-row auto-compression-divider-row" data-compression-card="1">
+      <div class="auto-compression-divider${done?' auto-compression-divider-done':''}" aria-label="${esc(preview)}">
+        <span class="auto-compression-divider-line"></span>
+        <span class="auto-compression-divider-label">${done?li('file-text',13):''}${esc(preview)}</span>
+        <span class="auto-compression-divider-line"></span>
+      </div>
     </div>`;
+}
+function _autoCompressionWorklogNode(state){
+  const row=document.createElement('div');
+  row.className='tool-card-row compression-card-row auto-compression-divider-row';
+  row.setAttribute('data-compression-card','1');
+  const label=_autoCompressionPreviewText(state);
+  const done=state&&state.phase==='done';
+  row.innerHTML=`
+    <div class="auto-compression-divider${done?' auto-compression-divider-done':''}" aria-label="${esc(label)}">
+      <span class="auto-compression-divider-line"></span>
+      <span class="auto-compression-divider-label">${done?li('file-text',13):''}${esc(label)}</span>
+      <span class="auto-compression-divider-line"></span>
+    </div>`;
+  return row;
 }
 function _compressionCardsNode(state){
   const wrap=document.createElement('div');
@@ -6285,6 +8571,37 @@ function appendLiveCompressionCard(state){
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return false;
   closeCurrentLiveActivityGroup();
+  if(state.automatic){
+    const group=ensureLiveWorklogContainer(inner,{activityKey:_activityKeyForLiveTurn()});
+    const list=_toolWorklogListEl(group);
+    if(!group||!list) return false;
+    const node=_autoCompressionWorklogNode(state);
+    node.setAttribute('data-live-compression-card','1');
+    node.setAttribute('data-compression-phase',String(state.phase||''));
+    if(state.phase==='running'){
+      const started=_compressionElapsedStartedAt(state)||Date.now()/1000;
+      node.setAttribute('data-compression-started-at',String(started));
+      node.setAttribute('data-compression-message',String(state.message||'Compressing context'));
+      _startCompressionElapsedTimer();
+    } else {
+      node.removeAttribute('data-compression-started-at');
+      node.removeAttribute('data-compression-message');
+      const _activeCompState = _compressionStateForCurrentSession();
+      if (!_activeCompState || !_activeCompState.automatic || _activeCompState.phase !== 'running') {
+        _clearCompressionElapsedTimer();
+      }
+    }
+    const existingRunning=group.querySelector('[data-live-compression-card="1"][data-compression-started-at]');
+    const existingDone=Array.from(group.querySelectorAll('[data-live-compression-card="1"][data-compression-phase="done"]')).pop();
+    const existing=state.phase==='running'?existingRunning:(existingRunning||existingDone);
+    if(existing) existing.replaceWith(node);
+    else list.appendChild(node);
+    _syncToolCallGroupSummary(group);
+    _moveLiveRunStatusToTurnEnd();
+    _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+    if(typeof scrollIfPinned==='function') scrollIfPinned();
+    return true;
+  }
   const node=_compressionCardsNode(state);
   if(!node) return false;
   node.setAttribute('data-live-compression-card','1');
@@ -6359,7 +8676,10 @@ function _collectHandoffSummaryStates(messages){
 function _isContextCompactionMessage(m){
   if(!m||!m.role||m.role==='tool') return false;
   const text=msgContent(m)||String(m.content||'');
-  return /^\s*\[context compaction/i.test(text) || /^\s*context compaction/i.test(text);
+  return _isContextCompactionText(text);
+}
+function _isContextCompactionText(text){
+  return /^\s*\[context compaction/i.test(String(text||'')) || /^\s*context compaction/i.test(String(text||''));
 }
 function _isPreservedCompressionTaskListMarkerText(text){
   return /^\s*\[your active task list was preserved across context compression\]/i.test(String(text||''));
@@ -6436,6 +8756,9 @@ function _latestCompressionReferenceMessage(messages, summaryText=''){
     if(contentNorm.includes(summaryNorm)) return {message:m, rawIdx:i};
   }
   return {message:null, rawIdx:-1};
+}
+function _shouldShowSettledCompressionReference(referenceText){
+  return !!String(referenceText||'').trim() && !_isContextCompactionText(referenceText);
 }
 function _compressionReferenceCardHtml(text, open=false){
   const copy=_engineAwareCompressionCopy();
@@ -6657,6 +8980,7 @@ function clearMessageRenderCache(){
   _sessionHtmlCache.clear();
   _sessionHtmlCacheSid=null;
   clearVisibleMessageRowCache();
+  _clearMessageVirtualHeightCache();
 }
 
 function _messageRenderCacheSignature(){
@@ -6815,6 +9139,36 @@ function _cliToolCardHasDiffSnippet(resultSnippet, patchSnippet){
   return !!patchSnippet || _cliLooksLikePatchDiff(resultSnippet);
 }
 
+function _assistantToolAnchorIdxForMessage(messages, rawIdx){
+  const list=Array.isArray(messages)?messages:[];
+  const current=list[rawIdx];
+  if(_assistantMessageHasVisibleContent(current)) return rawIdx;
+  if(_assistantReasoningPayloadText(current)) return rawIdx;
+  for(let idx=rawIdx-1;idx>=0;idx--){
+    if(_assistantMessageHasVisibleContent(list[idx])) return idx;
+  }
+  return rawIdx;
+}
+function _toolArgsSnapshot(args, limit){
+  if(!args||typeof args!=='object'||Array.isArray(args)) return {};
+  const max=Math.max(1,Number(limit)||6);
+  const priority=[
+    'query','search_query','searchQuery','pattern','q','keyword','keywords','term',
+    'url','uri','command','cmd','path','file','file_path','filename','file_glob',
+    'glob','offset','limit',
+  ];
+  const keys=[
+    ...priority.filter(k=>Object.prototype.hasOwnProperty.call(args,k)),
+    ...Object.keys(args).filter(k=>!priority.includes(k)),
+  ].slice(0,max);
+  const out={};
+  keys.forEach(k=>{
+    const v=String(args[k]);
+    out[k]=v.slice(0,120)+(v.length>120?'...':'');
+  });
+  return out;
+}
+
 function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
@@ -6822,6 +9176,7 @@ function _captureMessageScrollSnapshot(){
   return {
     top:el.scrollTop,
     bottom,
+    scrollHeight:el.scrollHeight,
     pinned:_shouldFollowMessagesOnDomReplace(),
     userUnpinned:_messageUserUnpinned,
   };
@@ -6834,6 +9189,16 @@ function _restoreMessageScrollSnapshot(snapshot){
   el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
+  const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
+  if(bottomDistance>250){
+    _messageUserUnpinned=true;
+    _scrollPinned=false;
+    _nearBottomCount=0;
+  }else if(bottomDistance<=120){
+    _messageUserUnpinned=false;
+    _scrollPinned=true;
+    _nearBottomCount=2;
+  }
   requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
 }
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
@@ -6863,18 +9228,63 @@ function _renderMessagesWithScrollSnapshot(options){
   renderMessages({...(options||{}),preserveScroll:true});
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
 }
+let _assistantTurnAnchorSettledFinalAnswerWarned=false;
+function _assistantTurnAnchorSettledFinalAnswer(message, content, context){
+  try{
+    const api=(typeof window!=='undefined')?window.HermesAssistantTurnAnchors:null;
+    if(!api||typeof api.projectAssistantTurnAnchorSettledMessageFinalAnswer!=='function') return null;
+    const result=api.projectAssistantTurnAnchorSettledMessageFinalAnswer(message,{
+      session_id:context&&context.session_id,
+      raw_idx:context&&context.raw_idx,
+      content,
+    });
+    const finalAnswer=result&&typeof result.final_answer==='string'?result.final_answer:'';
+    return finalAnswer?finalAnswer:null;
+  }catch(err){
+    if(!_assistantTurnAnchorSettledFinalAnswerWarned&&typeof console!=='undefined'&&console.warn){
+      _assistantTurnAnchorSettledFinalAnswerWarned=true;
+      console.warn('assistant turn anchor settled-final projection failed',err);
+    }
+    return null;
+  }
+}
 function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // Terminal stream renders can happen after S.activeStreamId is cleared.
   // In that case, preserveScroll asks the normal pin-state helper to decide:
   // pinned users stay at bottom; users who manually scrolled up get their
   // pre-render scrollTop restored after the DOM replacement.
   if(preserveScroll){
-    if(_scrollPinned) scrollIfPinned();
-    else _restoreMessageScrollSnapshot(scrollSnapshot);
+    const readerAwayFromBottom=!!(
+      scrollSnapshot &&
+      Number.isFinite(Number(scrollSnapshot.bottom)) &&
+      Number(scrollSnapshot.bottom)>250
+    );
+    // Keep master's follow heuristic for pinned / still-near-bottom users:
+    // _followMessagesAfterDomReplace() does a FORCED scrollToBottom() (synchronous
+    // bottom write + forced settle), so the final settled response can't leave a
+    // pinned reader a few lines short. Only genuinely-scrolled-up (unpinned, not
+    // near bottom) users fall through to keep their position and get the
+    // new-message cue. (Using scrollIfPinned() here instead would skip the forced
+    // write unless distance>500 and let the DOM-rebuild scroll event cancel the
+    // delayed settles — Codex CORE catch on #3631.)
+    if(!readerAwayFromBottom && !_messageUserUnpinned && _followMessagesAfterDomReplace()) return;
+    _restoreMessageScrollSnapshot(scrollSnapshot);
+    _maybeShowNewMessageScrollCue(scrollSnapshot);
     return;
   }
   if(S.activeStreamId){
     scrollIfPinned();
+    return;
+  }
+  // Auto-follow OFF + the user has scrolled up: don't yank them to the bottom on
+  // an automatic (non-preserve) re-render. This also covers the send() race where
+  // renderMessages() runs before S.activeStreamId is set, so a stream-start
+  // wouldn't otherwise be caught by the scrollIfPinned() branch above. A fresh
+  // session load (not unpinned) still lands at the bottom as expected. (Codex #4006.)
+  // renderMessages() captures the pre-wipe snapshot for this case too (see its
+  // scrollSnapshot init), so restoring here lands the reader where they were.
+  if(!_autoScrollFollow && _messageUserUnpinned){
+    _restoreMessageScrollSnapshot(scrollSnapshot);
     return;
   }
   scrollToBottom();
@@ -6882,17 +9292,42 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
 
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
-  const scrollSnapshot=preserveScroll?_captureMessageScrollSnapshot():null;
+  // Capture the pre-wipe scroll position when preserving OR when Auto-follow is
+  // off and the user has scrolled up — both need to restore the reader's position
+  // after the DOM rebuild rather than snap to the bottom. (Codex #4006 r3.)
+  const scrollSnapshot=(preserveScroll||(!_autoScrollFollow&&_messageUserUnpinned))?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const msgCount=S.messages.length;
+  // During session switch, S.messages is intentionally cleared while the full
+  // message fetch is still in flight. Other async updates can still call
+  // renderMessages() in this window. Keep the existing loading placeholder.
+  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
-  const renderWindowSize=_currentMessageRenderWindowSize();
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
     (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
   );
+
+  const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
+  const visWithIdx=_getVisibleMessagesWithIdx();
+  $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
+  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
+  const renderWindowKey=_messageVirtualWindowKeyFor(virtualWindow);
+  const windowStart=virtualWindow.start;
+  const windowEnd=virtualWindow.end;
+  const renderHeadVisWithIdx=visWithIdx.slice(windowStart, windowEnd);
+  const renderTailStart=virtualWindow.virtualized?Math.max(windowEnd, virtualWindow.tailStart):windowEnd;
+  const renderTailVisWithIdx=virtualWindow.virtualized&&renderTailStart<visWithIdx.length
+    ? visWithIdx.slice(renderTailStart)
+    : [];
+  const renderVisWithIdx=renderHeadVisWithIdx.concat(renderTailVisWithIdx);
+  const renderVisibleIdxs=[
+    ...renderHeadVisWithIdx.map((_,idx)=>windowStart+idx),
+    ...renderTailVisWithIdx.map((_,idx)=>renderTailStart+idx),
+  ];
+  const headRenderCount=renderHeadVisWithIdx.length;
 
   // Fast path: switching back to a previously rendered session with same count.
   // Guard: sid !== _sessionHtmlCacheSid ensures in-session updates (edits,
@@ -6906,20 +9341,48 @@ function renderMessages(options){
     const renderSignature=_messageRenderCacheSignature();
     cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
-    if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===renderSignature){
+    if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
+      _messageVirtualWindowKey=renderWindowKey;
       _sessionHtmlCacheSid=sid;
+      _rehydrateTransparentStreamDom(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+      _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
       requestAnimationFrame(()=>postProcessRenderedMessages(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
   }
-
-  const compressionState=_compressionStateForCurrentSession();
+  // Mid-stream flicker fix (#3877): when a renderMessages() rebuild is reached
+  // while THIS session is actively streaming (e.g. the clarify-response echo at
+  // messages.js, or a CLI-import refresh), the `inner.innerHTML=''` below detaches
+  // the live `#liveAssistantTurn` node — and the smd parser keeps writing into
+  // that now-orphaned node, so the streamed text vanishes until the next stream
+  // event rebuilds the turn ("disappears, then reappears"). Capture the live
+  // turn's actual DOM node (not its HTML — the parser holds a live reference into
+  // it) so it can be re-attached after the rebuild, keeping the parser target
+  // connected and the streamed text visible. Only for the streaming session's own
+  // live turn; never affects settled transcripts.
+  let _preservedLiveTurn=null;
+  if(sid&&INFLIGHT[sid]){
+    const _lt=document.getElementById('liveAssistantTurn');
+    if(_lt&&(!_lt.dataset||!_lt.dataset.sessionId||_lt.dataset.sessionId===sid)){
+      _preservedLiveTurn=_lt;
+    }
+  }
+  const compressionState=(()=>{
+    let compressionState=_compressionStateForCurrentSession();
+    if(!S.busy && compressionState && compressionState.automatic){
+      window._compressionUi=null;
+      _clearCompressionElapsedTimer();
+      _setCompressionSessionLock(null);
+      compressionState=null;
+    }
+    return compressionState;
+  })();
   if(window._compressionUi && !compressionState) clearCompressionUi();
   const handoffState=_handoffStateForCurrentSession();
   if(window._handoffUi && !handoffState) window._handoffUi=null;
@@ -6932,22 +9395,7 @@ function renderMessages(options){
   const sessionCompressionSummary=(
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
-  const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
-  const vis=S.messages.filter(m=>{
-    if(!m||!m.role||m.role==='tool')return false;
-    if(_isContextCompactionMessage(m)) return false;
-    if(_isPreservedCompressionTaskListMessage(m)) return false;
-    if(_isRecoveryControlMessage(m)) return false;
-    if(m.role==='assistant'){
-      const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-      const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-      if(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)) return true;
-      if(_assistantMessageHasVisibleContent(m)) return true;
-    }
-    return m._statusCard||msgContent(m)||m.attachments?.length;
-  });
-  $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
+  const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
@@ -6957,30 +9405,10 @@ function renderMessages(options){
   const referenceText=referenceMessage
     ? msgContent(referenceMessage)||String(referenceMessage.content||'')
     : sessionCompressionSummary;
-  const referenceNode=(!compressionState && !!referenceText && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
+  const referenceNode=(!compressionState && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   let preservedCompressionTaskCardsAttached=!!referenceNode;
-  // Cache visWithIdx so expanding the render window (Load earlier) doesn't
-  // re-scan S.messages from scratch.  Invalidate only when the message array
-  // length changes — i.e. new messages arrived or session was truncated.
-  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length){
-    const rebuilt=[];
-    let ri=0;
-    for(const m of S.messages){
-      if(!m||!m.role||m.role==='tool'){ri++;continue;}
-      if(_isPreservedCompressionTaskListMessage(m)){ri++;continue;}
-      if(_isRecoveryControlMessage(m)){ri++;continue;}
-      const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-      const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) rebuilt.push({m,rawIdx:ri});
-      ri++;
-    }
-    _visWithIdxCache=rebuilt;
-    _visWithIdxCacheLen=S.messages.length;
-  }
-  const visWithIdx=_visWithIdxCache;
   const preservedCompressionRawIdxs=[];
   let rawIdx=0;
   for(const m of S.messages){
@@ -6988,31 +9416,23 @@ function renderMessages(options){
     if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
     rawIdx++;
   }
-  // Show a top affordance when earlier transcript content exists either in
-  // memory (DOM windowing) or on the server (paginated session fetch).
-  // Prefer expanding the local render window first so a fully loaded long
-  // session can reduce DOM nodes without losing in-memory transcript data.
-  const windowStart=Math.max(0, visWithIdx.length-renderWindowSize);
-  const hiddenBeforeCount=windowStart;
-  const renderVisWithIdx=visWithIdx.slice(windowStart);
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
+  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(visWithIdx);
+  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(visWithIdx);
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
   const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
-  if(hiddenBeforeCount>0 || hasServerOlder){
+  if(virtualWindow.virtualized&&virtualWindow.topPad>0){
+    inner.appendChild(_messageVirtualSpacer(virtualWindow.topPad,'before'));
+  }
+  if(hasServerOlder){
     const indicator=document.createElement('button');
     indicator.type='button';
     indicator.id='loadOlderIndicator';
     indicator.className='load-older-indicator message-window-load-earlier';
-    indicator.textContent=hiddenBeforeCount>0
-      ? `Load earlier messages (${hiddenBeforeCount} hidden)`
-      : (serverOlderCount>0
-        ? `Load earlier messages (${serverOlderCount} older)`
-        : (typeof t==='function'?t('load_older_messages'):'Load earlier messages'));
-    indicator.onclick=()=>{
-      if(hiddenBeforeCount>0) _showEarlierRenderedMessages();
-      else if(typeof _loadOlderMessages==='function') _loadOlderMessages();
-    };
+    indicator.textContent=serverOlderCount>0
+      ? `Load earlier messages (${serverOlderCount} older)`
+      : (typeof t==='function'?t('load_older_messages'):'Load earlier messages');
     inner.appendChild(indicator);
     _wireMessageWindowLoadEarlierButton();
   }
@@ -7032,9 +9452,21 @@ function renderMessages(options){
   );
   let insertionAnchor=null;
   if(typeof insertionAnchorFull==='number'){
-    if(insertionAnchorFull<windowStart) insertionAnchor=renderVisWithIdx.length?0:null;
-    else if(insertionAnchorFull<windowStart+renderVisWithIdx.length) insertionAnchor=insertionAnchorFull-windowStart;
-    else insertionAnchor=renderVisWithIdx.length?renderVisWithIdx.length-1:null;
+    const hasVirtualRenderGap=renderVisibleIdxs.some((idx,pos)=>idx!==windowStart+pos);
+    if(!hasVirtualRenderGap){
+      if(insertionAnchorFull<windowStart) insertionAnchor=renderVisWithIdx.length?0:null;
+      else if(insertionAnchorFull<windowStart+renderVisWithIdx.length) insertionAnchor=insertionAnchorFull-windowStart;
+      else insertionAnchor=renderVisWithIdx.length?renderVisWithIdx.length-1:null;
+    }else if(renderVisibleIdxs.length){
+      let previousVisibleIdx=-1;
+      for(let i=0;i<renderVisibleIdxs.length;i++){
+        if(renderVisibleIdxs[i]<=insertionAnchorFull) previousVisibleIdx=i;
+        else break;
+      }
+      insertionAnchor=previousVisibleIdx>=0?previousVisibleIdx:0;
+    }else{
+      insertionAnchor=null;
+    }
   }
   let _prevSepKey=null;
   let currentAssistantTurn=null;
@@ -7042,19 +9474,51 @@ function renderMessages(options){
   // full visWithIdx.  The jump-to-question button is only rendered for
   // assistant messages that appear in the current render window anyway.
   const questionRawIdxByAssistantRawIdx=new Map();
-  // Seed lastQuestionRawIdx from hidden messages so the first visible
-  // assistant message still gets a valid jump target even when its
-  // corresponding user message sits just before the render window.
   let lastQuestionRawIdx=-1;
-  for(let i=0;i<windowStart;i++){
-    const role=visWithIdx[i]?.m?.role;
-    if(role==='user') lastQuestionRawIdx=visWithIdx[i].rawIdx;
-  }
-  for(const entry of renderVisWithIdx){
+  const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
+  const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));
+  for(const entry of visWithIdx){
     const role=entry&&entry.m&&entry.m.role;
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
-    else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+    else if(role==='assistant'&&renderedRawIdxs.has(entry.rawIdx)) questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
   }
+  const assistantRawIdxByQuestionRawIdx=new Map();
+  for(const [aIdx,qIdx] of questionRawIdxByAssistantRawIdx){
+    if(!assistantRawIdxByQuestionRawIdx.has(qIdx)) assistantRawIdxByQuestionRawIdx.set(qIdx,aIdx);
+  }
+  // #3709 (defect B): build a per-turn combined visible-answer text so the
+  // thinking echo-strip can de-dupe a thinking-only message (whose own visible
+  // body is empty) against the answer prose carried by a SIBLING message in the
+  // same turn. A turn = the run of assistant messages between two user messages.
+  // Map every assistant rawIdx in a run to the run's combined visible text.
+  const _turnVisibleTextByRawIdx=new Map();
+  {
+    let _run=[]; let _runText=[];
+    const _flush=()=>{
+      if(_run.length){
+        const combined=_runText.join('\n\n');
+        for(const ri of _run) _turnVisibleTextByRawIdx.set(ri, combined);
+      }
+      _run=[]; _runText=[];
+    };
+    for(const entry of renderVisWithIdx){
+      const em=entry&&entry.m; const role=em&&em.role;
+      if(role==='assistant'){
+        _run.push(entry.rawIdx);
+        // Visible prose = content with any leading <think>…</think> /channel-thought
+        // block stripped (the same blocks the per-message extractor removes below).
+        let vis=typeof em.content==='string'?em.content:'';
+        vis=vis.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'')
+               .replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'')
+               .replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trim();
+        if(vis) _runText.push(vis);
+      }else{
+        _flush();
+      }
+    }
+    _flush();
+  }
+
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
@@ -7064,7 +9528,6 @@ function renderMessages(options){
   // range.
   const toolCallAssistantIdxs=new Set();
   if(Array.isArray(S.toolCalls)){
-    const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
     for(const tc of S.toolCalls){
       if(!tc) continue;
       const idx=tc.assistant_msg_idx;
@@ -7076,6 +9539,13 @@ function renderMessages(options){
   // Windowed render loop replaces the legacy full loop:
   // for(let vi=0;vi<visWithIdx.length;vi++)
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
+    if(virtualWindow.virtualized&&virtualWindow.bottomPad>0&&vi===headRenderCount){
+      // The virtual gap breaks assistant-turn adjacency. Reset the current
+      // turn before rendering the always-visible tail so assistant segments do
+      // not merge across the spacer boundary.
+      currentAssistantTurn=null;
+      inner.appendChild(_messageVirtualSpacer(virtualWindow.bottomPad,'after'));
+    }
     const {m,rawIdx}=renderVisWithIdx[vi];
     const _tsSep=m._ts||m.timestamp;
     if(_tsSep){
@@ -7092,30 +9562,39 @@ function renderMessages(options){
     let content=m.content||'';
     let thinkingText='';
     if(Array.isArray(content)){
-      thinkingText=content.filter(p=>p&&(p.type==='thinking'||p.type==='reasoning')).map(p=>p.thinking||p.reasoning||p.text||'').join('\n');
       content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
     }
-    if(!thinkingText && (m.reasoning_content || m.reasoning)) thinkingText=m.reasoning_content || m.reasoning;
-    if(!thinkingText && typeof content==='string'){
-      const thinkMatch=content.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
-      if(thinkMatch){
-        thinkingText=thinkMatch[1].trim();
-        content=content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'').trimStart();
-      }
-      if(!thinkingText){
-        // Historical name "gemmaMatch" refers to MiniMax <|channel>thought format.
-        const gemmaMatch=content.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
-        if(gemmaMatch){
-          thinkingText=gemmaMatch[1].trim();
-          content=content.replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'').trimStart();
+    if(m.role==='assistant'&&!m._live&&typeof content==='string'){
+      const anchorFinal=_assistantTurnAnchorSettledFinalAnswer(m, content, {
+        session_id:sid,
+        raw_idx:rawIdx,
+      });
+      if(anchorFinal!==null) content=anchorFinal;
+    }
+    if(typeof content==='string'){
+      if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
+        const split=window._extractInlineThinkingFromContentForRender(content, thinkingText);
+        thinkingText=split.reasoning||thinkingText;
+        content=split.content;
+      }else if(!thinkingText){
+        const thinkMatch=content.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
+        if(thinkMatch){
+          thinkingText=thinkMatch[1].trim();
+          content=content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'').trimStart();
         }
-      }
-      if(!thinkingText){
-        // Gemma 4 uses asymmetric <|turn|>thinking\n...<turn|> delimiters.
-        const gemmaTurnMatch=content.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
-        if(gemmaTurnMatch){
-          thinkingText=gemmaTurnMatch[1].trim();
-          content=content.replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trimStart();
+        if(!thinkingText){
+          const gemmaMatch=content.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
+          if(gemmaMatch){
+            thinkingText=gemmaMatch[1].trim();
+            content=content.replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'').trimStart();
+          }
+        }
+        if(!thinkingText){
+          const gemmaTurnMatch=content.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
+          if(gemmaTurnMatch){
+            thinkingText=gemmaTurnMatch[1].trim();
+            content=content.replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trimStart();
+          }
         }
       }
     }
@@ -7124,8 +9603,13 @@ function renderMessages(options){
       content='**Error:** No response received after context compression. Please retry.';
     }
     const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
-    if(thinkingText&&!isUser){
-      thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent);
+    if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
+      content='';
+    }
+    if(!isUser&&(isCompactWorklogMode()||isTransparentStream())&&!thinkingText){
+      const turnFinalVisibleContent=assistantTurnFinalVisibleContentByRawIdx.get(rawIdx)||'';
+      const turnVisibleContents=assistantTurnVisibleContentByRawIdx.get(rawIdx)||[];
+      thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents);
     }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     const nextRendered=renderVisWithIdx[vi+1];
@@ -7169,22 +9653,12 @@ function renderMessages(options){
     // user loses the navigation affordance.
     const _qJumpTarget=(!isUser&&!m._live)?questionRawIdxByAssistantRawIdx.get(rawIdx):undefined;
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
-      ? _questionJumpButtonHtml(_qJumpTarget)
+      ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
-      if(compressionState || referenceNode){
-        continue;
-      }else{
-        currentAssistantTurn=null;
-        const row=document.createElement('div');
-        const preservedForThisCard=preservedCompressionTaskCardsAttached?[]:preservedCompressionTaskMessages;
-        row.innerHTML=_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard);
-        if(preservedForThisCard.length) preservedCompressionTaskCardsAttached=true;
-        inner.appendChild(row.firstElementChild);
-        continue;
-      }
+      continue;
     }
 
     if(isUser){
@@ -7209,6 +9683,13 @@ function renderMessages(options){
     seg.className='assistant-segment';
     seg.dataset.msgIdx=rawIdx;
     seg.dataset.rawText=String(content).trim();
+    if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
+    if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
+    const messageBelongsInWorklog=!S.busy&&isCompactWorklogMode()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});
+    if(messageBelongsInWorklog){
+      seg.classList.add('assistant-segment-worklog-source');
+      seg.setAttribute('aria-hidden','true');
+    }
     if(m._live){
       currentAssistantTurn.id='liveAssistantTurn';
       // Stamp the session id on the live turn so finalizeThinkingCard()
@@ -7219,8 +9700,31 @@ function renderMessages(options){
       seg.setAttribute('data-live-assistant','1');
     }
     if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
+    // A turn whose visible content is empty but which carries a separate
+    // `reasoning` field (e.g. a run-journal-recovered anchor: empty content +
+    // reasoning + `_recovered_from_run_journal`) extracts NO inline thinkingText
+    // and would render no Thinking Card at all — collapsing to an empty hidden
+    // anchor. A session made entirely of such rows then paints blank (only date
+    // separators) — the #3875 reporter's exact case (Compact tool activity OFF,
+    // i.e. legacy mode). Surface the message's reasoning payload as the Thinking
+    // Card source for these empty-content turns so the turn is never blank.
+    //
+    // LEGACY-MODE ONLY (!isSimplifiedToolCalling()): the simplified/Worklog path
+    // already derives reasoning above (line ~8149 via
+    // _worklogReasoningTextFromMessage, which strips an exact visible-answer echo
+    // so reasoning duplicating a sibling answer is not re-shown). Repopulating the
+    // raw reasoning here would bypass that echo-strip and re-render the duplicate
+    // as a Worklog Thinking card (Codex gate catch). In legacy mode there is no
+    // Worklog folding, so the raw payload is the correct Thinking-card source.
+    // Stays OUT of the inline-content `thinkingText` extraction block (#2565) and
+    // only fires for empty-content/no-inline-thinking turns, so answer-bearing
+    // messages are unchanged.
+    if(!isUser&&!m._live&&!isSimplifiedToolCalling()&&!thinkingText&&!String(content||'').trim()&&!filesHtml&&!statusHtml){
+      const _reasoningPayload=_assistantReasoningPayloadText(m);
+      if(_reasoningPayload) thinkingText=_reasoningPayload;
+    }
     if(thinkingText&&window._showThinking!==false){
-      if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
+      if((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml);
@@ -7297,7 +9801,7 @@ function renderMessages(options){
     }
     inner.appendChild(node);
   }
-  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)
+  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceNode||compressionState)&&preservedCompressionTaskMessages.length)
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   const preservedOnlyAnchor=preservedCompressionRawIdxs.length
@@ -7324,7 +9828,14 @@ function renderMessages(options){
   // tracking, or runs that didn't go through the normal streaming path), build
   // a display list from per-message tool_calls (OpenAI format) stored in each
   // assistant message. This covers the reload case described in issue #140.
-  if(!S.busy && (!S.toolCalls||!S.toolCalls.length)){
+  const hasMessageToolMetadata=!S.busy&&Array.isArray(S.messages)&&S.messages.some(m=>
+    m&&m.role==='assistant'&&(
+      (Array.isArray(m.tool_calls)&&m.tool_calls.length>0)||
+      (Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0)||
+      (Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use'))
+    )
+  );
+  if(!S.busy && (hasMessageToolMetadata||!S.toolCalls||!S.toolCalls.length)){
     // Index tool outputs by tool_call_id / tool_use_id so the
     // fallback-built cards carry their result snippet (not just the command).
     // Without this step CLI-origin sessions reload with empty tool cards.
@@ -7352,13 +9863,39 @@ function renderMessages(options){
       }
       if(m.role==='assistant'){
         const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-        const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
         const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+        const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
         if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});
       }
     });
     const derived=[];
+    const liveToolMetadata=Array.isArray(S._settledLiveToolMetadata)
+      ? S._settledLiveToolMetadata
+      : (Array.isArray(S.toolCalls)?S.toolCalls:[]);
+    const liveMetadataByTid=new Map();
+    liveToolMetadata.forEach((tc,idx)=>{
+      if(!tc||typeof tc!=='object') return;
+      const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+      if(tid&&!liveMetadataByTid.has(tid)) liveMetadataByTid.set(tid,{tc,idx});
+    });
+    const usedLiveToolMetadata=new Set();
+    const copyLiveToolMetadata=(next,name,tid)=>{
+      let matchEntry=tid?liveMetadataByTid.get(tid):null;
+      if(!matchEntry){
+        const matchIdx=liveToolMetadata.findIndex((tc,i)=>tc&&!usedLiveToolMetadata.has(i)&&(!name||tc.name===name));
+        if(matchIdx>=0) matchEntry={tc:liveToolMetadata[matchIdx],idx:matchIdx};
+      }
+      if(matchEntry){
+        usedLiveToolMetadata.add(matchEntry.idx);
+        const live=matchEntry.tc||{};
+        for(const key of ['activityBurstId','duration','started_at']){
+          if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
+        }
+      }
+      return next;
+    };
     fallbackToolSources.forEach(({m,rawIdx})=>{
+      const assistantToolAnchorIdx=_assistantToolAnchorIdxForMessage(S.messages,rawIdx);
       // OpenAI format: top-level tool_calls field on the assistant message
       (m.tool_calls||[]).forEach(tc=>{
         if(!tc||typeof tc!=='object') return;
@@ -7369,17 +9906,43 @@ function renderMessages(options){
         const tid=tc.id||tc.call_id||'';
         const patchSnippet=_cliPatchSnippetFromArgs(name,args);
         const resultSnippet=resultsByTid[tid]||'';
-        let argsSnap={};
-        Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-        derived.push({
+        let argsSnap=_toolArgsSnapshot(args);
+        derived.push(copyLiveToolMetadata({
           name,
           snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
           is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
           tid,
-          assistant_msg_idx:rawIdx,
+          assistant_msg_idx:assistantToolAnchorIdx,
           args:argsSnap,
           done:true,
-        });
+        }, name, tid));
+      });
+      // WebUI partial/live format: _partial_tool_calls snapshots survive
+      // interrupted or adapter-shaped settles even when session.tool_calls is empty.
+      const partialToolCalls=Array.isArray(m._partial_tool_calls)?m._partial_tool_calls:[];
+      partialToolCalls.forEach(tc=>{
+        if(!tc||typeof tc!=='object') return;
+        const fn=tc.function||{};
+        const name=tc.name||fn.name||'tool';
+        let args=tc.args||tc.input||{};
+        if(!args||typeof args!=='object'){
+          try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){ args={}; }
+        }else if(!Object.keys(args).length&&fn.arguments){
+          try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){}
+        }
+        const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+        const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+        const resultSnippet=resultsByTid[tid]||tc.snippet||tc.preview||'';
+        const argsSnap=_toolArgsSnapshot(args);
+        derived.push(copyLiveToolMetadata({
+          name,
+          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+          tid,
+          assistant_msg_idx:assistantToolAnchorIdx,
+          args:argsSnap,
+          done:true,
+        }, name, tid));
       });
       // Anthropic format: tool_use blocks inside assistant content array
       if(Array.isArray(m.content)){
@@ -7390,19 +9953,16 @@ function renderMessages(options){
           const tid=p.id||'';
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
           const resultSnippet=resultsByTid[tid]||'';
-          const argsSnap={};
-          if(args && typeof args==='object'){
-            Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-          }
-          derived.push({
+          const argsSnap=_toolArgsSnapshot(args);
+          derived.push(copyLiveToolMetadata({
             name,
             snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
             is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
-            assistant_msg_idx:rawIdx,
+            assistant_msg_idx:assistantToolAnchorIdx,
             args:argsSnap,
             done:true,
-          });
+          }, name, tid));
         });
       }
       // WebUI-internal partial tool calls captured on cancel/stop
@@ -7415,111 +9975,246 @@ function renderMessages(options){
           const tid=tc.id||tc.call_id||tc.tool_call_id||tc.tid||'';
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
           const resultSnippet=_cliToolResultSnippet(tc.snippet||tc.result||tc.output||tc.preview||'');
-          const argsSnap={};
-          if(args && typeof args==='object'){
-            Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-          }
-          derived.push({
+          const argsSnap=_toolArgsSnapshot(args,4);
+          derived.push(copyLiveToolMetadata({
             name,
             snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
             is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
-            assistant_msg_idx:rawIdx,
+            assistant_msg_idx:assistantToolAnchorIdx,
             args:argsSnap,
             done:true,
-          });
+          }, name, tid));
         });
       }
     });
     if(derived.length) S.toolCalls=derived;
+    if(S._settledLiveToolMetadata) S._settledLiveToolMetadata=null;
   }
-  if(!S.busy){
-    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"])').forEach(el=>el.remove());
-    const byAssistant = {};
-    for(const tc of (S.toolCalls||[])){
-      const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;
-      if(!byAssistant[key]) byAssistant[key] = [];
-      byAssistant[key].push(tc);
-    }
+  if(!S.busy || (S.toolCalls&&S.toolCalls.length)){
+    // Rebuild settled tool/worklog/thinking nodes. The `|| (S.toolCalls.length)`
+    // arm is REQUIRED, not just `!S.busy`: when renderMessages re-runs during an
+    // active stream (e.g. switching back to an in-progress session, busy=true),
+    // the earlier innerHTML wipe removed every settled turn's worklog above the
+    // live turn. Gating purely on `!S.busy` skipped this rebuild while busy and
+    // left those prior turns' tool cards gone until the stream finished (#3401
+    // regression vs master; same content-loss-on-switch class as #3668). The
+    // `:not([data-live-thinking="1"])` / live-card guards below keep the active
+    // turn's own live nodes from being double-built.
+    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+    const byActivity = new Map();
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
-    const anchorInsertAfter = new Map();
-    if(isSimplifiedToolCalling()){
-      const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
-      for(const aIdx of activityIdxs){
-        const cards=byAssistant[aIdx]||[];
-        if(!cards.length&&assistantThinking.has(aIdx)){
-          const anchorRow=assistantSegments.get(aIdx);
-          if(anchorRow&&window._showThinking!==false){
-            anchorRow.insertAdjacentHTML('beforeend',_thinkingCardHtml(assistantThinking.get(aIdx)));
-          }
-          continue;
+    const _assistantAnchorForActivity=(aIdx,segmentSeq,burstId)=>{
+      if(segmentSeq){
+        for(const seg of assistantSegments.values()){
+          if(seg&&seg.getAttribute('data-live-segment-seq')===String(segmentSeq)) return seg;
         }
-        let anchorRow=assistantSegments.get(aIdx)||null;
-        if(!anchorRow&&assistantIdxs.length){
-          if(aIdx<assistantIdxs[0]) continue;
-          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
-        }
-        if(!anchorRow) continue;
-        const anchorParent=anchorRow.parentElement;
-        let insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode,activityKey:`assistant:${aIdx}`});
-        const sourceMsg=S.messages[aIdx]||{};
-        if(sourceMsg._turnDuration!==undefined) group.setAttribute('data-turn-duration', String(sourceMsg._turnDuration));
-        const body=group&&group.querySelector('.tool-call-group-body');
-        if(!body) continue;
-        const thinkingText=assistantThinking.get(aIdx);
-        if(thinkingText){
-          body.appendChild(_thinkingActivityNode(thinkingText, false));
-        }
-        for(const tc of cards){
-          body.appendChild(buildToolCard(tc));
-        }
-        _syncToolCallGroupSummary(group);
-        if(anchorRow) anchorInsertAfter.set(anchorRow, group);
       }
-    }else if(S.toolCalls && S.toolCalls.length){
-      for(const [key, cards] of Object.entries(byAssistant)){
-        const aIdx = parseInt(key);
-        let anchorRow=assistantSegments.get(aIdx)||null;
-        if(!anchorRow&&assistantIdxs.length){
-          if(aIdx<assistantIdxs[0]) continue;
-          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+      const wantedBurst=burstId!==undefined&&burstId!==null&&String(burstId)!==''&&String(burstId)!=='0'?String(burstId):'';
+      if(wantedBurst){
+        for(const seg of assistantSegments.values()){
+          if(seg&&seg.getAttribute('data-activity-burst-id')===wantedBurst) return seg;
         }
+      }
+      let anchorRow=assistantSegments.get(aIdx)||null;
+      if(!anchorRow&&assistantIdxs.length){
+        if(aIdx<assistantIdxs[0]) return null;
+        const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+        anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+      }
+      return anchorRow;
+    };
+    const _turnDurationForAnchor=(anchorRow)=>{
+      if(!anchorRow) return undefined;
+      const turn=anchorRow.closest('.assistant-turn');
+      const blocks=_assistantTurnBlocks(turn);
+      if(!blocks) return undefined;
+      let duration;
+      for(const seg of blocks.querySelectorAll('.assistant-segment')){
+        const idx=Number(seg.dataset&&seg.dataset.msgIdx);
+        const msg=Number.isFinite(idx)?S.messages[idx]:null;
+        if(msg&&msg._turnDuration!==undefined) duration=msg._turnDuration;
+      }
+      return duration;
+    };
+    const durationAssignedTurns = new Set();
+    const activityByTurn = new Map();
+    const activityOrder = [];
+    const ensureActivityBucket=(key,aIdx,segmentSeq,burstId)=>{
+      if(!byActivity.has(key)){
+        const entry={key,aIdx,segmentSeq:segmentSeq||'',burstId:burstId||'',cards:[],thinkingIdx:null,includeAnchorReason:false};
+        byActivity.set(key,entry);
+        activityOrder.push(entry);
+      }
+      return byActivity.get(key);
+    };
+    const normalizeToken=(value)=>{
+      const hasValue=value!==undefined&&value!==null&&String(value)!==''&&String(value)!=='0';
+      return hasValue?String(value):'';
+    };
+    for(const tc of (S.toolCalls||[])){
+      if(!tc) continue;
+      const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
+      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
+      const segmentSeq=normalizeToken(tc.activitySegmentSeq);
+      const burstId=normalizeToken(tc.activityBurstId);
+      const key=segmentSeq?`segment:${segmentSeq}`:(burstId?`burst:${burstId}`:`assistant:${aIdx}`);
+      const entry=ensureActivityBucket(key,aIdx,segmentSeq,burstId);
+      entry.cards.push(tc);
+      entry.includeAnchorReason=true;
+    }
+    for(const aIdx of assistantThinking.keys()){
+      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
+      const seg=assistantSegments.get(aIdx);
+      const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
+      const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
+      const key=segmentSeq?`segment:${segmentSeq}`:(burstId?`burst:${burstId}`:`assistant:${aIdx}`);
+      const entry=ensureActivityBucket(key,aIdx,segmentSeq,burstId);
+      if(entry.thinkingIdx===null) entry.thinkingIdx=aIdx;
+    }
+    for(const [aIdx,seg] of assistantSegments){
+      if(!seg||!seg.classList||!seg.classList.contains('assistant-segment-worklog-source')) continue;
+      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
+      if(!_worklogReasonHtmlFromAnchor(seg)) continue;
+      const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
+      const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
+      const key=segmentSeq?`segment:${segmentSeq}`:(burstId?`burst:${burstId}`:`assistant:${aIdx}`);
+      const entry=ensureActivityBucket(key,aIdx,segmentSeq,burstId);
+      entry.includeAnchorReason=true;
+    }
+    activityOrder.sort((a,b)=>{
+      const anchorA=_assistantAnchorForActivity(a.aIdx,a.segmentSeq,a.burstId);
+      const anchorB=_assistantAnchorForActivity(b.aIdx,b.segmentSeq,b.burstId);
+      const idxA=(anchorA&&anchorA.parentElement)?Array.prototype.indexOf.call(anchorA.parentElement.children,anchorA):Number.MAX_SAFE_INTEGER;
+      const idxB=(anchorB&&anchorB.parentElement)?Array.prototype.indexOf.call(anchorB.parentElement.children,anchorB):Number.MAX_SAFE_INTEGER;
+      if(idxA!==idxB) return idxA-idxB;
+      const seqA=a.segmentSeq!==''?Number(a.segmentSeq):Number.MAX_SAFE_INTEGER;
+      const seqB=b.segmentSeq!==''?Number(b.segmentSeq):Number.MAX_SAFE_INTEGER;
+      if(Number.isFinite(seqA)&&Number.isFinite(seqB)&&seqA!==seqB) return seqA-seqB;
+      const burstA=a.burstId!==''?Number(a.burstId):Number.MAX_SAFE_INTEGER;
+      const burstB=b.burstId!==''?Number(b.burstId):Number.MAX_SAFE_INTEGER;
+      if(Number.isFinite(burstA)&&Number.isFinite(burstB)&&burstA!==burstB) return burstA-burstB;
+      return a.aIdx-b.aIdx;
+    });
+    if(!isTransparentStream()){
+      for(const entry of activityOrder){
+        const {aIdx,segmentSeq,burstId,cards,thinkingIdx,includeAnchorReason}=entry;
+        if(aIdx<assistantIdxs[0]) continue;
+        const anchorRow=_assistantAnchorForActivity(aIdx,segmentSeq,burstId);
         if(!anchorRow) continue;
         const anchorParent=anchorRow.parentElement;
-        const frag=document.createDocumentFragment();
-        let lastInsertedNode=null;
-        for(const tc of cards){
-          const card=buildToolCard(tc);
-          frag.appendChild(card);
-          lastInsertedNode=card;
+        const anchorReasonHtml=_worklogReasonHtmlFromAnchor(anchorRow);
+        const thinkingText=thinkingIdx!==null?assistantThinking.get(thinkingIdx):'';
+        if(!cards.length&&!anchorReasonHtml&&!thinkingText) continue;
+        const anchorTurn=anchorRow.closest('.assistant-turn');
+        if(!anchorTurn) continue;
+        let state=activityByTurn.get(anchorTurn);
+        if(!state){
+          const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
+          if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
+          const activityKey=`assistant:${aIdx}`;
+          const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
+          const group=ensureActivityGroup(anchorParent,{
+            collapsed:true,
+            anchor:anchorRow,
+            beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
+            syncAnchorReason:anchorIsWorklogSource,
+            activityKey,
+            burstId:burstId||'',
+            segmentSeq:segmentSeq||'',
+            turnDuration:includeTurnDuration?_turnDurationForAnchor(anchorRow):undefined,
+          });
+          const list=_toolWorklogListEl(group);
+          if(!list) continue;
+          list.innerHTML='';
+          state={group,cards:[],seenReasons:new Set(),seenTools:new Set()};
+          activityByTurn.set(anchorTurn,state);
         }
-        // Add expand/collapse toggle for groups with 2+ cards
-        if(cards.length>=2){
-          const toggle=document.createElement('div');
-          toggle.className='tool-cards-toggle';
-          // Collect card elements before they get moved to DOM
-          const cardEls=Array.from(frag.querySelectorAll('.tool-card'));
-          const expandBtn=document.createElement('button');
-          expandBtn.textContent=t('expand_all');
-          expandBtn.onclick=()=>cardEls.forEach(c=>c.classList.add('open'));
-          const collapseBtn=document.createElement('button');
-          collapseBtn.textContent=t('collapse_all');
-          collapseBtn.onclick=()=>cardEls.forEach(c=>c.classList.remove('open'));
-          toggle.appendChild(expandBtn);
-          toggle.appendChild(collapseBtn);
-          frag.insertBefore(toggle,frag.firstChild);
+        state.cards.push(...cards);
+        _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
+          live:false,
+          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml,
+          thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
+          thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:'',
+          seenReasons:state.seenReasons,
+          seenTools:state.seenTools,
+        });
+      }
+      activityByTurn.forEach(state=>{
+        _syncToolCallGroupSummary(state.group);
+      });
+    }else{
+      // ── transparent_stream path: individual expandable event rows ──
+      const transparentInsertCursors=new Map();
+      // Per-turn dedup of echoed thinking text — mirrors the compact-worklog
+      // path's `seenReasons` Set (the transparent branch previously had none,
+      // so the same echoed reasoning rendered twice, once out of chronological
+      // position). Keyed by the assistant turn element. (Trifecta finding O-Bug1.)
+      const transparentSeenThinking=new Map();
+      for(const entry of activityOrder){
+        const event={
+          ...entry,
+          thinkingText:entry.thinkingIdx!==null?assistantThinking.get(entry.thinkingIdx):'',
+        };
+        const {aIdx,segmentSeq,burstId,cards}=event;
+        if(aIdx<assistantIdxs[0]) continue;
+        const anchorRow=_assistantAnchorForActivity(aIdx,segmentSeq,burstId);
+        if(!anchorRow) continue;
+        const anchorTurn=anchorRow.closest('.assistant-turn');
+        const turn=anchorTurn;
+        const blocks=_assistantTurnBlocks(anchorTurn);
+        if(!anchorTurn||!blocks) continue;
+        const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
+        const insertAfterCursor=(row)=>{
+          const cursor=transparentInsertCursors.get(anchorRow)||anchorRow;
+          const ref=cursor&&cursor.parentElement===blocks?cursor.nextElementSibling:null;
+          if(ref&&ref.parentElement===blocks) blocks.insertBefore(row,ref);
+          else blocks.appendChild(row);
+          transparentInsertCursors.set(anchorRow,row);
+        };
+        const insertBeforeAnchor=(row)=>{
+          if(anchorRow&&anchorRow.parentElement===blocks) blocks.insertBefore(row,anchorRow);
+          else blocks.appendChild(row);
+        };
+        if(event.thinkingText){
+          const _thinkKey=typeof _normalizeThinkingEchoCompare==='function'
+            ? _normalizeThinkingEchoCompare(event.thinkingText)
+            : String(event.thinkingText).trim();
+          let _seen=transparentSeenThinking.get(anchorTurn);
+          if(!_seen){_seen=new Set();transparentSeenThinking.set(anchorTurn,_seen);}
+          if(_thinkKey&&_seen.has(_thinkKey)){
+            // Echoed reasoning already rendered for this turn — skip the duplicate.
+          }else{
+            if(_thinkKey)_seen.add(_thinkKey);
+            const thinkingRow=_decorateTransparentEventRow(_thinkingActivityNode(event.thinkingText,false),{
+              type:'thinking',
+              text:event.thinkingText,
+              preview:event.thinkingText,
+              segmentSeq,
+              burstId,
+            });
+            if(!anchorIsWorklogSource) insertBeforeAnchor(thinkingRow);
+            else insertAfterCursor(thinkingRow);
+          }
         }
-        const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-        const refNode = insertAfterNode ? insertAfterNode.nextSibling : null;
-        if(refNode) anchorParent.insertBefore(frag,refNode);
-        else anchorParent.appendChild(frag);
-        if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
+        for(const toolCall of cards){
+          event.toolCall=toolCall;
+          const toolRow=_decorateTransparentEventRow(buildToolCard(event.toolCall),{
+            type:'tool',
+            name:event.toolCall&&event.toolCall.name,
+            status:_transparentToolStatus(event.toolCall,true),
+            toolCall:event.toolCall,
+            segmentSeq,
+            burstId,
+          });
+          insertAfterCursor(toolRow);
+        }
+        _syncTransparentEventControls(turn);
       }
     }
   }
+  _restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);
+  _messageVirtualWindowKey=renderWindowKey;
   // Render per-turn duration and optional token usage on assistant messages.
   // Duration stays visible even when token usage is disabled, because it answers
   // the basic "how long did that turn take?" UX question. Only walk rendered
@@ -7535,14 +10230,11 @@ function renderMessages(options){
       const failoverText=_gatewayRoutingFailoverText(routing);
       const modelWarningText=_gatewayModelWarningText(routing);
       const hasTurnUsage=!!msg._turnUsage;
-      // The activity-group summary owns the "Done in …" duration ONLY when a
-      // group is actually created. A tool-call turn always builds one. A
-      // thinking-only turn under Simplified Tool Calling now renders thinking
-      // inline (no group — see the `continue` at the activityIdxs loop, #3592),
-      // so it must keep its footer duration; suppressing it there would silently
-      // drop "Done in …" for thinking-only turns (#3592 review).
-      const compactActivityForMessage=isSimplifiedToolCalling()&&toolCallAssistantIdxs.has(mi);
-      const durationText=compactActivityForMessage?'':_formatTurnDuration(msg._turnDuration);
+      // The Worklog summary owns the "Done in …" duration whenever this
+      // assistant message contributes tool or thinking detail to a folded
+      // Worklog above the final answer.
+      const compactWorklogForMessage=isCompactWorklogMode()&&(toolCallAssistantIdxs.has(mi)||assistantThinking.has(mi));
+      const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;
       const seg=assistantSegments.get(mi);
       const row=seg?seg.closest('.assistant-turn'):null;
@@ -7589,13 +10281,230 @@ function renderMessages(options){
       }
       if(fragments.length){
         targetFoot.classList.add('msg-foot-with-usage');
-        for(let i=fragments.length-1;i>=0;i--) targetFoot.insertBefore(fragments[i], targetFoot.firstChild);
+        for(let i=fragments.length-1;i>=0;i--){
+          // Guard: firstChild may be null (empty foot) or orphaned.
+          const firstChild=targetFoot.firstChild;
+          if(firstChild&&firstChild.parentNode===targetFoot) targetFoot.insertBefore(fragments[i], firstChild);
+          else targetFoot.appendChild(fragments[i]);
+        }
+      }
+    }
+  }
+  // Transparent mode per-turn wiring: collapsible Hermes chat name tag, old-event
+  // fading, and the bottom-of-turn footer (elapsed · tokens · TTFT · status).
+  // Runs after the per-turn duration block above so the footer can reuse the
+  // computed durationText / tokens / TTFT for each settled assistant turn.
+  if(isTransparentStream()){
+    for(const turn of inner.querySelectorAll('.assistant-turn')){
+      if(turn.id==='liveAssistantTurn') continue;
+      const blocks=_assistantTurnBlocks(turn);
+      if(!blocks) continue;
+      const hasTransparentRows=blocks.querySelector(':scope > .transparent-event-row');
+      _wireTransparentTurnToggle(turn);
+      // Restore collapse state from the map (survives DOM rebuild).
+      const seg=turn.querySelector('.assistant-segment');
+      if(seg&&sid){
+        const mi=seg.getAttribute('data-msg-idx');
+        if(mi!=null&&_transparentTurnCollapsedStates[`${sid}:${mi}`]){
+          turn.setAttribute('data-transparent-turn-collapsed','1');
+          const role=turn.querySelector('.msg-role.assistant');
+          if(role) role.setAttribute('aria-expanded','false');
+        }
+      }
+      _applyTransparentRowFading(turn);
+      if(hasTransparentRows){
+        // Find the corresponding message to read duration/usage.
+        const seg=turn.querySelector('.assistant-segment');
+        let durationText='';
+        let ttftText='';
+        let tokensText='';
+        if(seg){
+          const mi=seg.getAttribute('data-msg-idx');
+          if(mi!=null){
+            const msg=S.messages[Number(mi)]||{};
+            if(msg._turnDuration!=null) durationText=_formatTurnDuration(msg._turnDuration);
+            if(msg._firstTokenMs!=null) ttftText=_formatFirstToken(msg._firstTokenMs);
+            if(msg._turnUsage){
+              const inTok=msg._turnUsage.input_tokens||0;
+              const outTok=msg._turnUsage.output_tokens||0;
+              tokensText=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
+            }
+          }
+        }
+        _renderTransparentTurnFooter(turn,{
+          durationText,
+          ttftText,
+          tokensText,
+          statusText: t('done')||'Done',
+        });
+      }else{
+        // No transparent rows → no footer needed.
+        _renderTransparentTurnFooter(turn,{});
+      }
+    }
+  }
+  // Fail-safe invariant (#3875): a settled assistant turn must never render with
+  // ZERO visible content. The Worklog redesign (#3401) folds intermediate
+  // assistant segments into a collapsed Worklog card and hides the source segment
+  // (`assistant-segment-worklog-source` → display:none). That is correct WHEN the
+  // turn also has a visible final answer. But when a turn's ONLY content is folded
+  // into a collapsed Worklog (e.g. an autonomous/interrupted run whose final
+  // assistant message is empty, or a reload where S.toolCalls didn't hydrate so the
+  // worklog card built with no expandable tool steps), every segment is hidden and
+  // the turn paints as nothing — leaving the transcript a bare stack of date
+  // separators (#3875 brick). Reveal such turns so their content is never silently
+  // swallowed: expand the turn's Worklog group(s) when the turn has no other
+  // visible content. This NEVER touches a turn that has any visible segment, so the
+  // intended collapsed-Worklog UX is preserved whenever a visible answer exists.
+  // The live turn is excluded by its `liveAssistantTurn` id (it drives its own
+  // state during a stream), so this sweep is safe to run even while busy — a
+  // historical blank turn must not re-paint blank during a follow-up stream
+  // (Opus advisor, stage-342).
+  {
+    const _turnHasVisibleContent=(turn)=>{
+      const segs=turn.querySelectorAll('.assistant-segment');
+      for(const seg of segs){
+        // A segment shows real content only when it is NOT worklog-folded AND its
+        // body/files/status actually painted (the anchor-only placeholder class
+        // carries no visible body).
+        if(seg.classList.contains('assistant-segment-worklog-source')) continue;
+        if(seg.classList.contains('assistant-segment-anchor')) continue;
+        if((seg.textContent||'').trim()) return true;
+      }
+      return false;
+    };
+    for(const turn of inner.querySelectorAll('.assistant-turn')){
+      if(turn.id==='liveAssistantTurn') continue; // live turn drives its own state
+      if(_turnHasVisibleContent(turn)) continue;
+      // No visible content — surface the folded Worklog so the turn isn't blank.
+      const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
+      let revealed=false;
+      for(const group of groups){
+        if(!(group.textContent||'').trim()) continue; // empty group can't help
+        if(group.classList.contains('tool-call-group-collapsed')){
+          group.classList.remove('tool-call-group-collapsed');
+          group.classList.add('open');
+          const summary=group.querySelector('.tool-call-group-summary,.activity-summary');
+          if(summary) summary.setAttribute('aria-expanded','true');
+        }
+        // `revealed` means "this turn has a non-empty Worklog group that the user
+        // can see" — NOT "we just expanded something". An already-open non-empty
+        // group is itself visible (it slips past _turnHasVisibleContent only
+        // because that check inspects .assistant-segment nodes, not group bodies),
+        // so the turn isn't truly blank and the last-resort un-hide below is
+        // unnecessary. Keep this assignment OUTSIDE the if(collapsed) branch.
+        revealed=true;
+      }
+      // Last resort: no usable worklog group either, but hidden worklog-source
+      // segments carry the real text — un-hide them so nothing is lost.
+      if(!revealed){
+        for(const seg of turn.querySelectorAll('.assistant-segment-worklog-source')){
+          if(!(seg.textContent||'').trim()) continue;
+          seg.classList.remove('assistant-segment-worklog-source');
+          seg.removeAttribute('aria-hidden');
+        }
+      }
+    }
+  }
+  // Re-attach the preserved live turn (#3877). The rebuild above recreated a
+  // live turn from S.messages, but the live assistant message's content lags the
+  // stream (it is only persisted to S.messages on a throttled write-back) — so the
+  // fresh node often shows LESS streamed text than the ORIGINAL node, which is
+  // still referenced by the smd parser and holds the real in-progress reply. Swap
+  // the preserved (parser) node back in so the parser target stays connected and
+  // the visible text never blanks.
+  //
+  // The swap fires when the preserved node carries at least as much streamed text
+  // as the rebuilt one (`_rebuiltLen <= _preservedLen`). The `<=` (not `<`) is
+  // load-bearing: at the throttled-persist boundary the rebuilt turn's live
+  // content can EQUAL the preserved length, and the old `<` guard then skipped the
+  // swap — leaving the smd parser writing into the detached original node, which
+  // is exactly the residual "disappears, then reappears" frame (#3877 reopen). On
+  // a tie the preserved node is strictly preferable (it holds the live parser
+  // reference; identical length means nothing is lost). When the rebuilt turn
+  // genuinely has MORE content (e.g. a reconnect where S.messages caught up past
+  // the parser), the guard correctly skips and lets the parser re-resolve to the
+  // fuller node.
+  //
+  // Swap at the SEGMENT level — replace only the rebuilt live segment with the
+  // preserved one — so a multi-segment turn (earlier settled segments + tool/
+  // worklog groups built by the rebuild) keeps that rebuilt-only structure; a
+  // whole-turn replaceWith would discard it when the preserved snapshot predates
+  // those segments. Fall back to whole-turn replace only when the rebuilt turn has
+  // no live segment to swap into. No-op for a settled turn or when nothing was
+  // streaming.
+  if(_preservedLiveTurn){
+    const _rebuilt=document.getElementById('liveAssistantTurn');
+    // Pick the PARSER-OWNED live segment, not just the first one. On reconnect /
+    // post-tool activity boundaries a live turn can carry MULTIPLE
+    // [data-live-assistant="1"] segments, and the smd parser writes into the
+    // LAST (tail) one (see ensureAssistantRow in messages.js — it re-attaches to
+    // the last live segment). Prefer the preserved segment whose
+    // data-live-segment-seq matches the rebuilt tail (same logical segment), then
+    // fall back to the last preserved live segment. Using querySelector() (first)
+    // here would move the wrong segment and leave the parser-owned tail detached
+    // in a multi-segment turn.
+    const _rebuiltSegs=_rebuilt?_rebuilt.querySelectorAll('[data-live-assistant="1"]'):null;
+    const _rebuiltSeg=(_rebuiltSegs&&_rebuiltSegs.length)?_rebuiltSegs[_rebuiltSegs.length-1]:null;
+    const _preservedSegs=_preservedLiveTurn.querySelectorAll('[data-live-assistant="1"]');
+    let _preservedSeg=_preservedSegs.length?_preservedSegs[_preservedSegs.length-1]:null;
+    const _rebuiltSeq=_rebuiltSeg?_rebuiltSeg.getAttribute('data-live-segment-seq'):null;
+    if(_rebuiltSeq){
+      for(const _seg of _preservedSegs){
+        if(_seg.getAttribute('data-live-segment-seq')===_rebuiltSeq){_preservedSeg=_seg;break;}
+      }
+    }
+    const _preservedLen=_liveAssistantSegmentTextLength(_preservedSeg||_preservedLiveTurn);
+    // Structural-block counts: a live turn can be AHEAD of S.messages with
+    // Activity/tool/worklog blocks that haven't persisted yet — even with ZERO
+    // streamed text (e.g. an Activity-only turn mid-tool-call). The text-length
+    // gate alone would skip preservation in that case, so a scroll-triggered
+    // rebuild on a long (virtualized) transcript could blink those live-only
+    // blocks for a frame. Also restore when the preserved turn carries more
+    // structure than the rebuilt (lagging-S.messages) turn. (#3714 ship-review)
+    const _structuralCount=(turn)=> turn?turn.querySelectorAll(
+      '[data-live-assistant="1"],.tool-call-group,.tool-card-row,'+
+      '.tool-worklog-group,.live-worklog[data-live-worklog-shell="1"],'+
+      '.wl-reason,.agent-activity-thinking,.thinking-card-row'
+    ).length:0;
+    const _preservedStructure=_structuralCount(_preservedLiveTurn);
+    const _rebuiltStructure=_structuralCount(_rebuilt);
+    if(_preservedLen>0 || _preservedStructure>_rebuiltStructure){
+      const _rebuiltLen=_rebuilt?_liveAssistantSegmentTextLength(_rebuiltSeg||_rebuilt):-1;
+      if(_rebuiltLen<=_preservedLen){
+        // Decide segment-level vs whole-turn restore. Segment-level keeps the
+        // rebuilt turn's structure (good when the rebuild is the structural
+        // superset). But the whole premise here is that the live DOM can be
+        // AHEAD of S.messages: a tool/worklog group can land in the live turn
+        // between the last throttled persist and this rebuild, so the rebuilt
+        // turn (built from the lagging S.messages) may have FEWER structural
+        // blocks. In that case a segment-only swap would drop those live-only
+        // blocks for a frame — so restore the WHOLE preserved turn instead.
+        // Otherwise (rebuild has >= the preserved turn's structural blocks) do
+        // the precise segment swap so rebuilt-only structure is kept.
+        if(_rebuilt&&_rebuiltSeg&&_preservedSeg&&_rebuiltStructure>=_preservedStructure){
+          // Rebuild is the structural superset — swap only the parser-owned
+          // (tail) live segment, keeping rebuilt-only segments / tool groups.
+          // (No dataset.sessionId stamp here: only the segment enters the DOM;
+          // the rebuilt turn was already stamped at build time, see above.)
+          _rebuiltSeg.replaceWith(_preservedSeg);
+        }else if(_rebuilt){
+          // Rebuilt turn lacks structure the live turn already has (live-only
+          // tool card not yet persisted), or has no live segment to target —
+          // restore the whole preserved turn so nothing the user saw vanishes.
+          if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
+          _rebuilt.replaceWith(_preservedLiveTurn);
+        }else{
+          if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
+          inner.appendChild(_preservedLiveTurn);
+        }
       }
     }
   }
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
+  if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>postProcessRenderedMessages(inner));
@@ -7612,10 +10521,11 @@ function renderMessages(options){
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
       const renderSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;
-      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize,signature:renderSignature});
+      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowKey,signature:renderSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
+  _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
 }
 
 function _toolDisplayName(tc){
@@ -7624,7 +10534,271 @@ function _toolDisplayName(tc){
   if(name==='delegate_task') return 'Delegate task';
   return name;
 }
+
+// Activity-summary detection for persisted memory/skill writes (#3340, #3544).
+// Action vocabularies match the real agent tool enums:
+//   memory.action      = add | replace | remove   (add/replace persist content → "saved")
+//   skill_manage.action= create | patch | edit | delete | write_file | remove_file
+//                        (create/patch/edit/write_file mutate a skill → "updated")
+// Deletions (memory 'remove', skill 'delete'/'remove_file') are intentionally
+// excluded so the "saved"/"updated" label verbs stay accurate; running/errored
+// calls are excluded so only completed writes are counted.
+const _MEMORY_SAVE_ACTIONS=new Set(['add','replace']);
+const _SKILL_UPDATE_ACTIONS=new Set(['create','patch','edit','write_file']);
+function _tcAction(tc){
+  return String((tc&&tc.args&&tc.args.action)||'').toLowerCase();
+}
+function _isMemorySave(tc){
+  if(!tc||tc.name!=='memory'||tc.done===false||tc.is_error) return false;
+  return _MEMORY_SAVE_ACTIONS.has(_tcAction(tc));
+}
+function _isSkillUpdate(tc){
+  if(!tc||tc.name!=='skill_manage'||tc.done===false||tc.is_error) return false;
+  return _SKILL_UPDATE_ACTIONS.has(_tcAction(tc));
+}
+// ── Tool action label helpers ──────────────────────────────────────────────
+function _decodeToolLabelEntities(value){
+  return String(value||'')
+    .replace(/&quot;/g,'"')
+    .replace(/&#39;|&apos;/g,"'")
+    .replace(/&lt;/g,'<')
+    .replace(/&gt;/g,'>')
+    .replace(/&amp;/g,'&');
+}
+function _redactToolTargetLabel(value){
+  return String(value||'')
+    .replace(/\bsshpass\s+-p\s+(?:"[^"]*"|'[^']*'|\S+)/gi,'sshpass -p "[redacted]"')
+    .replace(/(--password(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]')
+    .replace(/(password(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]');
+}
+function _shortToolLabel(value, limit){
+  const text=String(value||'').replace(/\s+/g,' ').trim();
+  const max=limit||112;
+  if(text.length<=max) return text;
+  const head=Math.max(24, Math.floor(max*.68));
+  const tail=Math.max(12, max-head-3);
+  return text.slice(0,head).trimEnd()+'...'+text.slice(-tail).trimStart();
+}
+function _toolActionKind(tc){
+  const n=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
+  if(!n) return 'unknown';
+  if(n==='subagent_progress'||n==='delegate_task') return 'delegate';
+  if(n.includes('terminal')||n.includes('shell')||n.includes('command')||n.includes('process')||n==='execute_code') return 'shell';
+  if(n.includes('read')||n.includes('view')||n.includes('open')||n==='vision_analyze') return 'read';
+  if(n.includes('list')||n==='todo') return 'list';
+  if(n.includes('web')||n.includes('fetch')||n.includes('curl')||n.includes('extract')||n.includes('browse')||n.includes('navigate')) return 'web';
+  if(n.includes('search')||n.includes('grep')||n.includes('find')) return 'search';
+  if(n.includes('write')||n.includes('patch')||n.includes('edit')) return 'write';
+  return 'unknown';
+}
+function _toolTargetLabel(tc){
+  const a=tc&&tc.args||{};
+  const raw=a.cmd||a.command||a.path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||tc.preview||'';
+  return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
+}
+function _toolVisibleTargetLabel(tc, opts){
+  opts=opts||{};
+  const target=_toolTargetLabel(tc);
+  if(!target) return '';
+  return _shortToolLabel(target, opts.limit||112);
+}
+function _toolCommandTitle(command){
+  const normalized=String(command||'').replace(/\s+/g,' ').trim();
+  if(!normalized) return '';
+  if(/^git\s+fetch\b/i.test(normalized)) return 'git fetch';
+  if(/^git\s+(?:status|rev-list|branch)\b/i.test(normalized)) return 'git ahead/behind';
+  if(/^git\s+log\b/i.test(normalized)) return 'git log';
+  if(/\bcurl\b/i.test(normalized)&&/\/health\b/i.test(normalized)) return 'health check';
+  if(/\b(?:ps|pgrep)\b/i.test(normalized)) return 'process check';
+  const m=normalized.match(/\blsof\b.*(?:-i|:)(\d{2,5})\b/i);
+  if(m) return `port ${m[1]} check`;
+  if(/\blaunchctl\b/i.test(normalized)) return 'launchctl';
+  return _shortToolLabel(normalized,72);
+}
+function _toolQueryTitle(query){
+  const normalized=String(query||'').replace(/\s+/g,' ').trim();
+  return _shortToolLabel(normalized,72);
+}
+function _toolActionLabelText(tc, opts){
+  opts=opts||{};
+  const kind=_toolActionKind(tc);
+  const done=tc&&tc.done!==false;
+  const isErr=tc&&tc.is_error;
+  let target=opts.generic?'':_toolVisibleTargetLabel(tc, opts);
+  if(kind==='shell'&&target) target=_toolCommandTitle(target);
+  else if((kind==='search'||kind==='web')&&target) target=_toolQueryTitle(target);
+  const verbs={
+    shell:   {ing:'Running',   ed:'Ran'},
+    read:    {ing:'Reading',   ed:'Read'},
+    list:    {ing:'Listing',   ed:'Listed'},
+    search:  {ing:'Searching for',ed:'Searched for'},
+    web:     {ing:'Checking',  ed:'Checked'},
+    write:   {ing:'Updating',  ed:'Updated'},
+    delegate:{ing:'Delegating',ed:'Delegated'},
+    unknown: {ing:'Running',   ed:'Ran'},
+  };
+  const v=verbs[kind]||verbs.unknown;
+  const display=_toolDisplayName(tc);
+  if(isErr){
+    return target?`Failed ${v.ing.toLowerCase()} ${target}`:`Failed ${v.ing.toLowerCase()} ${display}`;
+  }
+  if(done) return target?`${v.ed} ${target}`:`${v.ed} ${display}`;
+  return target?`${v.ing} ${target}`:`${v.ing} ${display}`;
+}
+function _toolActionLabel(tc){
+  return esc(_toolActionLabelText(tc,{limit:112}));
+}
+const _toolWorklogSummaries={
+  shell:{running:'Running a command',runningMany:'Running {n} commands',done:'Ran a command',doneMany:'Ran {n} commands'},
+  read:{running:'Reading a file',runningMany:'Read {n} files',done:'Read a file',doneMany:'Read {n} files'},
+  list:{running:'Listing files',runningMany:'Listed {n} items',done:'Listed files',doneMany:'Listed {n} files'},
+  search:{running:'Searching workspace',runningMany:'Searching workspace {n} times',done:'Searched workspace',doneMany:'Searched workspace {n} times'},
+  web:{running:'Checking web',runningMany:'Checked web {n} times',done:'Checked the web',doneMany:'Checked the web {n} times'},
+  write:{running:'Updating a file',runningMany:'Updated {n} files',done:'Wrote a file',doneMany:'Wrote {n} files'},
+  delegate:{running:'Delegating a task',runningMany:'Delegated {n} tasks',done:'Delegated a task',doneMany:'Delegated {n} tasks'},
+  unknown:{running:'Running a tool',runningMany:'Running {n} tools',done:'Ran a tool',doneMany:'Ran {n} tools'},
+};
+function _toolWorklogActionParts(tc){
+  if(tc&&tc.nodeType===1){
+    const row=tc.classList&&tc.classList.contains('tool-card-row')?tc:tc.closest&&tc.closest('.tool-card-row');
+    const card=tc.classList&&tc.classList.contains('tool-card')?tc:(row&&row.querySelector('.tool-card'));
+    const actionLabel=(row&&row.dataset.toolActionLabel)||(card&&card.querySelector('.tool-card-name')&&card.querySelector('.tool-card-name').textContent.trim())||'';
+    const kind=(row&&row.dataset.toolKind)||'unknown';
+    const isDone=!((row&&row.dataset.toolDone)==='false'||(card&&card.classList.contains('tool-card-running')));
+    const isErr=(row&&row.dataset.toolError)==='true'||(card&&card.classList.contains('tool-card-error'));
+    return {kind,isDone,isErr,target:'',summary:_toolWorklogSummaries[kind]||_toolWorklogSummaries.unknown,actionLabel};
+  }
+  const kind=_toolActionKind(tc);
+  return {
+    kind,
+    isDone:tc&&tc.done!==false,
+    isErr:tc&&tc.is_error,
+    target:_toolTargetLabel(tc),
+    summary:_toolWorklogSummaries[kind]||_toolWorklogSummaries.unknown,
+    actionLabel:_toolActionLabelText(tc),
+  };
+}
+function _toolWorklogSummary(toolCalls, opts){
+  const cards=Array.from(toolCalls||[]).filter(tc=>tc);
+  if(!cards.length) return (opts&&opts.live)?'Running':'Worklog';
+  if(cards.length===1){
+    const part=_toolWorklogActionParts(cards[0]);
+    const fmt=part.summary||_toolWorklogSummaries.unknown;
+    const line=part.isDone?fmt.done:fmt.running;
+    return part.isErr?`${line}, 1 failed`:line;
+  }
+  const order=['shell','read','write','search','web','list','delegate','unknown'];
+  const runningCounts={}, doneCounts={};
+  let failed=0;
+  for(const tc of cards){
+    const part=_toolWorklogActionParts(tc);
+    const counts=part.isDone?doneCounts:runningCounts;
+    counts[part.kind]=(counts[part.kind]||0)+1;
+    if(part.isErr) failed+=1;
+  }
+  const emit=(counts,state)=>{
+    const out=[];
+    for(const kind of order){
+      const n=counts[kind]||0;
+      if(!n) continue;
+      const fmt=_toolWorklogSummaries[kind]||_toolWorklogSummaries.unknown;
+      if(n===1) out.push(state==='done'?fmt.done:fmt.running);
+      else out.push((state==='done'?fmt.doneMany:fmt.runningMany).replace('{n}',String(n)));
+    }
+    return out;
+  };
+  const lines=[...emit(runningCounts,'running'),...emit(doneCounts,'done')];
+  if(failed) lines.push(`${failed} failed`);
+  return lines.length?lines.map((line,idx)=>idx===0?line:line.charAt(0).toLowerCase()+line.slice(1)).join(', '):_toolActionLabel(cards[0]);
+}
+function _toolWorklogListEl(group){
+  if(!group) return null;
+  return group.querySelector('.tool-worklog-list') || group.querySelector('.activity-body') || group.querySelector('.tool-call-group-body');
+}
+function _toolWorklogToolsEl(group){
+  const list=_toolWorklogListEl(group);
+  if(!list) return null;
+  let tools=list.querySelector(':scope > .wl-step-tools[data-worklog-tools="1"]');
+  if(!tools){
+    tools=document.createElement('div');
+    tools.className='wl-step-tools tool-worklog-tools';
+    tools.setAttribute('data-worklog-tools','1');
+    list.appendChild(tools);
+  }
+  return tools;
+}
+function _liveToolStepEl(group){
+  const list=_toolWorklogListEl(group);
+  if(!list) return null;
+  const last=list.lastElementChild;
+  if(last&&last.classList&&last.classList.contains('wl-step-tools')&&last.getAttribute('data-worklog-tools')==='1') return last;
+  const tools=document.createElement('div');
+  tools.className='wl-step-tools tool-worklog-tools';
+  tools.setAttribute('data-worklog-tools','1');
+  list.appendChild(tools);
+  return tools;
+}
+function _directWorklogToolRows(list){
+  if(!list) return [];
+  const rows=[];
+  Array.from(list.children).forEach(child=>{
+    if(child.classList&&child.classList.contains('tool-card-row')) rows.push(child);
+    else if(child.classList&&(child.classList.contains('tool-worklog-tool-group')||child.classList.contains('tool-group'))) rows.push(...Array.from(child.querySelectorAll('.tool-card-row')));
+  });
+  return rows;
+}
+function _unwrapNestedToolGroups(tools){
+  if(!tools) return;
+  tools.querySelectorAll(':scope > .tool-worklog-tool-group,:scope > .tool-group').forEach(el=>el.remove());
+}
+function _syncToolRowsContainer(tools, isLiveWorklog){
+  if(!tools) return;
+  const rows=_directWorklogToolRows(tools);
+  _unwrapNestedToolGroups(tools);
+  rows.forEach(row=>{ if(row.parentElement) row.remove(); });
+  tools.querySelectorAll(':scope > .tool-card-row').forEach(row=>row.remove());
+  const shouldGroup=tools.classList.contains('wl-step-tools') && rows.length>1;
+  if(!shouldGroup){
+    rows.forEach(row=>tools.appendChild(row));
+    return;
+  }
+  const hasRunning=rows.some(row=>row&&row.dataset&&row.dataset.toolDone==='false');
+  const shouldOpen=_worklogDetailsExpandedDefault();
+  const group=document.createElement('div');
+  group.className='tool-group'+(shouldOpen?' open':' tool-worklog-tool-group-collapsed');
+  group.setAttribute('data-tool-worklog-tool-group','1');
+  let groupKey='group';
+  if(tools.parentElement){
+    const steps=Array.from(tools.parentElement.children).filter(child=>child.classList&&child.classList.contains('wl-step-tools')&&child.getAttribute('data-worklog-tools')==='1');
+    const stepIdx=steps.indexOf(tools);
+    if(stepIdx>=0) groupKey=`step:${stepIdx}`;
+  }
+  group.setAttribute('data-tool-group-disclosure-key',groupKey);
+  const summary=hasRunning?'Running':_toolWorklogSummary(rows,{live:isLiveWorklog, toolCount:rows.length});
+  group.innerHTML=`<button type="button" class="tool-group-head tool-worklog-tool-group-head" aria-expanded="${shouldOpen?'true':'false'}" onclick="_toggleToolWorklogGroup(this)"><span class="tg-sum tool-worklog-tool-group-label">${esc(summary)}</span><span class="tool-call-group-chevron tg-caret">${li('chevron-right',12)}</span></button><div class="tool-group-body tool-worklog-tool-group-body"><div class="tg-rows tool-worklog-tool-group-rows"></div></div>`;
+  const body=group.querySelector('.tg-rows');
+  rows.forEach(row=>body.appendChild(row));
+  tools.appendChild(group);
+}
+function _syncToolWorklogToolGroup(group){
+  const list=_toolWorklogListEl(group);
+  if(!list) return;
+  const isLiveWorklog=!!(group.getAttribute('data-live-tool-worklog-group')==='1' || group.getAttribute('data-live-tool-call-group')==='1');
+  const steps=Array.from(list.querySelectorAll(':scope > .wl-step-tools[data-worklog-tools="1"]'));
+  if(!steps.length){
+    const pendingRows=_directWorklogToolRows(list);
+    if(!pendingRows.length) return;
+    const tools=_toolWorklogToolsEl(group);
+    if(!tools) return;
+    pendingRows.forEach(row=>tools.appendChild(row));
+    _syncToolRowsContainer(tools,isLiveWorklog);
+    return;
+  }
+  steps.forEach(tools=>_syncToolRowsContainer(tools,isLiveWorklog));
+}
 function toolIcon(name){
+  const raw=String(name||'');
+  if(raw.startsWith('mcp__')||raw.startsWith('mcp.')) return li('plug');
   const icons={
     terminal:        li('terminal'),
     read_file:       li('file-text'),
@@ -7708,6 +10882,14 @@ function _toolCardPreviewText(tc, displaySnippet){
 function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='tool-card-row';
+  if(!row.dataset) row.dataset={};
+  row.dataset.toolName=String(tc&&tc.name||'tool');
+  row.dataset.toolKind=typeof _toolActionKind==='function'?_toolActionKind(tc):'unknown';
+  row.dataset.toolDone=String(tc&&tc.done!==false);
+  row.dataset.toolError=String(!!(tc&&tc.is_error));
+  row.dataset.toolActionLabel=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc):_toolDisplayName(tc);
+  const disclosureKey=typeof _toolDisclosureIdentity==='function'?_toolDisclosureIdentity(tc):'';
+  if(disclosureKey) row.setAttribute('data-tool-disclosure-key', disclosureKey);
   const icon=toolIcon(tc.name);
   const hasDetail=(tc.snippet&&tc.snippet!==tc.preview)||(tc.args&&Object.keys(tc.args).length>0);
   let displaySnippet='';
@@ -7726,7 +10908,8 @@ function buildToolCard(tc){
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
-  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
+  const openClass=hasDetail&&_worklogDetailsExpandedDefault()?' open':'';
+  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'')+openClass;
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
   let displayName=_toolDisplayName(tc);
   let previewText=_toolCardPreviewText(tc, displaySnippet);
@@ -7742,7 +10925,7 @@ function buildToolCard(tc){
       </div>
       ${hasDetail?`<div class="tool-card-detail">
         ${tc.args&&Object.keys(tc.args).length?`<div class="tool-card-args">${
-          Object.entries(tc.args).map(([k,v])=>`<div><span class="tool-arg-key">${esc(k)}</span> <span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
+          Object.entries(tc.args).map(([k,v])=>`<div class="tool-arg-pair"><span class="tool-arg-key">${esc(k)}</span><span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
           <pre>${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?`<code class="diff-block" data-highlighted="1">${_colorDiffLines(displaySnippet)}</code>`:esc(displaySnippet)}</pre>
@@ -7750,6 +10933,15 @@ function buildToolCard(tc){
         </div>`:''}
       </div>`:''}
     </div>`;
+  row._tcData = tc;
+  // Durable classification flags: _tcData (a JS property) does NOT survive the
+  // outerHTML/innerHTML snapshot+restore the live tool-call group uses on session
+  // switch/restore, which would make _syncToolCallGroupSummary re-count restored
+  // memory/skill rows as generic tools and silently drop the suffix. Mirror the
+  // classification onto data-* attributes so it survives serialization. (#3544)
+  if(_isMemorySave(tc)){row.setAttribute('data-memory-save','1');row.removeAttribute('data-skill-update');}
+  else if(_isSkillUpdate(tc)){row.setAttribute('data-skill-update','1');row.removeAttribute('data-memory-save');}
+  else {row.removeAttribute('data-memory-save');row.removeAttribute('data-skill-update');}
   return row;
 }
 
@@ -7794,19 +10986,54 @@ function _toggleToolDiff(btn){
 
 function _syncToolCallGroupSummary(group){
   if(!group) return;
-  const cards=Array.from(group.querySelectorAll('.tool-card-row .tool-card'));
+  if(group.getAttribute('data-tool-worklog-group')==='1') _syncToolWorklogToolGroup(group);
+  const cards=Array.from((_toolWorklogListEl(group)||group).querySelectorAll('.tool-card-row .tool-card,.tool-card-row.tl'));
   const toolCount=cards.length;
-  const label=group.querySelector('.tool-call-group-label');
+  const label=group.querySelector('.tool-worklog-label') || group.querySelector('.tool-call-group-label');
+  const isWorklogGroup=!!(group.getAttribute('data-tool-worklog-group')==='1');
+  const isLiveWorklog=!!(group.getAttribute('data-live-tool-worklog-group')==='1' || group.getAttribute('data-live-tool-call-group')==='1');
+  const hasRunningTool=cards.some(card=>card.classList.contains('tool-card-running'));
+  if(isWorklogGroup){
+    if(hasRunningTool) group.setAttribute('data-tool-worklog-running','1');
+    else group.removeAttribute('data-tool-worklog-running');
+  }
   const durationEl=group.querySelector('.tool-call-group-duration');
   if(label){
-    if(group.getAttribute('data-live-tool-call-group')==='1'){
-      label.textContent=toolCount?`Activity: ${toolCount} tool${toolCount===1?'':'s'}`:'Activity · Running';
-    }else if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
-    else label.textContent='Activity';
+    if(group.getAttribute('data-run-activity-group')==='1'){
+      label.textContent=toolCount?_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount}):'Running';
+    }else if(isWorklogGroup){
+      label.textContent=_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount, labelOnly:!toolCount&&isLiveWorklog});
+      if(!label.textContent) label.textContent=isLiveWorklog?'Running':'Worklog';
+    }else{
+      const rows=Array.from(group.querySelectorAll('.tool-card-row'));
+      // Prefer the live _tcData classification; fall back to the durable data-*
+      // flags for rows restored from an HTML snapshot (which drops JS properties).
+      const isMem=r=>_isMemorySave(r._tcData)||r.getAttribute('data-memory-save')==='1';
+      const isSkill=r=>_isSkillUpdate(r._tcData)||r.getAttribute('data-skill-update')==='1';
+      const memCount=rows.filter(isMem).length;
+      const skillCount=rows.filter(r=>!isMem(r)&&isSkill(r)).length;
+      const otherCount=Math.max(0, toolCount-memCount-skillCount);
+      let suffix='';
+      if(memCount) suffix+=`, ${memCount} ${memCount===1?'memory':'memories'} saved`;
+      if(skillCount) suffix+=`, ${skillCount} ${skillCount===1?'skill':'skills'} updated`;
+      const toolsPart=otherCount?`${otherCount} tool${otherCount===1?'':'s'}`:'';
+      if(group.getAttribute('data-live-tool-call-group')==='1'){
+        if(toolsPart) label.textContent=`Activity: ${toolsPart}${suffix}`;
+        else if(suffix) label.textContent=`Activity: ${suffix.slice(2)}`;
+        else label.textContent='Running';
+      }else if(toolsPart||suffix){
+        label.textContent=toolsPart?`Activity: ${toolsPart}${suffix}`:`Activity: ${suffix.slice(2)}`;
+      }else label.textContent='Activity';
+    }
     label.setAttribute('data-sweep-label', label.textContent);
   }
   if(durationEl){
-    if(group.getAttribute('data-live-tool-call-group')==='1'){
+    if(group.getAttribute('data-run-activity-group')==='1'){
+      const durationText=_formatTurnDuration(group.dataset.turnDuration);
+      const label=durationText?'':_activityElapsedLabel(group);
+      durationEl.textContent=durationText?` Done in ${durationText}`:(label?` Working for ${label}`:'');
+      durationEl.style.display=durationEl.textContent?'':'none';
+    }else if(group.getAttribute('data-live-tool-call-group')==='1'){
       const activeText=_activityElapsedLabel(group);
       const progressText=_activityLiveProgressLabel(group);
       if(activeText) group.setAttribute('data-active-turn-elapsed',activeText);
@@ -7815,7 +11042,7 @@ function _syncToolCallGroupSummary(group){
       durationEl.style.display=durationEl.textContent?'':'none';
     }else{
       const durationText=_formatTurnDuration(group.dataset.turnDuration);
-      durationEl.textContent=durationText?`Done in ${durationText}`:'';
+      durationEl.textContent=durationText?` Done in ${durationText}`:'';
       durationEl.style.display=durationText?'':'none';
     }
   }
@@ -7875,6 +11102,9 @@ function appendLiveToolCard(tc){
   // Guard: ignore if session was switched. Prevents stale tool events from
   // a previous session's SSE stream from manipulating the new session's DOM.
   if(!S.session||!S.activeStreamId) return;
+  const opts=arguments[1]||{};
+  if(opts.sessionId&&S.session.session_id!==opts.sessionId) return;
+  if(opts.streamId&&S.activeStreamId!==opts.streamId) return;
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -7884,89 +11114,156 @@ function appendLiveToolCard(tc){
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return;
-  const tid=tc.tid||'';
-  if(!isSimplifiedToolCalling()){
-    // Update existing card in place (tool_complete after tool_start)
+  const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
+  const children=Array.from(inner.children);
+  const burstId=tc.activityBurstId!==undefined&&tc.activityBurstId!==null&&String(tc.activityBurstId)!=='0'?String(tc.activityBurstId):'';
+  const segmentSeq=tc.activitySegmentSeq!==undefined&&tc.activitySegmentSeq!==null&&String(tc.activitySegmentSeq)!=='0'?String(tc.activitySegmentSeq):'';
+  const segmentAnchor=segmentSeq?_findLiveAssistantAnchorForSegment(inner, segmentSeq):null;
+  const burstAnchor=burstId?_findLatestVisibleLiveAssistantByBurst(inner, burstId):null;
+  const anchor=segmentAnchor||burstAnchor||_findLatestVisibleLiveAssistant(inner)||children.filter(el=>el.matches('[data-live-assistant="1"]')).pop();
+  const effectiveSegmentSeq=anchor&&anchor.getAttribute?anchor.getAttribute('data-live-segment-seq')||segmentSeq:segmentSeq;
+  if(isTransparentStream()){
+    const insertTransparentRow=(row)=>{
+      const liveFooter=inner.querySelector('#liveRunStatus');
+      if(liveFooter&&liveFooter.parentElement===inner){
+        inner.insertBefore(row,liveFooter);
+      }else{
+        inner.appendChild(row);
+      }
+    };
     if(tid){
-      const existing=inner.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
+      const existing=inner.querySelector(`.transparent-event-row[data-live-tid="${CSS.escape(tid)}"],.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
       if(existing){
-        const replacement=buildToolCard(tc);
+        const replacement=_decorateTransparentEventRow(buildToolCard(tc),{
+          type:'tool',
+          name:tc&&tc.name,
+          status:_transparentToolStatus(tc),
+          toolCall:tc,
+          segmentSeq:effectiveSegmentSeq,
+          burstId,
+        });
         replacement.dataset.liveTid=tid;
+        // Preserve the user's expand state + detail tab across tool completion:
+        // the running row is rebuilt fresh on toolComplete, which would otherwise
+        // snap an expanded row shut and reset its Full/Output tab. The detail-mode
+        // is preserved regardless of open state (a user who picked Output then
+        // collapsed should still get Output on re-open). (Trifecta O-Bug2 + r2.)
+        try{
+          const _oldCard=existing.querySelector('.tool-card,.thinking-card');
+          const _newCard=replacement.querySelector('.tool-card,.thinking-card');
+          const _oldDetail=existing.querySelector('.tool-card-detail');
+          const _newDetail=replacement.querySelector('.tool-card-detail');
+          const _mode=_oldDetail&&_oldDetail.getAttribute('data-transparent-detail-mode');
+          if(_newDetail&&_mode){
+            const _tab=_newDetail.querySelector(`.transparent-detail-mode[data-mode="${_mode}"]`);
+            if(_tab) _setTransparentDetailMode(_tab,_mode);
+          }
+          if(_oldCard&&_newCard&&_oldCard.classList.contains('open')){
+            _setTransparentCardOpen(_newCard,true);
+          }
+        }catch(_){ /* non-fatal: completion still renders, just collapsed */ }
         existing.replaceWith(replacement);
-        // Keep #toolRunningRow alive — dots stay until text starts streaming
-        // or the next tool fires (which replaces them). Removing here caused
-        // a gap between tool completion and the first text token arriving.
+        _syncTransparentEventControls(turn);
+        _moveLiveRunStatusToTurnEnd();
+        if(typeof scrollIfPinned==='function') scrollIfPinned();
         return;
       }
     }
-    const row=buildToolCard(tc);
+    const row=_decorateTransparentEventRow(buildToolCard(tc),{
+      type:'tool',
+      name:tc&&tc.name,
+      status:_transparentToolStatus(tc),
+      toolCall:tc,
+      segmentSeq:effectiveSegmentSeq,
+      burstId,
+    });
     if(tid) row.dataset.liveTid=tid;
-    // Insert after whichever comes last: the current live assistant segment or
-    // the last tool card. This handles both cases:
-    //   text → tool1 → tool2  (no text between tools: anchor is card1)
-    //   text1 → tool1 → text2 → tool2  (text between tools: anchor is text2)
-    const children=Array.from(inner.children);
-    // Include .thinking-card-row so tool cards land AFTER a finalized thinking
-    // card, not between the text segment and thinking.
-    const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-card-row,.thinking-card-row')).pop();
-    if(anchor) anchor.insertAdjacentElement('afterend', row);
-    else inner.appendChild(row);
-    // Add a 3-dot waiting indicator below the tool card so there's visual
-    // feedback while the tool is running. Removed when text starts streaming
-    // (ensureAssistantRow) or when tool_complete fires.
-    const oldWait=$('toolRunningRow');if(oldWait)oldWait.remove();
-    const waitRow=document.createElement('div');
-    waitRow.id='toolRunningRow';
-    waitRow.className='assistant-segment';
-    waitRow.innerHTML='<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
-    row.insertAdjacentElement('afterend', waitRow);
+    insertTransparentRow(row);
+    _syncTransparentEventControls(turn);
+    _moveLiveRunStatusToTurnEnd();
     if(typeof scrollIfPinned==='function') scrollIfPinned();
     return;
   }
-  const children=Array.from(inner.children);
-  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')).pop();
-  const group=ensureActivityGroup(inner,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
-  const body=group.querySelector('.tool-call-group-body');
-  const toolName=_toolDisplayName(tc);
-  const toolEventId=tid?`tool-${tid}`:`tool-${String(tc.name||'tool').replace(/[^a-z0-9_-]/gi,'_')}`;
-  const toolDone=tc.done!==false;
-  _appendActivityEvent(group,{
-    id:toolEventId,
-    kind:'tool',
-    label:toolDone?`Tool finished: ${toolName}`:`Running tool: ${toolName}`,
-    detail:tc.preview||tc.snippet||'',
-    status:toolDone?(tc.is_error?'error':'done'):'waiting',
-    ts:_activityNowSeconds(),
+  if(anchor) _removeEmptyLiveWorklogShells(inner);
+  const group=ensureLiveWorklogContainer(inner,{
+    anchor,
+    activityKey:_activityKeyForLiveTurn(),
+    segmentSeq:effectiveSegmentSeq,
+    burstId,
   });
-  const waiting=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"]');
-  if(waiting&&!toolDone){
-    const labelEl=waiting.querySelector('.agent-activity-status-label');
-    const detailEl=waiting.querySelector('.agent-activity-status-detail');
-    if(labelEl) labelEl.textContent='Waiting on tool result';
-    if(detailEl) detailEl.textContent=`${_activityProgressLabelForToolName(toolName)}: ${toolName}. Results will appear here.`;
-  }
-  // Update existing card in place (tool_complete after tool_start)
+  const list=_liveToolStepEl(group);
+  if(!list) return;
+  // toolComplete can replace the existing live card with the same tid.
   if(tid){
-    const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
+    const existing=group.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
     if(existing){
       const replacement=buildToolCard(tc);
       replacement.dataset.liveTid=tid;
       existing.replaceWith(replacement);
       _syncToolCallGroupSummary(group);
+      _moveLiveRunStatusToTurnEnd();
+      if(typeof scrollIfPinned==='function') scrollIfPinned();
       return;
     }
   }
+  const worklog=_toolWorklogListEl(group) || list;
+  const waiting=worklog.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"] .agent-activity-status-label');
+  if(waiting&&tc.done===false) waiting.textContent='Waiting on tool result';
   const row=buildToolCard(tc);
   if(tid) row.dataset.liveTid=tid;
-  body.appendChild(row);
+  list.appendChild(row);
   _syncToolCallGroupSummary(group);
+  _moveLiveRunStatusToTurnEnd();
   if(typeof scrollIfPinned==='function') scrollIfPinned();
+}
+
+function _findLatestLiveAssistantByBurst(inner, burstId){
+  if(!inner || !burstId) return null;
+  const candidates=Array.from(inner.querySelectorAll(`[data-live-assistant="1"][data-activity-burst-id="${CSS.escape(String(burstId))}"]`))
+    .filter(el=>el.isConnected!==false);
+  return candidates[candidates.length-1] || null;
+}
+function _findLatestLiveAssistantBySegment(inner, segmentSeq){
+  if(!inner || !segmentSeq) return null;
+  const candidates=Array.from(inner.querySelectorAll(`[data-live-assistant="1"][data-live-segment-seq="${CSS.escape(String(segmentSeq))}"]`)).filter(el=>el.isConnected!==false);
+  return candidates[candidates.length-1] || null;
+}
+function _liveAssistantHasVisibleText(el){
+  if(!el||!el.matches||!el.matches('[data-live-assistant="1"]')) return false;
+  const body=el.querySelector&&el.querySelector('.msg-body');
+  const text=(body?body.textContent:el.textContent)||el.dataset&&el.dataset.rawText||'';
+  return !!String(text||'').trim();
+}
+function _findPreviousVisibleLiveAssistant(inner, beforeNode){
+  if(!inner) return null;
+  let node=beforeNode&&beforeNode.previousElementSibling;
+  while(node){
+    if(_liveAssistantHasVisibleText(node)) return node;
+    node=node.previousElementSibling;
+  }
+  return null;
+}
+function _findLatestVisibleLiveAssistant(inner){
+  if(!inner) return null;
+  const candidates=Array.from(inner.querySelectorAll('[data-live-assistant="1"]')).filter(el=>el.isConnected!==false&&_liveAssistantHasVisibleText(el));
+  return candidates[candidates.length-1] || null;
+}
+function _findLatestVisibleLiveAssistantByBurst(inner, burstId){
+  if(!inner || !burstId) return null;
+  const candidates=Array.from(inner.querySelectorAll(`[data-live-assistant="1"][data-activity-burst-id="${CSS.escape(String(burstId))}"]`))
+    .filter(el=>el.isConnected!==false&&_liveAssistantHasVisibleText(el));
+  return candidates[candidates.length-1] || null;
+}
+function _findLiveAssistantAnchorForSegment(inner, segmentSeq){
+  const exact=_findLatestLiveAssistantBySegment(inner, segmentSeq);
+  if(exact&&_liveAssistantHasVisibleText(exact)) return exact;
+  return _findPreviousVisibleLiveAssistant(inner, exact) || _findLatestVisibleLiveAssistant(inner) || exact;
 }
 
 function clearLiveToolCards(){
   if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
   const inner=_assistantTurnBlocks($('liveAssistantTurn'));
-  if(inner) inner.querySelectorAll('.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]').forEach(el=>el.remove());
+  if(inner) inner.querySelectorAll('.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]:not(.transparent-event-row)').forEach(el=>el.remove());
   // Reset the per-turn user expand intent so the next turn starts at the
   // default collapsed state (#1298).
   if(typeof _clearLiveActivityUserIntent==='function') _clearLiveActivityUserIntent();
@@ -7974,6 +11271,41 @@ function clearLiveToolCards(){
   // leftover cards were inserted there before this refactor took effect.
   const container=$('liveToolCards');
   if(container){container.innerHTML='';container.style.display='none';}
+}
+function _removeEmptyLiveWorklogShells(inner){
+  if(!inner) return;
+  inner.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-worklog-shell="1"],.tool-call-group[data-live-worklog-shell="1"]').forEach(group=>{
+    if(!group.querySelector('.tool-card-row,.wl-reason,.agent-activity-thinking')) group.remove();
+  });
+}
+function ensureLiveWorklogShell(){
+  if(!S.session||!S.activeStreamId) return null;
+  $('emptyState').style.display='none';
+  if(!isSimplifiedToolCalling()){
+    appendThinking();
+    return $('thinkingRow');
+  }
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    if(S.session) turn.dataset.sessionId=S.session.session_id;
+    $('msgInner').appendChild(turn);
+  }
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return null;
+  if(isTransparentStream()){
+    _moveLiveRunStatusToTurnEnd();
+    scrollIfPinned();
+    return blocks;
+  }
+  const group=ensureLiveWorklogContainer(blocks,{
+    activityKey:_activityKeyForLiveTurn(),
+  });
+  if(!group) return null;
+  _moveLiveRunStatusToTurnEnd();
+  scrollIfPinned();
+  return group;
 }
 
 // ── Edit + Regenerate ──
@@ -8306,8 +11638,33 @@ function loadDiffInline(container){
   });
 }
 
+const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
+
+function buildCsvTablePreview(path, text){
+  if(typeof text!=='string') return {errorKey:'csv_error'};
+  if(text.length>CSV_MAX_SIZE) return {errorKey:'csv_too_large'};
+  const rows=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(r=>r.trim());
+  if(rows.length<2) return {errorKey:'csv_no_data'};
+  // Auto-detect separator (comma, semicolon, tab)
+  // Heuristic: uses the first separator found in the header row. Edge case:
+  // quoted fields containing commas without non-quoted commas in the header
+  // could cause misdetection — acceptable trade-off for a preview renderer.
+  const firstLine=rows[0];
+  const separators=[',',';','\t'];
+  const sep=separators.find(s=>firstLine.includes(s))||',';
+  const headers=rows[0].split(sep).map(c=>c.trim().replace(/^["']|["']$/g,''));
+  const bodyRows=rows.slice(1).map(r=>'<tr>'+r.split(sep).map(c=>`<td>${esc(c.trim().replace(/^["']|["']$/g,''))}</td>`).join('')+'</tr>').join('');
+  const headerRow=headers.map(h=>`<th>${esc(h)}</th>`).join('');
+  return {
+    html:`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())} <span style="opacity:.5;font-size:11px">${t('csv_header_note')}</span></div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`,
+  };
+}
+
+function _csvPreviewErrorHtml(path, errorKey){
+  return `<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
+}
+
 function loadCsvInline(container){
-  const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
   const root=container||document;
   root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
@@ -8315,29 +11672,11 @@ function loadCsvInline(container){
     fetch('api/media?path='+encodeURIComponent(path))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
-        if(text.length>CSV_MAX_SIZE){
-          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_too_large')}</span></div>`;
-          return;
-        }
-        const rows=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(r=>r.trim());
-        if(rows.length<2){
-          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_no_data')}</span></div>`;
-          return;
-        }
-        // Auto-detect separator (comma, semicolon, tab)
-        // Heuristic: uses the first separator found in the header row. Edge case:
-        // quoted fields containing commas without non-quoted commas in the header
-        // could cause misdetection — acceptable trade-off for a preview renderer.
-        const firstLine=rows[0];
-        const separators=[',',';','\t'];
-        let sep=separators.find(s=>firstLine.includes(s))||',';
-        const headers=rows[0].split(sep).map(c=>c.trim().replace(/^["']|["']$/g,''));
-        const bodyRows=rows.slice(1).map(r=>'<tr>'+r.split(sep).map(c=>`<td>${esc(c.trim().replace(/^["']|["']$/g,''))}</td>`).join('')+'</tr>').join('');
-        const headerRow=headers.map(h=>`<th>${esc(h)}</th>`).join('');
-        el.outerHTML=`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())} <span style="opacity:.5;font-size:11px">${t('csv_header_note')}</span></div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
+        const preview=buildCsvTablePreview(path, text);
+        el.outerHTML=preview.html||_csvPreviewErrorHtml(path, preview.errorKey||'csv_error');
       })
       .catch(()=>{
-        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_error')}</span></div>`;
+        el.outerHTML=_csvPreviewErrorHtml(path, 'csv_error');
       });
   });
 }
@@ -8484,7 +11823,7 @@ function loadPdfInline(container){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
-          return pdfjsLib.getDocument({data:buf}).promise;
+          return pdfjsLib.getDocument({data:buf, isEvalSupported:false}).promise;
         })
         .then(pdf=>{
           if(!pdf) return;
@@ -8517,16 +11856,14 @@ function loadPdfInline(container){
       loadPdf(window._pdfjsLib);
     } else if(!_pdfjsLoading){
       _pdfjsLoading=true;
+      const _pdfSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
+      const _pdfWorker='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
+      const _pdfBlob=new Blob([`import*as p from'${_pdfSrc}';p.GlobalWorkerOptions.workerSrc='${_pdfWorker}';window._pdfjsLib=p;window._pdfjsReady=true;window.dispatchEvent(new Event('pdfjs-ready'));`],{type:'application/javascript'});
       const s=document.createElement('script');
-      s.src='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
       s.type='module';
-      s.textContent=`
-        import * as pdfjsLib from '${s.src}';
-        pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
-        window._pdfjsLib=pdfjsLib;
-        window._pdfjsReady=true;
-        window.dispatchEvent(new Event('pdfjs-ready'));
-      `;
+      const _pdfBlobUrl=URL.createObjectURL(_pdfBlob);
+      s.src=_pdfBlobUrl;
+      s.onload=()=>URL.revokeObjectURL(_pdfBlobUrl);
       document.head.appendChild(s);
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
@@ -8684,7 +12021,7 @@ function renderKatexBlocks(container,options){
 
 function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
-  const openClass=isSimplifiedToolCalling()?'':' open';
+  const openClass=_worklogDetailsExpandedDefault()?' open':'';
   return (clean&&String(clean).trim())
     ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
@@ -8710,12 +12047,21 @@ function finalizeThinkingCard(){
   // stream that started it, not the session currently displayed.
   const _guardTurn = $('liveAssistantTurn');
   if(_guardTurn && S.session && _guardTurn.dataset.sessionId !== S.session.session_id) return;
+  if(isTransparentStream()){
+    const row=$('thinkingRow');
+    if(row){
+      row.removeAttribute('id');
+      row.removeAttribute('data-thinking-active');
+      row.removeAttribute('data-live-thinking');
+    }
+    return;
+  }
   if(!isSimplifiedToolCalling()){
     const row=$('thinkingRow');
     if(!row) return;
     // If the row is still just a spinner (no thinking content rendered),
     // remove it entirely — it's the initial waiting dots.
-    const hasContent=row.querySelector('.thinking-card') || row.classList.contains('thinking-card-row');
+    const hasContent=!!row.querySelector('.thinking-card');
     if(!hasContent && row.getAttribute('data-thinking-active')==='1'){
       row.remove();
       return;
@@ -8733,19 +12079,14 @@ function finalizeThinkingCard(){
     return;
   }
   const turn=$('liveAssistantTurn');
-  const group=turn&&turn.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
+  const group=turn&&turn.querySelector('.live-worklog[data-live-tool-call-group="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"]');
   if(group){
-    // Respect the user's explicit expand intent (#1298) — only force-collapse
-    // when the user has not manually expanded this turn's activity group, or
-    // has manually collapsed it. Otherwise the panel snaps shut whenever new
-    // activity arrives, even mid-read.
-    if(_liveActivityUserExpanded !== true && !(window._activityFeedExpandedDefault === true && _liveActivityUserExpanded !== false)){
-      group.classList.add('tool-call-group-collapsed');
-      const summary=group.querySelector('.tool-call-group-summary');
-      if(summary) summary.setAttribute('aria-expanded','false');
-    }
-    const active=turn.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
-    if(active) active.removeAttribute('data-thinking-active');
+    const activeReason=turn.querySelector('.wl-reason[data-worklog-reason-active="1"]');
+    if(activeReason) activeReason.removeAttribute('data-worklog-reason-active');
+    turn.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(active=>{
+      active.removeAttribute('data-thinking-active');
+      active.removeAttribute('data-live-thinking');
+    });
     _syncToolCallGroupSummary(group);
   }
 }
@@ -8753,124 +12094,137 @@ function appendThinking(text='', options){
   // Guard: ignore if session was switched during an async SSE stream.
   // The old stream's reasoning events can still fire after switch;
   // without this check they would pollute the new session's DOM.
+  options=options||{};
   const allowPendingPlaceholder=!!(options&&options.pending===true);
   if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
-  $('emptyState').style.display='none';
-  let turn=$('liveAssistantTurn');
-  if(!turn){
-    turn=_createAssistantTurn();
-    turn.id='liveAssistantTurn';
-    if(S.session) turn.dataset.sessionId=S.session.session_id;  // see #1366
-    $('msgInner').appendChild(turn);
-  }
-  const blocks=_assistantTurnBlocks(turn);
-  if(!blocks) return;
+  const empty=$('emptyState');
+  if(empty) empty.style.display='none';
   if(!isSimplifiedToolCalling()){
     let row=$('thinkingRow');
     if(!row){
       row=document.createElement('div');
-      row.className='assistant-segment';
+      row.id='thinkingRow';
+      row.className='thinking-card-row';
+      const inner=$('msgInner');
+      if(inner) inner.appendChild(row);
+    }
+    row.setAttribute('data-thinking-active','1');
+    _renderThinkingInto(row,text);
+    if(typeof scrollIfPinned==='function') scrollIfPinned();
+    return;
+  }
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    if(S.session) turn.dataset.sessionId=S.session.session_id;
+    const inner=$('msgInner');
+    if(inner) inner.appendChild(turn);
+  }
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return;
+  const clean=_sanitizeThinkingDisplayText(text);
+  if(clean&&window._showThinking!==false){
+    const segmentSeq=options.segmentSeq!==undefined&&options.segmentSeq!==null?String(options.segmentSeq):'';
+    const burstId=options.burstId!==undefined&&options.burstId!==null?String(options.burstId):'';
+    const thinkingKey=String(options.thinkingKey||(
+      segmentSeq?`segment:${segmentSeq}`:
+      burstId?`burst:${burstId}`:
+      'turn'
+    ));
+    if(isTransparentStream()){
+      let row=blocks.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
+      if(!row){
+        row=_thinkingActivityNode(clean, false);
+        row.id='thinkingRow';
+        row.setAttribute('data-live-thinking','1');
+        row.setAttribute('data-live-thinking-key',thinkingKey);
+        if(segmentSeq) row.setAttribute('data-live-segment-seq',segmentSeq);
+        if(burstId) row.setAttribute('data-activity-burst-id',burstId);
+        blocks.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(el=>{
+          if(el!==row){
+            el.removeAttribute('id');
+            el.removeAttribute('data-thinking-active');
+            el.removeAttribute('data-live-thinking');
+          }
+        });
+        row.setAttribute('data-thinking-active','1');
+        const liveFooter=blocks.querySelector('#liveRunStatus');
+        if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(row,liveFooter);
+        else blocks.appendChild(row);
+      }else{
+        _renderThinkingInto(row, clean);
+      }
       row.id='thinkingRow';
       row.setAttribute('data-thinking-active','1');
-      // Insert after whichever comes last: a live assistant segment or a tool card.
-      // This mirrors appendLiveToolCard's anchor logic so thinking always appears
-      // in the right position in the interleaved sequence.
-      // Also skip #toolRunningRow (dots) — thinking should go before dots, not after.
-      const allChildren=Array.from(blocks.children);
-      const anchor=allChildren.filter(el=>
-        el.id!=='toolRunningRow' &&
-        el.matches('[data-live-assistant="1"],.tool-card-row')
-      ).pop();
-      if(anchor) anchor.insertAdjacentElement('afterend', row);
-      else blocks.appendChild(row);
+      _decorateTransparentEventRow(row,{
+        type:'thinking',
+        text:clean,
+        preview:clean,
+        segmentSeq,
+        burstId,
+      });
+      _syncTransparentEventControls(turn);
+      if(typeof scrollIfPinned==='function') scrollIfPinned();
+      return;
     }
-    const clean=_sanitizeThinkingDisplayText(text);
-    const hasClean=!!String(clean||'').trim();
-    row.className=hasClean?'assistant-segment thinking-card-row':'assistant-segment';
-    _renderThinkingInto(row,text);
-    scrollIfPinned();
-    // Auto-scroll the thinking card body to bottom if the user is watching
-    // (scroll pinned). If the user scrolled up to read history, leave it alone.
-    if(_scrollPinned){
-      const body=row&&row.querySelector('.thinking-card-body');
-      if(body) body.scrollTop=body.scrollHeight;
+    const group=ensureLiveWorklogContainer(blocks,{
+      activityKey:options.activityKey||(S.activeStreamId?'live:'+S.activeStreamId:null),
+    });
+    const list=_toolWorklogListEl(group);
+    if(list){
+      let row=list.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
+      if(!row){
+        row=_thinkingActivityNode(clean, false, thinkingKey);
+        row.setAttribute('data-live-thinking','1');
+        row.setAttribute('data-live-thinking-key',thinkingKey);
+        if(segmentSeq) row.setAttribute('data-live-segment-seq',segmentSeq);
+        if(burstId) row.setAttribute('data-activity-burst-id',burstId);
+        list.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(el=>{
+          if(el!==row){
+            el.removeAttribute('data-thinking-active');
+            el.removeAttribute('data-live-thinking');
+          }
+        });
+        row.setAttribute('data-thinking-active','1');
+        list.appendChild(row);
+      }else{
+        _renderThinkingInto(row, clean);
+      }
+      row.setAttribute('data-thinking-active','1');
+      _syncToolCallGroupSummary(group);
     }
-    return;
   }
-  const thinkingText=String(text||'').trim()||'Thinking…';
-  const cleanThinking=_sanitizeThinkingDisplayText(thinkingText);
-  const allChildren=Array.from(blocks.children);
-  const anchor=allChildren.filter(el=>
-    el.id!=='toolRunningRow' &&
-    el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row')
-  ).pop();
-  const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
-  const body=group&&group.querySelector('.tool-call-group-body');
-  if(!body) return;
-  if(!cleanThinking||cleanThinking==='Thinking…'){
-    const hasRunningTool=!!body.querySelector('.tool-card.tool-card-running');
-    const hasToolCard=!!body.querySelector('.tool-card-row');
-    let label;
-    let detail;
-    if(!S.activeStreamId && options && options.pending){
-      label='Starting agent';
-      detail='Creating the stream and sending your message…';
-    }else if(hasRunningTool){
-      label='Waiting on tool result';
-      detail=_activityWaitingDetail(group,label);
-    }else if(hasToolCard){
-      label='Waiting on model';
-      detail=_activityWaitingDetail(group,label);
-    }else{
-      label='Waiting for first model token';
-      detail='Stream connected; no model output has arrived yet.';
-    }
-    _appendActivityEvent(group,{id:'thinking-placeholder',kind:'waiting',label,detail,status:'waiting',ts:_activityNowSeconds()});
-    const active=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
-    if(active) active.removeAttribute('data-thinking-active');
-    _syncToolCallGroupSummary(group);
-    scrollIfPinned();
-    return;
-  }
-  const placeholder=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"]');
-  if(placeholder) placeholder.remove();
-  let row=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
-  if(!row){
-    const thinkingCards=Array.from(body.querySelectorAll('.agent-activity-thinking'));
-    row=thinkingCards.pop()||null;
-    if(row) row.setAttribute('data-thinking-active','1');
-  }
-  if(!row){
-    row=_thinkingActivityNode(thinkingText, false);
-    row.setAttribute('data-thinking-active','1');
-    body.appendChild(row);
-  }else{
-    _renderThinkingInto(row,thinkingText);
-  }
-  _activityMarkObserved(group);
-  _syncToolCallGroupSummary(group);
-  scrollIfPinned();
-  if(_scrollPinned){
-    const body=row&&row.querySelector('.thinking-card-body');
-    if(body) body.scrollTop=body.scrollHeight;
-  }
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
-function updateThinking(text=''){appendThinking(text);}
+function updateThinking(text='', options){appendThinking(text, options);}
 function removeThinking(){
+  if(isTransparentStream()){
+    const liveTurn=$('liveAssistantTurn');
+    const blocks=_assistantTurnBlocks(liveTurn);
+    if(blocks) blocks.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(row=>{
+      row.removeAttribute('id');
+      row.removeAttribute('data-thinking-active');
+      row.removeAttribute('data-live-thinking');
+    });
+    if(liveTurn&&blocks&&!blocks.children.length) liveTurn.remove();
+    return;
+  }
   if(!isSimplifiedToolCalling()){
     const el=$('thinkingRow');
     if(el) el.remove();
-    const turn=$('liveAssistantTurn');
-    const blocks=_assistantTurnBlocks(turn);
-    if(turn&&blocks&&!blocks.children.length) turn.remove();
+    const liveTurn=$('liveAssistantTurn');
+    const blocks=_assistantTurnBlocks(liveTurn);
+    if(liveTurn&&blocks&&!blocks.children.length) liveTurn.remove();
     return;
   }
   const turn=$('liveAssistantTurn');
   const blocks=_assistantTurnBlocks(turn);
   if(blocks) blocks.querySelectorAll('.agent-activity-thinking').forEach(el=>el.remove());
-  if(blocks) blocks.querySelectorAll('.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
+  if(blocks) blocks.querySelectorAll('.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+  if(blocks) blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
     _syncToolCallGroupSummary(group);
-    if(!group.querySelector('.tool-card-row,.agent-activity-thinking')){
+    if(!group.querySelector('.tool-card-row,.agent-activity-thinking,.wl-reason')){
       if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
       group.remove();
     }
@@ -9151,6 +12505,16 @@ function _copyTextWithFallback(text, successMsg, failurePrefix){
   return Promise.resolve();
 }
 
+function _workspaceCreateTargetLabel(targetDir){
+  return targetDir && targetDir !== '.' ? targetDir : t('workspace_root');
+}
+
+function _workspaceJoinTargetPath(targetDir, name){
+  const cleanName=String(name||'').trim();
+  if(!cleanName) return '';
+  return (!targetDir||targetDir==='.') ? cleanName : `${targetDir}/${cleanName}`;
+}
+
 function _showWorkspaceRootContextMenu(e){
   document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
   const menu=document.createElement('div');
@@ -9159,6 +12523,20 @@ function _showWorkspaceRootContextMenu(e){
   const vw=window.innerWidth,vh=window.innerHeight;
   menu.style.left=(e.clientX+160>vw?e.clientX-170:e.clientX)+'px';
   menu.style.top=(e.clientY+80>vh?e.clientY-80:e.clientY)+'px';
+
+  menu.appendChild(_workspaceContextMenuItem(t('new_file'),async()=>{
+    menu.remove();
+    await promptNewFile('.');
+  }));
+
+  menu.appendChild(_workspaceContextMenuItem(t('new_folder'),async()=>{
+    menu.remove();
+    await promptNewFolder('.');
+  }));
+
+  const createSep=document.createElement('hr');
+  createSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(createSep);
 
   menu.appendChild(_workspaceContextMenuItem(t('reveal_in_finder'),async()=>{
     menu.remove();
@@ -9496,6 +12874,21 @@ function _showFileContextMenu(e, item){
   const vw=window.innerWidth,vh=window.innerHeight;
   menu.style.left=(e.clientX+140>vw?e.clientX-150:e.clientX)+'px';
   menu.style.top=(e.clientY+100>vh?e.clientY-100:e.clientY)+'px';
+  const targetDir=item.type==='dir' ? item.path : _workspaceParentDir(item.path);
+
+  menu.appendChild(_workspaceContextMenuItem(t('new_file'),async()=>{
+    menu.remove();
+    await promptNewFile(targetDir);
+  }));
+
+  menu.appendChild(_workspaceContextMenuItem(t('new_folder'),async()=>{
+    menu.remove();
+    await promptNewFolder(targetDir);
+  }));
+
+  const createSep=document.createElement('hr');
+  createSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(createSep);
 
   // Rename
   const renameItem=document.createElement('div');
@@ -9543,10 +12936,6 @@ function _showFileContextMenu(e, item){
         await navigator.clipboard.writeText(abs);
         showToast(t('path_copied'));
       }catch(clipErr){
-        // Fallback for browsers where Clipboard API is gated (older Safari,
-        // non-secure contexts). Use the legacy execCommand path against a
-        // hidden textarea — this is the same pattern boot.js uses for the
-        // "Copy" buttons on code blocks.
         const ta=document.createElement('textarea');
         ta.value=abs;
         ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
@@ -9564,8 +12953,6 @@ function _showFileContextMenu(e, item){
   };
   menu.appendChild(copyPathItem);
 
-  // Download as zip — only for directories. Streams the folder contents
-  // through /api/folder/download which builds the zip on the fly.
   if(item.type==='dir'){
     const dlItem=document.createElement('div');
     dlItem.textContent=t('download_folder');
@@ -9581,7 +12968,6 @@ function _showFileContextMenu(e, item){
     menu.appendChild(dlItem);
   }
 
-  // Divider + Delete
   const sep=document.createElement('hr');
   sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
   menu.appendChild(sep);
@@ -9643,9 +13029,7 @@ async function deleteWorkspaceFile(relPath, name){
   }catch(e){setStatus(t('delete_failed')+e.message);}
 }
 
-async function promptNewFile(){
-  // If no active session but a default workspace is configured, auto-create
-  // a session bound to it so workspace actions work on the blank new-chat page.
+async function promptNewFile(targetDir = S.currentDir || '.'){
   if(!S.session){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws) return;
@@ -9655,19 +13039,24 @@ async function promptNewFile(){
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
-  const name=await showPromptDialog({title:t('new_file_prompt'),placeholder:'filename.txt',confirmLabel:t('create')});
-  if(!name||!name.trim())return;
-  const relPath=S.currentDir==='.'?name.trim():(S.currentDir+'/'+name.trim());
+  const targetLabel=_workspaceCreateTargetLabel(targetDir);
+  const name=await showPromptDialog({
+    title:t('new_file_prompt_title', targetLabel),
+    placeholder:'filename.txt',
+    confirmLabel:t('create')
+  });
+  if(!name||!name.trim()) return;
+  const relPath=_workspaceJoinTargetPath(targetDir,name);
   try{
     await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,content:''})});
     showToast(t('created')+name.trim());
+    delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);
     openFile(relPath);
   }catch(e){setStatus(t('create_failed')+e.message);}
 }
 
-async function promptNewFolder(){
-  // Same auto-create-session logic as promptNewFile for the blank page.
+async function promptNewFolder(targetDir = S.currentDir || '.'){
   if(!S.session){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws) return;
@@ -9677,20 +13066,26 @@ async function promptNewFolder(){
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;
-  const name=await showPromptDialog({title:t('new_folder_prompt'),placeholder:'folder-name',confirmLabel:t('create')});
-  if(!name||!name.trim())return;
-  const relPath=S.currentDir==='.'?name.trim():(S.currentDir+'/'+name.trim());
+  const targetLabel=_workspaceCreateTargetLabel(targetDir);
+  const name=await showPromptDialog({
+    title:t('new_folder_prompt_title', targetLabel),
+    placeholder:'folder-name',
+    confirmLabel:t('create')
+  });
+  if(!name||!name.trim()) return;
+  const relPath=_workspaceJoinTargetPath(targetDir,name);
   try{
     await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
     showToast(t('folder_created')+name.trim());
+    delete S._dirCache[targetDir || '.'];
     await loadDir(S.currentDir);
-    // Offer to add the new folder as a space (#782)
-    const absPath=S.session.workspace?((S.currentDir==='.'?S.session.workspace:S.session.workspace+'/'+S.currentDir)+'/'+name.trim()):null;
+    const absPath=S.session.workspace?(targetDir==='.'?`${S.session.workspace}/${name.trim()}`:`${S.session.workspace}/${targetDir}/${name.trim()}`):null;
     if(absPath){
       const addAsSpace=await showConfirmDialog({
         title:t('folder_add_as_space_title'),
         message:t('folder_add_as_space_msg'),
         confirmLabel:t('folder_add_as_space_btn'),
+        cancelLabel:t('status_no'),
         focusCancel:true
       });
       if(addAsSpace){
