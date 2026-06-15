@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.434] — 2026-06-15 — Release OU (reject symlinked skill files on save)
+
+### Fixed
+
+- **Saving a skill no longer writes through a symlinked `SKILL.md`.** `_handle_skill_save` now rejects a symlinked skill file with a 400 instead of following it and overwriting the link's target — extending the workspace symlink hardening (#4217 / #4234) to the skills surface. (#4240)
+
 ## [v0.51.433] — 2026-06-15 — Release OT (reject symlinked entries in /api/file/save, #4234)
 
 ### Fixed
