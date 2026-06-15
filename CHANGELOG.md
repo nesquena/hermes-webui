@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+## [v0.51.422] — 2026-06-14 — Release OI (optional Todos tab in workspace panel, #3564)
+
 ### Added
 
 - **Optional Todos tab in the workspace panel (off by default).** A new Settings toggle ("Show Todos tab in workspace panel") adds a Todos tab alongside Files and Artifacts in the right-side workspace panel, mirroring the active session's task list with status icons (completed, in-progress, pending, cancelled). The existing sidebar Todos panel remains available regardless of the setting. (#3564)
