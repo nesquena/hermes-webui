@@ -31,6 +31,7 @@ SOURCE_LABELS = {
     'slack': 'Slack',
     'telegram': 'Telegram',
     'tool': 'Tool',
+    'tui': 'TUI',
     'webui': 'WebUI',
     'weixin': 'Weixin',
 }
@@ -47,7 +48,7 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
 
     if raw == 'webui':
         session_source = 'webui'
-    elif raw == 'cli':
+    elif raw in {'cli', 'tui'}:
         session_source = 'cli'
     elif raw in MESSAGING_SOURCES:
         session_source = 'messaging'
@@ -176,7 +177,12 @@ def is_cli_session_row(row: dict) -> bool:
         return False
     if source == "cli":
         return True
-    if source_tag == "cli" or raw_source == "cli" or source_name == "cli" or source_label == "cli":
+    if (
+        source_tag in {"cli", "tui"}
+        or raw_source in {"cli", "tui"}
+        or source_name in {"cli", "tui"}
+        or source_label in {"cli", "tui"}
+    ):
         return True
 
     # Legacy imported CLI rows may only be marked as CLI in sidebar metadata.
@@ -201,6 +207,14 @@ def is_cli_session_row_visible(row: dict) -> bool:
     message_count = _as_positive_int(row.get("actual_message_count") or row.get("message_count"))
     if message_count <= 0:
         return False
+
+    if "tui" in {
+        _normalize_source_name(row.get("source")),
+        _normalize_source_name(row.get("source_tag")),
+        _normalize_source_name(row.get("raw_source")),
+        _normalize_source_name(row.get("source_label")),
+    }:
+        return True
 
     if _has_cli_lineage(row):
         return True
@@ -375,10 +389,20 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         ):
             if key in tip:
                 merged[key] = tip[key]
-        if not merged.get('title'):
-            merged['title'] = tip.get('title')
-        if not merged.get('source'):
-            merged['source'] = tip.get('source')
+        if str(tip.get('source') or '').strip().lower() == 'tui':
+            # TUI continuation rows are user-visible session segments (#6, #17,
+            # ...), not opaque compression snapshots. Keep navigation pointed at
+            # the latest tip and show that tip's title so the newest conversation
+            # can be found by its visible TUI name.
+            if tip.get('title'):
+                merged['title'] = tip.get('title')
+            if tip.get('source'):
+                merged['source'] = tip.get('source')
+        else:
+            if not merged.get('title'):
+                merged['title'] = tip.get('title')
+            if not merged.get('source'):
+                merged['source'] = tip.get('source')
         merged['_lineage_root_id'] = row['id']
         merged['_lineage_tip_id'] = tip['id']
         merged['_compression_segment_count'] = segment_count
