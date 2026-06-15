@@ -16602,6 +16602,8 @@ def _handle_skill_save(handler, body):
         return bad(handler, "Invalid skill path")
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_file = skill_dir / "SKILL.md"
+    if skill_file.is_symlink():
+        return bad(handler, "Cannot save to a symlinked skill file")
     skill_file.write_text(body["content"], encoding="utf-8")
     return j(handler, {"ok": True, "name": skill_name, "path": str(skill_file)})
 
