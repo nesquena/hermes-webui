@@ -23,6 +23,7 @@ def test_busy_hint_bar_css():
     assert ".busy-hint-bar" in src
     assert ".busy-hint-bar[hidden]" in src
     assert ".busy-hint-pill" in src
+    assert ".busy-hint-pill[hidden]" in src
 
 
 def test_busy_hint_pills_have_actions():

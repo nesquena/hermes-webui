@@ -1383,6 +1383,7 @@
   .busy-hint-bar{display:flex;align-items:center;gap:4px;padding:4px 10px;flex-wrap:wrap;border-top:1px solid var(--border);background:var(--bg);}
   .busy-hint-bar[hidden]{display:none;}
   .busy-hint-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:0.75em;cursor:pointer;transition:background .15s,color .15s;white-space:nowrap;}
+  .busy-hint-pill[hidden]{display:none;}
   .busy-hint-pill:hover{background:var(--hover);color:var(--fg);}
   .busy-hint-pill--new-chat{margin-left:auto;}
   .approval-btn-icon{font-size:13px;line-height:1;}
