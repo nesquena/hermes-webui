@@ -4510,6 +4510,9 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
             idx += 1
             continue
         if idx == 0 and existing_timestamp is not None and existing_timestamp > timestamp:
+            # With no surviving sidecar/context row before this slot, a real
+            # interruption rescue is indistinguishable from a compacted-out old
+            # prompt; prefer avoiding no-watermark resurrection in that shape.
             return False
         while (
             idx < len(messages)

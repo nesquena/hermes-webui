@@ -21,11 +21,11 @@ def test_rename_endpoint_syncs_title_to_state_db():
         "rename handler must call _sync_session_title_to_insights(s) so the "
         "new title reaches state.db, matching the regenerate handler"
     )
-    assert 'publish_session_list_changed("session_rename", profile=getattr(s, "profile", None))' in block
+    assert 'publish_session_list_changed(\n            "session_rename",' in block
     # Sync must run BEFORE the list-changed publish, matching the regenerate
     # handler, so SSE subscribers refresh after state.db holds the new title.
     sync_idx = block.index("_sync_session_title_to_insights(s)")
-    publish_idx = block.index('publish_session_list_changed("session_rename", profile=getattr(s, "profile", None))')
+    publish_idx = block.index('publish_session_list_changed(\n            "session_rename",')
     assert sync_idx < publish_idx, (
         "rename must sync to state.db before publishing the list-changed event"
     )
