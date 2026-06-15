@@ -12702,6 +12702,7 @@ function _renderTreeItems(container, entries, depth){
 
     const isLk = item.type === 'symlink';
     const isDirLike = item.type === 'dir' || (isLk && item.is_dir);
+    const isFileLike = !isDirLike;
     el.dataset.wsIsDir = String(isDirLike);
 
     if(isDirLike){
@@ -12801,16 +12802,16 @@ function _renderTreeItems(container, entries, depth){
     };
     el.appendChild(nameEl);
 
-    // Size -- only for files
-    if(item.type==='file'&&item.size){
+    // Size -- for real files and symlinks that resolve to files
+    if(isFileLike&&item.size){
       const sizeEl=document.createElement('span');
       sizeEl.className='file-size';
       sizeEl.textContent=`${(item.size/1024).toFixed(1)}k`;
       el.appendChild(sizeEl);
     }
 
-    // Delete button -- for files and directories
-    if(item.type==='file'){
+    // Delete button -- for file-like rows and directory-like rows
+    if(isFileLike){
       const del=document.createElement('button');
       del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
       del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceFile(item.path,item.name);};

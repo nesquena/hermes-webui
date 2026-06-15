@@ -33,6 +33,11 @@ class TestIsDirLikeLocals:
         assert "const isDirLike = item.type === 'dir' || (isLk && item.is_dir);" in block, \
             "isDirLike local must be declared inside the per-item loop"
 
+    def test_isFileLike_local_declared(self):
+        block = _render_block()
+        assert "const isFileLike = !isDirLike;" in block, \
+            "isFileLike local must be declared for file-like symlink handling"
+
     def test_wsIsDir_dataset_set(self):
         block = _render_block()
         assert "el.dataset.wsIsDir = String(isDirLike);" in block, \
@@ -82,3 +87,15 @@ class TestDragDropGuard:
     def test_workspace_drag_guard_widened(self):
         assert '[data-ws-is-dir="true"]' in WS_JS, \
             "workspace.js drag-over guard must also exclude [data-ws-is-dir='true'] rows"
+
+
+class TestSymlinkFileAffordances:
+    def test_size_badge_uses_isFileLike(self):
+        block = _render_block()
+        assert "if(isFileLike&&item.size){" in block, \
+            "symlink-to-file rows must render the file-size badge"
+
+    def test_delete_button_uses_isFileLike(self):
+        block = _render_block()
+        assert "if(isFileLike){" in block, \
+            "symlink-to-file rows must render the inline delete button"
