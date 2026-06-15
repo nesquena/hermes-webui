@@ -3,35 +3,45 @@
 
 ## [Unreleased]
 
+### Internal
+
+- **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259)
+
 ## [v0.51.444] — 2026-06-15 — Release PE (refresh sidebar session list on uncommitted writes + settings changes)
 
 ### Fixed
 
 - **The sidebar session list now refreshes when new sessions are written but not yet checkpointed, and when settings change.** When CLI-session visibility is on, the `/api/sessions` response is cached and invalidated by a fingerprint of its source files. That fingerprint stamped the main `state.db` and the session index but not the SQLite write-ahead log (`state.db-wal`) — so a freshly-written CLI/agent session that was still in the WAL (not yet checkpointed into the main db file) could be missed until the next checkpoint, leaving the sidebar stale. The fingerprint now also stamps `state.db-wal` and the settings file, so those changes invalidate the cache immediately. Invalidation stays scoped to the CLI-session cache keys. (#4268)
 
+## [v0.51.443] — 2026-06-15 — Release PD (scope session by-id reads + exports to active profile)
+
 ### Security
 
 - **Direct session reads and exports now honor the active-profile boundary, like the session list already does.** `/api/sessions` scopes its rows to the request's active Hermes profile, but two by-id endpoints did not: `GET /api/session?session_id=…` (transcript/metadata read, including the CLI-session fallback) and `GET /api/session/export?session_id=…` (full transcript JSON download) loaded a session purely by id. A stale, leaked, or guessed session id from another profile could therefore disclose that profile's transcript or export. Both paths now apply the same `_profiles_match(...)` check and return the same `404` used for missing sessions (so they don't reveal foreign-profile session existence). Default/legacy-root profile aliasing is preserved, and the `/api/sessions` list path is unchanged. (#3982, #3991)
+
+## [v0.51.442] — 2026-06-15 — Release PC (require auth for passkey enrollment)
 
 ### Security
 
 - **First passkey enrollment is now gated like first-password onboarding.** On a `HERMES_WEBUI_PASSKEY=1` instance with auth not yet configured, a remote unauthenticated caller could register the *first* passkey credential and claim the account before the legitimate operator. The passkey registration endpoints now apply the same onboarding gate as first-password setup: only loopback/private-network requests (or an explicit `HERMES_WEBUI_ONBOARDING_OPEN=1` operator opt-in) can bootstrap the first passkey, and remote/tunnel callers are rejected. The locality check uses the raw socket address (forwarded headers are ignored unless `HERMES_WEBUI_TRUST_FORWARDED_FOR=1`), so it can't be spoofed via `X-Forwarded-For`/`Host`. Once auth is enabled, additional enrollment requires a valid authenticated session. The passkey *login* path is unchanged. (#4171)
 
+## [v0.51.441] — 2026-06-15 — Release PB (honest notification-permission controls)
+
 ### Fixed
 
 - **Notification permission controls now reflect the real browser state (#4118).** The "Enable notifications" button in Settings was a silent no-op once permission had already been granted or denied — it gave no feedback and didn't show the current state. It now reflects the live `Notification.permission` value: the button is disabled with an explanatory tooltip/aria-label when permission is already granted, surfaces the denied/unsupported states honestly, and the granted branch confirms with a toast instead of doing nothing.
+
+## [v0.51.440] — 2026-06-15 — Release PA (advanced per-model options + auxiliary model routing)
 
 ### Added
 
 - **Advanced model options and auxiliary model routing in Settings → Preferences.** A gear button next to the main model selector opens a "Main model options" dialog (Base URL override, Extra body JSON merged into the request, API key override — all the fields that actually take effect). An "Auxiliary Models" section lets you route side-tasks (vision, compression, web-extract, session-search, approval, MCP, title-generation, skills-hub, curator, kanban-decomposer, profile-describer, triage-specifier) to specific models/providers, each with its own advanced options (including per-task timeout / download-timeout / max-concurrency). API keys are write-only (never echoed back), `extra_body` must be a valid JSON object (malformed input is rejected with a 400), and the main model's `extra_body` is now passed through to the agent at request time via `request_overrides`. (#3097)
 
+## [v0.51.439] — 2026-06-15 — Release OZ (Insights dashboard polish)
+
 ### Changed
 
 - **Dashboard aesthetic refinements on the Insights page (#766).** Model names in the usage table render bold and cost/token figures use tabular-nums for cleaner column alignment; the per-model table columns are tightened. Error alerts (gateway-offline, cron needs-attention) now use the error accent color with a slightly heavier border, while the informational cron-script-job banner stays amber — sharpening the info-vs-problem distinction. Minor profile-card and workspace-divider spacing polish. (#766)
-
-### Internal
-
-- **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259)
 
 ## [v0.51.438] — 2026-06-15 — Release OY (model cost/health comparison table on Insights)
 
