@@ -62,8 +62,21 @@ def test_model_health_i18n_keys_exist_in_locale_blocks():
         "insights_model_health_replacement",
         "insights_model_health_cost_per_m",
     ]
-    for key in keys:
-        assert I18N_JS.count(f"{key}:") >= 8, f"missing locale entries for {key}"
+    # Split i18n.js into per-locale blocks (top-level "  <code>: {" entries) and
+    # assert EVERY locale carries all four keys — a `count >= N` check silently
+    # tolerates a locale missing the keys (English fallback). #3634 pt gap.
+    import re
+
+    locale_starts = [
+        (m.group(1), m.start())
+        for m in re.finditer(r"""^  ['"]?([A-Za-z_-]+)['"]?: \{$""", I18N_JS, re.MULTILINE)
+    ]
+    assert len(locale_starts) >= 13, f"expected 13+ locale blocks, found {len(locale_starts)}"
+    bounds = locale_starts + [("__end__", len(I18N_JS))]
+    for i, (code, start) in enumerate(locale_starts):
+        block = I18N_JS[start : bounds[i + 1][1]]
+        for key in keys:
+            assert f"{key}:" in block, f"locale '{code}' is missing {key}"
 
 
 def test_model_health_table_css_is_responsive_and_contained():

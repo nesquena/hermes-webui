@@ -12313,6 +12313,10 @@ const LOCALES = {
     insights_token_breakdown: 'Token Breakdown',  // TODO: translate
     insights_tokens: 'Tokens',  // TODO: translate
     insights_total: 'Total',  // TODO: translate
+    insights_model_health_title: 'Model health comparison',  // TODO: translate
+    insights_model_health_provider: 'Provider',  // TODO: translate
+    insights_model_health_replacement: 'Replacement guide',  // TODO: translate
+    insights_model_health_cost_per_m: 'Cost / 1M',  // TODO: translate
     settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
     settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
     voice_error: 'Voice not supported in this browser',  // TODO: translate
