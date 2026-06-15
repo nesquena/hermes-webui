@@ -72,10 +72,27 @@ def test_fresh_install_no_settings_file_defaults_on(settings_file):
 
 
 def test_fresh_install_onboarding_not_completed_defaults_on(settings_file):
-    """Settings file exists but onboarding not completed (mid-first-run) → True."""
+    """Settings file with ONLY a not-yet-completed onboarding flag (still
+    mid-first-run, no other user state) → True."""
     _write(settings_file, {"onboarding_completed": False})
     loaded = config.load_settings()
     assert loaded["show_cli_sessions"] is True
+
+
+def test_established_cli_user_without_onboarding_flag_grandfathered_off(settings_file):
+    """A CLI-configured user who tweaked a WebUI setting (e.g. theme) but never
+    ran the onboarding wizard is still an ESTABLISHED install — grandfather OFF.
+
+    Keying the grandfather only on onboarding_completed would miss this user and
+    silently flip their sidebar on (Opus #4230 review finding). Any persisted
+    setting other than a falsy onboarding flag marks the install established.
+    """
+    _write(settings_file, {"onboarding_completed": False, "theme": "dark"})
+    loaded = config.load_settings()
+    assert loaded["show_cli_sessions"] is False, (
+        "an install with persisted user settings (even without onboarding "
+        "completed) must be grandfathered OFF, not flipped on"
+    )
 
 
 def test_established_install_absent_key_grandfathered_off(settings_file):

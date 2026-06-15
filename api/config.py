@@ -6650,12 +6650,21 @@ def load_settings() -> dict:
                 # Grandfather established installs OFF for show_cli_sessions (#3988).
                 # The default flipped True so NEW users see CLI/TUI/messaging
                 # sessions without hunting for the toggle — but an existing user
-                # who already completed onboarding and never opted in should not
-                # have their sidebar silently change. If the saved settings predate
-                # the flip (onboarding done, key absent), pin it to the old default.
-                if (
-                    "show_cli_sessions" not in stored
-                    and bool(stored.get("onboarding_completed"))
+                # who never opted in should not have their sidebar silently change.
+                # Treat the install as established (and pin the old False default)
+                # when show_cli_sessions is absent AND the file already carries
+                # real user state — either onboarding was completed, or some
+                # setting OTHER than a not-yet-completed onboarding flag has been
+                # persisted. Keying on "has saved user state" (not just
+                # onboarding_completed) also covers a CLI-configured user who
+                # tweaked a WebUI setting before running the wizard. A genuinely
+                # new / still-mid-onboarding file falls through to the True default.
+                _established_keys = [
+                    k for k in stored
+                    if k not in ("show_cli_sessions", "onboarding_completed")
+                ]
+                if "show_cli_sessions" not in stored and (
+                    bool(stored.get("onboarding_completed")) or _established_keys
                 ):
                     settings["show_cli_sessions"] = False
         except Exception:

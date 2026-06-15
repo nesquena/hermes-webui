@@ -14850,15 +14850,18 @@ def _handle_file_move(handler, body):
         # returning a confusing 400 for a move that actually happened.
         ws_root_resolved = ws_root.resolve()
         source = safe_resolve(ws_root, body["path"])
-        if not source.exists():
-            return bad(handler, "File not found", 404)
-        # Reject a symlinked SOURCE entry. safe_resolve() follows the final
-        # symlink, so source.name/source.parent would point at the link's
-        # TARGET, not the dragged entry — moving link.txt would silently move
-        # dir/real.txt and leave link.txt dangling. Detect the symlink on the
-        # lexically-requested final component (lstat, no-follow) and refuse.
+        # Reject a symlinked SOURCE entry BEFORE the follow-based exists() check.
+        # safe_resolve() follows the final symlink, so source.name/source.parent
+        # would point at the link's TARGET, not the dragged entry — moving
+        # link.txt would silently move dir/real.txt and leave link.txt dangling.
+        # Detect the symlink on the lexically-requested final component (lstat,
+        # no-follow) and refuse; running this before exists() also means a
+        # dangling symlink is rejected (400) rather than misclassified as 404
+        # (matches the delete/rename ordering).
         if (ws_root / body["path"]).is_symlink():
             return bad(handler, "Cannot move a symlinked entry")
+        if not source.exists():
+            return bad(handler, "File not found", 404)
         dest_dir_raw = (body.get("dest_dir") or ".").strip()
         if not dest_dir_raw:
             dest_dir_raw = "."
