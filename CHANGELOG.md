@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Interrupted WebUI session reconciliation now preserves state.db-only user prompts that precede a newer sidecar tail.** If recovery writes a later assistant/error tail to the sidecar while the triggering user prompt only exists in `state.db`, `/api/session` inserts that missing user turn chronologically instead of dropping it as an old replay row. (#2361)
+
 ## [v0.51.424] — 2026-06-15 — Release OK (visible-message tail pagination, #4069)
 
 ### Fixed

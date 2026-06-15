@@ -228,6 +228,36 @@ def test_state_db_full_replay_does_not_append_after_sidecar_tail():
     assert merged[-1]["content"] == "opened browser preview"
 
 
+def test_state_db_only_user_prompt_before_sidecar_tail_is_reinserted_chronologically():
+    """A missing state.db-only user prompt must not be hidden by a newer sidecar tail.
+
+    Interruption/restart recovery can persist a newer assistant/error tail in
+    the WebUI sidecar while the user prompt that triggered it only exists in
+    state.db. The append-only reconciliation should preserve that state-backed
+    user turn and place it before the newer sidecar tail instead of treating
+    every state row older than the sidecar tail as replay.
+    """
+    sidecar_messages = [
+        {"role": "user", "content": "old user", "timestamp": 100.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 101.0},
+        {"role": "assistant", "content": "newer recovery tail", "timestamp": 103.0},
+    ]
+    state_messages = [
+        {"role": "user", "content": "old user", "timestamp": 100.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 101.0},
+        {"role": "user", "content": "missing prompt", "timestamp": 102.0},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+
+    assert [m["content"] for m in merged] == [
+        "old user",
+        "old assistant",
+        "missing prompt",
+        "newer recovery tail",
+    ]
+
+
 def test_state_db_middle_segment_replay_does_not_append_after_sidecar_tail():
     """A replayed state.db segment from the middle must not be appended after the tail."""
     sidecar_messages = [

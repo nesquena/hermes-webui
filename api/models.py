@@ -4462,6 +4462,20 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     return state_messages[best_len:]
 
 
+def _insert_state_message_chronologically(messages: list, msg: dict) -> None:
+    """Insert a state.db-only row before newer sidecar rows when possible."""
+    timestamp = _message_timestamp_as_float(msg)
+    if timestamp is None:
+        messages.append(msg)
+        return
+    for idx, existing in enumerate(messages):
+        existing_timestamp = _message_timestamp_as_float(existing)
+        if existing_timestamp is not None and existing_timestamp > timestamp:
+            messages.insert(idx, msg)
+            return
+    messages.append(msg)
+
+
 def merge_session_messages_append_only(
     sidecar_messages: list,
     state_messages: list,
@@ -4655,6 +4669,13 @@ def merge_session_messages_append_only(
                 else:
                     continue
             else:
+                if msg.get("role") == "user" and _session_message_content_key(msg) not in seen_content_keys:
+                    seen_message_keys.add(key)
+                    seen_dedup_keys.add(dedup_key)
+                    seen_content_keys.add(_session_message_content_key(msg))
+                    seen_visible_keys.add(visible_key)
+                    _insert_state_message_chronologically(merged_messages, msg)
+                    continue
                 continue
         seen_message_keys.add(key)
         seen_dedup_keys.add(dedup_key)
