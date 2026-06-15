@@ -14,6 +14,7 @@ PATH DISCOVERY:
     4. System python3 as a last resort
 """
 import json
+import multiprocessing
 import os
 import pathlib
 import shutil
@@ -31,6 +32,16 @@ if not (3, 11) <= sys.version_info[:2] <= (3, 13):
         "instead of an unsupported system python.",
         returncode=3,
     )
+
+WINDOWS = sys.platform == "win32"
+requires_fcntl = pytest.mark.skipif(
+    WINDOWS,
+    reason="requires fcntl-backed nonblocking pipe reads",
+)
+requires_fork = pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    reason="requires multiprocessing fork",
+)
 
 # ── Repo root discovery ────────────────────────────────────────────────────
 # conftest.py lives at <repo>/tests/conftest.py
