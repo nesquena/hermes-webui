@@ -3,7 +3,11 @@
 
 ## [Unreleased]
 
-## [v0.51.440] — 2026-06-15 — Release PA (advanced per-model options + auxiliary model routing)
+## [v0.51.441] — 2026-06-15 — Release PB (honest notification-permission controls)
+
+### Fixed
+
+- **Notification permission controls now reflect the real browser state (#4118).** The "Enable notifications" button in Settings was a silent no-op once permission had already been granted or denied — it gave no feedback and didn't show the current state. It now reflects the live `Notification.permission` value: the button is disabled with an explanatory tooltip/aria-label when permission is already granted, surfaces the denied/unsupported states honestly, and the granted branch confirms with a toast instead of doing nothing.
 
 ### Added
 
