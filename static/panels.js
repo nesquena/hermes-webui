@@ -3441,6 +3441,30 @@ async function copyLogsAll() {
 }
 
 // ── Insights panel ──
+const STATIC_MODEL_HEALTH_ROWS = [
+  {id:'openai/gpt-5.4-mini', provider:'OpenAI', inputCostPerM:0.25, outputCostPerM:2.00, replacement:'Default economical general-purpose model'},
+  {id:'openai/gpt-5.4', provider:'OpenAI', inputCostPerM:2.00, outputCostPerM:10.00, replacement:'Use for complex synthesis; fall back to Mini for routine turns'},
+  {id:'anthropic/claude-sonnet-4.5', provider:'Anthropic', inputCostPerM:3.00, outputCostPerM:15.00, replacement:'Strong coding and analysis option; use Mini for low-risk chat'},
+  {id:'google/gemini-2.5-pro', provider:'Google', inputCostPerM:1.25, outputCostPerM:10.00, replacement:'Long-context research option; use Flash for speed-sensitive work'},
+  {id:'google/gemini-2.5-flash', provider:'Google', inputCostPerM:0.30, outputCostPerM:2.50, replacement:'Low-latency replacement for lighter multimodal or research turns'},
+];
+
+function _renderModelHealthCost(row) {
+  const input = Number(row.inputCostPerM || 0);
+  const output = Number(row.outputCostPerM || 0);
+  return `$${input.toFixed(2)} / $${output.toFixed(2)}`;
+}
+
+function _renderStaticModelHealthTable() {
+  const rows = STATIC_MODEL_HEALTH_ROWS.map(row => `<div class="insights-table-row">
+    <span class="insights-model-name" title="${esc(row.id)}">${esc(row.id)}</span>
+    <span>${esc(row.provider)}</span>
+    <span>${esc(_renderModelHealthCost(row))}</span>
+    <span class="insights-model-health-replacement">${esc(row.replacement)}</span>
+  </div>`).join('');
+  return `<details class="insights-card insights-model-health-card"><summary><span class="insights-card-title">${esc(t('insights_model_health_title'))}</span></summary><div class="insights-table insights-model-health-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_health_provider'))}</span><span>${esc(t('insights_model_health_cost_per_m'))}</span><span>${esc(t('insights_model_health_replacement'))}</span></div>${rows}</div></details>`;
+}
+
 async function loadInsights(animate) {
   const box = $('insightsContent');
   const refreshBtn = $('insightsRefreshBtn');
@@ -3684,6 +3708,7 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   } else {
     modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-empty">${esc(t('insights_no_usage_data'))}</div></div>`;
   }
+  const modelHealthHtml = _renderStaticModelHealthTable();
 
   // Activity by day of week
   let dowHtml = '';
@@ -3737,6 +3762,7 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
       ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
     </div>
     ${dailyHtml}
+    ${modelHealthHtml}
     <div class="insights-row insights-usage-grid">
       ${tokenCards}
       ${modelsHtml}
