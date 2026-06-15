@@ -983,13 +983,6 @@ def _provider_has_key(provider_id: str) -> bool:
         env_value = os.getenv(env_var)
         if _provider_value_counts_as_api_key(provider_id, env_value):
             return True
-        try:
-           from agent.credential_pool import load_pool
-           pool = load_pool(provider_id)   # provider_id == "custom:bothub" for custom
-           if pool and pool.has_credentials():
-               return True
-        except Exception:
-           pass
         # Fall back to legacy env-var aliases (e.g. lmstudio's pre-#1500
         # LMSTUDIO_API_KEY name) so existing users don't lose detection
         # after an env-var rename.  See _PROVIDER_ENV_VAR_ALIASES.
@@ -998,7 +991,18 @@ def _provider_has_key(provider_id: str) -> bool:
                 return True
             if _provider_value_counts_as_api_key(provider_id, os.getenv(alias)):
                 return True
-    
+    # Check credential pool — covers custom providers registered via
+    # `hermes auth add` which store keys in auth.json (not config.yaml).
+    # Must be outside the `if env_var:` block above: custom providers
+    # (custom:bothub, etc.) have no env var, so that block is skipped.
+    try:
+        from agent.credential_pool import load_pool
+        pool = load_pool(provider_id)
+        if pool and pool.has_credentials():
+            return True
+    except ImportError:
+        pass
+
     cfg = get_config()
     # Check model.api_key — only match if this provider is the active one.
     # Previously this checked globally, causing all providers to show
@@ -1080,12 +1084,12 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         from agent.credential_pool import load_pool
         pool = load_pool(provider_id)
         if pool and pool.has_credentials():
-            entry = pool.peek()
+            entry = pool.select()
             if entry:
                 key = getattr(entry, "access_token", "") or getattr(entry, "runtime_api_key", "")
                 if key:
                     return key
-    except Exception:
+    except ImportError:
         pass
     return None
 
@@ -2369,7 +2373,7 @@ def get_providers() -> dict[str, Any]:
                     pool = load_pool(cp_id)
                     if pool and pool.has_credentials():
                         cp_has_key = True
-                except Exception:
+                except ImportError:
                     pass
             providers.append({
                 "id": cp_id,

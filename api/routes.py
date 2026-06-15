@@ -12224,13 +12224,6 @@ def _handle_live_models(handler, parsed):
                 # Fallback: try credential pool for base_url + api_key
                 if (not _base_url or not _api_key) and provider.startswith("custom:"):
                     try:
-                        import sys as _lmsys
-                        import os as _lmos
-                        _lm_agent_dir = _lmos.path.join(_lmos.path.dirname(_lmos.path.dirname(_lmos.path.abspath(__file__))),
-                                                       "..", "..", ".hermes", "hermes-agent")
-                        _lm_agent_dir = _lmos.path.normpath(_lm_agent_dir)
-                        if _lm_agent_dir not in _lmsys.path:
-                            _lmsys.path.insert(0, _lm_agent_dir)
                         from agent.credential_pool import load_pool as _lpool
                         _lm_pool = _lpool(provider)
                         if _lm_pool and _lm_pool.has_credentials():
@@ -12240,7 +12233,7 @@ def _handle_live_models(handler, parsed):
                                     _api_key = _lm_entry.runtime_api_key
                                 if not _base_url:
                                     _base_url = str(getattr(_lm_entry, "base_url", "") or "").strip()
-                    except Exception:
+                    except ImportError:
                         pass
                 if _base_url and _api_key:
                     try:

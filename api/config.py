@@ -5262,7 +5262,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                                     _cp_api_key = _entry.runtime_api_key
                                 if not _cp_base_url:
                                     _cp_base_url = str(getattr(_entry, "base_url", "") or "").strip()
-                    except Exception:
+                    except ImportError:
                         pass
 
                 if _slug and _cp_base_url:
