@@ -178,6 +178,12 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     """Translate Hermes Gateway tool-progress SSE payloads to WebUI events."""
     if not isinstance(payload, dict):
         return None
+    event_type = str(payload.get("event") or "").strip().lower()
+    if event_type == "reasoning.available":
+        reason_delta = _gateway_reasoning_delta(payload)
+        if not reason_delta:
+            return None
+        return "reasoning", {"text": reason_delta}
     name = str(payload.get("tool") or payload.get("name") or payload.get("function_name") or "").strip()
     if not name:
         return None
@@ -190,13 +196,13 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
         return None
     status = str(payload.get("status") or "running").strip().lower()
     tid = payload.get("toolCallId") or payload.get("tool_call_id") or payload.get("id")
-    is_complete = status in {"completed", "complete", "success", "error", "failed"}
+    is_complete = event_type == "tool.completed" or status in {"completed", "complete", "success", "error", "failed"}
     event_payload = {
         "event_type": "tool.completed" if is_complete else "tool.started",
         "name": name,
         "preview": payload.get("label") or payload.get("preview"),
         "args": payload.get("args") if isinstance(payload.get("args"), dict) else {},
-        "is_error": status in {"error", "failed"},
+        "is_error": bool(payload.get("error")) or status in {"error", "failed"},
     }
     if tid:
         event_payload["tid"] = str(tid)
@@ -204,24 +210,33 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
 
 
 def _gateway_runs_approval_event(payload: dict) -> dict | None:
-    """Map a runs-API hermes.approval.required payload to the WebUI approval contract."""
+    """Map a runs-API approval.request payload to the WebUI approval contract."""
     if not isinstance(payload, dict):
         return None
-    tool = str(payload.get("tool") or payload.get("function_name") or "").strip()
+    tool = str(payload.get("tool") or payload.get("function_name") or payload.get("pattern_key") or "").strip()
     command = str(payload.get("command") or "").strip()
+    description = str(payload.get("description") or "").strip()
+    pattern_keys = payload.get("pattern_keys") if isinstance(payload.get("pattern_keys"), list) else []
+    pattern_key = str(payload.get("pattern_key") or "").strip()
     args = payload.get("args") if isinstance(payload.get("args"), (list, dict)) else []
     run_id = str(payload.get("run_id") or "").strip()
     approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
     risk = str(payload.get("risk_level") or "high").strip()
-    if not (tool or command):
+    choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
+    if not (tool or command or description):
         return None
     return {
         "tool": tool,
         "command": command,
+        "description": description,
+        "pattern_key": pattern_key,
+        "pattern_keys": pattern_keys or ([pattern_key] if pattern_key else []),
         "args": args,
         "risk_level": risk,
         "run_id": run_id,
         "approval_id": approval_id,
+        "choices": choices,
+        "allow_permanent": "always" in choices,
     }
 
 
@@ -250,11 +265,32 @@ def _run_gateway_runs_api_streaming(
         except Exception:
             logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
             message_content = str(msg_text or "")
+    instructions_parts = []
+    conversation_history = []
+    for entry in prefill_messages or []:
+        if not isinstance(entry, dict):
+            continue
+        role = str(entry.get("role") or "").strip().lower()
+        content = entry.get("content")
+        if role == "system":
+            if isinstance(content, str) and content.strip():
+                instructions_parts.append(content)
+            elif content is not None:
+                instructions_parts.append(str(content))
+            continue
+        if role not in {"user", "assistant"}:
+            continue
+        conversation_history.append({"role": role, "content": content})
+    run_input = message_content if isinstance(message_content, str) else str(msg_text or "")
     run_body = {
         "model": model or "default",
-        "messages": [*prefill_messages, {"role": "user", "content": message_content}],
+        "input": run_input,
         **body_extras,
     }
+    if instructions_parts:
+        run_body["instructions"] = "\n\n".join(part for part in instructions_parts if part)
+    if conversation_history:
+        run_body["conversation_history"] = conversation_history
     req = urllib.request.Request(
         url_runs,
         data=json.dumps(run_body).encode("utf-8"),
@@ -298,14 +334,15 @@ def _run_gateway_runs_api_streaming(
                 payload = json.loads(data)
             except json.JSONDecodeError:
                 continue
-            if sse_event == "hermes.approval.required":
+            payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip() or "message"
+            if payload_event == "approval.request":
                 approval_data = _gateway_runs_approval_event(payload)
                 if approval_data:
                     approval_data["run_id"] = run_id
                     put_gateway_event("approval", approval_data)
                 sse_event = "message"
                 continue
-            if sse_event == "hermes.tool.progress":
+            if payload_event in {"tool.started", "tool.completed", "reasoning.available"}:
                 translated = _gateway_tool_progress_event(payload)
                 if translated:
                     event_name, event_payload = translated
@@ -336,14 +373,29 @@ def _run_gateway_runs_api_streaming(
                         update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
                 sse_event = "message"
                 continue
-            if sse_event == "reasoning.available":
-                reason_delta = _gateway_reasoning_delta(payload)
-                if reason_delta:
-                    if stream_id in STREAM_REASONING_TEXT:
-                        STREAM_REASONING_TEXT[stream_id] += reason_delta
-                    put_gateway_event("reasoning", {"text": reason_delta})
+            if payload_event == "message.delta":
+                delta = str(payload.get("delta") or "")
+                if delta:
+                    final_text += delta
+                    if stream_id in STREAM_PARTIAL_TEXT:
+                        STREAM_PARTIAL_TEXT[stream_id] += delta
+                    put_gateway_event("token", {"text": delta})
                 sse_event = "message"
                 continue
+            if payload_event == "run.completed":
+                output = str(payload.get("output") or "")
+                if output and not final_text:
+                    final_text = output
+                    if stream_id in STREAM_PARTIAL_TEXT:
+                        STREAM_PARTIAL_TEXT[stream_id] = output
+                usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+                sse_event = "message"
+                continue
+            if payload_event == "run.failed":
+                raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
+            if payload_event == "run.cancelled":
+                put_gateway_event("cancel", {"message": "Cancelled by gateway"})
+                return final_text, usage
             reasoning_delta = _gateway_sse_reasoning_delta(payload)
             if reasoning_delta:
                 if stream_id in STREAM_REASONING_TEXT:
@@ -488,7 +540,7 @@ def _run_gateway_chat_streaming(
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
         # Capability gate: use runs API when gateway advertises approval support.
-        _use_runs_api = gateway_supports_approval(base_url)
+        _use_runs_api = gateway_supports_approval(base_url, api_key)
         if _use_runs_api:
             body_extras = {}
             if model_provider:

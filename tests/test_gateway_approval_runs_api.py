@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 from unittest.mock import MagicMock, patch
 
 
@@ -11,7 +12,7 @@ from unittest.mock import MagicMock, patch
 # ---------------------------------------------------------------------------
 
 def test_gateway_capability_detection():
-    """get_gateway_caps / gateway_supports_approval correctly parse /health/detailed."""
+    """get_gateway_caps / gateway_supports_approval correctly parse /v1/capabilities."""
     from api.config import (
         gateway_supports_approval,
         invalidate_gateway_caps,
@@ -21,9 +22,13 @@ def test_gateway_capability_detection():
     invalidate_gateway_caps()
 
     def _fake_urlopen_capable(req, *, timeout=None):
+        assert req.full_url == "http://fake:1234/v1/capabilities"
+        assert req.get_header("Authorization") == "Bearer secret"
         body = json.dumps({
-            "approval_events": True,
-            "run_approval_response": True,
+            "features": {
+                "approval_events": True,
+                "run_approval_response": True,
+            },
         }).encode()
         resp = MagicMock()
         resp.read.return_value = body
@@ -32,11 +37,12 @@ def test_gateway_capability_detection():
         return resp
 
     with patch("urllib.request.urlopen", side_effect=_fake_urlopen_capable):
-        assert gateway_supports_approval("http://fake:1234") is True
+        assert gateway_supports_approval("http://fake:1234", "secret") is True
 
     invalidate_gateway_caps()
 
     def _fake_urlopen_incapable(req, *, timeout=None):
+        assert req.full_url == "http://fake:5678/v1/capabilities"
         body = json.dumps({}).encode()
         resp = MagicMock()
         resp.read.return_value = body
@@ -88,7 +94,7 @@ def test_gateway_runs_api_submission():
 
     try:
         with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}):
-            with patch("api.gateway_chat.gateway_supports_approval", lambda _: True), \
+            with patch("api.gateway_chat.gateway_supports_approval", lambda *_args, **_kwargs: True), \
                  patch("api.gateway_chat._run_gateway_runs_api_streaming", fake_runs_streaming), \
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
@@ -112,29 +118,129 @@ def test_gateway_runs_api_submission():
 # ---------------------------------------------------------------------------
 
 def test_gateway_approval_event_translation():
-    """_gateway_runs_approval_event maps fields correctly and returns None on missing tool/command."""
+    """_gateway_runs_approval_event maps actual gateway approval fields."""
     from api.gateway_chat import _gateway_runs_approval_event
 
     payload = {
-        "tool": "bash",
         "command": "rm -rf /tmp/x",
-        "args": ["--force"],
-        "risk_level": "critical",
+        "description": "Dangerous command approval",
+        "pattern_key": "dangerous_command",
+        "pattern_keys": ["dangerous_command"],
         "run_id": "run-999",
         "approval_id": "appr-1",
+        "choices": ["once", "session", "always", "deny"],
     }
     result = _gateway_runs_approval_event(payload)
     assert result is not None
-    assert result["tool"] == "bash"
+    assert result["tool"] == "dangerous_command"
     assert result["command"] == "rm -rf /tmp/x"
-    assert result["args"] == ["--force"]
-    assert result["risk_level"] == "critical"
+    assert result["description"] == "Dangerous command approval"
+    assert result["pattern_key"] == "dangerous_command"
+    assert result["pattern_keys"] == ["dangerous_command"]
+    assert result["choices"] == ["once", "session", "always", "deny"]
+    assert result["allow_permanent"] is True
+    assert result["risk_level"] == "high"
     assert result["run_id"] == "run-999"
     assert result["approval_id"] == "appr-1"
 
-    # Missing both tool and command should return None.
+    # Missing command/description/tool should return None.
     assert _gateway_runs_approval_event({"risk_level": "high"}) is None
     assert _gateway_runs_approval_event({}) is None
+
+
+def test_gateway_runs_api_streaming_parses_real_run_events():
+    """The runs-API bridge must parse the real gateway event payloads."""
+    from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT
+    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_runs_api_streaming
+
+    events = []
+    requests = []
+    stream_id = "sid-real-runs"
+    STREAM_PARTIAL_TEXT[stream_id] = ""
+    STREAM_REASONING_TEXT[stream_id] = ""
+
+    class _JsonResponse:
+        def __init__(self, payload):
+            self._payload = json.dumps(payload).encode("utf-8")
+
+        def read(self, _limit=None):
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    class _SseResponse:
+        def __init__(self, lines):
+            self._lines = lines
+
+        def __iter__(self):
+            return iter(self._lines)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    def fake_urlopen(req, *, timeout=None):
+        requests.append(req)
+        if req.full_url.endswith("/v1/runs"):
+            return _JsonResponse({"run_id": "run-abc"})
+        return _SseResponse([
+            b'data: {"event":"approval.request","command":"rm -rf /tmp/x","description":"Dangerous command approval","pattern_key":"dangerous_command","pattern_keys":["dangerous_command"],"choices":["once","session","always","deny"],"run_id":"run-abc","approval_id":"appr-1"}\n',
+            b'\n',
+            b'data: {"event":"reasoning.available","text":"thinking..."}\n',
+            b'\n',
+            b'data: {"event":"message.delta","delta":"Hello"}\n',
+            b'\n',
+            b'data: {"event":"run.completed","output":"Hello","usage":{"input_tokens":3,"output_tokens":1}}\n',
+            b'\n',
+        ])
+
+    try:
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            final_text, usage = _run_gateway_runs_api_streaming(
+                session_id="sess1",
+                msg_text="hi",
+                model="test-model",
+                workspace="/tmp",
+                stream_id=stream_id,
+                base_url="http://gw:8642",
+                api_key="secret",
+                prefill_messages=[
+                    {"role": "system", "content": "system prompt"},
+                    {"role": "assistant", "content": "earlier reply"},
+                ],
+                body_extras={"provider": "anthropic"},
+                put_gateway_event=lambda event, data: events.append((event, data)),
+                cancel_event=threading.Event(),
+            )
+    finally:
+        STREAM_PARTIAL_TEXT.pop(stream_id, None)
+        STREAM_REASONING_TEXT.pop(stream_id, None)
+        _STREAM_RUN_IDS.pop(stream_id, None)
+
+    run_req = requests[0]
+    run_body = json.loads(run_req.data.decode("utf-8"))
+    assert run_req.full_url == "http://gw:8642/v1/runs"
+    assert run_req.get_header("Authorization") == "Bearer secret"
+    assert run_body["input"] == "hi"
+    assert run_body["instructions"] == "system prompt"
+    assert run_body["conversation_history"] == [{"role": "assistant", "content": "earlier reply"}]
+    assert run_body["provider"] == "anthropic"
+    assert "messages" not in run_body
+
+    assert final_text == "Hello"
+    assert usage["input_tokens"] == 3
+    assert usage["output_tokens"] == 1
+    assert events[0][0] == "approval"
+    assert events[0][1]["description"] == "Dangerous command approval"
+    assert events[0][1]["approval_id"] == "appr-1"
+    assert events[1] == ("reasoning", {"text": "thinking..."})
+    assert events[2] == ("token", {"text": "Hello"})
 
 
 # ---------------------------------------------------------------------------
