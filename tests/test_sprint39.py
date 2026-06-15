@@ -155,6 +155,41 @@ class TestApplyOnboardingKeySync(unittest.TestCase):
                          "OPENAI_API_KEY must be set directly on os.environ after apply")
         os.environ.pop("OPENAI_API_KEY", None)
 
+    def test_aimlapi_setup_writes_aimlapi_env_and_base_url(self):
+        """AIML API onboarding must wire its own env var and OpenAI-compatible base URL."""
+        import pathlib
+
+        os.environ.pop("AIMLAPI_API_KEY", None)
+
+        mock_cfg = {"model": {}}
+        save_yaml_mock = unittest.mock.MagicMock()
+        write_env_mock = unittest.mock.MagicMock()
+
+        with patch("api.onboarding._load_yaml_config", return_value=mock_cfg), \
+             patch("api.onboarding._save_yaml_config", save_yaml_mock), \
+             patch("api.onboarding._write_env_file", write_env_mock), \
+             patch("api.onboarding.reload_config"), \
+             patch("api.onboarding.get_onboarding_status", return_value={"completed": True}), \
+             patch("api.onboarding._get_config_path", return_value=pathlib.Path("/tmp/fake.yaml")), \
+             patch("api.onboarding._load_env_file", return_value={}), \
+             patch("api.onboarding._provider_api_key_present", return_value=False), \
+             patch("api.onboarding._get_active_hermes_home", return_value=pathlib.Path("/tmp")):
+
+            mod.apply_onboarding_setup({
+                "provider": "aimlapi",
+                "model": "openai/gpt-4o-mini",
+                "api_key": "aiml-test-key",
+            })
+
+        write_env_mock.assert_called_once()
+        self.assertEqual(write_env_mock.call_args.args[1], {"AIMLAPI_API_KEY": "aiml-test-key"})
+        saved_cfg = save_yaml_mock.call_args.args[1]
+        self.assertEqual(saved_cfg["model"]["provider"], "aimlapi")
+        self.assertEqual(saved_cfg["model"]["default"], "openai/gpt-4o-mini")
+        self.assertEqual(saved_cfg["model"]["base_url"], "https://api.aimlapi.com/v1")
+        self.assertEqual(os.environ.get("AIMLAPI_API_KEY"), "aiml-test-key")
+        os.environ.pop("AIMLAPI_API_KEY", None)
+
     def test_no_key_provided_does_not_set_environ(self):
         """If no api_key is given (key already present), os.environ is not clobbered."""
         import pathlib

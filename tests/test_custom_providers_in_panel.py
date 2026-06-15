@@ -318,3 +318,58 @@ class TestDeepSeekV4Models:
         assert ds.get("default_base_url") == "https://api.deepseek.com", (
             f"Base URL should be bare domain, got: {ds.get('default_base_url')}"
         )
+
+    def test_aimlapi_onboarding_preset_uses_curated_model_catalog(self):
+        """AI/ML API should be a named OpenAI-compatible preset with curated chat models."""
+        from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+
+        meta = _SUPPORTED_PROVIDER_SETUPS.get("aimlapi", {})
+        assert meta.get("label") == "AI/ML API"
+        assert meta.get("env_var") == "AIMLAPI_API_KEY"
+        assert meta.get("default_model") == "gpt-5-chat"
+        assert meta.get("default_base_url") == "https://api.aimlapi.com/v1"
+        assert meta.get("requires_base_url") is False
+        models = meta.get("models") or []
+        model_ids = {m.get("id") for m in models}
+        assert "gpt-5-chat" in model_ids
+        assert "gpt-4o-mini" in model_ids
+        assert "claude-sonnet-4-5-20250929" in model_ids
+        assert "gemini-3-flash-preview" in model_ids
+        assert meta.get("category") == "easy_start"
+
+    def test_aimlapi_is_registered_as_builtin_provider(self):
+        """AI/ML API must be available beyond onboarding in the shared provider catalog."""
+        from api.config import _PROVIDER_DISPLAY, _PROVIDER_MODELS
+
+        assert _PROVIDER_DISPLAY.get("aimlapi") == "AI/ML API"
+        ids = {m.get("id") for m in _PROVIDER_MODELS.get("aimlapi", [])}
+        assert "gpt-5-chat" in ids
+        assert "x-ai/grok-4-07-09" in ids
+
+    def test_aimlapi_provider_card_is_configurable(self, monkeypatch, tmp_path):
+        """Settings providers must let users manage the AIML API key."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("AIMLAPI_API_KEY", "aiml-test-key-12345678")
+
+        old_cfg, old_mtime = TestCustomProvidersInGetProviders()._setup_cfg(
+            custom_providers=[],
+            active_provider="aimlapi",
+        )
+
+        from api.providers import get_providers
+        try:
+            result = get_providers()
+            aimlapi = next(p for p in result["providers"] if p["id"] == "aimlapi")
+            assert aimlapi["display_name"] == "AI/ML API"
+            assert aimlapi["has_key"] is True
+            assert aimlapi["configurable"] is True
+            assert "gpt-5-chat" in {m["id"] for m in aimlapi["models"]}
+        finally:
+            TestCustomProvidersInGetProviders()._restore_cfg(old_cfg, old_mtime)
+
+    def test_aimlapi_has_live_models_endpoint_fallback(self):
+        """Live model enrichment should know AIML API's OpenAI-compatible root."""
+        from api.routes import _OPENAI_COMPAT_ENDPOINTS
+
+        assert _OPENAI_COMPAT_ENDPOINTS.get("aimlapi") == "https://api.aimlapi.com/v1"

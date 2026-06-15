@@ -65,6 +65,15 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": list(_PROVIDER_MODELS.get("openai", [])),
         "category": "easy_start",
     },
+    "aimlapi": {
+        "label": "AI/ML API",
+        "env_var": "AIMLAPI_API_KEY",
+        "default_model": "gpt-5-chat",
+        "default_base_url": "https://api.aimlapi.com/v1",
+        "requires_base_url": False,
+        "models": list(_PROVIDER_MODELS.get("aimlapi", [])),
+        "category": "easy_start",
+    },
     # ── Open / self-hosted ─────────────────────────────────────────────
     "ollama": {
         "label": "Ollama",

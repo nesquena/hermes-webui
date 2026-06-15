@@ -197,6 +197,25 @@ class TestModelPickerSortOrder:
         )
         _teardown_config()
 
+    def test_aimlapi_active_provider_group_uses_builtin_catalog(self, tmp_path, monkeypatch):
+        """AIML API should appear in /api/models as a first-class active provider."""
+        _setup_config(tmp_path, monkeypatch,
+            "model:\n"
+            "  provider: aimlapi\n"
+            "  default: gpt-5-chat\n"
+        )
+
+        result = config.get_available_models()
+        group_ids = [g.get("provider_id") for g in result.get("groups", [])]
+        aimlapi = next(g for g in result["groups"] if g.get("provider_id") == "aimlapi")
+        model_ids = {m.get("id") for m in aimlapi.get("models", [])}
+
+        assert group_ids[0] == "aimlapi"
+        assert aimlapi["provider"] == "AI/ML API"
+        assert "gpt-5-chat" in model_ids
+        assert "x-ai/grok-4-07-09" in model_ids
+        _teardown_config()
+
     def test_custom_groups_before_configured(self, tmp_path, monkeypatch):
         """custom:* groups sort before providers that merely have keys."""
         _setup_config(tmp_path, monkeypatch,

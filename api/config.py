@@ -873,6 +873,7 @@ _PROVIDER_DISPLAY = {
     "openrouter": "OpenRouter",
     "anthropic": "Anthropic",
     "openai": "OpenAI",
+    "aimlapi": "AI/ML API",
     "openai-api": "OpenAI API",
     "openai-codex": "OpenAI Codex",
     "xai-oauth": "xAI Grok OAuth",
@@ -1283,6 +1284,26 @@ _PROVIDER_MODELS = {
         {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
+    ],
+    "aimlapi": [
+        {"id": "gpt-4o-mini", "label": "GPT-4o mini"},
+        {"id": "gpt-4o", "label": "GPT-4o"},
+        {"id": "gpt-5-chat", "label": "GPT-5 Chat"},
+        {"id": "gpt-5", "label": "GPT-5"},
+        {"id": "gpt-5-mini", "label": "GPT-5 mini"},
+        {"id": "gpt-5-nano", "label": "GPT-5 nano"},
+        {"id": "gpt-5.1-chat-latest", "label": "GPT-5.1 Chat latest"},
+        {"id": "gpt-5.2-chat-latest", "label": "GPT-5.2 Chat latest"},
+        {"id": "claude-sonnet-4-5-20250929", "label": "Claude Sonnet 4.5"},
+        {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
+        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+        {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+        {"id": "deepseek-chat", "label": "DeepSeek Chat"},
+        {"id": "deepseek-reasoner", "label": "DeepSeek Reasoner"},
+        {"id": "x-ai/grok-4-07-09", "label": "Grok 4"},
+        {"id": "qwen3.5-flash", "label": "Qwen3.5 Flash"},
+        {"id": "qwen3-coder-480b-a35b-instruct", "label": "Qwen3 Coder"},
+        {"id": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "label": "Llama 3.3 70B Instruct Turbo"},
     ],
     "openai-api": [
         {"id": "gpt-5.5",      "label": "GPT-5.5"},
@@ -2175,7 +2196,7 @@ def resolve_model_provider(model_id: str) -> tuple:
         # fired in the prefix==config_provider case, causing HTTP 404 from the
         # portal which requires the full provider/model id (#2177; sibling of
         # #854 / #894 for Nous, where this guard was originally added).
-        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
+        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia", "aimlapi"}
         if config_provider in _PORTAL_PROVIDERS:
             return model_id, config_provider, config_base_url
         # If prefix matches config provider exactly, strip it and use that provider directly.
@@ -5048,6 +5069,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
             for k in (
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
+                "AIMLAPI_API_KEY",
                 "OPENROUTER_API_KEY",
                 "GOOGLE_API_KEY",
                 "GEMINI_API_KEY",
@@ -5082,6 +5104,8 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                 # picker without a manual config.yaml edit. Users without Codex OAuth will see
                 # picker entries but hit auth errors at inference time (#1189 known limitation).
                 detected_providers.add("openai-codex")
+            if all_env.get("AIMLAPI_API_KEY"):
+                detected_providers.add("aimlapi")
             if all_env.get("OPENROUTER_API_KEY"):
                 detected_providers.add("openrouter")
             if all_env.get("GOOGLE_API_KEY"):

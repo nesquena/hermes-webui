@@ -688,6 +688,7 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "openrouter": "OPENROUTER_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "aimlapi": "AIMLAPI_API_KEY",
     "google": "GOOGLE_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "zai": "GLM_API_KEY",

@@ -1293,6 +1293,7 @@ _PROVIDER_ALIASES = {
 # returns [] for a provider (#871).  Kept at module level so the dict is
 # built once, not reconstructed per request.
 _OPENAI_COMPAT_ENDPOINTS = {
+    "aimlapi": "https://api.aimlapi.com/v1",
     "zai": "https://api.z.ai/v1",
     "minimax": "https://api.minimax.chat/v1",
     "mistralai": "https://api.mistral.ai/v1",

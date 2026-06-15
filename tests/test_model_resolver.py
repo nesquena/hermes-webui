@@ -69,6 +69,19 @@ def test_openai_prefix_stripped_for_direct_api():
     assert provider == 'openai'
 
 
+def test_aimlapi_namespaced_models_stay_on_aimlapi_endpoint():
+    """AIML API curated namespaced models are routed through its OpenAI-compatible base URL."""
+    model, provider, base_url = _resolve_with_config(
+        'x-ai/grok-4-07-09',
+        provider='aimlapi',
+        base_url='https://api.aimlapi.com/v1',
+        default='x-ai/grok-4-07-09',
+    )
+    assert model == 'x-ai/grok-4-07-09'
+    assert provider == 'aimlapi'
+    assert base_url == 'https://api.aimlapi.com/v1'
+
+
 # ── Cross-provider routing ───────────────────────────────────────────────
 
 def test_cross_provider_routes_through_openrouter():
