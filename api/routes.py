@@ -7965,7 +7965,7 @@ def handle_get(handler, parsed) -> bool:
                         '  <meta charset="utf-8">\n'
                         f'  <title>{label}</title>\n'
                         f'  {css_tag}\n'
-                        '  <script>(function(){{var _f=fetch;window.fetch=function(u,o){{if(!u||u.indexOf("/api/plugins/")!==0)return _f(u,o);o=o||{{}};o.headers=new Headers(o.headers||{{}});if(!o.headers.has("X-Plugin-Request"))o.headers.set("X-Plugin-Request","1");return _f(u,o)}}}})()</script>\n'
+                        '  <script>(function(){var _f=fetch;window.fetch=function(u,o){if(!u||u.indexOf("/api/plugins/")!==0)return _f(u,o);o=o||{};o.headers=new Headers(o.headers||{});if(!o.headers.has("X-Plugin-Request"))o.headers.set("X-Plugin-Request","1");return _f(u,o)}})()</script>\n'
                         '</head>\n'
                         '<body>\n'
                         '  <div id="pluginPageContainer"></div>\n'
