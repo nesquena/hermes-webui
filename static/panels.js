@@ -6773,7 +6773,7 @@ async function loadSettingsPanel(){
     const apiRedactCb=$('settingsApiRedact');
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
-    if(showCliCb){showCliCb.checked=!!settings.show_cli_sessions;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    if(showCliCb){showCliCb.checked=settings.show_cli_sessions!==false;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCronCb=$('settingsShowCronSessions');
     if(showCronCb){
       showCronCb.checked=!!settings.show_cron_sessions;

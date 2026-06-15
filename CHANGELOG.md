@@ -7,6 +7,22 @@
 
 - **TUI-origin Hermes Agent sessions now stay discoverable in the CLI/agent sidebar view.** State-db rows with `source='tui'` are normalized as CLI-like rows, legacy browser payloads also treat raw `tui` as CLI-like for destructive-action gating, and TUI continuation chains display the latest tip title instead of an older parent title. (#3986, #3988, #3418)
 
+## [v0.51.428] — 2026-06-15 — Release OO (bound non-git project-context file walk, #4164)
+
+### Fixed
+
+- **The Project Context tab no longer surfaces `AGENTS.md` / `HERMES.md` / `CLAUDE.md` files from ABOVE a non-git workspace.** When a workspace isn't a git repo, the context-file walk had no stop boundary and climbed to the filesystem root, so a file in a parent directory (e.g. `/tmp/HERMES.md` or one in your home dir) could appear in the tab even though it's outside the workspace. The walk is now bounded at the workspace root when there's no git root (the cwd is still scanned, preserving in-workspace context files). A matching bound on the agent-side walk is a tracked follow-up; until then the WebUI may under-report context files that live above a non-git workspace, which is strictly safer than over-reporting them. (#4164)
+
+## [v0.51.427] — 2026-06-15 — Release ON (CLI sessions on by default for new installs #3988 + symlink delete/rename guard #4217)
+
+### Changed
+
+- **CLI / TUI / messaging sessions now appear in the sidebar by default for new installs (#3988).** `show_cli_sessions` now defaults to `True`, so sessions from the CLI, TUI, Telegram, Discord, and the Hermes One desktop app show up in the WebUI sidebar without users having to discover the toggle in Settings. **Existing installs are grandfathered:** a user who already completed onboarding and never opted in keeps their previous (hidden) behavior — the default change only affects fresh installs. The toggle remains in Settings → Sessions for anyone who wants to change it.
+
+### Fixed
+
+- **Deleting or renaming a workspace symlink no longer destroys the file or directory it points to (#4217).** `/api/file/delete` and `/api/file/rename` resolved the final symlink before operating on the target, so a standard delete/rename against a symlink name acted on the real (possibly out-of-workspace) target. Both handlers now reject a symlinked path with a 400, matching the guard the move handler already had. (#4217)
+
 ## [v0.51.426] — 2026-06-15 — Release OM (custom-provider model-prefix routing fix, #4210)
 
 ### Fixed
