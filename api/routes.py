@@ -4080,16 +4080,6 @@ def _messages_for_limited_payload(messages) -> list:
     return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
-def _max_message_timestamp(messages):
-    newest = None
-    for msg in messages or []:
-        timestamp = _message_timestamp_as_float(msg)
-        if timestamp is None:
-            continue
-        newest = timestamp if newest is None else max(newest, timestamp)
-    return newest
-
-
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     """Return the display sidecar plus only necessary state.db rows for msg_limit.
 
@@ -4630,7 +4620,6 @@ from api.models import (
     get_state_db_session_summary,
     merge_session_messages_append_only,
     _active_stream_ids,
-    _message_timestamp_as_float,
     _session_message_merge_key,
     _session_message_visible_key,
     _is_empty_partial_activity_message,
