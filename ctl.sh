@@ -20,6 +20,9 @@ Commands:
   status                      Show daemon, host/port, log, and health status
   logs [--lines N] [--follow|--no-follow]
                               Show the daemon log (defaults to tail -n 100 -f)
+  update [base]               Fetch upstream and show incoming diff vs the current
+                              branch, then ask for confirmation (rebase/restart are
+                              manual in v1; default base: upstream/master)
 EOF
 }
 
@@ -431,7 +434,8 @@ status_cmd() {
   local host="${HOST:-${HERMES_WEBUI_HOST:-127.0.0.1}}"
   local port="${PORT:-${HERMES_WEBUI_PORT:-8787}}"
   local log_path="${LOG_FILE}"
-  local pid uptime health
+  local pid uptime health branch
+  branch="$(cd "${REPO_ROOT}" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')"
 
   if pid="$(_current_pid 2>/dev/null)"; then
     uptime="$(ps -p "${pid}" -o etime= 2>/dev/null | sed 's/^ *//' || true)"
@@ -440,6 +444,7 @@ status_cmd() {
     echo "  PID:     ${pid}"
     echo "  Uptime:  ${uptime:-unknown}"
     echo "  Bound:   ${host}:${port}"
+    echo "  Branch:  ${branch}"
     echo "  Log:     ${log_path}"
     echo "  Health:  ${health}"
   else
@@ -447,6 +452,7 @@ status_cmd() {
     echo "● hermes-webui — stopped"
     echo "  PID:     -"
     echo "  Bound:   ${host}:${port}"
+    echo "  Branch:  ${branch}"
     echo "  Log:     ${log_path}"
     echo "  Health:  not checked"
   fi
@@ -487,6 +493,52 @@ logs_cmd() {
   fi
 }
 
+update_cmd() {
+  # v1 (Exocortex #77): fetch upstream + diff stat + confirmation only.
+  # Rebase, tests and restart stay manual — see EXOCRTX_MODIFICATIONS.md for
+  # the per-file conflict map that guides the rebase.
+  cd "${REPO_ROOT}"
+  git rev-parse --git-dir >/dev/null 2>&1 || {
+    echo "[ctl] update requires a git checkout (${REPO_ROOT})" >&2
+    return 2
+  }
+  git remote get-url upstream >/dev/null 2>&1 || {
+    echo "[ctl] no 'upstream' remote configured (expected nesquena/hermes-webui)" >&2
+    return 2
+  }
+
+  local base="${1:-upstream/master}"
+  local branch
+  branch="$(git rev-parse --abbrev-ref HEAD)"
+
+  echo "[ctl] fetching upstream..."
+  git fetch upstream
+
+  if git diff --quiet "HEAD..${base}" 2>/dev/null; then
+    echo "[ctl] ${branch} already up to date with ${base}."
+    return 0
+  fi
+
+  echo "[ctl] incoming changes ${base} -> ${branch}:"
+  git diff --stat "HEAD..${base}"
+  echo
+
+  local reply
+  printf "[ctl] proceed with rebase? (manual in v1 — this prints the steps) [y/N] "
+  read -r reply
+  case "${reply}" in
+    y|Y|yes|YES)
+      echo "[ctl] run, guided by EXOCRTX_MODIFICATIONS.md:"
+      echo "        git rebase ${base}"
+      echo "        ./ctl.sh restart && curl -s http://127.0.0.1:8787/health"
+      echo "        # on conflict: git rebase --abort && ./ctl.sh restart"
+      ;;
+    *)
+      echo "[ctl] aborted — no changes applied."
+      ;;
+  esac
+}
+
 cmd="${1:-}"
 if [[ $# -gt 0 ]]; then
   shift
@@ -498,6 +550,7 @@ case "${cmd}" in
   restart) stop_cmd; start_cmd "$@" ;;
   status) status_cmd ;;
   logs) logs_cmd "$@" ;;
+  update) update_cmd "$@" ;;
   -h|--help|help|"") usage ;;
   *) echo "[ctl] Unknown command: ${cmd}" >&2; usage >&2; exit 2 ;;
 esac
