@@ -14,6 +14,8 @@ PATH DISCOVERY:
     4. System python3 as a last resort
 """
 import json
+import inspect
+import multiprocessing
 import os
 import pathlib
 import shutil
@@ -31,6 +33,16 @@ if not (3, 11) <= sys.version_info[:2] <= (3, 13):
         "instead of an unsupported system python.",
         returncode=3,
     )
+
+WINDOWS = sys.platform == "win32"
+requires_fcntl = pytest.mark.skipif(
+    WINDOWS,
+    reason="requires fcntl-backed nonblocking pipe reads",
+)
+requires_fork = pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    reason="requires multiprocessing fork",
+)
 
 # ── Repo root discovery ────────────────────────────────────────────────────
 # conftest.py lives at <repo>/tests/conftest.py
@@ -244,6 +256,8 @@ requires_agent_modules = pytest.mark.skipif(
 def pytest_configure(config):
     config.addinivalue_line("markers", "requires_agent: skip when hermes-agent dir is not found")
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
+    config.addinivalue_line("markers", "requires_fcntl: skip when fcntl-backed file-descriptor operations are unavailable")
+    config.addinivalue_line("markers", "requires_fork: skip when the platform lacks multiprocessing fork support")
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
@@ -601,6 +615,120 @@ def _server_boot_diagnostic(headline, log_path):
     return "\n".join(parts)
 
 
+def _kill_process_tree(pid):
+    """Best-effort kill for a known fixture-owned or port-owning PID."""
+    if not pid or pid <= 0:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                **({"creationflags": subprocess.CREATE_NO_WINDOW}),
+            )
+            return
+        import signal
+
+        os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass
+
+
+def _kill_port_owner(port):
+    """Best-effort free of TEST_PORT, using a Windows-native owner lookup."""
+    try:
+        if sys.platform != "win32":
+            subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=5)
+            return
+
+        creationflags = {"creationflags": subprocess.CREATE_NO_WINDOW}
+        ps_cmd = (
+            "$port = " + str(port) + "; "
+            "$conn = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue | "
+            "Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1', '0.0.0.0', '::', '::ffff:127.0.0.1') } | "
+            "Select-Object -First 1 -ExpandProperty OwningProcess; "
+            "if ($conn) { $conn }"
+        )
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            **creationflags,
+        )
+        pid_text = proc.stdout.strip()
+        if not pid_text:
+            proc = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                **creationflags,
+            )
+            port_suffixes = (f":{port}", f"[::]:{port}", f"127.0.0.1:{port}", f"[::1]:{port}")
+            for line in proc.stdout.splitlines():
+                parts = line.split()
+                if len(parts) < 5 or parts[0].upper() != "TCP":
+                    continue
+                local_addr = parts[1]
+                state = parts[3].upper()
+                owner_pid = parts[4]
+                if state == "LISTENING" and any(local_addr.endswith(suffix) for suffix in port_suffixes):
+                    pid_text = owner_pid
+                    break
+        if pid_text:
+            _kill_process_tree(int(pid_text))
+    except Exception:
+        pass
+
+
+def _rmtree_retry(path):
+    """Remove a tree, retrying on Windows after clearing read-only bits."""
+    target = pathlib.Path(path)
+    if not target.exists():
+        return
+    if sys.platform != "win32":
+        shutil.rmtree(target)
+        return
+
+    def _clear_readonly(_func, entry, _exc):
+        try:
+            os.chmod(entry, 0o666)
+            _func(entry)
+        except Exception:
+            raise
+
+    rmtree_kwargs = (
+        {"onexc": _clear_readonly}
+        if "onexc" in inspect.signature(shutil.rmtree).parameters
+        else {"onerror": _clear_readonly}
+    )
+
+    attempts = 5
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            shutil.rmtree(target, **rmtree_kwargs)
+            return
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt == attempts:
+                break
+            time.sleep(0.3)
+
+    leftovers = []
+    try:
+        leftovers = [child.name for child in list(target.iterdir())[:5]]
+    except Exception:
+        pass
+    leftover_note = f" leftovers={leftovers}" if leftovers else ""
+    raise RuntimeError(f"Could not remove {target} after {attempts} attempts.{leftover_note}") from last_exc
+
+
 # ── Session-scoped test server ────────────────────────────────────────────────
 
 @pytest.fixture(scope="session", autouse=True)
@@ -612,18 +740,13 @@ def test_server():
     # Kill any leftover process on the test port before starting.
     # Stale servers from QA harness runs or prior test sessions cause
     # conftest to think the server is already up, producing false failures.
-    try:
-        import subprocess as _sp
-        _sp.run(['fuser', '-k', f'{TEST_PORT}/tcp'],
-                capture_output=True, timeout=5)
-    except Exception:
-        pass
+    _kill_port_owner(TEST_PORT)
     import time as _time
     _time.sleep(0.5)  # brief pause to let the port release
 
     # Clean slate
     if TEST_STATE_DIR.exists():
-        shutil.rmtree(TEST_STATE_DIR)
+        _rmtree_retry(TEST_STATE_DIR)
     TEST_STATE_DIR.mkdir(parents=True)
     TEST_WORKSPACE.mkdir(parents=True)
 
@@ -759,16 +882,12 @@ def test_server():
         last_reason = reason
         # Tear down the failed attempt and free the port before retrying.
         try:
-            proc.kill()
+            _kill_process_tree(proc.pid)
             proc.wait(timeout=5)
         except Exception:
             pass
         if _attempt < boot_attempts:
-            try:
-                import subprocess as _sp2
-                _sp2.run(['fuser', '-k', f'{TEST_PORT}/tcp'], capture_output=True, timeout=5)
-            except Exception:
-                pass
+            _kill_port_owner(TEST_PORT)
             time.sleep(1.0)
     else:
         pytest.fail(
@@ -787,12 +906,9 @@ def test_server():
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _kill_process_tree(proc.pid)
 
-    try:
-        shutil.rmtree(TEST_STATE_DIR)
-    except Exception:
-        pass
+    _rmtree_retry(TEST_STATE_DIR)
 
 
 # ── Test base URL ─────────────────────────────────────────────────────────────
