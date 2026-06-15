@@ -3,6 +3,16 @@
 
 ## [Unreleased]
 
+## [v0.51.427] — 2026-06-15 — Release ON (CLI sessions on by default for new installs #3988 + symlink delete/rename guard #4217)
+
+### Changed
+
+- **CLI / TUI / messaging sessions now appear in the sidebar by default for new installs (#3988).** `show_cli_sessions` now defaults to `True`, so sessions from the CLI, TUI, Telegram, Discord, and the Hermes One desktop app show up in the WebUI sidebar without users having to discover the toggle in Settings. **Existing installs are grandfathered:** a user who already completed onboarding and never opted in keeps their previous (hidden) behavior — the default change only affects fresh installs. The toggle remains in Settings → Sessions for anyone who wants to change it.
+
+### Fixed
+
+- **Deleting or renaming a workspace symlink no longer destroys the file or directory it points to (#4217).** `/api/file/delete` and `/api/file/rename` resolved the final symlink before operating on the target, so a standard delete/rename against a symlink name acted on the real (possibly out-of-workspace) target. Both handlers now reject a symlinked path with a 400, matching the guard the move handler already had. (#4217)
+
 ## [v0.51.426] — 2026-06-15 — Release OM (custom-provider model-prefix routing fix, #4210)
 
 ### Fixed
