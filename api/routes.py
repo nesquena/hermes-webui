@@ -7299,6 +7299,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/list":
         return _handle_list_dir(handler, parsed)
 
+    if parsed.path == "/api/inbox/status":
+        return _handle_inbox_status(handler, parsed)
+
     if parsed.path == "/api/git/status":
         return _handle_git_status(handler, parsed)
 
@@ -9044,6 +9047,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/file/move":
         return _handle_file_move(handler, body)
 
+    if parsed.path == "/api/inbox/move":
+        return _handle_inbox_move(handler, body)
+
     if parsed.path == "/api/file/create-dir":
         return _handle_create_dir(handler, body)
 
@@ -10323,6 +10329,9 @@ def _handle_list_dir(handler, parsed):
     try:
         rel_path = qs.get("path", ["."])[0]
         entries = list_dir(Path(workspace), rel_path)
+        # Inbox is an intake zone: surface newest-arrived files first (#78).
+        if rel_path.strip("/").split("/")[0] == "_inbox":
+            entries = sorted(entries, key=lambda e: e.get("mtime_ns") or 0, reverse=True)
         return j(
             handler,
             {
@@ -10333,6 +10342,82 @@ def _handle_list_dir(handler, parsed):
         )
     except (FileNotFoundError, ValueError) as e:
         return bad(handler, _sanitize_error(e), 404)
+
+
+def _resolve_session_workspace(sid):
+    """Resolve a session id to its workspace path, falling back to CLI sessions.
+
+    Returns the workspace string, or None when the session is unknown.
+    """
+    try:
+        return get_session(sid).workspace
+    except KeyError:
+        try:
+            for cs in get_cli_sessions():
+                if cs["session_id"] == sid:
+                    return cs.get("workspace", "") or None
+        except Exception:
+            return None
+    return None
+
+
+def _handle_inbox_status(handler, parsed):
+    """GET /api/inbox/status?session_id=...&dir=_inbox
+
+    Count regular files directly under the inbox dir (default ``_inbox``),
+    newest first. Powers the tree badge and the inbox panel. A missing inbox
+    dir is reported as an empty inbox, not an error.
+    """
+    qs = parse_qs(parsed.query)
+    sid = qs.get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id is required")
+    workspace = _resolve_session_workspace(sid)
+    if workspace is None:
+        return bad(handler, "Session not found", 404)
+    inbox_rel = qs.get("dir", ["_inbox"])[0]
+    try:
+        entries = list_dir(Path(workspace), inbox_rel)
+    except (FileNotFoundError, ValueError):
+        return j(handler, {"count": 0, "files": [], "dir": inbox_rel})
+    files = [e for e in entries if e.get("type") == "file"]
+    files.sort(key=lambda e: e.get("mtime_ns") or 0, reverse=True)
+    return j(
+        handler,
+        {
+            "count": len(files),
+            "files": [
+                {
+                    "name": e["name"],
+                    "path": e["path"],
+                    "size": e.get("size"),
+                    "mtime_ns": e.get("mtime_ns"),
+                }
+                for e in files
+            ],
+            "dir": inbox_rel,
+        },
+    )
+
+
+def _handle_inbox_move(handler, body):
+    """POST /api/inbox/move {session_id, path, dest_dir}
+
+    Move a file out of the inbox into a destination folder (microverso).
+    The source must live under the inbox dir — defense in depth, since the UI
+    only offers inbox files. Confirmation is enforced in the UI; the backend
+    never moves on its own. The race-safe move itself is delegated to the
+    shared file-move handler so both paths share one validated implementation.
+    """
+    try:
+        require(body, "session_id", "path", "dest_dir")
+    except ValueError as e:
+        return bad(handler, str(e))
+    inbox_rel = (body.get("inbox_dir") or "_inbox").strip("/")
+    norm = str(body.get("path") or "").strip().lstrip("/")
+    if not (norm == inbox_rel or norm.startswith(inbox_rel + "/")):
+        return bad(handler, f"path must be inside {inbox_rel}/")
+    return _handle_file_move(handler, body)
 
 
 def _sse_with_id(handler, event, data, event_id=None):
