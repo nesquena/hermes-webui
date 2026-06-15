@@ -3,9 +3,17 @@
 
 ## [Unreleased]
 
+## [v0.51.424] — 2026-06-15 — Release OK (visible-message tail pagination, #4069)
+
 ### Fixed
 
 - **Tool-heavy session tails now paginate by visible messages, so a "page" shows a consistent number of real replies.** Loading a session with many tool-call rows previously let hidden tool rows consume the per-page message budget, so a page could show very few actual user/assistant messages. The paginated window is now sized by visible (user/assistant) rows while still carrying the tool-result rows needed to render each assistant tool card's result snippet, and large hidden tool outputs are bounded in the paginated payload. The paginated tail is a contiguous slice of the same merged transcript the full load produces (no separate raw read path), so it stays display-equivalent. (#4069)
+
+## [v0.51.423] — 2026-06-15 — Release OJ (virtualize long message transcripts, #500)
+
+### Changed
+
+- **Long chat transcripts are now virtualized for smoother scrolling and rendering.** Sessions with more than 80 messages render only a viewport window (plus a buffer and the most recent 50 messages always-rendered) instead of the entire transcript, with spacer elements preserving scroll geometry. Shorter sessions are unchanged. This removes the jank and slow rebuilds that long (hundreds-of-turn) sessions previously hit. Scroll restoration, jump-to-question, live streaming, and session-switch all preserve their behavior. Note: the browser's native in-page find (Ctrl+F) only matches messages currently in the rendered window on very long transcripts. (#500)
 
 ## [v0.51.422] — 2026-06-14 — Release OI (optional Todos tab in workspace panel, #3564)
 
