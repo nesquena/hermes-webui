@@ -3940,6 +3940,40 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     return bool(role and role != "tool")
 
 
+def _tool_call_ids_in_messages(messages) -> set:
+    """Collect tool-call IDs declared on renderable rows (assistant tool_calls /
+    partial tool_calls / Anthropic tool_use content blocks) so trailing
+    tool-result rows can be matched back to a call present in the window."""
+    ids = set()
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        for key in ("tool_calls", "_partial_tool_calls"):
+            for call in msg.get(key) or []:
+                if isinstance(call, dict):
+                    cid = call.get("id") or call.get("tool_call_id")
+                    if cid:
+                        ids.add(str(cid))
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "tool_use":
+                    cid = part.get("id")
+                    if cid:
+                        ids.add(str(cid))
+    return ids
+
+
+def _tool_result_matches_call_ids(message, call_ids) -> bool:
+    """Return True if a role:tool row's tool_call_id/tool_use_id is in ``call_ids``."""
+    if not call_ids or not isinstance(message, dict):
+        return False
+    if str(message.get("role") or "").lower() != "tool":
+        return False
+    tid = message.get("tool_call_id") or message.get("tool_use_id") or ""
+    return bool(tid) and str(tid) in call_ids
+
+
 def _message_window_for_display(messages, msg_limit=None, msg_before=None, expand_renderable=False) -> tuple[list, int]:
     """Return a paginated message window plus its offset in ``messages``.
 
@@ -3965,16 +3999,34 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
         return source, 0
     limit = max(1, int(msg_limit))
     end_idx = len(source)
+    last_renderable_idx = None
     for idx in range(end_idx - 1, -1, -1):
         if _message_counts_as_renderable_for_window(source[idx]):
-            end_idx = idx + 1
+            last_renderable_idx = idx
             break
-    else:
+    if last_renderable_idx is None:
         start_idx = max(0, end_idx - limit)
         return source[start_idx:end_idx], start_idx
+    # Keep the last renderable row, plus any immediately-following tool-result
+    # rows whose tool_call_id matches a tool-call on a renderable row already in
+    # the window. The renderer rebuilds tool cards (CLI-origin / empty
+    # S.toolCalls path) from role:"tool" rows indexed by tool_call_id
+    # (static/ui.js resultsByTid), so dropping the result row that follows the
+    # newest assistant tool-call would leave that card without its snippet.
+    # Orphan trailing tool-only rows (no matching call in the window) are still
+    # skipped, preserving the visible-row budget. (#4070 ship-review)
+    end_idx = last_renderable_idx + 1
+    window_tool_call_ids = _tool_call_ids_in_messages(source[: last_renderable_idx + 1])
+    while end_idx < len(source) and not _message_counts_as_renderable_for_window(
+        source[end_idx]
+    ):
+        if _tool_result_matches_call_ids(source[end_idx], window_tool_call_ids):
+            end_idx += 1
+        else:
+            break
     start_idx = 0
     renderable_count = 0
-    for idx in range(end_idx - 1, -1, -1):
+    for idx in range(last_renderable_idx, -1, -1):
         if not _message_counts_as_renderable_for_window(source[idx]):
             continue
         renderable_count += 1

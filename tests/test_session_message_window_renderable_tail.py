@@ -138,3 +138,49 @@ def test_cold_load_expands_but_caps_at_total_renderable():
     # Only 1 renderable row in the whole session → expand back to index 0.
     assert offset == 0
     assert window[0]["content"] == "only-user"
+
+
+def test_initial_msg_limit_keeps_matching_trailing_tool_result_row():
+    """A role:tool result row whose tool_call_id matches the newest assistant
+    tool-call must be retained in the paginated window — the renderer rebuilds
+    tool cards from these rows (CLI-origin / empty S.toolCalls path), so dropping
+    it leaves the card without its result snippet. (#4070 ship-review)
+    """
+    messages = [
+        {"role": "user", "content": "do a thing"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call_1", "function": {"name": "terminal", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "the result output"},
+    ]
+
+    window, offset = _message_window_for_display(messages, msg_limit=30)
+
+    assert [m["role"] for m in window] == ["user", "assistant", "tool"]
+    assert any(
+        m["role"] == "tool" and m.get("tool_call_id") == "call_1" for m in window
+    )
+    assert offset == 0
+
+
+def test_initial_msg_limit_skips_orphan_trailing_tool_rows_without_match():
+    """Trailing tool rows with NO matching tool-call in the window are still
+    skipped (they don't consume the visible-row budget). Guards against the
+    matching-tool fix over-extending the window. (#4070 ship-review)
+    """
+    messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+    ] + [
+        {"role": "tool", "tool_call_id": f"orphan_{idx}", "content": f"r{idx}"}
+        for idx in range(40)
+    ]
+
+    window, offset = _message_window_for_display(messages, msg_limit=5)
+
+    assert [m["role"] for m in window] == ["user", "assistant"]
+    assert offset == 0
