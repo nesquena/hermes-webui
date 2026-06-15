@@ -550,7 +550,14 @@ function setLargeMarkdownForceRenderVisible(visible){
 
 function renderMarkdownPreviewContent(data){
   showPreview('md');
-  $('previewMd').innerHTML=renderMd(data.content);
+  const dir=_previewCurrentPath.includes('/')
+    ?_previewCurrentPath.substring(0,_previewCurrentPath.lastIndexOf('/')+1)
+    :'';
+  $('previewMd').innerHTML=renderMd(data.content,{
+    localBase:dir,
+    localImageUrlFn:(localPath)=>
+      `api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(localPath)}`
+  });
   requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
 }
 

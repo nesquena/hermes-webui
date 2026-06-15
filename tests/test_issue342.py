@@ -27,11 +27,11 @@ def test_autolink_comment_present():
 def test_autolink_regex_in_rendermd():
     """The autolink regex pattern (https?://) should appear in renderMd()."""
     content = read_ui_js()
-    # Locate the renderMd function body
-    rendermd_start = content.find('function renderMd(raw){')
+    # Locate the renderMd function body (signature may have optional params)
+    rendermd_start = content.find('function renderMd(raw')
     assert rendermd_start != -1, "renderMd function not found in ui.js"
     # Find the closing brace after renderMd (look for the autolink pattern within it)
-    rendermd_body = content[rendermd_start:rendermd_start + 15000]
+    rendermd_body = content[rendermd_start:rendermd_start + 30000]
     assert 'https?:\\/\\/' in rendermd_body, (
         "Autolink regex (https?:\\/\\/) not found inside renderMd() body."
     )

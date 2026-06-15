@@ -363,11 +363,11 @@ def test_workspace_calls_render_katex_after_preview():
 
 def test_workspace_renders_katex_after_file_open():
     """workspace.js renderKatexBlocks call must come after the renderMd(data.content) assignment."""
-    preview_md_pos = WORKSPACE_JS.find("renderMd(data.content)")
+    preview_md_pos = WORKSPACE_JS.find("renderMd(data.content")
     # Use the actual call string (not a stray regex match on 'M' characters)
     katex_call_str = "renderKatexBlocks==='function'"
     katex_call_pos = WORKSPACE_JS.find(katex_call_str)
-    assert preview_md_pos != -1, "renderMd(data.content) not found in workspace.js"
+    assert preview_md_pos != -1, "renderMd(data.content not found in workspace.js"
     assert katex_call_pos != -1, (
         "renderKatexBlocks guard (typeof renderKatexBlocks==='function') not found in workspace.js"
     )

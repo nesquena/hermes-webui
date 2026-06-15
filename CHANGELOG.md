@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Workspace markdown preview now renders local images.** Markdown files opened in the workspace sidebar now display inline images referenced with local paths (e.g. `![alt](image.png)`, `![alt](sub/image.jpeg)`). Images are served through the existing workspace file endpoint and support the same click-to-open lightbox as chat message images. Parent-directory traversal paths (e.g. `../escape.png`) are blocked for security and left as raw markdown text.
+
 ## [v0.51.430] — 2026-06-15 — Release OQ (session-list-changed events carry the changed session id)
 
 ### Changed

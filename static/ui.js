@@ -3849,12 +3849,25 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
   return clean;
 }
 
-function renderMd(raw){
+function renderMd(raw, opts){
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
   // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
   // a blockquote sent as "&gt; text" would never be recognised as a blockquote.
   s=s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
+  // ── Local image helper (workspace md preview) ─────────────────────────────
+  // opts.localBase: directory prefix (e.g. "sub/dir/") for resolving local paths
+  // opts.localImageUrlFn(localPath): returns the URL string for a local image path
+  // Returns null when local image resolution is not configured or path is rejected
+  // (e.g. parent-dir traversal). Callers should fall back to raw markdown text.
+  function _localImage(alt, url) {
+    if (!opts || !opts.localImageUrlFn) return null;
+    const base = opts.localBase || '';
+    let resolved = base + url.replace(/^\//, '');
+    // Block parent-directory traversal
+    if (/^(?:\.\/)?\.\./.test(resolved) || /\/\.\.(?:\/|$)/.test(resolved)) return null;
+    return opts.localImageUrlFn(resolved);
+  }
   // ── Blockquote pre-pass (must run BEFORE every other markdown pass) ────────
   // Group consecutive >-prefixed lines, strip the > prefix from each line,
   // recursively render the stripped content with the full pipeline, and
@@ -3881,7 +3894,7 @@ function renderMd(raw){
       // Recursive call: full pipeline on stripped content. Handles fenced
       // code, headings, hr, ordered/unordered lists, nested blockquotes
       // (>>) — anything that renderMd handles at the top level.
-      const rendered=renderMd(stripped);
+      const rendered=renderMd(stripped, opts);
       _bq_stash.push('<blockquote>'+rendered+'</blockquote>');
       // Surround the token with blank lines so the paragraph splitter
       // isolates it as its own chunk (otherwise the token gets wrapped
@@ -4083,7 +4096,16 @@ function renderMd(raw){
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
+    // Also handles local paths (e.g. "images.jpeg") for workspace md preview.
     t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    // Run local-image pass if localBaseUrl is configured
+    if(opts&&opts.localImageUrlFn){
+      t=t.replace(/!\[([^\]]*)\]\(([^)\s"'<>]+)\)/g,(_,alt,url)=>{
+        const src=_localImage(alt,url);
+        if(src) return `<img src="${src.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
+        return `![${alt}](${url})`;
+      });
+    }
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -4225,7 +4247,16 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
+  // Also handles local paths (e.g. "images.jpeg") for workspace md preview.
   s=s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  // Outer local-image pass for workspace md preview
+  if(opts&&opts.localImageUrlFn){
+    s=s.replace(/!\[([^\]]*)\]\(([^)\s"'<>]+)\)/g,(_,alt,url)=>{
+      const src=_localImage(alt,url);
+      if(src) return `<img src="${src.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
+      return `![${alt}](${url})`;
+    });
+  }
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
