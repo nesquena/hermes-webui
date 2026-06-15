@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Long chat transcripts are now virtualized for smoother scrolling and rendering.** Sessions with more than 80 messages render only a viewport window (plus a buffer and the most recent 50 messages always-rendered) instead of the entire transcript, with spacer elements preserving scroll geometry. Shorter sessions are unchanged. This removes the jank and slow rebuilds that long (hundreds-of-turn) sessions previously hit. Scroll restoration, jump-to-question, live streaming, and session-switch all preserve their behavior. Note: the browser's native in-page find (Ctrl+F) only matches messages currently in the rendered window on very long transcripts. (#500)
+
 ## [v0.51.422] — 2026-06-14 — Release OI (optional Todos tab in workspace panel, #3564)
 
 ### Added

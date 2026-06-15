@@ -10455,7 +10455,21 @@ function renderMessages(options){
       }
     }
     const _preservedLen=_liveAssistantSegmentTextLength(_preservedSeg||_preservedLiveTurn);
-    if(_preservedLen>0){
+    // Structural-block counts: a live turn can be AHEAD of S.messages with
+    // Activity/tool/worklog blocks that haven't persisted yet — even with ZERO
+    // streamed text (e.g. an Activity-only turn mid-tool-call). The text-length
+    // gate alone would skip preservation in that case, so a scroll-triggered
+    // rebuild on a long (virtualized) transcript could blink those live-only
+    // blocks for a frame. Also restore when the preserved turn carries more
+    // structure than the rebuilt (lagging-S.messages) turn. (#3714 ship-review)
+    const _structuralCount=(turn)=> turn?turn.querySelectorAll(
+      '[data-live-assistant="1"],.tool-call-group,.tool-card-row,'+
+      '.tool-worklog-group,.live-worklog[data-live-worklog-shell="1"],'+
+      '.wl-reason,.agent-activity-thinking,.thinking-card-row'
+    ).length:0;
+    const _preservedStructure=_structuralCount(_preservedLiveTurn);
+    const _rebuiltStructure=_structuralCount(_rebuilt);
+    if(_preservedLen>0 || _preservedStructure>_rebuiltStructure){
       const _rebuiltLen=_rebuilt?_liveAssistantSegmentTextLength(_rebuiltSeg||_rebuilt):-1;
       if(_rebuiltLen<=_preservedLen){
         // Decide segment-level vs whole-turn restore. Segment-level keeps the
@@ -10468,13 +10482,6 @@ function renderMessages(options){
         // blocks for a frame — so restore the WHOLE preserved turn instead.
         // Otherwise (rebuild has >= the preserved turn's structural blocks) do
         // the precise segment swap so rebuilt-only structure is kept.
-        const _structuralCount=(turn)=> turn?turn.querySelectorAll(
-          '[data-live-assistant="1"],.tool-call-group,.tool-card-row,'+
-          '.tool-worklog-group,.live-worklog[data-live-worklog-shell="1"],'+
-          '.wl-reason,.agent-activity-thinking,.thinking-card-row'
-        ).length:0;
-        const _preservedStructure=_structuralCount(_preservedLiveTurn);
-        const _rebuiltStructure=_structuralCount(_rebuilt);
         if(_rebuilt&&_rebuiltSeg&&_preservedSeg&&_rebuiltStructure>=_preservedStructure){
           // Rebuild is the structural superset — swap only the parser-owned
           // (tail) live segment, keeping rebuilt-only segments / tool groups.
