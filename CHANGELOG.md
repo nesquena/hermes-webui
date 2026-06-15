@@ -3,7 +3,11 @@
 
 ## [Unreleased]
 
-## [v0.51.443] — 2026-06-15 — Release PD (scope session by-id reads + exports to active profile)
+## [v0.51.444] — 2026-06-15 — Release PE (refresh sidebar session list on uncommitted writes + settings changes)
+
+### Fixed
+
+- **The sidebar session list now refreshes when new sessions are written but not yet checkpointed, and when settings change.** When CLI-session visibility is on, the `/api/sessions` response is cached and invalidated by a fingerprint of its source files. That fingerprint stamped the main `state.db` and the session index but not the SQLite write-ahead log (`state.db-wal`) — so a freshly-written CLI/agent session that was still in the WAL (not yet checkpointed into the main db file) could be missed until the next checkpoint, leaving the sidebar stale. The fingerprint now also stamps `state.db-wal` and the settings file, so those changes invalidate the cache immediately. Invalidation stays scoped to the CLI-session cache keys. (#4268)
 
 ### Security
 
