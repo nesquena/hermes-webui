@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.438] — 2026-06-15 — Release OY (model cost/health comparison table on Insights)
+
+### Added
+
+- **The Insights panel has an opt-in "Model health comparison" reference table.** A collapsible (default-collapsed) table listing common models with their provider, input/output cost per 1M tokens, and a plain-English replacement/when-to-use guide — a quick at-a-glance cost reference alongside the usage analytics. Every cell is HTML-escaped; the data is static (no new API calls), and the four new i18n keys are present across all locales. (#691)
+
 ## [v0.51.437] — 2026-06-15 — Release OX (Escape blurs the composer for keyboard nav)
 
 ### Fixed
