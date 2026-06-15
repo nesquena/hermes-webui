@@ -3,7 +3,11 @@
 
 ## [Unreleased]
 
-## [v0.51.439] — 2026-06-15 — Release OZ (Insights dashboard polish)
+## [v0.51.440] — 2026-06-15 — Release PA (advanced per-model options + auxiliary model routing)
+
+### Added
+
+- **Advanced model options and auxiliary model routing in Settings → Preferences.** A gear button next to the main model selector opens a "Main model options" dialog (Base URL override, Extra body JSON merged into the request, API key override — all the fields that actually take effect). An "Auxiliary Models" section lets you route side-tasks (vision, compression, web-extract, session-search, approval, MCP, title-generation, skills-hub, curator, kanban-decomposer, profile-describer, triage-specifier) to specific models/providers, each with its own advanced options (including per-task timeout / download-timeout / max-concurrency). API keys are write-only (never echoed back), `extra_body` must be a valid JSON object (malformed input is rejected with a 400), and the main model's `extra_body` is now passed through to the agent at request time via `request_overrides`. (#3097)
 
 ### Changed
 
