@@ -389,10 +389,22 @@ function _scheduleActiveSessionIdleReload(sid) {
     if(!S||!S.session||S.session.session_id !== sid) return;
     if(S.busy || S.activeStreamId) return;
     try{
-      await loadSession(sid, {force:true, externalRefreshReason:'idle-reconcile'});
+      // Avoid an unconditional same-session force reload the moment streaming
+      // settles. On mobile PWA this produces a visible end-of-turn flash and can
+      // briefly restore the pane with stale layout geometry. Use a lightweight
+      // metadata probe for the just-finished active turn, but preserve the
+      // original forced reload as a fallback when that probe fails.
+      const outcome = await _probeActiveSessionServerFreshness('idle-reconcile', {
+        allowNative: true,
+        ignoreStreamJustFinished: true,
+      });
+      if(outcome === 'failed'){
+        await loadSession(sid, {force:true, externalRefreshReason:'idle-reconcile'});
+      }
     }catch(_){}
   },0);
 }
+
 
 function _purgeStaleInflightEntries() {
   // Clean up INFLIGHT entries for sessions the server confirms are NOT
@@ -3664,37 +3676,47 @@ function ensureSessionTimeRefreshPoll(){
   }, _sessionTimeRefreshMs);
 }
 
-async function refreshActiveSessionIfExternallyUpdated(reason){
-  if(_activeSessionExternalRefreshInFlight) return;
-  if(!S.session || !S.session.session_id) return;
-  if(S.busy || S.activeStreamId) return;
-  if(!_isExternalSession(S.session)) return;
-  // Cooldown: don't force-reload immediately after streaming ends — the
+async function _probeActiveSessionServerFreshness(reason, opts={}){
+  if(_activeSessionExternalRefreshInFlight) return 'skipped';
+  if(!S.session || !S.session.session_id) return 'skipped';
+  if(S.busy || S.activeStreamId) return 'skipped';
+  if(!opts.allowNative && !_isExternalSession(S.session)) return 'skipped';
+  // Cooldown: don't force-reload immediately after streaming ends - the
   // "done" event already delivered the final messages. Reloading here would
-  // clear S.toolCalls and lose Activity.
-  if(typeof window !== 'undefined' && window._streamJustFinished) return;
-  if(typeof document !== 'undefined' && document.hidden) return;
+  // clear S.toolCalls and lose Activity. The idle-reconcile path may bypass
+  // this guard because it only runs for the just-finished active turn and
+  // first probes server metadata before falling back to the original reload.
+  if(!opts.ignoreStreamJustFinished && typeof window !== 'undefined' && window._streamJustFinished) return 'skipped';
+  if(typeof document !== 'undefined' && document.hidden) return 'skipped';
   const sid = S.session.session_id;
   const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
   const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
   _activeSessionExternalRefreshInFlight = true;
   try{
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false});
-    if(!data || !data.session) return;
-    if(!S.session || S.session.session_id !== sid) return;
-    if(S.busy || S.activeStreamId) return;
+    if(!data || !data.session) return 'unchanged';
+    if(!S.session || S.session.session_id !== sid) return 'skipped';
+    if(S.busy || S.activeStreamId) return 'skipped';
     const remoteCount = Number(data.session.message_count || 0);
     const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
     if(remoteCount > localCount || remoteLast > localLast){
       await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});
       if(typeof renderSessionList==='function') void renderSessionList();
+      return 'reloaded';
     }
+    return 'unchanged';
   }catch(e){
     // Ignore transient refresh failures; the next poll/focus event will retry.
+    return 'failed';
   }finally{
     _activeSessionExternalRefreshInFlight = false;
   }
 }
+
+async function refreshActiveSessionIfExternallyUpdated(reason){
+  return _probeActiveSessionServerFreshness(reason);
+}
+
 
 function ensureActiveSessionExternalRefreshPoll(){
   if(_activeSessionExternalRefreshTimer) return;
