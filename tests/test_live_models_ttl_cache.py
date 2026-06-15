@@ -112,3 +112,22 @@ def test_live_models_cache_returns_deep_copies(monkeypatch):
 
     assert second["provider"] == "openai"
     assert second["models"] == [{"id": "openai/gpt-test", "label": "GPT Test"}]
+
+
+def test_live_models_endpoint_respects_picker_visibility_budget(monkeypatch):
+    import api.config as config
+    import api.routes as routes
+
+    _install_provider_model_ids(
+        monkeypatch,
+        lambda provider: [f"{provider}/model-{idx}" for idx in range(40)],
+    )
+    _patch_live_models_basics(monkeypatch, routes)
+
+    parsed = urlparse("/api/models/live?provider=openai")
+    payload = routes._handle_live_models(object(), parsed)
+
+    assert payload["count"] == config._MODEL_PICKER_VISIBLE_TARGET
+    assert [m["id"] for m in payload["models"]] == [
+        f"openai/model-{idx}" for idx in range(config._MODEL_PICKER_VISIBLE_TARGET)
+    ]
