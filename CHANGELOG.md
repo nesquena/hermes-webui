@@ -3,7 +3,11 @@
 
 ## [Unreleased]
 
-## [v0.51.442] — 2026-06-15 — Release PC (require auth for passkey enrollment)
+## [v0.51.443] — 2026-06-15 — Release PD (scope session by-id reads + exports to active profile)
+
+### Security
+
+- **Direct session reads and exports now honor the active-profile boundary, like the session list already does.** `/api/sessions` scopes its rows to the request's active Hermes profile, but two by-id endpoints did not: `GET /api/session?session_id=…` (transcript/metadata read, including the CLI-session fallback) and `GET /api/session/export?session_id=…` (full transcript JSON download) loaded a session purely by id. A stale, leaked, or guessed session id from another profile could therefore disclose that profile's transcript or export. Both paths now apply the same `_profiles_match(...)` check and return the same `404` used for missing sessions (so they don't reveal foreign-profile session existence). Default/legacy-root profile aliasing is preserved, and the `/api/sessions` list path is unchanged. (#3982, #3991)
 
 ### Security
 
