@@ -57,6 +57,18 @@ def test_remote_terminal_workspace_paths_outside_cwd_still_reject(monkeypatch):
         workspace.resolve_trusted_workspace("/Users/other/projects/demo")
 
 
+def test_remote_terminal_workspace_paths_with_parent_escape_still_reject(monkeypatch):
+    monkeypatch.setattr(api_config, "get_config", lambda: _remote_config())
+
+    escaped = f"{REMOTE_CWD}/../other/projects/demo"
+
+    with pytest.raises(ValueError, match="Path does not exist"):
+        workspace.validate_workspace_to_add(escaped)
+
+    with pytest.raises(ValueError, match="Path does not exist"):
+        workspace.resolve_trusted_workspace(escaped)
+
+
 @pytest.mark.parametrize("workspace_path", ["/etc", "/etc/ssh"])
 def test_remote_terminal_workspace_system_roots_still_reject(monkeypatch, workspace_path):
     monkeypatch.setattr(api_config, "get_config", lambda: _remote_config(terminal={"backend": "ssh", "cwd": "/etc"}))
@@ -66,3 +78,15 @@ def test_remote_terminal_workspace_system_roots_still_reject(monkeypatch, worksp
 
     with pytest.raises(ValueError, match="Path points to a system directory"):
         workspace.resolve_trusted_workspace(workspace_path)
+
+
+@pytest.mark.parametrize("validator", [workspace.resolve_trusted_workspace, workspace.validate_workspace_to_add])
+def test_var_home_workspaces_stay_allowed_before_system_root_blocklist(monkeypatch, validator):
+    home = Path("/var/home/joeyshiue")
+    candidate = home / "projects/demo"
+
+    monkeypatch.setattr(workspace, "_resolve_path", lambda raw: candidate if str(raw) == str(candidate) else Path(raw))
+    monkeypatch.setattr(workspace, "_home_path", lambda: home)
+    monkeypatch.setattr(workspace, "_workspace_access_error", lambda _candidate: None)
+
+    assert validator(str(candidate)) == candidate

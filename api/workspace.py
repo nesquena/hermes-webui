@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import shutil
 import stat
 import subprocess
@@ -110,6 +111,13 @@ def _posix_is_within(path: PurePosixPath, root: PurePosixPath) -> bool:
         return False
 
 
+def _normalize_posix_path(path: str | Path | None) -> str | None:
+    candidate = _as_posix_path(path)
+    if candidate is None:
+        return None
+    return posixpath.normpath(candidate.as_posix())
+
+
 def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
     """Return True when the active terminal backend runs outside this WebUI host."""
     if not isinstance(terminal_cfg, dict):
@@ -143,13 +151,15 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
     raw = _strip_surrounding_quotes(str(path)).strip()
     if not raw:
         return None
-    posix_candidate = _as_posix_path(raw)
-    posix_base = _as_posix_path(cwd)
-    if posix_candidate is not None and posix_base is not None:
-        if _is_blocked_workspace_path(Path(raw), raw) or _is_blocked_workspace_path(Path(cwd), cwd):
+    normalized_raw = _normalize_posix_path(raw)
+    normalized_cwd = _normalize_posix_path(cwd)
+    if normalized_raw is not None and normalized_cwd is not None:
+        posix_candidate = PurePosixPath(normalized_raw)
+        posix_base = PurePosixPath(normalized_cwd)
+        if _is_blocked_workspace_path(Path(normalized_raw), normalized_raw) or _is_blocked_workspace_path(Path(normalized_cwd), normalized_cwd):
             return None
         if posix_candidate == posix_base or _posix_is_within(posix_candidate, posix_base):
-            return _resolve_path(raw)
+            return _resolve_path(normalized_raw)
         return None
     candidate = _resolve_path(raw)
     base = _resolve_path(cwd)
@@ -746,9 +756,6 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
     candidate = _resolve_path(path)
 
-    if _is_blocked_workspace_path(candidate, path):
-        raise ValueError(f"Path points to a system directory: {candidate}")
-
     access_error = _workspace_access_error(candidate)
     remote_candidate = _remote_terminal_workspace_candidate(path)
     if access_error:
@@ -771,6 +778,9 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
             return candidate
         except ValueError:
             pass
+
+    if _is_blocked_workspace_path(candidate, path):
+        raise ValueError(f"Path points to a system directory: {candidate}")
 
     # (B) Trusted if already in the saved workspace list — covers non-home installs
     try:
@@ -838,9 +848,6 @@ def validate_workspace_to_add(path: str) -> Path:
     path = _strip_surrounding_quotes(path)
     candidate = _resolve_path(path)
 
-    if _is_blocked_workspace_path(candidate, path):
-        raise ValueError(f"Path points to a system directory: {candidate}")
-
     access_error = _workspace_access_error(candidate)
     remote_candidate = _remote_terminal_workspace_candidate(path)
     if access_error:
@@ -858,6 +865,9 @@ def validate_workspace_to_add(path: str) -> Path:
     _home = _home_path()
     if _home != Path("/") and _is_within(candidate, _home):
         return candidate
+
+    if _is_blocked_workspace_path(candidate, path):
+        raise ValueError(f"Path points to a system directory: {candidate}")
 
     return candidate
 
