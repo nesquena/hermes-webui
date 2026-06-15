@@ -270,6 +270,16 @@ class GatewayWatcher:
         q = queue.Queue(maxsize=10)
         with self._sub_lock:
             self._subscribers.append(q)
+            # Stop-race safety: if stop() already ran (set _stop_event and drained
+            # the then-current subscriber list) before we appended, this queue would
+            # never receive the sentinel and the SSE loop would hang open with
+            # keepalives but no events. Enqueue the sentinel ourselves so the handler
+            # closes and reconnects to the live registry watcher. (#3629 / Codex gate)
+            if self._stop_event.is_set():
+                try:
+                    q.put_nowait(None)
+                except Exception:
+                    logger.debug("Failed to send stop sentinel to late subscriber")
         return q
 
     def unsubscribe(self, q: queue.Queue):

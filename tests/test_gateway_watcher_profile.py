@@ -324,3 +324,19 @@ def test_profile_switch_response_survives_watcher_restart_failure(monkeypatch):
 
     assert handler.status == 200
     assert handler.get_json() == {"ok": True, "name": "demo"}
+
+
+def test_subscribe_after_stop_gets_sentinel_immediately():
+    """Stop-race safety (#3629 / Codex gate): a subscriber added AFTER stop() has
+    already set _stop_event and drained the then-current subscriber list must still
+    receive the None sentinel — otherwise the SSE loop hangs open with keepalives but
+    no events (it never learns the watcher it attached to was reaped during a
+    concurrent profile switch)."""
+    from api import gateway_watcher as gw
+
+    watcher = gw.GatewayWatcher(hermes_home=None, profile_name="race")
+    # Simulate the reaped/stopped watcher: stop() ran before this subscribe().
+    watcher.stop()
+    q = watcher.subscribe()
+    # The late subscriber must find the sentinel already queued (no block / hang).
+    assert q.get_nowait() is None
