@@ -2210,6 +2210,8 @@
   .preview-md tr:nth-child(even){background:var(--code-inline-bg);}
   /* #486: inline code inside table cells needs scaled sizing to avoid overflow/clipping */
   .preview-md td code,.preview-md th code{font-size:0.85em;padding:1px 4px;vertical-align:baseline;}
+  /* Workspace md preview: render images at natural size, capped to container width */
+  .preview-md .msg-media-img{display:block;width:auto;height:auto;max-width:100%;object-fit:contain;border-radius:6px;margin:8px 0;cursor:zoom-in;border:1px solid var(--border);}
   /* File type badge in preview path bar */
   .preview-badge{display:inline-block;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:8px;text-transform:uppercase;letter-spacing:.06em;}
   .preview-badge.img,.preview-badge.image,.preview-badge.audio,.preview-badge.video{background:var(--accent-bg);color:var(--accent-text);}
