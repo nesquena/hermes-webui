@@ -12226,10 +12226,11 @@ def _handle_live_models(handler, parsed):
                 # Fallback: try credential pool for base_url + api_key
                 if (not _base_url or not _api_key) and provider.startswith("custom:"):
                     try:
-                        from api.config import _has_explicit_pool_credentials
+                        from api.config import _has_explicit_pool_credentials, _resolve_provider_alias
                         if _has_explicit_pool_credentials(provider):
                             from agent.credential_pool import load_pool as _lpool
-                            _lm_pool = _lpool(provider)
+                            _resolved = _resolve_provider_alias(provider)
+                            _lm_pool = _lpool(_resolved)
                             if _lm_pool:
                                 _lm_entry = _lm_pool.select()
                                 if _lm_entry:

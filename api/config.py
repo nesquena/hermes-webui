@@ -5294,7 +5294,8 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         from api.config import _has_explicit_pool_credentials
                         if _has_explicit_pool_credentials(_slug):
                             from agent.credential_pool import load_pool
-                            _pool = load_pool(_slug)
+                            _resolved = _resolve_provider_alias(_slug)
+                            _pool = load_pool(_resolved)
                             if _pool:
                                 _entry = _pool.select()
                                 if _entry:

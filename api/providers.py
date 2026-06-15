@@ -1083,10 +1083,13 @@ def _get_provider_api_key(provider_id: str) -> str | None:
                     return cp_key
     # Fallback: try credential pool (e.g. bothub key stored via auth.json)
     try:
-        from api.config import _has_explicit_pool_credentials
+        from api.config import _has_explicit_pool_credentials, _resolve_provider_alias
         if _has_explicit_pool_credentials(provider_id):
             from agent.credential_pool import load_pool
-            pool = load_pool(provider_id)
+            # Must resolve alias here too: _has_explicit_pool_credentials does it
+            # internally, but load_pool sees the original unresolved provider_id.
+            _resolved = _resolve_provider_alias(provider_id)
+            pool = load_pool(_resolved)
             if pool:
                 entry = pool.select()
                 if entry:
