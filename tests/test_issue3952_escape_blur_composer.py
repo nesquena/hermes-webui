@@ -39,9 +39,15 @@ def test_escape_blurs_focused_composer_after_higher_priority_escape_actions():
     """Escape should let keyboard-only users leave the composer and use j/k nav."""
     block = _escape_block()
 
-    blur_idx = block.find("if(document.activeElement===$('msg')){")
+    blur_idx = block.find("document.activeElement===$('msg')")
     assert blur_idx != -1, "Escape handler must detect the focused composer"
     assert "$('msg').blur();" in block[blur_idx:], "Escape handler must blur the composer"
+    # The blur must be skipped while an IME candidate window is composing, so
+    # Escape dismisses the candidate (CJK input) rather than blurring the composer.
+    blur_line = block[blur_idx : block.find("\n", blur_idx)]
+    assert "!e.isComposing" in blur_line and "!_imeComposing" in blur_line, (
+        "Escape blur must be guarded against IME composition"
+    )
 
     assert block.index("skipOnboarding") < blur_idx, "onboarding dismissal stays higher priority"
     assert block.index("_closeSettingsPanel") < blur_idx, "settings dismissal stays higher priority"
