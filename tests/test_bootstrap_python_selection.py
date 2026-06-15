@@ -4,6 +4,13 @@ from unittest.mock import patch
 import bootstrap
 
 
+def _repo_venv_python(repo_root: pathlib.Path) -> pathlib.Path:
+    rel = pathlib.Path(
+        "Scripts/python.exe" if bootstrap.platform.system() == "Windows" else "bin/python"
+    )
+    return repo_root / ".venv" / rel
+
+
 def test_ensure_python_prefers_agent_venv_when_launcher_cannot_import_agent(monkeypatch, tmp_path):
     """Avoid starting WebUI with a local venv that later cannot import AIAgent."""
     local_python = tmp_path / "webui" / ".venv" / "bin" / "python"
@@ -42,11 +49,12 @@ def test_ensure_python_fails_loudly_when_no_interpreter_can_import_agent(monkeyp
     fake_venv_python = tmp_path / "fake-repo-venv-python"
     fake_venv_python.write_text("", encoding="utf-8")
     monkeypatch.setattr(bootstrap, "REPO_ROOT", tmp_path)
-    # Ensure the .venv/bin/python (or .venv/Scripts/python.exe) path resolves
-    # to our fake binary so .exists() returns True and EnvBuilder is skipped.
-    venv_subdir = tmp_path / ".venv" / "bin"
-    venv_subdir.mkdir(parents=True, exist_ok=True)
-    (venv_subdir / "python").write_text("", encoding="utf-8")
+    # Ensure the platform-native repo-local venv python already exists so
+    # EnvBuilder.create() is skipped and the test stays focused on interpreter
+    # selection rather than venv creation internals.
+    venv_python = _repo_venv_python(tmp_path)
+    venv_python.parent.mkdir(parents=True, exist_ok=True)
+    venv_python.write_text("", encoding="utf-8")
     if (tmp_path / ".venv").exists():  # platform-independent guard
         pass
 
@@ -81,7 +89,7 @@ def test_local_venv_is_created_with_symlinks(monkeypatch, tmp_path):
     with patch.object(bootstrap.venv, "EnvBuilder") as mock_builder:
         # Make EnvBuilder().create() materialize the venv python so the post-create
         # `_python_can_run_webui_and_agent` retry path doesn't trip on a missing file.
-        venv_python = tmp_path / ".venv" / "bin" / "python"
+        venv_python = _repo_venv_python(tmp_path)
 
         def fake_create(target):
             venv_python.parent.mkdir(parents=True, exist_ok=True)

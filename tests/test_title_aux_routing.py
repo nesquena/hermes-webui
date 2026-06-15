@@ -7,6 +7,7 @@ Covers:
   - _aux_title_timeout rejects zero, negative, and non-numeric values
 """
 import os
+from pathlib import Path
 import sys
 import types
 import unittest
@@ -785,7 +786,7 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
 
         self.assertEqual(captured.get('hermes_home'), 'profile-home')
         self.assertEqual(str(captured.get('skill_module_home')), 'profile-home')
-        self.assertEqual(str(captured.get('skill_module_dir')), 'profile-home/skills')
+        self.assertEqual(Path(str(captured.get('skill_module_dir'))), Path('profile-home') / 'skills')
         self.assertEqual(captured.get('restored_hermes_home'), 'default-home')
         self.assertEqual(getattr(fake_skill_module, 'HERMES_HOME'), 'default-home')
         self.assertEqual(getattr(fake_skill_module, 'SKILLS_DIR'), 'default-home/skills')
