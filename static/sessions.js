@@ -6283,6 +6283,15 @@ function renderSessionListFromCache(){
         try{
           if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
           await loadSession(s.session_id);renderSessionListFromCache();
+          // #4159: if the user clicked a content-search hit, scroll the
+          // newly-loaded transcript to the matched message and flash it.
+          // _jumpToMessage handles the out-of-render-window case (it refetches
+          // the full session with msg_limit=9999) and the in-window case
+          // (smooth scrollIntoView + flash).
+          if(s.match_type==='content' && Number.isInteger(s.match_message_idx) && typeof _jumpToMessage==='function'){
+            const _jumpIdx=s.match_message_idx;
+            window.setTimeout(()=>{ try{ _jumpToMessage(_jumpIdx); }catch(_e){} }, 0);
+          }
           if(typeof closeMobileSidebar==='function')closeMobileSidebar();
         }finally{
           el.classList.remove('loading');
