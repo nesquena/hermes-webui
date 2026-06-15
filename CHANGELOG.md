@@ -3,9 +3,11 @@
 
 ## [Unreleased]
 
-### Added
+## [v0.51.431] — 2026-06-15 — Release OR (make request logging non-fatal)
 
-- **Workspace markdown preview now renders local images.** Markdown files opened in the workspace sidebar now display inline images referenced with local paths (e.g. `![alt](image.png)`, `![alt](sub/image.jpeg)`). Images are served through the existing workspace file endpoint and support the same click-to-open lightbox as chat message images. Parent-directory traversal paths (e.g. `../escape.png`) are blocked for security and left as raw markdown text.
+### Fixed
+
+- **A closed or redirected stdout/stderr stream can no longer abort an HTTP response before it's sent.** Request/access logging and request-error logging now route through a small guarded print helper, so if agent or tool code redirects or closes the process-wide output streams in another thread, the log write is swallowed instead of raising mid-response. Real handler errors are unaffected — the error message and traceback are still built and still surface a 500; only the log I/O is guarded, and `KeyboardInterrupt`/`SystemExit` still propagate. (#4188)
 
 ## [v0.51.430] — 2026-06-15 — Release OQ (session-list-changed events carry the changed session id)
 
