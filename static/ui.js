@@ -2400,8 +2400,14 @@ function renderModelDropdown(){
       if(shouldRenderHeading){
         const heading=document.createElement('div');
         heading.className='model-group';
-        const count=hiddenCount?0:(meta.modelCount||0);
-        heading.textContent=count>1?`${meta.label} (${count})`:meta.label;
+        // When COLLAPSED (hiddenCount>0) keep the backend-decorated label verbatim
+        // ("Nous (2 of 4)") so the overflow count shows. When EXPANDED, strip that
+        // decoration and append the rendered-row count, otherwise the heading reads
+        // "Nous (2 of 4) (4)" (double count). Count rendered rows, not modelCount,
+        // so hoisted-configured models aren't double-counted. (#3691)
+        const count=hiddenCount?0:groupRows.length;
+        const _plainLabel=String(meta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,'');
+        heading.textContent=count>1?`${_plainLabel} (${count})`:meta.label;
         dd.appendChild(heading);
         _renderProviderEndpointHint(meta);
       }

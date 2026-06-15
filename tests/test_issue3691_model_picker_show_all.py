@@ -464,6 +464,12 @@ def test_runtime_picker_preserves_backend_decorated_nous_heading_without_double_
     assert 'class="model-opt-provider">Nous<' in row_html, (
         "Each row's provider chip should render the plain provider label (e.g. 'Nous')."
     )
+    # After expand, the heading must not double-count ("Nous (2 of 4) (4)") — it should
+    # strip the backend decoration and show the plain rendered-row count. (#3691)
+    expanded_heading_text = "\n".join(item["textContent"] for item in out["expanded"])
+    assert "(2 of 4) (4)" not in expanded_heading_text, (
+        "Expanded heading must not append a second count onto the decorated overflow label."
+    )
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
