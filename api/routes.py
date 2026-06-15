@@ -13760,9 +13760,11 @@ def _handle_chat_start(handler, body, diag=None):
             return bad(handler, str(e))
         diag.stage("get_session") if diag else None
         try:
-            s = get_session(body["session_id"])
+            s = _get_or_materialize_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
+        except PermissionError:
+            return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         if requested_profile:

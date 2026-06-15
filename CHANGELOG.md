@@ -7,6 +7,19 @@
 
 - **Session sidebar discoverability now preserves multi-row imported/CLI lineages when a fuller pre-compression snapshot exists.** The sidebar may still expose the fuller snapshot, but it no longer suppresses multiple messageful non-snapshot rows from the same imported/CLI lineage as if they were a single inactive continuation. (#498, #3418)
 
+## [v0.51.426] — 2026-06-15 — Release OM (custom-provider model-prefix routing fix, #4210)
+
+### Fixed
+
+- **Custom providers with no `base_url` no longer get hijacked to OpenRouter when the model id has a known-provider prefix.** A bare `custom` or named `custom:<slug>` provider pointed at a vendor-routing proxy (e.g. `custom:llm-proxy` with no configured `base_url`, since the proxy URL is supplied at request time) used to receive an OpenRouter redirect for model ids like `x-ai/grok-2` or `google/gemma-2` whenever the prefix was a member of `_PROVIDER_MODELS`. The backend then failed to initialize with `RuntimeError: No LLM provider configured` because the user had no OpenRouter credentials configured. `resolve_model_provider()` now applies the same custom-provider exemption the `config_base_url` branch already carries (sibling of #3872 / v0.51.349), so the request stays on the user's selected custom provider with the full model id preserved. (#4210)
+
+## [v0.51.425] — 2026-06-15 — Release OL (data-integrity batch: empty-pending guard #4205 + cron-reply fix #3975)
+
+### Fixed
+
+- **A session save can no longer wipe an in-flight conversation to empty.** `Session.save()` now guards against overwriting a session that has on-disk messages with an empty message list while a turn is still in flight (an active stream or a pending user message), preventing a rare data-loss window where a transient empty save clobbered the real transcript. New/legitimately-empty sessions and cancel paths are unaffected. (#4205)
+- **Replying to cron (and other foreign-origin) sessions now works instead of redirecting to the start page.** The chat-send handler now materializes a missing WebUI sidecar from state.db via the shared `_get_or_materialize_session` helper (the same path four sibling handlers already use) and returns a clean 403 on a genuine read-only/messaging-session write, so replies to cron-run sessions send correctly. (#3975)
+
 ## [v0.51.424] — 2026-06-15 — Release OK (visible-message tail pagination, #4069)
 
 ### Fixed
