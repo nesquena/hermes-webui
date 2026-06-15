@@ -4051,14 +4051,14 @@ def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
         return sidecar_messages
-    if sidecar_messages:
-        sidecar_newest = _max_message_timestamp(sidecar_messages)
-        state_newest = _max_message_timestamp(state_db_messages)
-        if (
-            sidecar_newest is not None
-            and (state_newest is None or state_newest <= sidecar_newest)
-        ):
-            return sidecar_messages
+    # NOTE: do not short-circuit to the sidecar when state.db has no strictly
+    # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
+    # newest (recovery / edited-in-place / missing-timestamp cases) is still
+    # absent from the sidecar and must be reconciled — dropping it would render
+    # a tail that differs from the full merge path (silent wrong-transcript on
+    # the paginated load). The append-only merge is O(n) over already-bounded
+    # in-memory lists; the real latency win here is skipping the lineage-parent
+    # DISK load above, which we still skip. (#4070 ship-review)
     return merge_session_messages_append_only(
         sidecar_messages,
         state_db_messages,
