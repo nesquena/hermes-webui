@@ -16715,16 +16715,23 @@ def _handle_memory_write(handler, body):
     except ImportError:
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
-    mem_dir.mkdir(parents=True, exist_ok=True)
     section = body["section"]
     if section == "memory":
+        if mem_dir.is_symlink():
+            return bad(handler, "Cannot write through a symlinked memories directory")
+        mem_dir.mkdir(parents=True, exist_ok=True)
         target = mem_dir / "MEMORY.md"
     elif section == "user":
+        if mem_dir.is_symlink():
+            return bad(handler, "Cannot write through a symlinked memories directory")
+        mem_dir.mkdir(parents=True, exist_ok=True)
         target = mem_dir / "USER.md"
     elif section == "soul":
         target = home / "SOUL.md"
     else:
         return bad(handler, 'section must be "memory", "user", or "soul"')
+    if target.is_symlink():
+        return bad(handler, "Cannot write to a symlinked memory file")
     target.write_text(body["content"], encoding="utf-8")
     return j(handler, {"ok": True, "section": section, "path": str(target)})
 
