@@ -3,15 +3,25 @@
 
 ## [Unreleased]
 
+## [v0.51.437] — 2026-06-15 — Release OX (Escape blurs the composer for keyboard nav)
+
+### Fixed
+
+- **Pressing Escape in the message composer now blurs it so j/k message navigation works.** Keyboard-only users could not reach the j/k session-navigation shortcuts while the composer held focus (it swallowed the keys). Escape now blurs the composer when it's focused — after any higher-priority Escape action (closing the slash-command dropdown, dismissing onboarding/settings, cancelling a message edit, clearing the session search) still runs first. The slash-command dropdown's Escape handler now stops propagation so closing it doesn't also blur in the same keystroke, and the blur is skipped while an IME candidate window is composing (so Escape dismisses the candidate for CJK input instead of blurring). (#3952)
+
 ## [v0.51.436] — 2026-06-15 — Release OW (cron sessions mark unread on new runs)
 
 ### Fixed
 
 - **Cron sessions in the sidebar now mark unread when a new run lands, attributed to the correct job.** When a scheduled job finished, the sidebar's unread resolver matched a session id against `cron_<jobid>_` prefixes built only from the just-completed jobs, so a job whose id is a prefix of another's (e.g. `backup` vs `backup_full`) could steal the other's session (`cron_backup_full_…` resolving to `backup`). The resolver now considers all known job ids and attributes each session to the longest matching job-id prefix, which is provably unambiguous (the matching prefixes of a single session id are nested, so the longest is unique). The lookup is a read-only `state.db` scan that only runs when a cron actually completed, degrades gracefully on contention, and filters in Python rather than via SQL `LIKE`. (#3460)
 
+## [v0.51.435] — 2026-06-15 — Release OV (supported local pytest runner)
+
 ### Added
 
 - **`./scripts/test.sh` runs the suite in a repo-local, version-correct virtualenv.** The runner finds a supported interpreter (Python 3.11–3.13), creates or rebuilds a repo-local `.venv` when needed, installs the pinned dev dependencies from the new `requirements-dev.txt`, and then runs pytest — so contributors get a one-command, correctly-versioned test path instead of a bare `pytest` that may collect against an unsupported system Python. `tests/conftest.py` also fails fast with a clear message if pytest is launched on an unsupported interpreter, and the runner refuses to create or `--clear` a virtualenv through a symlinked `.venv` (which would otherwise empty the symlink's target). Dev-tooling only — no runtime or app behavior changes. (#3908)
+
+## [v0.51.434] — 2026-06-15 — Release OU (reject symlinked skill files on save)
 
 ### Fixed
 
