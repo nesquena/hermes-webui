@@ -7,6 +7,12 @@
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266)
 
+## [v0.51.445] — 2026-06-15 — Release PF (scope gateway watcher to the active profile)
+
+### Fixed
+
+- **The gateway session watcher is now per-profile, so switching profiles in one tab no longer breaks gateway live-updates in another.** The watcher that drives gateway session SSE updates was a single process-wide instance: when one browser tab switched profiles it stopped and replaced that global watcher, silently stealing the gateway event stream from tabs on other profiles. Gateway watchers are now keyed by profile (a registry, not a singleton), each request's SSE stream subscribes to its own active profile's watcher, a profile switch only restarts that profile's watcher (never one another tab is observing), and idle watchers with no subscribers are reaped. Switching profiles in a tab now also reconnects that tab's own gateway stream to the new profile. (#2848)
+
 ## [v0.51.444] — 2026-06-15 — Release PE (refresh sidebar session list on uncommitted writes + settings changes)
 
 ### Fixed
