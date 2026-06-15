@@ -3,7 +3,11 @@
 
 ## [Unreleased]
 
-## [v0.51.434] — 2026-06-15 — Release OU (reject symlinked skill files on save)
+## [v0.51.435] — 2026-06-15 — Release OV (supported local pytest runner)
+
+### Added
+
+- **`./scripts/test.sh` runs the suite in a repo-local, version-correct virtualenv.** The runner finds a supported interpreter (Python 3.11–3.13), creates or rebuilds a repo-local `.venv` when needed, installs the pinned dev dependencies from the new `requirements-dev.txt`, and then runs pytest — so contributors get a one-command, correctly-versioned test path instead of a bare `pytest` that may collect against an unsupported system Python. `tests/conftest.py` also fails fast with a clear message if pytest is launched on an unsupported interpreter, and the runner refuses to create or `--clear` a virtualenv through a symlinked `.venv` (which would otherwise empty the symlink's target). Dev-tooling only — no runtime or app behavior changes. (#3908)
 
 ### Fixed
 
