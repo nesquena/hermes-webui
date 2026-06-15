@@ -258,6 +258,64 @@ def test_state_db_only_user_prompt_before_sidecar_tail_is_reinserted_chronologic
     ]
 
 
+def test_state_db_only_user_prompt_equal_timestamp_stays_before_assistant_tail():
+    """Same-timestamp rescued user prompts must not render after the answer."""
+    sidecar_messages = [
+        {"role": "assistant", "content": "answer", "timestamp": 100.0},
+    ]
+    state_messages = [
+        {"role": "user", "content": "the question", "timestamp": 100.0},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+
+    assert [m["content"] for m in merged] == ["the question", "answer"]
+
+
+def test_state_db_only_user_prompt_does_not_split_tool_call_and_result_pair():
+    """Chronological rescue must preserve assistant tool_call/tool result adjacency."""
+    sidecar_messages = [
+        {
+            "role": "assistant",
+            "content": "I will inspect it",
+            "timestamp": 100.0,
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file"}}],
+        },
+        {"role": "tool", "content": "tool result", "timestamp": 101.0, "tool_call_id": "call_1"},
+        {"role": "assistant", "content": "final answer", "timestamp": 103.0},
+    ]
+    state_messages = [
+        {"role": "user", "content": "missing prompt", "timestamp": 100.5},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+
+    assert [m["content"] for m in merged] == [
+        "I will inspect it",
+        "tool result",
+        "missing prompt",
+        "final answer",
+    ]
+
+
+def test_state_db_only_user_prompt_before_sidecar_start_is_not_resurrected_without_watermark():
+    """No-watermark context/compression reads must not revive old pre-sidecar users."""
+    sidecar_messages = [
+        {"role": "assistant", "content": "compacted summary", "timestamp": 200.0},
+        {"role": "assistant", "content": "current answer", "timestamp": 201.0},
+    ]
+    state_messages = [
+        {"role": "user", "content": "compressed-out old prompt", "timestamp": 100.0},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+
+    assert [m["content"] for m in merged] == [
+        "compacted summary",
+        "current answer",
+    ]
+
+
 def test_state_db_middle_segment_replay_does_not_append_after_sidecar_tail():
     """A replayed state.db segment from the middle must not be appended after the tail."""
     sidecar_messages = [

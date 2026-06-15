@@ -4476,18 +4476,46 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     return state_messages[best_len:]
 
 
-def _insert_state_message_chronologically(messages: list, msg: dict) -> None:
-    """Insert a state.db-only row before newer sidecar rows when possible."""
+def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
+    """Insert a state.db-only row before newer sidecar rows when safe.
+
+    Returns False when the only chronological slot would resurrect an old state
+    row before the sidecar/context begins. This keeps no-watermark compression
+    display paths from reintroducing rows that were already compacted out.
+    """
     timestamp = _message_timestamp_as_float(msg)
     if timestamp is None:
         messages.append(msg)
-        return
-    for idx, existing in enumerate(messages):
+        return True
+    idx = 0
+    while idx < len(messages):
+        existing = messages[idx]
         existing_timestamp = _message_timestamp_as_float(existing)
-        if existing_timestamp is not None and existing_timestamp > timestamp:
-            messages.insert(idx, msg)
-            return
+        should_insert = existing_timestamp is not None and (
+            existing_timestamp > timestamp
+            or (
+                existing_timestamp == timestamp
+                and msg.get("role") == "user"
+                and existing.get("role") == "assistant"
+            )
+        )
+        if not should_insert:
+            idx += 1
+            continue
+        if idx == 0 and existing_timestamp is not None and existing_timestamp > timestamp:
+            return False
+        while (
+            idx < len(messages)
+            and messages[idx].get("role") == "tool"
+            and idx > 0
+            and messages[idx - 1].get("role") == "assistant"
+            and messages[idx - 1].get("tool_calls")
+        ):
+            idx += 1
+        messages.insert(idx, msg)
+        return True
     messages.append(msg)
+    return True
 
 
 def merge_session_messages_append_only(
@@ -4684,11 +4712,11 @@ def merge_session_messages_append_only(
                     continue
             else:
                 if msg.get("role") == "user" and _session_message_content_key(msg) not in seen_content_keys:
-                    seen_message_keys.add(key)
-                    seen_dedup_keys.add(dedup_key)
-                    seen_content_keys.add(_session_message_content_key(msg))
-                    seen_visible_keys.add(visible_key)
-                    _insert_state_message_chronologically(merged_messages, msg)
+                    if _insert_state_message_chronologically(merged_messages, msg):
+                        seen_message_keys.add(key)
+                        seen_dedup_keys.add(dedup_key)
+                        seen_content_keys.add(_session_message_content_key(msg))
+                        seen_visible_keys.add(visible_key)
                     continue
                 continue
         seen_message_keys.add(key)
