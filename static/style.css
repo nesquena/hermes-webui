@@ -4055,6 +4055,49 @@ main.main > #mainPlugin{display:none;}
 #mainSettings .settings-field > div[style*="color:var(--muted)"],
 #mainSettings .settings-field > div[style*="color: var(--muted)"]{font-size:12px;color:var(--muted);line-height:1.5;}
 
+.model-advanced-row{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 34px;
+  gap:8px;
+  align-items:center;
+}
+.model-advanced-row #settingsModel{
+  width:100%!important;
+  min-width:0;
+  box-sizing:border-box;
+}
+.model-advanced-btn{
+  width:32px;
+  height:32px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:8px;
+  border:1px solid var(--border);
+  background:var(--input-bg);
+  color:var(--muted);
+  cursor:pointer;
+  line-height:1;
+  padding:0;
+  flex:0 0 32px;
+  box-sizing:border-box;
+}
+.model-advanced-btn svg{display:block;flex-shrink:0;}
+.model-advanced-btn:hover:not(:disabled),
+.model-advanced-btn:focus-visible:not(:disabled){
+  color:var(--accent);
+  border-color:var(--accent);
+  background:var(--accent-bg);
+}
+.model-advanced-btn:focus-visible{
+  outline:2px solid var(--focus-ring);
+  outline-offset:2px;
+}
+.model-advanced-btn:disabled{
+  opacity:.7;
+  cursor:not-allowed;
+}
+
 /* Sidebar tab visibility — hide nav-tab and matching rail-btn when toggled off by user */
 .nav-tab-hidden{display:none!important;}
 
