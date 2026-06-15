@@ -9309,7 +9309,6 @@ function renderMessages(options){
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
     (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
   );
-  const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
 
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
@@ -9395,6 +9394,7 @@ function renderMessages(options){
   const sessionCompressionSummary=(
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
+  const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
