@@ -177,7 +177,7 @@ class TestApplyOnboardingKeySync(unittest.TestCase):
 
             mod.apply_onboarding_setup({
                 "provider": "aimlapi",
-                "model": "openai/gpt-4o-mini",
+                "model": "gpt-5-chat",
                 "api_key": "aiml-test-key",
             })
 
@@ -185,7 +185,7 @@ class TestApplyOnboardingKeySync(unittest.TestCase):
         self.assertEqual(write_env_mock.call_args.args[1], {"AIMLAPI_API_KEY": "aiml-test-key"})
         saved_cfg = save_yaml_mock.call_args.args[1]
         self.assertEqual(saved_cfg["model"]["provider"], "aimlapi")
-        self.assertEqual(saved_cfg["model"]["default"], "openai/gpt-4o-mini")
+        self.assertEqual(saved_cfg["model"]["default"], "gpt-5-chat")
         self.assertEqual(saved_cfg["model"]["base_url"], "https://api.aimlapi.com/v1")
         self.assertEqual(os.environ.get("AIMLAPI_API_KEY"), "aiml-test-key")
         os.environ.pop("AIMLAPI_API_KEY", None)
@@ -264,6 +264,19 @@ class TestApplyOnboardingSkipGuard(unittest.TestCase):
             })
 
         save_yaml_mock.assert_called_once()
+
+
+def test_aimlapi_runtime_key_fallback_reads_profile_env(tmp_path, monkeypatch):
+    """AIML API should still run when hermes-agent lacks a native aimlapi registry."""
+    monkeypatch.delenv("AIMLAPI_API_KEY", raising=False)
+    (tmp_path / ".env").write_text(
+        "AIMLAPI_API_KEY=aiml-profile-key\n",
+        encoding="utf-8",
+    )
+
+    from api.streaming import _resolve_aimlapi_api_key
+
+    assert _resolve_aimlapi_api_key(tmp_path) == "aiml-profile-key"
 
 
 if __name__ == "__main__":

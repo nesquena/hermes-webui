@@ -1285,6 +1285,7 @@ _PROVIDER_MODELS = {
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
+    # Curated chat-capable AIML API subset for the initial offline picker.
     "aimlapi": [
         {"id": "gpt-4o-mini", "label": "GPT-4o mini"},
         {"id": "gpt-4o", "label": "GPT-4o"},

@@ -263,6 +263,26 @@ def _resolve_custom_provider_runtime_overrides(
     return resolved_provider, resolved_api_key, resolved_base_url
 
 
+def _resolve_aimlapi_api_key(profile_home: str | Path | None = None) -> str | None:
+    api_key = os.getenv("AIMLAPI_API_KEY", "").strip()
+    if api_key:
+        return api_key
+    if not profile_home:
+        return None
+    try:
+        env_path = Path(profile_home) / ".env"
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == "AIMLAPI_API_KEY":
+                return value.strip().strip('"').strip("'") or None
+    except OSError:
+        return None
+    return None
+
+
 def _same_base_url_endpoint(url_a: str, url_b: str) -> bool:
     """True if two base URLs point at the same scheme+host+port endpoint.
 
@@ -6178,6 +6198,8 @@ def _run_agent_streaming(
             resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
                 resolved_provider, resolved_api_key, resolved_base_url
             )
+            if resolved_provider == "aimlapi" and not resolved_api_key:
+                resolved_api_key = _resolve_aimlapi_api_key(_profile_home)
 
             # Read per-profile config at call time (not module-level snapshot).
             # The streaming worker is a detached thread that does NOT inherit the
