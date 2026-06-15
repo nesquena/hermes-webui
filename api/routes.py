@@ -6571,7 +6571,9 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, get_available_models())
 
     if parsed.path == "/api/models/live":
-        return _handle_live_models(handler, parsed)
+        from api.profiles import profile_env_for_active_request
+        with profile_env_for_active_request("/api/models/live", logger_override=logger):
+            return _handle_live_models(handler, parsed)
 
     # ── Auxiliary models (GET/POST) ──
     if parsed.path == "/api/model/auxiliary":
@@ -12224,15 +12226,17 @@ def _handle_live_models(handler, parsed):
                 # Fallback: try credential pool for base_url + api_key
                 if (not _base_url or not _api_key) and provider.startswith("custom:"):
                     try:
-                        from agent.credential_pool import load_pool as _lpool
-                        _lm_pool = _lpool(provider)
-                        if _lm_pool and _lm_pool.has_credentials():
-                            _lm_entry = _lm_pool.select()
-                            if _lm_entry:
-                                if not _api_key:
-                                    _api_key = _lm_entry.runtime_api_key
-                                if not _base_url:
-                                    _base_url = str(getattr(_lm_entry, "base_url", "") or "").strip()
+                        from api.config import _has_explicit_pool_credentials
+                        if _has_explicit_pool_credentials(provider):
+                            from agent.credential_pool import load_pool as _lpool
+                            _lm_pool = _lpool(provider)
+                            if _lm_pool:
+                                _lm_entry = _lm_pool.select()
+                                if _lm_entry:
+                                    if not _api_key:
+                                        _api_key = _lm_entry.runtime_api_key
+                                    if not _base_url:
+                                        _base_url = str(getattr(_lm_entry, "base_url", "") or "").strip()
                     except ImportError:
                         pass
                 if _base_url and _api_key:

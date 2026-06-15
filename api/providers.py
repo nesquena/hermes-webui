@@ -995,10 +995,12 @@ def _provider_has_key(provider_id: str) -> bool:
     # `hermes auth add` which store keys in auth.json (not config.yaml).
     # Must be outside the `if env_var:` block above: custom providers
     # (custom:bothub, etc.) have no env var, so that block is skipped.
+    # Uses the cached _has_explicit_pool_credentials helper which also
+    # filters gh-cli / GITHUB_TOKEN ambient entries so copilot doesn't
+    # appear just because `gh` is installed.
     try:
-        from agent.credential_pool import load_pool
-        pool = load_pool(provider_id)
-        if pool and pool.has_credentials():
+        from api.config import _has_explicit_pool_credentials
+        if _has_explicit_pool_credentials(provider_id):
             return True
     except ImportError:
         pass
@@ -1081,14 +1083,16 @@ def _get_provider_api_key(provider_id: str) -> str | None:
                     return cp_key
     # Fallback: try credential pool (e.g. bothub key stored via auth.json)
     try:
-        from agent.credential_pool import load_pool
-        pool = load_pool(provider_id)
-        if pool and pool.has_credentials():
-            entry = pool.select()
-            if entry:
-                key = getattr(entry, "access_token", "") or getattr(entry, "runtime_api_key", "")
-                if key:
-                    return key
+        from api.config import _has_explicit_pool_credentials
+        if _has_explicit_pool_credentials(provider_id):
+            from agent.credential_pool import load_pool
+            pool = load_pool(provider_id)
+            if pool:
+                entry = pool.select()
+                if entry:
+                    key = getattr(entry, "runtime_api_key", "") or getattr(entry, "access_token", "")
+                    if key:
+                        return key
     except ImportError:
         pass
     return None
@@ -2369,9 +2373,8 @@ def get_providers() -> dict[str, Any]:
             # Fallback: check credential pool (key added via hermes auth add)
             if not cp_has_key:
                 try:
-                    from agent.credential_pool import load_pool
-                    pool = load_pool(cp_id)
-                    if pool and pool.has_credentials():
+                    from api.config import _has_explicit_pool_credentials
+                    if _has_explicit_pool_credentials(cp_id):
                         cp_has_key = True
                 except ImportError:
                     pass

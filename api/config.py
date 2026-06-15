@@ -3856,6 +3856,44 @@ def _static_models_catalog_without_live_probes() -> dict:
 # only changes when the user adds/removes credentials, which is rare; a 24h TTL
 # is plenty safe and ensures get_available_models() cold paths are fast.
 _CREDENTIAL_POOL_CACHE: dict[str, tuple[float, "CredentialPool"]] = {}  # noqa: F821  forward-ref string annotation, resolved at runtime  # pid -> (ts, pool)
+
+
+def _has_explicit_pool_credentials(provider_id: str) -> bool:
+    """Return True when the credential pool has at least one non-ambient entry
+    for *provider_id* (i.e. not a gh-cli / GITHUB_TOKEN auto-detect).
+
+    Reuses ``_CREDENTIAL_POOL_CACHE`` so that callers on hot paths (provider
+    detection, model listing, live-model fetch) don't pay the ~10s load_pool
+    cost more than once per TTL window.
+    """
+    try:
+        from agent.credential_pool import load_pool as _load_pool
+
+        _pid = _resolve_provider_alias(provider_id)
+        _cached = _CREDENTIAL_POOL_CACHE.get(_pid)
+        if _cached is not None:
+            _cp_ts, _cp_pool = _cached
+            if (time.time() - _cp_ts) < 86400.0:
+                _all_entries = _cp_pool.entries()
+            else:
+                _cp_pool = _load_pool(_pid)
+                _CREDENTIAL_POOL_CACHE[_pid] = (time.time(), _cp_pool)
+                _all_entries = _cp_pool.entries()
+        else:
+            _cp_pool = _load_pool(_pid)
+            _CREDENTIAL_POOL_CACHE[_pid] = (time.time(), _cp_pool)
+            _all_entries = _cp_pool.entries()
+
+        return any(
+            not _is_ambient_gh_cli_entry(
+                str(getattr(e, "source", "") or ""),
+                str(getattr(e, "label", "") or ""),
+                str(getattr(e, "key_source", "") or ""),
+            )
+            for e in _all_entries
+        )
+    except ImportError:
+        return False
 _provider_models_invalidated_ts: dict[str, float] = {}  # provider_id -> timestamp of last invalidation
 
 # Disk-backed in-memory cache for get_available_models().
@@ -5253,15 +5291,17 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                 # Fallback: check credential pool for both api_key and base_url
                 if (not _cp_api_key or not _cp_base_url) and _slug:
                     try:
-                        from agent.credential_pool import load_pool
-                        _pool = load_pool(_slug)
-                        if _pool and _pool.has_credentials():
-                            _entry = _pool.select()
-                            if _entry:
-                                if not _cp_api_key:
-                                    _cp_api_key = _entry.runtime_api_key
-                                if not _cp_base_url:
-                                    _cp_base_url = str(getattr(_entry, "base_url", "") or "").strip()
+                        from api.config import _has_explicit_pool_credentials
+                        if _has_explicit_pool_credentials(_slug):
+                            from agent.credential_pool import load_pool
+                            _pool = load_pool(_slug)
+                            if _pool:
+                                _entry = _pool.select()
+                                if _entry:
+                                    if not _cp_api_key:
+                                        _cp_api_key = _entry.runtime_api_key
+                                    if not _cp_base_url:
+                                        _cp_base_url = str(getattr(_entry, "base_url", "") or "").strip()
                     except ImportError:
                         pass
 
