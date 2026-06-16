@@ -72,10 +72,36 @@ def _auto_state_dir_name(repo_root) -> str:
 TEST_PORT      = int(os.getenv('HERMES_WEBUI_TEST_PORT',
                                str(_auto_test_port(REPO_ROOT))))
 TEST_BASE      = f"http://127.0.0.1:{TEST_PORT}"
+
+# ── Test state dir: HARD-ISOLATED from production ──────────────────────────
+# Test state must NEVER live inside the real Hermes home (~/.hermes or any
+# HERMES_HOME), or anywhere near production profiles/files/server. Earlier this
+# defaulted to ``HERMES_HOME / webui-test-<hash>`` which wrote test state INTO
+# ~/.hermes/profiles/<...>/ (observed: 144 leaked webui-test-* dirs in the real
+# profile home). We now anchor the default under the OS temp dir, in a dedicated
+# `hermes-webui-tests/` namespace, fully outside any production tree.
+import tempfile as _tempfile
+_TEST_STATE_ROOT = pathlib.Path(
+    os.getenv('HERMES_WEBUI_TEST_STATE_ROOT', _tempfile.gettempdir())
+) / 'hermes-webui-tests'
 TEST_STATE_DIR = pathlib.Path(os.getenv(
     'HERMES_WEBUI_TEST_STATE_DIR',
-    str(HERMES_HOME / _auto_state_dir_name(REPO_ROOT))
-))
+    str(_TEST_STATE_ROOT / _auto_state_dir_name(REPO_ROOT))
+)).resolve()
+
+# Production-proximity guard: refuse to run if the resolved test state dir lands
+# inside the real Hermes home tree. This is a hard stop — a misconfigured
+# HERMES_WEBUI_TEST_STATE_DIR pointing at ~/.hermes would let tests wipe/clobber
+# production profiles, sessions, and credentials on teardown.
+_REAL_HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).resolve()
+if TEST_STATE_DIR == _REAL_HERMES_HOME or _REAL_HERMES_HOME in TEST_STATE_DIR.parents:
+    raise RuntimeError(
+        f"REFUSING TO RUN: test state dir {TEST_STATE_DIR} is inside the production "
+        f"Hermes home {_REAL_HERMES_HOME}. Tests must never touch production files. "
+        f"Unset HERMES_WEBUI_TEST_STATE_DIR (defaults to a temp dir) or point it "
+        f"outside ~/.hermes."
+    )
+
 TEST_WORKSPACE = TEST_STATE_DIR / 'test-workspace'
 
 # Publish at module level so api.config, _pytest_port.py, and any test module
@@ -685,12 +711,20 @@ def _kill_port_owner(port):
 
 
 def _rmtree_retry(path):
-    """Remove a tree, retrying on Windows after clearing read-only bits."""
+    """Remove a tree, retrying transient races (Linux + Windows).
+
+    The retry loop covers two real failure modes seen in CI/local:
+      * Windows: read-only bits / lingering handles (cleared via onexc/onerror).
+      * Linux: `OSError [Errno 39] Directory not empty` — a background thread or
+        daemon (model-metadata fetcher, session-events watcher, profile writer)
+        creates a file inside the tree WHILE shutil.rmtree is walking it, so the
+        parent rmdir fails even though we just emptied it. A short retry lets the
+        racing writer settle; a final ignore_errors sweep guarantees teardown
+        never fails the test over a pure cleanup race (the dir is abandoned test
+        state, not an assertion target).
+    """
     target = pathlib.Path(path)
     if not target.exists():
-        return
-    if sys.platform != "win32":
-        shutil.rmtree(target)
         return
 
     def _clear_readonly(_func, entry, _exc):
@@ -704,7 +738,7 @@ def _rmtree_retry(path):
         {"onexc": _clear_readonly}
         if "onexc" in inspect.signature(shutil.rmtree).parameters
         else {"onerror": _clear_readonly}
-    )
+    ) if sys.platform == "win32" else {}
 
     attempts = 5
     last_exc = None
@@ -720,13 +754,27 @@ def _rmtree_retry(path):
                 break
             time.sleep(0.3)
 
+    # Final fallback: a concurrent-writer race (Errno 39) shouldn't fail teardown.
+    # Best-effort ignore_errors sweep; if anything remains it's abandoned test
+    # state under HERMES_HOME, not something a test asserts on.
+    shutil.rmtree(target, ignore_errors=True)
+    if not target.exists():
+        return
     leftovers = []
     try:
         leftovers = [child.name for child in list(target.iterdir())[:5]]
     except Exception:
         pass
+    # Don't raise — log-and-continue. Raising here turns a benign cleanup race
+    # into a spurious test ERROR (the behaviour #4283-area tests hit when a
+    # model-metadata background fetch repopulated the profile dir mid-teardown).
+    import warnings as _warnings
     leftover_note = f" leftovers={leftovers}" if leftovers else ""
-    raise RuntimeError(f"Could not remove {target} after {attempts} attempts.{leftover_note}") from last_exc
+    _warnings.warn(
+        f"_rmtree_retry: could not fully remove {target} after {attempts} attempts"
+        f"{leftover_note} (last_exc={last_exc!r}); left for OS temp cleanup.",
+        stacklevel=2,
+    )
 
 
 # ── Session-scoped test server ────────────────────────────────────────────────

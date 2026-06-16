@@ -29,16 +29,22 @@ def _auto_state_dir_name(repo_root: pathlib.Path) -> str:
 
 _TESTS_DIR   = pathlib.Path(__file__).parent.resolve()
 _REPO_ROOT   = _TESTS_DIR.parent.resolve()
-_HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME',
-                             str(pathlib.Path.home() / '.hermes')))
 
 TEST_PORT = int(os.environ.get('HERMES_WEBUI_TEST_PORT',
                                str(_auto_test_port(_REPO_ROOT))))
 BASE = f"http://127.0.0.1:{TEST_PORT}"
 
+# Test state dir: prefer the value conftest.py published to the environment.
+# The standalone fallback anchors under the OS temp dir (NOT ~/.hermes) so test
+# state is never created inside the production Hermes home — matching conftest's
+# hard-isolation default. (See conftest.py TEST_STATE_DIR.)
+import tempfile as _tempfile
+_TEST_STATE_ROOT = pathlib.Path(
+    os.environ.get('HERMES_WEBUI_TEST_STATE_ROOT', _tempfile.gettempdir())
+) / 'hermes-webui-tests'
 TEST_STATE_DIR = pathlib.Path(os.environ.get(
     'HERMES_WEBUI_TEST_STATE_DIR',
-    str(_HERMES_HOME / _auto_state_dir_name(_REPO_ROOT))
+    str(_TEST_STATE_ROOT / _auto_state_dir_name(_REPO_ROOT))
 ))
 
 # Default model injected by conftest — tests that mutate the default model
