@@ -4446,10 +4446,20 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     if not sidecar_context or not state_messages:
         return state_messages
 
+    # Recovered interrupted turns are special: the visible interruption marker
+    # is synthetic, so the recovered user turn should still count as a mirrored
+    # prefix when it is the actual aligned prefix row.
+    allow_single_row_prefix = bool(
+        isinstance(sidecar_context[0], dict)
+        and sidecar_context[0].get('_recovered')
+        and str(sidecar_context[0].get('role') or '') == 'user'
+    )
+
     sidecar_keys = [_session_message_content_key(m) for m in sidecar_context]
     state_keys = [_session_message_content_key(m) for m in state_messages]
     max_offset = min(len(sidecar_keys), len(state_keys))
     best_len = 0
+    best_offset = 0
     for offset in range(max_offset):
         length = 0
         while (
@@ -4460,12 +4470,13 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
             length += 1
         if length > best_len:
             best_len = length
+            best_offset = offset
 
     # Require at least two mirrored rows. A single repeated short user message
     # is not enough evidence that state.db starts with a mirrored context
     # segment, but small recovered contexts often contain only a compact summary
     # and one follow-up row; those should still use the delta path.
-    if best_len < 2:
+    if best_len < (1 if allow_single_row_prefix and best_offset == 0 else 2):
         return state_messages
 
     # Drop only rows that can be aligned with the remaining sidecar context in
