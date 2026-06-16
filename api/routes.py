@@ -17041,11 +17041,23 @@ def _handle_session_import_cli(handler, body):
     # Check if already imported — refresh messages from CLI store if new ones arrived
     existing = Session.load(sid)
     if existing:
-        refresh_profile = requested_profile or getattr(existing, "profile", None)
+        # Cross-profile boundary: an unqualified (non-all-profiles) request must not
+        # read or refresh a session that belongs to another profile, even though the
+        # WebUI session store (SESSION_DIR) is a single global directory. This mirrors
+        # the /api/session detail and /api/session/export profile-scoping gates.
+        # An explicit all_profiles import is still allowed, but only when the request's
+        # profile matches the stored session's profile.
+        existing_profile = getattr(existing, "profile", None)
+        if allow_all_profiles:
+            if requested_profile and not _profiles_match(existing_profile, requested_profile):
+                return bad(handler, "Session not found in CLI store", 404)
+        elif not _session_visible_to_active_profile(existing_profile, handler):
+            return bad(handler, "Session not found in CLI store", 404)
+        refresh_profile = requested_profile or existing_profile
         cli_meta = _resolve_cli_import_metadata(
             sid,
             requested_profile=refresh_profile,
-            allow_all_profiles=allow_all_profiles or bool(refresh_profile),
+            allow_all_profiles=allow_all_profiles,
         )
         fresh_msgs = get_cli_session_messages(
             sid,
