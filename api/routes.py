@@ -424,7 +424,11 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
 # (mcp_server.py) can import it without duplicating the visibility model.
 # Re-exported here so existing `_profiles_match(...)` call sites in this
 # module keep resolving without per-call-site refactors.
-from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
+from api.profiles import (  # noqa: F401, E402  (re-export)
+    _profiles_match,
+    get_active_profile_name,
+    get_active_profile_name as _get_active_profile_name,
+)
 
 
 def _all_profiles_query_flag(parsed_url) -> bool:
@@ -436,6 +440,22 @@ def _all_profiles_query_flag(parsed_url) -> bool:
     qs = parse_qs(parsed_url.query)
     raw = qs.get('all_profiles', [''])[0].strip().lower()
     return raw in ('1', 'true', 'yes', 'on')
+
+
+def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
+    """Return whether a detail-load session belongs to the active profile.
+
+    Real request handlers must enforce the same profile boundary as
+    /api/sessions, even when the request has no hermes_profile cookie and the
+    process-level active profile is the default/root profile. Direct unit-callers
+    without a request handler keep the historical metadata-load behavior.
+    """
+    if handler is None:
+        return True
+    active_profile = _get_active_profile_name()
+    if not isinstance(session_profile, str):
+        session_profile = None
+    return _profiles_match(session_profile, active_profile)
 
 
 def _active_skills_dir() -> Path:
@@ -1455,14 +1475,18 @@ def _session_list_cache_path_stamp(path: Path | None) -> tuple[int, int]:
         return (0, 0)
 
 
-def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
+def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int]]:
     _cache_profile, _cache_all_profiles, cache_show_cli_sessions, *_rest = key
     if not cache_show_cli_sessions:
-        return ((0, 0), (0, 0), (0, 0))
+        return ((0, 0), (0, 0), (0, 0), (0, 0), (0, 0))
     try:
         state_db_path = Path(_active_state_db_path())
     except Exception:
         state_db_path = None
+    try:
+        state_db_wal_path = state_db_path.with_name(f"{state_db_path.name}-wal") if state_db_path is not None else None
+    except Exception:
+        state_db_wal_path = None
     try:
         gateway_metadata_path = _gateway_session_metadata_path()
     except Exception:
@@ -1471,10 +1495,16 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
         session_index_path = SESSION_DIR / "_index.json"
     except Exception:
         session_index_path = None
+    try:
+        settings_file = SETTINGS_FILE
+    except Exception:
+        settings_file = None
     return (
         _session_list_cache_path_stamp(state_db_path),
+        _session_list_cache_path_stamp(state_db_wal_path),
         _session_list_cache_path_stamp(gateway_metadata_path),
         _session_list_cache_path_stamp(session_index_path),
+        _session_list_cache_path_stamp(settings_file),
     )
 
 
@@ -1847,6 +1877,7 @@ from api.config import (
     CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
     load_settings,
     save_settings,
+    SETTINGS_FILE,
     set_hermes_default_model,
     model_with_provider_context,
     get_reasoning_status,
@@ -6829,6 +6860,9 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+            _session_profile = getattr(s, 'profile', None) or None
+            if not _session_visible_to_active_profile(_session_profile, handler):
+                return bad(handler, "Session not found", 404)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
@@ -6836,7 +6870,6 @@ def handle_get(handler, parsed) -> bool:
             cli_messages = []
             state_db_messages = []
             metadata_summary = None
-            _session_profile = getattr(s, 'profile', None) or None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
@@ -7124,6 +7157,9 @@ def handle_get(handler, parsed) -> bool:
             if _was_webui_session:
                 return bad(handler, "Session not found", 404)
             cli_meta = _lookup_cli_session_metadata(sid)
+            _session_profile = (cli_meta or {}).get("profile") or None
+            if not _session_visible_to_active_profile(_session_profile, handler):
+                return bad(handler, "Session not found", 404)
             msgs = get_cli_session_messages(sid)
             if msgs:
                 sess = {
@@ -7925,8 +7961,27 @@ def handle_get(handler, parsed) -> bool:
     return False  # 404
 
 
-# ── GET route helpers
+# ── POST auth helpers
 
+def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
+    """Require auth, or the existing local-only first-run bootstrap gate.
+
+    Registering additional passkeys is an auth-factor enrollment action and
+    requires a valid WebUI session.  The first passkey can still bootstrap a
+    passkey-only instance, but only through the same local/private-network
+    onboarding gate used for first password setup.
+    """
+    from api.auth import is_auth_enabled, parse_cookie, verify_session
+
+    auth_enabled = is_auth_enabled()
+    if not auth_enabled:
+        if _onboarding_gate_allows(handler, auth_enabled):
+            return True, "", 200
+        return False, "Authentication required", 401
+    cookie_val = parse_cookie(handler)
+    if not cookie_val or not verify_session(cookie_val):
+        return False, "Authentication required", 401
+    return True, "", 200
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
@@ -9166,6 +9221,11 @@ def handle_post(handler, parsed) -> bool:
             # the old profile's cached model list (#1200 — profile-switch model bug).
             from api.config import invalidate_models_cache
             invalidate_models_cache()
+            try:
+                from api.gateway_watcher import restart_watcher_for_profile
+                restart_watcher_for_profile(name)
+            except Exception as exc:
+                logger.warning("Failed to restart gateway watcher for profile %s: %s", name, exc)
             return j(handler, result, extra_headers={
                 'Set-Cookie': build_profile_cookie(name, handler),
             })
@@ -9934,6 +9994,9 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        ok, error, status = _require_passkey_registration_auth(handler)
+        if not ok:
+            return j(handler, {"error": error}, status=status)
         try:
             return j(handler, {"ok": True, "publicKey": registration_options(handler)})
         except PasskeyRateLimitError as e:
@@ -9947,6 +10010,9 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        ok, error, status = _require_passkey_registration_auth(handler)
+        if not ok:
+            return j(handler, {"error": error}, status=status)
         try:
             result = finish_registration(body, handler)
             result["credentials"] = registered_credentials()
@@ -10185,6 +10251,9 @@ def _handle_session_export(handler, parsed):
     try:
         s = get_session(sid)
     except KeyError:
+        return bad(handler, "Session not found", 404)
+    active_profile = get_active_profile_name()
+    if not _profiles_match(getattr(s, "profile", None), active_profile):
         return bad(handler, "Session not found", 404)
     safe = redact_session_data(s.__dict__)
     payload = json.dumps(safe, ensure_ascii=False, indent=2)
@@ -12710,14 +12779,11 @@ def _handle_live_models(handler, parsed):
         if not ids:
             return _finish({"provider": provider, "models": [], "count": 0})
 
-        # For Nous Portal, apply the same featured-set cap that
-        # /api/models uses so background enrichment via _fetchLiveModels()
-        # doesn't undo the dropdown trim — otherwise a 397-model catalog
-        # would still flood the picker after the initial render finished
-        # the cap. The full list is returned via the main /api/models
-        # endpoint's extra_models field for /model autocomplete; the live
-        # endpoint is purely a dropdown-enrichment surface, so it should
-        # match the dropdown's visibility budget. (#1567)
+        # Match the same dropdown visibility budget that /api/models uses so
+        # background enrichment via _fetchLiveModels() does not re-append an
+        # uncapped catalog after the initial picker render. The full catalog
+        # still comes from /api/models via extra_models for search/show-all;
+        # this endpoint is only a dropdown-enrichment surface. (#1567, #3691)
         if provider == "nous":
             try:
                 from api.config import _build_nous_featured_set
@@ -12726,6 +12792,10 @@ def _handle_live_models(handler, parsed):
                 ids = _featured
             except Exception:
                 logger.debug("Failed to apply Nous featured-set cap for /api/models/live")
+        else:
+            from api.config import _MODEL_PICKER_OVERFLOW_THRESHOLD, _MODEL_PICKER_VISIBLE_TARGET
+            if len(ids) > _MODEL_PICKER_OVERFLOW_THRESHOLD:
+                ids = ids[:_MODEL_PICKER_VISIBLE_TARGET]
 
         # Normalise to {id, label} — provider_model_ids() returns plain string IDs.
         # For ollama-cloud use the shared Ollama formatter (handles `:variant` suffix).

@@ -1569,6 +1569,9 @@ def _format_nous_label(mid: str) -> str:
 # without one vendor dominating.
 _NOUS_FEATURED_THRESHOLD = 25
 _NOUS_FEATURED_TARGET = 15
+_MODEL_PICKER_OVERFLOW_THRESHOLD = _NOUS_FEATURED_THRESHOLD
+_MODEL_PICKER_VISIBLE_TARGET = _NOUS_FEATURED_TARGET
+_OPENROUTER_FREE_TIER_AUGMENT_CAP = 30
 
 # Vendor-prefix priority order for featured selection. Lower index = picked
 # earlier when sampling the live catalog. Reflects which vendors users have
@@ -1676,6 +1679,71 @@ def _build_nous_featured_set(
     return chosen, extras
 
 
+def _strip_picker_provider_hint(model_id: str) -> str:
+    mid = str(model_id or "").strip()
+    if mid.startswith("@") and ":" in mid:
+        return mid[mid.index(":") + 1 :]
+    return mid
+
+
+def _model_matches_picker_selection(
+    model_id: str,
+    selected_model_id: str | None,
+    provider_id: str | None = None,
+) -> bool:
+    selected = str(selected_model_id or "").strip()
+    candidate = str(model_id or "").strip()
+    if not selected or not candidate:
+        return False
+    if candidate == selected:
+        return True
+
+    selected_bare = _strip_picker_provider_hint(selected)
+    candidate_bare = _strip_picker_provider_hint(candidate)
+    if selected_bare != candidate_bare:
+        return False
+
+    selected_provider = ""
+    if selected.startswith("@") and ":" in selected:
+        selected_provider = selected[1 : selected.index(":")].lower()
+    candidate_provider = str(provider_id or "").strip().lower()
+    if candidate.startswith("@") and ":" in candidate:
+        candidate_provider = candidate[1 : candidate.index(":")].lower()
+
+    return not selected_provider or not candidate_provider or selected_provider == candidate_provider
+
+
+def _split_picker_overflow_models(
+    ordered_models: list[dict],
+    *,
+    selected_model_id: str | None = None,
+    provider_id: str | None = None,
+    threshold: int = _MODEL_PICKER_OVERFLOW_THRESHOLD,
+    target: int = _MODEL_PICKER_VISIBLE_TARGET,
+) -> tuple[list[dict], list[dict]]:
+    """Split an ordered picker catalog into visible rows plus an overflow tail."""
+    models = [copy.deepcopy(m) for m in (ordered_models or []) if isinstance(m, dict) and m.get("id")]
+    if len(models) <= threshold:
+        return models, []
+
+    visible = models[:target]
+    extras = models[target:]
+    if not selected_model_id:
+        return visible, extras
+
+    if any(_model_matches_picker_selection(m.get("id", ""), selected_model_id, provider_id) for m in visible):
+        return visible, extras
+
+    for idx, model in enumerate(extras):
+        if not _model_matches_picker_selection(model.get("id", ""), selected_model_id, provider_id):
+            continue
+        displaced = visible[-1]
+        visible[-1] = model
+        extras[idx] = displaced
+        break
+    return visible, extras
+
+
 def _apply_provider_prefix(
     raw_models: list[dict],
     provider_id: str,
@@ -1730,22 +1798,25 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
     if not groups:
         return
 
-    # Collect {model_id: [(group_idx, model_idx), ...]} in alphabetical
-    # provider_id order so that the "first occurrence stays unchanged" rule is
-    # deterministic across config edits (adding/removing/reordering providers).
+    # Collect {model_id: [(group_idx, bucket_name, model_idx), ...]} in
+    # alphabetical provider_id order so that the "first occurrence stays
+    # unchanged" rule is deterministic across config edits
+    # (adding/removing/reordering providers). Include ``extra_models`` too:
+    # slash-command resolution and picker filtering consume the full catalog.
     sorted_group_indices = sorted(
         range(len(groups)),
         key=lambda i: groups[i].get("provider_id", ""),
     )
-    id_map: dict[str, list[tuple[int, int]]] = {}
+    id_map: dict[str, list[tuple[int, str, int]]] = {}
     for gi in sorted_group_indices:
         group = groups[gi]
-        for mi, model in enumerate(group.get("models", [])):
-            mid = str(model.get("id", "") or "").strip()
-            # Skip IDs that are already provider-qualified.
-            if not mid or mid.startswith("@"):
-                continue
-            id_map.setdefault(mid, []).append((gi, mi))
+        for bucket_name in ("models", "extra_models"):
+            for mi, model in enumerate(group.get(bucket_name, []) or []):
+                mid = str(model.get("id", "") or "").strip()
+                # Skip IDs that are already provider-qualified.
+                if not mid or mid.startswith("@"):
+                    continue
+                id_map.setdefault(mid, []).append((gi, bucket_name, mi))
 
     # For any ID appearing in 2+ groups, prefix all but the first occurrence.
     # This handles N>2 providers correctly: the loop iterates over all
@@ -1753,9 +1824,9 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
     for original_id, locations in id_map.items():
         if len(locations) < 2:
             continue
-        for gi, mi in locations[1:]:
+        for gi, bucket_name, mi in locations[1:]:
             group = groups[gi]
-            model = group["models"][mi]
+            model = group[bucket_name][mi]
             pid = group.get("provider_id", "")
             model["id"] = f"@{pid}:{original_id}"
             provider_name = group.get("provider", pid)
@@ -5505,6 +5576,47 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
 
         # 5. Build model groups
         if detected_providers:
+            _picker_selected_model_id = (
+                (model_cfg.get("model") if isinstance(model_cfg, dict) else None)
+                or default_model
+                or None
+            )
+
+            def _append_picker_group(
+                provider_label: str,
+                provider_id: str,
+                raw_models: list[dict] | None,
+                *,
+                models_endpoint_error: dict | None = None,
+                apply_prefix: bool = True,
+                decorate_overflow_label: bool = False,
+                allow_empty: bool = False,
+            ) -> None:
+                picker_models = copy.deepcopy(raw_models or [])
+                if apply_prefix:
+                    picker_models = _apply_provider_prefix(picker_models, provider_id, active_provider)
+                visible_models, extra_models = _split_picker_overflow_models(
+                    picker_models,
+                    selected_model_id=_picker_selected_model_id,
+                    provider_id=provider_id,
+                )
+                if not (visible_models or extra_models or models_endpoint_error or allow_empty):
+                    return
+                group_entry = {
+                    "provider": provider_label,
+                    "provider_id": provider_id,
+                    "models": visible_models,
+                }
+                if decorate_overflow_label and extra_models:
+                    group_entry["provider"] = (
+                        f"{provider_label} ({len(visible_models)} of {len(visible_models) + len(extra_models)})"
+                    )
+                if extra_models:
+                    group_entry["extra_models"] = extra_models
+                if models_endpoint_error:
+                    group_entry["models_endpoint_error"] = models_endpoint_error
+                groups.append(group_entry)
+
             for pid in sorted(detected_providers):
                 # Custom-provider PIDs are populated above via the
                 # _named_custom_groups branch (or skipped intentionally).
@@ -5530,10 +5642,13 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         if not _nc_models:
                             _nc_models = auto_detected_models_by_provider.get(pid, [])
                         if _nc_models or pid in _named_custom_errors:
-                            group = {"provider": _nc_display, "provider_id": pid, "models": _nc_models}
-                            if pid in _named_custom_errors:
-                                group["models_endpoint_error"] = _named_custom_errors[pid]
-                            groups.append(group)
+                            _append_picker_group(
+                                _nc_display,
+                                pid,
+                                _nc_models,
+                                models_endpoint_error=_named_custom_errors.get(pid),
+                                apply_prefix=False,
+                            )
                     continue
                 provider_name = _effective_provider_display_name(pid, _PROVIDER_DISPLAY)
                 if pid == "openrouter":
@@ -5573,10 +5688,10 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                             "https://openrouter.ai/api/v1/models",
                             headers={"Accept": "application/json"},
                         )
+                        free_tier_models = []
+                        selected_free_tier_model = None
                         with _urlreq.urlopen(_req, timeout=8.0) as _resp:
                             _payload = json.loads(_resp.read().decode())
-                        _free_count = 0
-                        _free_cap = 30  # don't drown the picker — top 30 free tier
                         for _item in _payload.get("data", []) or []:
                             if not isinstance(_item, dict):
                                 continue
@@ -5602,11 +5717,27 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                             _label = _name.split("/")[-1] if "/" in _name else _name
                             if "(free)" not in _label.lower():
                                 _label = f"{_label} (free)"
-                            seen_ids.add(_mid)
-                            raw_models.append({"id": _mid, "label": _label})
-                            _free_count += 1
-                            if _free_count >= _free_cap:
-                                break
+                            _entry = {"id": _mid, "label": _label}
+                            free_tier_models.append(_entry)
+                            if _model_matches_picker_selection(
+                                _mid,
+                                _picker_selected_model_id,
+                                "openrouter",
+                            ):
+                                selected_free_tier_model = _entry
+                        if len(free_tier_models) > _OPENROUTER_FREE_TIER_AUGMENT_CAP:
+                            free_tier_models = free_tier_models[:_OPENROUTER_FREE_TIER_AUGMENT_CAP]
+                            if (
+                                selected_free_tier_model
+                                and not any(
+                                    m.get("id") == selected_free_tier_model.get("id")
+                                    for m in free_tier_models
+                                )
+                            ):
+                                free_tier_models[-1] = selected_free_tier_model
+                        for _entry in free_tier_models:
+                            seen_ids.add(_entry["id"])
+                            raw_models.append(_entry)
                     except Exception:
                         logger.debug("OpenRouter free-tier live fetch unavailable; using fallback")
 
@@ -5620,13 +5751,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                             if m.get("provider") == "OpenRouter"
                         ]
 
-                    groups.append(
-                        {
-                            "provider": "OpenRouter",
-                            "provider_id": "openrouter",
-                            "models": raw_models,
-                        }
-                    )
+                    _append_picker_group("OpenRouter", "openrouter", raw_models)
                 elif pid == "ollama-cloud":
                     raw_models = []
                     try:
@@ -5640,14 +5765,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         logger.warning("Failed to load Ollama Cloud models from hermes_cli")
 
                     if raw_models:
-                        models = _apply_provider_prefix(raw_models, pid, active_provider)
-                        groups.append(
-                            {
-                                "provider": provider_name,
-                                "provider_id": pid,
-                                "models": models,
-                            }
-                        )
+                        _append_picker_group(provider_name, pid, raw_models)
                 elif pid == "openai-codex":
                     # Codex account catalogs drift faster than WebUI releases
                     # (for example gpt-5.3-codex-spark in #1680). Ask the
@@ -5677,14 +5795,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get("openai-codex", []))
 
                     if raw_models:
-                        models = _apply_provider_prefix(raw_models, pid, active_provider)
-                        groups.append(
-                            {
-                                "provider": provider_name,
-                                "provider_id": pid,
-                                "models": models,
-                            }
-                        )
+                        _append_picker_group(provider_name, pid, raw_models)
                 elif pid == "nous":
                     # Nous Portal exposes a curated catalog (~30 models on most
                     # accounts, up to several hundred for enterprise tiers) via
@@ -5701,8 +5812,6 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     # decorated with the truncation count so users know more
                     # exists.
                     raw_models = []
-                    extra_models: list[dict] = []
-                    truncated_label_suffix = ""
                     live_fetch_failed = False
                     try:
                         from hermes_cli.models import provider_model_ids as _provider_model_ids
@@ -5714,39 +5823,15 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         live_fetch_failed = True
 
                     if live_ids:
-                        # Sticky-selection signal: prefer the explicitly-active
-                        # model from cfg["model"]["model"] (what the user is
-                        # currently using) over cfg["model"]["default"] (the
-                        # configured default suggestion). Falls back to the
-                        # latter so first-load before any selection still works.
-                        _model_cfg = cfg.get("model", {})
-                        _selected = (
-                            (isinstance(_model_cfg, dict) and _model_cfg.get("model"))
-                            or default_model
-                            or None
-                        )
                         featured_ids, extras_ids = _build_nous_featured_set(
                             live_ids,
-                            selected_model_id=_selected,
+                            selected_model_id=_picker_selected_model_id,
                         )
-                        # Prefix every live id with "@nous:" so routing matches
-                        # the explicit-provider-hint branch of resolve_model_provider
-                        # (same convention as the curated static list — see
-                        # tests/test_nous_portal_routing.py for the invariant).
+                        ordered_ids = featured_ids + extras_ids
                         raw_models = [
                             {"id": f"@nous:{mid}", "label": _format_nous_label(mid)}
-                            for mid in featured_ids
+                            for mid in ordered_ids
                         ]
-                        extra_models = [
-                            {"id": f"@nous:{mid}", "label": _format_nous_label(mid)}
-                            for mid in extras_ids
-                        ]
-                        if extras_ids:
-                            # Show "(15 of 397)" so the user understands the picker
-                            # is showing a featured subset, not a broken short list.
-                            truncated_label_suffix = (
-                                f" ({len(featured_ids)} of {len(live_ids)})"
-                            )
                     elif not live_fetch_failed:
                         # Live-fetch returned an empty list AND did not raise —
                         # the user is gated as authenticated by detection above
@@ -5770,18 +5855,13 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get("nous", []))
 
                     if raw_models:
-                        models = _apply_provider_prefix(raw_models, pid, active_provider)
-                        # Apply the same prefix transform to extras so /model
-                        # autocomplete sees consistent IDs across the two lists.
-                        extras = _apply_provider_prefix(extra_models, pid, active_provider) if extra_models else []
-                        group_entry = {
-                            "provider": provider_name + truncated_label_suffix,
-                            "provider_id": pid,
-                            "models": models,
-                        }
-                        if extras:
-                            group_entry["extra_models"] = extras
-                        groups.append(group_entry)
+                        _append_picker_group(
+                            provider_name,
+                            pid,
+                            raw_models,
+                            apply_prefix=False,
+                            decorate_overflow_label=True,
+                        )
                 elif pid == "lmstudio":
                     # LM Studio is a local server — fetch live loaded models via
                     # the OpenAI-compatible /v1/models endpoint (#WebUI).
@@ -5830,14 +5910,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                                 logger.debug("LM Studio /models fetch failed at %s", endpoint)
 
                     if raw_models:
-                        models = _apply_provider_prefix(raw_models, pid, active_provider)
-                        groups.append(
-                            {
-                                "provider": provider_name,
-                                "provider_id": pid,
-                                "models": models,
-                            }
-                        )
+                        _append_picker_group(provider_name, pid, raw_models)
                 elif (
                     pid in _PROVIDER_MODELS
                     or pid in _canonical_to_raw_provider_key
@@ -5878,14 +5951,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     detected_models = auto_detected_models_by_provider.get(pid, [])
                     if detected_models and not raw_models:
                         raw_models = copy.deepcopy(detected_models)
-                    models = _apply_provider_prefix(raw_models, pid, active_provider)
-                    groups.append(
-                        {
-                            "provider": provider_name,
-                            "provider_id": pid,
-                            "models": models,
-                        }
-                    )
+                    _append_picker_group(provider_name, pid, raw_models)
                 else:
                     detected_models = auto_detected_models_by_provider.get(pid)
                     if detected_models:
@@ -5914,25 +5980,26 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         # see every group's id rewritten to the FIRST
                         # provider's prefix, and labels accumulated every
                         # provider's name).
-                        groups.append(
-                            {
-                                "provider": provider_name,
-                                "provider_id": pid,
-                                "models": models_for_group,
-                            }
+                        _append_picker_group(
+                            provider_name,
+                            pid,
+                            models_for_group,
+                            apply_prefix=False,
                         )
                     elif pid == "custom" and cfg_base_url:
                         # Anonymous custom endpoint: /v1/models probe may have
                         # failed (e.g. llama-server, lightweight relay), but the
-                        # chat endpoint itself may still work.  Add the group
+                        # chat endpoint itself may still work. Add the group
                         # with an empty model list so the user can type a model
                         # ID manually rather than being blocked by a silent
                         # probe failure (#2542).
-                        groups.append({
-                            "provider": provider_name,
-                            "provider_id": pid,
-                            "models": [],
-                        })
+                        groups.append(
+                            {
+                                "provider": provider_name,
+                                "provider_id": pid,
+                                "models": [],
+                            }
+                        )
         else:
             if default_model:
                 label = _get_label_for_model(default_model, groups)
@@ -5961,7 +6028,12 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     default_model,
                 )
             else:
-                all_ids_norm = {_norm_model_id(m["id"]) for g in groups for m in g.get("models", [])}
+                all_ids_norm = {
+                    _norm_model_id(m["id"])
+                    for g in groups
+                    for bucket_name in ("models", "extra_models")
+                    for m in g.get(bucket_name, [])
+                }
                 if _norm_model_id(default_model) not in all_ids_norm:
                     label = _get_label_for_model(default_model, groups)
                     target_display = (

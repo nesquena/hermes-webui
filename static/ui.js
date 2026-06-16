@@ -687,6 +687,17 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   requestAnimationFrame(()=>{ _programmaticScroll=false; });
   return true;
 }
+function _messageViewportIntersectsRenderedRow(){
+  const container=$('messages');
+  if(!container) return true;
+  const containerRect=container.getBoundingClientRect();
+  const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
+  for(const row of rows){
+    const rect=row.getBoundingClientRect();
+    if(rect.bottom>containerRect.top+1&&rect.top<containerRect.bottom-1) return true;
+  }
+  return false;
+}
 function _measureMessageVirtualRow(inner, entry){
   if(!inner||!entry) return 0;
   const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
@@ -1848,7 +1859,7 @@ async function populateModelDropdown(opts={}){
         opt.value=m.id;
         opt.textContent=m.label;
         og.appendChild(opt);
-        _dynamicModelLabels[m.id]=m.id;
+        _dynamicModelLabels[m.id]=m.label||m.id;
       }
       // Hydrate the label map from extra_models too (the catalog tail that
       // doesn't render as <option> entries when the picker is capped — see
@@ -1857,8 +1868,9 @@ async function populateModelDropdown(opts={}){
       // persisted-localStorage value renderable with its proper label
       // instead of falling back to the bare ID. #1567.
       if(Array.isArray(g.extra_models)){
+        try{ og.dataset.extraModels=JSON.stringify(g.extra_models); }catch(_e){ og.dataset.extraModels='[]'; }
         for(const m of g.extra_models){
-          if(m && m.id) _dynamicModelLabels[m.id]=m.id;
+          if(m && m.id) _dynamicModelLabels[m.id]=m.label||m.id;
         }
       }
       sel.appendChild(og);
@@ -2113,37 +2125,126 @@ function _positionModelDropdown(){
   dd.style.left=`${left}px`;
 }
 
+function _readModelOverflowData(group){
+  if(!group||!group.dataset||!group.dataset.extraModels) return [];
+  try{
+    const parsed=JSON.parse(group.dataset.extraModels);
+    return Array.isArray(parsed)?parsed.filter(m=>m&&m.id):[];
+  }catch(_e){
+    return [];
+  }
+}
+
+function _appendOverflowOptionsToGroup(group, extraModels){
+  if(!group||!Array.isArray(extraModels)||!extraModels.length) return 0;
+  // The selected model may already have been injected into the <select> (e.g. a
+  // hidden overflow model picked from search via _ensureModelOptionInDropdown).
+  // Appending it again here would create a duplicate row once the group expands,
+  // so reuse/move any existing option with the same value instead of re-creating it. (#3691)
+  const parentSelect=(group.parentNode&&group.parentNode.tagName==='SELECT')?group.parentNode:null;
+  const existingByValue=new Map();
+  if(parentSelect){
+    for(const opt of Array.from(parentSelect.querySelectorAll('option'))){
+      if(opt&&typeof opt.value==='string') existingByValue.set(opt.value,opt);
+    }
+  }
+  let appended=0;
+  for(const m of extraModels){
+    if(!m||!m.id) continue;
+    const existing=existingByValue.get(m.id);
+    if(existing){
+      // Move the already-present option into this group rather than duplicating it.
+      if(existing.parentNode!==group) group.appendChild(existing);
+      continue;
+    }
+    const opt=document.createElement('option');
+    opt.value=m.id;
+    opt.textContent=m.label||m.id;
+    group.appendChild(opt);
+    appended++;
+  }
+  if(group.dataset){
+    group.dataset.extraModels='[]';
+    group.dataset.overflowExpanded='1';
+  }
+  return appended;
+}
+
 function renderModelDropdown(){
   const dd=$('composerModelDropdown');
   const sel=$('modelSelect');
   if(!dd||!sel) return;
-  // Store model data for filtering
   const _modelData=[];
+  const _groupMeta=new Map();
+  const _groupOrder=[];
   const _badgeMap=window._configuredModelBadges||{};
+  const _ensureGroupMeta=(groupKey,groupLabel,providerId,optgroup)=>{
+    if(!_groupMeta.has(groupKey)){
+      _groupMeta.set(groupKey,{
+        key:groupKey,
+        label:groupLabel||'',
+        providerId:providerId||'',
+        optgroup:optgroup||null,
+        modelsEndpointError:null,
+        modelCount:0,
+        hiddenCount:0,
+        endpointErrorOnly:false,
+      });
+      _groupOrder.push(groupKey);
+    }
+    return _groupMeta.get(groupKey);
+  };
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
       const providerId=child.dataset&&child.dataset.provider?child.dataset.provider:'';
+      const groupKey=providerId||child.label||`group-${_groupOrder.length}`;
+      const groupMeta=_ensureGroupMeta(groupKey,child.label||'',providerId,child);
       let modelsEndpointError=null;
       if(child.dataset&&child.dataset.modelsEndpointError){
         try{ modelsEndpointError=JSON.parse(child.dataset.modelsEndpointError); }catch(_e){ modelsEndpointError=null; }
       }
+      groupMeta.modelsEndpointError=modelsEndpointError;
       for(const opt of Array.from(child.children)){
         const rawValue=String(opt.value||'');
         const displayName=rawValue.startsWith('@custom:')
           ? getModelLabel(rawValue)
           : (opt.textContent||getModelLabel(rawValue));
-        _modelData.push({value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
+        const entry={value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',groupKey,providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId),hiddenByDefault:false};
+        _modelData.push(entry);
+        groupMeta.modelCount++;
       }
-      if(modelsEndpointError && !child.children.length){
-        _modelData.push({value:`__models_endpoint_error__:${providerId||child.label||''}`,name:'',id:'',group:child.label||'',providerId,modelsEndpointError,endpointErrorOnly:true});
+      for(const overflowModel of _readModelOverflowData(child)){
+        const displayName=overflowModel.id.startsWith('@custom:')
+          ? getModelLabel(overflowModel.id)
+          : (overflowModel.label||getModelLabel(overflowModel.id));
+        _modelData.push({
+          value:overflowModel.id,
+          name:esc(displayName),
+          id:esc(overflowModel.id),
+          group:child.label||'',
+          groupKey,
+          providerId,
+          modelsEndpointError,
+          badge:_getConfiguredModelBadge(overflowModel.id,_badgeMap,providerId),
+          hiddenByDefault:true,
+        });
+        groupMeta.modelCount++;
+        groupMeta.hiddenCount++;
+      }
+      if(modelsEndpointError && !child.children.length && !groupMeta.hiddenCount){
+        groupMeta.endpointErrorOnly=true;
+        _modelData.push({value:`__models_endpoint_error__:${providerId||child.label||''}`,name:'',id:'',group:child.label||'',groupKey,providerId,modelsEndpointError,endpointErrorOnly:true});
       }
     }
     if(child.tagName==='OPTION'){
+      const groupKey='__ungrouped__';
+      _ensureGroupMeta(groupKey,'','',null);
       const rawValue=String(child.value||'');
       const displayName=rawValue.startsWith('@custom:')
         ? getModelLabel(rawValue)
         : (child.textContent||getModelLabel(rawValue));
-      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
+      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:'',badge:_getConfiguredModelBadge(child.value,_badgeMap),hiddenByDefault:false});
+      _groupMeta.get(groupKey).modelCount++;
     }
   }
   const _existingConfiguredKeys=new Set(_modelData.map(existing=>_normalizeConfiguredModelKey(existing.value)));
@@ -2185,7 +2286,30 @@ function renderModelDropdown(){
     }
     return 500;
   };
-  // Filter function (defined AFTER _searchRow and _cust* are created)
+  const _renderProviderEndpointHint=(entry)=>{
+    if(!entry||!entry.label||!entry.modelsEndpointError) return;
+    const hint=document.createElement('div');
+    hint.className='model-provider-hint';
+    hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
+    dd.appendChild(hint);
+  };
+  const _expandOverflowGroup=(groupMetaEntry)=>{
+    if(!groupMetaEntry||!groupMetaEntry.optgroup) return;
+    const currentTerm=_si.value;
+    const extraModels=_readModelOverflowData(groupMetaEntry.optgroup);
+    if(!_appendOverflowOptionsToGroup(groupMetaEntry.optgroup,extraModels)) return;
+    renderModelDropdown();
+    const nextSearch=dd.querySelector('.model-search-input');
+    if(!nextSearch) return;
+    nextSearch.value=currentTerm;
+    if(nextSearch._listeners&&typeof nextSearch._listeners.input==='function'){
+      nextSearch._listeners.input();
+      return;
+    }
+    if(typeof nextSearch.dispatchEvent==='function'){
+      nextSearch.dispatchEvent(new Event('input'));
+    }
+  };
   const _filterModels=(term)=>{
     term=term.trim().toLowerCase();
     const found=new Set();
@@ -2230,9 +2354,13 @@ function renderModelDropdown(){
         return a.name.localeCompare(b.name);
       });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
-    // Clear and rebuild
+    const configuredSemanticKeys=new Set(configuredModels.map(m=>`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`));
+    const _effectiveHiddenCount=(groupKey)=>_modelData.filter(m=>
+      m.groupKey===groupKey
+      && m.hiddenByDefault
+      && !configuredSemanticKeys.has(`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`)
+    ).length;
     dd.innerHTML='';
-    // Add search and custom elements first (CRITICAL: must be before models)
     dd.appendChild(_scopeNote);
     dd.appendChild(_searchRow);
     dd.appendChild(_custSep);
@@ -2268,45 +2396,64 @@ function renderModelDropdown(){
         dd.appendChild(row);
       }
     }
-    // Add remaining models matching filter
-    let _lastGroup=null;
-    // Count models per group for heading labels (#1425)
-    const _groupCounts={};
-    for(const m of _modelData){
-      if(configuredIds.has(m.value)) continue;
-      if(m.group&&!m.endpointErrorOnly) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
-    }
-    const _renderProviderEndpointHint=(groupName)=>{
-      if(!groupName) return;
-      const entry=_modelData.find(m=>m.group===groupName&&m.modelsEndpointError);
-      if(!entry||!entry.modelsEndpointError) return;
-      const hint=document.createElement('div');
-      hint.className='model-provider-hint';
-      hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
-      dd.appendChild(hint);
-    };
-    for(const m of _modelData){
-      if(configuredIds.has(m.value)||!matches(m)) continue;
-      if(m.group&&m.group!==_lastGroup){
+    for(const groupKey of _groupOrder){
+      const meta=_groupMeta.get(groupKey);
+      if(!meta) continue;
+      const hiddenCount=_effectiveHiddenCount(groupKey);
+      const groupRows=_modelData.filter(m=>
+        m.groupKey===groupKey
+        && !configuredIds.has(m.value)
+        && !m.endpointErrorOnly
+        && matches(m)
+        && (!m.hiddenByDefault || !!term)
+      );
+      const shouldRenderHeading=!!meta.label&&(groupRows.length||meta.endpointErrorOnly||(!term&&hiddenCount));
+      if(shouldRenderHeading){
         const heading=document.createElement('div');
         heading.className='model-group';
-        const count=_groupCounts[m.group]||0;
-        heading.textContent=count>1?`${m.group} (${count})`:m.group;
+        // When COLLAPSED (hiddenCount>0) keep the backend-decorated label verbatim
+        // ("Nous (2 of 4)") so the overflow count shows. When EXPANDED, strip that
+        // decoration and append the rendered-row count, otherwise the heading reads
+        // "Nous (2 of 4) (4)" (double count). Count rendered rows, not modelCount,
+        // so hoisted-configured models aren't double-counted. (#3691)
+        const count=hiddenCount?0:groupRows.length;
+        const _plainLabel=String(meta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,'');
+        heading.textContent=count>1?`${_plainLabel} (${count})`:meta.label;
         dd.appendChild(heading);
-        _renderProviderEndpointHint(m.group);
-        _lastGroup=m.group;
+        _renderProviderEndpointHint(meta);
       }
-      if(m.endpointErrorOnly) continue;
-      const row=document.createElement('div');
-      row.className='model-opt'+(m.value===sel.value?' active':'');
-      const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
-      // Inline provider chip on every row that has a group (#1425)
-      const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
-      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-      row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
-      dd.appendChild(row);
+      for(const m of groupRows){
+        const row=document.createElement('div');
+        row.className='model-opt'+(m.value===sel.value?' active':'');
+        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+        // The group heading carries the overflow count ("Provider (15 of 30)"); the
+        // per-row provider chip must show the PLAIN provider label only — otherwise
+        // the count is stamped redundantly on every row and reads as nonsense after
+        // "Show all" expands the group (e.g. row 30 still showing "(15 of 30)"). (#3691)
+        const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
+        const providerChip=_plainGroup?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
+        dd.appendChild(row);
+      }
+      if(!term&&hiddenCount){
+        const showAll=document.createElement('div');
+        showAll.className='model-opt model-opt-show-all';
+        showAll.tabIndex=0;
+        showAll.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(t('model_show_all_models',hiddenCount)||`Show all ${hiddenCount} models`)}</span></div>`;
+        showAll.onclick=(e)=>{
+          if(e&&typeof e.stopPropagation==='function') e.stopPropagation();
+          _expandOverflowGroup(meta);
+        };
+        showAll.addEventListener('keydown',e=>{
+          if(e.key==='Enter'||e.key===' '){
+            e.preventDefault();
+            _expandOverflowGroup(meta);
+          }
+        });
+        dd.appendChild(showAll);
+      }
     }
-    // Show "No results" if filtered and nothing matched
     if(term&&found.size===0){
       const noResult=document.createElement('div');
       noResult.className='model-search-no-results';
@@ -2316,10 +2463,8 @@ function renderModelDropdown(){
       noResult.style.textAlign='center';
       dd.appendChild(noResult);
     }
-    // Restore focus to search input
     _si.focus();
   };
-  // Event handlers for search input
   _si.addEventListener('input',()=>_filterModels(_si.value));
   // Keyboard navigation through filtered model rows (#2791).
   const _visibleModelRows=()=>Array.from(dd.querySelectorAll('.model-opt'));
@@ -2347,20 +2492,16 @@ function renderModelDropdown(){
     }
   });
   _si.addEventListener('click',e=>e.stopPropagation());
-  // Event handlers for clear button
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
-  // Event handlers for custom input
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
   _cb.onclick=_applyCustom;
   _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
-  // Add search and custom elements to dropdown (initial render)
   dd.appendChild(_scopeNote);
   dd.appendChild(_searchRow);
   dd.appendChild(_custSep);
   dd.appendChild(_custRow);
-  // Apply initial filter (empty shows all)
   _filterModels('');
 }
 
@@ -2612,7 +2753,8 @@ document.addEventListener('click',function(e){
 });
 
 // ── Session toolsets chip (#493) ───────────────────────────────────────────
-let _currentSessionToolsets = null; // null = global, array = custom list
+let _currentSessionToolsets = null; // null = active profile defaults, array = custom list
+let _toolsetsCatalog = null;
 
 function _applyToolsetsChip(toolsets) {
   _currentSessionToolsets = toolsets;
@@ -2634,9 +2776,9 @@ function _applyToolsetsChip(toolsets) {
     chip.classList.add('has-custom');
     chip.title = t('session_toolsets') + ': ' + toolsets.join(', ');
   } else {
-    label.textContent = t('session_toolsets_global');
+    label.textContent = t('session_toolsets_profile_defaults');
     chip.classList.remove('has-custom');
-    chip.title = t('session_toolsets');
+    chip.title = t('session_toolsets') + ': ' + t('session_toolsets_profile_defaults');
   }
 }
 
@@ -2652,6 +2794,115 @@ function syncToolsetsChip() {
   _syncToolsetsChip();
 }
 
+function _normalizeToolsetsCatalog(payload) {
+  const servers = payload && Array.isArray(payload.servers) ? payload.servers : [];
+  const seen = new Set();
+  const names = [];
+  servers.forEach(function(server) {
+    const name = String((server && server.name) || '').trim();
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    names.push(name);
+  });
+  return names;
+}
+
+function _loadToolsetsCatalog() {
+  if (Array.isArray(_toolsetsCatalog)) return Promise.resolve(_toolsetsCatalog);
+  return api('/api/mcp/servers')
+    .then(function(payload) {
+      _toolsetsCatalog = _normalizeToolsetsCatalog(payload);
+      return _toolsetsCatalog;
+    })
+    .catch(function() {
+      _toolsetsCatalog = false;
+      return [];
+    });
+}
+
+function invalidateToolsetsCatalog(payload) {
+  _toolsetsCatalog = payload && Array.isArray(payload.servers) ? _normalizeToolsetsCatalog(payload) : null;
+}
+if (typeof window !== 'undefined') window.invalidateToolsetsCatalog = invalidateToolsetsCatalog;
+
+function _toolsetsInputList(input) {
+  if (!input) return [];
+  return input.value.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function _ensureToolsetsPresetSection() {
+  const dd = $('composerToolsetsDropdown');
+  if (!dd) return null;
+  let section = $('toolsetsPresetSections');
+  if (section) return section;
+  section = document.createElement('div');
+  section.id = 'toolsetsPresetSections';
+  section.className = 'toolsets-preset-sections';
+  const inputRow = dd.querySelector('.toolsets-dropdown-input-row');
+  if (inputRow) dd.insertBefore(section, inputRow);
+  else dd.appendChild(section);
+  return section;
+}
+
+function _appendToolsetsLabel(section, text) {
+  const label = document.createElement('div');
+  label.className = 'toolsets-dropdown-desc';
+  label.textContent = text;
+  section.appendChild(label);
+}
+
+function _renderToolsetsPresetSections(opts) {
+  const state = opts && opts.state;
+  const input = opts && opts.input;
+  const section = _ensureToolsetsPresetSection();
+  if (!section || !state || !input) return;
+  const selected = _toolsetsInputList(input);
+  const selectedSet = new Set(selected);
+  const hasCustom = selected.length > 0;
+  state.textContent = hasCustom
+    ? '🔧 ' + selected.join(', ')
+    : '👤 ' + t('session_toolsets_profile_defaults');
+
+  section.innerHTML = '';
+  const defaultsBtn = document.createElement('button');
+  defaultsBtn.type = 'button';
+  defaultsBtn.id = 'toolsetsProfileDefaultsBtn';
+  defaultsBtn.className = 'toolsets-action-btn toolsets-clear-btn';
+  defaultsBtn.textContent = t('session_toolsets_use_profile_defaults');
+  section.appendChild(defaultsBtn);
+
+  _appendToolsetsLabel(section, t('session_toolsets_configured_servers'));
+  if (_toolsetsCatalog === null) {
+    _appendToolsetsLabel(section, t('session_toolsets_loading_servers'));
+    return;
+  }
+  if (_toolsetsCatalog === false) {
+    _appendToolsetsLabel(section, t('mcp_load_failed'));
+    return;
+  }
+  if (!Array.isArray(_toolsetsCatalog) || !_toolsetsCatalog.length) {
+    _appendToolsetsLabel(section, t('session_toolsets_no_configured_servers'));
+    return;
+  }
+  _toolsetsCatalog.forEach(function(name) {
+    const row = document.createElement('label');
+    row.className = 'toolsets-server-option';
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '6px';
+    row.style.margin = '4px 0';
+    row.style.fontSize = '12px';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'toolsets-server-checkbox';
+    checkbox.value = name;
+    checkbox.checked = selectedSet.has(name);
+    row.appendChild(checkbox);
+    row.appendChild(document.createTextNode(name));
+    section.appendChild(row);
+  });
+}
+
 function _populateToolsetsDropdown() {
   const desc = $('toolsetsDropdownDesc');
   const state = $('toolsetsDropdownState');
@@ -2665,14 +2916,14 @@ function _populateToolsetsDropdown() {
   input.placeholder = t('session_toolsets_placeholder');
   // Escape key handler for toolsets input
   input.onkeydown = function(e) { if(e.key === 'Escape') closeToolsetsDropdown(); };
+  input.oninput = function() { _renderToolsetsPresetSections({ state, input }); };
   const hasCustom = Array.isArray(_currentSessionToolsets) && _currentSessionToolsets.length > 0;
   if (hasCustom) {
-    state.textContent = '🔧 ' + _currentSessionToolsets.join(', ');
     input.value = _currentSessionToolsets.join(', ');
   } else {
-    state.textContent = '🌍 ' + t('session_toolsets_global');
     input.value = '';
   }
+  _renderToolsetsPresetSections({ state, input });
 }
 
 function _positionToolsetsDropdown() {
@@ -2708,6 +2959,14 @@ function toggleToolsetsDropdown() {
   if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
   _syncToolsetsChip();
   _populateToolsetsDropdown();
+  _loadToolsetsCatalog().then(function() {
+    const stillOpen = dd && dd.classList.contains('open');
+    if (stillOpen) {
+      const state = $('toolsetsDropdownState');
+      const input = $('toolsetsInput');
+      _renderToolsetsPresetSections({ state, input });
+    }
+  });
   dd.classList.add('open');
   _positionToolsetsDropdown();
   chip.classList.add('active');
@@ -2753,6 +3012,12 @@ document.addEventListener('click', function(e) {
     !e.target.closest('#composerToolsetsChip') &&
     !e.target.closest('#composerToolsetsDropdown')
   ) closeToolsetsDropdown();
+  // Active profile defaults button
+  if (e.target.closest('#toolsetsProfileDefaultsBtn')) {
+    _applySessionToolsets(null);
+    closeToolsetsDropdown();
+    return;
+  }
   // Apply button
   if (e.target.closest('#toolsetsApplyBtn')) {
     const input = $('toolsetsInput');
@@ -2775,6 +3040,21 @@ document.addEventListener('click', function(e) {
     _applySessionToolsets(null);
     closeToolsetsDropdown();
   }
+});
+
+document.addEventListener('change', function(e) {
+  if (!e.target.closest('#toolsetsPresetSections')) return;
+  if (!e.target.classList.contains('toolsets-server-checkbox')) return;
+  const input = $('toolsetsInput');
+  const state = $('toolsetsDropdownState');
+  if (!input) return;
+  const checked = Array.from(document.querySelectorAll('#toolsetsPresetSections .toolsets-server-checkbox:checked'))
+    .map(el => String(el.value || '').trim())
+    .filter(Boolean);
+  const catalogSet = new Set(Array.isArray(_toolsetsCatalog) ? _toolsetsCatalog : []);
+  const manual = _toolsetsInputList(input).filter(name => !catalogSet.has(name));
+  input.value = checked.concat(manual).join(', ');
+  _renderToolsetsPresetSections({ state, input });
 });
 
 // Position toolsets dropdown on resize, OR close it if the chip is no longer
@@ -9174,6 +9454,7 @@ function _captureMessageScrollSnapshot(){
   if(!el) return null;
   const bottom=Math.max(0,el.scrollHeight-el.scrollTop-el.clientHeight);
   return {
+    anchor:(typeof _captureMessageViewportAnchor==='function')?_captureMessageViewportAnchor():null,
     top:el.scrollTop,
     bottom,
     scrollHeight:el.scrollHeight,
@@ -9185,8 +9466,13 @@ function _restoreMessageScrollSnapshot(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
-  _programmaticScroll=true;
-  el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  const restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
+    ? _restoreMessageViewportAnchor(snapshot.anchor,0)
+    : false;
+  if(!restoredViaAnchor){
+    _programmaticScroll=true;
+    el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  }
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
   const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
@@ -9199,7 +9485,9 @@ function _restoreMessageScrollSnapshot(snapshot){
     _scrollPinned=true;
     _nearBottomCount=2;
   }
-  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  if(!restoredViaAnchor){
+    requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  }
 }
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
   const el=$('messages');
@@ -9290,8 +9578,20 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   scrollToBottom();
 }
 
+function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow){
+  if(!preserveScroll||!virtualWindow||!virtualWindow.virtualized||!!(options&&options._virtualFallback)) return false;
+  if(_messageViewportIntersectsRenderedRow()) return false;
+  if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){
+    _sessionHtmlCache.delete(_sessionHtmlCacheSid);
+  }
+  _messageVirtualWindowKey='';
+  renderMessages({preserveScroll:true,_virtualFallback:true});
+  return true;
+}
+
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
+  const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when Auto-follow is
   // off and the user has scrolled up — both need to restore the reader's position
   // after the DOM rebuild rather than snap to the bottom. (Codex #4006 r3.)
@@ -9313,7 +9613,9 @@ function renderMessages(options){
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
   $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
-  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
+  const virtualWindow=virtualFallback
+    ? {virtualized:false,start:0,end:visWithIdx.length,topPad:0,bottomPad:0,total:visWithIdx.length,tailStart:visWithIdx.length}
+    : _currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
   const renderWindowKey=_messageVirtualWindowKeyFor(virtualWindow);
   const windowStart=virtualWindow.start;
   const windowEnd=virtualWindow.end;
@@ -9349,6 +9651,7 @@ function renderMessages(options){
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
       requestAnimationFrame(()=>postProcessRenderedMessages(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
@@ -10506,6 +10809,7 @@ function renderMessages(options){
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+  if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>postProcessRenderedMessages(inner));
   // Refresh todo panel if it's currently open

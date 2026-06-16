@@ -1,6 +1,7 @@
 import json
 import subprocess
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ def _isolate_sessions(tmp_path, monkeypatch):
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent.resolve()))
     SESSIONS.clear()
     yield session_dir
     SESSIONS.clear()
@@ -32,7 +34,7 @@ def test_worktree_metadata_round_trips_through_session_file(_isolate_sessions):
     s.save()
 
     raw = json.loads(s.path.read_text(encoding="utf-8"))
-    assert raw["worktree_path"].endswith(".worktrees/hermes-1234")
+    assert Path(raw["worktree_path"]).as_posix().endswith(".worktrees/hermes-1234")
     assert raw["worktree_branch"] == "hermes/hermes-1234"
     assert raw["worktree_repo_root"].endswith("repo")
     assert raw["worktree_created_at"] == 123.5
@@ -133,7 +135,7 @@ def test_create_worktree_for_workspace_calls_agent_setup_with_repo_root(tmp_path
     info = worktrees.create_worktree_for_workspace(nested)
 
     assert seen["repo_root"] == str(repo.resolve())
-    assert info["path"].endswith(".worktrees/hermes-test")
+    assert Path(info["path"]).as_posix().endswith(".worktrees/hermes-test")
     assert info["branch"] == "hermes/hermes-test"
     assert info["repo_root"] == str(repo.resolve())
     assert info["created_at"] >= now

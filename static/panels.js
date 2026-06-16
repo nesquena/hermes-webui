@@ -1109,7 +1109,7 @@ async function _populateCronFormModelSelect(selectedModel, selectedProvider, dis
       const og = document.createElement('optgroup');
       og.label = g.provider || g.provider_id || 'Configured';
       if (g.provider_id) og.dataset.provider = g.provider_id;
-      for (const m of (Array.isArray(g.models) ? g.models : [])) {
+      for (const m of [...(Array.isArray(g.models) ? g.models : []), ...(Array.isArray(g.extra_models) ? g.extra_models : [])]) {
         if (!m || !m.id) continue;
         const opt = document.createElement('option');
         opt.value = m.id;
@@ -5591,6 +5591,14 @@ async function switchToProfile(name) {
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
 
+    // Reconnect the gateway SSE to the NEW profile's watcher. The backend watcher
+    // registry is now profile-keyed (#3629), but this tab's existing EventSource is
+    // still subscribed to the PREVIOUS profile's watcher — and the probe-based
+    // reattach is gated on `!_gatewaySSE`, which can't fire while the old stream is
+    // open. startGatewaySSE() closes the old ES (stopGatewaySSE) and reconnects with
+    // the new profile cookie; it self-gates on window._showCliSessions internally.
+    if (typeof startGatewaySSE === 'function') startGatewaySSE();
+
     // Update composer placeholder and title bar while the core profile-switch
     // state is still close to the profile API response.
     if (typeof applyBotName === 'function') applyBotName();
@@ -5773,7 +5781,7 @@ async function _populateProfileFormModelSelect(){
       const og = document.createElement('optgroup');
       og.label = g.provider || g.provider_id || 'Configured';
       if (g.provider_id) og.dataset.provider = g.provider_id;
-      for (const m of (Array.isArray(g.models) ? g.models : [])) {
+      for (const m of [...(Array.isArray(g.models) ? g.models : []), ...(Array.isArray(g.extra_models) ? g.extra_models : [])]) {
         if (!m || !m.id) continue;
         const opt = document.createElement('option');
         opt.value = m.id;
@@ -6679,7 +6687,7 @@ async function loadSettingsPanel(){
           const og=document.createElement('optgroup');
           og.label=g.provider;
           if(g.provider_id) og.dataset.provider=g.provider_id;
-          for(const m of g.models){
+          for(const m of [...(g.models||[]),...(g.extra_models||[])]){
             const opt=document.createElement('option');
             opt.value=m.id;opt.textContent=m.label;
             og.appendChild(opt);
@@ -8276,10 +8284,10 @@ async function _loadAuxiliaryModels(){
  // Build provider list from /api/models groups
  // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
  const groups=(modelsData&&modelsData.groups)||[];
- _auxProviders=groups.filter(g=>g.provider&&g.models&&g.models.length>0).map(g=>({
+ _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
  slug:g.provider_id||g.provider,
  name:g.provider,
- models:g.models.map(m=>m.id),
+ models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
  }));
  if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
  _mainAdvancedConfig=auxData.main||{};
@@ -8664,10 +8672,16 @@ function toggleMcpServer(name, enabled){
     method:'PATCH',
     body:JSON.stringify({enabled:enabled}),
   }).then(r=>{
-    if(r&&r.ok) showToast(t(enabled?'mcp_enabled_toast':'mcp_disabled_toast',name));
+    if(r&&r.ok){
+      _refreshMcpToolsetsCatalog();
+      showToast(t(enabled?'mcp_enabled_toast':'mcp_disabled_toast',name));
+    }
     else showToast(t('mcp_toggle_failed'),'error');
     loadMcpServers();
   }).catch(()=>{showToast(t('mcp_toggle_failed'),'error');loadMcpServers();});
+}
+function _refreshMcpToolsetsCatalog(payload){
+  if(typeof window.invalidateToolsetsCatalog==='function') window.invalidateToolsetsCatalog(payload);
 }
 function loadMcpServers(){
   const list=$('mcpServerList');
@@ -8675,6 +8689,7 @@ function loadMcpServers(){
   list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('loading'))}</div>`;
   api('/api/mcp/servers').then(r=>{
     if(!r||!Array.isArray(r.servers)) return;
+    _refreshMcpToolsetsCatalog(r);
     if(!r.servers.length){
       list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_no_servers'))}</div>`;
       return;
@@ -8984,8 +8999,30 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
 
 function updateNotificationPermissionStatus(){
   const el=$('notificationPermissionStatus');
+  const btn=$('notificationPermissionButton');
+  const btnWrap=$('notificationPermissionButtonWrap');
   if(!el) return;
-  if(!('Notification' in window)){el.textContent=t('notifications_unsupported');return;}
+  if(!('Notification' in window)){
+    const unsupported=t('notifications_unsupported');
+    el.textContent=unsupported;
+    if(btn){
+      btn.disabled=true;
+      btn.title='';
+      btn.setAttribute('aria-label', unsupported);
+      btn.setAttribute('aria-disabled','true');
+    }
+    if(btnWrap) btnWrap.title=unsupported;
+    return;
+  }
   const perm=Notification.permission||'default';
-  el.textContent=t('notifications_permission_status', perm);
+  const label=t('notifications_permission_status', perm);
+  el.textContent=label;
+  if(btn){
+    const granted=perm==='granted';
+    btn.disabled=granted;
+    btn.title=granted?'':label;
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('aria-disabled', granted?'true':'false');
+  }
+  if(btnWrap) btnWrap.title=label;
 }

@@ -14,6 +14,8 @@ all_profiles=1 opt-in path. End-to-end HTTP-level tests live separately under
 tests/test_sessions_endpoint.py if/when added.
 """
 
+from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import urlparse
 
 import pytest
@@ -207,6 +209,227 @@ def test_static_sessions_js_trusts_server_profile_scoping():
     assert forbidden_count not in src, (
         "Client otherProfileCount must come from server, not strict-equality fallback"
     )
+
+
+# ── Direct session access must also honor active profile ───────────────────
+
+
+class _ProfileScopedSession:
+    def __init__(self, session_id="foreign_001", profile="other"):
+        self.session_id = session_id
+        self.profile = profile
+        self.active_stream_id = None
+        self.messages = [{"role": "user", "content": "foreign profile secret"}]
+        self.tool_calls = []
+        self.pending_user_message = None
+        self.pending_attachments = []
+        self.pending_started_at = None
+        self.context_length = 0
+        self.threshold_tokens = 0
+        self.last_prompt_tokens = 0
+
+    def compact(self, *args, **kwargs):
+        return {
+            "session_id": self.session_id,
+            "title": "Foreign session",
+            "profile": self.profile,
+            "workspace": "/tmp/foreign",
+            "model": "gpt-test",
+            "message_count": len(self.messages),
+        }
+
+
+def test_get_session_rejects_session_from_inactive_profile():
+    """A known session_id from another profile must not bypass /api/sessions scoping.
+
+    /api/sessions already filters rows by active profile.  The detail endpoint
+    must apply the same check after loading the sidecar; otherwise a stale URL or
+    guessed id can disclose another profile's transcript.
+    """
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    parsed = urlparse("/api/session?session_id=foreign_001&messages=1&resolve_model=0")
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", return_value=_ProfileScopedSession()), \
+         patch("api.routes._clear_stale_stream_state", return_value=False), \
+         patch("api.routes._lookup_cli_session_metadata", return_value={}), \
+         patch("api.routes.get_state_db_session_messages", return_value=[]), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(headers={"Cookie": "hermes_profile=default"}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert "json" not in captured, "foreign-profile transcript must not be returned"
+
+
+def test_get_session_rejects_metadata_only_session_from_inactive_profile():
+    """Metadata-only loads must not bypass the active-profile boundary."""
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    parsed = urlparse("/api/session?session_id=foreign_001&messages=0&resolve_model=0")
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", return_value=_ProfileScopedSession()), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(headers={"Cookie": "hermes_profile=default"}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert "json" not in captured, "foreign-profile metadata must not be returned"
+
+
+def test_get_session_rejects_cookieless_session_from_inactive_profile():
+    """Cookieless requests must still enforce the active-profile boundary."""
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    parsed = urlparse("/api/session?session_id=foreign_001&messages=0&resolve_model=0")
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", return_value=_ProfileScopedSession()), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(headers={}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert "json" not in captured, "cookieless foreign-profile metadata must not be returned"
+
+
+def test_get_session_rejects_cli_session_from_inactive_profile():
+    """CLI fallback responses must use the same active-profile boundary."""
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    parsed = urlparse("/api/session?session_id=cli_foreign&messages=1&resolve_model=0")
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", side_effect=KeyError), \
+         patch("api.routes.SESSION_INDEX_FILE", SimpleNamespace(exists=lambda: False)), \
+         patch("api.routes._lookup_cli_session_metadata", return_value={"profile": "other"}), \
+         patch("api.routes.get_cli_session_messages", return_value=[{"role": "user", "content": "foreign profile secret"}]), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(headers={"Cookie": "hermes_profile=default"}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert "json" not in captured, "foreign-profile CLI transcript must not be returned"
+
+
+# ── Direct session export must also honor active profile ─────────────────
+
+
+class _ExportCaptureHandler:
+    def __init__(self):
+        self.headers = {}
+        self.status = None
+        self.sent_headers = []
+        self.ended = False
+        self.wfile = SimpleNamespace(write=self._write)
+        self.body = b""
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.sent_headers.append((name, value))
+
+    def end_headers(self):
+        self.ended = True
+
+    def _write(self, data):
+        self.body += data
+
+
+def test_session_export_rejects_session_from_inactive_profile():
+    """A known session_id from another profile must not bypass /api/sessions scoping.
+
+    /api/sessions hides foreign-profile rows by default, but the export endpoint
+    loaded directly by id and serialized the sidecar. It must apply the same
+    active-profile check before writing the JSON attachment.
+    """
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    foreign = SimpleNamespace(
+        session_id="foreign_export_001",
+        profile="other",
+        messages=[{"role": "user", "content": "foreign profile secret"}],
+    )
+
+    handler = _ExportCaptureHandler()
+    parsed = urlparse("/api/session/export?session_id=foreign_export_001")
+    with patch("api.routes.get_session", return_value=foreign), \
+         patch("api.routes.get_active_profile_name", return_value="default"), \
+         patch("api.routes.bad", side_effect=fake_bad):
+        routes._handle_session_export(handler, parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert handler.status is None
+    assert handler.body == b""
+
+
+def test_session_export_allows_session_from_active_profile():
+    """Same-profile exports still stream the redacted JSON attachment."""
+    import api.routes as routes
+
+    active = SimpleNamespace(
+        session_id="active_export_001",
+        profile="default",
+        messages=[{"role": "user", "content": "same profile content"}],
+    )
+
+    handler = _ExportCaptureHandler()
+    parsed = urlparse("/api/session/export?session_id=active_export_001")
+    with patch("api.routes.get_session", return_value=active), \
+         patch("api.routes.get_active_profile_name", return_value="default"), \
+         patch("api.routes.redact_session_data", side_effect=lambda data: data):
+        routes._handle_session_export(handler, parsed)
+
+    assert handler.status == 200
+    assert handler.ended is True
+    assert b"same profile content" in handler.body
+    assert ("Cache-Control", "no-store") in handler.sent_headers
+
 
 
 # ── Cleanup ────────────────────────────────────────────────────────────────
