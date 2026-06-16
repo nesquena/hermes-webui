@@ -687,6 +687,17 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   requestAnimationFrame(()=>{ _programmaticScroll=false; });
   return true;
 }
+function _messageViewportIntersectsRenderedRow(){
+  const container=$('messages');
+  if(!container) return true;
+  const containerRect=container.getBoundingClientRect();
+  const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
+  for(const row of rows){
+    const rect=row.getBoundingClientRect();
+    if(rect.bottom>containerRect.top+1&&rect.top<containerRect.bottom-1) return true;
+  }
+  return false;
+}
 function _measureMessageVirtualRow(inner, entry){
   if(!inner||!entry) return 0;
   const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
@@ -9443,6 +9454,7 @@ function _captureMessageScrollSnapshot(){
   if(!el) return null;
   const bottom=Math.max(0,el.scrollHeight-el.scrollTop-el.clientHeight);
   return {
+    anchor:(typeof _captureMessageViewportAnchor==='function')?_captureMessageViewportAnchor():null,
     top:el.scrollTop,
     bottom,
     scrollHeight:el.scrollHeight,
@@ -9454,8 +9466,13 @@ function _restoreMessageScrollSnapshot(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
-  _programmaticScroll=true;
-  el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  const restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
+    ? _restoreMessageViewportAnchor(snapshot.anchor,0)
+    : false;
+  if(!restoredViaAnchor){
+    _programmaticScroll=true;
+    el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  }
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
   const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
@@ -9468,7 +9485,9 @@ function _restoreMessageScrollSnapshot(snapshot){
     _scrollPinned=true;
     _nearBottomCount=2;
   }
-  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  if(!restoredViaAnchor){
+    requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  }
 }
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
   const el=$('messages');
@@ -9559,8 +9578,20 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   scrollToBottom();
 }
 
+function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow){
+  if(!preserveScroll||!virtualWindow||!virtualWindow.virtualized||!!(options&&options._virtualFallback)) return false;
+  if(_messageViewportIntersectsRenderedRow()) return false;
+  if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){
+    _sessionHtmlCache.delete(_sessionHtmlCacheSid);
+  }
+  _messageVirtualWindowKey='';
+  renderMessages({preserveScroll:true,_virtualFallback:true});
+  return true;
+}
+
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
+  const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when Auto-follow is
   // off and the user has scrolled up — both need to restore the reader's position
   // after the DOM rebuild rather than snap to the bottom. (Codex #4006 r3.)
@@ -9582,7 +9613,9 @@ function renderMessages(options){
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
   $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
-  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
+  const virtualWindow=virtualFallback
+    ? {virtualized:false,start:0,end:visWithIdx.length,topPad:0,bottomPad:0,total:visWithIdx.length,tailStart:visWithIdx.length}
+    : _currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
   const renderWindowKey=_messageVirtualWindowKeyFor(virtualWindow);
   const windowStart=virtualWindow.start;
   const windowEnd=virtualWindow.end;
@@ -9618,6 +9651,7 @@ function renderMessages(options){
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
       requestAnimationFrame(()=>postProcessRenderedMessages(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
@@ -10775,6 +10809,7 @@ function renderMessages(options){
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+  if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>postProcessRenderedMessages(inner));
   // Refresh todo panel if it's currently open
