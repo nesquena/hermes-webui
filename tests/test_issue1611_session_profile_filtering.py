@@ -152,6 +152,19 @@ def test_static_sessions_js_uses_all_profiles_query_when_toggle_on():
     )
 
 
+def test_static_sessions_js_marks_all_profiles_imports_with_profile():
+    """All-profiles row opens must opt into cross-profile import explicitly."""
+    from pathlib import Path
+
+    repo_root = Path(__file__).parent.parent
+    src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
+
+    assert "function _externalImportPayload(session)" in src
+    assert "payload.all_profiles = true;" in src
+    assert "payload.profile = session.profile;" in src
+    assert "JSON.stringify(_externalImportPayload(s))" in src
+
+
 # ── SHOULD-FIX #2: profile filter must run BEFORE messaging-source dedupe ──
 # Bug shape (Opus pre-release advisor): _messaging_source_key is profile-blind,
 # so if profiles A and B both have a session for the same Slack identity, a

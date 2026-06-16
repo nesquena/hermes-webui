@@ -56,9 +56,9 @@ def _extract_handler(name: str) -> str:
 def test_import_cli_initializes_model_from_lookup_with_unknown_fallback():
     """The metadata lookup path must still provide an explicit unknown model fallback."""
     handler = _extract_handler("_handle_session_import_cli")
-    lookup_idx = handler.find('cli_meta = _lookup_cli_session_metadata(sid)')
+    lookup_idx = handler.find('cli_meta = _resolve_cli_import_metadata(')
     if lookup_idx == -1:
-        lookup_idx = handler.find('cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True)')
+        lookup_idx = handler.find('cli_meta = _lookup_cli_session_metadata(sid)')
     model_idx = handler.find('model = cli_meta.get("model", "unknown") if cli_meta else "unknown"')
     assert lookup_idx != -1, "Expected metadata lookup in _handle_session_import_cli"
     assert model_idx != -1, (

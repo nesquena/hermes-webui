@@ -3886,6 +3886,40 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
     return {}
 
 
+def _request_wants_all_profiles_import(body) -> bool:
+    if not isinstance(body, dict):
+        return False
+    value = body.get("all_profiles")
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _normalize_import_profile_value(value):
+    profile = str(value or "").strip()
+    if not profile:
+        return None
+    try:
+        from api.profiles import _PROFILE_ID_RE
+        if profile != "default" and not _PROFILE_ID_RE.fullmatch(profile):
+            return ""
+    except Exception:
+        pass
+    return profile
+
+
+def _resolve_cli_import_metadata(session_id: str, *, requested_profile=None, allow_all_profiles: bool = False) -> dict:
+    cli_meta = _lookup_cli_session_metadata(session_id)
+    if cli_meta and (not requested_profile or _profiles_match(cli_meta.get("profile"), requested_profile)):
+        return cli_meta
+    if not allow_all_profiles:
+        return {}
+    cli_meta = _lookup_cli_session_metadata(session_id, all_profiles=True)
+    if cli_meta and requested_profile and not _profiles_match(cli_meta.get("profile"), requested_profile):
+        return {}
+    return cli_meta or {}
+
+
 def _messaging_session_identity(session: dict, raw_source: str) -> str:
     metadata = _lookup_gateway_session_identity(session.get("session_id"))
     session_key = _safe_first(
@@ -16979,14 +17013,26 @@ def _handle_session_import_cli(handler, body):
         return bad(handler, str(e))
 
     sid = str(body["session_id"])
+    requested_profile = _normalize_import_profile_value((body or {}).get("profile"))
+    if requested_profile == "":
+        return bad(handler, "invalid profile", 400)
+    allow_all_profiles = _request_wants_all_profiles_import(body)
+    if allow_all_profiles and not requested_profile:
+        return bad(handler, "profile is required for all_profiles import", 400)
 
     # Check if already imported — refresh messages from CLI store if new ones arrived
     existing = Session.load(sid)
     if existing:
-        cli_meta = _lookup_cli_session_metadata(sid)
-        if not cli_meta:
-            cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
-        fresh_msgs = get_cli_session_messages(sid, profile=(cli_meta or {}).get("profile"))
+        refresh_profile = requested_profile or getattr(existing, "profile", None)
+        cli_meta = _resolve_cli_import_metadata(
+            sid,
+            requested_profile=refresh_profile,
+            allow_all_profiles=allow_all_profiles or bool(refresh_profile),
+        )
+        fresh_msgs = get_cli_session_messages(
+            sid,
+            profile=(cli_meta or {}).get("profile") or refresh_profile,
+        )
         changed = False
         if fresh_msgs and len(fresh_msgs) > len(existing.messages):
             # Prefix-equality guard: only extend if existing messages are a prefix of
@@ -17033,10 +17079,12 @@ def _handle_session_import_cli(handler, body):
         )
 
     # Fetch messages from CLI store
-    cli_meta = _lookup_cli_session_metadata(sid)
-    if not cli_meta:
-        cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
-    profile = cli_meta.get("profile") if cli_meta else None
+    cli_meta = _resolve_cli_import_metadata(
+        sid,
+        requested_profile=requested_profile,
+        allow_all_profiles=allow_all_profiles,
+    )
+    profile = cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None)
     msgs = get_cli_session_messages(sid, profile=profile)
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)

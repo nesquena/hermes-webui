@@ -1234,8 +1234,8 @@ def test_import_cli_preserves_messaging_source_metadata(cleanup_test_sessions):
             pass
 
 
-def test_import_cli_falls_back_to_named_profile_state_db(cleanup_test_sessions):
-    """import_cli should resolve metadata and messages from a non-active profile store."""
+def test_import_cli_named_profile_requires_explicit_all_profiles_opt_in(cleanup_test_sessions):
+    """Unqualified import_cli should not read a named profile's state.db."""
     named_profile = 'issue1611-import'
     conn = _ensure_state_db(profile=named_profile)
     sid = 'gw_named_profile_import_001'
@@ -1249,6 +1249,34 @@ def test_import_cli_falls_back_to_named_profile_state_db(cleanup_test_sessions):
         )
 
         data, status = post('/api/session/import_cli', {'session_id': sid})
+        assert status == 404, data
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_import_cli_all_profiles_opt_in_reads_named_profile_state_db(cleanup_test_sessions):
+    """Explicit all-profiles imports should resolve messages from the named profile store."""
+    named_profile = 'issue1611-import'
+    conn = _ensure_state_db(profile=named_profile)
+    sid = 'gw_named_profile_import_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(
+            conn,
+            session_id=sid,
+            source='telegram',
+            title='Named Profile Telegram Session',
+        )
+
+        data, status = post('/api/session/import_cli', {
+            'session_id': sid,
+            'all_profiles': True,
+            'profile': named_profile,
+        })
         assert status == 200, data
         session = data.get('session', {})
         messages = session.get('messages', [])
