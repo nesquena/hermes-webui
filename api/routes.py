@@ -10308,6 +10308,33 @@ def _handle_sessions_search(handler, parsed):
     })
 
 
+def _enrich_artifact_entries(workspace, entries):
+    """Attach manifest status/title to artifact dirs under _artifacts/items/ (#81).
+
+    Mutates ``entries`` in place: each directory entry that has a readable
+    ``manifest.json`` gets ``artifact_status`` and ``artifact_title`` keys.
+    Unreadable or malformed manifests are skipped silently.
+    """
+    for e in entries:
+        if e.get("type") != "dir":
+            continue
+        try:
+            mf = safe_resolve_ws(workspace, e["path"] + "/manifest.json")
+            if not mf.is_file():
+                continue
+            data = json.loads(mf.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        st = data.get("status")
+        if isinstance(st, str):
+            e["artifact_status"] = st
+        title = data.get("title")
+        if isinstance(title, str):
+            e["artifact_title"] = title
+
+
 def _handle_list_dir(handler, parsed):
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
@@ -10335,6 +10362,9 @@ def _handle_list_dir(handler, parsed):
         # Inbox is an intake zone: surface newest-arrived files first (#78).
         if rel_path.strip("/").split("/")[0] == "_inbox":
             entries = sorted(entries, key=lambda e: e.get("mtime_ns") or 0, reverse=True)
+        # Artifact items carry manifest status/title for tree badges (#81).
+        if rel_path.strip("/") == "_artifacts/items":
+            _enrich_artifact_entries(Path(workspace), entries)
         return j(
             handler,
             {

@@ -12797,6 +12797,18 @@ function _renderTreeItems(container, entries, depth){
       el.appendChild(ib);
     }
 
+    // Artifact status badge from manifest.json (#81)
+    if(item.artifact_status){
+      const _aColors={draft:'#8f8a91',ready:'#1376ed',published:'#22c55e',failed:'#ef4444'};
+      const ac=_aColors[item.artifact_status]||'#8f8a91';
+      const ab=document.createElement('span');
+      ab.className='artifact-badge';
+      ab.textContent=item.artifact_status;
+      if(item.artifact_title)ab.title=item.artifact_title;
+      ab.style.cssText='margin-left:6px;font-size:10px;text-transform:uppercase;letter-spacing:.04em;background:'+ac+';color:#fff;border-radius:4px;padding:1px 5px;line-height:15px;';
+      el.appendChild(ab);
+    }
+
     // Size -- only for files
     if(item.type==='file'&&item.size){
       const sizeEl=document.createElement('span');
