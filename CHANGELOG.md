@@ -7,6 +7,12 @@
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)
 
+## [v0.51.451] — 2026-06-16 — Release PL (show named-profile external sessions in the all-profiles list)
+
+### Fixed
+
+- **The "all profiles" session list now includes CLI / Telegram / API sessions that live under named profiles.** Previously the all-profiles view enumerated only the active profile's external (non-WebUI) sessions, so a session started by a named-profile CLI, Telegram, or API client never appeared even with "all profiles" selected. Enumeration now scans across profiles when (and only when) the request explicitly asks for the all-profiles view. The cross-profile boundary is preserved: an unqualified single-profile request still resolves to the active profile's `state.db` (a foreign session id returns 404, the same not-found shape as a missing session), and the client only sends the cross-profile import fields from the all-profiles view — mirroring the active-profile scoping already applied to session detail loads and exports. (#4067, #4065)
+
 ## [v0.51.450] — 2026-06-16 — Release PK (preserve custom provider namespace prefixes in model normalization)
 
 ### Fixed

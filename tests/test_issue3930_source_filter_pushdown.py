@@ -269,8 +269,8 @@ def test_cron_source_filter_uses_cron_rescue_limit(monkeypatch, tmp_path):
 def test_api_sessions_passes_source_filter_only_on_sidebar_path(monkeypatch):
     captured = []
 
-    def fake_get_cli_sessions(source_filter=None):
-        captured.append(source_filter)
+    def fake_get_cli_sessions(source_filter=None, *, all_profiles=False):
+        captured.append({"source_filter": source_filter, "all_profiles": all_profiles})
         return []
 
     monkeypatch.setattr(routes, "all_sessions", lambda diag=None: [])
@@ -290,17 +290,20 @@ def test_api_sessions_passes_source_filter_only_on_sidebar_path(monkeypatch):
 
     assert handler.status == 200
     assert handler.json_body()["sessions"] == []
-    assert captured == ["  TUI  "]
+    assert captured == [{"source_filter": "  TUI  ", "all_profiles": False}]
 
 
 def test_non_sidebar_cli_session_callers_keep_default_get_cli_sessions_signature(monkeypatch):
+    captured = []
+
     monkeypatch.setattr(
         routes,
         "get_cli_sessions",
-        lambda: [{"session_id": "cli-session", "title": "CLI Session"}],
+        lambda *, all_profiles=False: captured.append(all_profiles) or [{"session_id": "cli-session", "title": "CLI Session"}],
     )
 
     assert routes._lookup_cli_session_metadata("cli-session") == {
         "session_id": "cli-session",
         "title": "CLI Session",
     }
+    assert captured == [False]

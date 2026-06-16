@@ -22,15 +22,21 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 from tests._pytest_port import BASE
 
 
-def get(path):
-    with urllib.request.urlopen(BASE + path, timeout=10) as r:
+def get(path, *, profile=None):
+    headers = {}
+    if profile:
+        headers["Cookie"] = f"hermes_profile={profile}"
+    req = urllib.request.Request(BASE + path, headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read()), r.status
 
 
-def post(path, body=None):
+def post(path, body=None, *, profile=None):
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(BASE + path, data=data,
-                                  headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if profile:
+        headers["Cookie"] = f"hermes_profile={profile}"
+    req = urllib.request.Request(BASE + path, data=data, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -55,16 +61,23 @@ def _get_test_state_dir():
     return _ptsd
 
 
-def _get_state_db_path():
+def _get_profile_state_dir(profile=None):
+    state_dir = _get_test_state_dir()
+    if isinstance(profile, str) and profile.strip():
+        return state_dir / 'profiles' / profile.strip()
+    return state_dir
+
+
+def _get_state_db_path(profile=None):
     """Return path to the test state.db."""
-    return _get_test_state_dir() / 'state.db'
+    return _get_profile_state_dir(profile) / 'state.db'
 
 
-def _ensure_state_db():
+def _ensure_state_db(profile=None):
     """Create state.db with sessions and messages tables if it doesn't exist.
     Returns a connection. Does NOT delete existing data (safe for parallel tests).
     """
-    db_path = _get_state_db_path()
+    db_path = _get_state_db_path(profile)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -1219,6 +1232,92 @@ def test_import_cli_preserves_messaging_source_metadata(cleanup_test_sessions):
             conn.close()
         except Exception:
             pass
+
+
+def test_import_cli_named_profile_requires_explicit_all_profiles_opt_in(cleanup_test_sessions):
+    """Unqualified import_cli should not read a named profile's state.db."""
+    named_profile = 'issue1611-import'
+    conn = _ensure_state_db(profile=named_profile)
+    sid = 'gw_named_profile_import_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(
+            conn,
+            session_id=sid,
+            source='telegram',
+            title='Named Profile Telegram Session',
+        )
+
+        data, status = post('/api/session/import_cli', {'session_id': sid})
+        assert status == 404, data
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_import_cli_all_profiles_opt_in_reads_named_profile_state_db(cleanup_test_sessions):
+    """Explicit all-profiles imports should resolve messages from the named profile store."""
+    named_profile = 'issue1611-import'
+    conn = _ensure_state_db(profile=named_profile)
+    sid = 'gw_named_profile_import_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(
+            conn,
+            session_id=sid,
+            source='telegram',
+            title='Named Profile Telegram Session',
+        )
+
+        data, status = post('/api/session/import_cli', {
+            'session_id': sid,
+            'all_profiles': True,
+            'profile': named_profile,
+        })
+        assert status == 200, data
+        session = data.get('session', {})
+        messages = session.get('messages', [])
+
+        assert session.get('session_id') == sid
+        assert session.get('profile') == named_profile
+        assert session.get('source_tag') == 'telegram'
+        assert session.get('session_source') == 'messaging'
+        assert [m.get('content') for m in messages] == ['Hello from Telegram', 'Hi there!']
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_all_profiles_cli_contexts_normalizes_default_profile_name(tmp_path, monkeypatch):
+    from api import models, profiles
+
+    profiles_root = tmp_path / "profiles"
+    profiles_root.mkdir()
+    (profiles_root / "research").mkdir()
+
+    monkeypatch.setattr(profiles, "_profiles_root", lambda: profiles_root)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: None)
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda profile_name: tmp_path / (profile_name or "default-home"),
+    )
+    monkeypatch.setattr(
+        profiles,
+        "list_profiles_api",
+        lambda: [{"name": None}, {"name": "research"}],
+    )
+
+    contexts, _cache_key = models._all_profiles_cli_contexts()
+
+    assert ("default" in [profile for _home, _db_path, profile in contexts])
+    assert ("research" in [profile for _home, _db_path, profile in contexts])
 
 
 def test_sessions_response_backfills_imported_messaging_source_metadata(cleanup_test_sessions):

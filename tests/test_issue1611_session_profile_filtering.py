@@ -14,11 +14,19 @@ all_profiles=1 opt-in path. End-to-end HTTP-level tests live separately under
 tests/test_sessions_endpoint.py if/when added.
 """
 
+import json
+import os
+import sqlite3
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
+import urllib.request
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+
+from tests._pytest_port import BASE
 
 
 # ── _profiles_match helper ─────────────────────────────────────────────────
@@ -142,6 +150,19 @@ def test_static_sessions_js_uses_all_profiles_query_when_toggle_on():
     assert "api('/api/projects' + allProfilesQS,{timeoutToast:false})" in src, (
         "Expected /api/projects fetch to use the variant query"
     )
+
+
+def test_static_sessions_js_marks_all_profiles_imports_with_profile():
+    """All-profiles row opens must opt into cross-profile import explicitly."""
+    from pathlib import Path
+
+    repo_root = Path(__file__).parent.parent
+    src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
+
+    assert "function _externalImportPayload(session)" in src
+    assert "payload.all_profiles = true;" in src
+    assert "payload.profile = session.profile;" in src
+    assert "JSON.stringify(_externalImportPayload(s))" in src
 
 
 # ── SHOULD-FIX #2: profile filter must run BEFORE messaging-source dedupe ──
@@ -431,6 +452,111 @@ def test_session_export_allows_session_from_active_profile():
     assert ("Cache-Control", "no-store") in handler.sent_headers
 
 
+def _profile_state_db_path(profile: str | None = None) -> Path:
+    root = Path(os.environ["HERMES_WEBUI_TEST_STATE_DIR"])
+    if profile:
+        return root / "profiles" / profile / "state.db"
+    return root / "state.db"
+
+
+def _ensure_agent_state_db(profile: str | None = None) -> sqlite3.Connection:
+    db_path = _profile_state_db_path(profile)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            user_id TEXT,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            title TEXT
+        );
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            timestamp REAL NOT NULL
+        );
+    """)
+    conn.commit()
+    return conn
+
+
+def _insert_agent_session(conn: sqlite3.Connection, session_id: str, *, source: str, title: str) -> None:
+    started_at = time.time()
+    conn.execute(
+        "INSERT OR REPLACE INTO sessions (id, source, title, model, started_at, message_count) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (session_id, source, title, "openai/gpt-5", started_at, 2),
+    )
+    conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, ?)",
+        (session_id, "Hello from other profile", started_at),
+    )
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'assistant', ?, ?)",
+        (session_id, "Reply from other profile", started_at + 1),
+    )
+    conn.commit()
+
+
+def _delete_agent_session(conn: sqlite3.Connection, session_id: str) -> None:
+    conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+    conn.commit()
+
+
+def _get_json(path: str) -> tuple[dict, int]:
+    req = urllib.request.Request(BASE + path)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read()), resp.status
+
+
+def _post_json(path: str, body: dict) -> tuple[dict, int]:
+    req = urllib.request.Request(
+        BASE + path,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read()), resp.status
+
+
+def test_all_profiles_query_includes_named_profile_cli_sessions():
+    """all_profiles=1 should aggregate agent sessions from non-active named profiles."""
+    conn = _ensure_agent_state_db("issue1611-named")
+    sid = "issue1611_named_profile_cli_001"
+    try:
+        _insert_agent_session(
+            conn,
+            sid,
+            source="telegram",
+            title="Named Profile Telegram Session",
+        )
+        _post_json("/api/settings", {"show_cli_sessions": True})
+
+        scoped, scoped_status = _get_json("/api/sessions")
+        assert scoped_status == 200
+        assert sid not in {row.get("session_id") for row in scoped.get("sessions", [])}
+
+        aggregate, aggregate_status = _get_json("/api/sessions?all_profiles=1")
+        assert aggregate_status == 200
+        session = next(
+            row for row in aggregate.get("sessions", [])
+            if row.get("session_id") == sid
+        )
+        assert session.get("profile") == "issue1611-named"
+        assert aggregate.get("all_profiles") is True
+    finally:
+        try:
+            _post_json("/api/settings", {"show_cli_sessions": False})
+        finally:
+            _delete_agent_session(conn, sid)
+            conn.close()
 
 # ── Cleanup ────────────────────────────────────────────────────────────────
 
