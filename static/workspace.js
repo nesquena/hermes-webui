@@ -946,10 +946,27 @@ async function uploadToWorkspace(file, dir) {
       showToast(msg, 5000, 'error');
     } else {
       showToast(t('uploaded') || ('Uploaded ' + (data.filename || file.name)), 2000);
+      // Uploading into the inbox pre-fills the composer so the agent is told
+      // a file arrived — editable, never auto-sent. #79
+      if (typeof _isInboxPath === 'function' && _isInboxPath(dir)) {
+        _prefillInboxPrompt(data.filename || file.name);
+      }
     }
   } catch (e) {
     showToast(t('upload_failed') || ('Upload failed: ' + e.message), 5000, 'error');
   }
+}
+
+function _prefillInboxPrompt(filename) {
+  const ta = document.getElementById('msg');
+  if (!ta) return;
+  const text = t('inbox_prefill_prompt').replace('{file}', filename);
+  ta.value = (ta.value && ta.value.trim()) ? (ta.value.replace(/\s+$/, '') + '\n' + text) : text;
+  // Fire input so the composer auto-resizes and enables the send button.
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  ta.focus();
+  try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (_) {}
+  showToast(t('inbox_prefill_toast'));
 }
 
 function _isOsFilesDrag(e) {

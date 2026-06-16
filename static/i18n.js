@@ -5,6 +5,8 @@
 
 const LOCALES = {
   en: {
+    inbox_prefill_prompt: "Add the following to context: file '{file}' was added to the inbox.",
+    inbox_prefill_toast: '📎 preloaded into the prompt',
     artifact_zip_download: 'Download ZIP (deliverable)',
     inbox_move_to: 'Move to microverso',
     inbox_move_pick: 'Choose destination',
@@ -11534,6 +11536,8 @@ const LOCALES = {
   },
 
   pt: {
+    inbox_prefill_prompt: "Insira o seguinte no contexto: arquivo '{file}' foi adicionado à caixa de entrada.",
+    inbox_prefill_toast: '📎 precarregado no prompt',
     artifact_zip_download: 'Baixar ZIP (entregável)',
     inbox_move_to: 'Mover para microverso',
     inbox_move_pick: 'Escolha o destino',
