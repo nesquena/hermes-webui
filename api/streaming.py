@@ -450,6 +450,18 @@ WebUI progress guidance:
 """.strip()
 
 
+def _project_name_for_session_project(project_id: Optional[str]) -> Optional[str]:
+    if not project_id:
+        return None
+    try:
+        from api.models import load_projects
+        projects = load_projects()
+        match = next((p for p in projects if p.get("project_id") == project_id), None)
+        return match.get("name") if match else None
+    except Exception:
+        return None
+
+
 def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
     """Return safe WebUI session metadata for the agent's ephemeral context.
 
