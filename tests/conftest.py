@@ -57,17 +57,51 @@ HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes')))
 # Override with HERMES_WEBUI_TEST_PORT / HERMES_WEBUI_TEST_STATE_DIR to pin.
 
 def _auto_test_port(repo_root) -> int:
-    """Map repo path to a unique port in 20000-29999 (10k range = near-zero collisions).
-    Far from system port ranges and Linux ephemeral ports (32768+).
-    Override with HERMES_WEBUI_TEST_PORT to use a specific port."""
+    """Pick a port for the session test server.
+
+    PARALLEL-SAFE: when ``HERMES_WEBUI_TEST_PORT`` is not pinned, grab a free
+    OS-assigned ephemeral port (bind to :0, read it back, release) so that
+    MULTIPLE concurrent pytest runs from the SAME worktree never collide on one
+    port. The old behaviour hashed the repo path to a fixed port in 20000-29999,
+    which meant a Codex/Opus gate running ``./scripts/test.sh`` from this worktree
+    (to verify a change) spun a server on the SAME port as a developer's
+    concurrently-running suite — and the fixture's ``_kill_port_owner(TEST_PORT)``
+    at setup then reaped the other run's server mid-suite, cascading every
+    HTTP-dependent test with ConnectionRefused. A per-process free port removes
+    the shared resource entirely, so gates + local suite + CI shards can all run
+    at once. Pin with ``HERMES_WEBUI_TEST_PORT`` for a reproducible/fixed port.
+    """
+    import socket
+    for _ in range(10):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+            except OSError:
+                continue
+        # Avoid the production WebUI port (8787) on the off chance the OS hands
+        # it out, and stay clear of privileged ranges.
+        if port and port != 8787 and port >= 1024:
+            return port
+    # Fallback to the legacy repo-hash port if the OS won't hand us one.
     import hashlib
     h = int(hashlib.md5(str(repo_root).encode()).hexdigest(), 16)
     return 20000 + (h % 10000)
 
-def _auto_state_dir_name(repo_root) -> str:
+def _auto_state_dir_name(repo_root, port=None) -> str:
+    """Per-(repo, port) state dir name.
+
+    Including the port makes the state dir unique PER pytest PROCESS (the port is
+    now a free per-process port, see _auto_test_port), so two concurrent runs
+    from the same worktree — e.g. a developer's suite + a Codex/Opus gate's
+    ./scripts/test.sh — get DISTINCT state dirs and never clobber each other's
+    sessions/db or race on teardown rmtree. Falls back to repo-hash-only when no
+    port is supplied (legacy callers).
+    """
     import hashlib
     h = hashlib.md5(str(repo_root).encode()).hexdigest()[:8]
-    return f"webui-test-{h}"
+    return f"webui-test-{h}-{port}" if port else f"webui-test-{h}"
 
 TEST_PORT      = int(os.getenv('HERMES_WEBUI_TEST_PORT',
                                str(_auto_test_port(REPO_ROOT))))
@@ -86,7 +120,7 @@ _TEST_STATE_ROOT = pathlib.Path(
 ) / 'hermes-webui-tests'
 TEST_STATE_DIR = pathlib.Path(os.getenv(
     'HERMES_WEBUI_TEST_STATE_DIR',
-    str(_TEST_STATE_ROOT / _auto_state_dir_name(REPO_ROOT))
+    str(_TEST_STATE_ROOT / _auto_state_dir_name(REPO_ROOT, TEST_PORT))
 )).resolve()
 
 # Production-proximity guard: refuse to run if the resolved test state dir lands
