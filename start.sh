@@ -83,6 +83,39 @@ fi
 # loopback, matching server.py's _abort_if_already_serving.
 _hermes_host="${HERMES_WEBUI_HOST:-127.0.0.1}"
 _hermes_port="${HERMES_WEBUI_PORT:-8787}"
+
+# CLI args override the env/defaults exactly as bootstrap.py's argparse does
+# (`port` is the first bare numeric positional; `--host VALUE` / `--host=VALUE`).
+# Without this, `./start.sh <port>` or `--host X` would probe the wrong endpoint
+# and could falsely report "already running" against a different instance.
+_hermes_args=("$@")
+_hermes_i=0
+while [[ ${_hermes_i} -lt ${#_hermes_args[@]} ]]; do
+  _hermes_arg="${_hermes_args[${_hermes_i}]}"
+  case "${_hermes_arg}" in
+    --host)
+      _hermes_next=$(( _hermes_i + 1 ))
+      if [[ ${_hermes_next} -lt ${#_hermes_args[@]} ]]; then
+        _hermes_host="${_hermes_args[${_hermes_next}]}"
+        _hermes_i=${_hermes_next}
+      fi
+      ;;
+    --host=*)
+      _hermes_host="${_hermes_arg#--host=}"
+      ;;
+    --*)
+      : # other flags (e.g. --no-browser) carry no positional value here
+      ;;
+    *)
+      # First bare numeric positional is the port (bootstrap.py: nargs="?").
+      if [[ "${_hermes_arg}" =~ ^[0-9]+$ ]]; then
+        _hermes_port="${_hermes_arg}"
+      fi
+      ;;
+  esac
+  _hermes_i=$(( _hermes_i + 1 ))
+done
+
 case "${_hermes_host}" in
   0.0.0.0|""|::|"[::]") _hermes_probe_host="127.0.0.1" ;;
   *) _hermes_probe_host="${_hermes_host}" ;;
