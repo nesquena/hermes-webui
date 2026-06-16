@@ -2286,12 +2286,12 @@ function renderModelDropdown(){
     }
     return 500;
   };
-  const _renderProviderEndpointHint=(entry)=>{
+  const _renderProviderEndpointHint=(entry,parent)=>{
     if(!entry||!entry.label||!entry.modelsEndpointError) return;
     const hint=document.createElement('div');
     hint.className='model-provider-hint';
     hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
-    dd.appendChild(hint);
+    (parent||dd).appendChild(hint);
   };
   const _expandOverflowGroup=(groupMetaEntry)=>{
     if(!groupMetaEntry||!groupMetaEntry.optgroup) return;
@@ -2310,8 +2310,14 @@ function renderModelDropdown(){
       nextSearch.dispatchEvent(new Event('input'));
     }
   };
+  // Collapsible group state — persists across _filterModels calls
+  const _groupOpenState={};
+  let _groupWrappers={};
   const _filterModels=(term)=>{
     term=term.trim().toLowerCase();
+    const hasSearch=!!term;
+    // On a fresh search, expand all groups (#collapse)
+    if(hasSearch) for(const k in _groupOpenState) _groupOpenState[k]=true;
     const found=new Set();
     for(const m of _modelData){
       const name=m.name.toLowerCase();
@@ -2420,7 +2426,27 @@ function renderModelDropdown(){
         const _plainLabel=String(meta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,'');
         heading.textContent=count>1?`${_plainLabel} (${count})`:meta.label;
         dd.appendChild(heading);
-        _renderProviderEndpointHint(meta);
+        const wrapper=document.createElement('div');
+        wrapper.className='model-group-body';
+        wrapper.dataset.group=groupKey;
+        if(!hasSearch&&Object.keys(_groupOpenState).length>0) _groupOpenState[groupKey]=false;
+        else _groupOpenState[groupKey]=true;
+        if(!_groupOpenState[groupKey]) wrapper.style.display='none';
+        else heading.classList.add('open');
+        heading.classList.add('collapsible');
+        dd.appendChild(wrapper);
+        _groupWrappers[groupKey]=wrapper;
+        // Render endpoint error hint inside the collapsible group (#4253)
+        _renderProviderEndpointHint(meta,wrapper);
+        heading.addEventListener('click',(e)=>{
+          e.stopPropagation();
+          const w=dd.querySelector(`.model-group-body[data-group="${CSS.escape(groupKey)}"]`);
+          if(!w) return;
+          const closed=w.style.display==='none';
+          w.style.display=closed?'':'none';
+          _groupOpenState[groupKey]=closed;
+          heading.classList.toggle('open',closed);
+        });
       }
       for(const m of groupRows){
         const row=document.createElement('div');
@@ -2434,7 +2460,11 @@ function renderModelDropdown(){
         const providerChip=_plainGroup?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
         row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
-        dd.appendChild(row);
+        if(m.groupKey&&_groupWrappers[m.groupKey]){
+          _groupWrappers[m.groupKey].appendChild(row);
+        }else{
+          dd.appendChild(row);
+        }
       }
       if(!term&&hiddenCount){
         const showAll=document.createElement('div');
@@ -2467,7 +2497,7 @@ function renderModelDropdown(){
   };
   _si.addEventListener('input',()=>_filterModels(_si.value));
   // Keyboard navigation through filtered model rows (#2791).
-  const _visibleModelRows=()=>Array.from(dd.querySelectorAll('.model-opt'));
+  const _visibleModelRows=()=>Array.from(dd.querySelectorAll('.model-opt')).filter(el=>!el.closest('.model-group-body')||el.closest('.model-group-body').style.display!=='none');
   const _activeRowIndex=(rows)=>rows.findIndex(r=>r.classList.contains('is-highlighted'));
   const _highlightRow=(rows,idx)=>{
     for(const r of rows) r.classList.remove('is-highlighted');
