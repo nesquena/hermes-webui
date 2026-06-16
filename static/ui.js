@@ -9706,9 +9706,7 @@ function renderMessages(options){
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
   const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
-  _programmaticScroll=true;
   inner.innerHTML='';
-  _programmaticScroll=false;
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
     S.messages,
