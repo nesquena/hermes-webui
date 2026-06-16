@@ -139,9 +139,9 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 >
 > | Launch method | How to stop |
 > |---|---|
-> | `python3 bootstrap.py` or `./start.sh` | **Ctrl-C** in the terminal (both run in the foreground) |
+> | `python3 bootstrap.py` | **Ctrl-C** in the terminal (runs in the foreground) |
 > | `./ctl.sh start` | `./ctl.sh stop` (sends SIGTERM, waits, then SIGKILL) |
-> | Detached `bootstrap.py` (no `--foreground`) | Find the PID via `lsof -i :8787` (or `ss -tlnp`) and `kill` it |
+> | Detached `bootstrap.py` (no `--foreground`) or `./start.sh` | Find the PID via `lsof -i :8787` (or `ss -tlnp`) and `kill` it |
 >
 > `./ctl.sh stop` cannot stop a server launched by `bootstrap.py` or `start.sh` directly — it only manages processes it started itself.
 
