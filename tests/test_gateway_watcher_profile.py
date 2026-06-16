@@ -4,6 +4,8 @@ import json
 import threading
 from urllib.parse import urlparse
 
+import pytest
+
 
 class _FakeHandler:
     def __init__(self):
@@ -27,6 +29,27 @@ class _FakeHandler:
 
     def get_json(self):
         return json.loads(self.body.decode("utf-8"))
+
+
+@pytest.fixture(autouse=True)
+def _disable_auth_for_profile_switch(monkeypatch):
+    """Keep these watcher/profile-switch tests hermetic w.r.t. leaked auth state.
+
+    The /api/profile/switch handler signs the active-profile cookie when auth is
+    enabled (helpers.build_profile_cookie -> auth.sign_profile_cookie_value),
+    which raises -> RuntimeError -> HTTP 409 if there's no active session. A
+    sibling test that enables password/passkey auth in the shared in-process
+    state would otherwise make the switch tests here return 409 instead of 200
+    under a full-suite run (they pass in isolation). Forcing auth OFF for this
+    module makes them order-independent — they exercise watcher restart, not
+    auth. Patch every import site so the value is consistent.
+    """
+    for _mod in ("api.auth", "api.helpers", "api.routes"):
+        try:
+            monkeypatch.setattr(f"{_mod}.is_auth_enabled", lambda: False, raising=False)
+        except Exception:
+            pass
+    yield
 
 
 def test_gateway_watcher_pins_explicit_profile_home(tmp_path, monkeypatch):
