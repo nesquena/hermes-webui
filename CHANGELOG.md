@@ -7,6 +7,12 @@
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)
 
+## [v0.51.447] — 2026-06-15 — Release PH (toolset selector shows the active profile's defaults)
+
+### Added
+
+- **The composer toolset selector now surfaces the active profile's toolset defaults.** When a conversation has no per-session toolset override it shows "profile defaults" (the toolsets the active profile enables) rather than a generic label, and the dropdown lists the configured MCP servers with their current state plus Apply / "Use profile defaults" controls. Picking toolsets is scoped to the current session only (it never mutates the profile or global config); when no MCP toolsets are configured it falls back cleanly to the global view. The selector appears only when the composer footer has room (wide desktop) and is hidden on narrow desktop and mobile so the footer never crowds. (#3100)
+
 ## [v0.51.446] — 2026-06-15 — Release PG (model picker "show all" for large provider catalogs)
 
 ### Added
