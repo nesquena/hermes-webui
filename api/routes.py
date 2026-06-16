@@ -2920,7 +2920,7 @@ def _normalize_provider_id(value: str | None) -> str:
             return False
         if raw == prefix:
             return True
-        return raw[len(prefix)] in "-:/"
+        return raw[len(prefix)] in "-:/."
 
     for prefix, normalized in (
         ("openai-codex", "openai"),

@@ -1742,6 +1742,7 @@ def test_provider_family_normalization_requires_a_real_namespace_boundary():
         "gemini": "google",
         "gemini/gemini-2.5-pro": "google",
         "openai-codex": "openai",
+        "openai.azure": "openai",
         "openrouter:my-model": "openrouter",
         "custom:agent37": "custom",
         "gemini_cli": "",
