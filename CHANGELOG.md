@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Stale background-process completion notifications no longer contaminate later turns (#4029).** The WebUI completion-notification drain filtered queued completions only by session ownership, with no age gate — so a `notify_on_complete` background task that finished long ago (or whose completion sat in the queue while the session was idle) had its `[IMPORTANT: ...]` notification prepended to whatever the user typed next, making the agent respond to a stale task and visibly re-delivering already-seen completion notifications. The agent now stamps each completion event with `completed_at` when it is enqueued (`tools/process_registry.py`), and the WebUI drain (`_drain_webui_process_notifications`) drops — silently consumes, without requeueing — any completion older than a configurable cap (default 6h, `HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS`, set `0` to disable). Events without a `completed_at` (older agent builds) are never dropped, preserving backward-compatible behavior. The existing session-ownership and consumed-state filters are unchanged, so completions for other tabs still remain queued for their owners. (#4029)
+
 ### Internal
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)
