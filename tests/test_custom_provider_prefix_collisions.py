@@ -123,3 +123,32 @@ def test_openai_api_session_model_not_repaired_to_default():
 
         assert resolved_model == "gpt-5.5-mini"
         assert changed is False
+
+
+def test_streaming_send_path_preserves_custom_namespace_models():
+    """The chat-SEND path (_apply_profile_provider_context_to_streaming_model in
+    api/streaming.py) had its own ungated bare-prefix loop — a custom namespace like
+    'gemini_cli/...' starts with 'gemini' and was clobbered to the profile default on
+    send (the #4278 collision on the send path, distinct from the session-load path).
+    The loop is now gated to un-namespaced model ids."""
+    from api.streaming import _apply_profile_provider_context_to_streaming_model as apply_ctx
+
+    # Custom-namespace models must survive the send path untouched.
+    for model in (
+        "gemini_cli/gemini-3-flash-preview",
+        "gpt_proxy/some-model",
+        "claude-relay/m",
+    ):
+        resolved, ctx, changed = apply_ctx(model, None, "custom:newapi", "x-ai/grok-composer")
+        assert resolved == model, model
+        assert changed is False, model
+
+    # A genuine bare cross-family model must STILL be repaired to the profile default.
+    resolved, ctx, changed = apply_ctx("gpt-5.5", None, "google", "gemini-3-pro")
+    assert resolved == "gemini-3-pro"
+    assert changed is True
+
+    # A slash-qualified cross-family model must STILL be repaired.
+    resolved, ctx, changed = apply_ctx("gemini/gemini-3-pro", None, "openai-api", "gpt-5.5")
+    assert resolved == "gpt-5.5"
+    assert changed is True

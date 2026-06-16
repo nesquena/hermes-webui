@@ -166,11 +166,17 @@ def _apply_profile_provider_context_to_streaming_model(
 
     profile_provider_normalized = _normalize_provider_id(profile_provider)
     model_lower = (model or "").lower()
-    for prefix in ("gpt", "claude", "gemini"):
-        if model_lower.startswith(prefix):
-            if _normalize_provider_id(prefix) != profile_provider_normalized:
-                return profile_default_model, provider_context, True
-            return model, provider_context, False
+    # Only run the bare-prefix family match on un-namespaced model ids. A custom
+    # namespace like "gemini_cli/..." or "claude-relay/..." merely *starts with* a
+    # first-party token; matching it here would clobber the model to the profile
+    # default on the send path (the #4278 collision — the slash-qualified branch
+    # below routes through the fixed _normalize_provider_id instead).
+    if "/" not in model_lower:
+        for prefix in ("gpt", "claude", "gemini"):
+            if model_lower.startswith(prefix):
+                if _normalize_provider_id(prefix) != profile_provider_normalized:
+                    return profile_default_model, provider_context, True
+                return model, provider_context, False
 
     if "/" in model_lower:
         slash_prefix = model_lower.split("/", 1)[0]
