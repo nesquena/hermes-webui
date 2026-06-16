@@ -195,6 +195,8 @@ def _run_git(
     env: dict[str, str] | None = None,
     destructive: bool = False,
     disable_filter_attributes: bool = False,
+    neutralize_filter_programs: bool = False,
+    neutralize_remote_helpers: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     cwd = ctx_or_cwd.repo_root if isinstance(ctx_or_cwd, GitContext) else ctx_or_cwd
     run_env = _clean_git_env(env)
@@ -205,15 +207,21 @@ def _run_git(
     temporary_attributes: list[str] = []
     temporary_dirs: list[str] = []
     try:
-        if effective_destructive and disable_filter_attributes:
+        if disable_filter_attributes:
             fd, attributes_path = tempfile.mkstemp(prefix="hermes-webui-git-attrs-")
             os.close(fd)
             attributes_file = attributes_path
             temporary_attributes = [attributes_path]
+        if disable_filter_attributes or neutralize_filter_programs:
+            # Read/status/fetch paths treat repo-local filter programs as
+            # untrusted code. Prefer raw-byte visibility over executing them.
             extra_configs.extend(_destructive_filter_overrides(cwd, run_env))
         if effective_destructive:
             extra_configs.extend(_destructive_merge_driver_overrides(cwd, run_env))
+        if effective_destructive or neutralize_remote_helpers:
+            extra_configs.extend(_destructive_remote_helper_overrides(cwd, run_env))
             args = _destructive_remote_command_args(args, cwd, run_env)
+        if effective_destructive:
             hooks_path = tempfile.mkdtemp(prefix="hermes-webui-git-hooks-")
             temporary_dirs = [hooks_path]
         result = subprocess.run(
@@ -519,8 +527,8 @@ def _collect_diff_paths(ctx: GitContext, cached: bool, *, ignore_cr_at_eol: bool
         ctx,
         args,
         check=False,
-        destructive=workspace_git_destructive_enabled(),
         disable_filter_attributes=workspace_git_destructive_enabled(),
+        neutralize_filter_programs=True,
     )
     if result.returncode != 0:
         return None
@@ -544,8 +552,8 @@ def _collect_numstat(
         ctx,
         args,
         check=False,
-        destructive=workspace_git_destructive_enabled(),
         disable_filter_attributes=workspace_git_destructive_enabled(),
+        neutralize_filter_programs=True,
     )
     if result.returncode != 0:
         return {}
@@ -576,7 +584,6 @@ def git_status(workspace: str | Path) -> dict:
     if ctx is None:
         return {"is_git": False}
 
-    destructive_reads = workspace_git_destructive_enabled()
     result = _run_git(
         ctx,
         [
@@ -590,8 +597,8 @@ def git_status(workspace: str | Path) -> dict:
             _workspace_pathspec(ctx),
         ],
         check=True,
-        destructive=destructive_reads,
-        disable_filter_attributes=destructive_reads,
+        disable_filter_attributes=workspace_git_destructive_enabled(),
+        neutralize_filter_programs=True,
     )
     staged_stats = _collect_numstat(ctx, cached=True)
     unstaged_stats = _collect_numstat(ctx, cached=False)
@@ -1001,7 +1008,7 @@ def _perform_checkout_locked(
         target = _validate_local_branch(ctx, ref)
         return _run_git(
             ctx,
-            ["switch", target],
+            ["switch", "--recurse-submodules=no", target],
             check=True,
             destructive=True,
             disable_filter_attributes=True,
@@ -1011,7 +1018,7 @@ def _perform_checkout_locked(
         start_ref = _validate_checkout_start(ctx, ref if (new_branch and ref and ref != new_branch) else "HEAD")
         return _run_git(
             ctx,
-            ["switch", "-c", branch, start_ref],
+            ["switch", "--recurse-submodules=no", "-c", branch, start_ref],
             check=True,
             destructive=True,
             disable_filter_attributes=True,
@@ -1023,7 +1030,7 @@ def _perform_checkout_locked(
         if exists.returncode == 0:
             result = _run_git(
                 ctx,
-                ["switch", branch_name],
+                ["switch", "--recurse-submodules=no", branch_name],
                 check=True,
                 destructive=True,
                 disable_filter_attributes=True,
@@ -1032,7 +1039,7 @@ def _perform_checkout_locked(
                 _run_git(ctx, ["branch", "--set-upstream-to", remote_ref, branch_name], check=False)
             return result
         branch = _validate_new_branch_name(ctx, branch_name)
-        args = ["switch", "-c", branch]
+        args = ["switch", "--recurse-submodules=no", "-c", branch]
         if track:
             args.append("--track")
         args.append(remote_ref)
@@ -1047,7 +1054,7 @@ def _perform_checkout_locked(
         target = _validate_checkout_start(ctx, ref)
         return _run_git(
             ctx,
-            ["switch", "--detach", target],
+            ["switch", "--recurse-submodules=no", "--detach", target],
             check=True,
             destructive=True,
             disable_filter_attributes=True,
@@ -1220,7 +1227,7 @@ def git_diff(workspace: str | Path, path: str, kind: str = "unstaged") -> dict:
     if kind == "staged":
         args.append("--cached")
     args.extend(["--", repo_rel])
-    result = _run_git(ctx, args, check=True)
+    result = _run_git(ctx, args, check=True, neutralize_filter_programs=True)
     diff = result.stdout
     binary = "Binary files " in diff or "GIT binary patch" in diff
     too_large = len(diff.encode("utf-8", errors="replace")) > DIFF_SIZE_LIMIT
@@ -1614,11 +1621,12 @@ def git_fetch(workspace: str | Path) -> dict:
     with _git_mutation_lock(ctx):
         result = _run_git(
             ctx,
-            ["fetch", "--prune"],
+            ["fetch", "--prune", "--no-recurse-submodules"],
             timeout=GIT_REMOTE_TIMEOUT,
             check=True,
-            destructive=True,
-            disable_filter_attributes=True,
+            disable_filter_attributes=workspace_git_destructive_enabled(),
+            neutralize_filter_programs=True,
+            neutralize_remote_helpers=True,
         )
     return {"ok": True, "message": _remote_message(result), "status": git_status(workspace)}
 
@@ -1630,11 +1638,13 @@ def git_pull(workspace: str | Path) -> dict:
     with _git_mutation_lock(ctx):
         result = _run_git(
             ctx,
-            ["pull", "--ff-only"],
+            ["pull", "--ff-only", "--no-recurse-submodules"],
             timeout=GIT_REMOTE_TIMEOUT,
             check=True,
             destructive=True,
             disable_filter_attributes=True,
+            neutralize_filter_programs=True,
+            neutralize_remote_helpers=True,
         )
     return {"ok": True, "message": _remote_message(result), "status": git_status(workspace)}
 
@@ -1659,5 +1669,7 @@ def git_push(workspace: str | Path) -> dict:
             check=True,
             destructive=True,
             disable_filter_attributes=True,
+            neutralize_filter_programs=True,
+            neutralize_remote_helpers=True,
         )
     return {"ok": True, "message": _remote_message(result), "status": git_status(workspace)}

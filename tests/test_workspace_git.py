@@ -309,6 +309,39 @@ def test_git_diff_skips_repo_local_textconv(tmp_path):
     assert not marker.exists()
 
 
+def test_git_diff_skips_repo_local_clean_filter_without_destructive_mode(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("scripted clean filter setup is POSIX-only")
+
+    from api.workspace_git import WORKSPACE_GIT_DESTRUCTIVE_ENV, git_diff
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitattributes").write_text("*.txt filter=demo\n", encoding="utf-8")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    marker = tmp_path / "git-diff-clean-filter-ran"
+    helper = tmp_path / "git_diff_clean_filter_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('clean filter ran', encoding='utf-8')\n"
+        "print(sys.stdin.read(), end='')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    _git(repo, "config", "filter.demo.clean", f'"{sys.executable}" "{helper}" "{marker}"')
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+
+    monkeypatch.delenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, raising=False)
+    diff = git_diff(repo, "tracked.txt", "unstaged")
+
+    assert "+two" in diff["diff"]
+    assert not marker.exists()
+
+
 def test_git_status_reports_untracked_files_inside_directories(tmp_path):
     from api.workspace_git import git_discard, git_status
 
@@ -727,6 +760,54 @@ def test_git_fetch_pull_and_push_skip_repo_local_remote_helpers_when_destructive
     assert not marker.exists()
 
 
+def test_git_fetch_skips_repo_local_remote_helpers_without_destructive_mode(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("scripted remote helper setup is POSIX-only")
+
+    from api.workspace_git import WORKSPACE_GIT_DESTRUCTIVE_ENV, git_fetch
+
+    remote = _init_bare_repo(tmp_path / "remote.git")
+
+    origin = _init_repo(tmp_path / "origin")
+    (origin / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(origin)
+    _git(origin, "branch", "-M", "main")
+    _git(origin, "remote", "add", "origin", str(remote))
+    _git(origin, "push", "-u", "origin", "main")
+    _git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", str(remote), str(clone))
+    _git(clone, "config", "user.email", "hermes-tests@example.invalid")
+    _git(clone, "config", "user.name", "Hermes Tests")
+
+    marker = tmp_path / "remote-helper-default-fetch-ran"
+    helper = tmp_path / "remote_helper_default_fetch.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('remote helper ran', encoding='utf-8')\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    helper_cmd = f'"{sys.executable}" "{helper}" "{marker}"'
+    _git(clone, "config", "remote.origin.uploadpack", helper_cmd)
+
+    (origin / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    _commit_all(origin, "Remote update")
+    _git(origin, "push")
+
+    monkeypatch.delenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, raising=False)
+    fetched = git_fetch(clone)
+
+    assert fetched["status"]["behind"] == 1
+    assert not marker.exists()
+
+
 def test_git_branches_lists_local_remote_and_upstream(tmp_path):
     from api.workspace_git import git_branches
 
@@ -1064,6 +1145,40 @@ def test_git_status_ignores_repo_local_fsmonitor_command(tmp_path):
     status = git_status(repo)
 
     assert status["is_git"] is True
+    assert not marker.exists()
+
+
+def test_git_status_skips_repo_local_clean_filter_without_destructive_mode(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("scripted clean filter setup is POSIX-only")
+
+    from api.workspace_git import WORKSPACE_GIT_DESTRUCTIVE_ENV, git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitattributes").write_text("*.txt filter=demo\n", encoding="utf-8")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    marker = tmp_path / "git-status-clean-filter-ran"
+    helper = tmp_path / "git_status_clean_filter_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('clean filter ran', encoding='utf-8')\n"
+        "print(sys.stdin.read(), end='')\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    _git(repo, "config", "filter.demo.clean", f'"{sys.executable}" "{helper}" "{marker}"')
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+
+    monkeypatch.delenv(WORKSPACE_GIT_DESTRUCTIVE_ENV, raising=False)
+    status = git_status(repo)
+
+    assert status["is_git"] is True
+    assert status["totals"]["unstaged"] == 1
     assert not marker.exists()
 
 
@@ -1604,6 +1719,78 @@ def test_git_checkout_skips_worktree_scope_filters_when_destructive_mode_enabled
     assert result["ok"] is True
     assert result["current_branch"] == "feature"
     assert not marker.exists()
+
+
+def test_git_fetch_and_pull_disable_submodule_recursion(monkeypatch, tmp_path):
+    from api import workspace_git
+
+    ctx = workspace_git.GitContext(tmp_path, tmp_path, "")
+    calls = []
+
+    def fake_run_git(ctx_or_cwd, args, **kwargs):
+        calls.append(list(args))
+        return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(workspace_git, "resolve_git_context", lambda workspace: ctx)
+    monkeypatch.setattr(workspace_git, "_run_git", fake_run_git)
+    monkeypatch.setattr(workspace_git, "git_status", lambda workspace: {"is_git": True})
+
+    workspace_git.git_fetch(tmp_path)
+    workspace_git.git_pull(tmp_path)
+
+    assert ["fetch", "--prune", "--no-recurse-submodules"] in calls
+    assert ["pull", "--ff-only", "--no-recurse-submodules"] in calls
+
+
+def test_git_checkout_disables_submodule_recursion(monkeypatch, tmp_path):
+    from api import workspace_git
+
+    ctx = workspace_git.GitContext(tmp_path, tmp_path, "")
+    calls = []
+
+    def fake_run_git(ctx_or_cwd, args, **kwargs):
+        calls.append(list(args))
+        return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(workspace_git, "resolve_git_context", lambda workspace: ctx)
+    monkeypatch.setattr(workspace_git, "_run_git", fake_run_git)
+    monkeypatch.setattr(workspace_git, "_dirty_worktree", lambda ctx: False)
+    monkeypatch.setattr(workspace_git, "_current_checkout_label", lambda ctx: "main")
+    monkeypatch.setattr(workspace_git, "_restore_branch_switch_stash_locked", lambda ctx, branch: {})
+    monkeypatch.setattr(workspace_git, "git_status", lambda workspace: {"is_git": True, "branch": "feature"})
+    monkeypatch.setattr(workspace_git, "git_branches", lambda workspace: {"current": "feature"})
+
+    result = workspace_git.git_checkout(tmp_path, "feature", "local")
+
+    assert result["current_branch"] == "feature"
+    assert ["switch", "--recurse-submodules=no", "feature"] in calls
+
+
+def test_perform_checkout_locked_disables_submodule_recursion_across_modes(monkeypatch, tmp_path):
+    from api import workspace_git
+
+    ctx = workspace_git.GitContext(tmp_path, tmp_path, "")
+    calls = []
+
+    def fake_run_git(ctx_or_cwd, args, **kwargs):
+        calls.append(list(args))
+        if args[:2] == ["show-ref", "--verify"]:
+            return types.SimpleNamespace(stdout="", stderr="", returncode=1)
+        return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(workspace_git, "_run_git", fake_run_git)
+    monkeypatch.setattr(workspace_git, "_validate_local_branch", lambda ctx, ref: ref)
+    monkeypatch.setattr(workspace_git, "_validate_new_branch_name", lambda ctx, name: name)
+    monkeypatch.setattr(workspace_git, "_validate_checkout_start", lambda ctx, ref: ref)
+    monkeypatch.setattr(workspace_git, "_validate_remote_branch", lambda ctx, ref: ref)
+
+    workspace_git._perform_checkout_locked(ctx, tmp_path, "feature", "new", "topic", False)
+    workspace_git._perform_checkout_locked(ctx, tmp_path, "origin/topic", "remote", "topic", True)
+    workspace_git._perform_checkout_locked(ctx, tmp_path, "deadbeef", "detach", None, False)
+
+    assert ["switch", "--recurse-submodules=no", "-c", "topic", "feature"] in calls
+    assert ["switch", "--recurse-submodules=no", "-c", "topic", "--track", "origin/topic"] in calls
+    assert ["switch", "--recurse-submodules=no", "--detach", "deadbeef"] in calls
 
 
 def test_git_stage_skips_included_repo_local_filters_when_destructive_mode_enabled(tmp_path, monkeypatch):
