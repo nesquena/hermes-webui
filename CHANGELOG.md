@@ -7,6 +7,12 @@
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)
 
+## [v0.51.446] — 2026-06-15 — Release PG (model picker "show all" for large provider catalogs)
+
+### Added
+
+- **The model picker now caps large provider lists and offers "Show all".** A provider group with more than 25 models shows the first 15 plus a "Show all N models" row that expands the rest in place, so the picker stays scannable for big catalogs (e.g. OpenRouter) without hiding anything — search already matches the hidden tail before expansion. The group heading carries the overflow count ("Provider (15 of 30)"); individual rows show the plain provider label. The Settings, scheduled-job, profile, and auxiliary-model selectors also include the full catalog (visible + overflow), so no model is dropped from those dropdowns. Groups of 25 or fewer are unchanged. (#3691)
+
 ## [v0.51.445] — 2026-06-15 — Release PF (scope gateway watcher to the active profile)
 
 ### Fixed
