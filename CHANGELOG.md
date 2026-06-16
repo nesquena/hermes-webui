@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Add token boundary check for provider normalization (#4278).** `_normalize_provider_id` matched provider prefixes using a broad `startswith()`, which incorrectly collapsed custom model namespace prefixes ending in alphanumeric characters (such as `gemini_cli` or `gpt_proxy`) into first-party families (e.g. `google` or `openai`). This triggered a silent "stale model repair" on session load, swapping the model to the profile default and clearing the turn metrics (`last_prompt_tokens` and `threshold_tokens`) on display. The normalization prefix match is now restricted to exact string matches or prefix matches followed strictly by accepted namespace delimiters (`:`, `/`). Hyphenated first-party provider aliases (`google-gemini`, `google-ai-studio`, `claude-code`) are now mapped explicitly in `_PROVIDER_ALIASES` to resolve via direct exact-match lookups. Resolves the composer context indicator ring disappearing for custom models. (#4278)
+
 ### Internal
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)
