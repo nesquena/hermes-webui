@@ -745,21 +745,27 @@ eval(extractConst('_expandOverflowGroup'));
 renderModelDropdown();
 const initial = snapshot(dropdown);
 const initialShowAllRow = findInTree(dropdown, node => String(node._innerHTML || '').includes('Show all'));
+// Click show-all FIRST (before any search) so the in-place path runs on a
+// fresh DOM with .model-opt-more still present. Searching first would trigger
+// a full re-render that removes .model-opt-more, making the stale onclick
+// reference fall into the full-rerender fallback instead of in-place.
+initialShowAllRow.onclick({ stopPropagation() {} });
+const expanded = snapshot(dropdown);
+// Now type a search, then clear it, to verify the hiddenByDefault sync
+// keeps the group fully expanded through the search→clear cycle.
 const searchInput = dropdown.children[1].querySelector('.model-search-input');
 searchInput.value = payload.searchTerm;
 searchInput._listeners.input();
 const searched = snapshot(dropdown);
-initialShowAllRow.onclick({ stopPropagation() {} });
-const searchInputAfterExpand = dropdown.children[1].querySelector('.model-search-input');
-searchInputAfterExpand.value = '';
-searchInputAfterExpand._listeners.input();
-const expanded = snapshot(dropdown);
+searchInput.value = '';
+searchInput._listeners.input();
+const cleared = snapshot(dropdown);
 
 process.stdout.write(JSON.stringify({
   inPlacePath: true,
   initialShowAll: initial.some(item => String(item.html || '').includes('Show all')),
   expandedHasShowAll: expanded.some(item => String(item.html || '').includes('Show all')),
-  clearedHasShowAll: expanded.some(item => String(item.html || '').includes('Show all')),
+  clearedHasShowAll: cleared.some(item => String(item.html || '').includes('Show all')),
   clearedModelCount: modelSelect.children[0].children.length,
   optionCountAfterExpand: modelSelect.children[0].children.length,
 }));
@@ -940,9 +946,11 @@ renderModelDropdown();
 
 // Find the group wrapper and check its display style
 let groupWrapperHidden = false;
+let foundWrapper = false;
 const walk = (node) => {
   for (const child of (node.children || [])) {
     if (child.className && child.className.includes('model-group-body')) {
+      foundWrapper = true;
       groupWrapperHidden = child.style.display === 'none';
     }
     if (child.children && child.children.length) walk(child);
@@ -951,7 +959,8 @@ const walk = (node) => {
 walk(dropdown);
 
 process.stdout.write(JSON.stringify({
-  groupRendersOpen: !groupWrapperHidden,
+  foundWrapper: foundWrapper,
+  groupRendersOpen: foundWrapper && !groupWrapperHidden,
 }));
 """
 
@@ -1193,12 +1202,17 @@ function makeOption(value, label, parent) {
 }
 
 function makeSelect(groups, selectedValue) {
-  const sel = { id: 'modelSelect', children: [], options: [], value: selectedValue || '' };
+  const sel = {
+    id: 'modelSelect', tagName: 'SELECT', children: [], options: [], value: selectedValue || '',
+    querySelectorAll(selector) { return querySelectorAllImpl(this, selector); },
+    querySelector(selector) { return querySelectorAllImpl(this, selector)[0] || null; },
+  };
   for (const group of groups || []) {
     const og = makeNode('optgroup');
     og.label = group.provider || '';
     og.dataset.provider = group.provider_id || '';
     og._ownerSelect = sel;
+    og.parentNode = sel;
     if (group.extra_models) og.dataset.extraModels = JSON.stringify(group.extra_models);
     for (const model of group.models || []) {
       og.appendChild(makeOption(model.id, model.label || model.id, og));
@@ -1224,13 +1238,18 @@ const dropdown = makeNode('div');
 dropdown.classList.add('open');
 const modelSelect = makeSelect(payload.groups, payload.selectedValue || payload.groups[0].models[0].id);
 
-// Pre-inject one overflow model as an <option> in the optgroup
-if (payload.preexistingModelId) {
+// Pre-inject one overflow model as an <option> in the optgroup to simulate
+// _ensureModelOptionInDropdown having already added it. Both overflow models
+// are pre-injected so _appendOverflowOptionsToGroup returns 0 new appends,
+// exercising the extraModels.length guard (not the return-value guard).
+if (payload.preexistingModelIds) {
   const og = modelSelect.children[0];
-  const preexisting = payload.groups[0].extra_models.find(m => m.id === payload.preexistingModelId);
-  if (preexisting && og) {
-    const opt = makeOption(preexisting.id, preexisting.label || preexisting.id, og);
-    og.appendChild(opt);
+  for (const mid of payload.preexistingModelIds) {
+    const preexisting = payload.groups[0].extra_models.find(m => m.id === mid);
+    if (preexisting && og) {
+      const opt = makeOption(preexisting.id, preexisting.label || preexisting.id, og);
+      og.appendChild(opt);
+    }
   }
 }
 
@@ -1272,23 +1291,25 @@ renderModelDropdown();
 const initialShowAllRow = findInTree(dropdown, node => String(node._innerHTML || '').includes('Show all'));
 initialShowAllRow.onclick({ stopPropagation() {} });
 
-// Check if preexisting model is now visible - look through all innerHTML or textContent
-let preexistingVisible = false;
+// Check if preexisting models are now visible - look through all innerHTML or textContent
+const idsToFind = new Set(payload.preexistingModelIds || []);
+const foundIds = new Set();
 let showAllGone = false;
 const walk = (node, depth=0) => {
-  // Check this node's content
-  if (node._innerHTML && node._innerHTML.includes(payload.preexistingModelId)) {
-    preexistingVisible = true;
+  for (const mid of idsToFind) {
+    if (node._innerHTML && node._innerHTML.includes(mid)) {
+      foundIds.add(mid);
+    }
+    if (node.textContent && String(node.textContent).includes(mid)) {
+      foundIds.add(mid);
+    }
   }
-  if (node.textContent && String(node.textContent).includes(payload.preexistingModelId)) {
-    preexistingVisible = true;
-  }
-  // Recurse into children
   if (node.children && node.children.length) {
     for (const child of node.children) walk(child, depth+1);
   }
 };
 walk(dropdown);
+const preexistingVisible = foundIds.size === idsToFind.size;
 const expanded = findInTree(dropdown, node => String(node._innerHTML || '').includes('Show all'));
 showAllGone = !expanded;
 
@@ -1553,6 +1574,9 @@ def test_runtime_inplace_endpoint_error_group_renders_open(_driver_paths):
         raise RuntimeError(f"node endpoint_error driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")
     out = json.loads(result.stdout)
 
+    assert out["foundWrapper"], (
+        "Expected a .model-group-body wrapper to be rendered"
+    )
     assert out["groupRendersOpen"], (
         "Groups with endpoint error should render open by default so the user sees the error hint"
     )
@@ -1579,7 +1603,7 @@ def test_runtime_inplace_expand_with_preexisting_options_reveals_them(_driver_pa
                 ],
             }
         ],
-        "preexistingModelId": "openrouter/overflow-one",
+        "preexistingModelIds": ["openrouter/overflow-one", "openrouter/overflow-two"],
         "searchTerm": "",
     }
     result = subprocess.run(
