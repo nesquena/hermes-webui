@@ -5,6 +5,7 @@
 
 const LOCALES = {
   en: {
+    artifact_zip_download: 'Download ZIP (deliverable)',
     inbox_move_to: 'Move to microverso',
     inbox_move_pick: 'Choose destination',
     inbox_move_confirm: 'Move "{file}" to {dest}?',
@@ -11533,6 +11534,7 @@ const LOCALES = {
   },
 
   pt: {
+    artifact_zip_download: 'Baixar ZIP (entregável)',
     inbox_move_to: 'Mover para microverso',
     inbox_move_pick: 'Escolha o destino',
     inbox_move_confirm: 'Mover "{file}" para {dest}?',

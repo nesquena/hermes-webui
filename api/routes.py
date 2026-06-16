@@ -7455,6 +7455,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/folder/download":
         return _handle_folder_download(handler, parsed)
 
+    if parsed.path == "/api/artifact/zip":
+        return _handle_artifact_zip(handler, parsed)
+
     if parsed.path == "/api/file":
         return _handle_file_read(handler, parsed)
 
@@ -11858,6 +11861,78 @@ def _handle_folder_download(handler, parsed):
     )
 
 
+def _handle_artifact_zip(handler, parsed):
+    """GET /api/artifact/zip?session_id=...&id=...
+
+    Stream a zip of the artifact package <workspace>/_artifacts/items/<id>/,
+    including ONLY the deliverable parts: source/, exports/ and manifest.json.
+    Internal provenance (receipts/, revisions/) is intentionally excluded. #84
+    """
+    import zipfile
+
+    qs = parse_qs(parsed.query)
+    sid = qs.get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id is required")
+    try:
+        s = get_session_for_file_ops(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+
+    art_id = (qs.get("id", [""])[0] or "").strip().strip("/")
+    if not art_id or "/" in art_id or art_id in (".", ".."):
+        return bad(handler, "invalid artifact id", 400)
+    rel = "_artifacts/items/" + art_id
+    try:
+        target = safe_resolve(Path(s.workspace), rel)
+    except ValueError:
+        return bad(handler, "invalid path", 400)
+    if not target.exists() or not target.is_dir():
+        return j(handler, {"error": "artifact not found"}, status=404)
+
+    workspace_root = Path(s.workspace).resolve()
+    files, _total, limit_hit = _folder_download_collect(
+        target, workspace_root, _folder_zip_max_bytes(), _folder_zip_max_files()
+    )
+    if limit_hit:
+        return j(handler, {"error": "artifact too large", "reason": limit_hit}, status=413)
+
+    # Keep only the deliverable parts; drop receipts/, revisions/, etc. (#84)
+    def _is_deliverable(arc: str) -> bool:
+        a = arc.replace("\\", "/")
+        return a == "manifest.json" or a.startswith("source/") or a.startswith("exports/")
+
+    files = [(fp, arc) for (fp, arc) in files if _is_deliverable(arc)]
+
+    zip_name = art_id + ".zip"
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/zip")
+    handler.send_header("Content-Disposition", _content_disposition_value("attachment", zip_name))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+
+    with zipfile.ZipFile(handler.wfile, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        for fp, arcname in files:
+            fd = None
+            try:
+                fd = open_anchored_fd(workspace_root, fp.resolve(), want_dir=False)
+                info = zipfile.ZipInfo(arcname)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                with os.fdopen(fd, "rb", closefd=True) as src:
+                    fd = None
+                    with zf.open(info, "w") as dst:
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
+            except (ValueError, OSError, PermissionError) as e:
+                logger.warning("artifact-zip: skipping %s: %s", fp, e)
+            finally:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+
+
 def _handle_file_raw(handler, parsed):
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
@@ -15020,8 +15095,15 @@ def _handle_file_save(handler, body):
         fd = open_anchored_write_fd(ws_root, target)
         with os.fdopen(fd, "wb", closefd=True) as fh:
             fh.write(data)
+        import hashlib
         return j(
-            handler, {"ok": True, "path": body["path"], "size": len(data)}
+            handler,
+            {
+                "ok": True,
+                "path": body["path"],
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            },
         )
     except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))

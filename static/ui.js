@@ -13046,6 +13046,21 @@ function _showFileContextMenu(e, item){
       window.location.href=url;
     };
     menu.appendChild(dlItem);
+
+    // Artifact dirs get a deliverable-only ZIP (source/+exports/+manifest). #84
+    if(/^_artifacts\/items\/[^/]+$/.test(String(item.path||'').replace(/^\/+/,''))){
+      const azItem=document.createElement('div');
+      azItem.textContent=t('artifact_zip_download');
+      azItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+      azItem.onmouseenter=()=>azItem.style.background='var(--hover-bg)';
+      azItem.onmouseleave=()=>azItem.style.background='';
+      azItem.onclick=()=>{
+        menu.remove();
+        const id=String(item.path).replace(/^\/+/,'').split('/').pop();
+        window.location.href='/api/artifact/zip?session_id='+encodeURIComponent(S.session.session_id)+'&id='+encodeURIComponent(id);
+      };
+      menu.appendChild(azItem);
+    }
   }
 
   // Inbox-only: move file out to a microverso. Explicit confirmation. #78
