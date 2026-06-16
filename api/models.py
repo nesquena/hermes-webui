@@ -4453,10 +4453,20 @@ def _session_message_dedup_key(msg: dict):
     )
 
 
+_VISIBLE_KEY_CONTENT_LIMIT = 500
+
+
 def _normalized_session_message_content(msg: dict) -> str:
     if not isinstance(msg, dict):
         return repr(msg)
-    return " ".join(str(msg.get("content") or "").split())
+    content = str(msg.get("content") or "")
+    # Normalize only the head to keep key comparisons O(1) for large tool outputs.
+    # The length suffix distinguishes messages with identical prefixes but different
+    # total sizes, so deduplication remains correct across content-truncated keys.
+    head = " ".join(content[:_VISIBLE_KEY_CONTENT_LIMIT].split())
+    if len(content) <= _VISIBLE_KEY_CONTENT_LIMIT:
+        return head
+    return f"{head}\x00{len(content)}"
 
 
 def _loose_session_message_content(value: str) -> str:
@@ -4482,7 +4492,11 @@ def _session_message_visible_key(msg: dict):
     # prefix matching.  Without this, all tool-calling messages map to
     # ("assistant", "") and the merge treats state.db rows as replays.
     _tc = msg.get("tool_calls")
-    _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
+    if _tc:
+        _tc_json = json.dumps(_tc, sort_keys=True, default=str)
+        _tc_key = _tc_json[:_VISIBLE_KEY_CONTENT_LIMIT] if len(_tc_json) > _VISIBLE_KEY_CONTENT_LIMIT else _tc_json
+    else:
+        _tc_key = ""
     return (
         str(msg.get("role") or ""),
         _normalized_session_message_content(msg),

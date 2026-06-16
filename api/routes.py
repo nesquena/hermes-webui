@@ -4261,13 +4261,15 @@ def _messages_for_limited_payload(messages) -> list:
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     """Return the display sidecar plus only necessary state.db rows for msg_limit.
 
-    Paginated session loads are latency-sensitive and should not stitch every
-    lineage segment before slicing the tail. Keep the lightweight
-    pre-compression snapshot stitch so continuation sessions can still reveal
-    archived history, then merge only newer state.db rows that have not reached
-    the sidecar yet.
+    Paginated loads are latency-sensitive and only need the tail window (last
+    msg_limit visible turns). We use the session's own sidecar directly rather
+    than stitching the full lineage — the tail is always within the current
+    sidecar for any session with more messages than msg_limit. Full lineage
+    stitching happens on the unbounded path (_webui_sidecar_lineage_messages_for_display)
+    used when no msg_limit is set, so the user can still scroll back into parent
+    segments via the msg_before pagination cursor.
     """
-    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    sidecar_messages = list(getattr(session, "messages", []) or [])
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
         return sidecar_messages
@@ -4286,8 +4288,36 @@ def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     )
 
 
+def _fast_message_prefix_key(msg: dict):
+    """Cheap message identity key for large-prefix sampling.
+
+    Uses role + first 200 chars + content length rather than the full
+    normalised content, so O(1) per message instead of O(content_length).
+    Sufficient for pre_compression_snapshot prefix matching where content
+    is a verbatim copy of the original conversation.
+    """
+    if not isinstance(msg, dict):
+        return ("non_dict",)
+    content = str(msg.get("content") or "")
+    return (
+        str(msg.get("role") or ""),
+        content[:200],
+        len(content),
+        bool(msg.get("tool_calls")),
+    )
+
+
+_PREFIX_SAMPLE_THRESHOLD = 50
+_PREFIX_SAMPLE_N = 5
+
+
 def _messages_start_with_visible_prefix(messages, prefix) -> bool:
-    """Return True when ``messages`` already replays ``prefix`` in display order."""
+    """Return True when ``messages`` already replays ``prefix`` in display order.
+
+    For large prefixes (> _PREFIX_SAMPLE_THRESHOLD) uses a sampled check
+    (first + last _PREFIX_SAMPLE_N messages with a cheap key) to avoid an
+    O(n × content_length) scan on long compression-snapshot parents.
+    """
     messages = list(messages or [])
     prefix = list(prefix or [])
     if not prefix:
@@ -4295,6 +4325,15 @@ def _messages_start_with_visible_prefix(messages, prefix) -> bool:
     if len(messages) < len(prefix):
         return False
     try:
+        if len(prefix) > _PREFIX_SAMPLE_THRESHOLD:
+            sample_indices = (
+                list(range(_PREFIX_SAMPLE_N))
+                + list(range(len(prefix) - _PREFIX_SAMPLE_N, len(prefix)))
+            )
+            return all(
+                _fast_message_prefix_key(messages[i]) == _fast_message_prefix_key(prefix[i])
+                for i in sample_indices
+            )
         return all(
             _session_message_visible_key(messages[idx]) == _session_message_visible_key(prefix_msg)
             for idx, prefix_msg in enumerate(prefix)
