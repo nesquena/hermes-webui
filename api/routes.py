@@ -1282,6 +1282,9 @@ _PROVIDER_ALIASES = {
     "gpt": "openai",
     "gemini": "google",
     "openai-codex": "openai",
+    "google-gemini": "google",
+    "google-ai-studio": "google",
+    "claude-code": "anthropic",
 }
 
 # OpenAI-compatible /v1/models endpoints for live model discovery.
@@ -2908,6 +2911,13 @@ def _handle_client_event_log(handler, body: dict) -> bool:
     return j(handler, {"ok": True, "event": payload.get("event")}) or True
 
 
+def _starts_token(raw: str, prefix: str) -> bool:
+    if not raw.startswith(prefix):
+        return False
+    rest = raw[len(prefix):]
+    return rest == "" or rest[0] in ":/"
+
+
 def _normalize_provider_id(value: str | None) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
@@ -2924,7 +2934,7 @@ def _normalize_provider_id(value: str | None) -> str:
         ("openrouter", "openrouter"),
         ("custom", "custom"),
     ):
-        if raw.startswith(prefix):
+        if _starts_token(raw, prefix):
             return normalized
     # Unknown prefix — return empty so callers treat it as "no match" and pass
     # the model through unchanged rather than incorrectly stripping it.
@@ -3479,11 +3489,12 @@ def _resolve_compatible_session_model_state(
         model_provider_from_name = _normalize_provider_id(model_prefix) if "/" in model else ""
 
         model_family = ""
-        model_lower = model.lower()
-        for bare_prefix in ("gpt", "claude", "gemini"):
-            if model_lower.startswith(bare_prefix):
-                model_family = _normalize_provider_id(bare_prefix)
-                break
+        if "/" not in model:
+            model_lower = model.lower()
+            for bare_prefix in ("gpt", "claude", "gemini"):
+                if model_lower.startswith(bare_prefix):
+                    model_family = _normalize_provider_id(bare_prefix)
+                    break
 
         if model_family and model_family != _profile_provider_normalized:
             if explicit_model_pick:

@@ -7,6 +7,12 @@
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)
 
+## [v0.51.450] — 2026-06-16 — Release PK (preserve custom provider namespace prefixes in model normalization)
+
+### Fixed
+
+- **Custom provider model namespaces are no longer silently rewritten to a first-party family.** `_normalize_provider_id` matched provider prefixes with a broad `startswith()`, so a custom namespace that merely *began* with a first-party token — `gemini_cli/...`, `gpt_proxy/...`, `claude-relay/...` — collapsed into the first-party family (`google`/`openai`/`anthropic`). On session reload this triggered a spurious "stale model repair" that swapped the model to the profile default and cleared the displayed turn metrics (`last_prompt_tokens`, `threshold_tokens`), making the composer context indicator ring disappear for custom models. Prefix matching is now restricted to an exact token or a prefix followed strictly by an accepted namespace delimiter (`:` or `/`), and genuine hyphenated first-party aliases (`google-gemini`, `google-ai-studio`, `claude-code`) are mapped explicitly so they still resolve. The bare-prefix family detection in the compatibility resolver also no longer fires on namespaced model IDs. (#4278)
+
 ## [v0.51.449] — 2026-06-16 — Release PJ (stop recovered turns replaying into later context)
 
 ### Fixed
