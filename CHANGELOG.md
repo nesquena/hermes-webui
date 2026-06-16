@@ -7,6 +7,12 @@
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)
 
+## [v0.51.455] — 2026-06-16 — Release PP (drop stale background-process completions instead of prepending them to a later turn)
+
+### Fixed
+
+- **A background task that finishes long after you've moved on no longer hijacks your next message.** When a `notify_on_complete` background task's completion fired after the user had left the session idle (or it sat queued), the WebUI prepended its `[IMPORTANT: … completed]` notification to whatever the user typed next — so the agent answered the *old* task and already-delivered completion notices reappeared on later turns. The notification drain now age-gates completions: one whose enqueue time is older than a configurable cap (`HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS`, default 6h; set `0` to disable) is silently consumed instead of delivered. Completions without a timestamp (older agent builds) are never dropped, so behavior is unchanged until the agent side stamps `completed_at`. (#4306, #4029)
+
 ## [v0.51.454] — 2026-06-16 — Release PO (complete the Japanese UI translation)
 
 ### Changed
