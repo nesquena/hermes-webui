@@ -5,6 +5,13 @@
 
 const LOCALES = {
   en: {
+    inbox_move_to: 'Move to microverso',
+    inbox_move_pick: 'Choose destination',
+    inbox_move_confirm: 'Move "{file}" to {dest}?',
+    inbox_moved: 'Moved to {dest}',
+    inbox_move_failed: 'Move failed: ',
+    inbox_no_dest: 'No destination folders available',
+    inbox_badge_tip: 'Inbox — {n} file(s) waiting',
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',
@@ -11526,6 +11533,13 @@ const LOCALES = {
   },
 
   pt: {
+    inbox_move_to: 'Mover para microverso',
+    inbox_move_pick: 'Escolha o destino',
+    inbox_move_confirm: 'Mover "{file}" para {dest}?',
+    inbox_moved: 'Movido para {dest}',
+    inbox_move_failed: 'Falha ao mover: ',
+    inbox_no_dest: 'Nenhuma pasta de destino disponível',
+    inbox_badge_tip: 'Inbox — {n} arquivo(s) aguardando',
     offline_title: 'Conexão perdida',
     offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
     offline_network_detail: 'O Hermes está inacessível neste navegador agora.',

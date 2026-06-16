@@ -12588,6 +12588,7 @@ function renderFileTree(){
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
+  _refreshInboxBadge();
 }
 
 function _isWorkspaceTreeMoveDrag(e){
@@ -12785,6 +12786,17 @@ function _renderTreeItems(container, entries, depth){
     };
     el.appendChild(nameEl);
 
+    // Inbox dir gets a numeric badge of files waiting. #78
+    if(item.type==='dir' && String(item.path||'').replace(/^\/+/,'')==='_inbox'){
+      const ib=document.createElement('span');
+      ib.className='inbox-badge';
+      const c=S._inboxCount||0;
+      ib.textContent=c>0?String(c):'';
+      ib.title=t('inbox_badge_tip').replace('{n}',String(c));
+      ib.style.cssText='margin-left:6px;font-size:11px;background:var(--accent,#3b8af0);color:#fff;border-radius:10px;padding:0 6px;min-width:16px;text-align:center;line-height:16px;'+(c>0?'':'display:none;');
+      el.appendChild(ib);
+    }
+
     // Size -- only for files
     if(item.type==='file'&&item.size){
       const sizeEl=document.createElement('span');
@@ -12863,6 +12875,74 @@ async function deleteWorkspaceDir(relPath, name){
     delete S._dirCache[relPath];
     await loadDir(S.currentDir);
   }catch(e){setStatus(t('delete_failed')+e.message);}
+}
+
+function _isInboxPath(p){
+  const n=String(p||'').replace(/^\/+/,'');
+  return n==='_inbox' || n.startsWith('_inbox/');
+}
+
+// Refresh the numeric inbox badge from the backend count. Non-blocking; bails
+// if the session changed mid-flight. #78
+async function _refreshInboxBadge(){
+  if(!S.session){S._inboxCount=0;return;}
+  const sessionId=S.session.session_id;
+  try{
+    const r=await api('/api/inbox/status?session_id='+encodeURIComponent(sessionId));
+    if(!S.session||S.session.session_id!==sessionId)return;
+    S._inboxCount=(r&&typeof r.count==='number')?r.count:0;
+  }catch(_){S._inboxCount=0;}
+  document.querySelectorAll('.inbox-badge').forEach(b=>{
+    const c=S._inboxCount||0;
+    b.textContent=c>0?String(c):'';
+    b.style.display=c>0?'':'none';
+    b.title=t('inbox_badge_tip').replace('{n}',String(c));
+  });
+}
+
+// Move an inbox file to a destination folder (microverso). Destinations are the
+// workspace's top-level dirs plus one level of micro/*. Always confirms; never
+// moves automatically. #78
+async function _promptInboxMove(item){
+  if(!S.session)return;
+  const sessionId=S.session.session_id;
+  let dests=[];
+  try{
+    const root=await api('/api/list?session_id='+encodeURIComponent(sessionId)+'&path=.');
+    dests=(root.entries||[]).filter(e=>e.type==='dir'&&e.name!=='_inbox').map(e=>e.path);
+    if(dests.includes('micro')){
+      try{
+        const m=await api('/api/list?session_id='+encodeURIComponent(sessionId)+'&path='+encodeURIComponent('micro'));
+        (m.entries||[]).filter(e=>e.type==='dir').forEach(e=>dests.push(e.path));
+      }catch(_){}
+    }
+  }catch(err){showToast(t('inbox_move_failed')+(err.message||err));return;}
+  if(!dests.length){showToast(t('inbox_no_dest'));return;}
+  document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
+  const menu=document.createElement('div');
+  menu.className='file-ctx-menu';
+  menu.style.cssText='position:fixed;left:50%;top:25%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:10000;min-width:220px;max-height:55vh;overflow:auto;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+  const title=document.createElement('div');
+  title.textContent=t('inbox_move_pick')+': '+item.name;
+  title.style.cssText='padding:7px 14px;font-size:12px;color:var(--text-dim,#999);';
+  menu.appendChild(title);
+  for(const d of dests){
+    menu.appendChild(_workspaceContextMenuItem(d,async()=>{
+      menu.remove();
+      const ok=await showConfirmDialog({title:t('inbox_move_confirm').replace('{file}',item.name).replace('{dest}',d),message:'',confirmLabel:t('inbox_move_to'),focusCancel:true});
+      if(!ok)return;
+      try{
+        await api('/api/inbox/move',{method:'POST',body:JSON.stringify({session_id:sessionId,path:item.path,dest_dir:d})});
+        showToast(t('inbox_moved').replace('{dest}',d));
+        if(S._dirCache){delete S._dirCache['_inbox'];delete S._dirCache[d];}
+        await loadDir(S.currentDir);
+        _refreshInboxBadge();
+      }catch(err){showToast(t('inbox_move_failed')+(err.message||err));}
+    }));
+  }
+  document.body.appendChild(menu);
+  const close=(ev)=>{if(!menu.contains(ev.target)){menu.remove();document.removeEventListener('mousedown',close);}};
+  setTimeout(()=>document.addEventListener('mousedown',close),0);
 }
 
 function _showFileContextMenu(e, item){
@@ -12966,6 +13046,17 @@ function _showFileContextMenu(e, item){
       window.location.href=url;
     };
     menu.appendChild(dlItem);
+  }
+
+  // Inbox-only: move file out to a microverso. Explicit confirmation. #78
+  if(item.type!=='dir' && _isInboxPath(item.path)){
+    const mvItem=document.createElement('div');
+    mvItem.textContent=t('inbox_move_to');
+    mvItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+    mvItem.onmouseenter=()=>mvItem.style.background='var(--hover-bg)';
+    mvItem.onmouseleave=()=>mvItem.style.background='';
+    mvItem.onclick=()=>{menu.remove();_promptInboxMove(item);};
+    menu.appendChild(mvItem);
   }
 
   const sep=document.createElement('hr');
