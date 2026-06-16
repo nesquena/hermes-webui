@@ -16942,6 +16942,13 @@ def _handle_memory_write(handler, body):
         target = home / "SOUL.md"
     else:
         return bad(handler, 'section must be "memory", "user", or "soul"')
+    # Refuse to write through a symlinked target file: a symlink planted at the
+    # memory path (e.g. via a restored/imported workspace) would otherwise let a
+    # memory write clobber an arbitrary file outside the memories directory. This
+    # mirrors the symlink-rejection hardening already shipped for skills/plugins
+    # (#4217/#4234/#4240).
+    if target.is_symlink():
+        return bad(handler, "Cannot write to a symlinked memory file")
     target.write_text(body["content"], encoding="utf-8")
     return j(handler, {"ok": True, "section": section, "path": str(target)})
 
