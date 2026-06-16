@@ -1109,7 +1109,7 @@ async function _populateCronFormModelSelect(selectedModel, selectedProvider, dis
       const og = document.createElement('optgroup');
       og.label = g.provider || g.provider_id || 'Configured';
       if (g.provider_id) og.dataset.provider = g.provider_id;
-      for (const m of (Array.isArray(g.models) ? g.models : [])) {
+      for (const m of [...(Array.isArray(g.models) ? g.models : []), ...(Array.isArray(g.extra_models) ? g.extra_models : [])]) {
         if (!m || !m.id) continue;
         const opt = document.createElement('option');
         opt.value = m.id;
@@ -5781,7 +5781,7 @@ async function _populateProfileFormModelSelect(){
       const og = document.createElement('optgroup');
       og.label = g.provider || g.provider_id || 'Configured';
       if (g.provider_id) og.dataset.provider = g.provider_id;
-      for (const m of (Array.isArray(g.models) ? g.models : [])) {
+      for (const m of [...(Array.isArray(g.models) ? g.models : []), ...(Array.isArray(g.extra_models) ? g.extra_models : [])]) {
         if (!m || !m.id) continue;
         const opt = document.createElement('option');
         opt.value = m.id;
@@ -6687,7 +6687,7 @@ async function loadSettingsPanel(){
           const og=document.createElement('optgroup');
           og.label=g.provider;
           if(g.provider_id) og.dataset.provider=g.provider_id;
-          for(const m of g.models){
+          for(const m of [...(g.models||[]),...(g.extra_models||[])]){
             const opt=document.createElement('option');
             opt.value=m.id;opt.textContent=m.label;
             og.appendChild(opt);
@@ -8284,10 +8284,10 @@ async function _loadAuxiliaryModels(){
  // Build provider list from /api/models groups
  // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
  const groups=(modelsData&&modelsData.groups)||[];
- _auxProviders=groups.filter(g=>g.provider&&g.models&&g.models.length>0).map(g=>({
+ _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
  slug:g.provider_id||g.provider,
  name:g.provider,
- models:g.models.map(m=>m.id),
+ models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
  }));
  if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
  _mainAdvancedConfig=auxData.main||{};

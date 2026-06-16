@@ -18,6 +18,7 @@ import api.config as config
 REPO = Path(__file__).resolve().parents[1]
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -56,6 +57,20 @@ def test_populate_model_dropdown_persists_extra_models_for_picker_runtime():
     assert "dataset.extraModels=JSON.stringify(g.extra_models)" in UI_JS, (
         "populateModelDropdown() must persist extra_models onto the optgroup so "
         "renderModelDropdown() can search hidden overflow models before expansion."
+    )
+
+
+def test_native_model_selectors_include_overflow_extra_models():
+    """The non-picker native <select> model selectors (Settings / Cron / Profile /
+    Auxiliary) must include g.extra_models, not just g.models — otherwise the
+    server-side overflow split (#3691) silently hides every model beyond the first
+    15 for any large provider in those selectors."""
+    assert PANELS_JS.count("extra_models") >= 4, (
+        "Settings/Cron/Profile/Auxiliary model selectors must each include g.extra_models "
+        "so large-provider catalogs aren't truncated to the visible-15 picker cap."
+    )
+    assert "[...(g.models||[]),...(g.extra_models||[])]" in PANELS_JS, (
+        "The composer-mirroring native selector must concat models + extra_models."
     )
 
 
