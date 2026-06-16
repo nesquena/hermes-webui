@@ -76,3 +76,50 @@ def test_resolve_session_model_state_custom_prefix_survives():
         assert resolved_model == "gemini_cli/gemini-3-flash-preview"
         assert resolved_provider == "custom:newapi"
         assert changed is False
+
+
+def test_hyphenated_first_party_provider_ids_still_normalize():
+    """Registered first-party provider IDs that use a hyphen separator (not ':' or '/')
+    must still normalize to their family via the explicit alias map — the ':/'-only token
+    boundary alone would drop them to '' and silently repair the session model to the
+    profile default (the #4278 regression class, caught on the openai-api provider id).
+    """
+    # openai-api is a real registered provider id (_PROVIDER_DISPLAY "OpenAI API").
+    assert _normalize_provider_id("openai-api") == "openai"
+    # The other hyphenated first-party ids already covered, kept here as a class guard.
+    assert _normalize_provider_id("openai-codex") == "openai"
+    assert _normalize_provider_id("google-gemini") == "google"
+    assert _normalize_provider_id("google-ai-studio") == "google"
+    assert _normalize_provider_id("claude-code") == "anthropic"
+
+
+def test_openai_api_session_model_not_repaired_to_default():
+    """A bare non-default GPT model under an openai-api active/profile provider must be
+    preserved, not silently repaired to the profile default (regression of the openai-api
+    alias gap)."""
+    with patch("api.routes.get_available_models") as mock_gam:
+        mock_gam.return_value = {
+            "active_provider": "openai-api",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI API",
+                    "provider_id": "openai-api",
+                    "models": [
+                        {"id": "gpt-5.5", "label": "GPT-5.5"},
+                        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
+                    ],
+                }
+            ],
+        }
+
+        resolved_model, resolved_provider, changed = _resolve_compatible_session_model_state(
+            "gpt-5.5-mini",
+            None,
+            profile_provider="openai-api",
+            profile_default_model="gpt-5.5",
+            prefer_cached_catalog=True,
+        )
+
+        assert resolved_model == "gpt-5.5-mini"
+        assert changed is False

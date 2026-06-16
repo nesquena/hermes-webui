@@ -1282,6 +1282,7 @@ _PROVIDER_ALIASES = {
     "gpt": "openai",
     "gemini": "google",
     "openai-codex": "openai",
+    "openai-api": "openai",
     "google-gemini": "google",
     "google-ai-studio": "google",
     "claude-code": "anthropic",
