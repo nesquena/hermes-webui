@@ -7,6 +7,12 @@
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)
 
+## [v0.51.456] — 2026-06-16 — Release PQ (start.sh tells you when the server is already running)
+
+### Changed
+
+- **`./start.sh` now detects an already-running server instead of pretending to start a new one.** Previously, running `./start.sh` while a server was already bound to the host:port would have `bootstrap.py` spawn a child that fails to bind and dies, while the existing instance answered the `/health` probe — so the script reported "ready" and exited 0 without actually starting anything. `start.sh` now probes `/health` first (best-effort, 2s timeout, via `curl`/`wget`; skipped if neither is present) and, when a server already answers, prints a clear message that nothing was (re)started plus how to restart (`./ctl.sh restart`, or stop-the-PID + `./start.sh`), then exits 0. This brings the detached `start.sh` path to parity with `ctl.sh`'s existing double-start refusal. The container path (which runs `server.py` directly) is unaffected. (#4308)
+
 ## [v0.51.455] — 2026-06-16 — Release PP (drop stale background-process completions instead of prepending them to a later turn)
 
 ### Fixed
