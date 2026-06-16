@@ -389,6 +389,24 @@ class TestPluginAssetIsolationHardening:
         assert "_dashboard_plugin_enabled" in asset_seg
         assert "_dashboard_plugin_enabled" in page_seg
 
+    def test_api_plugin_routes_enforce_enable_gate_server_side(self):
+        # The /api/plugins/<name>/<sub> backend routes (GET + POST) must also
+        # 404 a disabled plugin, otherwise disabling a plugin in the UI leaves
+        # its API endpoints reachable. Both blocks must gate before dispatch.
+        routes = read("api/routes.py")
+        blocks = []
+        start = 0
+        marker = 'if parsed.path.startswith("/api/plugins/"):'
+        while (idx := routes.find(marker, start)) != -1:
+            blocks.append(routes[idx:idx + 600])
+            start = idx + len(marker)
+        assert len(blocks) >= 2, "expected both GET and POST /api/plugins/ blocks"
+        for seg in blocks:
+            gate = seg.find("_dashboard_plugin_enabled")
+            dispatch = seg.find("_dispatch_plugin_subprocess")
+            assert gate != -1, "API plugin route missing enable gate"
+            assert gate < dispatch, "enable gate must run before dispatch"
+
 
 class TestSettingsAllowlistGuard:
     """The dashboard_plugins save path must not weaken the settings allowlist.

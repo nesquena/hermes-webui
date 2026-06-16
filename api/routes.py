@@ -6740,6 +6740,8 @@ def handle_get(handler, parsed) -> bool:
         if len(parts) != 5:
             return False
         plugin_name = parts[3]
+        if not _dashboard_plugin_enabled(plugin_name):
+            return False  # 404 — disabled plugins serve nothing
         sub_route = "/" + urllib.parse.unquote(parts[4])
         if ".." in sub_route:
             return False
@@ -8047,6 +8049,8 @@ def handle_post(handler, parsed) -> bool:
         if len(parts) != 5:
             return False
         plugin_name = parts[3]
+        if not _dashboard_plugin_enabled(plugin_name):
+            return False  # 404 — disabled plugins serve nothing
         sub_route = "/" + urllib.parse.unquote(parts[4])
         if ".." in sub_route:
             return False
