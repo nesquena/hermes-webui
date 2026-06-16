@@ -4114,6 +4114,7 @@ def get_cli_sessions(source_filter=None, *, all_profiles: bool = False) -> list:
                         ctx_home,
                         ctx_db_path,
                         ctx_profile,
+                        source_filter=source_filter,
                         visible_session_limit=None,
                         cron_project_limit=None,
                         include_claude_code=(idx == 0),
