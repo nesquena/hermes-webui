@@ -7,6 +7,12 @@
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)
 
+## [v0.51.448] — 2026-06-16 — Release PI (fix blank transcript viewport regression)
+
+### Fixed
+
+- **The chat transcript no longer renders blank after a reply in long conversations.** A regression from the message-list virtualization (v0.51.423, #3714) could leave the transcript viewport empty after an assistant reply settled — the data was still there, but you had to click "Newest Message" to force it back, and scrolling up could blank it again. The viewport now captures and restores a row anchor across re-renders (instead of only a raw scroll offset), and detects the blank state to force a one-time re-render recovery. (#4277)
+
 ## [v0.51.447] — 2026-06-15 — Release PH (toolset selector shows the active profile's defaults)
 
 ### Added
