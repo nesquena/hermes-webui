@@ -7,6 +7,12 @@
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)
 
+## [v0.51.453] — 2026-06-16 — Release PN (approval controls work on remote-gateway backends)
+
+### Fixed
+
+- **Tool-approval prompts on a remote-gateway backend now show working approve/deny controls.** When the WebUI was connected to a Hermes gateway that ran the agent, an approval request would appear but its approve/deny action had no backend to respond to, so the buttons did nothing. The WebUI now bridges the approval response to the gateway's runs API: when a session has an active gateway run, the approve/deny choice is forwarded to the gateway (run id is server-derived; the existing auth + CSRF on `/api/approval/respond` is preserved), and the gateway's approval-event capability is probed (and cached for 60s) so the runs-API path is used only when the gateway advertises support. Backends that don't use a gateway are unaffected — the local approval path is unchanged and only runs when no gateway run is active. Gateways too old to advertise approval support surface a clear "upgrade the gateway" message instead of a silent no-op. (#4229, #4203)
+
 ## [v0.51.452] — 2026-06-16 — Release PM (reject symlinked memory-file writes)
 
 ### Security
