@@ -781,12 +781,12 @@ def test_retry_truncates_model_context_when_it_is_separate(monkeypatch, tmp_path
             {"role": "user", "content": "visible one"},
             {"role": "assistant", "content": "visible two"},
             {"role": "user", "content": "visible three"},
-            {"role": "assistant", "content": "visible four"},
+            {"role": "assistant", "content": "**Error:** Provider openai is unavailable. Please retry."},
         ],
         context_messages=[
             {"role": "user", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary"},
             {"role": "user", "content": "visible three"},
-            {"role": "assistant", "content": "visible four"},
+            {"role": "assistant", "content": "**Error:** Provider openai is unavailable. Please retry."},
         ],
     )
     saved = []

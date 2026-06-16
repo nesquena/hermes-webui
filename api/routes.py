@@ -17378,6 +17378,18 @@ def _handle_session_import(handler, body):
         messages=messages,
         tool_calls=body.get("tool_calls", []),
     )
+    active_stream_id = body.get("active_stream_id")
+    if isinstance(active_stream_id, str) and active_stream_id:
+        s.active_stream_id = active_stream_id
+    pending_user_message = body.get("pending_user_message")
+    if isinstance(pending_user_message, str) and pending_user_message:
+        s.pending_user_message = pending_user_message
+    pending_attachments = body.get("pending_attachments")
+    if isinstance(pending_attachments, list):
+        s.pending_attachments = pending_attachments
+    pending_started_at = body.get("pending_started_at")
+    if isinstance(pending_started_at, (int, float)):
+        s.pending_started_at = pending_started_at
     s.pinned = body.get("pinned", False)
     with LOCK:
         SESSIONS[s.session_id] = s

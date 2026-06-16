@@ -6,11 +6,14 @@ Behavior parity reference: gateway/run.py:_handle_*_command in
 the hermes-agent repo.
 """
 from __future__ import annotations
+import copy
 import logging
+import re
 from typing import Any
 
-from api.config import LOCK, _get_session_agent_lock
-from api.models import get_session, SESSIONS
+from api.config import LOCK, SESSIONS_MAX, _get_session_agent_lock
+from api.models import get_session, SESSIONS, Session
+from api.session_events import publish_session_list_changed
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +70,82 @@ def _truncation_watermark_for(messages):
         return 0.0
 
 
+_RETRY_SAFE_ERROR_RE = re.compile(
+    r'^\*\*Error:\*\*\s+(Provider\s+.+|No response received after context compression\.\s*Please retry\.)',
+    re.IGNORECASE,
+)
+
+
+def _is_retry_safe_error_marker(message: dict) -> bool:
+    """Return True for a strict, empty-failed-turn assistant error marker.
+
+    A retry-safe tail row is assistant-only, carries plain text, has no
+    tool_calls/tool_use, and matches a narrow set of explicit retry markers.
+    """
+    if not isinstance(message, dict):
+        return False
+    if message.get('role') != 'assistant':
+        return False
+    # No tool calls or tool_use content
+    if message.get('tool_calls'):
+        return False
+    is_interrupted_marker = message.get('type') == 'interrupted' and message.get('_error')
+    content = message.get('content', '')
+    if isinstance(content, list):
+        has_tool_use = any(
+            isinstance(p, dict) and p.get('type') in ('tool_use', 'tool_result')
+            for p in content
+        )
+        if has_tool_use:
+            return False
+        text_parts = [
+            str(p.get('text', '') if isinstance(p, dict) else p)
+            for p in content
+        ]
+        text = ''.join(text_parts)
+    elif isinstance(content, str):
+        text = content
+    else:
+        text = str(content)
+    if is_interrupted_marker:
+        return True
+    if not _RETRY_SAFE_ERROR_RE.match(text.strip()):
+        return False
+    return True
+
+
+def _retry_tail_has_meaningful_output(tail: list) -> bool:
+    """Return True if the post-user tail contains recoverable output.
+
+    Any tool role, assistant tool_calls, normal assistant prose, artifacts,
+    media, or mixed rows make the tail meaningful and force a branch retry.
+    """
+    if not isinstance(tail, list) or not tail:
+        return False
+    # A single safe error marker is NOT meaningful
+    if len(tail) == 1 and _is_retry_safe_error_marker(tail[0]):
+        return False
+    return True
+
+
 def retry_last(session_id: str) -> dict[str, Any]:
-    """Truncate the session to before the last user message, return its text.
+    """Return the text of the last interrupted/pending user turn.
 
     Mirrors gateway/run.py:_handle_retry_command. Caller (webui frontend)
     is expected to put the returned text back in the composer and call
     send() to resume the conversation -- the agent's gateway calls its own
     _handle_message; the webui has no equivalent in-process pipeline.
+
+    If the session sidecar reports a non-empty ``pending_user_message``, retry
+    anchors on that pending interrupted turn instead of scanning backward in
+    persisted ``messages``. The stale pending/stream flags are cleared in place,
+    leaving the transcript untouched.
+
+    Otherwise, if the last persisted user turn produced visible/recoverable
+    output (assistant prose, tool results, artifacts, compression output), the
+    original session is preserved and a new branch session is created from the
+    prefix before that last user message, so the visible transcript does not
+    silently rewind.
 
     Raises:
         KeyError: session not found
@@ -101,27 +173,115 @@ def retry_last(session_id: str) -> dict[str, Any]:
         # the canonical cached instance inside the lock so the mutation lands
         # on the object the next reader will see, not a stale parallel copy.
         s = get_session(session_id)  # raises KeyError if missing
+        branch = None
+        branch_response = None
+        pending_response = None
         with LOCK:
             s = SESSIONS.get(session_id, s)
-            history = s.messages or []
-            last_user_idx = None
-            for i in range(len(history) - 1, -1, -1):
-                if history[i].get('role') == 'user':
-                    last_user_idx = i
-                    break
-            if last_user_idx is None:
-                raise ValueError('No previous message to retry.')
 
-            last_user_text = _extract_text(history[last_user_idx].get('content', ''))
-            removed_count = len(history) - last_user_idx
-            s.messages = history[:last_user_idx]
-            s.truncation_watermark = _truncation_watermark_for(s.messages)
-            if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
-                truncated_context = _truncate_at_last_user(s.context_messages)
-                if truncated_context is not None:
-                    s.context_messages = truncated_context
+            # Prefer the explicit interrupted/pending turn state over scanning
+            # backward in the persisted transcript. This prevents retry from
+            # jumping to an older user turn when the live sidecar already knows
+            # the interrupted text (#retry-target-anchoring).
+            pending_text = getattr(s, 'pending_user_message', None)
+            if pending_text:
+                s.active_stream_id = None
+                s.pending_user_message = None
+                s.pending_attachments = []
+                s.pending_started_at = None
+                pending_response = {
+                    'mode': 'pending',
+                    'last_user_text': _extract_text(pending_text),
+                    'removed_count': 0,
+                }
+            else:
+                history = s.messages or []
+                last_user_idx = None
+                for i in range(len(history) - 1, -1, -1):
+                    if history[i].get('role') == 'user':
+                        last_user_idx = i
+                        break
+                if last_user_idx is None:
+                    raise ValueError('No previous message to retry.')
+
+                last_user_text = _extract_text(history[last_user_idx].get('content', ''))
+                removed_count = len(history) - last_user_idx
+                tail = history[last_user_idx + 1:]
+
+                # If the interrupted turn produced visible output, branch instead of
+                # rewriting the active transcript in place (#2361).
+                if _retry_tail_has_meaningful_output(tail):
+                    prefix_messages = history[:last_user_idx]
+                    context_prefix = []
+                    if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
+                        truncated_context = _truncate_at_last_user(s.context_messages)
+                        if truncated_context is not None:
+                            context_prefix = truncated_context
+                    source_title = s.title or 'Untitled'
+                    branch_title = f"{source_title} (retry)"
+                    branch = Session(
+                        workspace=s.workspace,
+                        model=s.model,
+                        model_provider=getattr(s, 'model_provider', None),
+                        profile=getattr(s, 'profile', None),
+                        title=branch_title,
+                        messages=copy.deepcopy(prefix_messages),
+                        project_id=getattr(s, 'project_id', None),
+                        personality=getattr(s, 'personality', None),
+                        enabled_toolsets=getattr(s, 'enabled_toolsets', None),
+                        context_length=getattr(s, 'context_length', None),
+                        threshold_tokens=getattr(s, 'threshold_tokens', None),
+                        context_messages=copy.deepcopy(context_prefix),
+                        gateway_routing=copy.deepcopy(getattr(s, 'gateway_routing', None)),
+                        context_engine=getattr(s, 'context_engine', None),
+                        context_engine_state=copy.deepcopy(getattr(s, 'context_engine_state', None) or {}),
+                        parent_session_id=session_id,
+                        session_source='fork',
+                    )
+                    SESSIONS[branch.session_id] = branch
+                    if hasattr(SESSIONS, 'move_to_end'):
+                        SESSIONS.move_to_end(branch.session_id)
+                    while len(SESSIONS) > SESSIONS_MAX:
+                        try:
+                            SESSIONS.popitem(last=False)
+                        except TypeError:
+                            SESSIONS.popitem()
+                    branch_response = {
+                        'mode': 'branch',
+                        'session_id': branch.session_id,
+                        'parent_session_id': session_id,
+                        'last_user_text': last_user_text,
+                        'removed_count': removed_count,
+                    }
+                else:
+                    s.messages = history[:last_user_idx]
+                    s.truncation_watermark = _truncation_watermark_for(s.messages)
+                    if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
+                        truncated_context = _truncate_at_last_user(s.context_messages)
+                        if truncated_context is not None:
+                            s.context_messages = truncated_context
+
+        if pending_response is not None:
+            s.save()
+            return pending_response
+
+        if branch_response is not None:
+            if branch is None:
+                raise RuntimeError('Retry branch creation failed.')
+            branch.save()
+            publish_session_list_changed(
+                'session_branch',
+                profile=getattr(branch, 'profile', None),
+                session_id=getattr(branch, 'session_id', None),
+            )
+            return branch_response
+
         s.save()
-    return {'last_user_text': last_user_text, 'removed_count': removed_count}
+    return {
+        'mode': 'in_place',
+        'last_user_text': last_user_text,
+        'removed_count': removed_count,
+    }
 
 
 def undo_last(session_id: str) -> dict[str, Any]:

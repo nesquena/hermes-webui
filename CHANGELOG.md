@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/retry` no longer rewinds an interrupted chat when the attempted turn produced recoverable output; it preserves the original transcript and retries in a branch.** Previously, WebUI `/retry` always truncated the active session in place, losing visible assistant prose, tool results, artifacts, or compression output from the interrupted turn. Retry now detects whether the post-user tail contains meaningful output and, when it does, creates a branch session (`session_source=fork`, title `<original> (retry)`) from the prefix before the last user message. A strict, recognized assistant error marker (e.g. `**Error:** Provider ...` or `**Error:** No response received after context compression. Please retry.`) still retries in place. This preserves the visible transcript/model-context invariant in `docs/rfcs/webui-run-state-consistency-contract.md`.
+
 ## [v0.51.462] — 2026-06-16 — Release PW (sidebar survives slow loads)
 
 ### Fixed

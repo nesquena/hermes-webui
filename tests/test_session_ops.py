@@ -49,13 +49,13 @@ def test_retry_returns_last_user_text(cleanup_test_sessions):
         {'role': 'user', 'content': 'first user msg'},
         {'role': 'assistant', 'content': 'first reply'},
         {'role': 'user', 'content': 'second user msg'},
-        {'role': 'assistant', 'content': 'second reply'},
-        {'role': 'tool', 'content': 'tool output'},
+        {'role': 'assistant', 'content': '**Error:** Provider openai is unavailable. Please retry.'},
     ])
     r = _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
     assert r.get('ok') is True, r
+    assert r.get('mode') == 'in_place'
     assert r.get('last_user_text') == 'second user msg'
-    assert r.get('removed_count') == 3
+    assert r.get('removed_count') == 2
 
 
 def test_retry_truncates_transcript(cleanup_test_sessions):
@@ -63,9 +63,10 @@ def test_retry_truncates_transcript(cleanup_test_sessions):
         {'role': 'user', 'content': 'first user msg'},
         {'role': 'assistant', 'content': 'first reply'},
         {'role': 'user', 'content': 'second user msg'},
-        {'role': 'assistant', 'content': 'second reply'},
+        {'role': 'assistant', 'content': '**Error:** Provider openai is unavailable. Please retry.'},
     ])
-    _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
+    r = _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
+    assert r.get('mode') == 'in_place'
     sess = _get(f'/api/session?session_id={sid}')['session']
     # After retry: only the first exchange remains (2 messages).
     assert len(sess['messages']) == 2
@@ -103,10 +104,11 @@ def test_retry_does_not_double_append(cleanup_test_sessions):
         {'role': 'user', 'content': 'msg A'},
         {'role': 'assistant', 'content': 'reply A'},
         {'role': 'user', 'content': 'msg B'},
-        {'role': 'assistant', 'content': 'reply B'},
+        {'role': 'assistant', 'content': '**Error:** Provider openai is unavailable. Please retry.'},
     ])
     r = _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
-    assert r['removed_count'] == 2  # msg B + reply B
+    assert r.get('mode') == 'in_place'
+    assert r['removed_count'] == 2  # msg B + error marker
     sess = _get(f'/api/session?session_id={sid}')['session']
     msgs = sess['messages']
     # Only msg A + reply A remain. Critically: there is NO 'msg B' anywhere.
@@ -128,9 +130,9 @@ def test_retry_concurrent_requests_are_safe(cleanup_test_sessions):
     from concurrent.futures import ThreadPoolExecutor
     sid = _import_session_with_messages(cleanup_test_sessions, [
         {'role': 'user', 'content': 'msg A'},
-        {'role': 'assistant', 'content': 'reply A'},
+        {'role': 'assistant', 'content': '**Error:** Provider openai is unavailable. Please retry.'},
         {'role': 'user', 'content': 'msg B'},
-        {'role': 'assistant', 'content': 'reply B'},
+        {'role': 'assistant', 'content': '**Error:** Provider openai is unavailable. Please retry.'},
     ])
 
     def _do_retry():
@@ -148,7 +150,7 @@ def test_retry_concurrent_requests_are_safe(cleanup_test_sessions):
     msgs = sess['messages']
     valid_prefixes = (
         [],
-        [{'role': 'user', 'content': 'msg A'}, {'role': 'assistant', 'content': 'reply A'}],
+        [{'role': 'user', 'content': 'msg A'}, {'role': 'assistant', 'content': '**Error:** Provider openai is unavailable. Please retry.'}],
         [{'role': 'user', 'content': 'msg A'}],
     )
     msg_pairs = [(m['role'], m.get('content', '')) for m in msgs]

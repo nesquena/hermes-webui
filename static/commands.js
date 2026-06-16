@@ -1311,8 +1311,27 @@ async function cmdRetry(){
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
+    // If the interrupted turn produced visible output, the backend branches
+    // instead of rewriting the original transcript in place (#2361). Load the
+    // branch session before resending so the user retries on the preserved fork.
+    //
+    // If the backend anchored on a pending interrupted turn, it cleared the
+    // stale stream/pending state in place. Reload the original session so the
+    // frontend is not left with stale busy/pending flags before re-sending.
+    if(r&&r.mode==='branch'&&r.session_id){
+      await loadSession(r.session_id);
+      if(typeof renderSessionList==='function') await renderSessionList();
+      showToast(t('retry_branch_forked'));
+    }else{
+      const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
+      if(data&&data.session){S.session=data.session;S.messages=data.session.messages||[];S.toolCalls=[];S.activeStreamId=data.session.active_stream_id||null;if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
+    }
+    // Re-check active session: if the user switched sessions while we were
+    // awaiting, do not send to the wrong session.
+    if(!S.session||S.session.session_id!==activeSid){
+      const branchLoaded = r && r.mode === 'branch' && r.session_id === S.session?.session_id;
+      if(!branchLoaded) return;
+    }
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();await send();
   }catch(e){showToast(t('retry_failed')+e.message);}
 }
