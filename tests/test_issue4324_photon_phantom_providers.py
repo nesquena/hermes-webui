@@ -266,6 +266,30 @@ def test_real_provider_still_detected_importerror_path(monkeypatch, tmp_path):
     )
 
 
+def test_aliased_pool_key_still_detected_alongside_photon(monkeypatch, tmp_path):
+    """#4247 intent (aliased pool keys) is preserved end-to-end.
+
+    A pool key of ``google`` resolves to canonical ``gemini`` (in
+    _PROVIDER_MODELS, not _PROVIDER_DISPLAY) and must still surface as the
+    Gemini group even when non-model photon* keys are filtered out. Drives a
+    real pool key through detection rather than asserting on the helper alone.
+    """
+    extra = {
+        "google": [
+            {"id": "gp1", "label": "explicit-gemini", "source": "manual",
+             "auth_type": "api_key", "base_url": "https://generativelanguage.googleapis.com"}
+        ]
+    }
+    result = _call_get_available_models(
+        monkeypatch, tmp_path, _photon_auth_payload(extra), with_load_pool=True,
+    )
+    names = _group_names(result)
+    assert "Gemini" in names, f"Aliased google→gemini pool key must surface as Gemini; got {names}"
+    assert not any("photon" in n.lower() for n in names), (
+        f"Photon keys must still be filtered out; got {names}"
+    )
+
+
 # ── helper unit coverage ─────────────────────────────────────────────────────
 
 
