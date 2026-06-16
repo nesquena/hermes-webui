@@ -293,13 +293,13 @@ def test_aimlapi_runtime_key_prefers_profile_env(tmp_path, monkeypatch):
 
 
 def test_aimlapi_runtime_key_ignores_malformed_profile_env(tmp_path, monkeypatch):
-    """Malformed profile env files should not bubble out of the streaming path."""
+    """Malformed profile env files should not block the process env fallback."""
     monkeypatch.setenv("AIMLAPI_API_KEY", "aiml-process-key")
     (tmp_path / ".env").write_bytes(b"\xff\xfe\x00")
 
     from api.streaming import _resolve_aimlapi_api_key
 
-    assert _resolve_aimlapi_api_key(tmp_path) is None
+    assert _resolve_aimlapi_api_key(tmp_path) == "aiml-process-key"
 
 
 def test_aimlapi_runtime_key_uses_process_env_without_profile_env(tmp_path, monkeypatch):

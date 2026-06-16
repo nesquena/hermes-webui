@@ -276,7 +276,7 @@ def _resolve_aimlapi_api_key(profile_home: str | Path | None = None) -> str | No
                     if key.strip() == "AIMLAPI_API_KEY":
                         return value.strip().strip('"').strip("'") or None
         except Exception:
-            return None
+            pass
     api_key = os.getenv("AIMLAPI_API_KEY", "").strip()
     if api_key:
         return api_key
