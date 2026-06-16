@@ -451,6 +451,11 @@ WebUI progress guidance:
 
 
 def _project_name_for_session_project(project_id: Optional[str]) -> Optional[str]:
+    """Best-effort WebUI project-name lookup for per-turn ephemeral context.
+
+    Keep this uncached so a project rename is reflected on the next turn. The
+    projects list is small and already local WebUI state.
+    """
     if not project_id:
         return None
     try:
@@ -1777,6 +1782,10 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
     When *cfg* is provided, respects ``agent.image_input_mode`` — if the resolved
     mode is ``"text"``, returns a plain string (attachments are not embedded) so
     the agent's text-mode pipeline (``vision_analyze``) handles images.
+    ``workspace_ctx`` is retained for legacy/backcompat call sites that still
+    need a text prefix. The active WebUI project/workspace context path passes
+    an empty string here because that context is now delivered via the
+    ephemeral system prompt instead of by modifying user-authored text.
     """
     if not attachments:
         return workspace_ctx + msg_text
@@ -2242,6 +2251,11 @@ def _project_name_for_id(project_id: str | None) -> str | None:
     return None
 
 
+# Legacy/backcompat only: old PR drafts and persisted transcripts may contain a
+# structured WebUI context block followed by the workspace sentinel. New agent
+# turns do NOT prepend these blocks; active project/workspace context is carried
+# in ``agent.ephemeral_system_prompt``. Keep these helpers/regexes for title,
+# merge-repair, and UI/display stripping of old or leaked messages.
 def _hermes_webui_context_prefix(*, project_id=None, project_name=None, workspace=None) -> str:
     """Return WebUI project metadata prefix followed by the workspace sentinel."""
     return (
