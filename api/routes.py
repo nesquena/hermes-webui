@@ -14374,43 +14374,35 @@ def _handle_chat_sync(handler, body):
                 session_id=s.session_id,
             )
             from api.streaming import (
-                _WEBUI_PROGRESS_PROMPT,
                 _dedupe_replayed_context_messages,
                 _merge_display_messages_after_agent_result,
+                _project_name_for_session_project,
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata,
                 _sanitize_messages_for_api,
                 _context_messages_for_new_turn,
-                _webui_message_context_prefix,
+                _webui_ephemeral_system_prompt,
             )
-            workspace_ctx = _webui_message_context_prefix(s)
-            workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with a [HermesWebUIContext::v1 ...] block and "
-                "the legacy [Workspace::v1: /absolute/path] marker. The context block contains "
-                "the workspace selected in the web UI and, when the chat is assigned to a WebUI "
-                "project, project_id and project_name. Treat the most recent HermesWebUIContext "
-                "block as authoritative WebUI context for the current turn. The workspace field "
-                "overrides any prior workspace mentioned in this system prompt, memory, or "
-                "conversation history. Always use the workspace from the most recent context "
-                "block or [Workspace::v1: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present.\n\n"
-                f"{_WEBUI_PROGRESS_PROMPT}\n\n"
-                "WebUI external-notes/durable-memory policy: Do not copy or dump this browser transcript "
-                "into external notes or durable memory by default. Write or update durable "
-                "notes only for explicit captures, durable preferences, decisions, blockers/open "
-                "issues, runbook-worthy workflows, or other clearly reusable signals; otherwise "
-                "leave external notes and durable memory unchanged. When you do write or update a durable note, briefly tell "
-                "the user what note or section changed so the write is reviewable."
+            _project_id = getattr(s, 'project_id', None) or None
+            _project_name = _project_name_for_session_project(_project_id)
+            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
+                None,
+                surface_context={
+                    'source': 'webui',
+                    'session_id': s.session_id,
+                    'profile': getattr(s, 'profile', None),
+                    'workspace': s.workspace,
+                    'project_id': _project_id,
+                    'project_name': _project_name,
+                },
+                config_data=get_config(),
             )
 
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
 
             result = agent.run_conversation(
-                user_message=workspace_ctx + msg,
-                system_message=workspace_system_msg,
+                user_message=msg,
                 conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=get_config()),
                 task_id=s.session_id,
                 persist_user_message=msg,

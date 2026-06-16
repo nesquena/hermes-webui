@@ -16,9 +16,11 @@ def test_webui_injects_process_notifications_without_persisting_them_as_user_tex
     src = Path("api/streaming.py").read_text(encoding="utf-8")
 
     assert "_process_notifications = _drain_webui_process_notifications(session_id)" in src
-    assert "[*_process_notifications, msg_text]" in src
-    assert "_build_native_multimodal_message(workspace_ctx, _agent_msg_text" in src
-    assert "persist_user_message=msg_text" in src
+    assert "Current WebUI background process notifications for this turn" in src
+    assert "runtime context; not user-authored text" in src
+    assert "agent.ephemeral_system_prompt" in src
+    assert "_build_native_multimodal_message('', msg_text" in src
+    assert "_run_ephemeral_system_prompt = agent.ephemeral_system_prompt" in src
 
 
 def test_webui_sets_gateway_session_platform_for_background_watchers():

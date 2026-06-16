@@ -58,6 +58,46 @@ def test_webui_ephemeral_prompt_skips_empty_surface_fields():
     assert "Workspace:" not in prompt
 
 
+def test_webui_ephemeral_prompt_includes_project_context():
+    prompt = _webui_ephemeral_system_prompt(
+        None,
+        surface_context={
+            "source": "webui",
+            "session_id": "session-123",
+            "profile": "default",
+            "workspace": "/tmp/example-workspace",
+            "project_id": "proj_123",
+            "project_name": "Project One",
+        },
+    )
+
+    assert "Project context is injected fresh for the current WebUI turn" in prompt
+    assert "Project ID: proj_123" in prompt
+    assert "Project name: Project One" in prompt
+    assert "Project dossier convention: .hermes/projects/proj_123-<slug>/" in prompt
+    assert "active WebUI project" in prompt
+    assert "summary, status, decisions, artifacts, and links" in prompt
+    assert "HermesWebUIContext::v1" not in prompt
+    assert "first few lines" not in prompt
+
+
+def test_webui_ephemeral_prompt_explicitly_marks_unassigned_project():
+    prompt = _webui_ephemeral_system_prompt(
+        None,
+        surface_context={
+            "source": "webui",
+            "workspace": "/tmp/example-workspace",
+            "project_id": None,
+            "project_name": None,
+        },
+    )
+
+    assert "Project: none assigned (project_id is null)" in prompt
+    assert "Do not silently assume a project assignment" in prompt
+    assert "Project ID:" not in prompt
+    assert "Project dossier convention:" not in prompt
+
+
 def test_ephemeral_prompt_avoids_platform_info_when_no_config():
     """Without config_data, the delivery context falls back to defaults."""
     prompt = _webui_ephemeral_system_prompt(

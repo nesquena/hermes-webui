@@ -480,6 +480,17 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         value = str(raw).strip() if raw is not None else ""
         if value:
             lines.append(f"- {label}: {value}")
+
+    project_id = str(surface_context.get("project_id") or "").strip()
+    project_name = str(surface_context.get("project_name") or "").strip()
+    lines.append("- Project context is injected fresh for the current WebUI turn; persisted/display history may not contain it.")
+    if project_id:
+        lines.append(f"- Project ID: {project_id}")
+        lines.append(f"- Project name: {project_name or 'null'}")
+        lines.append(f"- Project dossier convention: .hermes/projects/{project_id}-<slug>/")
+        lines.append("- Treat this as the active WebUI project for durable project organization. When meaningful project context changes, use the dossier for summary, status, decisions, artifacts, and links; do not update it for trivial turns.")
+    else:
+        lines.append("- Project: none assigned (project_id is null). Do not silently assume a project assignment; suggest assigning the chat only when there is a likely existing-project match.")
     return "\n".join(lines)
 
 
@@ -6873,22 +6884,13 @@ def _run_agent_streaming(
                     put('cancel', {'message': 'Cancelled by user'})
                     return
 
-            # Prepend workspace context so the agent always knows which directory
-            # to use for file operations, regardless of session age or AGENTS.md defaults.
-            workspace_ctx = _webui_message_context_prefix(s)
-            workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with a [HermesWebUIContext::v1 ...] block and "
-                "the legacy [Workspace::v1: /absolute/path] marker. The context block contains "
-                "the workspace selected in the web UI and, when the chat is assigned to a WebUI "
-                "project, project_id and project_name. Treat the most recent HermesWebUIContext "
-                "block as authoritative WebUI context for the current turn. The workspace field "
-                "overrides any prior workspace mentioned in this system prompt, memory, or "
-                "conversation history. Always use the workspace from the most recent context "
-                "block or [Workspace::v1: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present."
-            )
+            # WebUI project/workspace context is injected through the ephemeral
+            # system prompt, not by prefixing the user message. This keeps the
+            # provider aware of the active project each turn while leaving
+            # persisted/display history clean and avoiding Hermes Agent
+            # persist_user_message mutation semantics.
+            _project_id = getattr(s, 'project_id', None) or None
+            _project_name = _project_name_for_session_project(_project_id)
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
             _personality_prompt = None
@@ -6918,9 +6920,12 @@ def _run_agent_streaming(
                     'session_id': session_id,
                     'profile': getattr(s, 'profile', None),
                     'workspace': s.workspace,
+                    'project_id': _project_id,
+                    'project_name': _project_name,
                 },
                 config_data=_cfg,
             )
+            _run_ephemeral_system_prompt = agent.ephemeral_system_prompt
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
             # fallback to now only for recovered/legacy flows where that marker is absent
@@ -6991,14 +6996,22 @@ def _run_agent_streaming(
             _ckpt_thread.start()
 
             _process_notifications = _drain_webui_process_notifications(session_id)
-            _agent_msg_text = msg_text
             if _process_notifications:
-                _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
-            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
+                _process_notification_context = (
+                    "Current WebUI background process notifications for this turn "
+                    "(runtime context; not user-authored text):\n"
+                    + "\n\n".join(_process_notifications).strip()
+                )
+                agent.ephemeral_system_prompt = (
+                    (agent.ephemeral_system_prompt or "").rstrip()
+                    + "\n\n"
+                    + _process_notification_context
+                ).strip()
+            _run_ephemeral_system_prompt = agent.ephemeral_system_prompt
+            user_message = _build_native_multimodal_message('', msg_text, attachments, workspace, cfg=_cfg)
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             result = agent.run_conversation(
                 user_message=user_message,
-                system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                 task_id=session_id,
                 persist_user_message=msg_text,
@@ -7357,6 +7370,7 @@ def _run_agent_streaming(
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                             agent = _AIAgent(**_agent_kwargs)
+                            agent.ephemeral_system_prompt = _run_ephemeral_system_prompt
                             with STREAMS_LOCK:
                                 AGENT_INSTANCES[stream_id] = agent
                             from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
@@ -7369,7 +7383,6 @@ def _run_agent_streaming(
                             try:
                                 _heal_result = agent.run_conversation(
                                     user_message=user_message,
-                                    system_message=workspace_system_msg,
                                     conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
@@ -8347,6 +8360,7 @@ def _run_agent_streaming(
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                     _heal_agent = _AIAgent(**_heal_kwargs)
+                    _heal_agent.ephemeral_system_prompt = _run_ephemeral_system_prompt
                     with STREAMS_LOCK:
                         AGENT_INSTANCES[stream_id] = _heal_agent
                     from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
@@ -8358,7 +8372,6 @@ def _run_agent_streaming(
                     try:
                         _heal_result = _heal_agent.run_conversation(
                             user_message=user_message,
-                            system_message=workspace_system_msg,
                             conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                             task_id=session_id,
                             persist_user_message=msg_text,
