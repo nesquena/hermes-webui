@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Voice transcription capability checks now recognize Hermes named command STT providers.** WebUI's `/api/transcribe/capability` now treats explicit `stt.provider` values that resolve through Hermes Agent's `stt.providers.<name>: type: command` registry as available, so browser voice recordings can use custom command-backed providers instead of falling back to browser speech recognition or raw audio uploads.
+
 ### Internal
 
 - **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)

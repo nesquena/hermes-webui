@@ -457,6 +457,13 @@ def _stt_provider_capability_from_module(stt):
             # non-WAV input through ffmpeg before invoking the command.
             return has_local_command() and has_browser_audio_converter()
 
+        def command_provider_available(provider):
+            resolver = getattr(stt, "_resolve_command_stt_provider_config", None)
+            try:
+                return callable(resolver) and resolver(provider, cfg_dict) is not None
+            except Exception:
+                return False
+
         def resolve_provider(provider):
             if provider == "local":
                 if bool(getattr(stt, "_HAS_FASTER_WHISPER", False)):
@@ -485,6 +492,8 @@ def _stt_provider_capability_from_module(stt):
                     return "none"
             if provider == "elevenlabs":
                 return "elevenlabs" if bool(env("ELEVENLABS_API_KEY")) else "none"
+            if command_provider_available(provider):
+                return provider
             return "none"
 
         explicit = "provider" in cfg_dict
