@@ -326,11 +326,94 @@ def test_retry_recovered_pending_turn_does_not_jump_to_older_user(cleanup_test_s
 
     r = _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
     assert r.get('ok') is True, r
-    assert r.get('mode') == 'in_place'
+    # The interrupted marker carries recovered output, so the retry branches
+    # to preserve the original transcript (including the recovered turn).
+    assert r.get('mode') == 'branch'
     assert r.get('last_user_text') == 'new interrupted turn C'
-    assert r.get('removed_count') == 2
+
+    # Original session is preserved with the recovered turn.
+    original = _get(f'/api/session?session_id={sid}')['session']
+    assert len(original['messages']) == 6
+
+    cleanup_test_sessions.append(r['session_id'])
+
+
+def test_retry_empty_string_pending_falls_through_to_persisted(cleanup_test_sessions):
+    """An empty-string pending_user_message must not trigger pending mode."""
+    sid = _import_session_with_messages(
+        cleanup_test_sessions,
+        [
+            {'role': 'user', 'content': 'first user msg'},
+            {'role': 'assistant', 'content': 'first reply'},
+            {'role': 'user', 'content': 'second user msg'},
+            {'role': 'assistant', 'content': '**Error:** Provider openai is unavailable. Please retry.'},
+        ],
+        pending_user_message='',
+    )
+    r = _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
+    assert r.get('ok') is True, r
+    assert r.get('mode') == 'in_place'
+    assert r.get('last_user_text') == 'second user msg'
+
+
+def test_retry_pending_equal_to_last_user_falls_through(cleanup_test_sessions):
+    """When pending_user_message equals the last persisted user, fall through."""
+    sid = _import_session_with_messages(
+        cleanup_test_sessions,
+        [
+            {'role': 'user', 'content': 'first user msg'},
+            {'role': 'assistant', 'content': 'first reply'},
+            {'role': 'user', 'content': 'duplicate turn'},
+            {'role': 'assistant', 'content': '**Error:** Provider openai is unavailable. Please retry.'},
+        ],
+        pending_user_message='duplicate turn',
+        active_stream_id='stream-dup',
+    )
+    r = _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
+    assert r.get('ok') is True, r
+    # Should NOT be pending mode — should fall through to persisted logic
+    assert r.get('mode') == 'in_place'
+    assert r.get('last_user_text') == 'duplicate turn'
+
+
+def test_retry_interrupted_marker_with_recovered_output_branches(cleanup_test_sessions):
+    """An interrupted marker carrying recovered output must force branch mode."""
+    sid = _import_session_with_messages(
+        cleanup_test_sessions,
+        [
+            {'role': 'user', 'content': 'first user msg'},
+            {'role': 'assistant', 'content': 'first reply'},
+            {'role': 'user', 'content': 'second user msg'},
+            {'role': 'assistant', 'content': 'The partial output above was recovered from the run journal, but the interrupted agent process could not continue.', 'type': 'interrupted', '_error': True},
+        ],
+    )
+    r = _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
+    assert r.get('ok') is True, r
+    # Must branch because the interrupted marker carries recovered output
+    assert r.get('mode') == 'branch'
+    assert r.get('last_user_text') == 'second user msg'
+
+    original = _get(f'/api/session?session_id={sid}')['session']
+    assert len(original['messages']) == 4
+
+    cleanup_test_sessions.append(r['session_id'])
+
+
+def test_retry_interrupted_marker_no_content_in_place(cleanup_test_sessions):
+    """An interrupted marker with no content is safe to retry in place."""
+    sid = _import_session_with_messages(
+        cleanup_test_sessions,
+        [
+            {'role': 'user', 'content': 'first user msg'},
+            {'role': 'assistant', 'content': 'first reply'},
+            {'role': 'user', 'content': 'second user msg'},
+            {'role': 'assistant', 'content': '', 'type': 'interrupted', '_error': True},
+        ],
+    )
+    r = _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
+    assert r.get('ok') is True, r
+    assert r.get('mode') == 'in_place'
+    assert r.get('last_user_text') == 'second user msg'
 
     sess = _get(f'/api/session?session_id={sid}')['session']
-    assert [m['content'] for m in sess['messages']] == [
-        'old turn A', 'old reply A', 'old turn B', 'old reply B'
-    ]
+    assert len(sess['messages']) == 2

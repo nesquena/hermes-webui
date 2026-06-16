@@ -1327,11 +1327,10 @@ async function cmdRetry(){
       if(data&&data.session){S.session=data.session;S.messages=data.session.messages||[];S.toolCalls=[];S.activeStreamId=data.session.active_stream_id||null;if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
     }
     // Re-check active session: if the user switched sessions while we were
-    // awaiting, do not send to the wrong session.
-    if(!S.session||S.session.session_id!==activeSid){
-      const branchLoaded = r && r.mode === 'branch' && r.session_id === S.session?.session_id;
-      if(!branchLoaded) return;
-    }
+    // awaiting, do not send to the wrong session. In branch mode the target
+    // is the branch session, not the original activeSid.
+    const targetSid=(r&&r.mode==='branch'&&r.session_id)?r.session_id:activeSid;
+    if(!S.session||S.session.session_id!==targetSid) return;
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();await send();
   }catch(e){showToast(t('retry_failed')+e.message);}
 }
