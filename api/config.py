@@ -986,6 +986,8 @@ def _is_known_model_provider(pid: str | None) -> bool:
     if not pid:
         return False
 
+    pid = pid.strip().lower()
+
     # Check against known provider dictionaries
     if pid in _PROVIDER_MODELS or pid in _PROVIDER_DISPLAY:
         return True
@@ -6056,21 +6058,12 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     detected_models = auto_detected_models_by_provider.get(pid)
                     if detected_models:
                         models_for_group = copy.deepcopy(detected_models)
-                    elif auto_detected_models and pid == "custom":
-                        # Don't fall back to the global auto_detected_models
-                        # list for the bare "custom" PID when the active
-                        # provider is something concrete (e.g. ai-gateway,
-                        # openrouter). Those auto-detected entries already
-                        # belong to the active provider's group — copying
-                        # them into a Custom group too produces phantom
-                        # duplicates with mismatched prefixes (#1881).
-                        if active_provider and active_provider != "custom":
+                    elif auto_detected_models and (pid == "custom" or _is_known_model_provider(pid)):
+                        if active_provider and active_provider != "custom" and pid == "custom":
                             models_for_group = []
                         else:
                             models_for_group = copy.deepcopy(auto_detected_models)
                     else:
-                        # Unknown provider with no provider-specific catalog:
-                        # don't fall back to the global catalog, skip entirely.
                         models_for_group = []
                     if models_for_group:
                         # Per-group deep copy so subsequent mutation by
