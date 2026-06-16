@@ -135,9 +135,16 @@ def main():
     plugin_name = os.environ.get("HERMES_PLUGIN_NAME", "unknown")
     plugin_dir = os.environ.get("HERMES_PLUGIN_DIR", "")
 
-    # Apply resource limits to this process (POSIX; silently skipped elsewhere)
+    # Apply resource limits to this process (POSIX; silently skipped elsewhere).
+    # NOTE: RLIMIT_AS caps *virtual address space*, not resident RAM. CPython
+    # plus shared libs already map 200-400MB before any plugin code runs, and a
+    # plugin importing numpy / Pillow / a cffi-backed lib can map well past that
+    # at startup. A tight value (e.g. 512MB) would make the interpreter abort
+    # before emitting the ready signal, so the plugin appears permanently
+    # unavailable. We set a generous ceiling that only trips on runaway
+    # allocation; true physical-RAM limiting belongs at the cgroup layer.
     for name, value in {
-        "RLIMIT_AS": 512 * 1024 * 1024, "RLIMIT_NPROC": 64,
+        "RLIMIT_AS": 3 * 1024 * 1024 * 1024, "RLIMIT_NPROC": 64,
         "RLIMIT_NOFILE": 256, "RLIMIT_CPU": 300,
     }.items():
         try:
