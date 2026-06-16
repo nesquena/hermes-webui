@@ -7005,7 +7005,8 @@ def handle_get(handler, parsed) -> bool:
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
-                state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
+                _db_tail = msg_limit * 20 if msg_limit is not None else None
+                state_db_messages = get_state_db_session_messages(sid, profile=_session_profile, tail_limit=_db_tail)
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
                 # reconciliation contract as full loads so stale/replayed

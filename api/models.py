@@ -4183,7 +4183,7 @@ def _json_loads_if_string(value):
         return value
 
 
-def get_state_db_session_messages(sid, *, stitch_continuations: bool = False, profile=None) -> list:
+def get_state_db_session_messages(sid, *, stitch_continuations: bool = False, profile=None, tail_limit: int | None = None) -> list:
     """Read messages for a Hermes session from state.db.
 
     When *profile* is supplied, reads from that profile's state.db; otherwise
@@ -4193,6 +4193,10 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False, pr
     ``stitch_continuations`` is true it preserves the historical CLI/external-agent
     behavior of walking compatible compression/close parent segments before reading
     messages.
+
+    ``tail_limit`` fetches only the last N raw rows from the DB, skipping a full
+    table scan for large sessions.  Only safe when ``stitch_continuations`` is
+    False (single-session query); ignored otherwise.
     """
     try:
         import sqlite3
@@ -4274,12 +4278,31 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False, pr
                             seen.add(current_id)
 
             placeholders = ', '.join('?' for _ in session_chain)
-            cur.execute(f"""
-                SELECT {', '.join(selected)}, session_id
-                FROM messages
-                WHERE session_id IN ({placeholders})
-                ORDER BY timestamp ASC, id ASC
-            """, session_chain)
+            use_tail = (
+                tail_limit is not None
+                and not stitch_continuations
+                and len(session_chain) == 1
+            )
+            if use_tail:
+                cols = ', '.join(selected)
+                id_order = ', id DESC' if 'id' in available else ''
+                id_asc = ', id ASC' if 'id' in available else ''
+                cur.execute(f"""
+                    SELECT {cols}, session_id FROM (
+                        SELECT {cols}, session_id
+                        FROM messages
+                        WHERE session_id IN ({placeholders})
+                        ORDER BY timestamp DESC{id_order}
+                        LIMIT {int(tail_limit)}
+                    ) ORDER BY timestamp ASC{id_asc}
+                """, session_chain)
+            else:
+                cur.execute(f"""
+                    SELECT {', '.join(selected)}, session_id
+                    FROM messages
+                    WHERE session_id IN ({placeholders})
+                    ORDER BY timestamp ASC, id ASC
+                """, session_chain)
             msgs = []
             for row in cur.fetchall():
                 msg = {
