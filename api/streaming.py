@@ -264,22 +264,22 @@ def _resolve_custom_provider_runtime_overrides(
 
 
 def _resolve_aimlapi_api_key(profile_home: str | Path | None = None) -> str | None:
+    if profile_home:
+        try:
+            env_path = Path(profile_home) / ".env"
+            if env_path.is_file():
+                for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    if key.strip() == "AIMLAPI_API_KEY":
+                        return value.strip().strip('"').strip("'") or None
+        except Exception:
+            return None
     api_key = os.getenv("AIMLAPI_API_KEY", "").strip()
     if api_key:
         return api_key
-    if not profile_home:
-        return None
-    try:
-        env_path = Path(profile_home) / ".env"
-        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            if key.strip() == "AIMLAPI_API_KEY":
-                return value.strip().strip('"').strip("'") or None
-    except OSError:
-        return None
     return None
 
 

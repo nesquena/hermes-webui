@@ -279,5 +279,37 @@ def test_aimlapi_runtime_key_fallback_reads_profile_env(tmp_path, monkeypatch):
     assert _resolve_aimlapi_api_key(tmp_path) == "aiml-profile-key"
 
 
+def test_aimlapi_runtime_key_prefers_profile_env(tmp_path, monkeypatch):
+    """The active profile key must win over a process env mirror from another profile."""
+    monkeypatch.setenv("AIMLAPI_API_KEY", "aiml-process-key")
+    (tmp_path / ".env").write_text(
+        "AIMLAPI_API_KEY=aiml-profile-key\n",
+        encoding="utf-8",
+    )
+
+    from api.streaming import _resolve_aimlapi_api_key
+
+    assert _resolve_aimlapi_api_key(tmp_path) == "aiml-profile-key"
+
+
+def test_aimlapi_runtime_key_ignores_malformed_profile_env(tmp_path, monkeypatch):
+    """Malformed profile env files should not bubble out of the streaming path."""
+    monkeypatch.setenv("AIMLAPI_API_KEY", "aiml-process-key")
+    (tmp_path / ".env").write_bytes(b"\xff\xfe\x00")
+
+    from api.streaming import _resolve_aimlapi_api_key
+
+    assert _resolve_aimlapi_api_key(tmp_path) is None
+
+
+def test_aimlapi_runtime_key_uses_process_env_without_profile_env(tmp_path, monkeypatch):
+    """Process env remains the fallback when the active profile has no .env file."""
+    monkeypatch.setenv("AIMLAPI_API_KEY", "aiml-process-key")
+
+    from api.streaming import _resolve_aimlapi_api_key
+
+    assert _resolve_aimlapi_api_key(tmp_path) == "aiml-process-key"
+
+
 if __name__ == "__main__":
     unittest.main()
