@@ -592,9 +592,15 @@ def main() -> None:
 
     # Start the gateway session watcher for real-time SSE updates
     try:
-        import threading, signal
         from api.gateway_watcher import start_watcher
-        t = threading.Thread(target=start_watcher, daemon=True)
+
+        def _start_watcher_safe():
+            try:
+                start_watcher()
+            except Exception as e:
+                print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+
+        t = threading.Thread(target=_start_watcher_safe, daemon=True)
         t.start()
         t.join(timeout=5)
         if t.is_alive():
