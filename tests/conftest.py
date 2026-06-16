@@ -81,8 +81,10 @@ def _auto_test_port(repo_root) -> int:
             except OSError:
                 continue
         # Avoid the production WebUI port (8787) on the off chance the OS hands
-        # it out, and stay clear of privileged ranges.
-        if port and port != 8787 and port >= 1024:
+        # it out, and stay clear of privileged ranges. Also cap below 64535 so
+        # tests that derive offset ports (test_server_port_exclusivity adds up to
+        # +905 to TEST_PORT) can't overflow past 65535.
+        if port and port != 8787 and 1024 <= port <= 64535:
             return port
     # Fallback to the legacy repo-hash port if the OS won't hand us one.
     import hashlib
@@ -103,6 +105,13 @@ def _auto_state_dir_name(repo_root, port=None) -> str:
     h = hashlib.md5(str(repo_root).encode()).hexdigest()[:8]
     return f"webui-test-{h}-{port}" if port else f"webui-test-{h}"
 
+# Whether the test port was explicitly pinned (vs auto-allocated). An auto port
+# is a fresh free OS port unique to this process, so it never needs the
+# _kill_port_owner() reap at setup — and reaping it would be DANGEROUS: fuser -k
+# on an ephemeral-range port can match a *client* socket (or the other concurrent
+# run's pytest) that merely has that local port, killing the wrong process. Only
+# pinned ports (which may have a genuinely stale prior server) get the reap.
+TEST_PORT_PINNED = bool(os.getenv('HERMES_WEBUI_TEST_PORT'))
 TEST_PORT      = int(os.getenv('HERMES_WEBUI_TEST_PORT',
                                str(_auto_test_port(REPO_ROOT))))
 TEST_BASE      = f"http://127.0.0.1:{TEST_PORT}"
@@ -838,9 +847,14 @@ def test_server():
     # Kill any leftover process on the test port before starting.
     # Stale servers from QA harness runs or prior test sessions cause
     # conftest to think the server is already up, producing false failures.
-    _kill_port_owner(TEST_PORT)
-    import time as _time
-    _time.sleep(0.5)  # brief pause to let the port release
+    # ONLY for a pinned port: an auto-allocated free port is unique to this
+    # process and was just confirmed free, so there's nothing stale to reap —
+    # and fuser -k on an ephemeral-range port could kill an unrelated client
+    # socket or a concurrent run's process (see TEST_PORT_PINNED note).
+    if TEST_PORT_PINNED:
+        _kill_port_owner(TEST_PORT)
+        import time as _time
+        _time.sleep(0.5)  # brief pause to let the port release
 
     # Clean slate
     if TEST_STATE_DIR.exists():
@@ -985,7 +999,8 @@ def test_server():
         except Exception:
             pass
         if _attempt < boot_attempts:
-            _kill_port_owner(TEST_PORT)
+            if TEST_PORT_PINNED:
+                _kill_port_owner(TEST_PORT)
             time.sleep(1.0)
     else:
         pytest.fail(
