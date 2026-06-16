@@ -100,7 +100,15 @@ TEST_STATE_DIR = pathlib.Path(os.getenv(
 # allowed even if it nominally sits below a temp-rooted HERMES_HOME.
 _PROD_HERMES_HOME = (HOME / '.hermes').resolve()
 _TEMP_ROOT = pathlib.Path(_tempfile.gettempdir()).resolve()
-_under_temp = TEST_STATE_DIR == _TEMP_ROOT or _TEMP_ROOT in TEST_STATE_DIR.parents
+# The temp-root exception only holds when the temp root is itself OUTSIDE the
+# production home. If TMPDIR is (mis)configured under ~/.hermes, a "temp" path is
+# still a production path — don't let it suppress the guard.
+_temp_root_is_safe = not (
+    _TEMP_ROOT == _PROD_HERMES_HOME or _PROD_HERMES_HOME in _TEMP_ROOT.parents
+)
+_under_temp = _temp_root_is_safe and (
+    TEST_STATE_DIR == _TEMP_ROOT or _TEMP_ROOT in TEST_STATE_DIR.parents
+)
 _under_prod = TEST_STATE_DIR == _PROD_HERMES_HOME or _PROD_HERMES_HOME in TEST_STATE_DIR.parents
 if _under_prod and not _under_temp:
     raise RuntimeError(
