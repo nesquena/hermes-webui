@@ -2429,8 +2429,8 @@ function renderModelDropdown(){
         const wrapper=document.createElement('div');
         wrapper.className='model-group-body';
         wrapper.dataset.group=groupKey;
-        if(!hasSearch&&Object.keys(_groupOpenState).length>0) _groupOpenState[groupKey]=false;
-        else _groupOpenState[groupKey]=true;
+        if(hasSearch) _groupOpenState[groupKey]=true;
+        else if(!(groupKey in _groupOpenState)) _groupOpenState[groupKey]=false;
         if(!_groupOpenState[groupKey]) wrapper.style.display='none';
         else heading.classList.add('open');
         heading.classList.add('collapsible');
