@@ -90,14 +90,22 @@ TEST_STATE_DIR = pathlib.Path(os.getenv(
 )).resolve()
 
 # Production-proximity guard: refuse to run if the resolved test state dir lands
-# inside the real Hermes home tree. This is a hard stop — a misconfigured
-# HERMES_WEBUI_TEST_STATE_DIR pointing at ~/.hermes would let tests wipe/clobber
-# production profiles, sessions, and credentials on teardown.
-_REAL_HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).resolve()
-if TEST_STATE_DIR == _REAL_HERMES_HOME or _REAL_HERMES_HOME in TEST_STATE_DIR.parents:
+# inside the REAL Hermes home tree — a misconfigured HERMES_WEBUI_TEST_STATE_DIR
+# pointing at ~/.hermes would let tests wipe/clobber production profiles,
+# sessions, and credentials on teardown. We anchor on the literal user-home
+# `~/.hermes` (NOT $HERMES_HOME): HERMES_HOME is frequently overridden to a
+# profile dir or, during a test run, to TEST_STATE_DIR itself — comparing
+# against it would either miss a real production path or false-trip when the
+# test dir legitimately lives in /tmp. A test dir under the OS temp dir is always
+# allowed even if it nominally sits below a temp-rooted HERMES_HOME.
+_PROD_HERMES_HOME = (HOME / '.hermes').resolve()
+_TEMP_ROOT = pathlib.Path(_tempfile.gettempdir()).resolve()
+_under_temp = TEST_STATE_DIR == _TEMP_ROOT or _TEMP_ROOT in TEST_STATE_DIR.parents
+_under_prod = TEST_STATE_DIR == _PROD_HERMES_HOME or _PROD_HERMES_HOME in TEST_STATE_DIR.parents
+if _under_prod and not _under_temp:
     raise RuntimeError(
         f"REFUSING TO RUN: test state dir {TEST_STATE_DIR} is inside the production "
-        f"Hermes home {_REAL_HERMES_HOME}. Tests must never touch production files. "
+        f"Hermes home {_PROD_HERMES_HOME}. Tests must never touch production files. "
         f"Unset HERMES_WEBUI_TEST_STATE_DIR (defaults to a temp dir) or point it "
         f"outside ~/.hermes."
     )
