@@ -13072,6 +13072,46 @@ function _showFileContextMenu(e, item){
         window.location.href='/api/artifact/zip?session_id='+encodeURIComponent(S.session.session_id)+'&id='+encodeURIComponent(id);
       };
       menu.appendChild(azItem);
+
+      // Publish to Drive (explicit, user-triggered). #82
+      const _artId=String(item.path).replace(/^\/+/,'').split('/').pop();
+      const pubItem=document.createElement('div');
+      pubItem.textContent=t('artifact_publish');
+      pubItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+      pubItem.onmouseenter=()=>pubItem.style.background='var(--hover-bg)';
+      pubItem.onmouseleave=()=>pubItem.style.background='';
+      pubItem.onclick=async()=>{
+        menu.remove();
+        showToast(t('artifact_publishing'),60000);
+        try{
+          const r=await api('/api/artifact/publish',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,artifact_id:_artId})});
+          const link=(r&&r.drive_link)||'';
+          showToast(t('artifact_published')+(link?' — '+link:''),6000);
+          if(link)window.open(link,'_blank','noopener');
+          if(S._dirCache)delete S._dirCache['_artifacts/items'];
+          loadDir(S.currentDir);
+        }catch(err){showToast(t('artifact_publish_failed')+(err.message||err),6000,'error');}
+      };
+      menu.appendChild(pubItem);
+
+      if(item.artifact_status==='published'){
+        const openItem=document.createElement('div');
+        openItem.textContent=t('artifact_open_drive');
+        openItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+        openItem.onmouseenter=()=>openItem.style.background='var(--hover-bg)';
+        openItem.onmouseleave=()=>openItem.style.background='';
+        openItem.onclick=async()=>{
+          menu.remove();
+          try{
+            const r=await api('/api/artifact/receipt?session_id='+encodeURIComponent(S.session.session_id)+'&id='+encodeURIComponent(_artId));
+            const rc=(r&&r.receipt)||{};
+            const link=rc.folder_link||rc.web_view_link||((rc.files||[])[0]||{}).webViewLink||'';
+            if(link)window.open(link,'_blank','noopener');
+            else showToast(t('artifact_no_receipt'),4000);
+          }catch(err){showToast(t('artifact_no_receipt'),4000);}
+        };
+        menu.appendChild(openItem);
+      }
     }
   }
 

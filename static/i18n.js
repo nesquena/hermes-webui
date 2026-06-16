@@ -5,6 +5,12 @@
 
 const LOCALES = {
   en: {
+    artifact_publish: 'Publish to Drive',
+    artifact_publishing: 'Publishing to Drive…',
+    artifact_published: 'Published to Drive',
+    artifact_publish_failed: 'Publish failed: ',
+    artifact_open_drive: 'Open in Drive',
+    artifact_no_receipt: 'No Drive link available',
     inbox_prefill_prompt: "Add the following to context: file '{file}' was added to the inbox.",
     inbox_prefill_toast: '📎 preloaded into the prompt',
     artifact_zip_download: 'Download ZIP (deliverable)',
@@ -11536,6 +11542,12 @@ const LOCALES = {
   },
 
   pt: {
+    artifact_publish: 'Publicar no Drive',
+    artifact_publishing: 'Publicando no Drive…',
+    artifact_published: 'Publicado no Drive',
+    artifact_publish_failed: 'Falha ao publicar: ',
+    artifact_open_drive: 'Abrir no Drive',
+    artifact_no_receipt: 'Nenhum link do Drive disponível',
     inbox_prefill_prompt: "Insira o seguinte no contexto: arquivo '{file}' foi adicionado à caixa de entrada.",
     inbox_prefill_toast: '📎 precarregado no prompt',
     artifact_zip_download: 'Baixar ZIP (entregável)',

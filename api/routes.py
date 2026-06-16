@@ -7458,6 +7458,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/artifact/zip":
         return _handle_artifact_zip(handler, parsed)
 
+    if parsed.path == "/api/artifact/receipt":
+        return _handle_artifact_receipt(handler, parsed)
+
     if parsed.path == "/api/file":
         return _handle_file_read(handler, parsed)
 
@@ -9052,6 +9055,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/inbox/move":
         return _handle_inbox_move(handler, body)
+
+    if parsed.path == "/api/artifact/publish":
+        return _handle_artifact_publish(handler, body)
 
     if parsed.path == "/api/file/create-dir":
         return _handle_create_dir(handler, body)
@@ -11961,6 +11967,117 @@ def _handle_artifact_zip(handler, parsed):
                         os.close(fd)
                     except OSError:
                         pass
+
+
+def _acervo_tool_path(name):
+    """Locate an Exocortex Acervo tool (e.g. artifact_publish.py).
+
+    Resolution order: $ACERVO/global/tools, $EXOCORTEX_HOME/acervo/global/tools,
+    then ~/exocortex/acervo/global/tools. Returns a Path or None. #82
+    """
+    candidates = []
+    acervo = os.environ.get("ACERVO")
+    if acervo:
+        candidates.append(Path(acervo) / "global" / "tools" / name)
+    exo = os.environ.get("EXOCORTEX_HOME")
+    if exo:
+        candidates.append(Path(exo) / "acervo" / "global" / "tools" / name)
+    candidates.append(Path.home() / "exocortex" / "acervo" / "global" / "tools" / name)
+    for c in candidates:
+        try:
+            if c.is_file():
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def _artifact_dir_for(session, art_id):
+    """Resolve and validate <workspace>/_artifacts/items/<id>. Returns Path or None."""
+    art_id = str(art_id or "").strip().strip("/")
+    if not art_id or "/" in art_id or art_id in (".", ".."):
+        return None
+    try:
+        return safe_resolve(Path(session.workspace), "_artifacts/items/" + art_id)
+    except ValueError:
+        return None
+
+
+def _handle_artifact_publish(handler, body):
+    """POST /api/artifact/publish {session_id, artifact_id}
+
+    Publish an artifact to Google Drive via the deterministic publisher at
+    $ACERVO/global/tools/artifact_publish.py. Returns {status, drive_link,
+    receipt}. Draft-First note: this is an explicit, user-triggered publish. #82
+    """
+    try:
+        require(body, "session_id", "artifact_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session_for_file_ops(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    artifact_dir = _artifact_dir_for(s, body.get("artifact_id"))
+    if artifact_dir is None:
+        return bad(handler, "invalid artifact id", 400)
+    if not artifact_dir.is_dir():
+        return j(handler, {"error": "artifact not found"}, status=404)
+    tool = _acervo_tool_path("artifact_publish.py")
+    if tool is None:
+        return j(handler, {"error": "artifact_publish.py not found; set ACERVO or EXOCORTEX_HOME"}, status=503)
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(tool), "publish", "--artifact-dir", str(artifact_dir)],
+            capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return j(handler, {"error": "publish timed out"}, status=504)
+    if proc.returncode != 0:
+        return j(handler, {
+            "error": "publish failed",
+            "detail": (proc.stderr or proc.stdout or "").strip()[-2000:],
+        }, status=502)
+    try:
+        result = json.loads(proc.stdout)
+    except (ValueError, json.JSONDecodeError):
+        result = {"raw": proc.stdout.strip()[-2000:]}
+    drive_link = ""
+    status = "published"
+    if isinstance(result, dict):
+        status = result.get("status", "published")
+        drive_link = result.get("folder_link") or result.get("web_view_link") or ""
+        files = result.get("files") or result.get("published_files") or []
+        if not drive_link and isinstance(files, list) and files and isinstance(files[0], dict):
+            drive_link = files[0].get("webViewLink", "")
+    return j(handler, {"ok": True, "status": status, "drive_link": drive_link, "receipt": result})
+
+
+def _handle_artifact_receipt(handler, parsed):
+    """GET /api/artifact/receipt?session_id=...&id=...
+
+    Return the parsed receipts/receipt.google_drive.json for a published
+    artifact (web_view_link / folder_path live inside). #82
+    """
+    qs = parse_qs(parsed.query)
+    sid = qs.get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id is required")
+    try:
+        s = get_session_for_file_ops(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    artifact_dir = _artifact_dir_for(s, qs.get("id", [""])[0])
+    if artifact_dir is None:
+        return bad(handler, "invalid artifact id", 400)
+    rcpt = artifact_dir / "receipts" / "receipt.google_drive.json"
+    if not rcpt.is_file():
+        return j(handler, {"error": "no receipt"}, status=404)
+    try:
+        data = json.loads(rcpt.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        return bad(handler, _sanitize_error(e), 500)
+    return j(handler, {"ok": True, "receipt": data})
 
 
 def _handle_file_raw(handler, parsed):
