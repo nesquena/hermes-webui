@@ -981,6 +981,41 @@ def _resolve_provider_alias(name: str) -> str:
     return _PROVIDER_ALIASES.get(raw, name)
 
 
+def _is_known_model_provider(provider_id: str) -> bool:
+    """True when *provider_id* names a model provider WebUI can render.
+
+    The credential pool (``auth.json`` → ``credential_pool``) stores keys for
+    BOTH model providers (whose API keys belong in the model picker) and
+    non-model platform plugins.  The Photon iMessage plugin, for example,
+    writes ``photon`` / ``photon_project`` / ``photon_user`` pool entries that
+    are messaging-platform credentials, not LLM API keys.  Only the former
+    should surface as provider groups.
+
+    Without this gate, #4247's pool-detection loop added *every* pool key to
+    ``detected_providers``; unknown ids then fell through to the global
+    auto-detected catalog and each phantom provider was painted with the full
+    model list (#4324).  ``provider_id`` is expected to be the canonical slug
+    (post ``_resolve_provider_alias``); the lookup is case-insensitive.
+
+    A provider is "known" when it is a configured custom-provider slug
+    (``custom:*``), appears in WebUI's static ``_PROVIDER_DISPLAY`` /
+    ``_PROVIDER_MODELS`` tables, or is a registered model-provider plugin.
+    """
+    pid = (provider_id or "").strip().lower()
+    if not pid:
+        return False
+    if pid.startswith("custom:"):
+        return True
+    if pid in _PROVIDER_DISPLAY or pid in _PROVIDER_MODELS:
+        return True
+    try:
+        if _is_plugin_model_provider(pid):
+            return True
+    except Exception:
+        logger.debug("plugin model-provider check failed for %s", pid)
+    return False
+
+
 def _custom_provider_slug_from_name(name: object) -> str:
     raw = str(name or "").strip().lower()
     if not raw:
@@ -5029,7 +5064,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                                     str(getattr(e, "key_source", "") or ""),
                                 )
                             ]
-                            if _explicit:
+                            if _explicit and _is_known_model_provider(_canonical_pid):
                                 detected_providers.add(_canonical_pid)
                         except Exception:
                             logger.debug("credential_pool.load_pool(%s) failed", _pid)
@@ -5047,7 +5082,9 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                             for _entry in _entries
                         )
                         if _has_explicit_cred:
-                            detected_providers.add(_resolve_provider_alias(str(_pid)))
+                            _canonical_pid = _resolve_provider_alias(str(_pid))
+                            if _is_known_model_provider(_canonical_pid):
+                                detected_providers.add(_canonical_pid)
         except Exception:
             logger.debug("Failed to inspect credential_pool from auth store")
 
@@ -6034,7 +6071,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     detected_models = auto_detected_models_by_provider.get(pid)
                     if detected_models:
                         models_for_group = copy.deepcopy(detected_models)
-                    elif auto_detected_models:
+                    elif auto_detected_models and (pid == "custom" or _is_known_model_provider(pid)):
                         # Don't fall back to the global auto_detected_models
                         # list for the bare "custom" PID when the active
                         # provider is something concrete (e.g. ai-gateway,
@@ -6047,6 +6084,17 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         else:
                             models_for_group = copy.deepcopy(auto_detected_models)
                     else:
+                        # An unrecognized provider id with no catalog of its
+                        # own must NOT be painted with the global
+                        # auto_detected_models list. Otherwise a non-model
+                        # credential_pool key (the Photon plugin's
+                        # photon/photon_project/photon_user entries, #4324) or
+                        # any future unknown id renders as a phantom provider
+                        # carrying the active endpoint's entire model catalog.
+                        # Such ids are dropped upstream by
+                        # _is_known_model_provider() in the pool-detection
+                        # loop; this omission is belt-and-braces matching the
+                        # #1572/#7372 "omit rather than misattribute" posture.
                         models_for_group = []
                     if models_for_group:
                         # Per-group deep copy so subsequent mutation by
