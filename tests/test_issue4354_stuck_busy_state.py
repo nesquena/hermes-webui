@@ -166,6 +166,34 @@ def test_attach_live_stream_has_silence_watchdog():
         "(and the initial declaration counts as 1, so we need ≥2 total writes)"
     )
 
+    # The server sends exclusively *named* SSE events. addEventListener('message')
+    # only fires for unnamed events per the EventSource spec, so wiring the
+    # bump to 'message' would mean _lastEventAt is never refreshed during
+    # active streaming — the watchdog would fire on every stream > 5 min.
+    # The bump must be in a *named* handler. We require it to be in 'token'
+    # (the highest-frequency named event) so a 5-min quiet window truly
+    # reflects server silence.
+    assert re.search(
+        r"source\.addEventListener\(\s*'token'[\s\S]{0,800}?_lastEventAt\s*=",
+        body,
+    ), (
+        "watchdog _lastEventAt must be bumped from the 'token' handler "
+        "(server sends only named events; 'message' never fires for them)"
+    )
+    # And no broken 'message' handler should be doing the bump — if it were,
+    # the test above would still pass on a buggy implementation where the
+    # bump is on a never-firing listener. We require the literal
+    # addEventListener('message', ... pattern (with comma after the event
+    # name) so the regex doesn't match the comment text that references
+    # 'message' as documentation.
+    assert not re.search(
+        r"addEventListener\(\s*'message'\s*,",
+        body,
+    ), (
+        "watchdog _lastEventAt must NOT be bumped from a 'message' listener "
+        "(would never fire for this server's named-event protocol)"
+    )
+
     # Terminal events clear the watchdog interval.
     for term in ("'done'", "'apperror'", "_closeSource"):
         assert term in body, f"watchdog must clear on terminal event {term}"

@@ -2991,11 +2991,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // in this function and at the top of attachLiveStream) can clear it.
     _silenceWatchdogInterval = _setupSilenceWatchdog(source);
 
-    // Bump the silence watchdog on any received event (#4354). A generic
-    // onmessage handler covers all event types including future additions.
-    try {
-      source.addEventListener('message', () => { _lastEventAt = Date.now(); });
-    } catch (_) {}
+    // Bump the silence watchdog heartbeat. The server sends exclusively
+    // *named* SSE events (token, stream_end, done, apperror), and per the
+    // EventSource spec addEventListener('message') only fires for *unnamed*
+    // events (no event: field). The 'token' handler below does the actual
+    // bump — it is the highest-frequency named event and tracks real
+    // server liveness. No 'message' handler is registered because it would
+    // never fire for this server's protocol.
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -3013,6 +3015,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // terminal handlers) address it without needing a reset here.
 
     source.addEventListener('token',e=>{
+      // Bump the silence watchdog heartbeat. The server sends exclusively
+      // *named* SSE events, so addEventListener('message') never fires —
+      // we have to bump _lastEventAt from a named handler. 'token' is the
+      // highest-frequency named event, so it tracks real server liveness.
+      _lastEventAt=Date.now();
       if(_terminalStateReached||_streamFinalized) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;

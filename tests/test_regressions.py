@@ -357,7 +357,10 @@ def test_token_handler_guards_session_id(cleanup_test_sessions):
     if token_idx < 0:
         token_idx = src.find("es.addEventListener('token'")
     assert token_idx >= 0, "token event handler not found"
-    token_block = src[token_idx:token_idx+300]
+    # #4354 added a comment + _lastEventAt bump at the top of the 'token'
+    # handler; widen the window from 300 to 800 to keep the activeSid guard
+    # check in scope.
+    token_block = src[token_idx:token_idx+800]
     assert "activeSid" in token_block, \
         "token handler must check activeSid before writing to DOM"
     assert "S.session.session_id!==activeSid" in token_block or \
