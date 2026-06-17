@@ -7191,6 +7191,18 @@ async function loadSettingsPanel(){
       const current=localStorage.getItem('hermes-tts-voice')||'';
       if(engine==='elevenlabs'){
         ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
+      } else if(engine==='irodori'){
+        const irodoriVoices=[
+          {value:'none',label:'Default (none)'},
+          {value:'hakua',label:'Hakua'},
+        ];
+        ttsVoiceSel.innerHTML='';
+        irodoriVoices.forEach(v=>{
+          const opt=document.createElement('option');
+          opt.value=v.value;opt.textContent=v.label;
+          if(v.value===current) opt.selected=true;
+          ttsVoiceSel.appendChild(opt);
+        });
       } else if(engine==='edge'){
         const edgeVoices=[
           {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},

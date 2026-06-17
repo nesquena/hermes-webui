@@ -11484,6 +11484,102 @@ def _normalize_tts_prosody(value, *, unit: str) -> str | None:
     return None
 
 
+def _is_loopback_tts_host(hostname: str | None) -> bool:
+    return (hostname or "").strip().lower() in {"127.0.0.1", "localhost", "::1"}
+
+
+def _normalize_irodori_base_url(value: str) -> str:
+    base = (value or "").strip().rstrip("/")
+    for suffix in ("/v1/audio/speech", "/v1"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)].rstrip("/")
+    return base
+
+
+def _parse_irodori_speed(value, *, fallback: float = 1.0) -> float | None:
+    if value is None or value == "":
+        return fallback
+    try:
+        speed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if 0.25 <= speed <= 4.0:
+        return speed
+    return None
+
+
+def _safe_irodori_voice_id(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]+", value or ""))
+
+
+def _resolve_irodori_tts_settings() -> dict:
+    """Resolve Irodori TTS settings from env, ~/.hermes/.env, and config.yaml."""
+    base_url = os.getenv("IRODORI_TTS_BASE_URL", "http://127.0.0.1:8088")
+    model = os.getenv("IRODORI_TTS_MODEL", "irodori-tts")
+    voice = os.getenv("IRODORI_TTS_VOICE", "none")
+    speed = _parse_irodori_speed(os.getenv("IRODORI_TTS_SPEED"), fallback=1.0) or 1.0
+    api_key = os.getenv("IRODORI_API_KEY", "").strip()
+
+    try:
+        from api.onboarding import _load_env_file
+        from api.profiles import get_active_hermes_home
+
+        env_file = _load_env_file(get_active_hermes_home() / ".env")
+        api_key = api_key or env_file.get("IRODORI_API_KEY", "").strip()
+        base_url = env_file.get("IRODORI_TTS_BASE_URL", base_url)
+        model = env_file.get("IRODORI_TTS_MODEL", model)
+        voice = env_file.get("IRODORI_TTS_VOICE", voice)
+        if env_file.get("IRODORI_TTS_SPEED") not in (None, ""):
+            speed = _parse_irodori_speed(env_file.get("IRODORI_TTS_SPEED"), fallback=speed) or speed
+    except Exception:
+        pass
+
+    try:
+        from api.config import get_config
+
+        tts_cfg = (get_config() or {}).get("tts", {})
+        if isinstance(tts_cfg, dict):
+            ir_cfg = tts_cfg.get("irodori", {})
+            if not isinstance(ir_cfg, dict):
+                ir_cfg = {}
+            if tts_cfg.get("provider") == "irodori" and not ir_cfg:
+                ir_cfg = {
+                    key: tts_cfg.get(key)
+                    for key in ("base_url", "model", "voice", "voice_id", "speed", "default_voice")
+                    if tts_cfg.get(key) not in (None, "")
+                }
+            base_url = ir_cfg.get("base_url", base_url)
+            model = ir_cfg.get("model", model) or model
+            voice = ir_cfg.get("voice_id", ir_cfg.get("voice", ir_cfg.get("default_voice", voice))) or voice
+            if ir_cfg.get("speed") not in (None, ""):
+                speed = _parse_irodori_speed(ir_cfg.get("speed"), fallback=speed) or speed
+    except Exception:
+        pass
+
+    return {
+        "base_url": _normalize_irodori_base_url(base_url),
+        "model": str(model).strip() or "irodori-tts",
+        "voice": str(voice).strip() or "none",
+        "speed": speed,
+        "api_key": api_key,
+    }
+
+
+def _irodori_api_key_allowed(base_url: str, api_key: str) -> bool:
+    if not api_key:
+        return False
+    allow_remote = os.getenv("IRODORI_TTS_ALLOW_REMOTE_API_KEY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if allow_remote:
+        return True
+    host = urlsplit(base_url if "://" in base_url else f"http://{base_url}").hostname
+    return _is_loopback_tts_host(host)
+
+
 def _handle_tts(handler, parsed):
     """Generate TTS audio via Edge TTS. POST JSON body only.
 
@@ -11505,7 +11601,7 @@ def _handle_tts(handler, parsed):
     voice = "zh-CN-XiaoxiaoNeural"
     rate_str = ""
     pitch_str = ""
-    engine = "edge"  # "edge" | "elevenlabs" | "browser" (browser is client-side only)
+    engine = "edge"  # "edge" | "elevenlabs" | "irodori" | "browser" (browser is client-side only)
 
     if handler.command != "POST":
         from api.helpers import bad as _bad
@@ -11518,9 +11614,17 @@ def _handle_tts(handler, parsed):
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
         engine = (data.get("engine") or "edge").strip().lower()
+        speed_raw = data.get("speed")
     except Exception:
         from api.helpers import bad as _bad
         return _bad(handler, "invalid request body", 400)
+
+    irodori_speed = None
+    if speed_raw not in (None, ""):
+        irodori_speed = _parse_irodori_speed(speed_raw)
+        if irodori_speed is None:
+            from api.helpers import bad as _bad
+            return _bad(handler, "invalid speed (expected 0.25–4.0)", 400)
 
     if rate_str is None:
         from api.helpers import bad as _bad
@@ -11589,6 +11693,72 @@ def _handle_tts(handler, parsed):
         logger.warning("TTS rate limit hit for client=%s", limiter._get_client_key(handler))
         from api.helpers import bad as _bad
         return _bad(handler, "rate limit exceeded — please wait", 429)
+
+    # ── Irodori TTS (OpenAI-compatible /v1/audio/speech) ───────────────
+    if engine == "irodori":
+        cfg = _resolve_irodori_tts_settings()
+        voice_id = (voice or cfg["voice"]).strip() or cfg["voice"]
+        if not _safe_irodori_voice_id(voice_id):
+            from api.helpers import bad as _bad
+            return _bad(handler, "invalid voice", 400)
+        if not _safe_irodori_voice_id(cfg["model"]):
+            from api.helpers import bad as _bad
+            return _bad(handler, "invalid model in config", 400)
+
+        speed = cfg["speed"] if irodori_speed is None else irodori_speed
+        endpoint = f"{cfg['base_url']}/v1/audio/speech"
+        req_body = json.dumps({
+            "model": cfg["model"],
+            "input": text,
+            "voice": voice_id,
+            "response_format": "mp3",
+            "speed": speed,
+        }).encode("utf-8")
+
+        from urllib.request import Request, urlopen as _urlopen
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+        }
+        if _irodori_api_key_allowed(cfg["base_url"], cfg["api_key"]):
+            headers["Authorization"] = f"Bearer {cfg['api_key']}"
+
+        req = Request(endpoint, data=req_body, headers=headers, method="POST")
+        audio_data = b""
+        try:
+            with _urlopen(req, timeout=120) as resp:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    audio_data += chunk
+        except Exception as exc:
+            logger.exception("Irodori TTS generation failed")
+            from api.helpers import bad as _bad
+            detail = str(exc).strip() or "connection failed"
+            if "Connection refused" in detail or "actively refused" in detail:
+                return _bad(
+                    handler,
+                    "Irodori TTS server unreachable — start the local server or check IRODORI_TTS_BASE_URL",
+                    503,
+                )
+            return _bad(handler, "Irodori TTS generation failed", 500)
+
+        if not audio_data:
+            from api.helpers import bad as _bad
+            return _bad(handler, "TTS produced no audio", 500)
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/mpeg")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(audio_data)))
+        handler.end_headers()
+        try:
+            handler.wfile.write(audio_data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return True
 
     # ── ElevenLabs TTS ──────────────────────────────────────────────────
     if engine == "elevenlabs":

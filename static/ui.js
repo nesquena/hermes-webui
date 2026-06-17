@@ -5941,6 +5941,10 @@ function speakMessage(btn){
     _playElevenLabsTts(clean, btn);
     return;
   }
+  if(engine==='irodori'){
+    _playIrodoriTts(clean, btn);
+    return;
+  }
   if(engine==='edge'){
     _playEdgeTtsChunked(clean, btn);
     return;
@@ -5960,6 +5964,42 @@ function speakMessage(btn){
   const utter=_buildBrowserUtterance(_ttsChunkQueue[0], btn);
   _ttsCurrentUtterance=utter;
   speechSynthesis.speak(utter);
+}
+
+function _irodoriTtsPayload(text){
+  const voice=localStorage.getItem('hermes-tts-voice')||'';
+  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+  const body={text:text, engine:'irodori'};
+  if(voice) body.voice=voice;
+  if(!isNaN(savedRate)) body.speed=savedRate;
+  return body;
+}
+
+function _playIrodoriTts(text, btn){
+  if(btn) btn.dataset.speaking='1';
+  _ttsSpeaking=true;
+  const _fail=function(msg){
+    _ttsSpeaking=false;_playingEdgeAudio=null;
+    if(btn)btn.dataset.speaking='0';
+    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+  };
+  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(_irodoriTtsPayload(text))
+  })
+  .then(function(r){
+    if(!r.ok){
+      return r.json().catch(function(){return {};}).then(function(j){
+        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+      });
+    }
+    return r.arrayBuffer();
+  })
+  .then(function(buf){
+    return _playAudioBuf(buf, btn, 'Irodori TTS');
+  })
+  .catch(function(e){ _fail((e&&e.message)||'Irodori TTS failed'); });
 }
 
 function _playElevenLabsTts(text, btn){
@@ -6070,6 +6110,10 @@ function autoReadLastAssistant(){
   if(!clean) return;
   if(engine==='elevenlabs'){
     _playElevenLabsTts(clean, null);
+    return;
+  }
+  if(engine==='irodori'){
+    _playIrodoriTts(clean, null);
     return;
   }
   if(engine==='edge'){

@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Irodori TTS is now selectable as a server-side TTS engine in Settings → Preferences.** Alongside Browser speech synthesis, Edge TTS, and ElevenLabs, you can pick Irodori for voice mode and message read-aloud. It calls a local OpenAI-compatible `/v1/audio/speech` endpoint using `IRODORI_TTS_BASE_URL` (env or `~/.hermes/.env`), optional `IRODORI_API_KEY`, and `tts.irodori` / `tts.provider: irodori` from the Hermes agent config. API keys are sent only to loopback hosts unless `IRODORI_TTS_ALLOW_REMOTE_API_KEY=1`.
+
 ## [v0.51.481] — 2026-06-17 — Release QP (gateway start/stop/restart controls in Settings)
 
 ### Added
