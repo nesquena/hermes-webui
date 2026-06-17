@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+- **The "Running" indicator no longer stays stuck after long provider connection errors (#4354).** The WebUI now (a) force-closes the live SSE connection and clears the local busy state after 5 minutes of silence with a low-key reconnecting toast, (b) lets the periodic `/api/sessions` reconcile path clear the busy state even while a send is in flight (gated on the server reporting the session as idle), and (c) only re-asserts busy state on session entry when the server's `active_stream_id` matches the local INFLIGHT's streamId. Pure WebUI change; no agent-side coordination required.
+
 ## [v0.51.489] — 2026-06-18 — Release QY (outline button no longer collides with the scroll control)
 
 ### Fixed
