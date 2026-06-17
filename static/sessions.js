@@ -387,9 +387,15 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   if (!serverRow) return false;
   if (!_isServerIdleSessionRow(serverRow)) return false;
   let changed=false;
-  if (typeof _sendInProgress !== 'undefined' && _sendInProgress) {
+  // Only clear _sendInProgress if it belongs to the *active* session. A
+  // background send in flight for a different session must not be clobbered
+  // by a reconcile on the active session — that would silently drop send
+  // tracking for the other session and risk a double-send. The sid guard
+  // matches every other call site in the file (#4354).
+  if (typeof _sendInProgress !== 'undefined' && _sendInProgress
+      && typeof _sendInProgressSid !== 'undefined' && _sendInProgressSid === sid) {
     _sendInProgress = false;
-    if (typeof _sendInProgressSid !== 'undefined') _sendInProgressSid = null;
+    _sendInProgressSid = null;
     changed = true;
   }
   if (S.busy) { S.busy=false; changed=true; }
@@ -1286,8 +1292,18 @@ async function loadSession(sid){
       // not the discard path. Mirrors Phase 2b's idle-session render
       // (syncTopbar + renderMessages) so the chat pane is visible after
       // the switch.
+      //
+      // Reset S.busy / S.activeStreamId here, not in the subsequent
+      // if(activeStreamId) block: those flags can carry over from a
+      // previous active session and the async _ensureMessagesLoaded
+      // await can leave the "Running" indicator stuck in the gap before
+      // the if(activeStreamId) block runs. updateSendBtn() refreshes the
+      // composer button to match the new idle state.
       delete INFLIGHT[sid];
       if(typeof clearInflightState==='function') clearInflightState(sid);
+      S.busy=false;
+      S.activeStreamId=null;
+      if(typeof updateSendBtn==='function') updateSendBtn();
       try {
         await _ensureMessagesLoaded(sid);
       } catch(_) {

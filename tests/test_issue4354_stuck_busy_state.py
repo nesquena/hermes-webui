@@ -218,7 +218,18 @@ def test_reconcile_active_session_idle_drops_send_progress_gate():
     )
 
     # The force-clear block resets the gate variable and the sid, but only
-    # inside the mutation path (i.e. gated by `if (S.busy)` or equivalent).
+    # when the in-progress send is for the *active* session — otherwise
+    # a background send in flight for a different session would be silently
+    # clobbered (#4354 P1, Greptile review). The sid guard must appear
+    # before the reset, in the same conditional as the _sendInProgress
+    # truthiness check.
+    assert re.search(
+        r"_sendInProgress[^&|]*&&[^&|]*_sendInProgressSid[^=]*===\s*sid",
+        body,
+    ), (
+        "reconcile force-clear must guard on _sendInProgressSid === sid "
+        "so a background send for another session isn't clobbered"
+    )
     assert re.search(r"_sendInProgress\s*=\s*false", body), (
         "reconcile must force-clear _sendInProgress when mutating state"
     )
@@ -290,6 +301,16 @@ def test_inflight_reattach_uses_server_truth():
     )
     assert "clearInflightState(sid)" in block_body, (
         "INFLIGHT reattach discard branch must call clearInflightState(sid)"
+    )
+    # The discard branch must also reset S.busy and S.activeStreamId so
+    # the "Running" indicator doesn't stay stuck when those flags were
+    # true from a preceding active session. updateSendBtn() refreshes the
+    # composer button. (#4354 P1, Greptile review.)
+    assert re.search(r"S\.busy\s*=\s*false", block_body), (
+        "INFLIGHT reattach discard branch must reset S.busy = false"
+    )
+    assert re.search(r"S\.activeStreamId\s*=\s*null", block_body), (
+        "INFLIGHT reattach discard branch must reset S.activeStreamId = null"
     )
 
     # The re-assert branch sets S.busy = true, AND it must be guarded by the
