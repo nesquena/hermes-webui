@@ -6648,7 +6648,7 @@ async function refreshSession() {
 }
 // ── Update banner ──
 function _formatUpdateTargetStatus(label,info){
-  if(!info||!(info.behind>0)) return null;
+  if(!info||info.no_git||!(info.behind>0)) return null;
   const release=(info.release_based&&info.latest_version)
     ?` (${info.current_version||'unknown'} -> ${info.latest_version})`
     :(info.branch?` (${info.branch})`:'');

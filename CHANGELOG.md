@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Docker and pip installs now show "Can't check for updates" instead of the misleading "Up to date" (#4356).** When the WebUI or agent is installed without a `.git` directory (e.g. via Docker image or `pip install`), the update check previously reported "Up to date" because there was nothing to compare against. It now detects the absence of `.git` and surfaces "Can't check for updates" in the settings panel. In mixed deployments where one component has a git checkout and the other does not, the valid git-side update info is still shown alongside the can't-check indicator.
+
 ## [v0.51.475] — 2026-06-17 — Release QJ (ElevenLabs TTS engine)
 
 ### Added
