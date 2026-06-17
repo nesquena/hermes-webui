@@ -75,11 +75,16 @@ class TestPasteHandlerTextWithImage:
         Additionally, text-only clipboards (no image items) must early-return before
         reaching the attach path."""
         body = _paste_handler_body()
-        # Text-only early-out: if no image items, return before any attach logic.
-        assert re.search(
-            r"if\s*\(\s*!\s*imageItems\.length\s*\)\s*return\s*;",
-            body,
-        ), "handler must early-return when there are no image files (text-only paste)"
+        # Text-only small pastes should return before preventDefault/attach;
+        # large text-only pastes may continue into the markdown-attachment path.
+        assert "if(!_shouldAttachLargePastedText(plainText))return;" in body, (
+            "handler must leave normal text-only paste to the browser before any preventDefault"
+        )
+        # The new text-only branch must run after the image path has returned,
+        # so image+text paste still uses the #1620 path below.
+        assert body.index("return;\n  }\n  const plainText") > body.index("addFiles(files)"), (
+            "text-only large-paste handling must not intercept the image+text attach path"
+        )
         # preventDefault must be gated on !hasText so text+image pastes let the
         # browser insert text natively.
         assert re.search(

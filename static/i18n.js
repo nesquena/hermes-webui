@@ -39,6 +39,7 @@ const LOCALES = {
     import_failed: 'Import failed: ',
     import_invalid_json: 'Invalid JSON',
     image_pasted: 'Image pasted: ',
+    text_pasted: 'Pasted text attached as ',
     // messages.js
     edit_message: 'Edit message',
     regenerate: 'Regenerate response',
@@ -1550,6 +1551,7 @@ const LOCALES = {
     import_failed: 'Importazione fallita: ',
     import_invalid_json: 'JSON non valido',
     image_pasted: 'Immagine incollata: ',
+    text_pasted: 'Testo incollato allegato come ',
     // messages.js
     edit_message: 'Modifica messaggio',
     regenerate: 'Rigenera risposta',
@@ -3052,6 +3054,7 @@ const LOCALES = {
     import_failed: 'インポート失敗: ',
     import_invalid_json: '無効な JSON',
     image_pasted: '画像を貼り付けました: ',
+    text_pasted: '貼り付けたテキストを添付しました: ',
     // messages.js
     edit_message: 'メッセージを編集',
     regenerate: '応答を再生成',
@@ -4557,6 +4560,7 @@ const LOCALES = {
     import_failed: 'Не удалось импортировать: ',
     import_invalid_json: 'Неверный JSON',
     image_pasted: 'Изображение вставлено: ',
+    text_pasted: 'Вставленный текст прикреплён как ',
     edit_message: 'Редактировать сообщение',
     regenerate: 'Сгенерировать ответ заново',
     copy: 'Копировать',
@@ -5990,6 +5994,7 @@ const LOCALES = {
     import_failed: 'Error al importar: ',
     import_invalid_json: 'JSON inválido',
     image_pasted: 'Imagen pegada: ',
+    text_pasted: 'Texto pegado adjuntado como ',
     // messages.js
     edit_message: 'Editar mensaje',
     regenerate: 'Regenerar respuesta',
@@ -7428,6 +7433,7 @@ const LOCALES = {
     import_failed: 'Import fehlgeschlagen: ',
     import_invalid_json: 'Ungültiges JSON',
     image_pasted: 'Bild eingefügt: ',
+    text_pasted: 'Eingefügter Text angehängt als ',
     // messages.js
     edit_message: 'Nachricht bearbeiten',
     regenerate: 'Antwort regenerieren',
@@ -8870,6 +8876,7 @@ const LOCALES = {
     import_failed: '导入失败：',
     import_invalid_json: 'JSON 无效',
     image_pasted: '已粘贴图片：',
+    text_pasted: '已将粘贴文本附加为：',
     // messages.js
     edit_message: '编辑消息',
     regenerate: '重新生成回复',
@@ -10320,6 +10327,7 @@ const LOCALES = {
     import_failed: '匯入失敗：',
     import_invalid_json: '無效的 JSON',
     image_pasted: '已貼上圖片：',
+    text_pasted: '已將貼上文字附加為：',
     // messages.js
     edit_message: '編輯訊息',
     regenerate: '重新產生回覆',
@@ -11811,6 +11819,7 @@ const LOCALES = {
     import_failed: 'Falha na importação: ',
     import_invalid_json: 'JSON inválido',
     image_pasted: 'Imagem colada: ',
+    text_pasted: 'Texto colado anexado como ',
     // messages.js
     edit_message: 'Editar mensagem',
     regenerate: 'Regenerar resposta',
@@ -13133,6 +13142,7 @@ const LOCALES = {
     import_failed: '가져오기 실패: ',
     import_invalid_json: '잘못된 JSON입니다',
     image_pasted: '붙여넣은 이미지: ',
+    text_pasted: '붙여넣은 텍스트를 첨부했습니다: ',
     // messages.js
     edit_message: '메시지 편집',
     regenerate: '응답 다시 생성',
@@ -14635,6 +14645,7 @@ const LOCALES = {
     import_failed: 'Échec de l\'importation :',
     import_invalid_json: 'JSON invalide',
     image_pasted: 'Image collée :',
+    text_pasted: 'Texte collé joint sous ',
     edit_message: 'Modifier le message',
     regenerate: 'Régénérer la réponse',
     copy: 'Copie',
@@ -16077,6 +16088,7 @@ const LOCALES = {
     import_failed: 'İçe aktarma başarısız oldu:',
     import_invalid_json: 'Geçersiz JSON',
     image_pasted: 'Yapıştırılan resim:',
+    text_pasted: 'Yapıştırılan metin şu adla eklendi: ',
     // messages.js
     edit_message: 'Mesajı düzenle',
     regenerate: 'Yanıtı yeniden oluştur',
@@ -17572,6 +17584,7 @@ const LOCALES = {
     import_failed: 'Import nie powiódł się: ',
     import_invalid_json: 'Nieprawidłowy JSON',
     image_pasted: 'Wklejono obraz: ',
+    text_pasted: 'Wklejony tekst załączono jako ',
     // messages.js
     edit_message: 'Edytuj wiadomość',
     regenerate: 'Wygeneruj ponownie odpowiedź',

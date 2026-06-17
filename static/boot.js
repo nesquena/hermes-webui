@@ -1569,26 +1569,66 @@ document.addEventListener('keydown',async e=>{
     }
   }
 });
+const LARGE_TEXT_PASTE_CHAR_THRESHOLD=4000;
+const LARGE_TEXT_PASTE_LINE_THRESHOLD=100;
+function _largeTextPasteLineCount(text){
+  const value=String(text||'');
+  const lines=value.split('\n');
+  return value.endsWith('\n')?lines.length-1:lines.length;
+}
+function _shouldAttachLargePastedText(text){
+  const value=String(text||'');
+  if(!value.trim())return false;
+  return value.length>=LARGE_TEXT_PASTE_CHAR_THRESHOLD || _largeTextPasteLineCount(value)>=LARGE_TEXT_PASTE_LINE_THRESHOLD;
+}
+function _largeTextPasteFileName(now){
+  const d=new Date(now||Date.now());
+  const stamp=d.toISOString().replace(/[:.]/g,'-').replace('T','_').replace('Z','');
+  const existing=new Set((S.pendingFiles||[]).map(f=>f&&f.name).filter(Boolean));
+  let name=`pasted-text-${stamp}.md`;
+  for(let i=2;existing.has(name);i++)name=`pasted-text-${stamp}-${i}.md`;
+  return name;
+}
+function _largeTextPasteFile(text,now){
+  const name=_largeTextPasteFileName(now||Date.now());
+  return new File([String(text||'')],name,{type:'text/markdown;charset=utf-8'});
+}
+function _largeTextPasteFitsUploadLimit(file){
+  return !(file&&typeof MAX_UPLOAD_BYTES==='number'&&file.size>MAX_UPLOAD_BYTES);
+}
+function _attachLargePastedText(file){
+  addFiles([file]);
+  if(typeof setStatus==='function')setStatus(t('text_pasted')+file.name);
+  return file;
+}
 $('msg').addEventListener('paste',e=>{
   const items=Array.from(e.clipboardData?.items||[]);
   // Extract image items (kind==='file' filter avoids misclassifying text/html
   // with embedded data URIs as images).
   const imageItems=items.filter(i=>i.kind==='file'&&i.type.startsWith('image/'));
-  if(!imageItems.length)return;
-  // If text is also present (common when copying images from browsers, Notes,
-  // Slack, etc.), let the browser paste the text normally AND attach the image.
-  // Only preventDefault when the clipboard is image-only (true screenshot paste).
-  const hasText=items.some(i=>i.kind==='string'&&(i.type==='text/plain'||i.type==='text/html'));
-  if(!hasText)e.preventDefault();
-  const pasteTs=Date.now();
-  const files=imageItems.map((i,idx)=>{
-    const blob=i.getAsFile();
-    const ext=i.type.split('/')[1]||'png';
-    const suffix=imageItems.length>1?`-${idx+1}`:'';
-    return new File([blob],`screenshot-${pasteTs}${suffix}.${ext}`,{type:i.type});
-  });
-  addFiles(files);
-  setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+  if(imageItems.length){
+    // If text is also present (common when copying images from browsers, Notes,
+    // Slack, etc.), let the browser paste the text normally AND attach the image.
+    // Only preventDefault when the clipboard is image-only (true screenshot paste).
+    const hasText=items.some(i=>i.kind==='string'&&(i.type==='text/plain'||i.type==='text/html'));
+    if(!hasText)e.preventDefault();
+    const pasteTs=Date.now();
+    const files=imageItems.map((i,idx)=>{
+      const blob=i.getAsFile();
+      const ext=i.type.split('/')[1]||'png';
+      const suffix=imageItems.length>1?`-${idx+1}`:'';
+      return new File([blob],`screenshot-${pasteTs}${suffix}.${ext}`,{type:i.type});
+    });
+    addFiles(files);
+    setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+    return;
+  }
+  const plainText=e.clipboardData?.getData('text/plain')||'';
+  if(!_shouldAttachLargePastedText(plainText))return;
+  const pastedTextFile=_largeTextPasteFile(plainText);
+  if(!_largeTextPasteFitsUploadLimit(pastedTextFile))return;
+  e.preventDefault();
+  _attachLargePastedText(pastedTextFile);
 });
 document.querySelectorAll('.suggestion').forEach(btn=>{
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
