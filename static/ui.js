@@ -12452,8 +12452,10 @@ function loadPdfInline(container){
               canvas.width=viewport.width;
               canvas.height=viewport.height;
               canvas.className='pdf-preview-canvas';
-              body.appendChild(canvas);
-              return page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
+              // Attach only after a successful render, so a render rejection
+              // (corrupt page data, null 2d context) can't leave a blank canvas
+              // behind — the .catch then simply skips to the next page.
+              return page.render({canvasContext:canvas.getContext('2d'),viewport}).promise.then(()=>{ body.appendChild(canvas); });
             }).then(()=>renderPage(i+1)).catch(()=>renderPage(i+1));
           };
           renderPage(1);
