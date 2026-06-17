@@ -575,6 +575,26 @@ EXPECT:
   - Clicking "Dismiss" removes the banner
 FAIL: No banner shown, page crashes, banner appears on normal reloads with no in-flight request.
 
+### Stuck "Running" indicator after long provider errors (#4354)
+
+1. Open a session, send a message.
+2. Use a network throttling proxy (e.g. Charles, mitmproxy) to block all traffic
+   to the provider's host for > 5 minutes while keeping the WebUI's own port
+   reachable.
+3. Observe the "Running" indicator stays on; EventSource drops silently; no
+   `apperror` event arrives.
+4. **Expected after the fix:** at the 5-minute mark, a "Stream connection
+   lost — reconnecting." toast appears and the "Running" indicator clears.
+   The active transcript remains. The periodic `/api/sessions` poll resumes
+   normal traffic.
+5. Restore network. No zombie busy state on the active pane.
+6. Switch to another session and back. **Expected:** no "Running" re-assertion
+   (because the local INFLIGHT was discarded by the server-truth check on
+   session entry).
+7. Variant: with a smaller watchdog threshold and a much longer retry budget,
+   the watchdog may fire during a legitimate retry. The user sees a brief
+   reconnecting toast and the indicator re-asserts on the next poll.
+
 ---
 
 ## Section 10: Multi-Session and Concurrent Behavior
