@@ -44,6 +44,57 @@ Follow that checklist's safety rules:
 
 ## Contribution style
 
+### Codebase navigation — prefer the indexed graph tools over raw grep
+
+Before grepping the codebase directly, prefer the indexed code-graph
+tools. They return call relationships, structural context, and
+"what depends on this" — information raw `grep` cannot.
+
+- **codegraph** (MCP `codegraph_codegraph_*`): structural queries over
+  the WebUI frontend (`static/*.js`, `bootstrap.py`, `api/`). Use
+  `codegraph_codegraph_explore --query "<concept>"` for source plus
+  call edges, `codegraph_codegraph_node --file <path>` for a single
+  file, `codegraph_codegraph_callers --symbol <name>` for blast radius
+  before editing.
+- **gitnexus** (MCP `gitnexus_*` + the local `gitnexus` CLI): process-
+  level queries and HTTP route mapping. Use `gitnexus_query --query
+  "<flow>"` for ranked call chains (processes), `gitnexus_impact
+  --target <name>` for the full impact graph of a symbol,
+  `gitnexus_route_map` for API route → handler → consumer mapping.
+
+When to use which:
+
+- Source of a specific function or concept → `codegraph_codegraph_node`
+  or `codegraph_codegraph_explore`.
+- Blast radius before editing a shared helper →
+  `codegraph_codegraph_callers --symbol <name>`.
+- End-to-end request flow, or "what handles route X" →
+  `gitnexus_query` / `gitnexus_route_map`.
+- Full impact graph of a symbol (processes affected, communities,
+  depths) → `gitnexus_impact`.
+- Raw text matching (e.g. find every literal `addEventListener('foo')`
+  across files) → fall back to `Grep` / `rg`. The graph tools index
+  symbols, not arbitrary string patterns, so very specific text
+  searches still belong to grep.
+
+Index freshness:
+
+- codegraph is re-read from disk on every call; no staleness.
+- gitnexus is built once and incrementally updated. If the index is
+  more than a handful of commits behind HEAD, refresh it before
+  relying on impact reports:
+  ```bash
+  gitnexus analyze
+  ```
+  The current staleness for this repo is also surfaced by
+  `gitnexus_list_repos` (look for `staleness.commitsBehind`).
+
+When the tools are unavailable or the index is broken, fall back to
+`Read` + `Grep`. Do not loop on failed MCP calls; surface the failure
+once and proceed with the manual fallback.
+
+### Commit and PR hygiene
+
 - Keep one logical change per PR; split unrelated refactors or cleanup.
 - Read `docs/CONTRACTS.md` and the linked contract/RFC for the touched
   subsystem before editing.
