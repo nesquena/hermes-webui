@@ -12434,6 +12434,15 @@ function loadPdfInline(container){
           // canvases stack vertically in the scrollable preview body.
           const MAX_PAGES=20;
           const n=Math.min(total,MAX_PAGES);
+          if(total>MAX_PAGES){
+            const notice=document.createElement('div');
+            notice.className='pdf-preview-truncated';
+            notice.textContent=t('pdf_truncated',MAX_PAGES,total);
+            body.appendChild(notice);
+          }
+          // On a per-page failure, skip that page and continue so one malformed
+          // page can't silently halt the preview or surface an unhandled
+          // promise rejection (renderPage runs outside the outer .catch chain).
           const renderPage=(i)=>{
             if(i>n) return;
             pdf.getPage(i).then(page=>{
@@ -12444,8 +12453,8 @@ function loadPdfInline(container){
               canvas.height=viewport.height;
               canvas.className='pdf-preview-canvas';
               body.appendChild(canvas);
-              page.render({canvasContext:canvas.getContext('2d'),viewport}).promise.then(()=>renderPage(i+1));
-            });
+              return page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
+            }).then(()=>renderPage(i+1)).catch(()=>renderPage(i+1));
           };
           renderPage(1);
         })
