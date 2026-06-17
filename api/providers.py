@@ -854,6 +854,7 @@ def _local_pool_snapshot(provider):
     """
     try:
         from agent.credential_pool import load_pool
+        from api.config import _is_ambient_gh_cli_entry
 
         pool = load_pool(provider)
         entries = list(pool.entries()) if pool is not None and hasattr(pool, "entries") else []
@@ -867,6 +868,11 @@ def _local_pool_snapshot(provider):
     exhausted_count = 0
     dead_count = 0
     for index, entry in enumerate(entries, start=1):
+        source = str(_entry_value(entry, "source") or "")
+        label_val = str(_entry_value(entry, "label", "source") or "")
+        key_source = str(_entry_value(entry, "key_source") or "")
+        if _is_ambient_gh_cli_entry(source, label_val, key_source):
+            continue
         label = _safe_entry_label(entry, index)
         entry_status = str(_entry_value(entry, "last_status") or "").strip().lower()
         if entry_status == "dead":
@@ -906,8 +912,12 @@ def _local_pool_snapshot(provider):
                 "fetched_at": None,
             })
 
+    if not rows:
+        return None
+
+    total = available_count + exhausted_count + dead_count
     pool_dict = {
-        "total_credentials": len(entries),
+        "total_credentials": total,
         "queried_credentials": 0,
         "available_credentials": available_count,
         "exhausted_credentials": exhausted_count,
@@ -919,7 +929,7 @@ def _local_pool_snapshot(provider):
         "credentials": rows,
     }
 
-    details = [str(available_count) + "/" + str(len(entries)) + " credentials available"]
+    details = [str(available_count) + "/" + str(total) + " credentials available"]
     if exhausted_count:
         details.append(str(exhausted_count) + " exhausted")
     if dead_count:

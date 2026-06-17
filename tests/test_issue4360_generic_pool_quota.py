@@ -16,11 +16,25 @@ from unittest.mock import MagicMock, patch
 from api.providers import _local_pool_snapshot, get_provider_quota
 
 
+def _is_ambient_gh_cli_entry_real(source, label, key_source):
+    markers = frozenset({"gh_cli", "gh auth token"})
+    env_sources = frozenset({"env:github_token", "env:gh_token"})
+    source_lower = source.strip().lower()
+    return (
+        source_lower in markers
+        or source_lower in env_sources
+        or label.strip().lower() == "gh auth token"
+        or key_source.strip().lower() == "gh auth token"
+    )
+
+
 @contextmanager
 def _fake_credential_pool(**kwargs):
-    """Context manager that ensures agent.credential_pool exists and patches load_pool."""
+    """Context manager that ensures agent.credential_pool and api.config exist and patches load_pool."""
     had_agent = "agent" in sys.modules
     had_cp = "agent.credential_pool" in sys.modules
+    had_api = "api" in sys.modules
+    had_api_config = "api.config" in sys.modules
     old_agent = sys.modules.get("agent")
 
     if not had_agent:
@@ -31,6 +45,18 @@ def _fake_credential_pool(**kwargs):
         _cp = types.ModuleType("agent.credential_pool")
         sys.modules["agent.credential_pool"] = _cp
         sys.modules["agent"].credential_pool = _cp
+
+    if not had_api:
+        _api = types.ModuleType("api")
+        _api.__path__ = []
+        sys.modules["api"] = _api
+    if not had_api_config:
+        _api_config = types.ModuleType("api.config")
+        _api_config._is_ambient_gh_cli_entry = _is_ambient_gh_cli_entry_real
+        sys.modules["api.config"] = _api_config
+        sys.modules["api"].config = _api_config
+    elif not hasattr(sys.modules["api.config"], "_is_ambient_gh_cli_entry"):
+        sys.modules["api.config"]._is_ambient_gh_cli_entry = _is_ambient_gh_cli_entry_real
 
     cp = sys.modules["agent.credential_pool"]
     if not hasattr(cp, "load_pool"):
@@ -45,6 +71,10 @@ def _fake_credential_pool(**kwargs):
             delattr(old_agent, "credential_pool")
     if not had_agent:
         sys.modules.pop("agent", None)
+    if not had_api_config:
+        sys.modules.pop("api.config", None)
+    if not had_api:
+        sys.modules.pop("api", None)
 
 
 class TestLocalPoolSnapshot(unittest.TestCase):
@@ -212,6 +242,56 @@ class TestLocalPoolSnapshot(unittest.TestCase):
             assert result.plan is None
             assert result.windows == ()
             assert isinstance(result.fetched_at, datetime)
+
+
+    def test_local_pool_snapshot_filters_ambient_gh_cli_entries(self):
+        """_local_pool_snapshot skips ambient gh-cli entries so providers like
+        copilot don't show a phantom "1 credential available" (#4247 class)."""
+        entry = SimpleNamespace(
+            label="gh auth token",
+            source="gh_cli",
+            key_source="gh auth token",
+            last_status="available",
+            last_status_at=None,
+            last_error_code=None,
+            last_error_reset_at=None,
+        )
+        pool = MagicMock()
+        pool.entries.return_value = [entry]
+
+        with _fake_credential_pool(return_value=pool):
+            result = _local_pool_snapshot("copilot")
+            assert result is None
+
+    def test_local_pool_snapshot_keeps_non_ambient_alongside_ambient(self):
+        """Non-ambient entries are kept even when ambient ones are present."""
+        ambient = SimpleNamespace(
+            label="gh auth token",
+            source="gh_cli",
+            key_source="gh auth token",
+            last_status="available",
+            last_status_at=None,
+            last_error_code=None,
+            last_error_reset_at=None,
+        )
+        real = SimpleNamespace(
+            label="My API Key",
+            source="user",
+            key_source="",
+            last_status="available",
+            last_status_at=None,
+            last_error_code=None,
+            last_error_reset_at=None,
+        )
+        pool = MagicMock()
+        pool.entries.return_value = [ambient, real]
+
+        with _fake_credential_pool(return_value=pool):
+            result = _local_pool_snapshot("copilot")
+            assert result is not None
+            assert result.pool["total_credentials"] == 1
+            assert result.pool["available_credentials"] == 1
+            assert len(result.pool["credentials"]) == 1
 
 
 class TestGetProviderQuotaLocalPool(unittest.TestCase):
