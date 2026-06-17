@@ -360,6 +360,17 @@ Confirmed follow-up scope:
 - Additional tests that prove live and replay use the same lifecycle for
   process prose, tool rows, compression status, and terminal states.
 
+Session entry no longer resurrects busy state from a zombie INFLIGHT
+(#4354). The reattach path in `loadSession` consults the server's
+`active_stream_id` and `last_message_at` before re-asserting
+`S.busy = true`; if the server disagrees (different stream id) or the
+session has been silent for > 10 minutes in the server's view, the
+local INFLIGHT is discarded and the persisted transcript renders
+normally. The 10-minute threshold is conservative: legitimate live
+streams have inter-event gaps < 1 min, and the periodic
+`/api/sessions` poll will re-assert busy on the next tick if the
+server genuinely is still streaming.
+
 ### Tool-only or low-prose runs
 
 Some valid long-running turns may produce little or no visible process prose

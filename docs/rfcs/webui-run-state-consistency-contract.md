@@ -142,6 +142,20 @@ These references are evidence for the contract. This RFC does not make the
 linked implementation PRs dependent on this document, and it does not close the
 tracking issue by itself.
 
+The client-side silence watchdog (#4354) force-closes the live SSE
+connection and clears the local busy state after 5 minutes of silence
+while the stream is still expected to be alive (closure-local
+`_lastEventAt` tracked via a generic `onmessage` handler, ticked every
+30 s). The periodic `/api/sessions` reconcile path is ungated from
+`_sendInProgress`; the gate variable is force-cleared as part of the
+reconcile mutation set, gated on the existing `_isServerIdleSessionRow`
+predicate so a real in-flight send is never clobbered. The INFLIGHT
+reattach path on session entry re-asserts busy state only when
+`S.session.active_stream_id === INFLIGHT[sid].streamId` AND
+`S.session.last_message_at` is within the last 10 minutes (seconds
+since epoch); otherwise the local INFLIGHT is discarded and the normal
+session-load render runs.
+
 ## Relationship To The Run Adapter RFC
 
 The run adapter RFC defines the longer-term event/control boundary for WebUI and
