@@ -151,7 +151,7 @@ def test_gateway_runs_api_submission():
     mock_session.pending_started_at = None
 
     try:
-        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}):
+        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"}):
             with patch("api.gateway_chat.gateway_supports_approval", lambda *_args, **_kwargs: True), \
                  patch("api.gateway_chat._run_gateway_runs_api_streaming", fake_runs_streaming), \
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
@@ -415,7 +415,7 @@ def test_gateway_runs_api_cancel_does_not_emit_empty_response():
         return None, {}
 
     try:
-        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}):
+        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"}):
             with patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
                  patch("api.gateway_chat._run_gateway_runs_api_streaming", side_effect=fake_runs_streaming), \
                  patch("api.gateway_chat.get_session", return_value=mock_session):

@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The runs API path in the gateway chat backend is now opt-in (#4362).** Previously, when the Hermes gateway advertised approval/runs support, the WebUI automatically routed through `/v1/runs` — which could silently change streaming behavior for existing deployments. The runs API path is now disabled by default and must be explicitly enabled via the `HERMES_WEBUI_GATEWAY_USE_RUNS_API` environment variable or `webui_gateway_use_runs_api: true` in `config.yaml`. Existing deployments that relied on implicit runs API routing should set this flag after upgrading.
+
 ## [v0.51.476] — 2026-06-17 — Release QK (cross-provider model-pick + non-git update-status fixes)
 
 ### Fixed

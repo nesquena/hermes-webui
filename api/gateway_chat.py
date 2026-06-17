@@ -36,6 +36,7 @@ _STREAM_RUN_IDS: dict[str, str] = {}
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
+_WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 
 
@@ -81,6 +82,18 @@ def _gateway_api_key(environ: dict[str, str] | None = None) -> str:
         or source.get("API_SERVER_KEY")
         or ""
     ).strip()
+
+
+def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | None = None) -> bool:
+    """Return True only when the operator has explicitly opted into the runs API path."""
+    source = os.environ if environ is None else environ
+    cfg = config_data if isinstance(config_data, dict) else {}
+    raw = str(
+        source.get(_WEBUI_GATEWAY_USE_RUNS_API_ENV)
+        or cfg.get("webui_gateway_use_runs_api")
+        or ""
+    ).strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
@@ -545,7 +558,7 @@ def _run_gateway_chat_streaming(
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
         # Capability gate: use runs API when gateway advertises approval support.
-        _use_runs_api = gateway_supports_approval(base_url, api_key)
+        _use_runs_api = _gateway_use_runs_api_enabled(cfg) and gateway_supports_approval(base_url, api_key)
         if _use_runs_api:
             body_extras = {}
             if model_provider:
