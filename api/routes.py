@@ -8981,7 +8981,6 @@ def handle_post(handler, parsed) -> bool:
             forked_messages = source_messages[:keep_count]
         else:
             forked_messages = list(source_messages)
-
         # Derive title
         if custom_title:
             branch_title = custom_title
@@ -9002,8 +9001,10 @@ def handle_post(handler, parsed) -> bool:
             enabled_toolsets=getattr(source, "enabled_toolsets", None),
             context_length=getattr(source, "context_length", None),
             threshold_tokens=getattr(source, "threshold_tokens", None),
-            # context_messages — deep copy so the branch has independent context
-            context_messages=copy.deepcopy(getattr(source, "context_messages", None) or []),
+            # context_messages must mirror the same visible branch prefix instead
+            # of inheriting the full source context; otherwise later sends can
+            # rehydrate truncated tail messages into the branch.
+            context_messages=copy.deepcopy(forked_messages),
             # Gateway routing — inherit from source
             gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
             # Context engine — inherit state so branch's context engine starts correctly

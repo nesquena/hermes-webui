@@ -159,6 +159,27 @@ def test_branch_keep_count_support():
         "Branch handler should slice messages by keep_count"
 
 
+def test_branch_keep_count_slices_context_messages_to_same_prefix():
+    """A forked prefix must not inherit hidden full-tail context_messages.
+
+    Edit/regenerate resend branches send a new turn immediately after branching.
+    If /api/session/branch copies only messages[:keep_count] but leaves
+    context_messages as the full source transcript, the next run can rehydrate
+    the truncated old tail back into the branch.
+    """
+    src = _read('api/routes.py')
+    branch_match = re.search(
+        r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
+        src, re.DOTALL
+    )
+    assert branch_match
+    block = branch_match.group(1)
+    assert 'context_messages=copy.deepcopy(forked_messages)' in block, \
+        "Branch handler should deep-copy context_messages from the same sliced prefix as messages"
+    assert 'context_messages=copy.deepcopy(getattr(source, "context_messages", None) or [])' not in block, \
+        "Branch handler must not copy the full hidden source context into truncated forks"
+
+
 def test_branch_auto_title():
     """Verify fork title defaults to '<original> (fork)'."""
     src = _read('api/routes.py')
