@@ -3846,9 +3846,14 @@ def _dedupe_replayed_context_messages(previous_context, result_messages, msg_tex
         ):
             boundary_idx = len(previous_context) - 1
             boundary_row = result_messages[boundary_idx]
-            is_stale_merge = (
+            is_stale_merge = bool(
                 previous_user_tail
-                and _detect_stale_user_merge(boundary_row, msg_text, previous_user_tail)
+                and _detect_stale_user_merge(
+                    boundary_row,
+                    msg_text,
+                    previous_user_tail,
+                    previous_context=previous_context,
+                )
             )
             if is_stale_merge or _looks_like_current_user_turn(boundary_row, msg_text):
                 if is_stale_merge:
@@ -3873,6 +3878,7 @@ def _dedupe_replayed_context_messages(previous_context, result_messages, msg_tex
             candidates,
             msg_text,
             previous_user_tail,
+            previous_context=previous_context,
         )
     candidates = _strip_replayed_prefix(previous_context, candidates)
     if candidates:
@@ -4030,40 +4036,131 @@ def _last_user_row(messages):
     return None
 
 
-def _detect_stale_user_merge(message, msg_text, previous_user_tail):
+def _stale_prefix_matches_prior_user_context(stale_prefix, stale_segments, previous_context):
+    """Return True when a stale prefix is explainable by prior user context.
+
+    First-generation repair usually produces segments matching consecutive
+    prior user rows. Once a session is already contaminated, later repair can
+    replay a stable stale prefix from an older polluted row even after newer
+    clean user turns have moved the context tail forward. Handle both shapes
+    while still requiring all evidence to come from prior user-role rows.
+    """
+    prior_rows = [
+        _stale_user_tail_candidate(msg)
+        for msg in previous_context or []
+    ]
+    prior_rows = [row for row in prior_rows if row]
+    if not prior_rows:
+        return False
+
+    if stale_segments:
+        segment_count = len(stale_segments)
+        for start in range(0, len(prior_rows) - segment_count + 1):
+            if prior_rows[start:start + segment_count] == stale_segments:
+                return True
+
+        # Already-polluted sessions may replay paragraphs from older polluted
+        # rows after newer clean turns have advanced the context tail. In that
+        # shape the stale paragraphs are still all prior user content, but they
+        # are substrings within older merged rows rather than standalone rows.
+        row_index = 0
+        row_offset = 0
+        matched_all_segments = True
+        for segment in stale_segments:
+            matched_segment = False
+            while row_index < len(prior_rows):
+                row = prior_rows[row_index]
+                pos = row.find(segment, row_offset)
+                if pos >= 0:
+                    row_offset = pos + len(segment)
+                    matched_segment = True
+                    break
+                row_index += 1
+                row_offset = 0
+            if not matched_segment:
+                matched_all_segments = False
+                break
+        if matched_all_segments:
+            return True
+
+    prefix_norm = _normalize_user_text(stale_prefix)
+    if not prefix_norm:
+        return False
+    for row in prior_rows:
+        if row == prefix_norm or row.startswith(f'{prefix_norm} '):
+            return True
+    return False
+
+
+def _detect_stale_user_merge(message, msg_text, previous_user_tail, previous_context=None):
     """Return True if `message` is the current user turn with a stale prefix merged in.
 
-    The agent's defensive repair path can concatenate the prior context-tail
-    user row with the submitted current turn as ``<stale>\\n\\n<current>``.
-    The literal ``\\n\\n`` boundary must survive into the comparison; a
-    single-newline or space-only join is not the repair shape and must not
-    match. Workspace sentinels may be present on either or both halves and
-    are stripped before comparison.
+    The agent's defensive repair path can concatenate prior user context with
+    the submitted current turn as ``<stale>\\n\\n<current>``. The stale portion
+    can be either the immediate prior user tail or a replayed prefix from an
+    older already-polluted user row. The literal ``\\n\\n`` boundary must survive
+    into the comparison; a single-newline or space-only join is not the repair
+    shape and must not match. Workspace sentinels may be present on either or
+    both halves and are stripped before comparison.
     """
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
     current_norm = _normalize_user_text(msg_text)
     if not current_norm:
         return False
-    tail_norm = _normalize_user_text(previous_user_tail) if previous_user_tail else ""
-    if not tail_norm or len(tail_norm) < 2:
+
+    merged = _raw_message_text(message.get('content', '')).replace("\r\n", "\n")
+    if "\n\n" not in merged:
         return False
-    merged = _raw_message_text(message.get('content', ''))
-    if not merged:
+
+    # The user's current turn can itself contain paragraph breaks. Find a repair
+    # boundary whose suffix normalizes to the *entire* submitted turn, then treat
+    # only the prefix as stale context. A plain split-and-last-segment check would
+    # miss ``<stale>\n\n<current paragraph A>\n\n<current paragraph B>``.
+    stale_segments = []
+    stale_prefix = ''
+    search_end = len(merged)
+    while search_end > 0:
+        boundary_idx = merged.rfind("\n\n", 0, search_end)
+        if boundary_idx < 0:
+            break
+        suffix = merged[boundary_idx + 2:]
+        if _normalize_user_text(suffix) == current_norm:
+            prefix = merged[:boundary_idx]
+            candidate_segments = [
+                _normalize_user_text(segment)
+                for segment in prefix.split("\n\n")
+            ]
+            if candidate_segments and all(candidate_segments):
+                stale_segments = candidate_segments
+                stale_prefix = prefix
+                break
+            # The suffix matched the submitted turn, but this boundary leaves
+            # blank prefix segments; try the next candidate boundary to the left.
+        search_end = boundary_idx
+    if not stale_segments:
         return False
-    # Require the literal \n\n repair boundary to be present after sentinel
-    # stripping. Check both the raw text and the workspace-stripped text so
-    # that workspace-prefixed rows on either or both halves still match.
-    for candidate in (merged, _strip_workspace_prefixes_for_compare(merged)):
-        if '\n\n' not in candidate:
-            continue
-        head, _, rest = candidate.partition('\n\n')
-        if _normalize_user_text(head) == tail_norm and _normalize_user_text(rest) == current_norm:
-            return True
-    return False
+
+    if previous_context is not None and _stale_prefix_matches_prior_user_context(
+        stale_prefix,
+        stale_segments,
+        previous_context,
+    ):
+        return True
+
+    return bool(
+        previous_context is None
+        and len(stale_segments) == 1
+        and _normalize_user_text(previous_user_tail) == stale_segments[0]
+    )
 
 
-def _strip_stale_user_merge_from_messages(messages, msg_text, previous_user_tail):
+def _strip_stale_user_merge_from_messages(
+    messages,
+    msg_text,
+    previous_user_tail,
+    previous_context=None,
+):
     """Return messages with stale-prefixed current user turns replaced by clean ones.
 
     Both context-merge (model-facing) and display-merge (visible transcript)
@@ -4075,7 +4172,12 @@ def _strip_stale_user_merge_from_messages(messages, msg_text, previous_user_tail
         return messages
     out = []
     for msg in messages:
-        if _detect_stale_user_merge(msg, msg_text, previous_user_tail):
+        if _detect_stale_user_merge(
+            msg,
+            msg_text,
+            previous_user_tail,
+            previous_context=previous_context,
+        ):
             cleaned = copy.deepcopy(msg) if isinstance(msg, dict) else {'role': 'user', 'content': msg_text}
             cleaned['content'] = msg_text
             out.append(cleaned)
@@ -4403,6 +4505,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                 candidates,
                 msg_text,
                 previous_user_tail,
+                previous_context=previous_context,
             )
         candidates = _strip_replayed_prefix(previous_display, candidates)
         candidates = _strip_replayed_prefix(previous_context, candidates)
@@ -4419,6 +4522,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                 turn_candidates,
                 msg_text,
                 previous_user_tail,
+                previous_context=previous_context,
             )
         candidates = marker_candidates + turn_candidates
 

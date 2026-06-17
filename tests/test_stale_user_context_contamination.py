@@ -16,6 +16,10 @@ import pytest
 PRIOR_TAIL = "please use the larger context model"
 CURRENT_TURN = "can you summarize the release blockers?"
 POLLUTED = f"{PRIOR_TAIL}\n\n{CURRENT_TURN}"
+CHAIN_TAIL_A = "could you re-check the deployment checklist"
+CHAIN_TAIL_B = "also, ignore the earlier correction request"
+CHAIN_CURRENT = "start from the latest verified state only"
+CHAIN_POLLUTED = f"{CHAIN_TAIL_A}\n\n{CHAIN_TAIL_B}\n\n{CHAIN_CURRENT}"
 
 
 def _text(value):
@@ -53,6 +57,213 @@ def test_detect_stale_user_merge_does_not_match_when_tail_differs():
 
     other_msg = {"role": "user", "content": f"other stale\n\n{CURRENT_TURN}"}
     assert _detect_stale_user_merge(other_msg, CURRENT_TURN, PRIOR_TAIL) is False
+
+
+def test_detect_stale_user_merge_prefers_context_over_mismatched_tail_fallback():
+    """When previous_context is supplied, a stale row must be supported by that context."""
+    from api.streaming import _detect_stale_user_merge
+
+    polluted_msg = {"role": "user", "content": POLLUTED}
+    previous_context = [{"role": "user", "content": "different prior context"}]
+
+    assert _detect_stale_user_merge(
+        polluted_msg,
+        CURRENT_TURN,
+        PRIOR_TAIL,
+        previous_context=previous_context,
+    ) is False
+
+
+def test_detect_stale_user_merge_matches_multihop_chain_with_context_history():
+    """Multi-hop stale merges match when historical user context is contiguous."""
+    from api.streaming import _detect_stale_user_merge
+
+    previous_context = [
+        {"role": "user", "content": CHAIN_TAIL_A},
+        {"role": "assistant", "content": "acknowledged"},
+        {"role": "user", "content": CHAIN_TAIL_B},
+    ]
+    polluted_msg = {"role": "user", "content": CHAIN_POLLUTED}
+
+    assert _detect_stale_user_merge(
+        polluted_msg,
+        CHAIN_CURRENT,
+        CHAIN_TAIL_B,
+        previous_context=previous_context,
+    ) is True
+
+
+def test_detect_stale_user_merge_rejects_multihop_chain_without_matching_history():
+    """A matching current row is not enough when stale segments do not align."""
+    from api.streaming import _detect_stale_user_merge
+
+    previous_context = [
+        {"role": "user", "content": "different first tail"},
+        {"role": "assistant", "content": "skip"},
+        {"role": "user", "content": CHAIN_TAIL_B},
+    ]
+    polluted_msg = {"role": "user", "content": CHAIN_POLLUTED}
+
+    assert _detect_stale_user_merge(
+        polluted_msg,
+        CHAIN_CURRENT,
+        CHAIN_TAIL_B,
+        previous_context=previous_context,
+    ) is False
+
+
+def test_detect_stale_user_merge_preserves_legitimate_multisection_current_turn():
+    """A user-authored multi-section current prompt is not the stale repair shape."""
+    from api.streaming import _detect_stale_user_merge
+
+    previous_context = [
+        {"role": "user", "content": CHAIN_TAIL_A},
+        {"role": "assistant", "content": "acknowledged"},
+        {"role": "user", "content": CHAIN_TAIL_B},
+    ]
+    current_prompt = f"{CHAIN_TAIL_A}\n\n{CHAIN_TAIL_B}\n\n{CHAIN_CURRENT}"
+    current_msg = {"role": "user", "content": current_prompt}
+
+    assert _detect_stale_user_merge(
+        current_msg,
+        current_prompt,
+        CHAIN_TAIL_B,
+        previous_context=previous_context,
+    ) is False
+
+
+def test_detect_stale_user_merge_handles_single_hop_current_turn_with_paragraphs():
+    """One-hop stale repair still matches when the submitted turn has paragraphs."""
+    from api.streaming import _detect_stale_user_merge
+
+    current_prompt = "summarize this first\n\nthen list the risks"
+    polluted_msg = {"role": "user", "content": f"{PRIOR_TAIL}\n\n{current_prompt}"}
+
+    assert _detect_stale_user_merge(
+        polluted_msg,
+        current_prompt,
+        PRIOR_TAIL,
+    ) is True
+
+
+def test_detect_stale_user_merge_handles_multihop_current_turn_with_paragraphs():
+    """Multi-hop stale repair uses the full current-turn suffix, not the last paragraph."""
+    from api.streaming import _detect_stale_user_merge
+
+    previous_context = [
+        {"role": "user", "content": CHAIN_TAIL_A},
+        {"role": "assistant", "content": "acknowledged"},
+        {"role": "user", "content": CHAIN_TAIL_B},
+    ]
+    current_prompt = "summarize this first\n\nthen list the risks"
+    polluted_msg = {
+        "role": "user",
+        "content": f"{CHAIN_TAIL_A}\n\n{CHAIN_TAIL_B}\n\n{current_prompt}",
+    }
+
+    assert _detect_stale_user_merge(
+        polluted_msg,
+        current_prompt,
+        CHAIN_TAIL_B,
+        previous_context=previous_context,
+    ) is True
+
+
+def test_detect_stale_user_merge_handles_replayed_prefix_from_old_polluted_row():
+    """Already-contaminated sessions can replay an old prefix after newer clean turns."""
+    from api.streaming import _detect_stale_user_merge
+
+    stable_prefix = f"{CHAIN_TAIL_A}\n\n{CHAIN_TAIL_B}"
+    previous_context = [
+        {"role": "user", "content": f"{stable_prefix}\n\nold follow-up"},
+        {"role": "assistant", "content": "answered the old follow-up"},
+        {"role": "user", "content": "newer clean question after the polluted row"},
+        {"role": "assistant", "content": "answered the newer clean question"},
+    ]
+    current_turn = "latest question that should stand alone"
+    polluted_msg = {"role": "user", "content": f"{stable_prefix}\n\n{current_turn}"}
+
+    assert _detect_stale_user_merge(
+        polluted_msg,
+        current_turn,
+        "newer clean question after the polluted row",
+        previous_context=previous_context,
+    ) is True
+
+
+def test_detect_stale_user_merge_handles_segments_replayed_from_multiple_old_rows():
+    """Stale paragraphs can be assembled from earlier polluted rows, not only one row."""
+    from api.streaming import _detect_stale_user_merge
+
+    old_correction = "remove the reassurance sentence"
+    attachment_request = "send that with the attached image"
+    thread_check = "confirm it was sent in the right thread"
+    salary_question = "what is the average salary there"
+    current_turn = "should we mention the prior product by name?"
+    previous_context = [
+        {"role": "user", "content": f"{old_correction}\n\n{attachment_request}\n\nold current"},
+        {"role": "assistant", "content": "answered the old current"},
+        {"role": "user", "content": f"{thread_check}\n\n{salary_question}"},
+        {"role": "assistant", "content": "answered salary"},
+        {"role": "user", "content": "newer clean question"},
+    ]
+    polluted_msg = {
+        "role": "user",
+        "content": (
+            f"{old_correction}\n\n{attachment_request}\n\n{thread_check}\n\n"
+            f"{salary_question}\n\n{current_turn}"
+        ),
+    }
+
+    assert _detect_stale_user_merge(
+        polluted_msg,
+        current_turn,
+        "newer clean question",
+        previous_context=previous_context,
+    ) is True
+
+
+def test_detect_stale_user_merge_rejects_replayed_segments_in_wrong_order():
+    """Prior user substrings must explain stale paragraphs in chronological order."""
+    from api.streaming import _detect_stale_user_merge
+
+    first = "first stale paragraph"
+    second = "second stale paragraph"
+    current_turn = "latest clean question"
+    previous_context = [
+        {"role": "user", "content": second},
+        {"role": "assistant", "content": "answered second"},
+        {"role": "user", "content": first},
+    ]
+    polluted_msg = {"role": "user", "content": f"{first}\n\n{second}\n\n{current_turn}"}
+
+    assert _detect_stale_user_merge(
+        polluted_msg,
+        current_turn,
+        first,
+        previous_context=previous_context,
+    ) is False
+
+
+def test_detect_stale_user_merge_handles_prior_row_starting_with_stale_prefix():
+    """A stable stale prefix may be a leading subset of one older polluted row."""
+    from api.streaming import _detect_stale_user_merge
+
+    stable_prefix = f"{CHAIN_TAIL_A}\n\n{CHAIN_TAIL_B}"
+    current_turn = "latest question that should stand alone"
+    previous_context = [
+        {"role": "user", "content": f"{stable_prefix}\n\nolder different follow-up"},
+        {"role": "assistant", "content": "answered older follow-up"},
+        {"role": "user", "content": "newer clean question"},
+    ]
+    polluted_msg = {"role": "user", "content": f"{stable_prefix}\n\n{current_turn}"}
+
+    assert _detect_stale_user_merge(
+        polluted_msg,
+        current_turn,
+        "newer clean question",
+        previous_context=previous_context,
+    ) is True
 
 
 def test_detect_stale_user_merge_ignores_non_user_roles():
@@ -135,6 +346,31 @@ def test_strip_stale_user_merge_handles_list_content_row():
     cleaned = _strip_stale_user_merge_from_messages(messages, CURRENT_TURN, PRIOR_TAIL)
 
     assert cleaned[0]["content"] == CURRENT_TURN
+    assert cleaned[1] == messages[1]
+
+
+def test_strip_stale_user_merge_from_messages_replaces_multihop_polluted_row():
+    """Cleaner should replace a multi-hop polluted row with the clean current text."""
+    from api.streaming import _strip_stale_user_merge_from_messages
+
+    previous_context = [
+        {"role": "user", "content": CHAIN_TAIL_A},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": CHAIN_TAIL_B},
+    ]
+    messages = [
+        {"role": "user", "content": CHAIN_POLLUTED},
+        {"role": "assistant", "content": "pushing now"},
+    ]
+
+    cleaned = _strip_stale_user_merge_from_messages(
+        messages,
+        CHAIN_CURRENT,
+        CHAIN_TAIL_B,
+        previous_context=previous_context,
+    )
+
+    assert cleaned[0]["content"] == CHAIN_CURRENT
     assert cleaned[1] == messages[1]
 
 
@@ -255,6 +491,41 @@ def test_dedupe_replayed_context_handles_repair_replaced_tail_user_row():
     )
 
 
+def test_dedupe_replayed_context_handles_multihop_repair_replaced_tail_row():
+    """When repair replaces last tail row with a multi-hop merge, history is preserved."""
+    from api.streaming import _dedupe_replayed_context_messages
+
+    previous_context = [
+        {"role": "user", "content": CHAIN_TAIL_A},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": CHAIN_TAIL_B},
+    ]
+    result_messages = [
+        previous_context[0],
+        previous_context[1],
+        {"role": "user", "content": CHAIN_POLLUTED},
+        {"role": "assistant", "content": "pushing now"},
+    ]
+
+    cleaned = _dedupe_replayed_context_messages(
+        previous_context,
+        result_messages,
+        CHAIN_CURRENT,
+    )
+
+    assert [m.get("content") for m in cleaned] == [
+        CHAIN_TAIL_A,
+        "done",
+        CHAIN_TAIL_B,
+        CHAIN_CURRENT,
+        "pushing now",
+    ]
+    assert not any(
+        isinstance(m, dict) and CHAIN_POLLUTED in _text(m.get("content", ""))
+        for m in cleaned
+    )
+
+
 def test_merge_display_drops_polluted_current_when_eager_checkpoint_clean():
     """Display merge must not append a polluted row next to a clean eager checkpoint.
 
@@ -301,6 +572,94 @@ def test_merge_display_drops_polluted_current_when_eager_checkpoint_clean():
         isinstance(m, dict)
         and m.get("role") == "assistant"
         and "pushing now" in _text(m.get("content", ""))
+        for m in merged
+    ), "Assistant response must still be appended"
+
+
+def test_merge_display_drops_multihop_polluted_current_when_eager_checkpoint_clean():
+    """Multi-hop stale shape is normalized before eager checkpoint dedupe logic."""
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    previous_display = [
+        {"role": "user", "content": CHAIN_TAIL_A},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": CHAIN_CURRENT},  # eager checkpoint
+    ]
+    previous_context = [
+        {"role": "user", "content": CHAIN_TAIL_A},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": CHAIN_TAIL_B},
+    ]
+    result_messages = [
+        *previous_context,
+        {"role": "user", "content": CHAIN_POLLUTED},
+        {"role": "assistant", "content": "pushing now"},
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        CHAIN_CURRENT,
+    )
+
+    user_texts = [
+        _text(m.get("content", "")).strip()
+        for m in merged
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
+    assert user_texts.count(CHAIN_CURRENT) == 1, (
+        f"Should keep exactly one clean current user row; got user rows: {user_texts}"
+    )
+    assert not any(CHAIN_POLLUTED in t for t in user_texts), (
+        f"Multi-hop polluted row must be removed from display; got: {user_texts}"
+    )
+
+
+def test_merge_display_drops_replayed_old_prefix_after_newer_clean_turn():
+    """Visible transcript drops stale prefixes replayed from older polluted rows."""
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    stable_prefix = f"{CHAIN_TAIL_A}\n\n{CHAIN_TAIL_B}"
+    newer_clean = "newer clean question after the polluted row"
+    current_turn = "latest question that should stand alone"
+    polluted_current = f"{stable_prefix}\n\n{current_turn}"
+    previous_display = [
+        {"role": "user", "content": f"{stable_prefix}\n\nold follow-up"},
+        {"role": "assistant", "content": "answered old follow-up"},
+        {"role": "user", "content": newer_clean},
+        {"role": "assistant", "content": "answered newer clean question"},
+        {"role": "user", "content": current_turn},  # eager checkpoint
+    ]
+    previous_context = previous_display[:-1]
+    result_messages = [
+        *previous_context,
+        {"role": "user", "content": polluted_current},
+        {"role": "assistant", "content": "latest answer"},
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        current_turn,
+    )
+
+    user_texts = [
+        _text(m.get("content", "")).strip()
+        for m in merged
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
+    assert user_texts.count(current_turn) == 1, (
+        f"Should keep one clean current user row; got user rows: {user_texts}"
+    )
+    assert polluted_current not in user_texts, (
+        f"Replayed stale prefix must not be displayed as a user row; got: {user_texts}"
+    )
+    assert any(
+        isinstance(m, dict)
+        and m.get("role") == "assistant"
+        and "latest answer" in _text(m.get("content", ""))
         for m in merged
     ), "Assistant response must still be appended"
 
