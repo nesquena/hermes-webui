@@ -1420,8 +1420,21 @@ function _isMessagingSession(session) {
  * before the WebUI can read or send messages into it.
  * Covers both legacy CLI sessions and messaging-source sessions.
  */
+function _isWebUiSourceSession(session) {
+  if (!session) return false;
+  const source = (
+    session.session_source
+    || session.raw_source
+    || session.source_tag
+    || session.source
+    || ''
+  ).toLowerCase();
+  return source === 'webui';
+}
+
 function _isExternalSession(session) {
-  return !!(session && (session.is_cli_session || _isMessagingSession(session)));
+  if (!session || _isWebUiSourceSession(session)) return false;
+  return !!(session.is_cli_session || _isMessagingSession(session));
 }
 
 function _externalImportPayload(session) {

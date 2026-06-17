@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Session detail loads now preserve WebUI-origin source metadata when state.db is the source of truth.** A stale sidecar could still say `raw_source=cli` / `is_cli_session=true` even though the session list already knew the session was WebUI-origin, making the active transcript enter the external-refresh reload path and disrupting scroll position while reading. The detail endpoint now reconciles WebUI source flags from state.db, and the frontend refuses to treat an explicit WebUI-source session as external.
+
 ## [v0.51.470] — 2026-06-17 — Release QE (transcript virtualization now experimental / off by default)
 
 ### Changed

@@ -4580,6 +4580,46 @@ def _normalize_sidebar_source_flags(session: dict) -> dict:
     return normalized
 
 
+def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> dict:
+    """Return a /api/session payload whose source flags match state.db truth.
+
+    WebUI-origin sidecars can carry stale CLI/import flags after older repair or
+    import paths touched the JSON file. The sidebar projection already trusts the
+    state.db source row for those sessions; the detail endpoint must do the same
+    or the frontend opens a WebUI-native transcript as an external session and
+    starts the destructive active-refresh reload loop.
+    """
+    if not isinstance(session, dict):
+        return session
+    if not _session_source_is_webui(state_meta):
+        return dict(session)
+
+    reconciled = dict(session)
+    reconciled["is_cli_session"] = False
+    reconciled["read_only"] = False
+    reconciled["source_tag"] = _safe_first(state_meta.get("source_tag"), "webui")
+    reconciled["raw_source"] = _safe_first(state_meta.get("raw_source"), "webui")
+    reconciled["session_source"] = _safe_first(state_meta.get("session_source"), "webui")
+    reconciled["source_label"] = _safe_first(state_meta.get("source_label"), "WebUI")
+    if state_meta.get("source"):
+        reconciled["source"] = state_meta["source"]
+
+    for key in ("message_count", "actual_message_count"):
+        if state_meta.get(key) is not None:
+            reconciled[key] = max(
+                _numeric_count(reconciled.get(key)),
+                _numeric_count(state_meta.get(key)),
+            )
+    for key in ("created_at", "updated_at", "last_message_at"):
+        if state_meta.get(key) is not None:
+            current = reconciled.get(key)
+            try:
+                reconciled[key] = max(float(current or 0), float(state_meta.get(key) or 0))
+            except (TypeError, ValueError):
+                reconciled[key] = state_meta[key]
+    return reconciled
+
+
 def _session_source_is_webui(session: dict) -> bool:
     """Return True for state.db/sidebar rows that describe WebUI-origin sessions."""
     if not isinstance(session, dict):
@@ -7205,7 +7245,9 @@ def handle_get(handler, parsed) -> bool:
                     float(raw.get("updated_at") or 0),
                     _merged_last_message_at,
                 )
-            if cli_meta and _is_messaging_session_record(cli_meta):
+            if cli_meta and _session_source_is_webui(cli_meta):
+                raw = _reconcile_session_detail_source_flags(raw, cli_meta)
+            elif cli_meta and _is_messaging_session_record(cli_meta):
                 raw = _merge_cli_sidebar_metadata(raw, cli_meta)
                 # ``message_count`` in /api/session is the display coordinate
                 # space used for pagination and the header badge. Messaging

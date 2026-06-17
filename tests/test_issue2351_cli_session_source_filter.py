@@ -110,6 +110,67 @@ def test_webui_source_overrides_stale_cli_flag_even_with_default_title():
     assert _normalize_sidebar_source_flags(stale_webui)["is_cli_session"] is False
 
 
+def test_webui_state_db_source_overrides_stale_cli_detail_payload():
+    from api.routes import _reconcile_session_detail_source_flags
+
+    detail_payload = {
+        "session_id": "webui-tip",
+        "title": "Long WebUI session",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "session_source": "cli",
+        "source_label": "CLI",
+        "is_cli_session": True,
+        "read_only": True,
+        "message_count": 24,
+    }
+    state_db_row = {
+        "session_id": "webui-tip",
+        "source_tag": "webui",
+        "raw_source": "webui",
+        "session_source": "webui",
+        "source_label": "WebUI",
+        "message_count": 26,
+    }
+
+    reconciled = _reconcile_session_detail_source_flags(detail_payload, state_db_row)
+
+    assert reconciled["is_cli_session"] is False
+    assert reconciled["read_only"] is False
+    assert reconciled["source_tag"] == "webui"
+    assert reconciled["raw_source"] == "webui"
+    assert reconciled["session_source"] == "webui"
+    assert reconciled["source_label"] == "WebUI"
+    assert reconciled["message_count"] == 26
+
+
+def test_real_cli_source_survives_detail_source_reconcile():
+    from api.routes import _reconcile_session_detail_source_flags
+
+    detail_payload = {
+        "session_id": "cli-tip",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "session_source": "cli",
+        "source_label": "CLI",
+        "is_cli_session": True,
+        "read_only": True,
+    }
+    state_db_row = {
+        "session_id": "cli-tip",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "session_source": "cli",
+        "source_label": "CLI",
+    }
+
+    reconciled = _reconcile_session_detail_source_flags(detail_payload, state_db_row)
+
+    assert reconciled["is_cli_session"] is True
+    assert reconciled["read_only"] is True
+    assert reconciled["source_tag"] == "cli"
+
+
 def test_real_cli_sidebar_cli_flag_is_preserved_before_frontend_response():
     from api.routes import _normalize_sidebar_source_flags
 
