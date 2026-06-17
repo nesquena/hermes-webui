@@ -1531,16 +1531,15 @@ document.addEventListener('keydown',async e=>{
 });
 $('msg').addEventListener('paste',e=>{
   const items=Array.from(e.clipboardData?.items||[]);
-  // When the clipboard carries BOTH text and an image (common from Notes,
-  // Word, browsers, Slack — the OS attaches a rendered preview alongside
-  // the plain text), prefer the text and let the browser paste normally.
-  // Only intercept when the clipboard is image-only (true screenshot paste).
-  // Tighten the image filter to kind==='file' so string items advertising an
-  // image MIME (e.g. text/html with an embedded data URI) are not misclassified.
-  const hasText=items.some(i=>i.kind==='string'&&(i.type==='text/plain'||i.type==='text/html'));
+  // Extract image items (kind==='file' filter avoids misclassifying text/html
+  // with embedded data URIs as images).
   const imageItems=items.filter(i=>i.kind==='file'&&i.type.startsWith('image/'));
-  if(!imageItems.length||hasText)return;
-  e.preventDefault();
+  if(!imageItems.length)return;
+  // If text is also present (common when copying images from browsers, Notes,
+  // Slack, etc.), let the browser paste the text normally AND attach the image.
+  // Only preventDefault when the clipboard is image-only (true screenshot paste).
+  const hasText=items.some(i=>i.kind==='string'&&(i.type==='text/plain'||i.type==='text/html'));
+  if(!hasText)e.preventDefault();
   const pasteTs=Date.now();
   const files=imageItems.map((i,idx)=>{
     const blob=i.getAsFile();
