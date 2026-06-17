@@ -128,7 +128,7 @@ class TestLoadPdfInlineFunction:
     def test_fallback_on_error(self):
         ui = _read_js('ui.js')
         idx = ui.find('function loadPdfInline')
-        body = ui[idx:idx + 3000]
+        body = ui[idx:idx + 4000]  # was 3000 — loadPdfInline grew with the per-page render loop + truncation notice
         assert 'pdf_error' in body, 'Must show error fallback on failure'
         assert 'pdf_download' in body or 'download=' in body, 'Error fallback must include download link'
 
