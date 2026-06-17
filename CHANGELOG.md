@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Inline PDF previews now render every page in a scrollable view instead of a clipped first page.** The chat artifact preview rendered only page 1 of a PDF into a `max-height:500px; overflow:hidden` flex container, so multi-page PDFs (e.g. exported chat transcripts) appeared cut off with no way to reach the rest — which looked like the preview had failed to render. `loadPdfInline()` now renders all pages (capped at 20) sequentially and stacks them vertically, and `.pdf-preview-body` became a scrollable column (`flex-direction:column; align-items:center; overflow:auto; max-height:600px`), with the page count shown in the preview header. The download link and the existing size-cap / error / 15s-timeout fallbacks are unchanged.
+
 ## [v0.51.475] — 2026-06-17 — Release QJ (ElevenLabs TTS engine)
 
 ### Added

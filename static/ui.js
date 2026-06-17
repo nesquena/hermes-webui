@@ -12422,25 +12422,32 @@ function loadPdfInline(container){
         })
         .then(pdf=>{
           if(!pdf) return;
-          pdf.getPage(1).then(page=>{
-            const canvas=document.createElement('canvas');
-            const scale=1.5;
-            const viewport=page.getViewport({scale});
-            canvas.width=viewport.width;
-            canvas.height=viewport.height;
-            canvas.className='pdf-preview-canvas';
-            page.render({canvasContext:canvas.getContext('2d'),viewport}).promise.then(()=>{
-              // Canvas bitmap is runtime state, not part of HTML serialization.
-              // Attach the canvas as a DOM node — interpolating its serialized
-              // form into a template string parses back as an empty canvas.
-              const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-              const wrap=document.createElement('div');
-              wrap.className='pdf-preview-wrap';
-              wrap.innerHTML=`<div class="pdf-preview-header"><span>📄 ${esc(fname)}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body"></div>`;
-              wrap.querySelector('.pdf-preview-body').appendChild(canvas);
-              el.replaceWith(wrap);
+          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          const total=pdf.numPages;
+          const pagesLabel=total>1?` · ${total} pages`:'';
+          const wrap=document.createElement('div');
+          wrap.className='pdf-preview-wrap';
+          wrap.innerHTML=`<div class="pdf-preview-header"><span>📄 ${esc(fname)}${pagesLabel}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body"></div>`;
+          const body=wrap.querySelector('.pdf-preview-body');
+          el.replaceWith(wrap);
+          // Render every page (capped) sequentially to limit memory; the
+          // canvases stack vertically in the scrollable preview body.
+          const MAX_PAGES=20;
+          const n=Math.min(total,MAX_PAGES);
+          const renderPage=(i)=>{
+            if(i>n) return;
+            pdf.getPage(i).then(page=>{
+              const canvas=document.createElement('canvas');
+              const scale=1.5;
+              const viewport=page.getViewport({scale});
+              canvas.width=viewport.width;
+              canvas.height=viewport.height;
+              canvas.className='pdf-preview-canvas';
+              body.appendChild(canvas);
+              page.render({canvasContext:canvas.getContext('2d'),viewport}).promise.then(()=>renderPage(i+1));
             });
-          });
+          };
+          renderPage(1);
         })
         .catch(()=>{
           const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';

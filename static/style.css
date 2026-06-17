@@ -5286,7 +5286,7 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .pdf-preview-header{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:var(--surface-2);font-size:12px;font-weight:600;}
 .pdf-preview-header a{color:var(--accent);text-decoration:none;font-weight:500;}
 .pdf-preview-header a:hover{text-decoration:underline;}
-.pdf-preview-body{display:flex;justify-content:center;padding:8px;background:#fff;border-radius:0 0 6px 6px;max-height:500px;overflow:hidden;}
+.pdf-preview-body{display:flex;flex-direction:column;align-items:center;gap:8px;justify-content:flex-start;padding:8px;background:#fff;border-radius:0 0 6px 6px;max-height:600px;overflow:auto;}
 .pdf-preview-canvas{max-width:100%;height:auto;border-radius:2px;}
 .pdf-preview-fallback{padding:8px;font-size:13px;}
 .pdf-preview-spinner{animation:pulse 1.5s ease-in-out infinite;}
