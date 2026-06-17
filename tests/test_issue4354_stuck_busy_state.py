@@ -153,6 +153,17 @@ def test_attach_live_stream_has_silence_watchdog():
     assert re.search(r"S\.activeStreamId\s*=\s*null", body), (
         "watchdog must clear S.activeStreamId"
     )
+    # After clearing busy state, the watchdog must refresh the composer
+    # button + topbar DOM, otherwise the red "stop" button lingers after
+    # the watchdog clears the run state. (nesquena-hermes re-review)
+    assert re.search(r"updateSendBtn\s*\(\s*\)", body), (
+        "watchdog fire block must call updateSendBtn() to refresh "
+        "the composer button (getComposerPrimaryAction reads S.busy)"
+    )
+    assert re.search(r"syncTopbar\s*\(\s*\)", body), (
+        "watchdog fire block must call syncTopbar() to refresh the "
+        "topbar busy affordance"
+    )
     assert re.search(r"showToast\([^)]*reconnect", body, re.IGNORECASE), (
         "watchdog must show a reconnect toast"
     )

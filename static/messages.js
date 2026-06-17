@@ -1506,6 +1506,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       S.busy = false;
       S.activeStreamId = null;
+      // Refresh the composer button + topbar — the computed action depends on
+      // S.busy / S.activeStreamId, so the DOM must be re-rendered or the
+      // red "stop" button lingers after the watchdog clears the run state.
+      if (typeof updateSendBtn === 'function') {
+        try { updateSendBtn(); } catch (_) {}
+      }
+      if (typeof syncTopbar === 'function') {
+        try { syncTopbar(); } catch (_) {}
+      }
       if (typeof showToast === 'function') {
         try { showToast('Stream connection lost — reconnecting.', 4000, 'warn'); } catch (_) {}
       }
