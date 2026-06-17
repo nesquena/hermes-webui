@@ -575,12 +575,10 @@ function _syncMessageVirtualHeightCache(visWithIdx){
     _messageVirtualHeightCacheSrc=S.messages;
     return;
   }
-  const validIds=new Set();
-  for(let i=0;i<visWithIdx.length;i++){
-    if(visWithIdx[i]&&visWithIdx[i].rawIdx!==undefined) validIds.add(visWithIdx[i].rawIdx);
-  }
+  if(_messageVirtualHeightCacheLen===S.messages.length&&_messageVirtualHeightCacheSrc===S.messages) return;
+  const msgLen=S.messages.length;
   for(const key of _messageVirtualHeightCacheById.keys()){
-    if(!validIds.has(key)) _messageVirtualHeightCacheById.delete(key);
+    if(key>=msgLen) _messageVirtualHeightCacheById.delete(key);
   }
   if(_messageVirtualHeightCacheById.size>500){
     const excess=_messageVirtualHeightCacheById.size-500;
@@ -732,7 +730,7 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     const totalHeight=_measureMessageVirtualRow(inner, entry);
     if(totalHeight<=0) continue;
     const cached=_messageVirtualHeightCacheById.get(entry.rawIdx);
-    if(cached!==totalHeight){
+    if(cached===undefined||Math.abs(cached-totalHeight)>1){
       _messageVirtualHeightCacheById.set(entry.rawIdx, totalHeight);
       changed=true;
     }

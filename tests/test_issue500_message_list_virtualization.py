@@ -922,80 +922,76 @@ console.log(JSON.stringify({userResult, assistantResult, toolCallResult}));
 
 
 def test_message_virtual_height_cache_persistence_across_window_shift():
-    """Test persistence: set heights for rawIdx 10-20, simulate window shift to 15-25, assert heights for 15-20 are cached."""
+    """Test persistence: heights survive a virtual window shift because pruning is identity-based, not visibility-based."""
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
-let S = {messages: []};
+let S = {messages: new Array(30)};
 let _messageVirtualHeightCacheLen = 0;
 let _messageVirtualHeightCacheSrc = null;
 eval(extractFunc('_syncMessageVirtualHeightCache'));
 
-// Mock the cache Map
 const _messageVirtualHeightCacheById = new Map();
 for (let i = 10; i <= 20; i++) {
   _messageVirtualHeightCacheById.set(i, 150 + i);
 }
 
-// Simulate first window with rawIdx 10-20
+// Sync with first window (rawIdx 10-20)
 const visWithIdx1 = Array.from({length: 11}, (_, i) => ({rawIdx: 10 + i, m: {role: 'user'}}));
 _syncMessageVirtualHeightCache(visWithIdx1);
 
-// After sync, cache for 10-20 should still be present
-const cachedAt15 = _messageVirtualHeightCacheById.get(15);
-const cachedAt20 = _messageVirtualHeightCacheById.get(20);
-
-// Simulate window shift to 15-25 (rawIdx 15-25)
+// Shift window to rawIdx 15-25; entries 10-14 should SURVIVE (identity-based pruning)
+S.messages = new Array(30);
 const visWithIdx2 = Array.from({length: 11}, (_, i) => ({rawIdx: 15 + i, m: {role: 'user'}}));
 _syncMessageVirtualHeightCache(visWithIdx2);
 
-// Entries 10-14 should be pruned, 15-20 should remain
-const pruned10 = _messageVirtualHeightCacheById.get(10);
-const stillCached15 = _messageVirtualHeightCacheById.get(15);
-const stillCached20 = _messageVirtualHeightCacheById.get(20);
+const still10 = _messageVirtualHeightCacheById.get(10);
+const still15 = _messageVirtualHeightCacheById.get(15);
+const still20 = _messageVirtualHeightCacheById.get(20);
 
-console.log(JSON.stringify({cachedAt15, cachedAt20, pruned10: pruned10 !== undefined ? pruned10 : null, stillCached15, stillCached20}));
+console.log(JSON.stringify({still10, still15, still20}));
 """
     result = json.loads(_run_node(source))
-    assert result["cachedAt15"] == 165, "rawIdx 15 should be cached at 165"
-    assert result["cachedAt20"] == 170, "rawIdx 20 should be cached at 170"
-    assert result["pruned10"] is None, "rawIdx 10 should be pruned after window shift"
-    assert result["stillCached15"] == 165, "rawIdx 15 should persist after shift"
-    assert result["stillCached20"] == 170, "rawIdx 20 should persist after shift"
+    assert result["still10"] == 160, "rawIdx 10 should survive window shift (identity-based)"
+    assert result["still15"] == 165, "rawIdx 15 should persist"
+    assert result["still20"] == 170, "rawIdx 20 should persist"
 
 
 def test_message_virtual_height_cache_pruning_on_sync():
-    """Test pruning: populate cache with rawIdx 1-10, sync with visWithIdx containing only 5-10, assert entries 1-4 are pruned."""
+    """Test pruning: entries with rawIdx >= messages.length are pruned when the message array shrinks."""
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
-let S = {messages: []};
+let S = {messages: new Array(15)};
 let _messageVirtualHeightCacheLen = 0;
 let _messageVirtualHeightCacheSrc = null;
 eval(extractFunc('_syncMessageVirtualHeightCache'));
 
-// Mock the cache Map
 const _messageVirtualHeightCacheById = new Map();
 for (let i = 1; i <= 10; i++) {
   _messageVirtualHeightCacheById.set(i, 100 + i);
 }
 
-// Sync with visWithIdx containing only rawIdx 5-10
-const visWithIdx = Array.from({length: 6}, (_, i) => ({rawIdx: 5 + i, m: {role: 'user'}}));
-_syncMessageVirtualHeightCache(visWithIdx);
+// First sync establishes baseline
+const visWithIdx1 = Array.from({length: 6}, (_, i) => ({rawIdx: 5 + i, m: {role: 'user'}}));
+_syncMessageVirtualHeightCache(visWithIdx1);
 
-// Check which entries remain
+// Shrink messages to 8 — entries 8, 9, 10 should be pruned
+S.messages = new Array(8);
+const visWithIdx2 = Array.from({length: 3}, (_, i) => ({rawIdx: 5 + i, m: {role: 'user'}}));
+_syncMessageVirtualHeightCache(visWithIdx2);
+
 const kept5 = _messageVirtualHeightCacheById.get(5);
-const kept10 = _messageVirtualHeightCacheById.get(10);
-const pruned1 = _messageVirtualHeightCacheById.get(1);
-const pruned4 = _messageVirtualHeightCacheById.get(4);
+const kept7 = _messageVirtualHeightCacheById.get(7);
+const pruned8 = _messageVirtualHeightCacheById.get(8);
+const pruned10 = _messageVirtualHeightCacheById.get(10);
 
-console.log(JSON.stringify({kept5, kept10, pruned1: pruned1 !== undefined ? pruned1 : null, pruned4: pruned4 !== undefined ? pruned4 : null, size: _messageVirtualHeightCacheById.size}));
+console.log(JSON.stringify({kept5, kept7, pruned8: pruned8 !== undefined ? pruned8 : null, pruned10: pruned10 !== undefined ? pruned10 : null, size: _messageVirtualHeightCacheById.size}));
 """
     result = json.loads(_run_node(source))
-    assert result["kept5"] == 105, "rawIdx 5 should remain cached"
-    assert result["kept10"] == 110, "rawIdx 10 should remain cached"
-    assert result["pruned1"] is None, "rawIdx 1 should be pruned"
-    assert result["pruned4"] is None, "rawIdx 4 should be pruned"
-    assert result["size"] == 6, "Cache should contain exactly 6 entries (5-10)"
+    assert result["kept5"] == 105, "rawIdx 5 should remain (within messages.length)"
+    assert result["kept7"] == 107, "rawIdx 7 should remain (within messages.length)"
+    assert result["pruned8"] is None, "rawIdx 8 should be pruned (>= messages.length)"
+    assert result["pruned10"] is None, "rawIdx 10 should be pruned (>= messages.length)"
+    assert result["size"] == 7, "Entries 1-7 should remain (rawIdx < 8)"
 
 
 def test_message_virtual_height_cache_full_clear():
