@@ -1465,6 +1465,42 @@ function closeOtherLiveStreams(activeSid){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  // Client-side silence watchdog (#4354). A dead EventSource can sit there
+  // forever as long as the browser keeps the TCP socket open. If we go 5
+  // minutes without any event while the stream is still expected to be
+  // alive, force-close the source, clear the local INFLIGHT, and let the
+  // next periodic /api/sessions poll reconcile. The user gets a low-key
+  // toast so they have a signal; the next legitimate send re-opens the
+  // stream. See docs/superpowers/specs/2026-06-17-issue-4354-stuck-busy-state-design.md.
+  const _STREAM_SILENCE_WATCHDOG_MS = 5 * 60 * 1000;
+  let _lastEventAt = Date.now();
+  const _silenceWatchdogInterval = setInterval(() => {
+    if (Date.now() - _lastEventAt < _STREAM_SILENCE_WATCHDOG_MS) return;
+    if (!S.busy) return;
+    if (S.activeStreamId !== streamId) return;
+    if (typeof _streamFinalized !== 'undefined' && _streamFinalized) return;
+    if (typeof _terminalStateReached !== 'undefined' && _terminalStateReached) return;
+    // Fire: close the source, drop local INFLIGHT, clear busy state, toast.
+    try { _closeSource(source); } catch (_) {}
+    if (typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[activeSid]) {
+      delete INFLIGHT[activeSid];
+    }
+    if (typeof clearInflightState === 'function') {
+      try { clearInflightState(activeSid); } catch (_) {}
+    }
+    S.busy = false;
+    S.activeStreamId = null;
+    if (typeof showToast === 'function') {
+      try { showToast('Stream connection lost — reconnecting.', 4000, 'warn'); } catch (_) {}
+    }
+    if (typeof setComposerStatus === 'function') {
+      try { setComposerStatus('Reconnecting…'); } catch (_) {}
+    }
+    if (typeof renderSessionList === 'function') {
+      try { renderSessionList(); } catch (_) {}
+    }
+    clearInterval(_silenceWatchdogInterval);
+  }, 30 * 1000);
   const reconnecting=!!options.reconnecting;
   if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
   else {
@@ -2928,6 +2964,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     LIVE_STREAMS[activeSid]={streamId,source};
 
+    // Bump the silence watchdog on any received event (#4354). A generic
+    // onmessage handler covers all event types including future additions.
+    try {
+      source.addEventListener('message', () => { _lastEventAt = Date.now(); });
+    } catch (_) {}
+
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
     // the accumulators here so the re-sent tokens wouldn't double the prefix.
@@ -3298,6 +3340,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // S.messages with stale server data (issue #3195).
       _streamFinalized=true;
       _terminalStateReached=true;
+      try { clearInterval(_silenceWatchdogInterval); } catch (_) {}
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
@@ -3664,6 +3707,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       _clearStreamEndRecovery();
       _terminalStateReached=true;
+      try { clearInterval(_silenceWatchdogInterval); } catch (_) {}
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
       _cancelAnimationFramePendingStreamRender();
@@ -3770,6 +3814,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_bailOutOfTerminalEventsFromStaleStream(source) && !_streamFinalized){
         return;
       }
+      try { clearInterval(_silenceWatchdogInterval); } catch (_) {}
       if(_terminalStateReached || _streamFinalized){
         _closeSource(source);
         return;
