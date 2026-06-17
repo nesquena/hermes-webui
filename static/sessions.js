@@ -381,13 +381,17 @@ function _isServerIdleSessionRow(s) {
 
 function _reconcileActiveSessionIdleStateFromList(serverRows) {
   if (!S || !S.session || !S.session.session_id) return false;
-  if (typeof _sendInProgress !== 'undefined' && _sendInProgress) return false;
   if (!Array.isArray(serverRows)) return false;
   const sid=S.session.session_id;
   const serverRow=serverRows.find(s=>s&&s.session_id===sid);
   if (!serverRow) return false;
   if (!_isServerIdleSessionRow(serverRow)) return false;
   let changed=false;
+  if (typeof _sendInProgress !== 'undefined' && _sendInProgress) {
+    _sendInProgress = false;
+    if (typeof _sendInProgressSid !== 'undefined') _sendInProgressSid = null;
+    changed = true;
+  }
   if (S.busy) { S.busy=false; changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }
   if (INFLIGHT&&INFLIGHT[sid]) {
