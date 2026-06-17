@@ -196,9 +196,14 @@ const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = {
   default: 140,
 };
 eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+eval(extractFunc('_messageVirtualHeightForIdx'));
 eval(extractFunc('_messageVirtualRoleForEntry'));
 let virtualized = true;
-let _messageVirtualHeightCache = [0, 220, 180, 120];
+const _messageVirtualHeightCacheById = new Map();
+_messageVirtualHeightCacheById.set(0, 120);  // user
+_messageVirtualHeightCacheById.set(1, 400);  // tool_call
+_messageVirtualHeightCacheById.set(2, 160);  // assistant
+_messageVirtualHeightCacheById.set(3, 140);  // default
 let _messageVirtualEstimatedRowHeight = 140;
 function _getVisibleMessagesWithIdx(){
   return [{rawIdx: 0}, {rawIdx: 1}, {rawIdx: 2}, {rawIdx: 3}];
@@ -214,21 +219,32 @@ const inactive = _messageVirtualPrependedHeightDelta(3);
 console.log(JSON.stringify({active, inactive}));
 """
     metrics = json.loads(_run_node(source))
-    assert metrics["active"] == 540
+    assert metrics["active"] == 680, f"Active should be 120+400+160=680, got {metrics['active']}"
     assert metrics["inactive"] is None
 
 
 def test_virtual_question_jump_scroll_target_uses_visible_index_height_prefix():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
-let _messageVirtualHeightCache = [100, 120, 80, 140];
-let _messageVirtualHeightCacheEntries = [];
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = {
+  user: 120,
+  assistant: 160,
+  tool_call: 400,
+  default: 140,
+};
+const _messageVirtualHeightCacheById = new Map();
+_messageVirtualHeightCacheById.set(10, 100);
+_messageVirtualHeightCacheById.set(12, 120);
+_messageVirtualHeightCacheById.set(14, 80);
+_messageVirtualHeightCacheById.set(16, 140);
 let _messageVirtualHeightCacheLen = 4;
 let _messageVirtualHeightCacheSrc = null;
 let _messageVirtualEstimatedRowHeight = 110;
 let _messageVirtualWindowKey = 'old';
 let S = {messages: [{}, {}, {}, {}]};
 function _messageIsRenderable(){ return true; }
+eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+eval(extractFunc('_messageVirtualHeightForIdx'));
 eval(extractFunc('_messageVirtualHeightEntryMatches'));
 eval(extractFunc('_syncMessageVirtualHeightCache'));
 eval(extractFunc('_messageVisibleIndexForRawIdx'));
@@ -239,7 +255,6 @@ const visWithIdx = [
   {rawIdx: 14, m: S.messages[2]},
   {rawIdx: 16, m: S.messages[3]},
 ];
-_messageVirtualHeightCacheEntries = visWithIdx;
 _messageVirtualHeightCacheSrc = S.messages;
 const visibleIdx = _messageVisibleIndexForRawIdx(14, visWithIdx);
 const scrollTop = _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, {clientHeight: 200});
@@ -254,15 +269,15 @@ def test_height_cache_preserves_measured_prefix_across_append_only_growth():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT = 140;
-let _messageVirtualHeightCache = [180, 220];
-let _messageVirtualHeightCacheEntries = [];
+const _messageVirtualHeightCacheById = new Map();
+_messageVirtualHeightCacheById.set(0, 180);
+_messageVirtualHeightCacheById.set(1, 220);
 let _messageVirtualHeightCacheLen = 2;
 let _messageVirtualHeightCacheSrc = null;
 let _messageVirtualEstimatedRowHeight = 200;
 let _messageVirtualWindowKey = 'stale-key';
 function _clearMessageVirtualHeightCache() {
-  _messageVirtualHeightCache = [];
-  _messageVirtualHeightCacheEntries = [];
+  _messageVirtualHeightCacheById.clear();
   _messageVirtualHeightCacheLen = 0;
   _messageVirtualHeightCacheSrc = null;
   _messageVirtualEstimatedRowHeight = MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
@@ -274,10 +289,6 @@ eval(extractFunc('_syncMessageVirtualHeightCache'));
 const first = {id: 'first'};
 const second = {id: 'second'};
 let S = {messages: [first, second]};
-_messageVirtualHeightCacheEntries = [
-  {rawIdx: 0, m: first},
-  {rawIdx: 1, m: second},
-];
 _messageVirtualHeightCacheSrc = S.messages;
 S = {messages: [first, second, {id: 'third'}]};
 _syncMessageVirtualHeightCache([
@@ -285,15 +296,17 @@ _syncMessageVirtualHeightCache([
   {rawIdx: 1, m: second},
   {rawIdx: 2, m: S.messages[2]},
 ]);
+const cacheArray = Array.from(_messageVirtualHeightCacheById.values());
 console.log(JSON.stringify({
-  cache: _messageVirtualHeightCache,
+  cacheValues: cacheArray,
+  cacheSize: _messageVirtualHeightCacheById.size,
   estimated: _messageVirtualEstimatedRowHeight,
   windowKey: _messageVirtualWindowKey,
 }));
 """
     metrics = json.loads(_run_node(source))
-    assert metrics["cache"][:2] == [180, 220]
-    assert len(metrics["cache"]) == 3
+    assert metrics["cacheValues"][:2] == [180, 220]
+    assert metrics["cacheSize"] == 2
     assert metrics["estimated"] == 200
     assert metrics["windowKey"] == ""
 
@@ -302,15 +315,15 @@ def test_height_cache_preserves_measured_suffix_across_prepended_history():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT = 140;
-let _messageVirtualHeightCache = [180, 220];
-let _messageVirtualHeightCacheEntries = [];
+const _messageVirtualHeightCacheById = new Map();
+_messageVirtualHeightCacheById.set(0, 180);
+_messageVirtualHeightCacheById.set(1, 220);
 let _messageVirtualHeightCacheLen = 2;
 let _messageVirtualHeightCacheSrc = null;
 let _messageVirtualEstimatedRowHeight = 200;
 let _messageVirtualWindowKey = 'stale-key';
 function _clearMessageVirtualHeightCache() {
-  _messageVirtualHeightCache = [];
-  _messageVirtualHeightCacheEntries = [];
+  _messageVirtualHeightCacheById.clear();
   _messageVirtualHeightCacheLen = 0;
   _messageVirtualHeightCacheSrc = null;
   _messageVirtualEstimatedRowHeight = MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
@@ -322,10 +335,6 @@ eval(extractFunc('_syncMessageVirtualHeightCache'));
 const first = {id: 'first'};
 const second = {id: 'second'};
 let S = {messages: [first, second]};
-_messageVirtualHeightCacheEntries = [
-  {rawIdx: 0, m: first},
-  {rawIdx: 1, m: second},
-];
 _messageVirtualHeightCacheSrc = S.messages;
 const olderA = {id: 'older-a'};
 const olderB = {id: 'older-b'};
@@ -336,15 +345,17 @@ _syncMessageVirtualHeightCache([
   {rawIdx: 2, m: first},
   {rawIdx: 3, m: second},
 ]);
+const cacheArray = Array.from(_messageVirtualHeightCacheById.values());
 console.log(JSON.stringify({
-  cache: _messageVirtualHeightCache,
+  cacheValues: cacheArray,
+  cacheSize: _messageVirtualHeightCacheById.size,
   estimated: _messageVirtualEstimatedRowHeight,
   windowKey: _messageVirtualWindowKey,
 }));
 """
     metrics = json.loads(_run_node(source))
-    assert metrics["cache"][2:] == [180, 220]
-    assert len(metrics["cache"]) == 4
+    assert metrics["cacheValues"][0:2] == [180, 220]
+    assert metrics["cacheSize"] == 2
     assert metrics["estimated"] == 200
     assert metrics["windowKey"] == ""
 
@@ -455,8 +466,8 @@ let _lastScrollTop = 0;
 let _messageUserUnpinned = true;
 let _scrollPinned = false;
 let _nearBottomCount = 0;
-let _messageVirtualHeightCache = Array.from({length: TOTAL}, () => ROW_HEIGHT);
-let _messageVirtualHeightCacheEntries = [];
+const _messageVirtualHeightCacheById = new Map();
+for(let i=0; i<TOTAL; i++) _messageVirtualHeightCacheById.set(i, ROW_HEIGHT);
 let _messageVirtualHeightCacheLen = TOTAL;
 let _messageVirtualHeightCacheSrc = null;
 let _messageVirtualEstimatedRowHeight = ROW_HEIGHT;
@@ -539,19 +550,18 @@ const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS={
   tool_call:400,
   default:140,
 };
-function _messageVirtualDefaultHeightForRole(role){
-  return MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[
-    role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role)?role:'default'
-  ];
-}
+eval(extractFunc('_messageVirtualDefaultHeightForRole'));
 const MESSAGE_VIRTUAL_THRESHOLD_ROWS = 80;
 const MESSAGE_VIRTUAL_BUFFER_PX = 900;
-let _messageVirtualHeightCache = [];
+const _messageVirtualHeightCacheById = new Map();
+let _messageVirtualHeightCacheLen = 0;
+let _messageVirtualHeightCacheSrc = null;
 let _messageVirtualEstimatedRowHeight = 140;
 function _syncMessageVirtualHeightCache(){ /* no-op for the test */ }
 function $(id){ return {scrollTop: 5000, clientHeight: 720}; }
 function _messageVirtualRoleForEntry(){ return 'default'; }
 const window = {};
+eval(extractFunc('_messageVirtualHeightForIdx'));
 eval(extractFunc('_messageVirtualWindow'));
 eval(extractFunc('_currentMessageVirtualWindow'));
 // 200 visible messages — well over the 80 threshold
@@ -790,35 +800,35 @@ const visWithIdx = [
 ];
 
 // --- _messageVirtualScrollTopForVisibleIdx ---
-let _messageVirtualHeightCache = [0, 0, 0];
-let _messageVirtualHeightCacheEntries = [];
+const _messageVirtualHeightCacheById = new Map();
 let _messageVirtualHeightCacheLen = 3;
 let _messageVirtualHeightCacheSrc = null;
 let _messageVirtualEstimatedRowHeight = 140;
 let _messageVirtualWindowKey = '';
 let S = {messages: visWithIdx.map(e => e.m)};
 function _messageIsRenderable(){ return true; }
+eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+eval(extractFunc('_messageVirtualHeightForIdx'));
 eval(extractFunc('_messageVirtualHeightEntryMatches'));
 eval(extractFunc('_syncMessageVirtualHeightCache'));
 eval(extractFunc('_messageVirtualScrollTopForVisibleIdx'));
 // scrollTop to visibleIdx=2 must sum heights of idx 0 (120) and idx 1 (400) = 520
-_messageVirtualHeightCacheEntries = visWithIdx;
 _messageVirtualHeightCacheSrc = S.messages;
 const scrollTop = _messageVirtualScrollTopForVisibleIdx(visWithIdx, 2, null);
 
 // --- _messageVirtualPrependedHeightDelta ---
 let virtualized2 = true;
-let _messageVirtualHeightCache2 = [0, 0, 0];
+let _messageVirtualHeightCacheById2 = new Map();
 let _messageVirtualEstimatedRowHeight2 = 140;
 function _getVisibleMessagesWithIdx(){ return visWithIdx; }
 function _messageVirtualKeepTailCount(){ return 0; }
 function _currentMessageVirtualWindow(){ return {virtualized: virtualized2}; }
-// Patch cache var used by _messageVirtualPrependedHeightDelta
-eval(extractFunc('_messageVirtualPrependedHeightDelta').replace(
-  /_messageVirtualHeightCache/g, '_messageVirtualHeightCache2'
-).replace(
-  /_messageVirtualEstimatedRowHeight/g, '_messageVirtualEstimatedRowHeight2'
-));
+// Patch cache Map used by _messageVirtualPrependedHeightDelta
+const origFunc = extractFunc('_messageVirtualPrependedHeightDelta');
+const patchedFunc = origFunc
+  .replace(/_messageVirtualHeightCacheById/g, '_messageVirtualHeightCacheById2')
+  .replace(/_messageVirtualEstimatedRowHeight/g, '_messageVirtualEstimatedRowHeight2');
+eval(patchedFunc);
 // Sum of first 3 uncached entries: user(120) + tool_call(400) + assistant(160) = 680
 const delta = _messageVirtualPrependedHeightDelta(3);
 
@@ -857,3 +867,231 @@ console.log(JSON.stringify({scrollTop, delta, windowCoversAll}));
     )
     # windowing function must also cover the same three rows
     assert metrics["windowCoversAll"] is True
+
+
+def test_message_virtual_height_cache_by_id_hit():
+    """Test cache hit: set a height in the Map for rawIdx=5, call _messageVirtualHeightForIdx. Assert returns cached value, not default."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = {
+  user: 120,
+  assistant: 160,
+  tool_call: 400,
+  default: 140,
+};
+eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+eval(extractFunc('_messageVirtualHeightForIdx'));
+
+// Mock the cache Map
+const _messageVirtualHeightCacheById = new Map();
+_messageVirtualHeightCacheById.set(5, 250);
+
+const result = _messageVirtualHeightForIdx(5, () => 'user');
+console.log(JSON.stringify({result}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["result"] == 250, "Should return cached value 250, not default"
+
+
+def test_message_virtual_height_cache_by_id_miss_with_role():
+    """Test cache miss with role fallback: call for uncached rawIdx. Assert returns per-role default."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = {
+  user: 120,
+  assistant: 160,
+  tool_call: 400,
+  default: 140,
+};
+eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+eval(extractFunc('_messageVirtualHeightForIdx'));
+
+// Mock the cache Map (empty)
+const _messageVirtualHeightCacheById = new Map();
+
+const userResult = _messageVirtualHeightForIdx(99, () => 'user');
+const assistantResult = _messageVirtualHeightForIdx(100, () => 'assistant');
+const toolCallResult = _messageVirtualHeightForIdx(101, () => 'tool_call');
+
+console.log(JSON.stringify({userResult, assistantResult, toolCallResult}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["userResult"] == 120, "User role should default to 120"
+    assert result["assistantResult"] == 160, "Assistant role should default to 160"
+    assert result["toolCallResult"] == 400, "Tool call role should default to 400"
+
+
+def test_message_virtual_height_cache_persistence_across_window_shift():
+    """Test persistence: set heights for rawIdx 10-20, simulate window shift to 15-25, assert heights for 15-20 are cached."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let S = {messages: []};
+let _messageVirtualHeightCacheLen = 0;
+let _messageVirtualHeightCacheSrc = null;
+eval(extractFunc('_syncMessageVirtualHeightCache'));
+
+// Mock the cache Map
+const _messageVirtualHeightCacheById = new Map();
+for (let i = 10; i <= 20; i++) {
+  _messageVirtualHeightCacheById.set(i, 150 + i);
+}
+
+// Simulate first window with rawIdx 10-20
+const visWithIdx1 = Array.from({length: 11}, (_, i) => ({rawIdx: 10 + i, m: {role: 'user'}}));
+_syncMessageVirtualHeightCache(visWithIdx1);
+
+// After sync, cache for 10-20 should still be present
+const cachedAt15 = _messageVirtualHeightCacheById.get(15);
+const cachedAt20 = _messageVirtualHeightCacheById.get(20);
+
+// Simulate window shift to 15-25 (rawIdx 15-25)
+const visWithIdx2 = Array.from({length: 11}, (_, i) => ({rawIdx: 15 + i, m: {role: 'user'}}));
+_syncMessageVirtualHeightCache(visWithIdx2);
+
+// Entries 10-14 should be pruned, 15-20 should remain
+const pruned10 = _messageVirtualHeightCacheById.get(10);
+const stillCached15 = _messageVirtualHeightCacheById.get(15);
+const stillCached20 = _messageVirtualHeightCacheById.get(20);
+
+console.log(JSON.stringify({cachedAt15, cachedAt20, pruned10: pruned10 !== undefined ? pruned10 : null, stillCached15, stillCached20}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["cachedAt15"] == 165, "rawIdx 15 should be cached at 165"
+    assert result["cachedAt20"] == 170, "rawIdx 20 should be cached at 170"
+    assert result["pruned10"] is None, "rawIdx 10 should be pruned after window shift"
+    assert result["stillCached15"] == 165, "rawIdx 15 should persist after shift"
+    assert result["stillCached20"] == 170, "rawIdx 20 should persist after shift"
+
+
+def test_message_virtual_height_cache_pruning_on_sync():
+    """Test pruning: populate cache with rawIdx 1-10, sync with visWithIdx containing only 5-10, assert entries 1-4 are pruned."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let S = {messages: []};
+let _messageVirtualHeightCacheLen = 0;
+let _messageVirtualHeightCacheSrc = null;
+eval(extractFunc('_syncMessageVirtualHeightCache'));
+
+// Mock the cache Map
+const _messageVirtualHeightCacheById = new Map();
+for (let i = 1; i <= 10; i++) {
+  _messageVirtualHeightCacheById.set(i, 100 + i);
+}
+
+// Sync with visWithIdx containing only rawIdx 5-10
+const visWithIdx = Array.from({length: 6}, (_, i) => ({rawIdx: 5 + i, m: {role: 'user'}}));
+_syncMessageVirtualHeightCache(visWithIdx);
+
+// Check which entries remain
+const kept5 = _messageVirtualHeightCacheById.get(5);
+const kept10 = _messageVirtualHeightCacheById.get(10);
+const pruned1 = _messageVirtualHeightCacheById.get(1);
+const pruned4 = _messageVirtualHeightCacheById.get(4);
+
+console.log(JSON.stringify({kept5, kept10, pruned1: pruned1 !== undefined ? pruned1 : null, pruned4: pruned4 !== undefined ? pruned4 : null, size: _messageVirtualHeightCacheById.size}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["kept5"] == 105, "rawIdx 5 should remain cached"
+    assert result["kept10"] == 110, "rawIdx 10 should remain cached"
+    assert result["pruned1"] is None, "rawIdx 1 should be pruned"
+    assert result["pruned4"] is None, "rawIdx 4 should be pruned"
+    assert result["size"] == 6, "Cache should contain exactly 6 entries (5-10)"
+
+
+def test_message_virtual_height_cache_full_clear():
+    """Test full clear: populate cache, sync with empty visWithIdx, assert Map is empty."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let S = {messages: []};
+let _messageVirtualHeightCacheLen = 0;
+let _messageVirtualHeightCacheSrc = null;
+eval(extractFunc('_syncMessageVirtualHeightCache'));
+
+// Mock the cache Map
+const _messageVirtualHeightCacheById = new Map();
+for (let i = 1; i <= 10; i++) {
+  _messageVirtualHeightCacheById.set(i, 100 + i);
+}
+
+const sizeBefore = _messageVirtualHeightCacheById.size;
+
+// Sync with empty visWithIdx
+_syncMessageVirtualHeightCache([]);
+
+const sizeAfter = _messageVirtualHeightCacheById.size;
+
+console.log(JSON.stringify({sizeBefore, sizeAfter}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["sizeBefore"] == 10, "Cache should contain 10 entries before clear"
+    assert result["sizeAfter"] == 0, "Cache should be empty after clear"
+
+
+def test_message_virtual_window_with_height_resolver():
+    """Test window function with heightForIdx resolver: call with varying heights. Assert window uses those heights."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = {
+  user: 120,
+  assistant: 160,
+  tool_call: 400,
+  default: 140,
+};
+eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+eval(extractFunc('_messageVirtualWindow'));
+
+// heightForIdx that returns varying heights: idx < 10 -> 200px, idx >= 10 -> 400px
+const heightForIdx = (idx) => idx < 10 ? 200 : 400;
+
+const metrics = _messageVirtualWindow({
+  total: 20,
+  scrollTop: 3000,  // Near middle
+  viewportHeight: 800,
+  heightForIdx,
+  bufferPx: 100,
+  threshold: 5,
+  keepTailCount: 3,
+});
+
+// With varying heights and scrollTop=3000:
+// Rows 0-9: 200px each = 2000px total
+// Rows 10-19: 400px each = 4000px total
+// scrollTop 3000 is past the first 10 rows (2000px), so should start in the 400px region
+const startsAfterFirstRegion = metrics.start > 9;
+
+console.log(JSON.stringify({
+  virtualized: metrics.virtualized,
+  start: metrics.start,
+  end: metrics.end,
+  topPad: metrics.topPad,
+  startsAfterFirstRegion
+}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["virtualized"] is True, "Should virtualize with 20 rows"
+    assert result["startsAfterFirstRegion"] is True, "Window should start after first region (rows 0-9)"
+    assert result["topPad"] > 2000, "topPad should account for the first 10 rows at 200px each"
+
+
+def test_message_virtual_height_cache_measurement_write():
+    """Test measurement write: simulate measurement, assert Map entry is set by rawIdx, not by visible index."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+// Minimal test for height cache write pattern
+const _messageVirtualHeightCacheById = new Map();
+
+// Simulate entry with rawIdx
+const entry = {rawIdx: 42, m: {role: 'assistant'}};
+const totalHeight = 320;
+
+// This is the pattern used in _updateMessageVirtualMeasurements
+_messageVirtualHeightCacheById.set(entry.rawIdx, totalHeight);
+
+const cached = _messageVirtualHeightCacheById.get(42);
+const byVisibleIdx = _messageVirtualHeightCacheById.get(0);  // Visible index would be wrong key
+
+console.log(JSON.stringify({cached, byVisibleIdx: byVisibleIdx !== undefined ? byVisibleIdx : null}));
+"""
+    result = json.loads(_run_node(source))
+    assert result["cached"] == 320, "Should be able to retrieve height by rawIdx=42"
+    assert result["byVisibleIdx"] is None, "Should not find height when keyed by visible index"

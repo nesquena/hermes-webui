@@ -390,8 +390,7 @@ function _messageVirtualDefaultHeightForRole(role){
 const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
-let _messageVirtualHeightCache=[];
-let _messageVirtualHeightCacheEntries=[];
+const _messageVirtualHeightCacheById=new Map();
 let _messageVirtualHeightCacheLen=0;
 let _messageVirtualHeightCacheSrc=null;
 let _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
@@ -409,8 +408,7 @@ function clearVisibleMessageRowCache(){
   _visWithIdxCacheSrc=null;
 }
 function _clearMessageVirtualHeightCache(){
-  _messageVirtualHeightCache=[];
-  _messageVirtualHeightCacheEntries=[];
+  _messageVirtualHeightCacheById.clear();
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
@@ -457,6 +455,11 @@ function _getVisibleMessagesWithIdx(){
   }
   return _visWithIdxCache;
 }
+function _messageVirtualHeightForIdx(idx,roleForIdx){
+  const cached=_messageVirtualHeightCacheById.get(idx);
+  if(cached!==undefined) return cached;
+  return _messageVirtualDefaultHeightForRole(roleForIdx());
+}
 function _messageVirtualWindow(opts){
   const total=Math.max(0, Number(opts&&opts.total)||0);
   const threshold=Math.max(1, Number(opts&&opts.threshold)||MESSAGE_VIRTUAL_THRESHOLD_ROWS);
@@ -467,7 +470,9 @@ function _messageVirtualWindow(opts){
   const tailStart=Math.max(0, total-keepTailCount);
   const heights=Array.isArray(opts&&opts.heights)?opts.heights:[];
   const roleForIdx=typeof (opts&&opts.roleForIdx)==='function'?opts.roleForIdx:null;
+  const heightForIdx=typeof (opts&&opts.heightForIdx)==='function'?opts.heightForIdx:null;
   const rowHeightFor=(idx)=>{
+    if(heightForIdx) return heightForIdx(idx);
     const cached=Number(heights[idx]);
     if(Number.isFinite(cached)&&cached>0) return cached;
     return roleForIdx?Math.max(1,_messageVirtualDefaultHeightForRole(roleForIdx(idx))):defaultHeight;
@@ -563,61 +568,26 @@ function _messageVirtualHeightPrefixEntryMatches(previousEntry, nextEntry){
   );
 }
 function _syncMessageVirtualHeightCache(visWithIdx){
-  const nextEntries=Array.isArray(visWithIdx)
-    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
-    : [];
-  if(
-    _messageVirtualHeightCacheLen===S.messages.length &&
-    _messageVirtualHeightCacheSrc===S.messages &&
-    _messageVirtualHeightCacheEntries.length===nextEntries.length
-  ) return;
-  const previousEntries=Array.isArray(_messageVirtualHeightCacheEntries)?_messageVirtualHeightCacheEntries:[];
-  const previousHeights=Array.isArray(_messageVirtualHeightCache)?_messageVirtualHeightCache.slice():[];
-  let nextHeights=null;
-  if(!previousEntries.length){
-    nextHeights=new Array(nextEntries.length);
-  }else if(!nextEntries.length){
-    _clearMessageVirtualHeightCache();
+  if(!visWithIdx||!visWithIdx.length){
+    _messageVirtualHeightCacheById.clear();
+    _messageVirtualWindowKey='';
     _messageVirtualHeightCacheLen=S.messages.length;
     _messageVirtualHeightCacheSrc=S.messages;
     return;
-  }else{
-    const sharedPrefix=Math.min(previousEntries.length,nextEntries.length);
-    let prefixMatches=true;
-    for(let i=0;i<sharedPrefix;i++){
-      if(!_messageVirtualHeightPrefixEntryMatches(previousEntries[i], nextEntries[i])){
-        prefixMatches=false;
-        break;
-      }
-    }
-    if(prefixMatches){
-      nextHeights=previousHeights.slice(0, sharedPrefix);
-      nextHeights.length=nextEntries.length;
-    }else if(nextEntries.length>=previousEntries.length){
-      const prependedCount=nextEntries.length-previousEntries.length;
-      let suffixMatches=true;
-      for(let i=0;i<previousEntries.length;i++){
-        if(!_messageVirtualHeightEntryMatches(previousEntries[i], nextEntries[i+prependedCount])){
-          suffixMatches=false;
-          break;
-        }
-      }
-      if(suffixMatches){
-        nextHeights=new Array(nextEntries.length);
-        for(let i=0;i<previousEntries.length;i++){
-          nextHeights[prependedCount+i]=previousHeights[i];
-        }
-      }
-    }
   }
-  if(nextHeights===null){
-    _clearMessageVirtualHeightCache();
-    _messageVirtualHeightCache=new Array(nextEntries.length);
-  }else{
-    _messageVirtualHeightCache=nextHeights;
-    _messageVirtualWindowKey='';
+  const validIds=new Set();
+  for(let i=0;i<visWithIdx.length;i++){
+    if(visWithIdx[i]&&visWithIdx[i].rawIdx!==undefined) validIds.add(visWithIdx[i].rawIdx);
   }
-  _messageVirtualHeightCacheEntries=nextEntries;
+  for(const key of _messageVirtualHeightCacheById.keys()){
+    if(!validIds.has(key)) _messageVirtualHeightCacheById.delete(key);
+  }
+  if(_messageVirtualHeightCacheById.size>500){
+    const excess=_messageVirtualHeightCacheById.size-500;
+    const iter=_messageVirtualHeightCacheById.keys();
+    for(let i=0;i<excess;i++) _messageVirtualHeightCacheById.delete(iter.next().value);
+  }
+  _messageVirtualWindowKey='';
   _messageVirtualHeightCacheLen=S.messages.length;
   _messageVirtualHeightCacheSrc=S.messages;
 }
@@ -650,9 +620,8 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     total:visWithIdx.length,
     scrollTop:container?container.scrollTop:0,
     viewportHeight:container?container.clientHeight:(_messageVirtualEstimatedRowHeight*6),
-    heights:_messageVirtualHeightCache,
     defaultHeight:_messageVirtualEstimatedRowHeight,
-    roleForIdx:idx=>_messageVirtualRoleForEntry(visWithIdx[idx]),
+    heightForIdx:idx=>_messageVirtualHeightForIdx(visWithIdx[idx].rawIdx,()=>_messageVirtualRoleForEntry(visWithIdx[idx])),
     keepTailCount,
   });
 }
@@ -662,11 +631,12 @@ function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
   const visWithIdx=_getVisibleMessagesWithIdx();
   const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
   if(!virtualWindow||!virtualWindow.virtualized) return null;
-  const limit=Math.min(count,_messageVirtualHeightCache.length);
+  const limit=Math.min(count,visWithIdx.length);
   let total=0;
   for(let i=0;i<limit;i++){
-    const cached=Number(_messageVirtualHeightCache[i]);
-    total+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+    const entry=visWithIdx[i];
+    const cached=_messageVirtualHeightCacheById.get(entry.rawIdx);
+    total+=(cached!==undefined)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(entry));
   }
   return Math.max(0,Math.round(total));
 }
@@ -680,11 +650,12 @@ function _messageVisibleIndexForRawIdx(rawIdx, visWithIdx){
 function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container){
   const idx=Math.max(0,Number(visibleIdx)||0);
   _syncMessageVirtualHeightCache(visWithIdx);
-  const limit=Math.min(idx,_messageVirtualHeightCache.length);
+  const limit=Math.min(idx,visWithIdx.length);
   let offset=0;
   for(let i=0;i<limit;i++){
-    const cached=Number(_messageVirtualHeightCache[i]);
-    offset+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+    const entry=visWithIdx[i];
+    const cached=_messageVirtualHeightCacheById.get(entry.rawIdx);
+    offset+=(cached!==undefined)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(entry));
   }
   const viewport=container?Math.max(0,Number(container.clientHeight)||0):0;
   return Math.max(0,Math.round(offset-(viewport*0.35)));
@@ -760,10 +731,9 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     if(!entry) continue;
     const totalHeight=_measureMessageVirtualRow(inner, entry);
     if(totalHeight<=0) continue;
-    const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
-    if(!Number.isFinite(visibleIdx)) continue;
-    if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
-      _messageVirtualHeightCache[visibleIdx]=totalHeight;
+    const cached=_messageVirtualHeightCacheById.get(entry.rawIdx);
+    if(cached!==totalHeight){
+      _messageVirtualHeightCacheById.set(entry.rawIdx, totalHeight);
       changed=true;
     }
     measuredTotal+=totalHeight;
