@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Selected chat text now appears as readable quote cards above the composer and as clean quoted blocks in sent messages.** The safer named-context behavior from #2543 is preserved — selections are still flushed as labeled Markdown quotes on send — but the pending context UI now shows a calm card with a left accent rail, editable label, remove action, and a clipped text excerpt, while the sent user bubble renders that generated context as a styled `figure`/`blockquote` instead of literal Markdown syntax.
+
 ## [v0.51.501] — 2026-06-18 — Release RK (Ctrl/Cmd+, opens Settings)
 
 ### Added
@@ -64,6 +68,7 @@
 ### Fixed
 
 - **Reloading a session with a large model context window no longer snaps it back to the 256k fallback (#4248).** The session reload path now resolves context-window metadata with the same base URL / API-key lookup inputs used by streaming saves, and it refuses to overwrite a larger persisted context window with the generic 256k fallback. The reload model-identity check also normalizes slash-qualified model ids (`provider/model`, OpenRouter-style) so a slash-stored model resolving to its bare id is not mistaken for a model change. Thanks @franksong2702.
+
 ## [v0.51.489] — 2026-06-18 — Release QY (outline button no longer collides with the scroll control)
 
 ### Fixed
@@ -117,7 +122,6 @@
 ### Fixed
 
 - **Smoother scrolling in the experimental "Virtualize long transcripts" mode — fewer jumps around tool-call rows and during measurement (#4346, via #4367 + #4368).** Two fixes to the (still default-off, opt-in) transcript virtualization: (1) per-role height estimates for not-yet-measured rows (user 120 / assistant 160 / tool_call 400 / default 140) so large tool-call rows aren't under-counted before they're measured, which previously threw off the initial scroll position; and (2) anchor-based scroll compensation during measurement — the view captures an anchor row + scrollTop, renders, then re-pins scrollTop by the anchor's measured delta, plus a short scroll-active guard that defers measurement refresh while you're actively scrolling. Both are additive and only run when "Virtualize long transcripts (experimental)" is enabled. Thanks @rodboev.
-
 ## [v0.51.482] — 2026-06-17 — Release QR (archived cron sessions stay hidden)
 
 ### Fixed

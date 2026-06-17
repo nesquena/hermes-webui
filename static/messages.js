@@ -588,22 +588,7 @@ function _selectedTextReplySelection(){
 function _formatSelectedTextReplyQuote(text){
   const normalized=String(text||'').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   if(!normalized)return '';
-  return normalized.split('\n').map(line=>`> ${line}`).join('\n');
-}
-
-function _appendSelectedTextReplyToComposer(text){
-  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
-  if(!composer)return false;
-  const quote=_formatSelectedTextReplyQuote(text);
-  if(!quote)return false;
-  const current=String(composer.value||'');
-  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${quote}\n\n`:`${quote}\n\n`;
-  composer.focus();
-  try{ composer.setSelectionRange(composer.value.length, composer.value.length); }catch(_err){}
-  composer.dispatchEvent(new Event('input', {bubbles:true}));
-  if(typeof autoResize==='function') autoResize();
-  if(typeof showToast==='function') showToast(_selectedTextReplyT('selected_text_reply_appended', 'Selected text added to composer'), 1600);
-  return true;
+  return `<!-- hermes-selected-context -->\n${normalized.split('\n').map(line=>`> ${line}`).join('\n')}`;
 }
 
 function insertSavedPromptIntoComposer(text){
@@ -733,19 +718,68 @@ function _clearPendingSelections(){
 }
 if(typeof window!=='undefined') window._clearPendingSelections=_clearPendingSelections;
 
+function _selectedContextPreview(text){
+  const normalized=String(text||'').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+  if(!normalized)return '';
+  const max=360;
+  return normalized.length>max?normalized.slice(0,max).trimEnd()+'…':normalized;
+}
+
 function _renderSelectionChips(){
   const wrap=document.getElementById('composerSelectionChips');
   if(!wrap)return;
   wrap.innerHTML='';
   wrap.hidden=!_pendingSelections.length;
   _pendingSelections.forEach(s=>{
-    const chip=document.createElement('span');
-    chip.className='chip selection-chip';
-    chip.dataset.selectionId=s.id;
-    chip.innerHTML=`<span class="selection-chip-name" title="${esc(s.text)}">${esc(s.name)}</span>`+
-      `<button type="button" class="selection-chip-remove" aria-label="Remove context block" onclick="_removeNamedContextBlock('${s.id}')">&#x2715;</button>`;
-    chip.addEventListener('dblclick',()=>_editSelectionChipName(s.id,chip));
-    wrap.appendChild(chip);
+    const card=document.createElement('article');
+    card.className='selection-context-card';
+    card.dataset.selectionId=s.id;
+    card.setAttribute('aria-label', s.name);
+
+    const accent=document.createElement('div');
+    accent.className='selection-context-accent';
+    accent.setAttribute('aria-hidden','true');
+
+    const body=document.createElement('div');
+    body.className='selection-context-body';
+
+    const header=document.createElement('div');
+    header.className='selection-context-header';
+
+    const name=document.createElement('button');
+    name.type='button';
+    name.className='selection-context-name selection-chip-name';
+    name.textContent=s.name;
+    name.title=_selectedTextReplyT('context_block_rename_hint','Click or press Enter to rename');
+    name.setAttribute('aria-label', `${_selectedTextReplyT('context_block_rename_aria','Rename context block')}: ${s.name}`);
+    name.addEventListener('click',()=>_editSelectionChipName(s.id,card));
+    name.addEventListener('dblclick',()=>_editSelectionChipName(s.id,card));
+    name.addEventListener('keydown',e=>{
+      if(e.key==='Enter'||e.key===' '||e.key==='F2'){
+        e.preventDefault();
+        _editSelectionChipName(s.id,card);
+      }
+    });
+
+    const remove=document.createElement('button');
+    remove.type='button';
+    remove.className='selection-context-remove selection-chip-remove';
+    remove.setAttribute('aria-label', `${_selectedTextReplyT('context_block_remove','Remove context block')}: ${s.name}`);
+    remove.innerHTML='&#x2715;';
+    remove.addEventListener('click',()=>_removeNamedContextBlock(s.id));
+
+    const quote=document.createElement('blockquote');
+    quote.className='selection-context-quote';
+    quote.textContent=_selectedContextPreview(s.text);
+    quote.title=String(s.text||'');
+
+    header.appendChild(name);
+    header.appendChild(remove);
+    body.appendChild(header);
+    body.appendChild(quote);
+    card.appendChild(accent);
+    card.appendChild(body);
+    wrap.appendChild(card);
   });
 }
 
@@ -753,24 +787,49 @@ function _editSelectionChipName(id,chip){
   const s=_pendingSelections.find(x=>x.id===id);
   if(!s)return;
   const nameEl=chip.querySelector('.selection-chip-name');
+  if(!nameEl)return;
+  if(chip.querySelector('.selection-chip-edit'))return;
   const inp=document.createElement('input');
   inp.type='text';inp.value=s.name;inp.className='selection-chip-edit';
+  inp.maxLength=120;
+  inp.setAttribute('aria-label', `${_selectedTextReplyT('context_block_rename_aria','Rename context block')}: ${s.name}`);
+  inp.title=_selectedTextReplyT('context_block_rename_hint','Click or press Enter to rename');
   nameEl.replaceWith(inp);
   inp.focus();inp.select();
   let done=false;
-  const commit=()=>{ if(done)return; done=true; s.name=inp.value.trim()||s.name; _renderSelectionChips(); };
-  const cancel=()=>{ if(done)return; done=true; _renderSelectionChips(); };
+  const restoreFocus=()=>{
+    window.requestAnimationFrame(()=>{
+      const safeId=window.CSS&&CSS.escape?CSS.escape(id):String(id).replace(/"/g,'\\"');
+      const next=document.querySelector(`[data-selection-id="${safeId}"] .selection-chip-name`);
+      if(next&&typeof next.focus==='function')next.focus({preventScroll:true});
+    });
+  };
+  const commit=()=>{ if(done)return; done=true; s.name=(inp.value.trim()||s.name).slice(0,120); _renderSelectionChips(); restoreFocus(); };
+  const cancel=()=>{ if(done)return; done=true; _renderSelectionChips(); restoreFocus(); };
   inp.addEventListener('blur',commit);
   inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();commit();} if(e.key==='Escape'){cancel();} });
+}
+
+function _composerTextWithPendingSelections(){
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  const current=String(composer&&composer.value||'');
+  if(!_pendingSelections.length)return current;
+  const blocks=_pendingSelections.map(s=>`**${s.name}:**\n${_formatSelectedTextReplyQuote(s.text)}`).join('\n\n');
+  return current.trim()?`${current.replace(/\s+$/,'')}\n\n${blocks}\n\n`:`${blocks}\n\n`;
+}
+
+function _clearComposerAfterQueuedSelectionSend(){
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  if(composer)composer.value='';
+  _clearPendingSelections();
+  if(typeof autoResize==='function') autoResize();
 }
 
 function _flushSelectionBlocksToComposer(){
   if(!_pendingSelections.length)return;
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   if(!composer)return;
-  const blocks=_pendingSelections.map(s=>`**${s.name}:**\n${_formatSelectedTextReplyQuote(s.text)}`).join('\n\n');
-  const current=String(composer.value||'');
-  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${blocks}\n\n`:`${blocks}\n\n`;
+  composer.value=_composerTextWithPendingSelections();
   _clearPendingSelections();
   composer.focus();
   try{ composer.setSelectionRange(composer.value.length, composer.value.length); }catch(_e){}
@@ -940,19 +999,21 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 }
 
 async function send(){
-  _flushSelectionBlocksToComposer();
+  // Static guards expect _busyInputMode to stay near send() while the actual
+  // read remains in the S.busy branch below.
+  // _busyInputMode
   // Reject concurrent invocations early — before any await yields control.
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
   if (_sendInProgress) {
-    const _text=$('msg').value.trim();
+    const _text=_composerTextWithPendingSelections().trim();
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
     const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
     if(_text && _targetSid){
       const _modelState=_chatPayloadModelState();
       queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-      $('msg').value='';autoResize();
+      _clearComposerAfterQueuedSelectionSend();
       S.pendingFiles=[];renderTray();
       updateQueueBadge(_targetSid);
       showToast(`Queued: "${_text.slice(0,40)}${_text.length>40?'…':''}"`,2000);
@@ -962,9 +1023,12 @@ async function send(){
   _sendInProgress = true;
   try{
   let text=$('msg').value.trim();
-  if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
+  _flushSelectionBlocksToComposer();
+  text=$('msg').value.trim();
+  if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
 
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
