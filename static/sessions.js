@@ -1106,7 +1106,7 @@ async function loadSession(sid){
   if(!activeStreamId){
     S.activeStreamId=null;
     S.busy=false;
-    if(INFLIGHT[sid]) {
+    if(INFLIGHT[sid]){
       delete INFLIGHT[sid];
       if(typeof clearInflightState==='function') clearInflightState(sid);
     }
@@ -1208,7 +1208,7 @@ async function loadSession(sid){
       }
       // Refresh todos from cold-load or persisted INFLIGHT before painting.
       if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
-      S.busy = true;
+      S.busy=true;
       // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
       // replaying persisted live tools so the compact Activity count survives
       // switching away from and back to an active chat (#1715).
@@ -1337,7 +1337,7 @@ async function loadSession(sid){
     _mergePendingSessionMessage(S.session,S.messages);
 
     if(activeStreamId){
-      S.busy = true;
+      S.busy=true;
       S.activeStreamId=activeStreamId;
       if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);

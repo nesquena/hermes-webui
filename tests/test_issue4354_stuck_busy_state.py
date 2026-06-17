@@ -210,12 +210,17 @@ def test_inflight_reattach_uses_server_truth():
     start = SESSIONS_SRC.find(sig)
     assert start != -1, "missing `if(INFLIGHT[sid]){` block in loadSession"
 
-    # The unconditional `S.busy=true;` is gone.
-    unconditional = "S.busy=true;"
-    assert SESSIONS_SRC.find(unconditional) == -1, (
-        "the unconditional `S.busy=true;` in the INFLIGHT reattach path "
-        "must be replaced with a server-truth-gated branch"
-    )
+    # The unconditional `S.busy=true;` in the INFLIGHT reattach path is gone.
+    # We use a structural check (the re-assert is inside a server-truth
+    # conditional) rather than a global substring search, because other
+    # branches in the file (e.g. the idle-session reattach at the end of
+    # loadSession) still set `S.busy = true` unconditionally.
+    # We extract the INFLIGHT reattach block by `rfind` (the substantive
+    # reattach branch is the last occurrence; the first occurrence is the
+    # small idle-reset block earlier in loadSession).
+    sig = "if(INFLIGHT[sid]){"
+    start = SESSIONS_SRC.rfind(sig)
+    assert start != -1, "missing `if(INFLIGHT[sid]){` reattach block in loadSession"
 
     # The replacement branch lives in the same function. We assert the
     # _body_ of the if-INFLIGHT block contains the right conditionals.
@@ -259,9 +264,25 @@ def test_inflight_reattach_uses_server_truth():
         "INFLIGHT reattach discard branch must call clearInflightState(sid)"
     )
 
-    # The re-assert branch sets S.busy = true.
+    # The re-assert branch sets S.busy = true, AND it must be guarded by the
+    # server-truth + recency condition. We verify the structural invariant:
+    # `S.busy = true` appears inside the `if(_serverStreamMatches && _sessionIsRecent)`
+    # branch, not unconditionally.
     assert re.search(r"S\.busy\s*=\s*true", block_body), (
         "INFLIGHT reattach must still set S.busy = true in the matching branch"
+    )
+    assert re.search(r"_serverStreamMatches", block_body) and re.search(r"_sessionIsRecent", block_body), (
+        "INFLIGHT reattach must gate S.busy = true on _serverStreamMatches && _sessionIsRecent"
+    )
+    # The condition `_serverStreamMatches && _sessionIsRecent` must appear
+    # BEFORE `S.busy = true` in the block (i.e. the busy re-assert is inside
+    # the conditional, not before it).
+    cond_pos = block_body.find("_serverStreamMatches")
+    busy_pos = block_body.find("S.busy = true")
+    if busy_pos == -1:
+        busy_pos = block_body.find("S.busy=true")
+    assert cond_pos != -1 and busy_pos != -1 and cond_pos < busy_pos, (
+        "S.busy = true must be inside the _serverStreamMatches && _sessionIsRecent branch"
     )
 
     # Runtime check via node: build a minimal harness that mirrors the

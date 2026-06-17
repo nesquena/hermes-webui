@@ -431,7 +431,10 @@ def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
     # grab the wrong one. (rfind = the substantive restore branch.)
     inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+4200]
+    # #4354 added a server-truth gate before the replay body, pushing the
+    # existing logic past the original 4200-char window. Use 6000 to cover
+    # the full block (clearLiveToolCards is near the end of the replay body).
+    inflight_block = src[inflight_idx:inflight_idx+6000]
     assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
     assert "clearLiveToolCards" in inflight_block,         "loadSession INFLIGHT branch must clear old live cards before restoring"
 
@@ -655,7 +658,10 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
     # grab the wrong one. (rfind = the substantive restore branch.)
     inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+4200]
+    # #4354 added a server-truth gate before the replay body; use a wider
+    # window so the existing assertions on S.busy=true; and renderMessages(
+    # still hit.
+    inflight_block = src[inflight_idx:inflight_idx+5000]
     busy_pos = inflight_block.find("S.busy=true;")
     # #3326 added an optional {preserveScroll} arg to the INFLIGHT-branch render
     # call, so match the call form rather than the bare `renderMessages();`.
@@ -673,7 +679,9 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     # grab the wrong one. (rfind = the substantive restore branch.)
     inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+1200]
+    # #4354 added a server-truth gate before the replay body; widen the
+    # window from 1200 to 2000 so the merged-tail call is still in scope.
+    inflight_block = src[inflight_idx:inflight_idx+2000]
 
     assert "await _ensureMessagesLoaded(sid);" in inflight_block, (
         "returning to an active stream should load the persisted transcript before adding the live tail"
@@ -770,7 +778,8 @@ def test_loadSession_inflight_sets_active_stream_before_replaying_live_tool_card
     # grab the wrong one. (rfind = the substantive restore branch.)
     inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+4200]
+    # #4354 added a server-truth gate before the replay body; widen to 5000.
+    inflight_block = src[inflight_idx:inflight_idx+5000]
     active_pos = inflight_block.find("S.activeStreamId=activeStreamId;")
     replay_pos = inflight_block.find("const replayPersistedLiveToolCards=(opts)=>{")
     attach_pos = inflight_block.find("attachLiveStream(sid, activeStreamId")
