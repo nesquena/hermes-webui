@@ -1511,14 +1511,28 @@ function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   // rebuild should preserve the loaded session model or the user's current
   // in-page selection when it still exists in the refreshed catalog.
   const shouldApplyBootDefault=!!(opts&&opts.preferProfileDefaultOnFreshBoot);
+
+  // Helper: try _applyModelToDropdown first; if the model is missing from the
+  // current catalog (cross-provider selection after a partial rebuild), inject
+  // it as a custom option via _ensureModelOptionInDropdown instead of returning
+  // null and letting the browser silently snap to the first <option> (#XXXX).
+  const _applyOrEnsure = function(modelId, providerId) {
+    const applied = _applyModelToDropdown(modelId, sel, providerId);
+    if (applied) return applied;
+    if (typeof _ensureModelOptionInDropdown === 'function') {
+      return _ensureModelOptionInDropdown(modelId, sel, providerId);
+    }
+    return null;
+  };
+
   if(shouldApplyBootDefault && data&&data.default_model && !(activeSession&&activeSession.model)){
-    return _applyModelToDropdown(data.default_model,sel,data.active_provider||null);
+    return _applyOrEnsure(data.default_model, data.active_provider||null);
   }
   if(activeSession&&activeSession.model){
-    return _applyModelToDropdown(activeSession.model,sel,activeSession.model_provider||null);
+    return _applyOrEnsure(activeSession.model, activeSession.model_provider||null);
   }
   if(previousState&&previousState.model){
-    return _applyModelToDropdown(previousState.model,sel,previousState.model_provider||null);
+    return _applyOrEnsure(previousState.model, previousState.model_provider||null);
   }
   return null;
 }
