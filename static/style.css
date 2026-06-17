@@ -5908,3 +5908,16 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 @media(max-width:900px){
   #outlineToggleBtn,#outlinePanelWrapper{display:none!important;}
 }
+
+/* Settings search */
+#settingsMenu .settings-search { position: relative; }
+.settings-search-results { position: absolute; top: 100%; left: 0; right: 0; z-index: 200; background: var(--dropdown-bg, var(--bg)); border: 1px solid var(--border2); border-radius: 8px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18); overflow: hidden; margin-top: 2px; }
+.settings-search-result { display: flex; align-items: center; gap: 4px; width: 100%; padding: 7px 12px; background: none; border: none; text-align: left; cursor: pointer; font-size: 12px; color: var(--text); transition: background 0.1s; }
+.settings-search-result:hover { background: var(--hover-bg); }
+.settings-search-section { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+.settings-search-arrow { color: var(--muted); font-size: 11px; }
+.settings-search-label { color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-search-empty { padding: 10px 12px; font-size: 12px; color: var(--muted); }
+/* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
+.settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
+@keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }

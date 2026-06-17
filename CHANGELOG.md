@@ -7,6 +7,12 @@
 
 - **Session detail loads now preserve WebUI-origin source metadata when state.db is the source of truth.** A stale sidecar could still say `raw_source=cli` / `is_cli_session=true` even though the session list already knew the session was WebUI-origin, making the active transcript enter the external-refresh reload path and disrupting scroll position while reading. The detail endpoint now reconciles WebUI source flags from state.db, and the frontend refuses to treat an explicit WebUI-source session as external.
 
+## [v0.51.471] — 2026-06-17 — Release QF (searchable settings)
+
+### Added
+
+- **Settings is now searchable (#3850).** A search box at the top of the Settings panel lets you find any setting across all sections (Appearance, Preferences, Providers, Plugins, System) without clicking through tabs — type a label fragment (e.g. "model", "theme", "language") and matching fields appear in a dropdown with their section breadcrumb. Clicking a result jumps to that section, scrolls the field into view, and pulses a brief highlight on it. Search clears after a pick. The index is built once on first search (covering lazily-loaded provider/plugin cards) and memoized. Thanks @rodboev.
+
 ## [v0.51.470] — 2026-06-17 — Release QE (transcript virtualization now experimental / off by default)
 
 ### Changed

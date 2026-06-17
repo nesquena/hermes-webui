@@ -394,8 +394,13 @@ def test_fade_text_effect_uses_dynamic_window_check():
     assert "return _streamFadeEnabledForStream;" not in helper_block
 
     # The preferences listener must update the runtime flag immediately, not
-    # only after autosave/save completes.
-    fade_cb_start = PANELS_JS.index("const fadeTextCb=$('settingsFadeTextEffect');", 300000)
+    # only after autosave/save completes. Anchor on the listener occurrence —
+    # the one immediately followed by the terminalAutoExpand field — rather than
+    # a fragile byte offset (panels.js has two `fadeTextCb=` references: the
+    # settings-body payload builder and this listener block).
+    fade_cb_start = PANELS_JS.index(
+        "const fadeTextCb=$('settingsFadeTextEffect');\n    if(fadeTextCb){"
+    )
     fade_cb_end = PANELS_JS.index("const terminalAutoExpandCb", fade_cb_start)
     fade_cb_block = PANELS_JS[fade_cb_start:fade_cb_end]
     assert "window._fadeTextEffect=fadeTextCb.checked" in fade_cb_block
