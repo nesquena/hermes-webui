@@ -1106,7 +1106,7 @@ async function loadSession(sid){
   if(!activeStreamId){
     S.activeStreamId=null;
     S.busy=false;
-    if(INFLIGHT[sid]){
+    if(INFLIGHT[sid]) {
       delete INFLIGHT[sid];
       if(typeof clearInflightState==='function') clearInflightState(sid);
     }
@@ -1174,95 +1174,115 @@ async function loadSession(sid){
   }
 
   if(INFLIGHT[sid]){
-    _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
-    const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
-    S.toolCalls=[];
-    try {
-      await _ensureMessagesLoaded(sid);
-    } catch(e) {
-      S.messages=inflightMessages;
-    }
-    const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
-    if(liveTailPrepared){
-      S.messages=_dropCurrentTurnAssistantMessages(S.messages);
-    }
-    S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
-    S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
-    if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
-      INFLIGHT[sid].messages=S.messages;
-    }
-    // Refresh todos from cold-load or persisted INFLIGHT before painting.
-    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
-    S.busy=true;
-    // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
-    // replaying persisted live tools so the compact Activity count survives
-    // switching away from and back to an active chat (#1715).
-    S.activeStreamId=activeStreamId;
-    const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
-    const replayPersistedLiveToolCards=(opts)=>{
-      const liveToolCalls=Array.isArray(S.toolCalls)
-        ? S.toolCalls
-        : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);
-      const skipUnkeyedRestoredDuplicates=!!(opts&&opts.skipUnkeyedRestoredDuplicates);
-      const restoredLiveTurn=skipUnkeyedRestoredDuplicates?document.getElementById('liveAssistantTurn'):null;
-      const hasRestoredLiveToolRows=!!(restoredLiveTurn&&restoredLiveTurn.querySelector('.tool-card-row'));
-      for(const tc of (liveToolCalls||[])){
-        if(skipUnkeyedRestoredDuplicates&&hasRestoredLiveToolRows&&!liveToolReplayId(tc)) continue;
-        if(tc&&tc.name) appendLiveToolCard(tc,{sessionId:sid,streamId:activeStreamId});
+    // Server-truth gate (#4354): only re-assert busy state if the server's
+    // current `active_stream_id` matches the local INFLIGHT's streamId AND
+    // the session was updated within the last 10 minutes. Otherwise the
+    // local INFLIGHT is a zombie from a long-dead stream; discard it and
+    // let the normal session-load render the persisted transcript.
+    const _inflightStreamId=INFLIGHT[sid].streamId||INFLIGHT[sid].stream_id;
+    const _serverStreamId=S.session.active_stream_id;
+    // last_message_at is seconds-since-epoch (float); see static/sessions.js:4887.
+    const _lastMessageAt=Number(S.session.last_message_at||0);
+    const _sessionIsRecent=_lastMessageAt>0
+      &&(Date.now()/1000-_lastMessageAt)<(10*60);
+    const _serverStreamMatches=!!_serverStreamId
+      &&!!_inflightStreamId
+      &&_serverStreamId===_inflightStreamId;
+    if(_serverStreamMatches&&_sessionIsRecent){
+      _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
+      const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
+      S.toolCalls=[];
+      try {
+        await _ensureMessagesLoaded(sid);
+      } catch(e) {
+        S.messages=inflightMessages;
       }
-    };
-    let didReconnect=false;
-    if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
-      INFLIGHT[sid].reattach=false;
-      if (_loadingSessionId !== sid) return;
-      didReconnect=true;
-      attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
-    }
-    syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
-    if(typeof ensureRunActivityForCurrentTurn==='function') ensureRunActivityForCurrentTurn();
-    const hasStructuredLiveState=!!(INFLIGHT[sid]&&(
-      String(INFLIGHT[sid].lastAssistantText||'').trim()||
-      String(INFLIGHT[sid].lastReasoningText||'').trim()||
-      (Array.isArray(INFLIGHT[sid].activityBurstAnchors)&&INFLIGHT[sid].activityBurstAnchors.length)||
-      (Array.isArray(INFLIGHT[sid].toolCalls)&&INFLIGHT[sid].toolCalls.length)
-    ));
-    let restoredLiveTurn=false;
-    if(typeof restoreLiveTurnHtmlForSession==='function'){
-      if(!hasStructuredLiveState){
-        restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
-      }else{
+      const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
+      if(liveTailPrepared){
+        S.messages=_dropCurrentTurnAssistantMessages(S.messages);
+      }
+      S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
+      S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
+      if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
+        INFLIGHT[sid].messages=S.messages;
+      }
+      // Refresh todos from cold-load or persisted INFLIGHT before painting.
+      if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
+      S.busy = true;
+      // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
+      // replaying persisted live tools so the compact Activity count survives
+      // switching away from and back to an active chat (#1715).
+      S.activeStreamId=activeStreamId;
+      const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
+      const replayPersistedLiveToolCards=(opts)=>{
+        const liveToolCalls=Array.isArray(S.toolCalls)
+          ? S.toolCalls
+          : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);
+        const skipUnkeyedRestoredDuplicates=!!(opts&&opts.skipUnkeyedRestoredDuplicates);
+        const restoredLiveTurn=skipUnkeyedRestoredDuplicates?document.getElementById('liveAssistantTurn'):null;
+        const hasRestoredLiveToolRows=!!(restoredLiveTurn&&restoredLiveTurn.querySelector('.tool-card-row'));
+        for(const tc of (liveToolCalls||[])){
+          if(skipUnkeyedRestoredDuplicates&&hasRestoredLiveToolRows&&!liveToolReplayId(tc)) continue;
+          if(tc&&tc.name) appendLiveToolCard(tc,{sessionId:sid,streamId:activeStreamId});
+        }
+      };
+      let didReconnect=false;
+      if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
+        INFLIGHT[sid].reattach=false;
+        if (_loadingSessionId !== sid) return;
+        didReconnect=true;
+        attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
+      }
+      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      if(typeof ensureRunActivityForCurrentTurn==='function') ensureRunActivityForCurrentTurn();
+      const hasStructuredLiveState=!!(INFLIGHT[sid]&&(
+        String(INFLIGHT[sid].lastAssistantText||'').trim()||
+        String(INFLIGHT[sid].lastReasoningText||'').trim()||
+        (Array.isArray(INFLIGHT[sid].activityBurstAnchors)&&INFLIGHT[sid].activityBurstAnchors.length)||
+        (Array.isArray(INFLIGHT[sid].toolCalls)&&INFLIGHT[sid].toolCalls.length)
+      ));
+      let restoredLiveTurn=false;
+      if(typeof restoreLiveTurnHtmlForSession==='function'){
+        if(!hasStructuredLiveState){
+          restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+        }else{
+          const liveTurn=document.getElementById('liveAssistantTurn');
+          const hasCurrentWorklogContent=!!(liveTurn&&liveTurn.querySelector(
+            '.live-worklog[data-live-worklog-shell="1"] .tool-card-row,'+
+            '.live-worklog[data-live-worklog-shell="1"] .wl-reason,'+
+            '.tool-call-group[data-live-tool-worklog-group="1"] .tool-card-row,'+
+            '.tool-call-group[data-live-tool-worklog-group="1"] .wl-reason,'+
+            '.tool-call-group[data-live-tool-call-group="1"] .tool-card-row,'+
+            '.tool-call-group[data-live-tool-call-group="1"] .wl-reason'
+          ));
+          if(hasCurrentWorklogContent) restoredLiveTurn=true;
+          else restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+        }
+      }
+      if(restoredLiveTurn&&didReconnect){
+        replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});
+      }
+      if(!restoredLiveTurn){
+        clearLiveToolCards();
+        if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+        if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+        else appendThinking();
+        replayPersistedLiveToolCards();
+      }
+      if(typeof ensureLiveWorklogShell==='function'){
         const liveTurn=document.getElementById('liveAssistantTurn');
-        const hasCurrentWorklogContent=!!(liveTurn&&liveTurn.querySelector(
-          '.live-worklog[data-live-worklog-shell="1"] .tool-card-row,'+
-          '.live-worklog[data-live-worklog-shell="1"] .wl-reason,'+
-          '.tool-call-group[data-live-tool-worklog-group="1"] .tool-card-row,'+
-          '.tool-call-group[data-live-tool-worklog-group="1"] .wl-reason,'+
-          '.tool-call-group[data-live-tool-call-group="1"] .tool-card-row,'+
-          '.tool-call-group[data-live-tool-call-group="1"] .wl-reason'
-        ));
-        if(hasCurrentWorklogContent) restoredLiveTurn=true;
-        else restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
+        if(!liveTurn||!liveTurn.querySelector('.tool-call-group[data-tool-worklog-group="1"]')) ensureLiveWorklogShell();
       }
+      loadDir('.');
+      setBusy(true);setComposerStatus('');
+      startApprovalPolling(sid);
+      if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
+      if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
+    }else{
+      // Stale local INFLIGHT — discard and fall through to normal session render.
+      delete INFLIGHT[sid];
+      if(typeof clearInflightState==='function') clearInflightState(sid);
     }
-    if(restoredLiveTurn&&didReconnect){
-      replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});
-    }
-    if(!restoredLiveTurn){
-      clearLiveToolCards();
-      if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
-      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
-      else appendThinking();
-      replayPersistedLiveToolCards();
-    }
-    if(typeof ensureLiveWorklogShell==='function'){
-      const liveTurn=document.getElementById('liveAssistantTurn');
-      if(!liveTurn||!liveTurn.querySelector('.tool-call-group[data-tool-worklog-group="1"]')) ensureLiveWorklogShell();
-    }
-    loadDir('.');
-    setBusy(true);setComposerStatus('');
-    startApprovalPolling(sid);
-    if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-    if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
@@ -1317,7 +1337,7 @@ async function loadSession(sid){
     _mergePendingSessionMessage(S.session,S.messages);
 
     if(activeStreamId){
-      S.busy=true;
+      S.busy = true;
       S.activeStreamId=activeStreamId;
       if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
