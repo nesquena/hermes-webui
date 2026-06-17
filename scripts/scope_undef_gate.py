@@ -104,16 +104,6 @@ PROJECT_DYNAMIC_GLOBALS = {
     "placeLiveToolCardsHost": "typeof-guarded optional (ui/sessions/messages call sites)",
     "watchInflightSession": "typeof-guarded optional fallback (sessions.js)",
     "_applyMediaPlaybackPreferences": "typeof-guarded optional (ui.js / workspace.js)",
-    # #4354 silence watchdog: `source` is an EventSource closure variable in
-    # attachLiveStream. It is always passed as a function argument to helpers
-    # (_closeSource, _runStreamEndRecovery, _restoreSettledSession,
-    # _setupSilenceWatchdog), never called bare. The gate's existing
-    # behavior accepts this pattern in nested functions (e.g.
-    # _scheduleStreamEndRecovery(source) at messages.js:3519); adding to the
-    # allowlist extends the same acceptance to the top-level call at the
-    # watchdog setup (messages.js:1445). NOT the #3696 class — the call is
-    # a direct argument pass, not a bare reference to a nested function.
-    "source": "EventSource ref in attachLiveStream; always passed as a function argument (messages.js:1445 + 3519 + 3527 + 3532 + others)",
 }
 
 

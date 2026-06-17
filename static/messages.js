@@ -1471,7 +1471,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // alive, force-close the source, clear the local INFLIGHT, and let the
   // next periodic /api/sessions poll reconcile. The user gets a low-key
   // toast so they have a signal; the next legitimate send re-opens the
-  // stream. See docs/superpowers/specs/2026-06-17-issue-4354-stuck-busy-state-design.md.
+  // stream.
+  //
+  // The interval handle is stored on this closure var so the terminal-event
+  // listeners (registered at the top of attachLiveStream, before the
+  // EventSource is created) can clearInterval() it. The actual setInterval
+  // call lives inside _wireSSE(source) — that is the only place where
+  // `source` is in scope as a real parameter (the scope_undef_gate removed
+  // `source` from its allowlist after #3696 caught a same-class bug).
+  let _silenceWatchdogInterval = null;
   const _STREAM_SILENCE_WATCHDOG_MS = 5 * 60 * 1000;
   let _lastEventAt = Date.now();
   // Wrap the watchdog in a function that takes `source` as a parameter.
@@ -1511,7 +1519,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }, 30 * 1000);
     return _interval;
   }
-  const _silenceWatchdogInterval = _setupSilenceWatchdog(source);
+  // Watchdog setup moved to _wireSSE(source) below — that's the only place
+  // where `source` is in scope as a real parameter. The interval handle
+  // is assigned to the closure var declared at the top of attachLiveStream.
   const reconnecting=!!options.reconnecting;
   if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
   else {
@@ -2974,6 +2984,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{existingLive.source.close();}catch(_){ }
     }
     LIVE_STREAMS[activeSid]={streamId,source};
+
+    // Start the silence watchdog now that the EventSource exists (#4354).
+    // The interval handle is stored on the closure var declared at the top
+    // of attachLiveStream so the terminal-event listeners (registered later
+    // in this function and at the top of attachLiveStream) can clear it.
+    _silenceWatchdogInterval = _setupSilenceWatchdog(source);
 
     // Bump the silence watchdog on any received event (#4354). A generic
     // onmessage handler covers all event types including future additions.

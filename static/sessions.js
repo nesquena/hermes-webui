@@ -1279,9 +1279,18 @@ async function loadSession(sid){
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
       if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
     }else{
-      // Stale local INFLIGHT — discard and fall through to normal session render.
+      // Stale local INFLIGHT — discard and load the persisted transcript
+      // so the chat pane isn't blank after the switch (#4354 P1).
+      // S.messages is reset to [] at the top of loadSession, and the
+      // subsequent if(activeStreamId) block calls renderMessages(), so
+      // without this load the user would see an empty conversation.
       delete INFLIGHT[sid];
       if(typeof clearInflightState==='function') clearInflightState(sid);
+      try {
+        await _ensureMessagesLoaded(sid);
+      } catch(_) {
+        // Fall through; the subsequent code will handle the empty messages.
+      }
     }
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
