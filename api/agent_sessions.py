@@ -173,6 +173,9 @@ def is_cli_session_row(row: dict) -> bool:
     source_label = _safe_lower(row.get("source_label"))
     if "webui" in {source, source_tag, raw_source, source_name, source_label}:
         return False
+    non_cli_sources = MESSAGING_SOURCES | {"cron", "tool", "api", "api_server"}
+    if {source, source_tag, raw_source, source_name, source_label} & non_cli_sources:
+        return False
     if source == "messaging":
         return False
     if source == "cli":

@@ -2593,7 +2593,7 @@ def _get_or_materialize_session(sid: str):
 
     # Preserve source metadata fields
     def _apply_source_meta(s):
-        s.is_cli_session = True
+        s.is_cli_session = is_cli_session_row(cli_meta)
         s.source_tag = cli_meta.get("source_tag")
         s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
         s.session_source = cli_meta.get("session_source")
@@ -9936,7 +9936,7 @@ def handle_post(handler, parsed) -> bool:
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
                 )
-                s.is_cli_session = True
+                s.is_cli_session = is_cli_session_row(cli_meta)
                 s.source_tag = cli_meta.get("source_tag")
                 s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
                 s.session_source = cli_meta.get("session_source")
@@ -9961,7 +9961,7 @@ def handle_post(handler, parsed) -> bool:
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
                 )
-                s.is_cli_session = True
+                s.is_cli_session = is_cli_session_row(cli_meta)
                 s.source_tag = cli_meta.get("source_tag")
                 s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
                 s.session_source = cli_meta.get("session_source")
