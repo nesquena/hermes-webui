@@ -1474,33 +1474,44 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // stream. See docs/superpowers/specs/2026-06-17-issue-4354-stuck-busy-state-design.md.
   const _STREAM_SILENCE_WATCHDOG_MS = 5 * 60 * 1000;
   let _lastEventAt = Date.now();
-  const _silenceWatchdogInterval = setInterval(() => {
-    if (Date.now() - _lastEventAt < _STREAM_SILENCE_WATCHDOG_MS) return;
-    if (!S.busy) return;
-    if (S.activeStreamId !== streamId) return;
-    if (typeof _streamFinalized !== 'undefined' && _streamFinalized) return;
-    if (typeof _terminalStateReached !== 'undefined' && _terminalStateReached) return;
-    // Fire: close the source, drop local INFLIGHT, clear busy state, toast.
-    try { _closeSource(source); } catch (_) {}
-    if (typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[activeSid]) {
-      delete INFLIGHT[activeSid];
-    }
-    if (typeof clearInflightState === 'function') {
-      try { clearInflightState(activeSid); } catch (_) {}
-    }
-    S.busy = false;
-    S.activeStreamId = null;
-    if (typeof showToast === 'function') {
-      try { showToast('Stream connection lost — reconnecting.', 4000, 'warn'); } catch (_) {}
-    }
-    if (typeof setComposerStatus === 'function') {
-      try { setComposerStatus('Reconnecting…'); } catch (_) {}
-    }
-    if (typeof renderSessionList === 'function') {
-      try { renderSessionList(); } catch (_) {}
-    }
-    clearInterval(_silenceWatchdogInterval);
-  }, 30 * 1000);
+  // Wrap the watchdog in a function that takes `source` as a parameter.
+  // The scope_undef_gate removed `source` from its allowlist after #3696
+  // caught a same-class bug; bare `source` references inside a nested
+  // function (even a setInterval callback) are flagged. Threading `source`
+  // as a parameter makes the dependency explicit and keeps the gate happy.
+  // The runner also owns the interval handle, which we return so the
+  // terminal-event paths in `attachLiveStream` can clear it.
+  function _setupSilenceWatchdog(_source) {
+    const _interval = setInterval(() => {
+      if (Date.now() - _lastEventAt < _STREAM_SILENCE_WATCHDOG_MS) return;
+      if (!S.busy) return;
+      if (S.activeStreamId !== streamId) return;
+      if (typeof _streamFinalized !== 'undefined' && _streamFinalized) return;
+      if (typeof _terminalStateReached !== 'undefined' && _terminalStateReached) return;
+      // Fire: close the source, drop local INFLIGHT, clear busy state, toast.
+      try { _closeSource(_source); } catch (_) {}
+      if (typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[activeSid]) {
+        delete INFLIGHT[activeSid];
+      }
+      if (typeof clearInflightState === 'function') {
+        try { clearInflightState(activeSid); } catch (_) {}
+      }
+      S.busy = false;
+      S.activeStreamId = null;
+      if (typeof showToast === 'function') {
+        try { showToast('Stream connection lost — reconnecting.', 4000, 'warn'); } catch (_) {}
+      }
+      if (typeof setComposerStatus === 'function') {
+        try { setComposerStatus('Reconnecting…'); } catch (_) {}
+      }
+      if (typeof renderSessionList === 'function') {
+        try { renderSessionList(); } catch (_) {}
+      }
+      clearInterval(_interval);
+    }, 30 * 1000);
+    return _interval;
+  }
+  const _silenceWatchdogInterval = _setupSilenceWatchdog(source);
   const reconnecting=!!options.reconnecting;
   if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
   else {

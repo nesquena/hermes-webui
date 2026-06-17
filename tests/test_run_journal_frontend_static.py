@@ -17,7 +17,11 @@ def test_reattach_path_uses_replay_when_status_reports_journal():
 
 
 def test_error_reconnect_path_can_restore_from_journal():
-    reconnect_pos = MESSAGES_SRC.index("setComposerStatus('Reconnecting")
+    # #4354 added a silence watchdog in attachLiveStream that also calls
+    # setComposerStatus('Reconnecting…'), so the first occurrence is now the
+    # watchdog. Use rfind to target the original reconnect handler in the
+    # EventSource error path.
+    reconnect_pos = MESSAGES_SRC.rfind("setComposerStatus('Reconnecting")
     block = MESSAGES_SRC[reconnect_pos : reconnect_pos + 900]
 
     assert "st.active" in block
