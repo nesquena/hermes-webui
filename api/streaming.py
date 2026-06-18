@@ -38,6 +38,7 @@ from api.config import (
     load_settings,
     parse_reasoning_effort,
     coerce_reasoning_effort_for_model,
+    _main_model_request_overrides,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -52,6 +53,25 @@ from api.models import (
     reconciled_state_db_messages_for_session,
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
+
+
+def _session_payload_with_full_messages(session, *, tool_calls=None):
+    """Return compact session metadata plus the embedded full transcript.
+
+    ``Session.compact()`` may intentionally use metadata-only counts from an
+    index/sidebar load. A settled SSE payload that embeds ``session.messages``
+    must report the count of that embedded transcript, otherwise completion and
+    reconcile paths can mistake a complete payload for a stale short window.
+    """
+    messages = list(getattr(session, 'messages', None) or [])
+    raw = session.compact() | {
+        'messages': messages,
+        'message_count': len(messages),
+    }
+    if tool_calls is not None:
+        raw['tool_calls'] = tool_calls
+    return raw
+
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -146,11 +166,17 @@ def _apply_profile_provider_context_to_streaming_model(
 
     profile_provider_normalized = _normalize_provider_id(profile_provider)
     model_lower = (model or "").lower()
-    for prefix in ("gpt", "claude", "gemini"):
-        if model_lower.startswith(prefix):
-            if _normalize_provider_id(prefix) != profile_provider_normalized:
-                return profile_default_model, provider_context, True
-            return model, provider_context, False
+    # Only run the bare-prefix family match on un-namespaced model ids. A custom
+    # namespace like "gemini_cli/..." or "claude-relay/..." merely *starts with* a
+    # first-party token; matching it here would clobber the model to the profile
+    # default on the send path (the #4278 collision — the slash-qualified branch
+    # below routes through the fixed _normalize_provider_id instead).
+    if "/" not in model_lower:
+        for prefix in ("gpt", "claude", "gemini"):
+            if model_lower.startswith(prefix):
+                if _normalize_provider_id(prefix) != profile_provider_normalized:
+                    return profile_default_model, provider_context, True
+                return model, provider_context, False
 
     if "/" in model_lower:
         slash_prefix = model_lower.split("/", 1)[0]
@@ -1020,6 +1046,86 @@ def _provider_error_payload(message: str, err_type: str, hint: str = '') -> dict
     return payload
 
 
+_MAX_ITERATION_SUMMARY_REQUEST = (
+    "You've reached the maximum number of tool-calling iterations allowed. "
+    "Please provide a final response summarizing what you've found and accomplished "
+    "so far, without calling any more tools."
+)
+
+
+def _is_synthetic_max_iteration_summary_request(message) -> bool:
+    """Return True for Hermes Agent's internal max-iteration summary prompt."""
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    text = " ".join(_message_text(message.get('content', '')).split())
+    expected = " ".join(_MAX_ITERATION_SUMMARY_REQUEST.split())
+    return text == expected
+
+
+def _drop_synthetic_max_iteration_summary_requests(messages, *, enabled: bool = True):
+    """Remove Agent-internal max-iteration summary prompts from WebUI state."""
+    if not enabled:
+        return list(messages or [])
+    return [
+        msg
+        for msg in list(messages or [])
+        if not _is_synthetic_max_iteration_summary_request(msg)
+    ]
+
+
+def _agent_result_tool_limit_reached(result) -> bool:
+    """Return True when current-turn metadata says the tool iteration cap fired."""
+    if not isinstance(result, dict):
+        return False
+    fields = [
+        result.get('turn_exit_reason'),
+        result.get('terminal_reason'),
+        result.get('status'),
+        result.get('state'),
+        result.get('error'),
+    ]
+    haystack = " ".join(str(value or '') for value in fields).lower()
+    if (
+        'max_iterations_reached' in haystack
+        or 'maximum number of tool-calling iterations' in haystack
+        or ('tool-calling iterations' in haystack and 'maximum' in haystack)
+    ):
+        return True
+    return False
+
+
+def _mark_latest_assistant_tool_limit_status(messages) -> bool:
+    """Annotate the latest usable assistant final answer as limit-stopped."""
+    for msg in reversed(list(messages or [])):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get('_error') or msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content')
+        if isinstance(content, list):
+            text = '\n'.join(
+                str(part.get('text') or part.get('content') or '')
+                for part in content
+                if isinstance(part, dict)
+            )
+        else:
+            text = str(content or '')
+        if msg.get('tool_calls') or not text.strip():
+            continue
+        msg['_terminal_state'] = 'tool_limit_reached'
+        msg['_terminal_reason'] = 'max_iterations'
+        msg.setdefault('_statusCard', {
+            'title': 'Tool iteration limit reached',
+            'subtitle': 'Stopped because the tool iteration limit was reached.',
+            'rows': [
+                {'label': 'State', 'value': 'Limit reached'},
+                {'label': 'Next step', 'value': 'Start a new turn to continue.'},
+            ],
+        })
+        return True
+    return False
+
+
 def _session_has_cancel_marker(session) -> bool:
     """Return True if a visible cancel/interrupted marker is already persisted."""
     for msg in reversed(getattr(session, 'messages', None) or []):
@@ -1430,6 +1536,31 @@ def _bind_turn_session_identity(session_id: str):
         _reset_turn_session_identity(tokens)
 
 
+def _stale_completion_max_age_seconds() -> float:
+    """Max age (seconds) a background-process completion may sit in the queue
+    before the WebUI drain treats it as stale and drops it instead of
+    prepending it to the user's next turn.
+
+    Completions older than this are silently consumed (not requeued) so a
+    notification that finally fires long after the user moved on cannot
+    contaminate an unrelated later turn. See nesquena/hermes-webui#4029.
+
+    Configurable via HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS. A value of
+    0 (or negative) disables age-gating and restores the legacy drain-all
+    behavior. Defaults to 6 hours.
+    """
+    raw = os.environ.get("HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS=%r; using default",
+                raw,
+            )
+    return 6 * 60 * 60  # 6 hours
+
+
 def _format_process_notification(evt: dict) -> str:
     """Format a completed background process notification for agent input."""
     if not isinstance(evt, dict):
@@ -1478,6 +1609,10 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
     if completion_queue is None:
         return []
 
+    # Computed once per drain (not per event): reads/validates the env cap a
+    # single time so an invalid value logs at most one warning per drain.
+    stale_completion_max_age = _stale_completion_max_age_seconds()
+
     while True:
         try:
             evt = completion_queue.get_nowait()
@@ -1500,6 +1635,25 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
         if getattr(proc, 'session_key', None) != session_id:
             skipped_events.append(evt)
             continue
+
+        # Age-gate stale completions: a completion that fires long after the
+        # user moved on must not be prepended to an unrelated later turn
+        # (nesquena/hermes-webui#4029). Drop (consume, do not requeue) any
+        # completion whose enqueue time is older than the configured cap.
+        # Events without a 'completed_at' (older agent builds) are never
+        # dropped here, preserving backward-compatible behavior.
+        if stale_completion_max_age > 0 and isinstance(evt, dict):
+            completed_at = evt.get('completed_at')
+            if isinstance(completed_at, (int, float)) and completed_at > 0:
+                age = time.time() - completed_at
+                if age > stale_completion_max_age:
+                    logger.info(
+                        "Dropping stale background-process completion for "
+                        "session %s (age %.0fs > cap %.0fs)",
+                        evt_sid, age, stale_completion_max_age,
+                    )
+                    _mark_process_completion_consumed(process_registry, evt_sid)
+                    continue
 
         notification = _format_process_notification(evt)
         if notification:
@@ -2333,6 +2487,48 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
     return 'minimax' in text or 'minimaxi.com' in text
 
 
+def _route_rejects_reasoning_extra(provider: str = '', model: str = '', base_url: str = '') -> bool:
+    """Routes known to reject an ``extra_body`` ``reasoning`` parameter with HTTP 400.
+
+    Title generation injects ``extra_body={"reasoning": {"enabled": False}}`` to
+    suppress thinking on reasoning-capable models (#2083). But OpenAI Chat
+    Completions (and Azure OpenAI) reject unknown top-level params with a 400, so
+    that inject silently fails the title call and falls back to a low-quality
+    heuristic title (#4161). Skip the inject for those routes.
+
+    OpenRouter Anthropic mandatory-reasoning models (Claude Sonnet 4.6 / Opus 4.8)
+    are reasoning-capable but reject a reasoning *disable* — title gen only needs
+    reasoning off, so skip the inject for them too rather than risk the same 400.
+    """
+    provider_lower = str(provider or '').strip().lower()
+    model_lower = str(model or '').strip().lower()
+    # Hostname-based match (not substring) so a proxy URL that merely *contains*
+    # one of these strings in a path segment isn't mis-classified.
+    host = ''
+    try:
+        from urllib.parse import urlsplit
+        host = (urlsplit(str(base_url or '').strip()).hostname or '').lower()
+    except Exception:
+        host = ''
+    if host == 'api.openai.com' or host.endswith('.openai.azure.com'):
+        return True
+    # Azure AI Foundry chat-completions hosts (also reject the reasoning param).
+    if host.endswith('.services.ai.azure.com') or host.endswith('.cognitiveservices.azure.com'):
+        return True
+    if provider_lower in ('openai', 'openai-api', 'openai-codex'):
+        return True
+    if (
+        provider_lower in ('azure', 'azure-foundry', 'azure-ai-foundry', 'azure-ai')
+        or provider_lower.startswith('azure/')
+        or provider_lower.startswith('azure-')
+    ):
+        return True
+    if (host == 'openrouter.ai' or host.endswith('.openrouter.ai')) and model_lower.startswith('anthropic/'):
+        # Anthropic on OpenRouter: mandatory-reasoning families reject a disable.
+        return True
+    return False
+
+
 def _get_aux_title_config() -> dict:
     """Return title_generation auxiliary config, or an empty dict on errors."""
     try:
@@ -2514,7 +2710,9 @@ def generate_title_raw_via_aux(
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
-    reasoning_extra = {"reasoning": {"enabled": False}}
+    reasoning_extra = {}
+    if not _route_rejects_reasoning_extra(provider, model, base_url):
+        reasoning_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
         reasoning_extra["reasoning_split"] = True
     try:
@@ -2539,7 +2737,7 @@ def generate_title_raw_via_aux(
                         max_tokens=max_tokens,
                         temperature=0.2,
                         timeout=_timeout,
-                        extra_body=reasoning_extra,
+                        extra_body=reasoning_extra or None,
                     )
                     raw, empty_status = _extract_title_response(resp, aux=True)
                     if raw:
@@ -2627,10 +2825,22 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         api_kwargs.pop('tools', None)
                         api_kwargs['temperature'] = 0.1
                         api_kwargs['timeout'] = 15.0
+                        # Reasoning suppression for title gen is already handled
+                        # route-correctly by `_build_api_kwargs()` from the
+                        # `agent.reasoning_config = {"enabled": False}` set above —
+                        # each provider profile applies (or deliberately omits) the
+                        # disable in the form its endpoint accepts (OpenAI/Nous omit
+                        # the field; LM Studio uses top-level reasoning_effort;
+                        # OpenRouter Anthropic mandatory-reasoning is omitted). Do NOT
+                        # re-inject a generic `reasoning:{enabled:False}` here — that
+                        # re-adds a 400-rejected param on top of the profile output
+                        # (#4161). MiniMax still needs reasoning_split, which the
+                        # profile path does not add.
+                        _tg_extra = dict(api_kwargs.get('extra_body') or {})
                         if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
-                            extra_body = dict(api_kwargs.get('extra_body') or {})
-                            extra_body['reasoning_split'] = True
-                            api_kwargs['extra_body'] = extra_body
+                            _tg_extra['reasoning_split'] = True
+                        if _tg_extra:
+                            api_kwargs['extra_body'] = _tg_extra
                         if 'max_completion_tokens' in api_kwargs:
                             api_kwargs['max_completion_tokens'] = max_tokens
                         else:
@@ -3616,24 +3826,69 @@ def _strip_replayed_context_items(existing_messages, candidates):
     return cleaned
 
 
-def _dedupe_replayed_context_messages(previous_context, result_messages):
+def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None):
     """Keep model context append-only without replayed blocks/summaries."""
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not previous_context or not result_messages:
         return result_messages
+    previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
     if not _messages_have_prefix(result_messages, previous_context):
+        # Agent-side role-sequence repair can replace the last prior user row
+        # with a repaired current-user row. In that shape the result no longer
+        # has `previous_context` as an exact prefix, but it should still be
+        # merged as: previous context + clean current turn + assistant/tool delta.
+        if (
+            msg_text
+            and len(previous_context) >= 1
+            and len(result_messages) >= len(previous_context)
+            and _messages_have_prefix(result_messages, previous_context[:-1])
+        ):
+            boundary_idx = len(previous_context) - 1
+            boundary_row = result_messages[boundary_idx]
+            is_stale_merge = bool(
+                previous_user_tail
+                and _detect_stale_user_merge(
+                    boundary_row,
+                    msg_text,
+                    previous_user_tail,
+                    previous_context=previous_context,
+                )
+            )
+            if is_stale_merge or _looks_like_current_user_turn(boundary_row, msg_text):
+                if is_stale_merge:
+                    # Clean only the stale-merged boundary row; leave all prior
+                    # history in previous_context untouched.
+                    cleaned_boundary = copy.deepcopy(boundary_row)
+                    cleaned_boundary['content'] = msg_text
+                    candidates = [cleaned_boundary] + result_messages[boundary_idx + 1:]
+                else:
+                    candidates = result_messages[boundary_idx:]
+                candidates = _strip_replayed_prefix(previous_context, candidates)
+                if candidates:
+                    candidates = _strip_replayed_context_items(previous_context, candidates)
+                return previous_context + candidates
         return result_messages
     candidates = result_messages[len(previous_context):]
+    # Strip stale merges only from the new-turn candidate slice so that
+    # legitimate historical user rows in the already-committed previous_context
+    # prefix are never rewritten.
+    if msg_text and previous_user_tail:
+        candidates = _strip_stale_user_merge_from_messages(
+            candidates,
+            msg_text,
+            previous_user_tail,
+            previous_context=previous_context,
+        )
     candidates = _strip_replayed_prefix(previous_context, candidates)
     if candidates:
         candidates = _strip_replayed_context_items(previous_context, candidates)
     return previous_context + candidates
 
 
-def _dedupe_replayed_active_context(previous_context, result_messages):
+def _dedupe_replayed_active_context(previous_context, result_messages, msg_text=None):
     """Keep model context append-only without re-appending a replayed tail."""
-    return _dedupe_replayed_context_messages(previous_context, result_messages)
+    return _dedupe_replayed_context_messages(previous_context, result_messages, msg_text)
 
 
 def _is_context_compression_marker(msg):
@@ -3729,6 +3984,215 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
     if current_user_key and _message_identity(history[-1]) == current_user_key:
         return history[:-1]
     return history
+
+
+def _strip_workspace_prefixes_for_compare(text: str) -> str:
+    """Remove WebUI workspace sentinels anywhere before text comparison."""
+    value = _strip_workspace_prefix(text, include_legacy=True)
+    for pattern in (_WORKSPACE_PREFIX_ANY_RE, _LEGACY_WORKSPACE_PREFIX_ANY_RE):
+        value = pattern.sub('', value)
+    return value.strip()
+
+
+def _normalize_user_text(text):
+    """Collapse whitespace and strip workspace sentinels for tail comparisons."""
+    if not isinstance(text, str):
+        return ""
+    return " ".join(_strip_workspace_prefixes_for_compare(text).split())
+
+
+def _raw_message_text(value) -> str:
+    """Extract text from a message content payload without stripping markup.
+
+    Used for the stale-user-merge detector so the literal boundary between
+    the prior tail and the current turn survives into the comparison. The
+    thinking-markup strip in ``_message_text`` collapses newlines, which
+    would defeat the boundary check.
+    """
+    if isinstance(value, list):
+        return ' '.join(
+            str(p.get('text') or p.get('content') or '')
+            for p in value
+            if isinstance(p, dict)
+        )
+    return str(value or '')
+
+
+def _stale_user_tail_candidate(msg):
+    """Return normalized text if msg is a user row that could be a stale tail."""
+    if not isinstance(msg, dict) or msg.get('role') != 'user':
+        return None
+    raw = _raw_message_text(msg.get('content', ''))
+    if not raw.strip():
+        return None
+    return _normalize_user_text(raw)
+
+
+def _last_user_row(messages):
+    """Return the last user-role row in `messages`, or None."""
+    for msg in reversed(list(messages or [])):
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            return msg
+    return None
+
+
+def _stale_prefix_matches_prior_user_context(stale_prefix, stale_segments, previous_context):
+    """Return True when a stale prefix is explainable by prior user context.
+
+    First-generation repair usually produces segments matching consecutive
+    prior user rows. Once a session is already contaminated, later repair can
+    replay a stable stale prefix from an older polluted row even after newer
+    clean user turns have moved the context tail forward. Handle both shapes
+    while still requiring all evidence to come from prior user-role rows.
+    """
+    prior_rows = [
+        _stale_user_tail_candidate(msg)
+        for msg in previous_context or []
+    ]
+    prior_rows = [row for row in prior_rows if row]
+    if not prior_rows:
+        return False
+
+    if stale_segments:
+        segment_count = len(stale_segments)
+        for start in range(0, len(prior_rows) - segment_count + 1):
+            if prior_rows[start:start + segment_count] == stale_segments:
+                return True
+
+        # Already-polluted sessions may replay paragraphs from older polluted
+        # rows after newer clean turns have advanced the context tail. In that
+        # shape the stale paragraphs are still all prior user content, but they
+        # are substrings within older merged rows rather than standalone rows.
+        #
+        # NOTE: this substring match is intentionally loose (a stale segment can
+        # coincidentally appear inside an unrelated prior row). Correctness does
+        # NOT depend on it being precise — the caller (_detect_stale_user_merge)
+        # only reaches here once the row's suffix already normalizes to the
+        # ENTIRE submitted turn, so anything this branch flags has a prefix that
+        # is extra-to-the-submission. Cleaning therefore only ever rewrites the
+        # row to the user's actual current turn; it can never drop legitimate
+        # current-turn content even on a coincidental substring hit.
+        row_index = 0
+        row_offset = 0
+        matched_all_segments = True
+        for segment in stale_segments:
+            matched_segment = False
+            while row_index < len(prior_rows):
+                row = prior_rows[row_index]
+                pos = row.find(segment, row_offset)
+                if pos >= 0:
+                    row_offset = pos + len(segment)
+                    matched_segment = True
+                    break
+                row_index += 1
+                row_offset = 0
+            if not matched_segment:
+                matched_all_segments = False
+                break
+        if matched_all_segments:
+            return True
+
+    prefix_norm = _normalize_user_text(stale_prefix)
+    if not prefix_norm:
+        return False
+    for row in prior_rows:
+        if row == prefix_norm or row.startswith(f'{prefix_norm} '):
+            return True
+    return False
+
+
+def _detect_stale_user_merge(message, msg_text, previous_user_tail, previous_context=None):
+    """Return True if `message` is the current user turn with a stale prefix merged in.
+
+    The agent's defensive repair path can concatenate prior user context with
+    the submitted current turn as ``<stale>\\n\\n<current>``. The stale portion
+    can be either the immediate prior user tail or a replayed prefix from an
+    older already-polluted user row. The literal ``\\n\\n`` boundary must survive
+    into the comparison; a single-newline or space-only join is not the repair
+    shape and must not match. Workspace sentinels may be present on either or
+    both halves and are stripped before comparison.
+    """
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    current_norm = _normalize_user_text(msg_text)
+    if not current_norm:
+        return False
+
+    merged = _raw_message_text(message.get('content', '')).replace("\r\n", "\n")
+    if "\n\n" not in merged:
+        return False
+
+    # The user's current turn can itself contain paragraph breaks. Find a repair
+    # boundary whose suffix normalizes to the *entire* submitted turn, then treat
+    # only the prefix as stale context. A plain split-and-last-segment check would
+    # miss ``<stale>\n\n<current paragraph A>\n\n<current paragraph B>``.
+    stale_segments = []
+    stale_prefix = ''
+    search_end = len(merged)
+    while search_end > 0:
+        boundary_idx = merged.rfind("\n\n", 0, search_end)
+        if boundary_idx < 0:
+            break
+        suffix = merged[boundary_idx + 2:]
+        if _normalize_user_text(suffix) == current_norm:
+            prefix = merged[:boundary_idx]
+            candidate_segments = [
+                _normalize_user_text(segment)
+                for segment in prefix.split("\n\n")
+            ]
+            if candidate_segments and all(candidate_segments):
+                stale_segments = candidate_segments
+                stale_prefix = prefix
+                break
+            # The suffix matched the submitted turn, but this boundary leaves
+            # blank prefix segments; try the next candidate boundary to the left.
+        search_end = boundary_idx
+    if not stale_segments:
+        return False
+
+    if previous_context is not None and _stale_prefix_matches_prior_user_context(
+        stale_prefix,
+        stale_segments,
+        previous_context,
+    ):
+        return True
+
+    return bool(
+        previous_context is None
+        and len(stale_segments) == 1
+        and _normalize_user_text(previous_user_tail) == stale_segments[0]
+    )
+
+
+def _strip_stale_user_merge_from_messages(
+    messages,
+    msg_text,
+    previous_user_tail,
+    previous_context=None,
+):
+    """Return messages with stale-prefixed current user turns replaced by clean ones.
+
+    Both context-merge (model-facing) and display-merge (visible transcript)
+    callers funnel through this so a single detection rule governs persistence.
+    The current user row is replaced with a clean copy using `msg_text` so the
+    displayed bubble matches what the human submitted, never the polluted pair.
+    """
+    if not messages or not msg_text:
+        return messages
+    out = []
+    for msg in messages:
+        if _detect_stale_user_merge(
+            msg,
+            msg_text,
+            previous_user_tail,
+            previous_context=previous_context,
+        ):
+            cleaned = copy.deepcopy(msg) if isinstance(msg, dict) else {'role': 'user', 'content': msg_text}
+            cleaned['content'] = msg_text
+            out.append(cleaned)
+        else:
+            out.append(msg)
+    return out
 
 
 def _save_streaming_checkpoint(session):
@@ -3939,6 +4403,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     result_messages = list(result_messages or [])
     if not result_messages:
         return previous_display
+    previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
 
     # ── Backfill normal turns from previous_context that are missing from
     # previous_display.  After context compression recovery, previous_context
@@ -3961,6 +4426,19 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         _has_context_only_turns = bool(_context_id_set - _display_id_set)
         if _has_context_only_turns:
             context_keys = [_message_identity(m) for m in previous_context]
+            # Precompute display keys once; avoids repeated json.dumps calls inside
+            # the inner any() loop (was O(D²·C) — see perf fix below).
+            _display_keys = [_message_identity(m) for m in previous_display]
+            # Multiset mirror of context_keys[_cursor:] kept in sync as _cursor
+            # advances. Enables O(1) membership tests in the any() check instead
+            # of an O(N) list scan, while preserving EXACT list-slice semantics:
+            # _message_identity intentionally returns duplicate keys for
+            # identical-content turns (and None for empty rows), so a plain set
+            # would drop a key still present later in the slice. A count-keyed
+            # dict (including None) matches `in context_keys[_cursor:]` exactly.
+            _remaining_ck_counts = {}
+            for _ck in context_keys:
+                _remaining_ck_counts[_ck] = _remaining_ck_counts.get(_ck, 0) + 1
             _backfilled = []
             # #3300 fix: track ONLY context rows we splice in, so the
             # visible-display backbone is never suppressed. Sharing one set
@@ -3972,7 +4450,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             _context_inserted = set()
             _cursor = 0
             for _display_idx, _dmsg in enumerate(previous_display):
-                _dkey = _message_identity(_dmsg)
+                _dkey = _display_keys[_display_idx]
                 if _dkey is not None:
                     _j = _cursor
                     while _j < len(context_keys) and context_keys[_j] != _dkey:
@@ -3984,10 +4462,20 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                             if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not _is_context_compression_marker(_cmsg):
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _context_inserted.add(_ckey)
+                        # Sync multiset: decrement keys consumed by advancing
+                        # the cursor to _j+1 (delete at zero so membership matches
+                        # the list slice exactly).
+                        for _k in range(_cursor, _j + 1):
+                            _consumed_ck = context_keys[_k]
+                            _ck_n = _remaining_ck_counts.get(_consumed_ck, 0) - 1
+                            if _ck_n <= 0:
+                                _remaining_ck_counts.pop(_consumed_ck, None)
+                            else:
+                                _remaining_ck_counts[_consumed_ck] = _ck_n
                         _cursor = _j + 1
                     elif not any(
-                        _message_identity(_future_dmsg) in context_keys[_cursor:]
-                        for _future_dmsg in previous_display[_display_idx + 1:]
+                        _display_keys[_fi] in _remaining_ck_counts
+                        for _fi in range(_display_idx + 1, len(_display_keys))
                     ):
                         for _k in range(_cursor, len(context_keys)):
                             _ckey = context_keys[_k]
@@ -3996,6 +4484,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _context_inserted.add(_ckey)
                         _cursor = len(context_keys)
+                        _remaining_ck_counts.clear()
                 # The display row is the visible backbone — always preserve it,
                 # in order, even when an earlier (identical-content) turn or a
                 # backfilled context row shares its timestamp-less identity.
@@ -4018,6 +4507,15 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
 
     if _messages_have_prefix(result_messages, previous_context):
         candidates = result_messages[len(previous_context):]
+        # Normalize stale merges only in the new-turn slice; never rewrite
+        # historical rows in the already-committed previous_context prefix.
+        if msg_text and previous_user_tail:
+            candidates = _strip_stale_user_merge_from_messages(
+                candidates,
+                msg_text,
+                previous_user_tail,
+                previous_context=previous_context,
+            )
         candidates = _strip_replayed_prefix(previous_display, candidates)
         candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
@@ -4027,6 +4525,14 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             if _is_context_compression_marker(m)
         ]
         turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
+        # Normalize stale merges only in the current-turn slice.
+        if msg_text and previous_user_tail:
+            turn_candidates = _strip_stale_user_merge_from_messages(
+                turn_candidates,
+                msg_text,
+                previous_user_tail,
+                previous_context=previous_context,
+            )
         candidates = marker_candidates + turn_candidates
 
     merged = previous_display[:]
@@ -5474,12 +5980,32 @@ def _run_agent_streaming(
         # the chat stuck in "Thinking…" forever.
         _approval_registered = False
         _unreg_notify = None
+        _cleanup_gateway_pending_mirror = None
         try:
+            try:
+                from api.route_approvals import (
+                    submit_gateway_pending_mirror as _submit_pending_for_polling,
+                    reconcile_gateway_pending_mirror_locked as _reconcile_gateway_pending_mirror_locked,
+                    _approval_sse_notify_locked as _approval_sse_notify_locked,
+                    _lock as _approval_lock,
+                )
+                def _cleanup_gateway_pending_mirror():
+                    with _approval_lock:
+                        head, total, _changed = _reconcile_gateway_pending_mirror_locked(session_id)
+                        _approval_sse_notify_locked(session_id, head, total)
+            except ImportError:
+                _submit_pending_for_polling = None
+                _cleanup_gateway_pending_mirror = None
             from tools.approval import (
                 register_gateway_notify as _reg_notify,
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
+                if _submit_pending_for_polling is not None:
+                    try:
+                        _submit_pending_for_polling(session_id, approval_data)
+                    except Exception:
+                        logger.warning("Failed to mirror approval into WebUI polling state", exc_info=True)
                 put('approval', approval_data)
             _reg_notify(session_id, _approval_notify_cb)
             _approval_registered = True
@@ -5777,10 +6303,30 @@ def _run_agent_streaming(
                     # Fallback: poll for pending approval in case notify_cb wasn't
                     # registered (e.g. older approval module without gateway support).
                     try:
-                        from tools.approval import has_pending as _has_pending, _pending, _lock
-                        if _has_pending(session_id):
-                            with _lock:
-                                p = dict(_pending.get(session_id, {}))
+                        from api.route_approvals import (
+                            _gateway_queues as _approval_gateway_queues,
+                            _lock as _approval_lock,
+                            _pending as _approval_pending,
+                            reconcile_gateway_pending_mirror_locked as _reconcile_gateway_pending_mirror_locked,
+                        )
+                        from tools.approval import has_blocking_approval as _has_blocking_approval
+                        if _has_blocking_approval(session_id):
+                            p = None
+                            with _approval_lock:
+                                _reconcile_gateway_pending_mirror_locked(session_id)
+                                queue = _approval_pending.get(session_id)
+                                if isinstance(queue, list):
+                                    p = dict(queue[0]) if queue else None
+                                elif queue:
+                                    p = dict(queue)
+                                if p is None:
+                                    gw_queue = _approval_gateway_queues.get(session_id) or []
+                                    if gw_queue:
+                                        raw = getattr(gw_queue[0], 'data', None) or {}
+                                        if raw:
+                                            p = dict(raw)
+                                        else:
+                                            logger.warning("Gateway queue entry for %s has no .data attribute", session_id)
                             if p:
                                 put('approval', p)
                     except ImportError:
@@ -5994,6 +6540,7 @@ def _run_agent_streaming(
             _prefill_context = _load_webui_prefill_context(_cfg)
             _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
             _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
+            _main_request_overrides = _main_model_request_overrides(_cfg)
             put('context_status', {
                 'session_id': session_id,
                 'prefill': _public_prefill_context_status(_prefill_context),
@@ -6175,6 +6722,8 @@ def _run_agent_streaming(
                 _agent_kwargs['max_iterations'] = _max_iterations_cfg
             if 'max_tokens' in _agent_params and _max_tokens_cfg is not None:
                 _agent_kwargs['max_tokens'] = _max_tokens_cfg
+            if 'request_overrides' in _agent_params and _main_request_overrides:
+                _agent_kwargs['request_overrides'] = _main_request_overrides
             # Params added in newer hermes-agent — skip if not supported
             if 'api_mode' in _agent_params:
                 _agent_kwargs['api_mode'] = _rt.get('api_mode')
@@ -6216,6 +6765,7 @@ def _run_agent_streaming(
                     _fallback_resolved or {},
                     sorted(_toolsets) if _toolsets else [],
                     _reasoning_config or {},
+                    _main_request_overrides or {},
                     _public_prefill_context_status(_prefill_context),
                     # #1897: profile_home is part of the agent's identity because
                     # AIAgent caches `_cached_system_prompt` from `load_soul_md()`
@@ -6599,7 +7149,12 @@ def _run_agent_streaming(
                             getattr(s, 'active_stream_id', None),
                         )
                         return
+                _tool_limit_reached = _agent_result_tool_limit_reached(result)
                 _result_messages = result.get('messages') or _previous_context_messages
+                _result_messages = _drop_synthetic_max_iteration_summary_requests(
+                    _result_messages,
+                    enabled=_tool_limit_reached,
+                )
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
@@ -6623,6 +7178,7 @@ def _run_agent_streaming(
                 _next_context_messages = _dedupe_replayed_context_messages(
                     _previous_context_messages,
                     _next_context_messages,
+                    msg_text,
                 )
                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                 s.messages = _merge_display_messages_after_agent_result(
@@ -6647,7 +7203,6 @@ def _run_agent_streaming(
                             for _part in _raw_content:
                                 if isinstance(_part, dict) and isinstance(_part.get('text'), str):
                                     _part['text'] = _strip_xml_tool_calls(_part['text'])
-
                 # ── Handle context compression side effects ──
                 # If compression fired inside run_conversation, the agent may have
                 # rotated its session_id. Detect and fix the mismatch before any
@@ -6791,12 +7346,18 @@ def _run_agent_streaming(
                 _terminal_failure = (
                     _agent_result_terminal_failure(result)
                     or (
+                        _tool_limit_reached
+                        and _session_lacks_final_assistant_answer(_all_result_messages)
+                    )
+                    or (
                         not _token_sent
                         and _session_lacks_final_assistant_answer(_all_result_messages)
                     )
                 )
                 if _terminal_failure:
                     _assistant_added = False
+                elif _tool_limit_reached and not _session_lacks_final_assistant_answer(s.messages):
+                    _mark_latest_assistant_tool_limit_status(s.messages)
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if _terminal_failure or (not _assistant_added and not _token_sent):
                     if cancel_event.is_set():
@@ -6898,6 +7459,10 @@ def _run_agent_streaming(
                                 # Since we're in a flat block, directly run the
                                 # post-result merge logic here.
                                 _result_messages = result.get('messages') or _previous_context_messages
+                                _result_messages = _drop_synthetic_max_iteration_summary_requests(
+                                    _result_messages,
+                                    enabled=_agent_result_tool_limit_reached(result),
+                                )
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages,
                                     _result_messages,
@@ -6905,6 +7470,7 @@ def _run_agent_streaming(
                                 _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
+                                    msg_text,
                                 )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
@@ -6934,6 +7500,17 @@ def _run_agent_streaming(
                             'The selected model may not be supported by your configured provider or '
                             'your API key is invalid. Run `hermes model` in your terminal to '
                             'update credentials, then restart the WebUI.'
+                        )
+                    elif _tool_limit_reached:
+                        _err_label = 'Tool iteration limit reached'
+                        _err_type = 'tool_limit_reached'
+                        _err_hint = (
+                            'The agent reached its configured tool iteration limit before producing '
+                            'a final answer. Start a narrower follow-up or increase agent.max_turns.'
+                        )
+                        _err_str = (
+                            'The agent reached its configured tool iteration limit before producing '
+                            'a final answer.'
                         )
                     else:
                         _err_label = _classification['label']
@@ -6972,19 +7549,24 @@ def _run_agent_streaming(
                             _error_message['provider_details_label'] = 'Cancellation details'
                         elif _err_type == 'interrupted':
                             _error_message['provider_details_label'] = 'Interruption details'
+                        elif _err_type == 'tool_limit_reached':
+                            _error_message['provider_details_label'] = 'Terminal state details'
                         s.messages.append(_error_message)
                         try:
                             s.save()
                         except Exception:
                             pass
                         _error_payload['session'] = redact_session_data(
-                            s.compact() | {'messages': s.messages, 'tool_calls': s.tool_calls}
+                            _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
                         )
                         _error_payload['session_id'] = s.session_id
                         _error_payload['old_session_id'] = _compression_origin_session_id
                         if _compression_continuation_session_id is not None:
                             _error_payload['new_session_id'] = _compression_continuation_session_id
                             _error_payload['continuation_session_id'] = _compression_continuation_session_id
+                        if _err_type == 'tool_limit_reached':
+                            _error_payload['terminal_state'] = 'tool_limit_reached'
+                            _error_payload['terminal_reason'] = 'max_iterations'
                         put('apperror', _error_payload)
                         # Legacy #373 source tests and clients look for the
                         # no_response type; #1765 keeps that type but improves
@@ -7294,11 +7876,13 @@ def _run_agent_streaming(
                         )
                         _cfg_ctx_len = _ctx_lookup.config_context_length
                         _cfg_custom_providers = _ctx_lookup.custom_providers
+                        _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
                         _cfg_base_url = _ctx_lookup.base_url or _cfg_base_url
                         _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                         _resolved_cl = get_model_context_length(
                             getattr(agent, 'model', resolved_model or '') or '',
                             _cfg_base_url,
+                            api_key=_cfg_api_key,
                             config_context_length=_cfg_ctx_len,
                             provider=_cfg_provider,
                             custom_providers=_cfg_custom_providers,
@@ -7552,12 +8136,14 @@ def _run_agent_streaming(
                     )
                     _cfg_ctx_len = _ctx_lookup.config_context_length
                     _cfg_custom_providers = _ctx_lookup.custom_providers
+                    _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
                     _cfg_base_url = _ctx_lookup.base_url
                     _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                     try:
                         _fb_cl = _get_cl(
                             getattr(agent, 'model', resolved_model or '') or '',
                             _cfg_base_url,
+                            api_key=_cfg_api_key,
                             config_context_length=_cfg_ctx_len,
                             provider=_cfg_provider,
                             custom_providers=_cfg_custom_providers,
@@ -7674,8 +8260,12 @@ def _run_agent_streaming(
                         })
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
-            raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
-            put('done', {'session': redact_session_data(raw_session), 'usage': usage})
+            raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
+            _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+            if _tool_limit_reached:
+                _done_payload['terminal_state'] = 'tool_limit_reached'
+                _done_payload['terminal_reason'] = 'max_iterations'
+            put('done', _done_payload)
             # Emit one last metering packet for the live message-header TPS label.
             meter_stats = meter().get_stats()
             meter_stats['session_id'] = session_id
@@ -7707,6 +8297,11 @@ def _run_agent_streaming(
                     _unreg_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister approval callback")
+            if _cleanup_gateway_pending_mirror is not None:
+                try:
+                    _cleanup_gateway_pending_mirror()
+                except Exception:
+                    logger.debug("Failed to reconcile gateway approval mirror")
             if _clarify_registered and _unreg_clarify_notify is not None:
                 try:
                     _unreg_clarify_notify(session_id)
@@ -7855,6 +8450,7 @@ def _run_agent_streaming(
                                 _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
+                                    msg_text,
                                 )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(

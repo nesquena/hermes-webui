@@ -87,6 +87,17 @@ def test_cron_recent_marks_muted_jobs_without_requesting_toast(monkeypatch):
             "toast_notifications": False,
         },
     ]
+    monkeypatch.setattr(
+        routes,
+        "_latest_cron_session_info_for_jobs",
+        lambda job_ids, completed_job_ids=None: {
+            str(job_id): {
+                "session_id": f"cron_{job_id}_latest",
+                "message_count": 3 if str(job_id) == "loud" else 5,
+            }
+            for job_id in (completed_job_ids or job_ids)
+        },
+    )
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
 
@@ -97,7 +108,11 @@ def test_cron_recent_marks_muted_jobs_without_requesting_toast(monkeypatch):
     assert handler.status == 200
     by_id = {item["job_id"]: item for item in body["completions"]}
     assert by_id["loud"]["toast_notifications"] is True
+    assert by_id["loud"]["session_id"] == "cron_loud_latest"
+    assert by_id["loud"]["message_count"] == 3
     assert by_id["muted"]["toast_notifications"] is False
+    assert by_id["muted"]["session_id"] == "cron_muted_latest"
+    assert by_id["muted"]["message_count"] == 5
 
 
 def test_cron_create_persists_muted_toast_setting_after_create(monkeypatch):

@@ -34,3 +34,21 @@ def test_legacy_todos_fallback_still_uses_raw_session_messages():
 
     assert "function _legacyTodosFromMessages()" in src
     assert "const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;" in src
+
+
+def test_workspace_todos_tab_prefers_live_sse_snapshot_before_cold_load_sidecar():
+    src = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    start = src.find("function _loadWorkspacePanelTodos()")
+    end = src.find("function _escHtml", start)
+
+    assert start != -1
+    assert end != -1
+    helper = src[start:end]
+
+    assert "if(S && Array.isArray(S.todos)){" in helper
+    assert "todos = S.todos;" in helper
+    assert "S.session.todo_state" in helper
+    assert helper.find("todos = S.todos;") < helper.find("S.session.todo_state"), (
+        "Workspace Todos must prefer the live S.todos snapshot so opening the tab "
+        "after todo_state SSE updates does not render the stale cold-load sidecar"
+    )

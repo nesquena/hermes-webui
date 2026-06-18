@@ -67,15 +67,44 @@ class TestPasteHandlerTextWithImage:
             body,
         ), "imageItems filter must use kind === 'file' && type.startsWith('image/')"
 
-    def test_handler_skips_attach_when_text_present(self):
-        """The early-return guard must short-circuit when text is in the clipboard,
-        so the browser's default text-paste runs and no image is attached."""
+    def test_handler_skips_preventDefault_when_text_present(self):
+        """When text is in the clipboard alongside an image, preventDefault() must
+        NOT be called so the browser's native text-paste runs. The handler should
+        still attach the image via addFiles(). The #1620 intent (don't swallow text)
+        is preserved by gating preventDefault on !hasText instead of bailing entirely.
+        Additionally, text-only clipboards (no image items) must early-return before
+        reaching the attach path."""
         body = _paste_handler_body()
-        # Guard shape: if(!imageItems.length || hasText) return;
+        # Text-only early-out: if no image items, return before any attach logic.
         assert re.search(
-            r"if\s*\(\s*!\s*imageItems\.length\s*\|\|\s*hasText\s*\)\s*return\s*;",
+            r"if\s*\(\s*!\s*imageItems\.length\s*\)\s*return\s*;",
             body,
-        ), "guard must early-return when there are no image files OR text is present"
+        ), "handler must early-return when there are no image files (text-only paste)"
+        # preventDefault must be gated on !hasText so text+image pastes let the
+        # browser insert text natively.
+        assert re.search(
+            r"if\s*\(\s*!\s*hasText\s*\)\s*e\.preventDefault\s*\(\s*\)\s*;",
+            body,
+        ), "preventDefault must be gated on !hasText (only intercept image-only paste)"
+
+    def test_handler_attaches_image_when_both_text_and_image_present(self):
+        """When the clipboard carries both text and image items (e.g. browser
+        Copy Image), addFiles() must still be reached so the image is attached.
+        The image attach path must NOT be guarded by hasText."""
+        body = _paste_handler_body()
+        # addFiles must appear AFTER the preventDefault gate, reachable regardless
+        # of whether text is present.
+        prevent_idx = body.find("preventDefault")
+        addfiles_idx = body.find("addFiles(files)")
+        assert addfiles_idx > prevent_idx, (
+            "addFiles(files) must come after the preventDefault gate and be "
+            "reachable even when hasText is true"
+        )
+        # No guard that bails before addFiles when hasText is true.
+        assert not re.search(
+            r"hasText\s*\)\s*return\s*;",
+            body,
+        ), "handler must NOT early-return on hasText before addFiles (regression for #1620 fix)"
 
     def test_handler_still_intercepts_pure_screenshot_paste(self):
         """Pure-screenshot paste (image-only clipboard) must still call preventDefault()

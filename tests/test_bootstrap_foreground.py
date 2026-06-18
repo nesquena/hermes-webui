@@ -231,10 +231,11 @@ class TestMainForegroundRouting:
     def stub_main_dependencies(self, monkeypatch, tmp_path):
         """Stub out everything main() calls except the routing decision."""
         import bootstrap as bs
+        python_exe = sys.executable
         monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
         monkeypatch.setattr(bs, "discover_agent_dir", lambda: tmp_path / "agent")
         monkeypatch.setattr(bs, "hermes_command_exists", lambda: True)
-        monkeypatch.setattr(bs, "discover_launcher_python", lambda *a: "/usr/bin/python3")
+        monkeypatch.setattr(bs, "discover_launcher_python", lambda *a: python_exe)
         monkeypatch.setattr(bs, "ensure_python_has_webui_deps", lambda *a, **kw: a[0])
         monkeypatch.setattr(bs, "wait_for_health", lambda *a, **kw: True)
         monkeypatch.setattr(bs, "open_browser", lambda *a, **kw: None)
@@ -265,6 +266,7 @@ class TestMainForegroundRouting:
     def test_foreground_flag_uses_execv(self, stub_main_dependencies, clean_env, monkeypatch):
         bs = stub_main_dependencies
         monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground"])
+        monkeypatch.setattr(sys, "platform", "linux")
 
         execv_calls = []
         popen_calls = []
@@ -289,9 +291,10 @@ class TestMainForegroundRouting:
         assert len(popen_calls) == 0, "--foreground must NOT call subprocess.Popen"
 
         path, argv = execv_calls[0]
-        assert path == "/usr/bin/python3"
+        python_exe = sys.executable
+        assert path == python_exe
         # argv[0] is the program name (convention), argv[1] is the script
-        assert argv[0] == "/usr/bin/python3"
+        assert argv[0] == python_exe
         assert argv[1].endswith("server.py")
 
     @pytest.mark.parametrize("var", [
@@ -304,6 +307,7 @@ class TestMainForegroundRouting:
     def test_supervisor_env_var_auto_promotes_to_execv(self, stub_main_dependencies, clean_env, monkeypatch, var):
         bs = stub_main_dependencies
         monkeypatch.setattr(sys, "argv", ["bootstrap.py"])  # no --foreground
+        monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setenv(var, "deadbeef")
 
         execv_calls = []
@@ -327,6 +331,7 @@ class TestMainForegroundRouting:
     def test_explicit_opt_in_env_auto_promotes_to_execv(self, stub_main_dependencies, clean_env, monkeypatch):
         bs = stub_main_dependencies
         monkeypatch.setattr(sys, "argv", ["bootstrap.py"])  # no --foreground flag
+        monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setenv("HERMES_WEBUI_FOREGROUND", "1")
 
         execv_calls = []
@@ -348,12 +353,13 @@ class TestForegroundEnvAndCwd:
     @pytest.fixture
     def setup(self, monkeypatch, tmp_path):
         import bootstrap as bs
+        python_exe = sys.executable
         monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
         agent_dir = tmp_path / "agent"
         agent_dir.mkdir()
         monkeypatch.setattr(bs, "discover_agent_dir", lambda: agent_dir)
         monkeypatch.setattr(bs, "hermes_command_exists", lambda: True)
-        monkeypatch.setattr(bs, "discover_launcher_python", lambda *a: "/usr/bin/python3")
+        monkeypatch.setattr(bs, "discover_launcher_python", lambda *a: python_exe)
         monkeypatch.setattr(bs, "ensure_python_has_webui_deps", lambda *a, **kw: a[0])
         monkeypatch.setattr(bs, "wait_for_health", lambda *a, **kw: True)
         monkeypatch.setattr(bs, "open_browser", lambda *a, **kw: None)
@@ -364,6 +370,7 @@ class TestForegroundEnvAndCwd:
     def test_foreground_chdirs_to_agent_dir_before_exec(self, setup, monkeypatch, clean_env):
         bs, agent_dir = setup
         monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground", "--host", "127.0.0.1", "9999"])
+        monkeypatch.setattr(sys, "platform", "linux")
 
         chdir_calls = []
         monkeypatch.setattr(os, "chdir", lambda p: chdir_calls.append(p))
@@ -382,6 +389,7 @@ class TestForegroundEnvAndCwd:
         monkeypatch.setattr(sys, "argv", [
             "bootstrap.py", "--foreground", "--host", "0.0.0.0", "9119"
         ])
+        monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setattr(os, "chdir", lambda p: None)
 
         def fake_execv(*a):
@@ -402,6 +410,7 @@ class TestForegroundEnvAndCwd:
     def test_foreground_does_not_call_wait_for_health(self, setup, monkeypatch, clean_env):
         bs, _ = setup
         monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground"])
+        monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setattr(os, "chdir", lambda p: None)
 
         wait_calls = []
@@ -444,9 +453,11 @@ class TestForegroundExecutabilityGuard:
     def test_non_executable_python_raises_runtime_error(self, setup_with_bad_python, monkeypatch, clean_env):
         bs = setup_with_bad_python
         monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground"])
+        monkeypatch.setattr(sys, "platform", "linux")
 
         execv_calls = []
         monkeypatch.setattr(os, "execv", lambda *a: execv_calls.append(a))
+        monkeypatch.setattr(os, "access", lambda path, mode: False)
         monkeypatch.setattr(os, "chdir", lambda p: None)
 
         with pytest.raises(RuntimeError, match="not executable"):

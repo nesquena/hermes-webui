@@ -18,11 +18,19 @@ def _open_file_body() -> str:
     return WORKSPACE_JS[start:start + 8000]
 
 
+def _code_preview_helper() -> str:
+    start = WORKSPACE_JS.index("function renderCodePreviewContent(path, content){")
+    end = WORKSPACE_JS.index("\nfunction renderCsvPreviewContent(path, content){", start)
+    return WORKSPACE_JS[start:end]
+
+
 def test_workspace_preview_assigns_prism_language_class():
     body = _open_file_body()
-    assert "_prismLanguageForPath(path)" in body
-    assert "codeEl.className='language-'+lang" in body
-    assert "Prism.highlightElement(codeEl)" in body
+    helper = _code_preview_helper()
+    assert "renderCodePreviewContent(path, data.content);" in body
+    assert "_prismLanguageForPath(path)" in helper
+    assert "codeEl.className='language-'+lang" in helper
+    assert "Prism.highlightElement(codeEl)" in helper
 
 
 def test_prism_language_map_covers_common_extensions():
@@ -61,12 +69,12 @@ def test_plain_text_files_do_not_inherit_prior_file_highlighting():
     2. Prism.highlightElement is only called when a non-empty language was
        assigned, so a class-less <code> never walks up to an ancestor class.
     """
-    body = _open_file_body()
+    helper = _code_preview_helper()
     # Guard 1: stale language-* token stripped from the <pre> before append.
-    assert "pre.className=pre.className.replace(/\\blanguage-\\S+/g,'')" in body, (
+    assert "pre.className=pre.className.replace(/\\blanguage-\\S+/g,'')" in helper, (
         "previewCode <pre> must have stale language-* classes stripped each render"
     )
     # Guard 2: highlightElement gated on a truthy lang.
-    assert "if(lang&&typeof Prism!=='undefined'&&typeof Prism.highlightElement==='function')" in body, (
+    assert "if(lang&&typeof Prism!=='undefined'&&typeof Prism.highlightElement==='function')" in helper, (
         "Prism.highlightElement must only run when a language was assigned"
     )

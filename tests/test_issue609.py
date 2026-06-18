@@ -61,10 +61,13 @@ def test_path_outside_boot_default_and_home_is_rejected(monkeypatch, tmp_path):
 
     boot_default = tmp_path / "data" / "workspace"
     boot_default.mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
     outside = tmp_path / "other_mount" / "secret"
     outside.mkdir(parents=True)
 
     monkeypatch.setattr(ws_mod, "_BOOT_DEFAULT_WORKSPACE", str(boot_default))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
     with pytest.raises(ValueError, match="outside the user home"):
         resolve_trusted_workspace(str(outside))
@@ -95,10 +98,13 @@ def test_path_traversal_via_dotdot_does_not_escape_boot_default(monkeypatch, tmp
 
     boot_default = tmp_path / "data" / "workspace"
     boot_default.mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
     sibling = tmp_path / "data" / "private"
     sibling.mkdir(parents=True)
 
     monkeypatch.setattr(ws_mod, "_BOOT_DEFAULT_WORKSPACE", str(boot_default))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
     # `boot_default/../private` resolves to `tmp_path/data/private`, which is
     # NOT a child of boot_default and not under home — must reject.

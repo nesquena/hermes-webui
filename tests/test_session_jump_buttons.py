@@ -50,6 +50,11 @@ def test_jump_to_session_start_button_loads_full_history_and_scrolls_top():
 
     assert "_ensureAllMessagesLoaded" in jump
     assert "_messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount())" in jump
+    expand_idx = jump.index("_messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount())")
+    top_idx = jump.index("container.scrollTop=0")
+    render_idx = jump.index("renderMessages({ preserveScroll:true })")
+    assert expand_idx < top_idx < render_idx
+    assert "_messageVirtualWindowKey=''" in jump
     assert "renderMessages({ preserveScroll:true })" in jump
     assert "container.scrollTop=0" in jump
     assert "btn.style.display=(hasSession&&canRevealStart&&awayFromStart)?'flex':'none'" in update

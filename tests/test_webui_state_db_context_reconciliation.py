@@ -132,6 +132,58 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
     ]
 
 
+def test_state_db_delta_after_context_allows_recovered_turn_prefix():
+    from api.models import state_db_delta_after_context
+
+    sidecar_context = [
+        {
+            "role": "user",
+            "content": "alright gateway restarted, lets give it a live test...",
+            "_recovered": True,
+        },
+        {
+            "role": "assistant",
+            "content": (
+                "**Response interrupted.**\n\n"
+                "The live response stream stopped before this turn finished. "
+                "The user message above was preserved, but no agent output was recovered."
+            ),
+            "_error": True,
+            "type": "interrupted",
+        },
+    ]
+    state_messages = [
+        {
+            "role": "user",
+            "content": "alright gateway restarted, lets give it a live test...",
+            "timestamp": 1.0,
+        },
+        {"role": "assistant", "content": "old assistant", "timestamp": 2.0},
+        {"role": "user", "content": "new prompt", "timestamp": 3.0},
+    ]
+
+    delta = state_db_delta_after_context(sidecar_context, state_messages)
+
+    assert [m.get("content") for m in delta] == ["old assistant", "new prompt"]
+
+
+def test_state_db_delta_after_context_does_not_promote_unrelated_prefix_as_recovered():
+    from api.models import state_db_delta_after_context
+
+    sidecar_context = [
+        {"role": "user", "content": "hi", "_recovered": True},
+        {"role": "user", "content": "hello"},
+    ]
+    state_messages = [
+        {"role": "user", "content": "hello", "timestamp": 1.0},
+        {"role": "assistant", "content": "response", "timestamp": 2.0},
+    ]
+
+    delta = state_db_delta_after_context(sidecar_context, state_messages)
+
+    assert [m.get("content") for m in delta] == ["hello", "response"]
+
+
 def test_webui_streaming_normalizes_trailing_prefill_user_before_current_turn(monkeypatch, tmp_path):
     import api.config as config
     import api.models as models

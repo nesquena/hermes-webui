@@ -53,7 +53,7 @@ def safe_resolve(root: Path, requested: str) -> Path:
 
 
 _CSP_CONNECT_BASE = (
-    "'self' http://127.0.0.1:* http://localhost:* "
+    "'self' http://127.0.0.1:* http://localhost:* http://ipc.localhost "
     "ws://127.0.0.1:* ws://localhost:*"
 )
 _CSP_EXTRA_CONNECT_RE = _re.compile(
@@ -161,13 +161,26 @@ def _safe_write(handler, body: bytes) -> None:
         )
 
 
-def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
+def _json_response_body(payload, *, pretty: bool = True) -> bytes:
+    """Serialize API JSON responses.
+
+    Sidebar/session endpoints can return thousands of rows on large installs.
+    Pretty-printing large list responses inflates both CPU and wire bytes. Keep
+    the public helper default stable for existing tests/callers; hot paths can
+    opt into compact JSON with ``pretty=False``.
+    """
+    if pretty:
+        return _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+    return _json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+
+
+def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True) -> None:
     """Send a JSON response.
 
     *extra_headers*: optional dict of additional headers to include
     (e.g., {'Set-Cookie': '...'}).  Headers are sent before end_headers().
     """
-    body = _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+    body = _json_response_body(payload, pretty=pretty)
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')
 
@@ -495,11 +508,36 @@ def read_body(handler) -> dict:
 # ── Profile cookie helpers (issue #798) ─────────────────────────────────────
 
 PROFILE_COOKIE_NAME = 'hermes_profile'
+_PROFILE_COOKIE_ENV = 'HERMES_WEBUI_PROFILE_COOKIE_NAME'
+_LEGACY_PROFILE_COOKIE_ENV = 'WEBUI_PROFILE_COOKIE_NAME'
+_legacy_profile_cookie_warned = False
 
 
 def get_profile_cookie_name() -> str:
-    """Return the cookie name used to persist the active WebUI profile."""
-    return os.getenv('WEBUI_PROFILE_COOKIE_NAME', PROFILE_COOKIE_NAME)
+    """Return the cookie name used to persist the active WebUI profile.
+
+    Honours ``HERMES_WEBUI_PROFILE_COOKIE_NAME`` so multiple WebUI instances
+    sharing a hostname (different ports) can use distinct profile-cookie names
+    instead of trampling each other; browsers scope cookies by host, not
+    host+port (RFC 6265). The original ``WEBUI_PROFILE_COOKIE_NAME`` is still
+    honoured as a deprecated fallback (warned once per process, since this is
+    called on every request).
+    """
+    name = os.getenv(_PROFILE_COOKIE_ENV, '').strip()
+    if name:
+        return name
+    legacy = os.getenv(_LEGACY_PROFILE_COOKIE_ENV, '').strip()
+    if legacy:
+        global _legacy_profile_cookie_warned
+        if not _legacy_profile_cookie_warned:
+            logger.warning(
+                '%s is deprecated; use %s instead.',
+                _LEGACY_PROFILE_COOKIE_ENV,
+                _PROFILE_COOKIE_ENV,
+            )
+            _legacy_profile_cookie_warned = True
+        return legacy
+    return PROFILE_COOKIE_NAME
 
 
 def get_profile_cookie(handler) -> str | None:

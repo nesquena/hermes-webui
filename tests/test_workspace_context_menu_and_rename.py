@@ -19,7 +19,7 @@ a user dogfooded the workspace panel:
     The `defaultValue` parameter was silently dropped; only the placeholder
     showed (the "ghost" name the user described).
 
-Run: /root/hermes-agent/venv/bin/python -m pytest tests/test_workspace_context_menu_and_rename.py -v
+Run: ./scripts/test.sh tests/test_workspace_context_menu_and_rename.py -v
 """
 
 from __future__ import annotations
@@ -325,9 +325,18 @@ class WorkspaceTargetedCreateContextMenuTests(unittest.TestCase):
 
     def test_file_context_menu_computes_target_directory_for_create_actions(self):
         body = self._slice_function("_showFileContextMenu")
-        self.assertRegex(
-            body,
-            r"const\s+targetDir\s*=\s*item\.type===['\"]dir['\"]\s*\?\s*item\.path\s*:\s*_workspaceParentDir\(item\.path\)",
+        # After the symlink PR, the guard changed from ``item.type==='dir'``
+        # to ``isDirLike`` (covers real dirs and directory-symlinks).
+        self.assertTrue(
+            re.search(
+                r"const\s+targetDir\s*=\s*item\.type===['\"]dir['\"]\s*\?\s*item\.path\s*:\s*_workspaceParentDir\(item\.path\)",
+                body,
+            ) or re.search(
+                r"const\s+targetDir\s*=\s*isDirLike\s*\?\s*item\.path\s*:\s*_workspaceParentDir\(item\.path\)",
+                body,
+            ),
+            "targetDir must be computed from item type (dir or isDirLike) "
+            "to determine the target directory for create actions",
         )
         self.assertIn("promptNewFile(targetDir)", body)
         self.assertIn("promptNewFolder(targetDir)", body)

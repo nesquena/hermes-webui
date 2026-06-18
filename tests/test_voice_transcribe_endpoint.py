@@ -156,3 +156,31 @@ def test_handle_transcribe_capability_reports_actual_local_command_fallback(monk
 
     assert available is True
     assert provider == "local_command"
+
+
+def test_handle_transcribe_capability_reports_named_command_provider(monkeypatch):
+    stt_config = {
+        "provider": "elevenlabs-gemini",
+        "providers": {
+            "elevenlabs-gemini": {
+                "type": "command",
+                "command": "/home/user/.hermes/scripts/hermes-elevenlabs-stt.sh {input}",
+            }
+        },
+    }
+    fake_mod = types.ModuleType("tools.transcription_tools")
+    fake_mod.__dict__.update(
+        {
+            "_load_stt_config": lambda: stt_config,
+            "is_stt_enabled": lambda cfg=None: True,
+            "_HAS_FASTER_WHISPER": False,
+            "_HAS_OPENAI": False,
+            "_HAS_MISTRAL": False,
+            "_resolve_command_stt_provider_config": lambda provider, cfg: cfg["providers"].get(provider),
+        }
+    )
+
+    available, provider = _stt_provider_capability_from_module(fake_mod)
+
+    assert available is True
+    assert provider == "elevenlabs-gemini"

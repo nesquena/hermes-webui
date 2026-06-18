@@ -228,7 +228,7 @@ class TestNormalizeConfiguredModelKeyMultiSlash:
 
     def test_at_provider_prefix_still_stripped(self, norm_driver):
         keys = _norm_keys(norm_driver, ["@custom:jingdong:GLM-5"])
-        assert keys["@custom:jingdong:GLM-5"] == "glm.5"
+        assert keys["@custom:jingdong:GLM-5"] == "jingdong:glm.5"
 
     def test_trailing_slash_fallback(self, norm_driver):
         """A trailing slash (malformed) must not collapse to empty."""

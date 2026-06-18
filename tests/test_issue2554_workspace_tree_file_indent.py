@@ -9,7 +9,12 @@ STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def _render_tree_item_toggle_block() -> str:
-    start = UI_JS.index("if(item.type==='dir'){\n      // Toggle arrow for directories")
+    # After the symlink PR, the guard changed from ``if(item.type==='dir')``
+    # to ``if(isDirLike)`` (covers real dirs and directory-symlinks).
+    try:
+        start = UI_JS.index("if(isDirLike){\n      // Toggle arrow for directories")
+    except ValueError:
+        start = UI_JS.index("if(item.type==='dir'){\n      // Toggle arrow for directories")
     end = UI_JS.index("\n\n    // Icon", start)
     return UI_JS[start:end]
 

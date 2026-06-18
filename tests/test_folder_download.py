@@ -89,7 +89,7 @@ def test_ui_context_menu_has_download_folder():
     assert "download_folder" in src
     download_idx = src.index("download_folder")
     snippet = src[max(0, download_idx - 200):download_idx]
-    assert "item.type==='dir'" in snippet or "item.type === 'dir'" in snippet
+    assert "isDirLike" in snippet or "item.type==='dir'" in snippet or "item.type === 'dir'" in snippet
 
 
 def test_ui_download_folder_uses_endpoint():

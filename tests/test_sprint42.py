@@ -743,9 +743,9 @@ def test_streaming_persists_reasoning_in_session():
     assert "_rm['reasoning'] = _existing_reasoning" in src, \
         "the no-think-block branch must still persist _reasoning_text into the assistant message"
 
-    # Persistence block must come BEFORE raw_session assignment
+    # Persistence block must come BEFORE the settled raw_session payload is built
     persist_idx = src.index("Persist reasoning trace in the session")
-    raw_session_idx = src.index("raw_session = s.compact()")
+    raw_session_idx = src.index("raw_session = _session_payload_with_full_messages")
     assert persist_idx < raw_session_idx, \
         "Reasoning persistence block must appear before raw_session assignment"
 

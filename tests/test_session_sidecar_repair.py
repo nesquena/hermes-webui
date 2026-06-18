@@ -440,7 +440,7 @@ class TestGetProfileHome:
         monkeypatch.setitem(sys.modules, "api.profiles", None)
         monkeypatch.setenv("HERMES_HOME", "/custom/hermes")
         result = _get_profile_home(None)
-        assert str(result) == "/custom/hermes"
+        assert result == Path(os.environ["HERMES_HOME"]).expanduser()
 
     def test_expands_tilde_in_hermes_home(self, monkeypatch):
         """If HERMES_HOME contains ~, it gets expanded."""
