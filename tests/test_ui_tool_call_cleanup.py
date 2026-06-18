@@ -435,11 +435,13 @@ class TestToolCallGroupingStatic:
         sync_fn = _function_body(UI_JS, "_syncToolCallGroupSummary")
         progress_fn = _function_body(UI_JS, "_activityProgressLabelForToolName")
         live_progress_fn = _function_body(UI_JS, "_activityLiveProgressLabel")
-        assert "_activityLiveProgressLabel" in sync_fn, (
-            "Live compact Activity rows should expose a readable transient progress label."
+        assert "_activityLiveProgressLabel" not in sync_fn, (
+            "Live compact Activity rows should no longer mix transient tool-progress text "
+            "into the processed-time anchor."
         )
-        assert "durationEl.textContent" in sync_fn and "filter(Boolean).join(' · ')" in sync_fn, (
-            "Progress should share the existing non-persistent summary/duration slot, not become transcript text."
+        assert "_activityProcessedElapsedLabel(group)" in sync_fn and "durationEl.textContent='';" in sync_fn, (
+            "The Worklog summary should own the processed-time anchor while the old "
+            "duration slot stays empty."
         )
         for label in ("Searching workspace", "Reading files", "Updating files", "Running command"):
             assert label in progress_fn
@@ -450,34 +452,32 @@ class TestToolCallGroupingStatic:
             "Readable progress must not reintroduce the noisy secondary tool-name list."
         )
 
-    def test_terminal_worklog_titles_summarize_common_diagnostic_commands(self):
-        start = UI_JS.find("function _toolCommandTitle")
-        end = UI_JS.find("function _toolQueryTitle", start)
-        assert start != -1 and end != -1, "_toolCommandTitle() source window not found"
-        command_fn = UI_JS[start:end]
-        assert "git fetch" in command_fn and "git ahead/behind" in command_fn, (
-            "Terminal Worklog rows should distinguish common git audit commands "
-            "instead of falling back to the generic 'command' title."
+    def test_individual_tool_rows_do_not_surface_result_previews(self):
+        action_fn = _function_body(UI_JS, "_toolActionLabelText")
+        target_fn = _function_body(UI_JS, "_toolTargetLabel")
+        preview_fn = _function_body(UI_JS, "_toolCardPreviewText")
+        build_fn = _function_body(UI_JS, "buildToolCard")
+
+        assert "kind==='shell'&&target" not in action_fn
+        assert "_toolCommandTitle(target)" not in action_fn
+        assert "tc.command||tc.raw_command||tc.original_command||tc.display_command" in target_fn
+        assert "tc.preview" not in target_fn
+        assert "const explicit=String(tc&&tc.preview||'').trim();" not in preview_fn
+        assert "if(explicit) return explicit;" not in preview_fn
+        assert "const hasRawDetail=!!(tc.snippet)" in build_fn
+        assert "const allowsDetail=typeof _toolCardAllowsDetail==='function'?_toolCardAllowsDetail(toolKind,tc):true;" in build_fn
+        assert "const hasDetail=hasRawDetail&&allowsDetail" in build_fn
+        assert "if(toolKind==='shell'||previewText===argPreview" in build_fn, (
+            "Individual tool rows should show input targets in the row title and "
+            "keep result previews inside the expanded detail."
         )
-        assert "git log" in command_fn, (
-            "Commit/PR audit commands should show a git log title instead of "
-            "the generic command fallback."
-        )
-        assert "health check" in command_fn, (
-            "curl localhost /health checks should get a readable L2 title."
-        )
-        assert "process check" in command_fn and "port ${m[1]} check" in command_fn, (
-            "ps/grep and lsof diagnostics should be scannable in L2 while full "
-            "commands remain in L3 detail."
-        )
-        assert "launchctl" in command_fn, (
-            "launchd service checks should keep their service intent visible in "
-            "the Worklog row title."
-        )
-        assert "return _shortToolLabel(normalized,72);" in command_fn, (
-            "Long shell diagnostics should still expose a short L2 command "
-            "summary instead of falling back to the bare 'command' title."
-        )
+
+    def test_read_search_list_web_detail_is_error_only(self):
+        helper = _function_body(UI_JS, "_toolCardAllowsDetail")
+
+        assert "read:1,search:1,list:1,web:1" in helper
+        assert "if(infoKinds[kind]&&!(tc&&tc.is_error)) return false;" in helper
+        assert "return true;" in helper
 
     def test_live_thinking_does_not_rewrite_visible_interim_echoes(self):
         interim_match = re.search(r"source\.addEventListener\('interim_assistant',e=>\{(.*?)\n\s*\}\);", MESSAGES_JS, re.S)
@@ -620,6 +620,7 @@ class TestToolCallGroupingStatic:
             "New live reasoning text should not create active Worklog prose rows."
         )
         reset_fn = _function_body(MESSAGES_JS, "_resetAssistantSegment")
+        assert "assistantRow=null" in reset_fn and "assistantBody=null" in reset_fn
         assert "function closeCurrentLiveActivityGroup()" in UI_JS, (
             "Visible interim assistant progress needs a shared helper to close the current Activity burst."
         )
@@ -753,9 +754,21 @@ class TestToolCardDesignTokens:
         assert "background:transparent" in tool_card_rule
         assert "border:0" in tool_card_rule
         assert "border-left:0" in tool_card_rule
-        assert "border-left:1pxsolidvar(--border-subtle)" in rows_rule, (
-            "Nested tool groups should be expressed with only a subtle left guide line."
-        )
+        assert "margin:3px000" in rows_rule
+        assert "padding-left:0" in rows_rule
+        assert "border-left:0" in rows_rule
+
+    def test_grouped_tool_rows_hide_child_icons_and_left_align(self):
+        css_min = re.sub(r"\s+", "", CSS)
+        assert ".tool-worklog-tool-group,.tool-group{width:100%;max-width:100%;" in css_min
+        assert ".tool-worklog-tool-group-body .tool-card-row," in CSS
+        assert ".tool-group-body .tool-card-row{width:100%;max-width:100%;margin:0;box-sizing:border-box;}" in CSS
+        assert ".tool-worklog-tool-group-body .tool-card-icon," in CSS
+        assert ".tool-group-body .tool-card-icon{display:none;}" in CSS
+        assert ".tool-worklog-tool-group-body .tool-card-header," in CSS
+        assert ".tool-group-body .tool-card-header{margin-left:0;padding-left:0;}" in CSS
+        assert ".tool-worklog-tool-group-body .tool-card-detail," in CSS
+        assert ".tool-group-body .tool-card-detail{width:100%;max-width:100%;box-sizing:border-box;}" in CSS
 
     def test_tool_card_header_and_text_use_spacing_and_font_tokens(self):
         css_min = re.sub(r"\s+", "", CSS)
@@ -768,6 +781,28 @@ class TestToolCardDesignTokens:
         assert ".tool-card-name{" in css_min and "font-size:var(--message-body-font-size)" in css_min
         assert "font-size:var(--message-body-font-size)" in title_rule
         assert "font-family:var(--font-mono)" in title_rule
+
+    def test_tool_card_open_state_switches_from_specific_to_generic_label(self):
+        css_min = re.sub(r"\s+", "", CSS)
+        assert ".tool-card-name-label{display:inline;}" in css_min
+        assert ".tool-card-name-generic{display:none;}" in css_min
+        assert ".tool-card.open .tool-card-name-label{display:none;}" in CSS
+        assert ".tool-card.open .tool-card-name-generic{display:inline;}" in CSS
+        assert ".tool-card-no-detail .tool-card-header{cursor:default;}" in CSS
+        assert ".tool-card-no-detail .tool-card-header:hover{background:transparent;color:var(--muted);}" in CSS
+
+        build_start = UI_JS.index("function buildToolCard(tc){")
+        build_end = UI_JS.index("function _syncToolCallGroupSummary", build_start)
+        build = UI_JS[build_start:build_end]
+        assert "_toolActionLabelText(tc,{limit:112})" in build
+        assert "_toolActionLabelText(tc,{generic:true,limit:112})" in build
+        assert "(hasDetail?'':' tool-card-no-detail')" in build
+        assert "const headerClick=hasDetail?" in build
+        assert '<div class="tool-card-header"${headerClick}>' in build
+        assert "tool-card-name-label" in build and "tool-card-name-generic" in build
+        assert "tool-card-detail-lead" in build
+        assert "_toolDetailLeadText(toolKind,tc)" in build
+        assert "const visibleArgs=(detailLeadText&&toolKind==='shell')?[]:argsEntries;" in build
 
     def test_worklog_thinking_card_uses_quiet_tool_row_hierarchy(self):
         selector = ".tool-worklog-list > .agent-activity-thinking .thinking-card,"
@@ -812,3 +847,50 @@ class TestToolCardDesignTokens:
         assert "padding:6px8px7px8px" in body_rule
         assert "font-size:var(--message-body-font-size)" in pre_rule
         assert "line-height:var(--message-body-line-height)" in pre_rule
+
+    def test_worklog_tool_steps_align_with_thinking_rows(self):
+        rule = re.sub(
+            r"\s+",
+            "",
+            CSS.split(".activity-body .wl-step-tools,", 1)[1].split("}", 1)[0],
+        )
+        reason_rule = re.sub(
+            r"\s+",
+            "",
+            CSS.split(".activity-body .wl-reason,", 1)[1].split("}", 1)[0],
+        )
+
+        assert ".tool-worklog-list>.wl-step-tools" in rule
+        assert "padding-left:0" in rule
+        assert "padding-left:var(--worklog-rail)" not in rule
+        assert ".tool-worklog-list>.wl-reason" in reason_rule
+        assert "padding-left:0" in reason_rule
+        assert "padding-left:var(--worklog-rail)" not in reason_rule
+
+    def test_tool_detail_layers_span_full_width(self):
+        card_rule = re.sub(
+            r"\s+",
+            "",
+            CSS.split(".tool-card-row,.tool-card{", 1)[1].split("}", 1)[0],
+        )
+        detail_rule = re.sub(
+            r"\s+",
+            "",
+            CSS.split(".tool-card-detail,.tl-detail{", 1)[1].split("}", 1)[0],
+        )
+        result_rule = re.sub(
+            r"\s+",
+            "",
+            CSS.split(".tool-card-args,.tool-card-result{", 1)[1].split("}", 1)[0],
+        )
+        pre_rule = re.sub(
+            r"\s+",
+            "",
+            CSS[CSS.index(".tool-card-result pre{", CSS.index(".tool-card-args,.tool-card-result{")):].split("{", 1)[1].split("}", 1)[0],
+        )
+
+        for rule in (card_rule, detail_rule, result_rule, pre_rule):
+            assert "width:100%" in rule
+            assert "max-width:100%" in rule
+            assert "box-sizing:border-box" in rule
+            assert "min-width:0" in rule

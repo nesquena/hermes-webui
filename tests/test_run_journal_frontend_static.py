@@ -112,7 +112,7 @@ def test_run_journal_cursor_tracks_every_long_task_timeline_event():
 
 def test_server_runtime_journal_snapshot_restores_structured_inflight_state():
     helper_pos = SESSIONS_SRC.index("function _serverLiveSnapshotToolId")
-    helper_block = SESSIONS_SRC[helper_pos : helper_pos + 2600]
+    helper_block = SESSIONS_SRC[helper_pos : helper_pos + 3600]
     load_pos = SESSIONS_SRC.index("async function loadSession")
     load_block = SESSIONS_SRC[load_pos : load_pos + 18000]
 

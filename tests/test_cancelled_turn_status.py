@@ -111,6 +111,14 @@ class TestCancelledTurnFinalizer:
         assert "provider_details_label||'Provider details'" in src
         assert "provider-error-details" in src
 
+    def test_cancel_error_carrier_is_not_folded_into_worklog(self):
+        src = _read("static/ui.js")
+        start = src.index("function _assistantMessageBelongsInWorklog")
+        end = src.index("function _assistantThinkingBelongsInWorklog", start)
+        block = src[start:end]
+
+        assert "if(m._error) return false;" in block
+
 
 class TestCancelledTurnPersistenceGuards:
     def test_cancel_marker_patterns_are_centralized_for_dedupe(self):

@@ -3,6 +3,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Live Compact Worklog now renders turn activity from the Assistant Turn Anchor scene instead of legacy DOM mirrors.** Process prose, reasoning, lifecycle rows, and tool boundaries flow through one ordered `activity_scene_v1` model so live activity, settled Worklog, hard refresh, and session re-entry preserve the same visible order. The final answer stays outside the folded Worklog while the Worklog appears above it.
+- **Compact Worklog interaction and Tool Cards now match the Codex-style hierarchy more closely.** The processed-time anchor appears immediately after send, starts as a localized "Thinking" placeholder, then becomes elapsed processed time; Tool Cards show command/target information at the row level, keep read/search/list/web rows summary-only unless they fail, align grouped child rows with Thinking rows, and use full-width detail panels for expandable shell/write/patch/edit rows.
+- **Assistant Turn Anchor scene persistence now targets the full transcript message.** Persisted Worklog scenes send the absolute assistant-message index even when the browser only loaded a tail window, and the server prefers a unique message reference before falling back to the normalized full index, preventing hard-refresh hydration from attaching a settled Worklog to an older assistant reply in long sessions.
+- **Assistant Turn Anchor recovery now accepts the browser's message reference format.** The anchor scene API canonicalizes incoming browser JSON refs before matching settled assistant messages, rejects ambiguous duplicate refs instead of falling back to a stale index, and includes already-received reasoning as a Thinking row in live run-journal snapshots after reconnect.
+- **Cancelled partial turns no longer permanently suppress later state.db transcript reconciliation.** The cancel replay guard now applies only while a partial assistant response plus cancellation marker are still the visible tail, so later successful turns can merge state.db-only deltas again. Anchor scene index fallback also rejects mismatched final-answer targets instead of persisting a Worklog scene onto the wrong assistant message after a stale ref miss.
+- **Settled Worklog hydration now strips live-only running rows from durable scenes.** If a persisted scene still contains a `live-reasoning:*` running Thinking row after the final answer settles, the server and browser drop it when transcript-backed settled Thinking exists; otherwise live prose/thinking/tool rows are sealed before the scene is rendered or persisted so hard refresh and natural settle do not show stale running activity at the bottom of the Worklog.
+
 ## [v0.51.513] — 2026-06-19 — Release RX (credential-pool quota status for all pooled providers)
 
 ### Added
@@ -26,7 +35,6 @@
 ### Added
 
 - **Kanban tasks can now set a workspace and manage dependencies from the WebUI (#3797).** The task-create modal gains a **Workspace kind** selector (scratch / worktree / directory) with a conditional path field (validated on create; correctly disabled on edit, which the backend does not patch), and a task's detail view gains **dependency** add/remove controls. The dependency field is an autocomplete of existing tasks (titles shown) rather than a blind ID box, rejects self-dependencies, and a dependency added to task X correctly records the linked task as X's prerequisite (parent). Dark-theme styled to match the rest of the editor. Linked-task IDs are JS-context-encoded in the action handlers. Thanks @rodboev. (Remaining task-editor parity items — skills, max runtime, dependencies at create time, workspace-path autocomplete — tracked in #4470.)
-
 ## [v0.51.509] — 2026-06-19 — Release RT (notice when the connected gateway can't do approvals)
 
 ### Added

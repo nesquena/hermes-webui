@@ -44,6 +44,40 @@ def test_webui_lineage_display_merge_includes_parent_only_rows(monkeypatch):
     ]
 
 
+def test_webui_lineage_display_keeps_cumulative_child_tail_without_timestamps(monkeypatch):
+    parent = SimpleNamespace(
+        session_id="parent",
+        messages=[
+            _msg("user", "first prompt", 1000.0),
+            _msg("assistant", "first answer", 1001.0),
+        ],
+    )
+    tip = SimpleNamespace(
+        session_id="tip",
+        parent_session_id="parent",
+        session_source="webui",
+        messages=[
+            _msg("user", "first prompt", 1000.0),
+            _msg("assistant", "first answer", 1001.0),
+            {"role": "user", "content": "continue after compression"},
+            {"role": "assistant", "content": "final after compression"},
+        ],
+        truncation_watermark=None,
+    )
+
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: parent)
+
+    merged = routes._merged_webui_lineage_messages_for_display(tip, tip.messages)
+
+    assert [m["content"] for m in merged] == [
+        "first prompt",
+        "first answer",
+        "continue after compression",
+        "final after compression",
+    ]
+    assert merged[-1]["role"] == "assistant"
+
+
 def test_webui_lineage_display_merge_skips_explicit_forks(monkeypatch):
     parent = SimpleNamespace(
         session_id="parent",
