@@ -918,6 +918,7 @@ _FALLBACK_MODELS = [
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7",             "label": "MiniMax M2.7"},
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7-highspeed",   "label": "MiniMax M2.7 Highspeed"},
     # Z.AI / GLM
+    {"provider": "Z.AI",      "id": "zai/glm-5.2",                      "label": "GLM-5.2"},
     {"provider": "Z.AI",      "id": "zai/glm-5.1",                      "label": "GLM-5.1"},
     {"provider": "Z.AI",      "id": "zai/glm-5",                        "label": "GLM-5"},
     {"provider": "Z.AI",      "id": "zai/glm-5-turbo",                  "label": "GLM-5 Turbo"},
@@ -1427,6 +1428,7 @@ _PROVIDER_MODELS = {
         {"id": "@nous:google/gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview (via Nous)"},
     ],
     "zai": [
+        {"id": "glm-5.2", "label": "GLM-5.2"},
         {"id": "glm-5.1", "label": "GLM-5.1"},
         {"id": "glm-5", "label": "GLM-5"},
         {"id": "glm-5-turbo", "label": "GLM-5 Turbo"},
@@ -1577,6 +1579,62 @@ _PROVIDER_MODELS = {
         {"id": "global.anthropic.claude-haiku-4-5-20251001-v1:0",  "label": "Global Anthropic Claude Haiku 4.5"},
     ],
 }
+
+
+def _seed_provider_models_from_core() -> None:
+    """Merge models from hermes_cli.models._PROVIDER_MODELS into the WebUI catalog.
+
+    The core's _PROVIDER_MODELS is the authoritative curated list of agent-capable
+    models per provider.  The WebUI's static dict above is a display-oriented copy
+    (with {id, label} entries) that can go stale when new models are added to the
+    core without a matching WebUI update.  This function bridges the gap by
+    injecting any missing model IDs from the core at startup.
+
+    Safe to call multiple times; only missing entries are added.  Silently no-ops
+    if hermes_cli is not importable (standalone WebUI deployments).
+    """
+    try:
+        from hermes_cli.models import _PROVIDER_MODELS as _core_pm
+    except Exception:
+        return
+
+    for provider_id, core_models in _core_pm.items():
+        if not isinstance(core_models, list):
+            continue
+        webui_list = _PROVIDER_MODELS.get(provider_id)
+        if webui_list is None:
+            # Provider exists in core but not in WebUI — seed the full list.
+            _PROVIDER_MODELS[provider_id] = [
+                {"id": mid, "label": _get_label_for_model(mid, [])}
+                for mid in core_models
+                if isinstance(mid, str) and mid.strip()
+            ]
+            continue
+        if not isinstance(webui_list, list):
+            continue
+        # Provider exists in both — inject missing model IDs.
+        existing_ids = {
+            (m.get("id") if isinstance(m, dict) else str(m)).replace("-", ".").lower()
+            for m in webui_list
+            if isinstance(m, dict) and m.get("id")
+        }
+        for mid in core_models:
+            if not isinstance(mid, str) or not mid.strip():
+                continue
+            normed = mid.strip().replace("-", ".").lower()
+            if normed not in existing_ids:
+                webui_list.append({
+                    "id": mid.strip(),
+                    "label": _get_label_for_model(mid.strip(), []),
+                })
+
+
+# Run once at import time so every consumer (resolve_model_provider, the model
+# picker, session creation) sees the merged catalog immediately.
+try:
+    _seed_provider_models_from_core()
+except Exception:
+    pass  # Defensive: never block module load over a seeding failure
 
 
 _AMBIENT_GH_CLI_MARKERS = frozenset({"gh_cli", "gh auth token"})
