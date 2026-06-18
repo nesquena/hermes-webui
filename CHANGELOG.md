@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.496] — 2026-06-18 — Release RF (compact provider quota chip on narrow composer)
+
+### Fixed
+
+- **The provider quota chip no longer gets truncated on a narrow composer (#4358).** The chip is now more compact (smaller height, padding, and gap, `max-width` 120px) and is hidden entirely on a very narrow composer where it would otherwise be clipped, matching how the context indicator already behaves at that width. Thanks @bergeouss.
+
 ## [v0.51.494] — 2026-06-18 — Release RD (TLS-aware launcher health probes)
 
 ### Fixed
