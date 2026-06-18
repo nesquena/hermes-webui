@@ -7,6 +7,12 @@
 
 - **Interrupted WebUI session reconciliation now preserves state.db-only user prompts that precede a newer sidecar tail.** If recovery writes a later assistant/error tail to the sidecar while the triggering user prompt only exists in `state.db`, `/api/session` inserts that missing user turn chronologically instead of dropping it as an old replay row. (#2361)
 
+## [v0.51.484] — 2026-06-18 — Release QT (collapsible paused cron section)
+
+### Added
+
+- **Paused cron jobs now collapse into their own section in the sidebar (#4026).** When you have paused/disabled scheduled jobs, they no longer clutter the active list — they're grouped under a collapsible "Paused (N)" section. The collapsed/expanded state is remembered (localStorage), and it reuses the existing translated "paused" label so it's localized in every language out of the box. Thanks @Sanjays2402.
+
 ## [v0.51.483] — 2026-06-18 — Release QS (virtual-scroll height + measurement scroll-jump fixes)
 
 ### Fixed

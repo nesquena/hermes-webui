@@ -1505,6 +1505,13 @@
   .cron-gateway-notice{margin:8px 8px 0;}
   .cron-item{width:100%;min-width:0;box-sizing:border-box;border-radius:10px;border:1px solid var(--border);margin-bottom:6px;overflow:hidden;transition:border-color .15s,background .15s;background:rgba(255,255,255,.02);cursor:pointer;}
   .cron-item:hover{border-color:var(--border2);}
+  .cron-paused-section{margin:8px 0 0;border-top:1px solid var(--border);padding-top:6px;}
+  .cron-paused-summary{cursor:pointer;font-size:11px;font-weight:600;color:var(--muted);padding:6px 4px;letter-spacing:.02em;text-transform:uppercase;list-style:none;outline:none;user-select:none;}
+  .cron-paused-summary::-webkit-details-marker{display:none;}
+  .cron-paused-summary::before{content:"▸";display:inline-block;width:12px;color:var(--muted);transition:transform .12s ease;}
+  .cron-paused-section[open] > .cron-paused-summary::before{transform:rotate(90deg);}
+  .cron-paused-summary:hover{color:var(--text);}
+  .cron-paused-inner{margin-top:4px;}
   .cron-header{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;}
   .cron-name{flex:1;font-size:13px;color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .cron-status{font-size:10px;font-weight:700;padding:2px 8px;border-radius:99px;flex-shrink:0;}
