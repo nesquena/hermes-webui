@@ -3509,7 +3509,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         renderSessionList();
         _setActivePaneIdleIfOwner();
         playNotificationSound();
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{sid:activeSid});
+        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:true,sid:activeSid});
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -5324,7 +5324,9 @@ function requestNotificationPermission(){
 }
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);
-  if(!force&&(!window._notificationsEnabled||!document.hidden)) return;
+  const forceHidden=!!(options&&options.forceHidden);
+  if(!window._notificationsEnabled&&!force) return;
+  if(!forceHidden&&!force&&!document.hidden) return;
   if(!('Notification' in window)) return;
   if(Notification.permission==='granted'){
     _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});

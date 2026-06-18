@@ -25,7 +25,7 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "_sessionUrlForSid(sid)" in MESSAGES_JS
     assert "data:{url}" in MESSAGES_JS
     assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
-    assert "sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{sid:activeSid})" in MESSAGES_JS
+    assert "sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:true,sid:activeSid})" in MESSAGES_JS
     assert "sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid})" in MESSAGES_JS
     assert "sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid})" in MESSAGES_JS
 
