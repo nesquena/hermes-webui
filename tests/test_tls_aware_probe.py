@@ -46,7 +46,7 @@ class _HealthHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"status": "ok"}')
 
-    def log_message(self, *args):  # silence
+    def log_message(self, *args):  # suppress server log noise during tests
         pass
 
 
