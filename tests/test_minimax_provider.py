@@ -146,10 +146,10 @@ def test_minimax_cn_provider_models_match_hermes_agent_catalog():
     """minimax-cn must have its own static catalog so an empty config provider still shows models."""
     models = config._PROVIDER_MODELS.get('minimax-cn', [])
     ids = [m['id'] for m in models]
-    assert ids == [
-        'MiniMax-M3',
-        'MiniMax-M2.7',
-    ]
+    # _seed_provider_models_from_core() may have enriched the static list at
+    # import time, so assert the curated entries are a subset rather than an
+    # exact match (#4413).
+    assert {'MiniMax-M3', 'MiniMax-M2.7'}.issubset(set(ids)), ids
     assert config._PROVIDER_DISPLAY.get('minimax-cn') == 'MiniMax (China)'
 
 
