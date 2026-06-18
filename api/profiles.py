@@ -371,6 +371,24 @@ def filter_profiles_for_webui_policy(rows: list[dict]) -> list[dict]:
     return result
 
 
+def session_profile_allowed_for_webui(session_profile: str | None) -> bool:
+    """Return True when a stored session's profile is visible on this instance.
+
+    Session rows live in one global WebUI store and are tagged with a profile
+    field. Locked/allowlisted WebUI instances must enforce that policy on direct
+    by-id loads as well as list endpoints; otherwise a caller that knows a
+    foreign session id could bypass the filtered session list. Reuse
+    _profiles_match() so legacy untagged/default/root-renamed rows keep the same
+    aliasing semantics as /api/sessions and /api/projects.
+    """
+    policy = get_webui_profile_policy()
+    allowed = policy.get("allowed_profiles") or []
+    if not allowed:
+        return True
+    name = session_profile or "default"
+    return any(_profiles_match(name, allowed_name) for allowed_name in allowed)
+
+
 def webui_profile_policy_response_fields() -> dict:
     """JSON fields advertised to the frontend for profile-lock UX."""
     policy = get_webui_profile_policy()

@@ -175,6 +175,65 @@ def test_allowlist_profile_switch_to_disallowed_profile_is_forbidden(monkeypatch
     assert "not allowed" in handler.response_json["error"].lower()
 
 
+def test_locked_profile_hides_foreign_session_detail_by_id(monkeypatch):
+    import api.routes as routes
+
+    _lock_to_macos(monkeypatch)
+    foreign = SimpleNamespace(session_id="foreign", profile="joey")
+    monkeypatch.setattr(routes, "get_session", lambda *a, **k: foreign)
+
+    handler = _Handler("/api/session?session_id=foreign")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 404
+    assert handler.response_json["error"] == "Session not found"
+
+
+def test_locked_profile_hides_foreign_session_export_by_id(monkeypatch):
+    import api.routes as routes
+
+    _lock_to_macos(monkeypatch)
+    foreign = SimpleNamespace(session_id="foreign", profile="joey")
+    monkeypatch.setattr(routes, "get_session", lambda *a, **k: foreign)
+
+    handler = _Handler("/api/session/export?session_id=foreign")
+    routes._handle_session_export(handler, urlparse(handler.path))
+
+    assert handler.status == 404
+    assert handler.response_json["error"] == "Session not found"
+
+
+@pytest.mark.parametrize("path,handler_name", [
+    ("/api/chat/start", "_handle_chat_start"),
+    ("/api/goal", "_handle_goal_command"),
+])
+def test_locked_profile_blocks_foreign_session_execution_by_id(monkeypatch, path, handler_name):
+    import api.routes as routes
+
+    _lock_to_macos(monkeypatch)
+    foreign = SimpleNamespace(session_id="foreign", profile="joey")
+    monkeypatch.setattr(routes, "get_session", lambda *a, **k: foreign)
+
+    body = {"session_id": "foreign", "message": "hello", "args": "go"}
+    handler = _Handler(path, body)
+    getattr(routes, handler_name)(handler, body)
+
+    assert handler.status == 404
+    assert handler.response_json["error"] == "Session not found"
+
+
+def test_locked_profile_blocks_foreign_session_mutation_loader(monkeypatch):
+    import api.routes as routes
+
+    _lock_to_macos(monkeypatch)
+    foreign = SimpleNamespace(session_id="foreign", profile="joey", read_only=False)
+    monkeypatch.setattr(routes, "get_session", lambda *a, **k: foreign)
+    monkeypatch.setattr(routes, "_ensure_full_session_before_mutation", lambda sid, s: s)
+
+    with pytest.raises(KeyError):
+        routes._get_or_materialize_session("foreign")
+
+
 def test_locked_profile_disables_all_profiles_query_flag(monkeypatch):
     import api.routes as routes
 

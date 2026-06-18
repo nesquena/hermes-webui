@@ -182,7 +182,12 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
 # (mcp_server.py) can import it without duplicating the visibility model.
 # Re-exported here so existing `_profiles_match(...)` call sites in this
 # module keep resolving without per-call-site refactors.
-from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
+from api.profiles import _profiles_match, session_profile_allowed_for_webui  # noqa: F401, E402
+
+
+def _session_allowed_for_webui_policy(session) -> bool:
+    """Return True if a by-id session load is allowed by WebUI profile policy."""
+    return session_profile_allowed_for_webui(_session_field(session, "profile", None))
 
 
 def _webui_profile_management_restricted_response(handler) -> bool:
@@ -1600,6 +1605,8 @@ def _get_or_materialize_session(sid: str):
     try:
         s = get_session(sid)
         s = _ensure_full_session_before_mutation(sid, s)
+        if not _session_allowed_for_webui_policy(s):
+            raise KeyError(sid)
         # Read-only guard on the happy path too: an already-stored read-only /
         # imported session must not be mutated via rename/update/move
         # (Session.save() does not enforce this). Scope this to the explicit
@@ -1615,6 +1622,8 @@ def _get_or_materialize_session(sid: str):
     # Fallback: try to materialize from CLI/agent session metadata
     cli_meta = _lookup_cli_session_metadata(sid)
     if not cli_meta:
+        raise KeyError(sid)
+    if not session_profile_allowed_for_webui(cli_meta.get("profile")):
         raise KeyError(sid)
 
     # Read-only guard: messaging sessions and Claude Code imports cannot be
@@ -5944,6 +5953,8 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+            if not _session_allowed_for_webui_policy(s):
+                return bad(handler, "Session not found", 404)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
@@ -6292,7 +6303,10 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Missing session_id")
         try:
             from api.session_ops import session_status
-            _clear_stale_stream_state(get_session(sid, metadata_only=True))
+            session_for_status = get_session(sid, metadata_only=True)
+            if not _session_allowed_for_webui_policy(session_for_status):
+                return bad(handler, "Session not found", 404)
+            _clear_stale_stream_state(session_for_status)
             return j(handler, session_status(sid))
         except KeyError:
             return bad(handler, "Session not found", 404)
@@ -6309,6 +6323,9 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Missing session_id")
         try:
             from api.session_ops import session_usage
+            session_for_usage = get_session(sid, metadata_only=True)
+            if not _session_allowed_for_webui_policy(session_for_usage):
+                return bad(handler, "Session not found", 404)
             return j(handler, session_usage(sid))
         except KeyError:
             return bad(handler, "Session not found", 404)
@@ -6578,6 +6595,8 @@ def handle_get(handler, parsed) -> bool:
         try:
             s = get_session(sid)
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_allowed_for_webui_policy(s):
             return bad(handler, "Session not found", 404)
         from api.workspace_git import GitWorkspaceError, git_status
 
@@ -7607,6 +7626,8 @@ def handle_post(handler, parsed) -> bool:
             s = _ensure_full_session_before_mutation(sid, s)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        if not _session_allowed_for_webui_policy(s):
+            return bad(handler, "Session not found", 404)
         if getattr(s, "read_only", False) or getattr(s, "is_imported", False):
             return bad(handler, "Read-only imported sessions cannot be renamed", 403)
         next_title, reason, raw_preview = generate_session_title_for_session(s, prefer_latest=prefer_latest)
@@ -7640,6 +7661,8 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(sid)
             s = _ensure_full_session_before_mutation(sid, s)
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_allowed_for_webui_policy(s):
             return bad(handler, "Session not found", 404)
         # Resolve personality from config.yaml agent.personalities section
         # (matches hermes-agent CLI behavior)
@@ -7695,6 +7718,8 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        if not _session_allowed_for_webui_policy(s):
+            return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(sid):
             s.enabled_toolsets = toolsets
             s.save()
@@ -7712,6 +7737,8 @@ def handle_post(handler, parsed) -> bool:
             try:
                 s = get_session(sid)
             except KeyError:
+                return bad(handler, "Session not found", 404)
+            if not _session_allowed_for_webui_policy(s):
                 return bad(handler, "Session not found", 404)
             draft = getattr(s, "composer_draft", {}) or {}
             return j(handler, {"draft": draft})
@@ -7740,6 +7767,8 @@ def handle_post(handler, parsed) -> bool:
         try:
             s = get_session(sid)
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_allowed_for_webui_policy(s):
             return bad(handler, "Session not found", 404)
         unchanged = False
         with _get_session_agent_lock(sid):
@@ -9412,6 +9441,8 @@ def _handle_session_export(handler, parsed):
     try:
         s = get_session(sid)
     except KeyError:
+        return bad(handler, "Session not found", 404)
+    if not _session_allowed_for_webui_policy(s):
         return bad(handler, "Session not found", 404)
     safe = redact_session_data(s.__dict__)
     payload = json.dumps(safe, ensure_ascii=False, indent=2)
@@ -12674,6 +12705,8 @@ def start_session_turn(
         s = get_session(session_id)
     except KeyError:
         return {"error": "Session not found", "_status": 404}
+    if not _session_allowed_for_webui_policy(s):
+        return {"error": "Session not found", "_status": 404}
 
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
@@ -12806,6 +12839,8 @@ def _handle_goal_command(handler, body):
     try:
         s = get_session(body["session_id"])
     except KeyError:
+        return bad(handler, "Session not found", 404)
+    if not _session_allowed_for_webui_policy(s):
         return bad(handler, "Session not found", 404)
 
     requested_profile = str(body.get("profile") or "").strip()
@@ -12952,6 +12987,8 @@ def _handle_chat_start(handler, body, diag=None):
         try:
             s = get_session(body["session_id"])
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_allowed_for_webui_policy(s):
             return bad(handler, "Session not found", 404)
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
