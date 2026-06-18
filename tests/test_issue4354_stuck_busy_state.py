@@ -312,23 +312,16 @@ def test_inflight_reattach_uses_server_truth():
                 break
     block_body = SESSIONS_SRC[brace + 1 : end]
 
-    # Server-truth + recency checks must be present.
+    # Server-truth check must be present (recency veto was removed —
+    # see loadSession comment: long agentic turns keep active_stream_id
+    # set while last_message_at goes stale, so dropping the INFLIGHT
+    # on switch-away/back would lose the live reattach. The watchdog's
+    # server-truth pre-fire check is the right place to handle "stream
+    # is active but silent.").
     assert "S.session.active_stream_id" in block_body, (
-        "INFLIGHT reattach must consult S.session.active_stream_id"
+        "INFLIGHT reattach must consult S.session.active_stream_id for "
+        "the server-truth gate (recency veto removed per nesquena-hermes re-review)"
     )
-    assert "S.session.last_message_at" in block_body, (
-        "INFLIGHT reattach must consult S.session.last_message_at for the recency check"
-    )
-    # NOTE: the 10-min last_message_at recency veto was intentionally
-    # removed (nesquena-hermes re-review). Long agentic turns keep
-    # active_stream_id set while last_message_at goes stale; dropping
-    # the INFLIGHT on switch-away/back would lose the live reattach.
-    # The recency check is now the watchdog's job (with server-truth
-    # pre-fire verification), not this reattach-time check.
-    # The recency check is intentionally removed; this assertion is
-    # no longer relevant. Server-truth is now the only gate at
-    # reattach-time, and the watchdog handles "stream is active but
-    # silent" via its server-truth pre-fire check.
 
     # The discard branch must delete INFLIGHT and call clearInflightState.
     assert re.search(r"delete\s+INFLIGHT\[sid\]", block_body), (
