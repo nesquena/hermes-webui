@@ -17,6 +17,18 @@ CONFIG_PY   = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 LOCALE_COUNT = 12
 
 
+def _css_rule_body(selector):
+    rule = re.search(re.escape(selector) + r"\{(?P<body>[^}]*)\}", STYLE_CSS, re.S)
+    assert rule
+    return rule.group("body")
+
+
+def _css_px(rule_body, property_name):
+    match = re.search(rf"{re.escape(property_name)}:(?P<value>\d+)px", rule_body)
+    assert match
+    return int(match.group("value"))
+
+
 def test_outline_panel_html_and_i18n_contract():
     """The panel shell, script tag, and locale keys must be present."""
     assert 'src="static/outline.js?v=__WEBUI_VERSION__"' in INDEX_HTML
@@ -115,3 +127,24 @@ def test_outline_wrapper_hidden_attr_actually_hides():
     the panel (the close button / auto-close set wrapper.hidden=true). An explicit
     #outlinePanelWrapper[hidden]{display:none} rule restores the expected behavior."""
     assert "#outlinePanelWrapper[hidden]{display:none;}" in STYLE_CSS
+
+
+def test_outline_fab_stacks_with_scroll_controls():
+    """The outline FAB shares the messages-shell positioning context with the
+    scroll controls, so composer height changes cannot make the controls overlap
+    in the bottom-right corner. (#4381)"""
+    shell_start = INDEX_HTML.index('<div class="messages-shell">')
+    messages_start = INDEX_HTML.index('<div class="messages" id="messages">', shell_start)
+    shell_controls = INDEX_HTML[shell_start:messages_start]
+    assert 'id="outlineToggleBtn"' in shell_controls
+    assert shell_controls.index('id="scrollToBottomBtn"') < shell_controls.index('id="outlineToggleBtn"')
+
+    outline_css = _css_rule_body("#outlineToggleBtn")
+    scroll_css = _css_rule_body(".scroll-to-bottom-btn")
+    assert "position:absolute" in outline_css
+    assert "position:fixed" not in outline_css
+    assert _css_px(outline_css, "right") == _css_px(scroll_css, "right")
+
+    outline_gap = _css_px(outline_css, "bottom")
+    scroll_top = _css_px(scroll_css, "bottom") + _css_px(scroll_css, "height")
+    assert outline_gap > scroll_top

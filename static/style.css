@@ -5864,7 +5864,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
 
 /* ── Conversation Outline Panel (#2124) ─────────────────────────────────── */
 #outlineToggleBtn{
-  position:fixed;bottom:120px;right:calc(var(--outline-workspace-offset, 0px) + 20px);z-index:9999;
+  position:absolute;bottom:60px;right:20px;z-index:12;
   width:38px;height:38px;border-radius:50%;
   background:var(--surface);border:1px solid var(--border2);
   color:var(--text);cursor:pointer;
