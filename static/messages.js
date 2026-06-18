@@ -7621,6 +7621,9 @@ function startSessionStream(sid) {
         const evSid = d.session_id || sid;
         const streamId = String(d.stream_id || '');
         if (!streamId || evSid !== sid) return;
+        if (d.queue_item_id && typeof _removeServerQueuedEntry === 'function') {
+          _removeServerQueuedEntry(sid, String(d.queue_item_id));
+        }
         // `recovered` marks an on-subscribe replay from the server: the tab
         // (re)connected to /api/session/stream AFTER the original
         // fire-and-forget server_turn_started had already been broadcast, so

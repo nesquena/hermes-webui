@@ -1545,6 +1545,7 @@ async function newSession(flash, options={}){
       });
     }
     updateQueueBadge(S.session.session_id);
+    if(typeof syncBackendSessionQueue==='function') syncBackendSessionQueue(S.session.session_id);
     syncTopbar();renderMessages();
     if(typeof _announceNewSessionWorkspace==='function') _announceNewSessionWorkspace(S.session);
     // Keep new-chat first paint instant. The workspace tree / git badge can

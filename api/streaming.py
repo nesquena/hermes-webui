@@ -10840,6 +10840,22 @@ def _run_agent_streaming(
                 exc_info=True,
             )
 
+        # Backend-owned queued follow-ups are session intent, not browser UI
+        # state. Once /api/session/queue acknowledges an item, this teardown
+        # hook starts the next queued turn after the active run settles even if
+        # every WebUI tab is disconnected. The queue drain has the same active
+        # run guard and 409 requeue behavior as process wakeups.
+        try:
+            from api.session_queue import drain_for_session
+
+            drain_for_session(session_id)
+        except Exception:
+            logger.debug(
+                "turn-teardown queued-followup drain failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+
 # ============================================================
 # SECTION: HTTP Request Handler
 # do_GET: read-only API endpoints + SSE stream + static HTML
