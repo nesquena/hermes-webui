@@ -464,3 +464,77 @@ console.log(JSON.stringify({ caseA, caseB, caseC }));
     assert out["caseC"]["hasInflight"] is True, (
         f"long agentic turn must NOT discard the INFLIGHT, got {out['caseC']}"
     )
+
+
+def test_watchdog_then_rechecks_termination_guards():
+    """Greptile discussion r3434935421 — the watchdog's setInterval
+    pre-checks `_streamFinalized` / `_terminalStateReached` / `S.busy` /
+    `S.activeStreamId` BEFORE calling `_verifyStreamStillActive`, but the
+    `.then()` continuation must re-check the same guards AFTER the async
+    server-truth verify. Otherwise, a natural `done` (or any other
+    terminal event) arriving during the 3-second server-truth window
+    sets `_streamFinalized = true` and `clearInterval`s the watchdog,
+    yet the in-flight promise still resolves to `false` (the server
+    has already popped the stream from STREAMS in the run thread's
+    finally block), and `_fireWatchdog` would fire spuriously —
+    producing a confusing "Stream connection lost — reconnecting."
+    toast immediately after a healthy completion.
+    """
+    # Locate the watchdog's server-truth pre-fire .then() block. The
+    # call site is unique to the silence watchdog (no other consumer
+    # of _verifyStreamStillActive exists in static/messages.js).
+    verify_call = "_verifyStreamStillActive(streamId).then((_stillActive) => {"
+    pos = MESSAGES_SRC.find(verify_call)
+    assert pos != -1, (
+        "watchdog must call _verifyStreamStillActive(streamId).then(...) "
+        "as its server-truth pre-fire (Greptile r3434935421)"
+    )
+
+    # Extract the .then() body via brace counting from the opening `{`
+    # that follows `_stillActive) => `.
+    brace = MESSAGES_SRC.find("{", pos)
+    assert brace != -1
+    depth = 0
+    end = brace
+    for i in range(brace, len(MESSAGES_SRC)):
+        ch = MESSAGES_SRC[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    then_body = MESSAGES_SRC[brace + 1 : end]
+
+    # All four guard re-checks must appear INSIDE the .then() body,
+    # mirroring the setInterval pre-check. The structural test catches
+    # the regression if any of them is moved or removed during a future
+    # refactor.
+    required_guards = [
+        "if (!S.busy) return;",
+        "if (S.activeStreamId !== streamId) return;",
+        "if (typeof _streamFinalized !== 'undefined' && _streamFinalized) return;",
+        "if (typeof _terminalStateReached !== 'undefined' && _terminalStateReached) return;",
+    ]
+    for guard in required_guards:
+        assert guard in then_body, (
+            f"watchdog .then() must re-check `{guard}` to avoid firing "
+            f"after natural stream completion during the 3s server-truth "
+            f"verify window (Greptile r3434935421). Body was:\n{then_body}"
+        )
+
+    # The fire path must still be present in the .then() — the re-checks
+    # gate it but don't replace it. A genuine stuck-stream condition
+    # (verify resolves false AND all four guards pass) must still fire.
+    assert "_fireWatchdog(_source);" in then_body, (
+        "watchdog .then() must still call _fireWatchdog on genuine "
+        "stuck-stream conditions (behind the re-check, Greptile r3434935421)"
+    )
+
+    # The heartbeat-refresh path must still be present in the .then().
+    assert "_lastEventAt = Date.now();" in then_body, (
+        "watchdog .then() must refresh the heartbeat when the server "
+        "confirms the stream is still active (tool/reasoning/approval "
+        "wait) — the re-check only gates the fire, not the refresh"
+    )

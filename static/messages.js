@@ -1539,7 +1539,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Server-truth pre-fire: if the server still considers the stream
       // active, the silence is a healthy wait (tool/reasoning/approval).
       // Refresh the heartbeat and skip the fire.
+      //
+      // Re-check the termination guards inside the .then() too. The
+      // setInterval pre-check guards the start of the verify, but a
+      // natural `done` (or any other terminal event) arriving during
+      // the 3-second server-truth window sets _streamFinalized and
+      // clearInterval's the watchdog — yet the in-flight promise still
+      // resolves to `false` (the server has already popped the stream
+      // from STREAMS in the run thread's finally block). Firing here
+      // would emit a spurious "Stream connection lost — reconnecting."
+      // toast immediately after a healthy completion. The same goes for
+      // a fresh attachLiveStream call swapping S.activeStreamId mid-
+      // verify, or the user navigating away so S.busy is false again.
       _verifyStreamStillActive(streamId).then((_stillActive) => {
+        if (!S.busy) return;
+        if (S.activeStreamId !== streamId) return;
+        if (typeof _streamFinalized !== 'undefined' && _streamFinalized) return;
+        if (typeof _terminalStateReached !== 'undefined' && _terminalStateReached) return;
         if (_stillActive) {
           _lastEventAt = Date.now();
           return;
