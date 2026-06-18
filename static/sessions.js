@@ -1187,18 +1187,16 @@ async function loadSession(sid){
     // let the normal session-load render the persisted transcript.
     const _inflightStreamId=INFLIGHT[sid].streamId||INFLIGHT[sid].stream_id;
     const _serverStreamId=S.session.active_stream_id;
-    // last_message_at is seconds-since-epoch (float); see static/sessions.js:4887.
-    // We do NOT use last_message_at age as a veto: long agentic turns
-    // (extended tool execution, extended reasoning, approval/clarify waits)
-    // legitimately keep active_stream_id set while last_message_at goes
-    // stale, and dropping the INFLIGHT on switch-away/back would lose the
-    // live reattach. If the stream id matches, the server stream is
-    // active — replay. Discard only when the stream id doesn't match
-    // (the local INFLIGHT is a zombie from a previous, now-finished stream).
-    // The watchdog's silence check is the right place to handle "stream
-    // is active but silent" — it tears down via server-truth verification
-    // (see #4354 follow-up in PR comments) rather than via this check.
-    const _lastMessageAt=Number(S.session.last_message_at||0);
+    // No last_message_at recency check here. Long agentic turns
+    // (extended tool execution, extended reasoning, approval/clarify
+    // waits) keep active_stream_id set while last_message_at goes stale;
+    // dropping the INFLIGHT on switch-away/back would lose the live
+    // reattach. Discard only when the stream id doesn't match (the
+    // local INFLIGHT is a zombie from a previous, now-finished stream).
+    // "Stream is active but silent" is the watchdog's job — it tears
+    // down via server-truth verification (`_verifyStreamStillActive`)
+    // rather than via a reattach-time recency heuristic. The recency
+    // veto was intentionally removed in the nesquena-hermes re-review.
     const _serverStreamMatches=!!_serverStreamId
       &&!!_inflightStreamId
       &&_serverStreamId===_inflightStreamId;
