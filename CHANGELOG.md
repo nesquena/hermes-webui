@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **An interrupted turn's user prompt no longer leaks into every subsequent turn's model context (#4283).** When a turn was interrupted (cancel, gateway restart, tool iteration limit), the `pending_user_message` recovery path appended the stale prompt to `session.messages` with `_recovered=True`, but did not mirror it to `session.context_messages`. Because `state.db` has no `_recovered` column, the flag was lost on the DB round-trip — the next turn's `reconciled_state_db_messages_for_session(prefer_context=True)` found the stale prompt as a flagless state.db delta, and `_sanitize_messages_for_api` could not filter it. The agent core then merged it with each new user message, prepending the old prompt to every turn indefinitely. The fix mirrors the recovered user to `context_messages` inside `_materialize_pending_user_turn_before_error` (covering all three callers: cancel, provider-error, and exception paths), and the `_recovered` skip in `_sanitize_messages_for_api` / `_api_safe_message_positions` is now conditional — it only strips the recovered user when no kept assistant message follows, preventing adjacent-assistant 400 errors on strict providers when a partial answer was saved before the interrupt.
+
 ## [v0.51.483] — 2026-06-18 — Release QS (virtual-scroll height + measurement scroll-jump fixes)
 
 ### Fixed

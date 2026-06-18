@@ -3407,6 +3407,29 @@ def _is_reasoning_only_assistant_message(msg) -> bool:
     return _content_has_reasoning_only_parts(content)
 
 
+def _recovered_user_anchors_kept_assistant(messages, start_idx):
+    """Return True when a _recovered user at *start_idx* is followed by a kept
+    assistant message (non-error, non-empty-partial, with visible content or
+    tool_calls).  In that case the user must be retained to preserve role
+    alternation — dropping it would leave two adjacent assistant messages,
+    which strict providers (DeepSeek, newer OpenAI) reject with HTTP 400.
+    """
+    for msg in messages[start_idx + 1:]:
+        if not isinstance(msg, dict):
+            continue
+        if _is_reasoning_only_assistant_message(msg):
+            continue
+        if msg.get('_error'):
+            continue
+        if msg.get('_partial') and not str(msg.get('content') or '').strip():
+            continue
+        role = msg.get('role')
+        if role == 'assistant':
+            return True
+        return False
+    return False
+
+
 def _sanitize_messages_for_api(messages, *, cfg: dict = None):
     """Return a deep copy of messages with only API-safe fields.
 
@@ -3442,7 +3465,7 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
 
     # Second pass: build the sanitized list, dropping orphaned tool messages.
     clean = []
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
             continue
         # Skip display-only Thinking entries. They are visible transcript
@@ -3460,6 +3483,19 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
         # API 400 errors on strict providers (empty assistant content).
         if msg.get('_partial') and not str(msg.get('content') or '').strip():
             continue
+        # Skip recovered user messages from the pending_user_message repair
+        # path — BUT only when they don't anchor a subsequent kept assistant
+        # message.  After an interrupted turn, the recovery logic appends the
+        # stale pending message to context_messages with _recovered=True (#4283).
+        # Without this filter, that message persists in model-facing context
+        # indefinitely, causing the agent core to merge it with the current
+        # turn's user message (concatenating with \n\n).  However, when a
+        # _partial assistant was saved before the interrupt, dropping the
+        # recovered user would leave two adjacent assistant messages, which
+        # strict providers reject with HTTP 400 — so the skip is conditional.
+        if msg.get('_recovered') and msg.get('role') == 'user':
+            if not _recovered_user_anchors_kept_assistant(messages, idx):
+                continue
         role = msg.get('role')
         if role == 'tool':
             tid = msg.get('tool_call_id') or ''
@@ -3525,6 +3561,12 @@ def _api_safe_message_positions(messages):
             continue
         if msg.get('_partial') and not str(msg.get('content') or '').strip():
             continue
+        # Conditionally skip _recovered user messages — mirrors
+        # _sanitize_messages_for_api.  Only skip when the recovered user
+        # does NOT anchor a subsequent kept assistant message (#4283).
+        if msg.get('_recovered') and msg.get('role') == 'user':
+            if not _recovered_user_anchors_kept_assistant(messages, idx):
+                continue
         role = msg.get('role')
         if role == 'tool':
             tid = msg.get('tool_call_id') or ''
@@ -5003,6 +5045,23 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     if pending_attachments:
         recovered['attachments'] = list(pending_attachments)
     session.messages.append(recovered)
+    # Mirror to context_messages so the _recovered flag survives the state.db
+    # round-trip (#4283).  state.db has no _recovered column, so without this
+    # mirror the next turn's reconciled_state_db_messages_for_session(
+    # prefer_context=True) finds the recovered user as a flagless state.db
+    # delta and _sanitize_messages_for_api cannot filter it — causing the
+    # interrupted turn's prompt to be prepended to every subsequent turn.
+    # Placing the mirror here (rather than in _persist_cancelled_turn) covers
+    # all three callers: cancel, provider-error, and exception paths.
+    ctx = getattr(session, 'context_messages', None)
+    if isinstance(ctx, list) and ctx:
+        rec_text = " ".join(str(recovered.get('content') or '').split())
+        if not any(
+            isinstance(e, dict) and e.get('role') == 'user'
+            and " ".join(str(e.get('content') or '').split()) == rec_text
+            for e in ctx[-8:]
+        ):
+            ctx.append({k: v for k, v in recovered.items() if k != 'timestamp'})
     # The new user turn is now committed to messages (#3831): retire a positive
     # truncation watermark left over from a prior retry/undo/edit so it cannot
     # freeze at the old edit boundary and later drop these post-edit turns on an
