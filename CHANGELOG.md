@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+- **Multi-container WebUI no longer dies on `uv pip install hermes-agent` with `could not create 'hermes_agent.egg-info': Permission denied` (#4395).** The staging block in `docker_init.bash` now `chmod -R u+w "$_stage_src"` after the rsync/cp copy. Without it, `rsync -a` / `cp -a` preserved the source tree's mode bits from the `:ro` `hermes-agent-src` mount (mode 555), leaving the staged `/tmp/hermes-agent-build` itself read-only even though hermeswebui owned it; setuptools then could not create `<pkg>.egg-info/` during PEP 517 `egg_info` and the container crashed at startup under `set -e`. Affects every multi-container deploy (`docker-compose.two-container.yml`, `docker-compose.three-container.yml`).
+
 ## [v0.51.484] — 2026-06-18 — Release QT (collapsible paused cron section)
 
 ### Added

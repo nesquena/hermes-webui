@@ -438,6 +438,13 @@ else
     # and `--reflink=auto` makes the copy near-free on overlay2/btrfs where
     # supported. We rebuild on every container start (the agent source can
     # change across volume re-init); cost is one rsync of ~10MB of Python source.
+    #
+    # NB: `rsync -a` / `cp -a` preserve the source tree's mode bits, so a `:ro`
+    # source mounted mode 555 leaves the staged copy also mode 555. setuptools
+    # then can't create `hermes_agent.egg-info/` next to the package — it dies
+    # with "Permission denied" even though `_stage_src` itself was created
+    # writable by hermeswebui. Re-add owner-write on the staged tree after the
+    # copy so the build dir is genuinely writable, not just owned by us.
     _stage_src="/tmp/hermes-agent-build"
     rm -rf "$_stage_src"
     mkdir -p "$_stage_src"
@@ -455,6 +462,8 @@ else
       rm -rf "$_stage_src"/*.egg-info "$_stage_src"/build "$_stage_src"/dist 2>/dev/null || true
       find "$_stage_src" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
     fi
+    chmod -R u+w "$_stage_src" \
+      || error_exit "Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"
     uv pip install "$_stage_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
       || error_exit "Failed to install hermes-agent's requirements"
     rm -rf "$_stage_src"
