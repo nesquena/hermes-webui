@@ -4949,19 +4949,6 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     )
 
 
-# Run the seeder once at import time, AFTER _get_label_for_model is defined.
-# Must be placed here (not at the top of the module near the seeder's def)
-# because the seeder calls _get_label_for_model, which is defined just above.
-# Moving the call earlier causes a NameError that the bare except silently
-# swallows — exactly when the seeder has real work to do (#4413).
-try:
-    _seed_provider_models_from_core()
-except ImportError:
-    pass  # hermes_cli not available (standalone deployment)
-except Exception:
-    logger.warning("provider-model seeder failed", exc_info=True)
-
-
 def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     """Return live model IDs from Hermes CLI for a provider, or [] on failure.
 
@@ -7524,3 +7511,16 @@ try:
     init_profile_state()
 except ImportError:
     pass  # hermes_cli not available -- default profile only
+
+
+# Run the provider-model seeder once at import time. Must be at the END of the
+# module because _seed_provider_models_from_core() calls _get_label_for_model,
+# which is defined ~3000 lines above. Placing the invocation earlier (e.g. right
+# after the seeder's def) caused a NameError that the bare except silently
+# swallowed — exactly when the seeder had real work to do (#4413).
+try:
+    _seed_provider_models_from_core()
+except ImportError:
+    pass  # hermes_cli not available (standalone deployment)
+except Exception:
+    logger.warning("provider-model seeder failed", exc_info=True)

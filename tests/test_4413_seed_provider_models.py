@@ -27,7 +27,6 @@ sys.path.insert(0, str(REPO.parent / ".hermes" / "hermes-agent"))
 from api.config import (
     _PROVIDER_MODELS,
     _seed_provider_models_from_core,
-    _get_label_for_model,
     _resolve_provider_alias,
 )
 
