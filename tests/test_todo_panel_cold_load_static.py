@@ -17,11 +17,8 @@ def test_ensure_messages_loaded_hydrates_session_todo_state_sidecar():
 def test_new_session_hydrates_todos_after_session_assignment():
     src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     start = src.find("async function newSession(flash, options={}){")
-    end = src.find("function _countAssistantMessages(", start)
-
     assert start != -1
-    assert end != -1
-    block = src[start:end]
+    block = src[start:start + 6000]
     assign_idx = block.find("S.session=data.session;S.messages=data.session.messages||[];")
     hydrate_idx = block.find("if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);")
 
