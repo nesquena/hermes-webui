@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Queued follow-up turns can now be backend-owned and drain after the active run settles even when the WebUI tab is disconnected.** Plain-text queued messages are acknowledged by `/api/session/queue`, stored under the WebUI session state, and started server-side from the stream teardown hook via the same `start_session_turn` path used by background-task wakeups. The browser keeps its queue chips as optimistic UI, but backend-acknowledged items no longer depend on `setBusy(false)` or an active tab to send. File-backed queued messages still use the existing browser-owned path until upload handoff is made server-side.
+
 ## [v0.51.620] — 2026-06-24 — Release WA (fix /api/sessions CPU spike + slowness during streaming)
 
 ### Fixed

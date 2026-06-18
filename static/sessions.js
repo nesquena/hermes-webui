@@ -962,6 +962,7 @@ async function newSession(flash, options={}){
       });
     }
     updateQueueBadge(S.session.session_id);
+    if(typeof syncBackendSessionQueue==='function') syncBackendSessionQueue(S.session.session_id);
     syncTopbar();renderMessages();
     const dirLoad=loadDir('.');
     // loadDir('.') is fire-and-forget while the workspace panel is closed:
