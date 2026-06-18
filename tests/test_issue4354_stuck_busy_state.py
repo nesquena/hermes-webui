@@ -178,19 +178,29 @@ def test_attach_live_stream_has_silence_watchdog():
     )
 
     # The server sends exclusively *named* SSE events. addEventListener('message')
-    # only fires for unnamed events per the EventSource spec, so wiring the
-    # bump to 'message' would mean _lastEventAt is never refreshed during
-    # active streaming — the watchdog would fire on every stream > 5 min.
-    # The bump must be in a *named* handler. We require it to be in 'token'
-    # (the highest-frequency named event) so a 5-min quiet window truly
-    # reflects server silence.
+    # only fires for unnamed events per the EventSource spec. To track real
+    # server liveness during long tool calls, extended reasoning, or
+    # approval/clarify waits (all of which can exceed 5 min without
+    # emitting a 'token'), the watchdog must bump _lastEventAt from a
+    # *central* heartbeat loop covering all non-terminal named event
+    # types — not just the 'token' handler.
+    # (nesquena-hermes re-review: token-only heartbeat let the watchdog
+    # tear down healthy streams on long agentic turns.)
     assert re.search(
-        r"source\.addEventListener\(\s*'token'[\s\S]{0,800}?_lastEventAt\s*=",
+        r"_WATCHDOG_HEARTBEAT_EVENTS",
         body,
     ), (
-        "watchdog _lastEventAt must be bumped from the 'token' handler "
-        "(server sends only named events; 'message' never fires for them)"
+        "watchdog must bump _lastEventAt from a central heartbeat loop "
+        "covering all non-terminal named events (long tool/reasoning/"
+        "approval turns emit no tokens but are healthy)"
     )
+    # The central loop must include the common named events. We check
+    # for a representative sample rather than the full list.
+    for _evt in ("token", "reasoning", "tool", "approval", "clarify"):
+        assert f"'{_evt}'" in body, (
+            f"central heartbeat loop must include '{_evt}' "
+            f"(otherwise the watchdog tears down on healthy {_evt}-only turns)"
+        )
     # And no broken 'message' handler should be doing the bump — if it were,
     # the test above would still pass on a buggy implementation where the
     # bump is on a never-firing listener. We require the literal
@@ -203,6 +213,18 @@ def test_attach_live_stream_has_silence_watchdog():
     ), (
         "watchdog _lastEventAt must NOT be bumped from a 'message' listener "
         "(would never fire for this server's named-event protocol)"
+    )
+    # Server-truth pre-fire check: the watchdog must confirm the stream
+    # is still active before tearing down local state, so a healthy
+    # server stream in a long wait (tool/reasoning/approval) doesn't
+    # get its local state ripped out.
+    assert re.search(
+        r"_verifyStreamStillActive|stream/status",
+        body,
+    ), (
+        "watchdog must perform a server-truth pre-fire check "
+        "(/api/chat/stream/status) before tearing down local state, "
+        "so healthy long-wait streams aren't torn down"
     )
 
     # Terminal events clear the watchdog interval.
@@ -297,14 +319,16 @@ def test_inflight_reattach_uses_server_truth():
     assert "S.session.last_message_at" in block_body, (
         "INFLIGHT reattach must consult S.session.last_message_at for the recency check"
     )
-    assert re.search(r"10\s*\*\s*60|600", block_body), (
-        "INFLIGHT reattach recency threshold must be 10 minutes (600 seconds)"
-    )
-    # The recency check must use Date.now()/1000 so units match seconds.
-    assert re.search(r"Date\.now\(\)\s*/\s*1000", block_body), (
-        "INFLIGHT reattach recency check must convert Date.now() to seconds "
-        "to match the seconds-since-epoch unit of last_message_at"
-    )
+    # NOTE: the 10-min last_message_at recency veto was intentionally
+    # removed (nesquena-hermes re-review). Long agentic turns keep
+    # active_stream_id set while last_message_at goes stale; dropping
+    # the INFLIGHT on switch-away/back would lose the live reattach.
+    # The recency check is now the watchdog's job (with server-truth
+    # pre-fire verification), not this reattach-time check.
+    # The recency check is intentionally removed; this assertion is
+    # no longer relevant. Server-truth is now the only gate at
+    # reattach-time, and the watchdog handles "stream is active but
+    # silent" via its server-truth pre-fire check.
 
     # The discard branch must delete INFLIGHT and call clearInflightState.
     assert re.search(r"delete\s+INFLIGHT\[sid\]", block_body), (
@@ -325,17 +349,20 @@ def test_inflight_reattach_uses_server_truth():
     )
 
     # The re-assert branch sets S.busy = true, AND it must be guarded by the
-    # server-truth + recency condition. We verify the structural invariant:
-    # `S.busy = true` appears inside the `if(_serverStreamMatches && _sessionIsRecent)`
+    # server-truth condition. The recency veto was removed in the
+    # nesquena-hermes re-review (long agentic turns keep active_stream_id
+    # set while last_message_at goes stale). We verify the structural
+    # invariant: `S.busy = true` appears inside the `if(_serverStreamMatches)`
     # branch, not unconditionally.
     assert re.search(r"S\.busy\s*=\s*true", block_body), (
         "INFLIGHT reattach must still set S.busy = true in the matching branch"
     )
-    assert re.search(r"_serverStreamMatches", block_body) and re.search(r"_sessionIsRecent", block_body), (
-        "INFLIGHT reattach must gate S.busy = true on _serverStreamMatches && _sessionIsRecent"
+    assert re.search(r"_serverStreamMatches", block_body), (
+        "INFLIGHT reattach must gate S.busy = true on _serverStreamMatches "
+        "(recency veto removed; server-truth alone is the gate)"
     )
-    # The condition `_serverStreamMatches && _sessionIsRecent` must appear
-    # BEFORE `S.busy = true` in the block (i.e. the busy re-assert is inside
+    # The condition `_serverStreamMatches` must appear BEFORE
+    # `S.busy = true` in the block (i.e. the busy re-assert is inside
     # the conditional, not before it).
     cond_pos = block_body.find("_serverStreamMatches")
     busy_pos = block_body.find("S.busy = true")
@@ -354,15 +381,20 @@ let clearedInflight = false;
 function clearInflightState(sid) {{ clearedInflight = (sid === 's1'); }}
 
 // Inlined from the real source — keep in sync with the fix.
+// Note: last_message_at recency veto was removed in the nesquena-hermes
+// re-review. The reattach branch only checks stream-id match; long
+// agentic turns keep active_stream_id set while last_message_at goes
+// stale, and dropping the INFLIGHT on switch-away/back would lose
+// the live reattach. The watchdog's silence check (with server-truth
+// pre-fire verification) is the right place to handle "stream is
+// active but silent".
 function reattach() {{
   const sid = 's1';
   if (INFLIGHT[sid]) {{
     const inflightStreamId = INFLIGHT[sid].streamId || INFLIGHT[sid].stream_id;
     const serverStreamId = S.session.active_stream_id;
-    const lastMessageAt = Number(S.session.last_message_at || 0);
-    const sessionIsRecent = lastMessageAt > 0 && (Date.now() / 1000 - lastMessageAt) < (10 * 60);
     const serverStreamMatches = !!serverStreamId && !!inflightStreamId && serverStreamId === inflightStreamId;
-    if (serverStreamMatches && sessionIsRecent) {{
+    if (serverStreamMatches) {{
       S.busy = true;
       S.activeStreamId = serverStreamId;
     }} else {{
@@ -381,7 +413,7 @@ clearedInflight = false;
 reattach();
 const caseA = {{ busy: S.busy, hasInflight: !!INFLIGHT['s1'], clearedInflight }};
 
-// Case B: server matches, recent → re-assert busy.
+// Case B: stream id matches (recency no longer a veto) → re-assert busy.
 INFLIGHT['s1'] = {{ streamId: 'live-stream' }};
 S.session.active_stream_id = 'live-stream';
 S.session.last_message_at = Date.now() / 1000 - 30;  // 30s ago
@@ -390,7 +422,17 @@ clearedInflight = false;
 reattach();
 const caseB = {{ busy: S.busy, activeStreamId: S.activeStreamId }};
 
-console.log(JSON.stringify({{ caseA, caseB }}));
+// Case C: long agentic turn — stream id matches but last_message_at
+// is 1 hour old. Should NOT be discarded.
+INFLIGHT['s1'] = {{ streamId: 'long-turn-stream' }};
+S.session.active_stream_id = 'long-turn-stream';
+S.session.last_message_at = Date.now() / 1000 - 60 * 60;  // 1 hour ago
+S.busy = false;
+clearedInflight = false;
+reattach();
+const caseC = {{ busy: S.busy, activeStreamId: S.activeStreamId, hasInflight: !!INFLIGHT['s1'] }};
+
+console.log(JSON.stringify({{ caseA, caseB, caseC }}));
 """
     result = subprocess.run(["node", "-e", harness], check=True, capture_output=True, text=True)
     out = json.loads(result.stdout)
@@ -406,10 +448,26 @@ console.log(JSON.stringify({{ caseA, caseB }}));
         f"stale INFLIGHT reattach must call clearInflightState, got {out['caseA']}"
     )
 
-    # Case B: matches and recent → busy re-asserted.
+    # Case B: stream id matches (regardless of recency) → busy re-asserted.
     assert out["caseB"]["busy"] is True, (
-        f"matching+recent INFLIGHT reattach must re-assert busy, got {out['caseB']}"
+        f"matching INFLIGHT reattach must re-assert busy, got {out['caseB']}"
     )
     assert out["caseB"]["activeStreamId"] == "live-stream", (
-        f"matching+recent INFLIGHT reattach must set S.activeStreamId, got {out['caseB']}"
+        f"matching INFLIGHT reattach must set S.activeStreamId, got {out['caseB']}"
+    )
+
+    # Case C: long agentic turn — stream id matches, last_message_at is
+    # 1 hour old. The recency veto is gone, so the INFLIGHT is kept
+    # and busy is re-asserted. This is the case the nesquena-hermes
+    # re-review specifically called out: a long turn switched away and
+    # back to should NOT be dropped.
+    assert out["caseC"]["busy"] is True, (
+        f"long agentic turn with stale last_message_at must not be "
+        f"discarded (stream id matches), got {out['caseC']}"
+    )
+    assert out["caseC"]["activeStreamId"] == "long-turn-stream", (
+        f"long agentic turn must re-assert S.activeStreamId, got {out['caseC']}"
+    )
+    assert out["caseC"]["hasInflight"] is True, (
+        f"long agentic turn must NOT discard the INFLIGHT, got {out['caseC']}"
     )

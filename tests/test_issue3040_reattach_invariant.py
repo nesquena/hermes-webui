@@ -162,9 +162,15 @@ def test_attachLiveStream_reconnect_seeds_from_INFLIGHT_not_querySelector():
     """
     fn_start = MESSAGES_JS.find("function attachLiveStream(")
     assert fn_start != -1, "attachLiveStream() not found in messages.js."
-    # Capture up to 60 lines after the function signature for the seed section.
+    # Capture up to 150 lines after the function signature for the seed section.
+    # #4354 added a silence watchdog + central heartbeat loop + server-truth
+    # pre-fire helper near the top of attachLiveStream, pushing the
+    # `let assistantText` declaration past the original 60-line window.
+    # The invariant the test guards (reconnect seeds from INFLIGHT, not
+    # from querySelector) is still preserved — only the capture window
+    # needs to grow to see it.
     fn_head_end = fn_start
-    for _ in range(60):
+    for _ in range(150):
         fn_head_end = MESSAGES_JS.find("\n", fn_head_end + 1)
         if fn_head_end == -1:
             break

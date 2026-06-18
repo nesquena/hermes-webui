@@ -1490,43 +1490,97 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // The runner also owns the interval handle, which we return so the
   // terminal-event paths in `attachLiveStream` can clear it.
   function _setupSilenceWatchdog(_source) {
+    // Server-truth pre-fire check (#4354, nesquena-hermes re-review).
+    // A long tool call, extended reasoning, or an approval/clarify wait
+    // can keep active_stream_id set on the server without emitting any
+    // other event for >5 min. Before tearing down local state, confirm
+    // the server still considers the stream active. If it does, refresh
+    // the heartbeat and skip the fire — the silence is a healthy wait, not
+    // a dead stream. Returns false on timeout / network error / missing
+    // api() helper so a flaky status check defaults to firing (the
+    // original watchdog behavior, which is safer than getting stuck).
+    function _verifyStreamStillActive(_streamId) {
+      return new Promise(function(_resolve) {
+        if (typeof api !== 'function') { _resolve(false); return; }
+        let _settled = false;
+        const _timer = setTimeout(function() {
+          if (_settled) return;
+          _settled = true;
+          _resolve(false);
+        }, 3000);
+        try {
+          api(`/api/chat/stream/status?stream_id=${encodeURIComponent(_streamId)}`)
+            .then(function(_st) {
+              if (_settled) return;
+              _settled = true;
+              clearTimeout(_timer);
+              _resolve(!!(_st && _st.active));
+            })
+            .catch(function() {
+              if (_settled) return;
+              _settled = true;
+              clearTimeout(_timer);
+              _resolve(false);
+            });
+        } catch (_) {
+          if (_settled) return;
+          _settled = true;
+          clearTimeout(_timer);
+          _resolve(false);
+        }
+      });
+    }
     const _interval = setInterval(() => {
       if (Date.now() - _lastEventAt < _STREAM_SILENCE_WATCHDOG_MS) return;
       if (!S.busy) return;
       if (S.activeStreamId !== streamId) return;
       if (typeof _streamFinalized !== 'undefined' && _streamFinalized) return;
       if (typeof _terminalStateReached !== 'undefined' && _terminalStateReached) return;
-      // Fire: close the source, drop local INFLIGHT, clear busy state, toast.
-      try { _closeSource(_source); } catch (_) {}
-      if (typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[activeSid]) {
-        delete INFLIGHT[activeSid];
-      }
-      if (typeof clearInflightState === 'function') {
-        try { clearInflightState(activeSid); } catch (_) {}
-      }
-      S.busy = false;
-      S.activeStreamId = null;
-      // Refresh the composer button + topbar — the computed action depends on
-      // S.busy / S.activeStreamId, so the DOM must be re-rendered or the
-      // red "stop" button lingers after the watchdog clears the run state.
-      if (typeof updateSendBtn === 'function') {
-        try { updateSendBtn(); } catch (_) {}
-      }
-      if (typeof syncTopbar === 'function') {
-        try { syncTopbar(); } catch (_) {}
-      }
-      if (typeof showToast === 'function') {
-        try { showToast('Stream connection lost — reconnecting.', 4000, 'warn'); } catch (_) {}
-      }
-      if (typeof setComposerStatus === 'function') {
-        try { setComposerStatus('Reconnecting…'); } catch (_) {}
-      }
-      if (typeof renderSessionList === 'function') {
-        try { renderSessionList(); } catch (_) {}
-      }
-      clearInterval(_interval);
+      // Server-truth pre-fire: if the server still considers the stream
+      // active, the silence is a healthy wait (tool/reasoning/approval).
+      // Refresh the heartbeat and skip the fire.
+      _verifyStreamStillActive(streamId).then((_stillActive) => {
+        if (_stillActive) {
+          _lastEventAt = Date.now();
+          return;
+        }
+        _fireWatchdog(_source);
+      });
     }, 30 * 1000);
     return _interval;
+  }
+  // Extracted fire block so the server-truth pre-fire check can call it
+  // from inside a .then() without nesting the whole 30-line body.
+  function _fireWatchdog(_source) {
+    // Fire: close the source, drop local INFLIGHT, clear busy state, toast.
+    try { _closeSource(_source); } catch (_) {}
+    if (typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[activeSid]) {
+      delete INFLIGHT[activeSid];
+    }
+    if (typeof clearInflightState === 'function') {
+      try { clearInflightState(activeSid); } catch (_) {}
+    }
+    S.busy = false;
+    S.activeStreamId = null;
+    // Refresh the composer button + topbar — the computed action depends on
+    // S.busy / S.activeStreamId, so the DOM must be re-rendered or the
+    // red "stop" button lingers after the watchdog clears the run state.
+    if (typeof updateSendBtn === 'function') {
+      try { updateSendBtn(); } catch (_) {}
+    }
+    if (typeof syncTopbar === 'function') {
+      try { syncTopbar(); } catch (_) {}
+    }
+    if (typeof showToast === 'function') {
+      try { showToast('Stream connection lost — reconnecting.', 4000, 'warn'); } catch (_) {}
+    }
+    if (typeof setComposerStatus === 'function') {
+      try { setComposerStatus('Reconnecting…'); } catch (_) {}
+    }
+    if (typeof renderSessionList === 'function') {
+      try { renderSessionList(); } catch (_) {}
+    }
+    clearInterval(_silenceWatchdogInterval);
   }
   // Watchdog setup moved to _wireSSE(source) below — that's the only place
   // where `source` is in scope as a real parameter. The interval handle
@@ -3024,11 +3078,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // terminal handlers) address it without needing a reset here.
 
     source.addEventListener('token',e=>{
-      // Bump the silence watchdog heartbeat. The server sends exclusively
-      // *named* SSE events, so addEventListener('message') never fires —
-      // we have to bump _lastEventAt from a named handler. 'token' is the
-      // highest-frequency named event, so it tracks real server liveness.
-      _lastEventAt=Date.now();
       if(_terminalStateReached||_streamFinalized) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
@@ -3372,6 +3421,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _handleBgTaskCompleteEvent(e, activeSid, {source:'stream'});
       }
     });
+
+    // Central heartbeat for the silence watchdog (#4354, nesquena-hermes
+    // re-review). The server sends exclusively *named* SSE events, and
+    // addEventListener('message') only fires for unnamed events — so we
+    // add a tiny extra listener for each known non-terminal event type
+    // to keep the heartbeat accurate during long tool calls, extended
+    // reasoning, or any other non-token activity. Terminal events
+    // ('done', 'apperror', source 'error') are intentionally excluded;
+    // they clear the watchdog via the existing clearInterval() calls.
+    // This is in addition to the explicit `_lastEventAt = Date.now()`
+    // in the 'token' handler.
+    const _WATCHDOG_HEARTBEAT_EVENTS = [
+      'token', 'interim_assistant', 'reasoning', 'tool', 'tool_complete',
+      'todo_state', 'state_saved', 'title', 'context_status',
+      'goal', 'goal_continue', 'bg_task_complete',
+      'approval', 'clarify',
+    ];
+    for (const _evt of _WATCHDOG_HEARTBEAT_EVENTS) {
+      try {
+        source.addEventListener(_evt, () => { _lastEventAt = Date.now(); });
+      } catch (_) {}
+    }
 
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;

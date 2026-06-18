@@ -682,9 +682,12 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     # grab the wrong one. (rfind = the substantive restore branch.)
     inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    # #4354 added a server-truth gate before the replay body; widen the
-    # window from 1200 to 2000 so the merged-tail call is still in scope.
-    inflight_block = src[inflight_idx:inflight_idx+2000]
+    # #4354 added a server-truth gate before the replay body, then
+    # nesquena-hermes re-review replaced the recency veto with a long
+    # explanatory comment. Widen the window from 2000 to 4000 so the
+    # merged-tail call (which lives deep inside the matching branch)
+    # is still in scope.
+    inflight_block = src[inflight_idx:inflight_idx+4000]
 
     assert "await _ensureMessagesLoaded(sid);" in inflight_block, (
         "returning to an active stream should load the persisted transcript before adding the live tail"

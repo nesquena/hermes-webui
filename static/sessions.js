@@ -1188,13 +1188,21 @@ async function loadSession(sid){
     const _inflightStreamId=INFLIGHT[sid].streamId||INFLIGHT[sid].stream_id;
     const _serverStreamId=S.session.active_stream_id;
     // last_message_at is seconds-since-epoch (float); see static/sessions.js:4887.
+    // We do NOT use last_message_at age as a veto: long agentic turns
+    // (extended tool execution, extended reasoning, approval/clarify waits)
+    // legitimately keep active_stream_id set while last_message_at goes
+    // stale, and dropping the INFLIGHT on switch-away/back would lose the
+    // live reattach. If the stream id matches, the server stream is
+    // active — replay. Discard only when the stream id doesn't match
+    // (the local INFLIGHT is a zombie from a previous, now-finished stream).
+    // The watchdog's silence check is the right place to handle "stream
+    // is active but silent" — it tears down via server-truth verification
+    // (see #4354 follow-up in PR comments) rather than via this check.
     const _lastMessageAt=Number(S.session.last_message_at||0);
-    const _sessionIsRecent=_lastMessageAt>0
-      &&(Date.now()/1000-_lastMessageAt)<(10*60);
     const _serverStreamMatches=!!_serverStreamId
       &&!!_inflightStreamId
       &&_serverStreamId===_inflightStreamId;
-    if(_serverStreamMatches&&_sessionIsRecent){
+    if(_serverStreamMatches){
       _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
       const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
       S.toolCalls=[];
