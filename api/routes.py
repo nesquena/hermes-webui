@@ -2555,12 +2555,12 @@ def _ensure_full_session_before_mutation(sid: str, session):
     return full_session
 
 
-def _cascade_archive_to_children(parent_sid: str) -> list[str]:
-    """Archive direct child sessions whose parent_session_id matches *parent_sid*.
+def _cascade_archive_to_children(parent_sid: str, unarchive: bool = False) -> list[str]:
+    """Archive (or unarchive) direct child sessions whose parent_session_id matches *parent_sid*.
 
     Scans both the in-memory SESSIONS cache and on-disk session files to cover
     children that may not be resident in memory.  Returns the list of child
-    session IDs that were archived.
+    session IDs that were modified.
     """
     from api.models import get_session
     from api.config import SESSION_DIR, _get_session_agent_lock
@@ -2573,9 +2573,11 @@ def _cascade_archive_to_children(parent_sid: str) -> list[str]:
         try:
             with _get_session_agent_lock(child_sid):
                 child = get_session(child_sid)
-                if getattr(child, "archived", False):
-                    return  # already archived
-                child.archived = True
+                current_archived = bool(getattr(child, "archived", False))
+                target = not unarchive  # archive=True → target=True; unarchive → target=False
+                if current_archived == target:
+                    return  # already in desired state
+                child.archived = target
                 child.save(touch_updated_at=False)
                 archived_ids.append(child_sid)
         except Exception:
@@ -2589,6 +2591,11 @@ def _cascade_archive_to_children(parent_sid: str) -> list[str]:
     with LOCK:
         for cached in list(SESSIONS.values()):
             if getattr(cached, "parent_session_id", None) == parent_sid:
+                # Skip ordinary forks — parent_session_id on a fork means
+                # "branched from", not "is a snapshot continuation child".
+                # Forks carry session_source="fork" (#4293 review remark).
+                if getattr(cached, "session_source", None) == "fork":
+                    continue
                 sid_str = str(getattr(cached, "session_id", ""))
                 if sid_str and sid_str != parent_sid:
                     in_memory_child_sids.append(sid_str)
@@ -2596,7 +2603,10 @@ def _cascade_archive_to_children(parent_sid: str) -> list[str]:
         _try_archive_child(child_sid)
 
     # 2) Scan on-disk session files for children not in memory.
-    needle = f'"parent_session_id": "{parent_sid}"'
+    #    Use load_metadata_only() for structured access to both
+    #    parent_session_id and session_source — avoids the 4096-byte
+    #    head-scan that can miss metadata past the first 4KB (#4293 review).
+    from api.models import Session
     try:
         for spath in SESSION_DIR.glob("*.json"):
             if spath.name.startswith("_"):
@@ -2605,11 +2615,17 @@ def _cascade_archive_to_children(parent_sid: str) -> list[str]:
             if child_sid == parent_sid or child_sid in archived_ids:
                 continue
             try:
-                head = spath.read_text(encoding="utf-8", errors="ignore")[:4096]
-            except (TypeError, OSError):
-                continue
-            if needle in head:
+                meta = Session.load_metadata_only(child_sid)
+                if meta is None:
+                    continue
+                if getattr(meta, "session_source", None) == "fork":
+                    continue
+                if str(getattr(meta, "parent_session_id", "")) != parent_sid:
+                    continue
                 _try_archive_child(child_sid)
+            except Exception:
+                logger.debug("Failed to load metadata for %s", child_sid, exc_info=True)
+                continue
     except Exception:
         logger.debug("Failed to scan session files for archive cascade", exc_info=True)
 
@@ -10041,6 +10057,8 @@ def handle_post(handler, parsed) -> bool:
         also_archived_child_ids = []
         if body.get("archived", True):
             also_archived_child_ids = _cascade_archive_to_children(sid)
+        else:
+            also_archived_child_ids = _cascade_archive_to_children(sid, unarchive=True)
         response_data = {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)}
         if also_archived_child_ids:
             response_data["also_archived_child_ids"] = also_archived_child_ids

@@ -5158,7 +5158,9 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(!_showArchived&&s.archived) continue;
     // #4293: Hide child sessions whose parent is archived (defensive fallback
     // in case the server-side cascade missed some edge case).
-    if(!_showArchived&&s.parent_session_id&&archivedSids.has(s.parent_session_id)) continue;
+    // Skip ordinary forks — they carry session_source="fork" and must remain
+    // independent conversations (#4293 review).
+    if(!_showArchived&&s.parent_session_id&&archivedSids.has(s.parent_session_id)&&s.session_source!="fork") continue;
     sessionsRaw.push(s);
   }
   if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
