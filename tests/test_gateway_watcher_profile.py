@@ -323,7 +323,11 @@ def test_profile_switch_restarts_watcher_best_effort(monkeypatch):
     routes.handle_post(handler, urlparse("/api/profile/switch"))
 
     assert handler.status == 200
-    assert handler.get_json() == {"ok": True, "name": "demo"}
+    payload = handler.get_json()
+    assert payload["ok"] is True
+    assert payload["name"] == "demo"
+    assert payload["profile_policy_mode"] == "normal"
+    assert payload["profile_locked"] is False
     assert calls == ["cache", ("watcher", "demo")]
     assert any(k == "Set-Cookie" for k, _v in handler.sent_headers)
 
@@ -346,7 +350,11 @@ def test_profile_switch_response_survives_watcher_restart_failure(monkeypatch):
     routes.handle_post(handler, urlparse("/api/profile/switch"))
 
     assert handler.status == 200
-    assert handler.get_json() == {"ok": True, "name": "demo"}
+    payload = handler.get_json()
+    assert payload["ok"] is True
+    assert payload["name"] == "demo"
+    assert payload["profile_policy_mode"] == "normal"
+    assert payload["profile_locked"] is False
 
 
 def test_subscribe_after_stop_gets_sentinel_immediately():
