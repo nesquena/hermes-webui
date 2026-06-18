@@ -1503,7 +1503,7 @@ _PROVIDER_ALIASES = {
 # returns [] for a provider (#871).  Kept at module level so the dict is
 # built once, not reconstructed per request.
 _OPENAI_COMPAT_ENDPOINTS = {
-    "zai": "https://api.z.ai/v1",
+    "zai": "https://api.z.ai/api/paas/v4",
     "minimax": "https://api.minimax.chat/v1",
     "mistralai": "https://api.mistral.ai/v1",
     "xai": "https://api.x.ai/v1",
@@ -13396,7 +13396,7 @@ def _handle_live_models(handler, parsed):
     - openai-codex: Codex OAuth endpoint + local ~/.codex/ cache fallback
     - Nous: live fetch from inference-api.nousresearch.com/v1/models
     - DeepSeek, kimi-coding, opencode-zen/go, custom: generic OpenAI-compat /v1/models
-    - ZAI, MiniMax, Google/Gemini: fall back to static list (non-standard endpoints)
+    - ZAI, MiniMax, xAI, Google/Gemini: OpenAI-compat /models (via configured base_url or _OPENAI_COMPAT_ENDPOINTS)
     - All others: static _PROVIDER_MODELS fallback
 
     The agent already maintains all provider-specific auth and endpoint logic
@@ -13613,7 +13613,36 @@ def _handle_live_models(handler, parsed):
         #  (b) the frontend shows the static list immediately and enriches in
         #      the background via _fetchLiveModels(), so the user never waits.
         if not ids:
-            _ep = _OPENAI_COMPAT_ENDPOINTS.get(provider)
+            import urllib.request
+            _providers_cfg = cfg.get("providers", {})
+            _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
+
+            # Prefer the provider's configured base_url over the hardcoded
+            # _OPENAI_COMPAT_ENDPOINTS table.  The configured URL reflects the
+            # actual plan/endpoint the user subscribed to (e.g. ZAI's coding
+            # plan uses /api/coding/paas/v4 while PAYG uses /api/paas/v4),
+            # whereas the hardcoded table may point to a non-existent path
+            # and silently 404 (#4413).
+            _ep = None
+            if isinstance(_prov, dict):
+                _ep = (_prov.get("base_url") or "").strip().rstrip("/")
+            if not _ep:
+                # Check custom_providers for a matching name (normalised).
+                for _cp in (cfg.get("custom_providers") or []):
+                    if isinstance(_cp, dict):
+                        _cp_name = (_cp.get("name") or "").strip().lower().replace(".", "")
+                        if _cp_name == provider:
+                            _ep = (_cp.get("base_url") or "").strip().rstrip("/")
+                            break
+            if not _ep:
+                # Check top-level model config if provider matches.
+                _mc = cfg.get("model", {})
+                if isinstance(_mc, dict) and (_mc.get("provider") or "").strip().lower() == provider:
+                    _ep = (_mc.get("base_url") or "").strip().rstrip("/")
+            # Fall back to hardcoded endpoint table.
+            if not _ep:
+                _ep = _OPENAI_COMPAT_ENDPOINTS.get(provider)
+
             if _ep:
                 try:
                     import urllib.request
@@ -13640,7 +13669,7 @@ def _handle_live_models(handler, parsed):
                         with urllib.request.urlopen(_req, timeout=8) as _resp:
                             _body = json.loads(_resp.read())
                         ids = [m.get("id", "") for m in _body.get("data", []) if m.get("id")]
-                        logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
+                        logger.debug("Live-fetched %d models from %s /models", len(ids), provider)
                 except Exception as _fetch_err:
                     logger.debug("Live fetch from %s failed: %s", provider, _fetch_err)
                     # Fall through to static list below

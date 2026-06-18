@@ -1592,16 +1592,43 @@ def _seed_provider_models_from_core() -> None:
 
     Safe to call multiple times; only missing entries are added.  Silently no-ops
     if hermes_cli is not importable (standalone WebUI deployments).
+
+    Must be called AFTER ``_get_label_for_model`` is defined (module-level
+    invocation is at the bottom of this module, not here).
     """
     try:
         from hermes_cli.models import _PROVIDER_MODELS as _core_pm
-    except Exception:
+    except ImportError:
         return
+
+    # Build a canonical-id → WebUI-key lookup so that providers whose canonical
+    # form differs between core and WebUI (e.g. core uses "xai" but WebUI
+    # indexes by "x-ai") merge into the existing entry instead of creating a
+    # duplicate (#4413).
+    _webui_key_by_canonical: dict[str, str] = {}
+    for _wk in _PROVIDER_MODELS:
+        try:
+            _canon = _resolve_provider_alias(_wk)
+        except Exception:
+            _canon = _wk
+        if _canon not in _webui_key_by_canonical:
+            _webui_key_by_canonical[_canon] = _wk
 
     for provider_id, core_models in _core_pm.items():
         if not isinstance(core_models, list):
             continue
+
+        # Resolve the core's provider_id to the WebUI's key for this provider.
+        webui_key = provider_id
         webui_list = _PROVIDER_MODELS.get(provider_id)
+        if webui_list is None:
+            try:
+                _canon_pid = _resolve_provider_alias(provider_id)
+            except Exception:
+                _canon_pid = provider_id
+            webui_key = _webui_key_by_canonical.get(_canon_pid, provider_id)
+            webui_list = _PROVIDER_MODELS.get(webui_key)
+
         if webui_list is None:
             # Provider exists in core but not in WebUI — seed the full list.
             _PROVIDER_MODELS[provider_id] = [
@@ -1627,14 +1654,6 @@ def _seed_provider_models_from_core() -> None:
                     "id": mid.strip(),
                     "label": _get_label_for_model(mid.strip(), []),
                 })
-
-
-# Run once at import time so every consumer (resolve_model_provider, the model
-# picker, session creation) sees the merged catalog immediately.
-try:
-    _seed_provider_models_from_core()
-except Exception:
-    pass  # Defensive: never block module load over a seeding failure
 
 
 _AMBIENT_GH_CLI_MARKERS = frozenset({"gh_cli", "gh auth token"})
@@ -4928,6 +4947,19 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
         w.upper() if (len(w) <= 3 and w.replace(".", "").isalnum() and not w.isdigit()) else w.capitalize()
         for w in bare.replace("_", "-").split("-")
     )
+
+
+# Run the seeder once at import time, AFTER _get_label_for_model is defined.
+# Must be placed here (not at the top of the module near the seeder's def)
+# because the seeder calls _get_label_for_model, which is defined just above.
+# Moving the call earlier causes a NameError that the bare except silently
+# swallows — exactly when the seeder has real work to do (#4413).
+try:
+    _seed_provider_models_from_core()
+except ImportError:
+    pass  # hermes_cli not available (standalone deployment)
+except Exception:
+    logger.warning("provider-model seeder failed", exc_info=True)
 
 
 def _read_live_provider_model_ids(provider_id: str) -> list[str]:
