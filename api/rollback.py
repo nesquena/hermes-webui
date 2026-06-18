@@ -7,13 +7,12 @@ created by the Hermes agent's CheckpointManager.  Checkpoints live at
 """
 
 import hashlib
-import json
 import logging
 import os
 import re
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -237,7 +236,7 @@ def get_checkpoint_diff(workspace: str, checkpoint: str) -> dict[str, Any]:
             # File exists in checkpoint but not in workspace (deleted)
             files_changed.append({"file": rel_path, "status": "deleted"})
             diff_lines.append(f"--- a/{rel_path}")
-            diff_lines.append(f"+++ /dev/null")
+            diff_lines.append("+++ /dev/null")
             diff_lines.append("@@ -1,{lines} +0,0 @@".format(lines=len(ckpt_content.splitlines())))
             for line in ckpt_content.splitlines():
                 diff_lines.append(f"-{line}")
@@ -263,6 +262,31 @@ def get_checkpoint_diff(workspace: str, checkpoint: str) -> dict[str, Any]:
     }
 
 
+def _restore_checkpoint_file(workspace_root: Path, ckpt_file: Path, rel_path: str) -> None:
+    """Restore one checkpoint file without following workspace symlinks outward."""
+    from api.workspace import open_anchored_create_fd, open_anchored_write_fd, safe_resolve_ws
+
+    target = safe_resolve_ws(workspace_root, rel_path)
+    if target.exists():
+        fd = open_anchored_write_fd(workspace_root, target)
+    else:
+        fd = open_anchored_create_fd(workspace_root, target)
+
+    src_stat = ckpt_file.stat()
+    with os.fdopen(fd, "wb") as out:
+        with ckpt_file.open("rb") as src:
+            shutil.copyfileobj(src, out)
+        out.flush()
+        try:
+            os.fchmod(out.fileno(), src_stat.st_mode & 0o777)
+        except (AttributeError, OSError):
+            logger.debug("Failed to apply restored mode to %s", target, exc_info=True)
+        try:
+            os.utime(out.fileno(), ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+        except OSError:
+            logger.debug("Failed to apply restored timestamp to %s", target, exc_info=True)
+
+
 def restore_checkpoint(workspace: str, checkpoint: str) -> dict[str, Any]:
     """Restore a checkpoint by copying files back to the workspace.
 
@@ -274,6 +298,7 @@ def restore_checkpoint(workspace: str, checkpoint: str) -> dict[str, Any]:
         files_restored: list of restored file paths
     """
     resolved = _resolve_workspace(workspace)
+    workspace_root = Path(resolved)
     checkpoint = _validate_checkpoint_id(checkpoint)
     ws_hash = _workspace_hash(resolved)
     ckpt_dir = _checkpoint_root() / ws_hash / checkpoint
@@ -297,16 +322,14 @@ def restore_checkpoint(workspace: str, checkpoint: str) -> dict[str, Any]:
 
     for rel_path in ckpt_files:
         ckpt_file = ckpt_dir / rel_path
-        ws_file = Path(resolved) / rel_path
 
         if not ckpt_file.is_file():
             continue
 
         try:
-            ws_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(ckpt_file), str(ws_file))
+            _restore_checkpoint_file(workspace_root, ckpt_file, rel_path)
             restored.append(rel_path)
-        except OSError as e:
+        except (OSError, ValueError) as e:
             errors.append({"file": rel_path, "error": str(e)})
             logger.warning("Failed to restore %s: %s", rel_path, e)
 

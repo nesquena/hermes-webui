@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rollback restore now refuses workspace symlink escapes.** Restoring a checkpoint writes through the workspace-anchored file helpers instead of pathname-based copies, so a symlink planted inside the workspace cannot redirect restored content outside the workspace.
+
 ## [v0.51.488] — 2026-06-18 — Release QW (rescue state.db user prompts that fall before a newer sidecar tail)
 
 ### Fixed
