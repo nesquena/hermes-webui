@@ -2555,6 +2555,67 @@ def _ensure_full_session_before_mutation(sid: str, session):
     return full_session
 
 
+def _cascade_archive_to_children(parent_sid: str) -> list[str]:
+    """Archive direct child sessions whose parent_session_id matches *parent_sid*.
+
+    Scans both the in-memory SESSIONS cache and on-disk session files to cover
+    children that may not be resident in memory.  Returns the list of child
+    session IDs that were archived.
+    """
+    from api.models import get_session
+    from api.config import SESSION_DIR, _get_session_agent_lock
+
+    archived_ids: list[str] = []
+
+    def _try_archive_child(child_sid: str) -> None:
+        if child_sid == parent_sid:
+            return
+        try:
+            with _get_session_agent_lock(child_sid):
+                child = get_session(child_sid)
+                if getattr(child, "archived", False):
+                    return  # already archived
+                child.archived = True
+                child.save(touch_updated_at=False)
+                archived_ids.append(child_sid)
+        except Exception:
+            logger.debug("Failed to cascade archive to child %s", child_sid, exc_info=True)
+
+    # 1) Scan in-memory cache (fast path).
+    #    Collect child IDs while holding LOCK, then archive outside to
+    #    avoid deadlock: _try_archive_child -> get_session also acquires LOCK
+    #    and threading.Lock is non-reentrant.
+    in_memory_child_sids: list[str] = []
+    with LOCK:
+        for cached in list(SESSIONS.values()):
+            if getattr(cached, "parent_session_id", None) == parent_sid:
+                sid_str = str(getattr(cached, "session_id", ""))
+                if sid_str and sid_str != parent_sid:
+                    in_memory_child_sids.append(sid_str)
+    for child_sid in in_memory_child_sids:
+        _try_archive_child(child_sid)
+
+    # 2) Scan on-disk session files for children not in memory.
+    needle = f'"parent_session_id": "{parent_sid}"'
+    try:
+        for spath in SESSION_DIR.glob("*.json"):
+            if spath.name.startswith("_"):
+                continue
+            child_sid = spath.stem
+            if child_sid == parent_sid or child_sid in archived_ids:
+                continue
+            try:
+                head = spath.read_text(encoding="utf-8", errors="ignore")[:4096]
+            except (TypeError, OSError):
+                continue
+            if needle in head:
+                _try_archive_child(child_sid)
+    except Exception:
+        logger.debug("Failed to scan session files for archive cascade", exc_info=True)
+
+    return archived_ids
+
+
 def _get_or_materialize_session(sid: str):
     """Get a session, materializing from CLI/agent metadata if not in WebUI store.
 
@@ -9975,12 +10036,20 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
+        # #4293: Cascade archive/unarchive to direct child sessions so they
+        # don't remain as orphaned sidebar rows when the parent is hidden.
+        also_archived_child_ids = []
+        if body.get("archived", True):
+            also_archived_child_ids = _cascade_archive_to_children(sid)
+        response_data = {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)}
+        if also_archived_child_ids:
+            response_data["also_archived_child_ids"] = also_archived_child_ids
         publish_session_list_changed(
             "session_archive",
             profile=getattr(s, "profile", None),
             session_id=getattr(s, "session_id", sid),
         )
-        return j(handler, {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)})
+        return j(handler, response_data)
 
     # ── Session move to project (POST) ──
     if parsed.path == "/api/session/move":
