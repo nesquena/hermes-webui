@@ -7313,6 +7313,7 @@ def handle_get(handler, parsed) -> bool:
         if not wiki_root or not os.path.isdir(wiki_root):
             return bad(handler, "Wiki not configured or directory not found", status=404)
         page_paths = _llm_wiki_page_files(wiki_root)
+        wiki_root = Path(wiki_root).resolve()
         pages = []
         for fp in sorted(page_paths, key=lambda p: str(p).lower()):
             try:
