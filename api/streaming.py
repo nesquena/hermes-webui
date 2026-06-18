@@ -3406,6 +3406,17 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
         # API 400 errors on strict providers (empty assistant content).
         if msg.get('_partial') and not str(msg.get('content') or '').strip():
             continue
+        # Skip recovered user messages from the pending_user_message repair path.
+        # After an interrupted turn (gateway restart, tool iteration limit), the
+        # recovery logic appends the stale pending message to context_messages
+        # with _recovered=True. Without this filter, that message persists in
+        # model-facing context indefinitely, causing the agent core's
+        # drop_thinking_only_and_merge_users to merge it with the current
+        # turn's user message (concatenating with \n\n), polluting every
+        # subsequent turn. The message stays in session.messages for display
+        # and state.db for persistence — only the model-facing copy is stripped.
+        if msg.get('_recovered') and msg.get('role') == 'user':
+            continue
         role = msg.get('role')
         if role == 'tool':
             tid = msg.get('tool_call_id') or ''
@@ -3470,6 +3481,8 @@ def _api_safe_message_positions(messages):
         if msg.get('_error'):
             continue
         if msg.get('_partial') and not str(msg.get('content') or '').strip():
+            continue
+        if msg.get('_recovered') and msg.get('role') == 'user':
             continue
         role = msg.get('role')
         if role == 'tool':
