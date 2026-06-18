@@ -159,14 +159,8 @@ def test_branch_keep_count_support():
         "Branch handler should slice messages by keep_count"
 
 
-def test_branch_keep_count_slices_context_messages_to_same_prefix():
-    """A forked prefix must not inherit hidden full-tail context_messages.
-
-    Edit/regenerate resend branches send a new turn immediately after branching.
-    If /api/session/branch copies only messages[:keep_count] but leaves
-    context_messages as the full source transcript, the next run can rehydrate
-    the truncated old tail back into the branch.
-    """
+def test_branch_full_fork_preserves_source_context_messages():
+    """Full forks should keep source context when it is already curated."""
     src = _read('api/routes.py')
     branch_match = re.search(
         r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
@@ -174,10 +168,40 @@ def test_branch_keep_count_slices_context_messages_to_same_prefix():
     )
     assert branch_match
     block = branch_match.group(1)
-    assert 'context_messages=copy.deepcopy(forked_messages)' in block, \
-        "Branch handler should deep-copy context_messages from the same sliced prefix as messages"
-    assert 'context_messages=copy.deepcopy(getattr(source, "context_messages", None) or [])' not in block, \
-        "Branch handler must not copy the full hidden source context into truncated forks"
+    assert 'if keep_count is None' in block, \
+        "Full-fork branch path should be explicit"
+    assert 'and isinstance(getattr(source, "context_messages", None), list)' in block, \
+        "Full-fork should only inherit list-typed source context_messages"
+    assert re.search(
+        r'context_messages=\(\s*copy\.deepcopy\(source\.context_messages\)\s*'
+        r'if keep_count is None\s*and '
+        r'isinstance\(getattr\(source, "context_messages", None\), list\)\s*'
+        r'else copy\.deepcopy\(forked_messages\)\s*\)',
+        block,
+        re.DOTALL,
+    ), "Branch should branch to source.context_messages only on full fork"
+
+
+def test_branch_truncated_fork_keeps_context_to_visible_prefix():
+    """Truncated branches still mirror the visible prefix context_messages."""
+    src = _read('api/routes.py')
+    branch_match = re.search(
+        r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
+        src, re.DOTALL
+    )
+    assert branch_match
+    block = branch_match.group(1)
+    assert 'forked_messages = source_messages[:keep_count]' in block, \
+        "Truncated branch should slice messages with keep_count"
+    assert re.search(r'if keep_count is not None:\s*forked_messages = source_messages\[:keep_count\]', block), \
+        "Truncated branch should explicitly take message prefix"
+    assert re.search(
+        r'context_messages=\(\s*copy\.deepcopy\(source\.context_messages\)\s*if keep_count is None\s*'
+        r'and isinstance\(getattr\(source, "context_messages", None\), list\)\s*else'
+        r'\s*copy\.deepcopy\(forked_messages\)\s*\)',
+        block,
+        re.DOTALL,
+    ), "Truncated fork should use forked message prefix as context when keep_count is set"
 
 
 def test_branch_auto_title():
@@ -358,6 +382,7 @@ def test_parent_indicator_hover_only_style():
 
 # ── Frontend: i18n keys ────────────────────────────────────────────────────────
 
+
 def test_i18n_branch_keys():
     """Verify all branch-related i18n keys exist in English locale."""
     src = _read('static/i18n.js')
@@ -372,6 +397,29 @@ def test_i18n_branch_keys():
     for key in required_keys:
         assert f"{key}:" in src or f"{key} :" in src, \
             f"Missing i18n key: {key}"
+
+
+def test_i18n_retry_branch_forked_for_branch_locales():
+    """Every locale with branch copy also defines retry_branch_forked."""
+    src = _read('static/i18n.js')
+    locale_matches = list(re.finditer(
+        r'\n\s*([A-Za-z]{2}(?:-[A-Za-z0-9]+)?)\s*:\s*\{',
+        src,
+    ))
+    assert locale_matches, "Expected locale blocks in static/i18n.js"
+
+    checked = []
+    for idx, match in enumerate(locale_matches):
+        locale = match.group(1)
+        start = match.end() - 1
+        end = locale_matches[idx + 1].start() if idx + 1 < len(locale_matches) else len(src)
+        block = src[start:end]
+        if ('branch_forked' in block) or ('branch_failed' in block):
+            checked.append(locale)
+            assert 'retry_branch_forked' in block, (
+                f"Locale '{locale}' has branch keys but is missing retry_branch_forked"
+            )
+    assert checked, "Expected at least one locale with branch keys"
 
 
 # ── Frontend: icon ─────────────────────────────────────────────────────────────

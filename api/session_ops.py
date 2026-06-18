@@ -75,6 +75,13 @@ _RETRY_SAFE_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
+_RECOVERED_SIGNALS = (
+    'recovered',
+    'partial output',
+    'run journal',
+    'could not continue',
+)
+
 
 def _is_retry_safe_error_marker(message: dict) -> bool:
     """Return True for a strict, empty-failed-turn assistant error marker.
@@ -121,12 +128,6 @@ def _is_retry_safe_error_marker(message: dict) -> bool:
             return True
         if len(stripped) > 100:
             return False
-        _RECOVERED_SIGNALS = (
-            'recovered',
-            'partial output',
-            'run journal',
-            'could not continue',
-        )
         if any(sig in stripped.lower() for sig in _RECOVERED_SIGNALS):
             return False
         return True
@@ -212,6 +213,10 @@ def retry_last(session_id: str) -> dict[str, Any]:
                 if last_persisted_text and _extract_text(pending_text) == last_persisted_text:
                     # Pending already materialized — fall through to persisted logic.
                     pending_text = None
+                    s.active_stream_id = None
+                    s.pending_user_message = None
+                    s.pending_attachments = []
+                    s.pending_started_at = None
 
             if pending_text:
                 s.active_stream_id = None

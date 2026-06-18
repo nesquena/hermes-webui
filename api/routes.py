@@ -9001,10 +9001,16 @@ def handle_post(handler, parsed) -> bool:
             enabled_toolsets=getattr(source, "enabled_toolsets", None),
             context_length=getattr(source, "context_length", None),
             threshold_tokens=getattr(source, "threshold_tokens", None),
-            # context_messages must mirror the same visible branch prefix instead
-            # of inheriting the full source context; otherwise later sends can
-            # rehydrate truncated tail messages into the branch.
-            context_messages=copy.deepcopy(forked_messages),
+            # Full-fork branches (no keep_count) should preserve the source
+            # session's curated context snapshot when available (eg. from
+            # compression), while truncated forks must keep the visible branch
+            # prefix only to avoid rehydrating discarded tail rows.
+            context_messages=(
+                copy.deepcopy(source.context_messages)
+                if keep_count is None
+                and isinstance(getattr(source, "context_messages", None), list)
+                else copy.deepcopy(forked_messages)
+            ),
             # Gateway routing — inherit from source
             gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
             # Context engine — inherit state so branch's context engine starts correctly

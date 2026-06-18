@@ -368,12 +368,20 @@ def test_retry_pending_equal_to_last_user_falls_through(cleanup_test_sessions):
         ],
         pending_user_message='duplicate turn',
         active_stream_id='stream-dup',
+        pending_started_at=111.0,
+        pending_attachments=[{'type': 'text', 'text': 'from stale sidecar'}],
     )
     r = _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
     assert r.get('ok') is True, r
     # Should NOT be pending mode — should fall through to persisted logic
     assert r.get('mode') == 'in_place'
     assert r.get('last_user_text') == 'duplicate turn'
+
+    sess = _get(f'/api/session?session_id={sid}')['session']
+    assert sess.get('active_stream_id') is None
+    assert sess.get('pending_user_message') is None
+    assert sess.get('pending_attachments') == []
+    assert sess.get('pending_started_at') is None
 
 
 def test_retry_interrupted_marker_with_recovered_output_branches(cleanup_test_sessions):
