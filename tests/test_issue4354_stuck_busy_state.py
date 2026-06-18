@@ -367,11 +367,11 @@ def test_inflight_reattach_uses_server_truth():
 
     # Runtime check via node: build a minimal harness that mirrors the
     # conditionals and verifies both branches behave correctly.
-    harness = f"""
-let S = {{ session: {{ session_id: 's1', active_stream_id: null, last_message_at: 0 }} }};
-let INFLIGHT = {{}};
+    harness = """
+let S = { session: { session_id: 's1', active_stream_id: null, last_message_at: 0 } };
+let INFLIGHT = {};
 let clearedInflight = false;
-function clearInflightState(sid) {{ clearedInflight = (sid === 's1'); }}
+function clearInflightState(sid) { clearedInflight = (sid === 's1'); }
 
 // Inlined from the real source — keep in sync with the fix.
 // Note: last_message_at recency veto was removed in the nesquena-hermes
@@ -381,51 +381,51 @@ function clearInflightState(sid) {{ clearedInflight = (sid === 's1'); }}
 // the live reattach. The watchdog's silence check (with server-truth
 // pre-fire verification) is the right place to handle "stream is
 // active but silent".
-function reattach() {{
+function reattach() {
   const sid = 's1';
-  if (INFLIGHT[sid]) {{
+  if (INFLIGHT[sid]) {
     const inflightStreamId = INFLIGHT[sid].streamId || INFLIGHT[sid].stream_id;
     const serverStreamId = S.session.active_stream_id;
     const serverStreamMatches = !!serverStreamId && !!inflightStreamId && serverStreamId === inflightStreamId;
-    if (serverStreamMatches) {{
+    if (serverStreamMatches) {
       S.busy = true;
       S.activeStreamId = serverStreamId;
-    }} else {{
+    } else {
       delete INFLIGHT[sid];
       clearInflightState(sid);
-    }}
-  }}
-}}
+    }
+  }
+}
 
 // Case A: stale local INFLIGHT, server says idle → discard, S.busy stays false.
-INFLIGHT['s1'] = {{ streamId: 'old-stream' }};
+INFLIGHT['s1'] = { streamId: 'old-stream' };
 S.session.active_stream_id = null;
 S.session.last_message_at = Date.now() / 1000 - 60 * 60;  // 1 hour ago
 S.busy = false;
 clearedInflight = false;
 reattach();
-const caseA = {{ busy: S.busy, hasInflight: !!INFLIGHT['s1'], clearedInflight }};
+const caseA = { busy: S.busy, hasInflight: !!INFLIGHT['s1'], clearedInflight };
 
 // Case B: stream id matches (recency no longer a veto) → re-assert busy.
-INFLIGHT['s1'] = {{ streamId: 'live-stream' }};
+INFLIGHT['s1'] = { streamId: 'live-stream' };
 S.session.active_stream_id = 'live-stream';
 S.session.last_message_at = Date.now() / 1000 - 30;  // 30s ago
 S.busy = false;
 clearedInflight = false;
 reattach();
-const caseB = {{ busy: S.busy, activeStreamId: S.activeStreamId }};
+const caseB = { busy: S.busy, activeStreamId: S.activeStreamId };
 
 // Case C: long agentic turn — stream id matches but last_message_at
 // is 1 hour old. Should NOT be discarded.
-INFLIGHT['s1'] = {{ streamId: 'long-turn-stream' }};
+INFLIGHT['s1'] = { streamId: 'long-turn-stream' };
 S.session.active_stream_id = 'long-turn-stream';
 S.session.last_message_at = Date.now() / 1000 - 60 * 60;  // 1 hour ago
 S.busy = false;
 clearedInflight = false;
 reattach();
-const caseC = {{ busy: S.busy, activeStreamId: S.activeStreamId, hasInflight: !!INFLIGHT['s1'] }};
+const caseC = { busy: S.busy, activeStreamId: S.activeStreamId, hasInflight: !!INFLIGHT['s1'] };
 
-console.log(JSON.stringify({{ caseA, caseB, caseC }}));
+console.log(JSON.stringify({ caseA, caseB, caseC }));
 """
     result = subprocess.run(["node", "-e", harness], check=True, capture_output=True, text=True)
     out = json.loads(result.stdout)
