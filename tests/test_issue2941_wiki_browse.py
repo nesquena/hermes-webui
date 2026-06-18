@@ -9,6 +9,7 @@ Verifies that:
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -297,3 +298,92 @@ def test_i18n_wiki_keys_in_all_locales():
                 f"i18n key '{key}' missing from locale block {i + 1} "
                 f"(position ~{lang_positions[i]})"
             )
+
+
+def test_wiki_page_files_documents_hardlink_trust_boundary():
+    from api import routes
+
+    doc = routes._llm_wiki_page_files.__doc__ or ""
+    assert "hardlink" in doc.lower()
+    assert "trusted" in doc.lower() or "operator-controlled" in doc.lower()
+
+
+def test_wiki_page_files_reuses_cache_with_unchanged_section_mtime(monkeypatch, tmp_path):
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    (wiki_root / "concepts").mkdir(parents=True)
+    page = wiki_root / "concepts" / "one.md"
+    page.write_text("# one\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+
+    calls = []
+
+    def fake_uncached(root):
+        calls.append(root)
+        return [page]
+
+    monkeypatch.setattr(routes, "_llm_wiki_page_files_uncached", fake_uncached)
+
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+    assert len(calls) == 1
+
+
+def test_wiki_page_files_cache_invalidates_when_section_mtime_changes(monkeypatch, tmp_path):
+    import time as _time
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    section = wiki_root / "concepts"
+    section.mkdir(parents=True)
+    first = section / "one.md"
+    second = section / "two.md"
+    first.write_text("# one\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+
+    calls = []
+
+    def fake_uncached(root):
+        calls.append(root)
+        return [first] if len(calls) == 1 else [first, second]
+
+    monkeypatch.setattr(routes, "_llm_wiki_page_files_uncached", fake_uncached)
+
+    assert routes._llm_wiki_page_files(wiki_root) == [first]
+    second.write_text("# two\n", encoding="utf-8")
+    _time.sleep(0.02)  # Ensure mtime granularity is sufficient on Windows
+    os.utime(str(section), None)
+    assert routes._llm_wiki_page_files(wiki_root) == [first, second]
+    assert len(calls) == 2
+
+
+def test_wiki_page_files_cache_expires_after_ttl(monkeypatch, tmp_path):
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    (wiki_root / "concepts").mkdir(parents=True)
+    page = wiki_root / "concepts" / "one.md"
+    page.write_text("# one\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 1.0)
+
+    calls = []
+    ticks = iter([100.0, 100.5, 101.5])
+    monkeypatch.setattr(routes.time, "monotonic", lambda: next(ticks))
+
+    def fake_uncached(root):
+        calls.append(root)
+        return [page]
+
+    monkeypatch.setattr(routes, "_llm_wiki_page_files_uncached", fake_uncached)
+
+    routes._llm_wiki_page_files(wiki_root)   # miss → rebuild (t=100.0)
+    routes._llm_wiki_page_files(wiki_root)   # hit (t=100.5 < 101.0)
+    routes._llm_wiki_page_files(wiki_root)   # miss → rebuild (t=101.5 > 101.0)
+    assert len(calls) == 2

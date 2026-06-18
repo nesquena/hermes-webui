@@ -5780,6 +5780,9 @@ _LLM_WIKI_MAX_PAGE_BYTES = 2 * 1024 * 1024
 _LLM_WIKI_FORBIDDEN_ROOTS = frozenset(
     str(Path(p).expanduser().resolve()) for p in ("/", "/etc", "/usr", "/var", "/opt", "/sys", "/proc")
 )
+_WIKI_ALLOWLIST_TTL = 5.0  # seconds
+_wiki_allowlist_cache: dict[str, dict[str, object]] = {}
+_wiki_allowlist_cache_lock = threading.Lock()
 
 
 def _llm_wiki_resolve_path() -> tuple[Path, str, bool]:
@@ -5832,7 +5835,28 @@ def _llm_wiki_count_files(root: Path) -> int:
     return count
 
 
-def _llm_wiki_page_files(wiki_path: Path) -> list[Path]:
+def _llm_wiki_page_files_cache_signature(wiki_path: Path) -> tuple:
+    """Return a change-detection signature over the configured wiki sections.
+
+    Reads only the section-level directories (not every page), using
+    st_mtime_ns, st_dev, and st_ino so that quick section replacements and
+    mtime-ns-resolution changes are both caught.  Missing or inaccessible
+    section dirs are represented as ``(section, None)`` so their appearance
+    or disappearance also invalidates the cache.
+    """
+    sig = []
+    for section in _LLM_WIKI_PAGE_DIRS:
+        section_dir = wiki_path / section
+        try:
+            st = section_dir.lstat()
+        except OSError:
+            sig.append((section, None))
+            continue
+        sig.append((section, st.st_dev, st.st_ino, st.st_mtime_ns))
+    return tuple(sig)
+
+
+def _llm_wiki_page_files_uncached(wiki_path: Path) -> list[Path]:
     pages: list[Path] = []
     # Defense in depth: refuse forbidden system roots, and resolve the wiki root
     # ONCE as the single trust base for all containment checks below.
@@ -5883,6 +5907,53 @@ def _llm_wiki_page_files(wiki_path: Path) -> list[Path]:
             except (OSError, ValueError):
                 continue
     return pages
+
+
+def _llm_wiki_page_files(wiki_path: Path) -> list[Path]:
+    """Return all allowlisted wiki page paths under *wiki_path*.
+
+    Trust boundary: the allowlist uses ``(st_dev, st_ino)`` inode identity.
+    A hardlink created at a listed page name *before* this snapshot is taken
+    would carry that page's identity through to the caller's fstat check.
+    This is only exploitable with write access to the wiki directory, which
+    is outside the realistic threat model (the wiki directory is
+    operator-controlled).  Defense-in-depth via an ``openat``-chain with
+    no-follow directory fds would close the gap but is deferred — the inode
+    match already defeats path-swap and symlink races at open time.
+    """
+    try:
+        wiki_root = wiki_path.resolve()
+    except OSError:
+        wiki_root = wiki_path
+
+    key = str(wiki_root)
+    sig = _llm_wiki_page_files_cache_signature(wiki_root)
+    now = time.monotonic()
+
+    with _wiki_allowlist_cache_lock:
+        cached = _wiki_allowlist_cache.get(key)
+        if (
+            cached is not None
+            and cached.get("signature") == sig
+            and now < cached.get("expires_at", 0)
+        ):
+            return list(cached["files"])
+
+    pages = _llm_wiki_page_files_uncached(wiki_root)
+
+    with _wiki_allowlist_cache_lock:
+        _wiki_allowlist_cache[key] = {
+            "signature": sig,
+            "expires_at": now + _WIKI_ALLOWLIST_TTL,
+            "files": tuple(pages),
+        }
+    return list(pages)
+
+
+def _llm_wiki_clear_page_files_cache() -> None:
+    """Clear the allowlist cache; intended for tests only."""
+    with _wiki_allowlist_cache_lock:
+        _wiki_allowlist_cache.clear()
 
 
 def _llm_wiki_last_writer(wiki_path: Path, page_files: list[Path]) -> str:
