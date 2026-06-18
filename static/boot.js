@@ -266,9 +266,9 @@ function closeMobileSidebar(){
   if(overlay)overlay.classList.remove('visible');
 }
 
-const _PWA_SIDEBAR_SWIPE_EDGE=28;
-const _PWA_SIDEBAR_SWIPE_TRIGGER=72;
-const _PWA_SIDEBAR_SWIPE_MAX_VERTICAL=48;
+const _PWA_SIDEBAR_SWIPE_EDGE=80;
+const _PWA_SIDEBAR_SWIPE_TRIGGER=64;
+const _PWA_SIDEBAR_SWIPE_MAX_VERTICAL=56;
 let _pwaSidebarSwipe=null;
 
 function _isPwaStandalone(){
@@ -298,7 +298,7 @@ function _openMobileSidebarFromGesture(){
 }
 
 function _onPwaSidebarSwipeStart(e){
-  if(!_isPwaStandalone()||_isDesktopWidth())return;
+  if(_isDesktopWidth())return;
   if(e.pointerType==='mouse'||(e.pointerType&&e.pointerType!=='touch'&&e.pointerType!=='pen'))return;
   if(document.querySelector('.sidebar')?.classList.contains('mobile-open'))return;
   const clientX=Number(e.clientX)||0;
