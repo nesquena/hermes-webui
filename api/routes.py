@@ -2775,6 +2775,8 @@ def _run_journal_live_snapshot(stream_id: str | None) -> dict | None:
 
     append_thinking_row(force=True)
 
+    # Keep a live anchor shell during session-switch replay even before the
+    # journal has projected visible prose or tool rows from the first events.
     if not anchor_activity_rows and events:
         anchor_activity_rows.append(
             {

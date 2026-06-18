@@ -8868,7 +8868,6 @@ function _anchorSceneRowsForRendering(scene, opts){
   const settled=!!(opts&&opts.settled);
   const out=[];
   const byKey=new Map();
-  const renderOrder=new WeakMap();
   const keyFor=(row)=>{
     if(!row) return '';
     if(row.role==='tool') return `tool:${_anchorSceneToolRowLogicalKey(row)||row.row_id||row.event_id||row.local_id||out.length}`;
@@ -8891,11 +8890,9 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(byKey.has(key)){
       const index=byKey.get(key);
       out[index]=row.role==='tool'?_anchorSceneMergeToolRows(out[index],row):row;
-      renderOrder.set(out[index],index);
     }else{
       byKey.set(key,out.length);
       out.push(row);
-      renderOrder.set(row,out.length);
     }
   }
   return out;
