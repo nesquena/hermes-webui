@@ -4637,7 +4637,7 @@ function renderMd(raw){
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
-    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
+    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
     t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
@@ -4778,7 +4778,7 @@ function renderMd(raw){
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
+  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
@@ -4864,7 +4864,7 @@ function renderMd(raw){
     if(!compact) return false;
     if(/^(javascript|data|vbscript):/i.test(compact)) return false;
     if(/^https?:\/\//i.test(raw)) return true;
-    if(/^(mailto:|tel:)/i.test(raw)) return true;
+    if(/^(mailto:|tel:|message:)/i.test(raw)) return true;
     if(img && /^api\//i.test(raw)) return true;
     if(!img && (/^api\//i.test(raw) || /^#/.test(raw) || _isInternalSessionHref(raw))) return true;
     return false;
