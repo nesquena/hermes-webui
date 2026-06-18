@@ -618,24 +618,24 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, absorbed into a batch release, or salvaged from a larger proposal — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
 <!-- BEGIN GENERATED CONTRIBUTORS -->
-Over **248 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
+Over **263 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
 
 ### Top contributors (by PR count, including absorbed/batch-released work)
 
 | # | Contributor | PRs | First → latest release |
 |---|---|---:|---|
-| 1 | [@franksong2702](https://github.com/franksong2702) | 181 | `v0.49.3` → `v0.51.405` |
-| 2 | [@Michaelyklam](https://github.com/Michaelyklam) | 118 | `v0.50.240` → `v0.51.198` |
-| 3 | [@rodboev](https://github.com/rodboev) | 97 | `v0.51.223` → `v0.51.414` |
-| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 79 | `v0.50.279` → `v0.51.425` |
+| 1 | [@franksong2702](https://github.com/franksong2702) | 191 | `v0.49.3` → `v0.51.435` |
+| 2 | [@Michaelyklam](https://github.com/Michaelyklam) | 124 | `v0.50.240` → `v0.51.198` |
+| 3 | [@rodboev](https://github.com/rodboev) | 124 | `v0.51.223` → `v0.51.481` |
+| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 87 | `v0.50.279` → `v0.51.466` |
 | 5 | [@bergeouss](https://github.com/bergeouss) | 70 | `v0.48.0` → `v0.51.385` |
-| 6 | [@AJV20](https://github.com/AJV20) | 34 | `v0.51.93` → `v0.51.227` |
-| 7 | [@dso2ng](https://github.com/dso2ng) | 30 | `v0.50.227` → `v0.51.327` |
-| 8 | [@starship-s](https://github.com/starship-s) | 19 | `v0.50.123` → `v0.51.153` |
-| 9 | [@jasonjcwu](https://github.com/jasonjcwu) | 16 | `v0.50.227` → `v0.51.235` |
-| 10 | [@dobby-d-elf](https://github.com/dobby-d-elf) | 15 | `v0.51.38` → `v0.51.161` |
+| 6 | [@AJV20](https://github.com/AJV20) | 38 | `v0.51.93` → `v0.51.227` |
+| 7 | [@dso2ng](https://github.com/dso2ng) | 36 | `v0.50.227` → `v0.51.474` |
+| 8 | [@starship-s](https://github.com/starship-s) | 22 | `v0.50.123` → `v0.51.473` |
+| 9 | [@Hinotoi-agent](https://github.com/Hinotoi-agent) | 17 | `v0.50.10` → `v0.51.443` |
+| 10 | [@dobby-d-elf](https://github.com/dobby-d-elf) | 16 | `v0.51.38` → `v0.51.161` |
 
-See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 248 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 263 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
 <!-- END GENERATED CONTRIBUTORS -->
 
 ### Notable contributions
