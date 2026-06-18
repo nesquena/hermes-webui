@@ -752,6 +752,10 @@ function _compensateScrollForMeasurementDelta(renderFn){
   const scrollTopBefore=container.scrollTop;
   renderFn();
   if(!anchorBefore) return;
+  if(scrollTopBefore<1){
+    const spacer=container.querySelector('[data-virtual-spacer="before"]');
+    if(!spacer||parseFloat(spacer.style.height||'0')<=0) return;
+  }
   const row=container.querySelector(`[data-msg-idx="${anchorBefore.rawIdx}"]`);
   if(!row) return;
   const containerRect=container.getBoundingClientRect();
