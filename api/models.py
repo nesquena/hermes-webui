@@ -3877,6 +3877,22 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
     return contexts, tuple(cache_entries)
 
 
+def _state_projection_sidecar_metadata(sid: str) -> dict:
+    """Return UI-owned metadata for a state.db-projected sidebar row."""
+    metadata = {"title": None, "archived": False}
+    try:
+        webui_meta = Session.load_metadata_only(sid)
+    except Exception:
+        return metadata
+    if not webui_meta:
+        return metadata
+    title = getattr(webui_meta, 'title', None)
+    if title:
+        metadata["title"] = title
+    metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
+    return metadata
+
+
 def _load_cli_sessions_uncached(
     hermes_home: Path,
     db_path: Path,
@@ -3944,15 +3960,14 @@ def _load_cli_sessions_uncached(
                 except Exception:
                     pass  # degrade gracefully
         # If a WebUI JSON file exists for this session (e.g. previously
-        # imported or renamed in the sidebar), prefer its title over the
-        # state.db title.  This fixes rename-not-persisting for CLI sessions
-        # after compression chain extension (#1486).
-        try:
-            _webui_meta = Session.load_metadata_only(sid)
-            if _webui_meta and getattr(_webui_meta, 'title', None):
-                _title = _webui_meta.title
-        except Exception:
-            pass
+        # imported or renamed in the sidebar), prefer its UI-owned metadata over
+        # the state.db projection. This keeps archived cron/tool/API runs hidden
+        # even when all_sessions() omits the hidden sidecar and the state row is
+        # re-injected from Hermes state.db (#4397).
+        _sidecar_meta = _state_projection_sidecar_metadata(sid)
+        if _sidecar_meta.get('title'):
+            _title = _sidecar_meta['title']
+        _archived = bool(_sidecar_meta.get('archived'))
         _display_title = _title or f'{_source.title()} Session'
         cli_sessions.append({
             'session_id': sid,
@@ -3963,7 +3978,7 @@ def _load_cli_sessions_uncached(
             'created_at': row['started_at'],
             'updated_at': raw_ts,
             'pinned': False,
-            'archived': False,
+            'archived': _archived,
             'project_id': _cron_pid() if is_cron_session(sid, _source) else None,
             'profile': profile,
             'source_tag': _source,
@@ -4033,12 +4048,10 @@ def _load_cli_sessions_uncached(
                                         break
                         except Exception:
                             pass
-                try:
-                    _webui_meta = Session.load_metadata_only(sid)
-                    if _webui_meta and getattr(_webui_meta, 'title', None):
-                        _title = _webui_meta.title
-                except Exception:
-                    pass
+                _sidecar_meta = _state_projection_sidecar_metadata(sid)
+                if _sidecar_meta.get('title'):
+                    _title = _sidecar_meta['title']
+                _archived = bool(_sidecar_meta.get('archived'))
                 _display_title = _title or 'Cron Session'
                 cli_sessions.append({
                     'session_id': sid,
@@ -4049,7 +4062,7 @@ def _load_cli_sessions_uncached(
                     'created_at': row['started_at'],
                     'updated_at': raw_ts,
                     'pinned': False,
-                    'archived': False,
+                    'archived': _archived,
                     'project_id': _cron_pid(),
                     'profile': profile_value,
                     'source_tag': 'cron',

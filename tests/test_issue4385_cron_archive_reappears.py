@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from unittest.mock import patch
 
 
@@ -77,6 +78,59 @@ def test_materializing_cron_session_preserves_non_cli_identity(monkeypatch):
     assert session.session_source == "cron"
     assert session.source_tag == "cron"
     assert session.is_cli_session is False
+
+
+def test_cron_state_projection_preserves_archived_sidecar(monkeypatch, tmp_path):
+    """A hidden archived sidecar must still mark the state.db cron projection archived."""
+    import api.models as models
+
+    sid = "cron_job123_20260618"
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                model TEXT,
+                message_count INTEGER,
+                started_at REAL,
+                source TEXT,
+                session_source TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO sessions (
+                id, title, model, message_count, started_at, source, session_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (sid, "Cron Session", "test-model", 1, 20, "cron", "cron"),
+        )
+
+    class ArchivedSidecar:
+        title = "Cron Session"
+        archived = True
+
+    monkeypatch.setattr(
+        models.Session,
+        "load_metadata_only",
+        staticmethod(lambda candidate: ArchivedSidecar() if candidate == sid else None),
+    )
+    monkeypatch.setattr(models, "ensure_cron_project", lambda: "cron-project")
+
+    rows = models._load_cli_sessions_uncached(
+        tmp_path,
+        db_path,
+        "default",
+        source_filter="cron",
+        include_claude_code=False,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == sid
+    assert rows[0]["archived"] is True
 
 
 def test_archived_cron_sidecar_suppresses_raw_unarchived_cron_row(monkeypatch):
