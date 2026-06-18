@@ -274,8 +274,7 @@ class TestFilePathEndpointBehaviour:
         body, status = _post("/api/file/path", {"session_id": sid, "path": "."})
         assert status == 200, body
         assert body.get("ok") is True
-        # Path should be absolute (starts with /).
-        assert body.get("path", "").startswith("/"), body
+        assert Path(body.get("path", "")).is_absolute(), body
 
     def test_does_not_404_on_missing_file(self):
         """Copy-path on a stale-but-recently-deleted file must still

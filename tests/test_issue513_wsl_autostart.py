@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -76,9 +77,9 @@ def test_windows_task_scheduler_helper_is_idempotent_and_validates_wsl_script_pa
 def test_powershell_helper_passes_parser_when_pwsh_is_available():
     pwsh = None
     for candidate in ("pwsh", "powershell"):
-        result = subprocess.run(["bash", "-lc", f"command -v {candidate}"], capture_output=True, text=True)
-        if result.returncode == 0:
-            pwsh = result.stdout.strip()
+        resolved = shutil.which(candidate)
+        if resolved:
+            pwsh = resolved
             break
     if not pwsh:
         # Linux CI often does not include PowerShell. The source-string tests

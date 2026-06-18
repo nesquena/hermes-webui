@@ -172,7 +172,7 @@ class RouteFakeHandler:
         self.wfile = io.BytesIO()
         self.status = None
         self.sent_headers = []
-        self.client_address = ("127.0.0.1", 12345)
+        self.client_address: tuple[str, int] = ("127.0.0.1", 12345)
 
     def send_response(self, status):
         self.status = status
@@ -212,6 +212,9 @@ def test_passkey_register_options_handles_base_passkey_errors(monkeypatch):
 
     monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
     monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "parse_cookie", lambda handler: "session")
+    monkeypatch.setattr(auth, "verify_session", lambda cookie: True)
 
     def raise_passkey_error(_handler):
         raise passkeys.PasskeyError("plain passkey error")
@@ -223,6 +226,109 @@ def test_passkey_register_options_handles_base_passkey_errors(monkeypatch):
 
     assert handler.status == 400
     assert json.loads(handler.wfile.getvalue())["error"] == "plain passkey error"
+
+def test_first_passkey_registration_options_rejects_remote_bootstrap(monkeypatch, tmp_path):
+    import api.auth as auth
+    import api.routes as routes
+
+    _set_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_PASSKEY", "1")
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(auth, "get_password_hash", lambda: None)
+
+    handler = RouteFakeHandler()
+    handler.client_address = ("8.8.8.8", 12345)
+    routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register/options"))
+
+    assert handler.status == 401
+    assert json.loads(handler.wfile.getvalue())["error"] == "Authentication required"
+
+
+def test_first_passkey_registration_rejects_remote_bootstrap(monkeypatch, tmp_path):
+    import api.auth as auth
+    import api.routes as routes
+
+    _set_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_PASSKEY", "1")
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(auth, "get_password_hash", lambda: None)
+
+    handler = RouteFakeHandler()
+    handler.client_address = ("8.8.8.8", 12345)
+    routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register"))
+
+    assert handler.status == 401
+    assert json.loads(handler.wfile.getvalue())["error"] == "Authentication required"
+
+
+def test_first_passkey_registration_options_allows_local_bootstrap(monkeypatch, tmp_path):
+    import api.auth as auth
+    import api.passkeys as passkeys
+    import api.routes as routes
+
+    _set_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_PASSKEY", "1")
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(auth, "get_password_hash", lambda: None)
+    monkeypatch.setattr(passkeys, "registration_options", lambda handler: {"challenge": "local-bootstrap"})
+
+    handler = RouteFakeHandler()
+    routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register/options"))
+
+    assert handler.status == 200
+    assert json.loads(handler.wfile.getvalue())["publicKey"] == {"challenge": "local-bootstrap"}
+
+
+def test_first_passkey_registration_allows_local_bootstrap(monkeypatch, tmp_path):
+    import api.auth as auth
+    import api.passkeys as passkeys
+    import api.routes as routes
+
+    _set_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_PASSKEY", "1")
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(auth, "get_password_hash", lambda: None)
+    monkeypatch.setattr(passkeys, "finish_registration", lambda body, handler: {"ok": True})
+    monkeypatch.setattr(passkeys, "registered_credentials", lambda: [{"id": "local-bootstrap"}])
+
+    handler = RouteFakeHandler()
+    routes.handle_post(handler, SimpleNamespace(path="/api/auth/passkey/register"))
+
+    assert handler.status == 200
+    assert json.loads(handler.wfile.getvalue()) == {"ok": True, "credentials": [{"id": "local-bootstrap"}]}
+
+
+def test_passkey_registration_requires_valid_session_when_auth_is_enabled(monkeypatch):
+    import api.auth as auth
+    import api.passkeys as passkeys
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "parse_cookie", lambda handler: None)
+    monkeypatch.setattr(
+        auth,
+        "verify_session",
+        lambda cookie: (_ for _ in ()).throw(AssertionError("verify_session should not be called without a cookie")),
+    )
+    monkeypatch.setattr(
+        passkeys,
+        "registration_options",
+        lambda handler: (_ for _ in ()).throw(AssertionError("registration_options should not be reached")),
+    )
+    monkeypatch.setattr(
+        passkeys,
+        "finish_registration",
+        lambda body, handler: (_ for _ in ()).throw(AssertionError("finish_registration should not be reached")),
+    )
+
+    for path in ("/api/auth/passkey/register/options", "/api/auth/passkey/register"):
+        handler = RouteFakeHandler()
+        routes.handle_post(handler, SimpleNamespace(path=path))
+
+        assert handler.status == 401
+        assert json.loads(handler.wfile.getvalue())["error"] == "Authentication required"
 
 
 def test_auth_status_reports_passkey_availability_source_contract():

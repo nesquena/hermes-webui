@@ -196,9 +196,16 @@ def test_populate_model_dropdown_reconciles_selection_after_rebuild():
     assert "_reconcileModelDropdownSelection(sel,data,previousSelection,opts);" in UI_JS
     snippet = _reconcile_selection_snippet()
     assert "preferProfileDefaultOnFreshBoot" in snippet
-    assert "return _applyModelToDropdown(data.default_model,sel,data.active_provider||null);" in snippet
-    assert "return _applyModelToDropdown(activeSession.model,sel,activeSession.model_provider||null);" in snippet
-    assert "return _applyModelToDropdown(previousState.model,sel,previousState.model_provider||null);" in snippet
+    # #4363: each branch now routes through _applyOrEnsure, which delegates to
+    # _ensureModelOptionInDropdown so a cross-provider model missing from a
+    # partially-rebuilt catalog is injected as a custom option instead of the
+    # browser silently snapping the <select> to its first <option>. The
+    # branch ORDER + per-branch model/provider arguments are unchanged.
+    assert "_applyOrEnsure(data.default_model, data.active_provider||null)" in snippet
+    assert "_applyOrEnsure(activeSession.model, activeSession.model_provider||null)" in snippet
+    assert "_applyOrEnsure(previousState.model, previousState.model_provider||null)" in snippet
+    # the helper must fall back to injecting the missing option, not return null
+    assert "_ensureModelOptionInDropdown(modelId, sel, providerId)" in snippet
     assert "_readPersistedModelState()" not in snippet
     assert "localStorage.getItem('hermes-webui-model')" not in snippet
 

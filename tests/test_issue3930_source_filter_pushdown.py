@@ -183,6 +183,39 @@ def test_get_cli_sessions_source_filter_uses_distinct_cache_key(monkeypatch, tmp
     assert filtered_again[0]["session_id"] == "session-tui"
 
 
+def test_get_cli_sessions_all_profiles_pushes_source_filter_to_every_context(monkeypatch, tmp_path):
+    """#4067 regression: the all_profiles CLI scan must thread source_filter into the
+    per-context _load_cli_sessions_uncached calls. The all-profiles branch keys the cache
+    on source_filter, so omitting it from the loader returned every-source sessions under
+    a filtered key (Codex SILENT finding on the #4067 re-gate)."""
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
+    models.clear_cli_sessions_cache()
+
+    # Two profile contexts; cache key derived from a stable token.
+    contexts = [
+        (hermes_home, hermes_home / "state.db", "default"),
+        (hermes_home / "p2", hermes_home / "p2" / "state.db", "haku"),
+    ]
+    monkeypatch.setattr(models, "_all_profiles_cli_contexts", lambda: (contexts, "ctx-key"))
+
+    seen = []
+
+    def fake_loader(_hermes_home, _db_path, _cli_profile, source_filter=None, **kwargs):
+        seen.append(source_filter)
+        return [{"session_id": f"s-{_cli_profile}-{source_filter or 'all'}", "title": "x"}]
+
+    monkeypatch.setattr(models, "_load_cli_sessions_uncached", fake_loader)
+
+    models.get_cli_sessions(source_filter="tui", all_profiles=True)
+
+    # Every context must receive the "tui" filter, not None.
+    assert seen == ["tui", "tui"], seen
+
+
 def test_load_cli_sessions_uncached_pushes_specific_source_into_state_db_scan(monkeypatch, tmp_path):
     db = tmp_path / "state.db"
     db.write_text("", encoding="utf-8")
@@ -269,8 +302,8 @@ def test_cron_source_filter_uses_cron_rescue_limit(monkeypatch, tmp_path):
 def test_api_sessions_passes_source_filter_only_on_sidebar_path(monkeypatch):
     captured = []
 
-    def fake_get_cli_sessions(source_filter=None):
-        captured.append(source_filter)
+    def fake_get_cli_sessions(source_filter=None, *, all_profiles=False):
+        captured.append({"source_filter": source_filter, "all_profiles": all_profiles})
         return []
 
     monkeypatch.setattr(routes, "all_sessions", lambda diag=None: [])
@@ -290,17 +323,20 @@ def test_api_sessions_passes_source_filter_only_on_sidebar_path(monkeypatch):
 
     assert handler.status == 200
     assert handler.json_body()["sessions"] == []
-    assert captured == ["  TUI  "]
+    assert captured == [{"source_filter": "  TUI  ", "all_profiles": False}]
 
 
 def test_non_sidebar_cli_session_callers_keep_default_get_cli_sessions_signature(monkeypatch):
+    captured = []
+
     monkeypatch.setattr(
         routes,
         "get_cli_sessions",
-        lambda: [{"session_id": "cli-session", "title": "CLI Session"}],
+        lambda *, all_profiles=False: captured.append(all_profiles) or [{"session_id": "cli-session", "title": "CLI Session"}],
     )
 
     assert routes._lookup_cli_session_metadata("cli-session") == {
         "session_id": "cli-session",
         "title": "CLI Session",
     }
+    assert captured == [False]

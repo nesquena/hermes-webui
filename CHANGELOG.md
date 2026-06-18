@@ -7,6 +7,337 @@
 
 - **Interrupted WebUI session reconciliation now preserves state.db-only user prompts that precede a newer sidecar tail.** If recovery writes a later assistant/error tail to the sidecar while the triggering user prompt only exists in `state.db`, `/api/session` inserts that missing user turn chronologically instead of dropping it as an old replay row. (#2361)
 
+## [v0.51.483] — 2026-06-18 — Release QS (virtual-scroll height + measurement scroll-jump fixes)
+
+### Fixed
+
+- **Smoother scrolling in the experimental "Virtualize long transcripts" mode — fewer jumps around tool-call rows and during measurement (#4346, via #4367 + #4368).** Two fixes to the (still default-off, opt-in) transcript virtualization: (1) per-role height estimates for not-yet-measured rows (user 120 / assistant 160 / tool_call 400 / default 140) so large tool-call rows aren't under-counted before they're measured, which previously threw off the initial scroll position; and (2) anchor-based scroll compensation during measurement — the view captures an anchor row + scrollTop, renders, then re-pins scrollTop by the anchor's measured delta, plus a short scroll-active guard that defers measurement refresh while you're actively scrolling. Both are additive and only run when "Virtualize long transcripts (experimental)" is enabled. Thanks @rodboev.
+
+## [v0.51.482] — 2026-06-17 — Release QR (archived cron sessions stay hidden)
+
+### Fixed
+
+- **Archived cron sessions no longer reappear in the Sessions tab after the list refreshes (#4385).** A stale sidecar with `is_cli_session: true` could make an archived cron/tool/API session resurface on refresh. The session loader now treats explicit cron/tool/API source metadata as non-CLI even when the sidecar claims otherwise, and preserves cron identity when the archive/materialization fallback creates a session, so archived cron rows stay hidden. Thanks @TomBanksAU.
+
+## [v0.51.481] — 2026-06-17 — Release QP (gateway start/stop/restart controls in Settings)
+
+### Added
+
+- **Settings → System now has start / stop / restart controls for the messaging gateway (#3628).** Manage the Hermes gateway (Telegram, Discord, Slack, etc.) from the WebUI without dropping to a terminal. The controls call the existing platform-aware `hermes gateway {start,stop,restart}` CLI (systemd on Linux, launchd on macOS), refresh the gateway status card, and surface bounded errors. The endpoint is auth + CSRF gated, validates the active profile name, runs a list-argv subprocess (no shell), and is serialized server-side so overlapping actions return 409 rather than spawning concurrent gateway processes. Thanks @rodboev.
+
+## [v0.51.480] — 2026-06-17 — Release QO (inline PDF preview renders all pages)
+
+### Fixed
+
+- **The inline PDF preview now renders all pages in a scrollable view instead of just page 1 (#4353).** Previously only the first page of a PDF attachment/export was rendered inline, so multi-page documents looked clipped/broken. The preview now renders every page (capped at 20 for memory) stacked vertically in a scrollable body, shows the page count in the header, and adds a "Showing the first N of M pages — download for the full document" notice when a PDF exceeds the cap. Per-page render failures are isolated (a malformed page is skipped rather than halting the whole preview), and each canvas is attached only after a successful render. Thanks @gourangasatapathyvit.
+
+## [v0.51.479] — 2026-06-17 — Release QN (named context blocks in the composer)
+
+### Added
+
+- **Selected chat text can now be collected as named context blocks before sending (#2543/#3306).** When you select text in a conversation and use "Reply with selection," instead of immediately dumping it into the composer, it's added as a small named chip ("Context 1", "Context 2", …) in a row above the message box. You can rename a chip (double-click) or remove it (×), stack several from different parts of the conversation, and on send they're flushed into the message as labeled markdown-quoted blocks (`**Name:**` + quoted text). Switching away from a session clears any pending blocks so they don't leak between conversations. Thanks @rodboev.
+
+## [v0.51.478] — 2026-06-17 — Release QM (read-only LLM Wiki browser in Insights)
+
+### Added
+
+- **The Insights panel now has a read-only LLM Wiki browser (#2941).** When the Hermes agent has an LLM Wiki configured (`WIKI_PATH` / `skills.config.wiki.path`), the Insights panel surfaces a knowledge-base observability section — enabled state, entry/page/raw-file counts, last-updated, and last writer — plus a browsable read-only view of the wiki pages. When no wiki directory is configured it shows a clear "Unavailable — set `WIKI_PATH`…" empty state instead of failing. The browser is strictly read-only and auth-gated, and the page-loading path is hardened against directory traversal (realpath + symlink-safe resolution). Thanks @rodboev.
+
+## [v0.51.477] — 2026-06-17 — Release QL (gateway runs-API routing now opt-in)
+
+### Fixed
+
+- **Gateway chat no longer silently loses mid-conversation context (#4362).** When the WebUI was connected to a Hermes gateway that advertised approval/runs support, it routed *every* browser chat turn through the gateway's `/v1/runs` API, which creates an isolated Api_Server session per turn — so the agent lost the conversation's context between messages. Routing through the runs API is now gated behind an explicit opt-in (`HERMES_WEBUI_GATEWAY_USE_RUNS_API=1` env var, or `webui_gateway_use_runs_api: true` in config), defaulting to off. Normal gateway chat now stays on `/v1/chat/completions`, which preserves the session via `X-Hermes-Session-Id`. Operators who want the in-gateway-chat approval-events flow can re-enable it with the flag. Thanks @rodboev.
+
+## [v0.51.476] — 2026-06-17 — Release QK (cross-provider model-pick + non-git update-status fixes)
+
+### Fixed
+
+- **Selecting a model from a non-default provider no longer silently reverts to the default model (#4363).** When the model dropdown rebuilds (panel switch, provider refresh, or a live-model fetch that times out and serves a fallback catalog), a cross-provider selection such as `@my-local:gemma4:12b` could vanish from the refreshed catalog — and the browser would quietly snap the `<select>` back to its first `<option>` (the default model). The dropdown now re-injects the chosen model as a custom option when it's missing from the rebuilt catalog, so your selection is preserved instead of silently changing under you. Thanks @edoumo.
+- **Docker and pip installs now show "Can't check for updates" instead of the misleading "Up to date" (#4356).** When the WebUI or agent is installed without a `.git` directory (e.g. via Docker image or `pip install`), the update check previously reported "Up to date" because there was nothing to compare against. It now detects the absence of `.git` and surfaces "Can't check for updates" in the Settings panel. In mixed deployments where one component has a git checkout and the other does not, the valid git-side update info is still shown alongside the can't-check indicator. Thanks @rodboev.
+
+## [v0.51.475] — 2026-06-17 — Release QJ (ElevenLabs TTS engine)
+
+### Added
+
+- **ElevenLabs is now selectable as a TTS engine in the WebUI (#3510).** Alongside Browser speech synthesis and Edge TTS, you can pick ElevenLabs for voice mode and message read-aloud. It uses the same credentials and voice you've already configured for the Hermes agent — `ELEVENLABS_API_KEY` (env, falling back to `~/.hermes/.env`) and `tts.elevenlabs.voice_id` / `model` from `config.yaml` — so there's nothing new to set up if the agent already has it (ElevenLabs is a built-in Hermes TTS provider). The endpoint validates the configured `voice_id` as a safe path segment, enforces the existing 5000-character cap and rate limit, and returns a clear error when no key is configured. Thanks @linux-fertxo.
+
+## [v0.51.474] — 2026-06-17 — Release QI (reconcile WebUI session source flags)
+
+### Fixed
+
+- **A WebUI-native session is no longer force-reloaded as if it were an imported CLI transcript (#4348).** When a WebUI-origin session carried a stale sidecar that still said `raw_source=cli` / `is_cli_session=true` (while state.db correctly recorded it as WebUI-origin), `/api/session` returned the stale flags and the browser opened it as an external session — entering the periodic external-refresh reload path that could rebuild the transcript while you were reading it. The detail endpoint now reconciles its source flags against the state.db row (the source of truth) before redaction, and the frontend `_isExternalSession()` refuses to classify an explicit WebUI-source session as external. Keeps the list and detail endpoints on one source-classification contract; imported CLI/messaging sessions are unaffected. Thanks @dso2ng.
+
+## [v0.51.473] — 2026-06-17 — Release QH (clean cancelled user context chains)
+
+### Fixed
+
+- **A cancelled or interrupted correction turn no longer reappears as a stale prefix on later messages (#4341).** WebUI keeps a visible transcript and a model-facing `context_messages` layer; when a correction turn was cancelled/interrupted, the agent's role-alternation repair could merge the stale user text into a later clean turn as `<stale>\n\n<current>`, contaminating model-facing context (and sometimes the visible transcript). Building on the one-hop cleanup in #4089, the WebUI merge/writeback boundary now also recognizes multi-hop repaired chains and replayed stale prefixes from older polluted rows, normalizing only the current-turn row back to exactly what the user submitted. The fix is anchored on a strict invariant — the repair suffix must normalize to the *entire* submitted turn — so multi-paragraph prompts, shared-prefix messages, and repeated identical turns are never mistaken for stale chains, and already-committed historical context rows are left intact. Thanks @starship-s.
+
+## [v0.51.472] — 2026-06-17 — Release QG (paste image + text together)
+
+### Fixed
+
+- **Pasting an image copied from a browser, Notes, or Slack now attaches the image again (#1620 regression).** When the clipboard carries both text and an image (the normal shape for "right-click → Copy Image" and most rich-source copies), the composer paste handler previously bailed entirely and silently dropped the image. It now attaches any real image (`kind==='file'` image item) while still letting the browser paste accompanying text normally — matching how the major AI chat UIs handle paste. Pure screenshots still attach as before, plain text still pastes with no attachment, and a rich-text editor's rendered HTML preview (a `text/html` string, not a file) is not misclassified as an image. Thanks @kaishi00.
+
+## [v0.51.471] — 2026-06-17 — Release QF (searchable settings)
+
+### Added
+
+- **Settings is now searchable (#3850).** A search box at the top of the Settings panel lets you find any setting across all sections (Appearance, Preferences, Providers, Plugins, System) without clicking through tabs — type a label fragment (e.g. "model", "theme", "language") and matching fields appear in a dropdown with their section breadcrumb. Clicking a result jumps to that section, scrolls the field into view, and pulses a brief highlight on it. Search clears after a pick. The index is built once on first search (covering lazily-loaded provider/plugin cards) and memoized. Thanks @rodboev.
+
+## [v0.51.470] — 2026-06-17 — Release QE (transcript virtualization now experimental / off by default)
+
+### Changed
+
+- **Transcript virtualization is now experimental and off by default (#4343).** The windowed rendering of very long transcripts (#500/#4214) caused a scroll-up flicker on long sessions with large tool-call blocks — the viewport "flicks back and forth" while scrolling up (a variable-height virtual-scroll anchor oscillation, distinct from the stream-completion jump fixed in #4325). Until the scroll behavior can be made reliable, the "Virtualize long transcripts" preference now defaults **off** for everyone — including anyone who had it on during v0.51.469 — and is relabeled experimental/opt-in. By default the full transcript renders at once (no flicker, and the browser's Find/Ctrl+F matches the whole conversation). You can opt back in under Settings → Preferences. Thanks @b3nw for the report and A/B confirmation. (Root-cause scroll-stability work tracked separately.)
+
+## [v0.51.469] — 2026-06-17 — Release QD (transcript virtualization fix + opt-out)
+
+### Fixed
+
+- **Long chat transcripts no longer freeze, jump to an older message, and scroll back after a streaming response completes (#4325).** Since transcript virtualization shipped (v0.51.440, #500/#4214), finalizing a streamed reply on a long (80+ message) session re-measured virtual row heights and restored the viewport by a stale pixel `scrollTop` that pointed at the wrong message after the remeasure — producing a freeze + scroll-jump + snap-back. The stream-end scroll restore now re-pins to a semantic DOM row (by message index) instead of a raw pixel offset, and when that anchor row was virtualized out of the current window it is mounted (scroll nudged + re-render with `preserveScroll`) before restoring. Thanks @rodboev (#4328).
+
+### Added
+
+- **You can now turn off transcript virtualization (#4325).** A new Preferences setting, "Virtualize long transcripts" (on by default), lets you opt out of the windowed rendering for very long transcripts. When disabled, the full transcript renders at once — useful if you hit any virtualization rendering/scroll edge case or want the browser's native Find (Ctrl+F) to match the entire conversation. Disabling it also short-circuits the virtual re-measure loop entirely.
+
+## [v0.51.468] — 2026-06-17 — Release QC (onboarding OAuth single-flight)
+
+### Security
+
+- **Onboarding OAuth start is now single-flight per provider/profile (#3972).** `POST /api/onboarding/oauth/start` runs background provider polling so the UI can detect completed CLI OAuth setup, and is reachable unauthenticated while first-run auth is being configured. Repeated start requests for the same provider/profile previously accumulated unbounded in-memory pending flows and daemon polling workers. The start path is now serialized under a per-`(provider, hermes_home)` lock across the full check → device-code request → flow insertion → worker spawn sequence, and the in-memory check-and-insert is paired atomically under the flows lock — so concurrent duplicate starts reuse the existing pending flow instead of racing a second device-code request or spawning a duplicate worker. Single (non-duplicate) start behavior is unchanged. Thanks @Hinotoi-agent.
+
+## [v0.51.467] — 2026-06-16 — Release QB (symlinks in workspace file tree)
+
+### Added
+
+- **The workspace file tree now shows symlinks with a distinct chain-link icon (#4226).** Symbolic links (both directory and file symlinks) render with a chain-link icon instead of the regular file/folder icon, and hovering a symlink shows "Symlink → {target}" with long targets middle-elided. Directory symlinks still expand and navigate like folders; regular files and folders are unchanged. The symlink target is the server-resolved path (already filtered to in-workspace targets by the existing workspace trust boundary) and is rendered via the DOM `title` property — never an HTML sink — so an arbitrary symlink target cannot inject markup. Thanks @rodboev.
+
+## [v0.51.466] — 2026-06-16 — Release QA (active transcript reconciles on session events)
+
+### Fixed
+
+- **An open WebUI transcript now reconciles when another client/process updates it (#4205 follow-up).** The #3916/#4195 external-refresh guard made the 30-second poll correctly skip WebUI-native sessions — but it also made `refreshActiveSessionIfExternallyUpdated()` return early for *every* non-external session, so a real `sessions_changed` event would update the sidebar list while leaving the currently-open transcript stale. The early-return is now scoped to the periodic `poll` path only; `event`/focus/visibility triggers run the existing count/timestamp divergence check (guarded by the in-flight/busy/streaming locks, so no refresh loop), and `_scheduleSessionEventsRefresh` reconciles the active transcript, not just the sidebar.
+
+## [v0.51.465] — 2026-06-16 — Release PZ (workspace null-byte hardening)
+
+### Fixed
+
+- **Remote workspace paths containing an embedded null byte are now rejected (#4326).** Completes the #4273/#3664 remote-workspace trust-boundary hardening (v0.51.463): `_remote_terminal_workspace_candidate` now fails closed on a `\x00` in either the candidate path or `terminal.cwd`, before normalization. Previously a null-byte path skipped the POSIX-normalize branch, `_safe_resolve` swallowed the `ValueError` and returned the raw null `Path`, and the string-level containment check wrongly succeeded — accepting the path. Matches the fail-closed null-byte handling already applied at `_as_posix_path` / `_safe_resolve`. Thanks @rodboev.
+
+## [v0.51.464] — 2026-06-16 — Release PY (scannable model picker)
+
+### Added
+
+- **Model picker provider groups are now collapsible and open scannable (#4279).** Provider groups in the model picker start collapsed except the group that owns your currently-selected model, so a picker with many providers/models opens as a tidy list of provider headings rather than one long flat scroll. Searching auto-expands matching groups (and searches hidden overflow models); clearing the search restores the collapsed-except-selected view. The "Show all N models" affordance is restyled as a distinct "+ Show all N models" expander (muted italic, indented, not mistakable for a selectable model) and now reveals the overflow in place — the group stays open and the view scrolls to the newly-revealed models instead of resetting to the top. The redundant per-row provider chip is suppressed for rows already under their own provider heading (kept only for hoisted/search rows). Builds on @akrhin's collapsible-groups work.
+
+### Fixed
+
+- **Non-model credential-pool keys no longer appear as phantom providers in the model picker (#4324).** A regression from #4247: the credential-pool detection loop added *every* `auth.json` → `credential_pool` key to the detected providers without checking it names a model provider. The Photon iMessage plugin writes three such keys (`photon`, `photon_project`, `photon_user`) that are messaging-platform credentials, not LLM API keys — so the picker showed three bogus "providers" (`photon`, `photon project`, `photon user`) each listing the full auto-detected model catalog. Pool detection is now gated on a new `_is_known_model_provider()` check (a `custom:*` slug, a static `_PROVIDER_DISPLAY`/`_PROVIDER_MODELS` entry, or a registered model-provider plugin) on both the `load_pool` and raw-dict fallback paths, and the group-builder's generic fallback no longer paints an unrecognized id with the global catalog. Real pool-keyed providers (`copilot`, aliased `google`→`gemini`) still surface. Reported by Nic; fix by @nesquena-hermes and independently by @rodboev (#4329/#4330).
+
+## [v0.51.463] — 2026-06-16 — Release PX (tighter remote workspace boundaries)
+
+### Fixed
+
+- **Remote POSIX workspace trust boundaries are hardened (#3664).** The remote-terminal workspace containment check now normalizes both the candidate path and `terminal.cwd` before comparing, so a lexical `..` escape (e.g. `{cwd}/../other/...`) no longer slips past the containment check. The blocked-system-root gate was also restored below the home-directory allow-list in both workspace validators, so legitimate systemd-homed paths under `/var/home/<user>/...` stay allowed while system directories remain blocked. POSIX path shapes are normalized at the source so every downstream block probe is consistent (`/etc/../home/user` → `/home/user`, `/./etc/ssh` → `/etc/ssh`). Workspace paths containing an embedded null byte now fail closed with a clean validation error instead of surfacing a 500 (at both the workspace validators and the `/api/workspaces/add` route preflight), and the add-workspace route now applies the same home-directory carve-out as the validators so systemd-homed workspaces under `/var/home/<user>/...` register correctly. Thanks @rodboev.
+
+## [v0.51.462] — 2026-06-16 — Release PW (sidebar survives slow loads)
+
+### Fixed
+
+- **The conversation sidebar no longer vanishes during slow or resilient session loads (#4167).** A slow `/api/sessions` response could leave the sidebar empty; it now keeps the list visible and shows a retryable error state (with an opt-in request retry) instead of blanking out. Read-only sessions (imported CLI and Claude Code sessions) correctly keep their rename/action-menu/swipe suppression and the detailed gateway model label renders, both of which had been dropped from the sidebar payload. And when a refresh fails right after switching profiles, the sidebar shows the error state rather than briefly re-rendering the previous profile's conversations. Thanks @ai-ag2026.
+
+## [v0.51.461] — 2026-06-16 — Release PV (custom-provider keys recognized from the pool)
+
+### Fixed
+
+- **Custom and aliased providers with credential-pool keys now show as configured (#4247).** Providers whose API keys live in the credential pool (added via `hermes auth add`) rather than env vars were reported unconfigured in the WebUI, so their models didn't appear. Provider detection now also consults the credential pool via `_has_explicit_pool_credentials()`, which filters the ambient `gh auth token` entry (so Copilot no longer falsely shows configured on any machine with `gh` installed) and is cache-routed to avoid the cold per-provider pool-load latency. Provider aliases (`glm`→`zai`, `github`→`copilot`, etc.) are resolved before loading the pool at every retrieval site, so detection and key-retrieval always read the same pool. The credential-pool cache is also now scoped to the active profile, so a custom provider configured in one profile no longer shows as configured in another profile that lacks the key. Thanks @akrhin.
+
+## [v0.51.460] — 2026-06-16 — Release PU (custom voice providers recognized)
+
+### Fixed
+
+- **Command (custom) speech-to-text providers are now recognized by the voice capability probe (#4312).** When `stt.provider` pointed at a Hermes command-type STT provider, the WebUI's `/api/transcribe/capability` probe only knew the built-in providers, so it reported voice input as unavailable and the browser fell back unnecessarily. The probe now delegates command-provider recognition to the agent's own resolver (`_resolve_command_stt_provider_config`) as the single source of truth, consulted after the built-in chain. Thanks @LLMinem.
+
+## [v0.51.459] — 2026-06-16 — Release PT (your message stays your message)
+
+### Fixed
+
+- **Stale prior-turn text no longer contaminates the current user message (#4089).** When the agent's defensive role-sequence repair concatenated the previous context-tail user row with the freshly-submitted turn as `<stale>\n\n<current>`, that polluted pair was persisted into both the model context and the visible transcript — so a new message could render prefixed with an earlier one. A new detector recognizes exactly this repair shape (it requires the literal `\n\n` boundary and an exact tail/current match after workspace-sentinel stripping) and normalizes the affected row back to the clean current turn. Both the model-context merge and the visible-transcript merge funnel through one rule, and the normalization is scoped strictly to the new-turn slice — committed history rows are never rewritten. Thanks @starship-s.
+
+## [v0.51.458] — 2026-06-16 — Release PS (long sessions stop hanging)
+
+### Fixed
+
+- **Server no longer hangs on long tool-call sessions (#4314).** The transcript-backfill loop in `_merge_display_messages_after_agent_result` was O(D²·C): it re-ran `_message_identity` (`json.dumps`) for every future display row on every outer iteration and used an O(N) list-slice membership test. On sessions with many tool-call turns this pegged a CPU core, held the GIL, and stalled the `/api/sessions` sidebar poll 5–11s per cycle — the WebUI appeared hung on the current turn. The loop now precomputes display identities once and keeps an O(1) multiset mirror of the remaining context keys, making it O(D²). Behavior is unchanged: the multiset preserves the exact membership semantics of the original list-slice (including duplicate-identity turns and empty rows), verified by a differential regression test. Thanks @psanger.
+
+## [v0.51.457] — 2026-06-16 — Release PR (gateway watcher can't brick startup)
+
+### Fixed
+
+- **Gateway watcher startup is now non-blocking (#4297).** `start_watcher()` ran synchronously in `main()` during boot, so if `_resolve_watcher_target()` stalled (a locked `state.db`, slow profile/home resolution, or an I/O block) the WebUI would never bind its port — a startup brick. It now starts on a daemon thread with a 5-second join, so the server proceeds to bind even when watcher initialization is slow; the watcher's own poll loop already ran on a separate daemon thread, so real-time SSE liveness is unchanged. Thanks @minidarkmimi.
+
+### Internal
+
+- **Windows pytest-harness compatibility (#3664).** Hardened the test suite to run on Windows: profile-home fallback paths are path-normalized, strict POSIX file-mode (`0o600`) assertions are gated behind `os.name != "nt"` (Linux still asserts them at full strictness), the conftest cleanup handles Windows process-tree/port teardown and the Py3.12+ `shutil.rmtree` `onexc` shim, and tests that require `fork`/`fcntl` carry `@requires_fork` / `@requires_fcntl` markers (which never skip on Linux). Test-only — no runtime or app behavior change, no Linux CI behavior change. (#4254, #4255, #4256, #4257, #4259, #4263, #4266, #4274)
+
+## [v0.51.456] — 2026-06-16 — Release PQ (start.sh tells you when the server is already running)
+
+### Changed
+
+- **`./start.sh` now detects an already-running server instead of pretending to start a new one.** Previously, running `./start.sh` while a server was already bound to the host:port would have `bootstrap.py` spawn a child that fails to bind and dies, while the existing instance answered the `/health` probe — so the script reported "ready" and exited 0 without actually starting anything. `start.sh` now probes `/health` first (best-effort, 2s timeout, via `curl`/`wget`; skipped if neither is present) and, when a server already answers, prints a clear message that nothing was (re)started plus how to restart (`./ctl.sh restart`, or stop-the-PID + `./start.sh`), then exits 0. This brings the detached `start.sh` path to parity with `ctl.sh`'s existing double-start refusal. The container path (which runs `server.py` directly) is unaffected. (#4308)
+
+## [v0.51.455] — 2026-06-16 — Release PP (drop stale background-process completions instead of prepending them to a later turn)
+
+### Fixed
+
+- **A background task that finishes long after you've moved on no longer hijacks your next message.** When a `notify_on_complete` background task's completion fired after the user had left the session idle (or it sat queued), the WebUI prepended its `[IMPORTANT: … completed]` notification to whatever the user typed next — so the agent answered the *old* task and already-delivered completion notices reappeared on later turns. The notification drain now age-gates completions: one whose enqueue time is older than a configurable cap (`HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS`, default 6h; set `0` to disable) is silently consumed instead of delivered. Completions without a timestamp (older agent builds) are never dropped, so behavior is unchanged until the agent side stamps `completed_at`. (#4306, #4029)
+
+## [v0.51.454] — 2026-06-16 — Release PO (complete the Japanese UI translation)
+
+### Changed
+
+- **Japanese (`ja`) locale: translated the remaining English fallbacks.** 69 UI strings in the Japanese locale that were still falling back to English — covering the activity-display modes, advanced/auxiliary model options, the gateway-approval message, and assorted settings labels — now have natural Japanese translations, bringing the `ja` block to parity with English. Proper nouns and fixed abbreviations (URL, N/A, YOLO, JSON, Hermes Agent, placeholders) are intentionally left as-is. No key changes — values only. (#4301)
+
+## [v0.51.453] — 2026-06-16 — Release PN (approval controls work on remote-gateway backends)
+
+### Fixed
+
+- **Tool-approval prompts on a remote-gateway backend now show working approve/deny controls.** When the WebUI was connected to a Hermes gateway that ran the agent, an approval request would appear but its approve/deny action had no backend to respond to, so the buttons did nothing. The WebUI now bridges the approval response to the gateway's runs API: when a session has an active gateway run, the approve/deny choice is forwarded to the gateway (run id is server-derived; the existing auth + CSRF on `/api/approval/respond` is preserved), and the gateway's approval-event capability is probed (and cached for 60s) so the runs-API path is used only when the gateway advertises support. Backends that don't use a gateway are unaffected — the local approval path is unchanged and only runs when no gateway run is active. Gateways too old to advertise approval support surface a clear "upgrade the gateway" message instead of a silent no-op. (#4229, #4203)
+
+## [v0.51.452] — 2026-06-16 — Release PM (reject symlinked memory-file writes)
+
+### Security
+
+- **Memory writes refuse a symlinked target file.** Writing memory (`MEMORY.md` / `USER.md` / `SOUL.md`) now rejects the write if the target path is a symlink, so a symlink planted at the memory path — e.g. via a restored or imported workspace — can no longer redirect a memory write to clobber an arbitrary file outside the memories directory. This extends the symlink-rejection hardening already shipped for skills and plugins (#4217 / #4234 / #4240). A symlinked parent `memories/` directory is intentionally still allowed (symlinking the whole directory is a legitimate setup); only the concrete target file is guarded. (#4242)
+
+## [v0.51.451] — 2026-06-16 — Release PL (show named-profile external sessions in the all-profiles list)
+
+### Fixed
+
+- **The "all profiles" session list now includes CLI / Telegram / API sessions that live under named profiles.** Previously the all-profiles view enumerated only the active profile's external (non-WebUI) sessions, so a session started by a named-profile CLI, Telegram, or API client never appeared even with "all profiles" selected. Enumeration now scans across profiles when (and only when) the request explicitly asks for the all-profiles view. The cross-profile boundary is preserved: an unqualified single-profile request still resolves to the active profile's `state.db` (a foreign session id returns 404, the same not-found shape as a missing session), and the client only sends the cross-profile import fields from the all-profiles view — mirroring the active-profile scoping already applied to session detail loads and exports. (#4067, #4065)
+
+## [v0.51.450] — 2026-06-16 — Release PK (preserve custom provider namespace prefixes in model normalization)
+
+### Fixed
+
+- **Custom provider model namespaces are no longer silently rewritten to a first-party family.** `_normalize_provider_id` matched provider prefixes with a broad `startswith()`, so a custom namespace that merely *began* with a first-party token — `gemini_cli/...`, `gpt_proxy/...`, `claude-relay/...` — collapsed into the first-party family (`google`/`openai`/`anthropic`). On session reload this triggered a spurious "stale model repair" that swapped the model to the profile default and cleared the displayed turn metrics (`last_prompt_tokens`, `threshold_tokens`), making the composer context indicator ring disappear for custom models. Prefix matching is now restricted to an exact token or a prefix followed strictly by an accepted namespace delimiter (`:` or `/`), and genuine hyphenated first-party aliases (`openai-api`, `openai-codex`, `google-gemini`, `google-ai-studio`, `claude-code`) are mapped explicitly so they still resolve. The same bare-prefix collision was also fixed on the chat-send path (the streaming profile-context resolver had its own ungated loop), and the bare-prefix family detection no longer fires on namespaced model IDs. (#4278)
+
+## [v0.51.449] — 2026-06-16 — Release PJ (stop recovered turns replaying into later context)
+
+### Fixed
+
+- **Interrupted conversations no longer replay the prior message into every later turn.** After a session was interrupted (gateway restart or tool-iteration limit) and recovered, the WebUI could re-inject the recovered user message into the context of each subsequent turn. The state-database context reconciliation now recognizes a recovered turn as a valid single-row aligned prefix (gated strictly to a recovered user turn at the head of the window), so it's matched and de-duplicated instead of replayed. (#4283)
+
+## [v0.51.448] — 2026-06-16 — Release PI (fix blank transcript viewport regression)
+
+### Fixed
+
+- **The chat transcript no longer renders blank after a reply in long conversations.** A regression from the message-list virtualization (v0.51.423, #3714) could leave the transcript viewport empty after an assistant reply settled — the data was still there, but you had to click "Newest Message" to force it back, and scrolling up could blank it again. The viewport now captures and restores a row anchor across re-renders (instead of only a raw scroll offset), and detects the blank state to force a one-time re-render recovery. (#4277)
+
+## [v0.51.447] — 2026-06-15 — Release PH (toolset selector shows the active profile's defaults)
+
+### Added
+
+- **The composer toolset selector now surfaces the active profile's toolset defaults.** When a conversation has no per-session toolset override it shows "profile defaults" (the toolsets the active profile enables) rather than a generic label, and the dropdown lists the configured MCP servers with their current state plus Apply / "Use profile defaults" controls. Picking toolsets is scoped to the current session only (it never mutates the profile or global config); when no MCP toolsets are configured it falls back cleanly to the global view. The selector appears only when the composer footer has room (wide desktop) and is hidden on narrow desktop and mobile so the footer never crowds. (#3100)
+
+## [v0.51.446] — 2026-06-15 — Release PG (model picker "show all" for large provider catalogs)
+
+### Added
+
+- **The model picker now caps large provider lists and offers "Show all".** A provider group with more than 25 models shows the first 15 plus a "Show all N models" row that expands the rest in place, so the picker stays scannable for big catalogs (e.g. OpenRouter) without hiding anything — search already matches the hidden tail before expansion. The group heading carries the overflow count ("Provider (15 of 30)"); individual rows show the plain provider label. The Settings, scheduled-job, profile, and auxiliary-model selectors also include the full catalog (visible + overflow), so no model is dropped from those dropdowns. Groups of 25 or fewer are unchanged. (#3691)
+
+## [v0.51.445] — 2026-06-15 — Release PF (scope gateway watcher to the active profile)
+
+### Fixed
+
+- **The gateway session watcher is now per-profile, so switching profiles in one tab no longer breaks gateway live-updates in another.** The watcher that drives gateway session SSE updates was a single process-wide instance: when one browser tab switched profiles it stopped and replaced that global watcher, silently stealing the gateway event stream from tabs on other profiles. Gateway watchers are now keyed by profile (a registry, not a singleton), each request's SSE stream subscribes to its own active profile's watcher, a profile switch only restarts that profile's watcher (never one another tab is observing), and idle watchers with no subscribers are reaped. Switching profiles in a tab now also reconnects that tab's own gateway stream to the new profile. (#2848)
+
+## [v0.51.444] — 2026-06-15 — Release PE (refresh sidebar session list on uncommitted writes + settings changes)
+
+### Fixed
+
+- **The sidebar session list now refreshes when new sessions are written but not yet checkpointed, and when settings change.** When CLI-session visibility is on, the `/api/sessions` response is cached and invalidated by a fingerprint of its source files. That fingerprint stamped the main `state.db` and the session index but not the SQLite write-ahead log (`state.db-wal`) — so a freshly-written CLI/agent session that was still in the WAL (not yet checkpointed into the main db file) could be missed until the next checkpoint, leaving the sidebar stale. The fingerprint now also stamps `state.db-wal` and the settings file, so those changes invalidate the cache immediately. Invalidation stays scoped to the CLI-session cache keys. (#4268)
+
+## [v0.51.443] — 2026-06-15 — Release PD (scope session by-id reads + exports to active profile)
+
+### Security
+
+- **Direct session reads and exports now honor the active-profile boundary, like the session list already does.** `/api/sessions` scopes its rows to the request's active Hermes profile, but two by-id endpoints did not: `GET /api/session?session_id=…` (transcript/metadata read, including the CLI-session fallback) and `GET /api/session/export?session_id=…` (full transcript JSON download) loaded a session purely by id. A stale, leaked, or guessed session id from another profile could therefore disclose that profile's transcript or export. Both paths now apply the same `_profiles_match(...)` check and return the same `404` used for missing sessions (so they don't reveal foreign-profile session existence). Default/legacy-root profile aliasing is preserved, and the `/api/sessions` list path is unchanged. (#3982, #3991)
+
+## [v0.51.442] — 2026-06-15 — Release PC (require auth for passkey enrollment)
+
+### Security
+
+- **First passkey enrollment is now gated like first-password onboarding.** On a `HERMES_WEBUI_PASSKEY=1` instance with auth not yet configured, a remote unauthenticated caller could register the *first* passkey credential and claim the account before the legitimate operator. The passkey registration endpoints now apply the same onboarding gate as first-password setup: only loopback/private-network requests (or an explicit `HERMES_WEBUI_ONBOARDING_OPEN=1` operator opt-in) can bootstrap the first passkey, and remote/tunnel callers are rejected. The locality check uses the raw socket address (forwarded headers are ignored unless `HERMES_WEBUI_TRUST_FORWARDED_FOR=1`), so it can't be spoofed via `X-Forwarded-For`/`Host`. Once auth is enabled, additional enrollment requires a valid authenticated session. The passkey *login* path is unchanged. (#4171)
+
+## [v0.51.441] — 2026-06-15 — Release PB (honest notification-permission controls)
+
+### Fixed
+
+- **Notification permission controls now reflect the real browser state (#4118).** The "Enable notifications" button in Settings was a silent no-op once permission had already been granted or denied — it gave no feedback and didn't show the current state. It now reflects the live `Notification.permission` value: the button is disabled with an explanatory tooltip/aria-label when permission is already granted, surfaces the denied/unsupported states honestly, and the granted branch confirms with a toast instead of doing nothing.
+
+## [v0.51.440] — 2026-06-15 — Release PA (advanced per-model options + auxiliary model routing)
+
+### Added
+
+- **Advanced model options and auxiliary model routing in Settings → Preferences.** A gear button next to the main model selector opens a "Main model options" dialog (Base URL override, Extra body JSON merged into the request, API key override — all the fields that actually take effect). An "Auxiliary Models" section lets you route side-tasks (vision, compression, web-extract, session-search, approval, MCP, title-generation, skills-hub, curator, kanban-decomposer, profile-describer, triage-specifier) to specific models/providers, each with its own advanced options (including per-task timeout / download-timeout / max-concurrency). API keys are write-only (never echoed back), `extra_body` must be a valid JSON object (malformed input is rejected with a 400), and the main model's `extra_body` is now passed through to the agent at request time via `request_overrides`. (#3097)
+
+## [v0.51.439] — 2026-06-15 — Release OZ (Insights dashboard polish)
+
+### Changed
+
+- **Dashboard aesthetic refinements on the Insights page (#766).** Model names in the usage table render bold and cost/token figures use tabular-nums for cleaner column alignment; the per-model table columns are tightened. Error alerts (gateway-offline, cron needs-attention) now use the error accent color with a slightly heavier border, while the informational cron-script-job banner stays amber — sharpening the info-vs-problem distinction. Minor profile-card and workspace-divider spacing polish. (#766)
+
+## [v0.51.438] — 2026-06-15 — Release OY (model cost/health comparison table on Insights)
+
+### Added
+
+- **The Insights panel has an opt-in "Model health comparison" reference table.** A collapsible (default-collapsed) table listing common models with their provider, input/output cost per 1M tokens, and a plain-English replacement/when-to-use guide — a quick at-a-glance cost reference alongside the usage analytics. Every cell is HTML-escaped; the data is static (no new API calls), and the four new i18n keys are present across all locales. (#691)
+
+## [v0.51.437] — 2026-06-15 — Release OX (Escape blurs the composer for keyboard nav)
+
+### Fixed
+
+- **Pressing Escape in the message composer now blurs it so j/k message navigation works.** Keyboard-only users could not reach the j/k session-navigation shortcuts while the composer held focus (it swallowed the keys). Escape now blurs the composer when it's focused — after any higher-priority Escape action (closing the slash-command dropdown, dismissing onboarding/settings, cancelling a message edit, clearing the session search) still runs first. The slash-command dropdown's Escape handler now stops propagation so closing it doesn't also blur in the same keystroke, and the blur is skipped while an IME candidate window is composing (so Escape dismisses the candidate for CJK input instead of blurring). (#3952)
+
+## [v0.51.436] — 2026-06-15 — Release OW (cron sessions mark unread on new runs)
+
+### Fixed
+
+- **Cron sessions in the sidebar now mark unread when a new run lands, attributed to the correct job.** When a scheduled job finished, the sidebar's unread resolver matched a session id against `cron_<jobid>_` prefixes built only from the just-completed jobs, so a job whose id is a prefix of another's (e.g. `backup` vs `backup_full`) could steal the other's session (`cron_backup_full_…` resolving to `backup`). The resolver now considers all known job ids and attributes each session to the longest matching job-id prefix, which is provably unambiguous (the matching prefixes of a single session id are nested, so the longest is unique). The lookup is a read-only `state.db` scan that only runs when a cron actually completed, degrades gracefully on contention, and filters in Python rather than via SQL `LIKE`. (#3460)
+
+## [v0.51.435] — 2026-06-15 — Release OV (supported local pytest runner)
+
+### Added
+
+- **`./scripts/test.sh` runs the suite in a repo-local, version-correct virtualenv.** The runner finds a supported interpreter (Python 3.11–3.13), creates or rebuilds a repo-local `.venv` when needed, installs the pinned dev dependencies from the new `requirements-dev.txt`, and then runs pytest — so contributors get a one-command, correctly-versioned test path instead of a bare `pytest` that may collect against an unsupported system Python. `tests/conftest.py` also fails fast with a clear message if pytest is launched on an unsupported interpreter, and the runner refuses to create or `--clear` a virtualenv through a symlinked `.venv` (which would otherwise empty the symlink's target). Dev-tooling only — no runtime or app behavior changes. (#3908)
+
+## [v0.51.434] — 2026-06-15 — Release OU (reject symlinked skill files on save)
+
+### Fixed
+
+- **Saving a skill no longer writes through a symlinked `SKILL.md`.** `_handle_skill_save` now rejects a symlinked skill file with a 400 instead of following it and overwriting the link's target — extending the workspace symlink hardening (#4217 / #4234) to the skills surface. (#4240)
+
+## [v0.51.433] — 2026-06-15 — Release OT (reject symlinked entries in /api/file/save, #4234)
+
+### Fixed
+
+- **Saving to a workspace symlink no longer writes through to the symlink's target.** `/api/file/save` resolved the final symlink before writing, so saving to a workspace symlink `link.txt → real.txt` overwrote `real.txt` instead of the link. It now rejects a symlinked path with a 400 (checked before the existence probe, so dangling symlinks are caught too) — completing the symlink hardening from #4217 (delete/rename/move) for the write path. `safe_resolve` already blocked out-of-workspace targets, so this closes the in-workspace overwrite-through-symlink case. (#4234)
+
+## [v0.51.432] — 2026-06-15 — Release OS (TUI sessions discoverable in the sidebar)
+
+### Fixed
+
+- **TUI sessions now show up in the sidebar like CLI sessions do.** The session source-classification only recognized `cli` (and friends), so `tui`-sourced sessions weren't tagged as CLI-origin and could be filtered out or mislabeled. `tui` is now treated alongside `cli` everywhere the source is classified, and a TUI continuation tip keeps the navigation pointed at the latest tip with its visible TUI title (rather than an opaque compression-snapshot title), so the newest TUI conversation is findable by name. (#4213)
+
+## [v0.51.431] — 2026-06-15 — Release OR (make request logging non-fatal)
+
+### Fixed
+
+- **A closed or redirected stdout/stderr stream can no longer abort an HTTP response before it's sent.** Request/access logging and request-error logging now route through a small guarded print helper, so if agent or tool code redirects or closes the process-wide output streams in another thread, the log write is swallowed instead of raising mid-response. Real handler errors are unaffected — the error message and traceback are still built and still surface a 500; only the log I/O is guarded, and `KeyboardInterrupt`/`SystemExit` still propagate. (#4188)
+
 ## [v0.51.430] — 2026-06-15 — Release OQ (session-list-changed events carry the changed session id)
 
 ### Changed

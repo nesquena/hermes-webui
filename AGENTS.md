@@ -47,6 +47,14 @@ Follow that checklist's safety rules:
 - Keep one logical change per PR; split unrelated refactors or cleanup.
 - Read `docs/CONTRACTS.md` and the linked contract/RFC for the touched
   subsystem before editing.
+- For local pytest runs, use `./scripts/test.sh` instead of bare `python3`,
+  `python -m pytest`, or `pytest`. The script creates/uses the repo `.venv`,
+  pins execution to Python 3.11-3.13, and installs missing dev test dependencies.
+  `HERMES_WEBUI_TEST_PYTHON` selects the supported base interpreter used to
+  create or rebuild `.venv`; it must not install test dependencies into a
+  system/Homebrew interpreter directly.
+  If a direct pytest invocation reports an unsupported interpreter, rerun through
+  `./scripts/test.sh` before debugging product code.
 - Prefer the existing Python + vanilla JavaScript structure. Do not add
   dependencies, build tools, frameworks, or long-lived processes without clear
   justification and a rollback story.

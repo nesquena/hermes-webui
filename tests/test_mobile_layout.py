@@ -13,7 +13,7 @@ They are static checks (no server needed) that catch common regressions:
   - No full-viewport overflow that would break scroll
 
 Run as part of the standard test suite:
-    pytest tests/test_mobile_layout.py -v
+    ./scripts/test.sh tests/test_mobile_layout.py -v
 """
 
 import pathlib

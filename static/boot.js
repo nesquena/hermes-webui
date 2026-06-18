@@ -1034,6 +1034,46 @@ window._micPendingSend=window._micPendingSend||false;
     }
     if(!clean){ _startListening(); return; }
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
+    if(engine==="elevenlabs"){
+      _ttsSpeaking=true;
+      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: clean, engine: 'elevenlabs'})
+      })
+      .then(r => {
+        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
+        return r.blob();
+      })
+      .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        _playingEdgeAudio=audio;
+        audio.onended = () => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+        };
+        audio.onerror = () => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        };
+        audio.play().catch(e => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        });
+      })
+      .catch(() => {
+        _ttsSpeaking=false;
+        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      });
+      return;
+    }
     if(engine==="edge"){
       const voice=localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural";
       const savedRate=parseFloat(localStorage.getItem("hermes-tts-rate"));
@@ -1425,7 +1465,7 @@ $('msg').addEventListener('keydown',e=>{
     if(e.key==='ArrowUp'){e.preventDefault();navigateCmdDropdown(-1);return;}
     if(e.key==='ArrowDown'){e.preventDefault();navigateCmdDropdown(1);return;}
     if(e.key==='Tab'){e.preventDefault();selectCmdDropdownItem();return;}
-    if(e.key==='Escape'){e.preventDefault();hideCmdDropdown();return;}
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();return;}
     if(e.key==='Enter'&&!e.shiftKey){
       if(_isImeEnter(e)){return;}
       e.preventDefault();
@@ -1521,20 +1561,25 @@ document.addEventListener('keydown',async e=>{
       const bar=editArea.closest('.msg-row')&&editArea.closest('.msg-row').querySelector('.msg-edit-bar');
       if(bar){const cancel=bar.querySelector('.msg-edit-cancel');if(cancel)cancel.click();}
     }
+    // Blur composer to enable j/k message navigation.
+    // Skip while an IME candidate window is composing — Escape there should
+    // dismiss the candidate, not blur the composer (CJK input).
+    if(document.activeElement===$('msg') && !e.isComposing && !_imeComposing){
+      $('msg').blur();
+    }
   }
 });
 $('msg').addEventListener('paste',e=>{
   const items=Array.from(e.clipboardData?.items||[]);
-  // When the clipboard carries BOTH text and an image (common from Notes,
-  // Word, browsers, Slack — the OS attaches a rendered preview alongside
-  // the plain text), prefer the text and let the browser paste normally.
-  // Only intercept when the clipboard is image-only (true screenshot paste).
-  // Tighten the image filter to kind==='file' so string items advertising an
-  // image MIME (e.g. text/html with an embedded data URI) are not misclassified.
-  const hasText=items.some(i=>i.kind==='string'&&(i.type==='text/plain'||i.type==='text/html'));
+  // Extract image items (kind==='file' filter avoids misclassifying text/html
+  // with embedded data URIs as images).
   const imageItems=items.filter(i=>i.kind==='file'&&i.type.startsWith('image/'));
-  if(!imageItems.length||hasText)return;
-  e.preventDefault();
+  if(!imageItems.length)return;
+  // If text is also present (common when copying images from browsers, Notes,
+  // Slack, etc.), let the browser paste the text normally AND attach the image.
+  // Only preventDefault when the clipboard is image-only (true screenshot paste).
+  const hasText=items.some(i=>i.kind==='string'&&(i.type==='text/plain'||i.type==='text/html'));
+  if(!hasText)e.preventDefault();
   const pasteTs=Date.now();
   const files=imageItems.map((i,idx)=>{
     const blob=i.getAsFile();
@@ -1846,6 +1891,10 @@ function applyBotName(){
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
     applyEmptyStateSuggestionPref();
+    // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
+    // It caused scroll-up flicker on long sessions, so it's off for everyone
+    // unless explicitly opted in; long transcripts render in full by default.
+    window._virtualizeTranscript=s.virtualize_transcript===true;
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=s.show_cli_sessions!==false;
@@ -1957,6 +2006,7 @@ function applyBotName(){
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
+    window._virtualizeTranscript=false;  // settings-load failed: default-OFF (experimental/opt-in) (#4343)
     window._showTps=false;
     window._fadeTextEffect=false;
     window._showCliSessions=true;  // settings-load failed: mirror the True config default (#3988)

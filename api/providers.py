@@ -991,6 +991,19 @@ def _provider_has_key(provider_id: str) -> bool:
                 return True
             if _provider_value_counts_as_api_key(provider_id, os.getenv(alias)):
                 return True
+    # Check credential pool — covers custom providers registered via
+    # `hermes auth add` which store keys in auth.json (not config.yaml).
+    # Must be outside the `if env_var:` block above: custom providers
+    # (custom:bothub, etc.) have no env var, so that block is skipped.
+    # Uses the cached _has_explicit_pool_credentials helper which also
+    # filters gh-cli / GITHUB_TOKEN ambient entries so copilot doesn't
+    # appear just because `gh` is installed.
+    try:
+        from api.config import _has_explicit_pool_credentials
+        if _has_explicit_pool_credentials(provider_id):
+            return True
+    except ImportError:
+        pass
 
     cfg = get_config()
     # Check model.api_key — only match if this provider is the active one.
@@ -1068,6 +1081,23 @@ def _get_provider_api_key(provider_id: str) -> str | None:
                     return os.getenv(cp_key[2:-1], "").strip() or None
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
+    # Fallback: try credential pool (e.g. bothub key stored via auth.json)
+    try:
+        from api.config import _has_explicit_pool_credentials, _resolve_provider_alias
+        if _has_explicit_pool_credentials(provider_id):
+            from agent.credential_pool import load_pool
+            # Must resolve alias here too: _has_explicit_pool_credentials does it
+            # internally, but load_pool sees the original unresolved provider_id.
+            _resolved = _resolve_provider_alias(provider_id)
+            pool = load_pool(_resolved)
+            if pool:
+                entry = pool.select()
+                if entry:
+                    key = getattr(entry, "runtime_api_key", "") or getattr(entry, "access_token", "")
+                    if key:
+                        return key
+    except ImportError:
+        pass
     return None
 
 
@@ -2343,6 +2373,14 @@ def get_providers() -> dict[str, Any]:
             if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
                 env_var = cp_api_key[2:-1]
                 cp_has_key = bool(os.getenv(env_var, "").strip())
+            # Fallback: check credential pool (key added via hermes auth add)
+            if not cp_has_key:
+                try:
+                    from api.config import _has_explicit_pool_credentials
+                    if _has_explicit_pool_credentials(cp_id):
+                        cp_has_key = True
+                except ImportError:
+                    pass
             providers.append({
                 "id": cp_id,
                 "display_name": cp_name,

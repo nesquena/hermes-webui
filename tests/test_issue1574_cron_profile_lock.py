@@ -5,6 +5,9 @@ import threading
 import types
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from conftest import requires_fork
+
 
 def _install_fake_cron(monkeypatch, run_job, events):
     cron_pkg = types.ModuleType("cron")
@@ -193,6 +196,7 @@ def _run_lock_probe_with_context(context_name, target, result_queue):
     return process.exitcode, acquired
 
 
+@requires_fork
 def test_spawn_context_does_not_inherit_parent_thread_locks(tmp_path):
     """Spawn starts a fresh interpreter where fork would clone a held lock."""
     helper_dir = tmp_path / "spawn_helper"
@@ -244,6 +248,7 @@ def test_spawn_context_does_not_inherit_parent_thread_locks(tmp_path):
     assert spawn_acquired is True
 
 
+@requires_fork
 def test_manual_cron_subprocess_drains_large_result_before_join(tmp_path):
     """A >100 KB result must not deadlock the parent before it can persist output."""
     if _real_hermes_agent_editable_install_present():
@@ -349,6 +354,7 @@ def test_manual_cron_run_does_not_hold_profile_lock_for_job_duration(tmp_path, m
     assert routes._is_cron_running("job1574") == (False, 0.0)
 
 
+@requires_fork
 def test_cron_job_subprocess_executes_under_selected_profile_home(tmp_path, monkeypatch):
     if _real_hermes_agent_editable_install_present():
         import pytest as _pytest

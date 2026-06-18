@@ -376,7 +376,17 @@ function _statusCardHtml(card){
 const MESSAGE_RENDER_WINDOW_DEFAULT=50;
 const MESSAGE_VIRTUAL_THRESHOLD_ROWS=80;
 const MESSAGE_VIRTUAL_BUFFER_PX=900;
-const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT=140;
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS={
+  user:120,
+  assistant:160,
+  tool_call:400,
+  default:140,
+};
+function _messageVirtualDefaultHeightForRole(role){
+  return MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[
+    role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role)?role:'default'
+  ];
+}
 const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
@@ -384,11 +394,26 @@ let _messageVirtualHeightCache=[];
 let _messageVirtualHeightCacheEntries=[];
 let _messageVirtualHeightCacheLen=0;
 let _messageVirtualHeightCacheSrc=null;
-let _messageVirtualEstimatedRowHeight=MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
+let _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
 let _messageVirtualScrollRaf=0;
 let _messageVirtualWindowKey='';
 let _messageVirtualMeasurementCycleKey='';
 let _messageVirtualMeasurementRetryCount=0;
+let _messageVirtualScrollActive=false;
+let _messageVirtualScrollSettleTimer=0;
+let _messageVirtualDeferredMeasurement=null;
+function _markMessageVirtualScrollActive(){
+  _messageVirtualScrollActive=true;
+  clearTimeout(_messageVirtualScrollSettleTimer);
+  _messageVirtualScrollSettleTimer=setTimeout(()=>{
+    _messageVirtualScrollActive=false;
+    if(_messageVirtualDeferredMeasurement){
+      const deferred=_messageVirtualDeferredMeasurement;
+      _messageVirtualDeferredMeasurement=null;
+      _scheduleMessageVirtualMeasurementRefresh(deferred);
+    }
+  },150);
+}
 // Cached visWithIdx array — invalidated when S.messages.length changes.
 let _visWithIdxCache=null;
 let _visWithIdxCacheLen=0;
@@ -403,10 +428,14 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCacheEntries=[];
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
-  _messageVirtualEstimatedRowHeight=MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
+  _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
   _messageVirtualMeasurementRetryCount=0;
+  _messageVirtualScrollActive=false;
+  clearTimeout(_messageVirtualScrollSettleTimer);
+  _messageVirtualScrollSettleTimer=0;
+  _messageVirtualDeferredMeasurement=null;
 }
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
@@ -450,15 +479,17 @@ function _getVisibleMessagesWithIdx(){
 function _messageVirtualWindow(opts){
   const total=Math.max(0, Number(opts&&opts.total)||0);
   const threshold=Math.max(1, Number(opts&&opts.threshold)||MESSAGE_VIRTUAL_THRESHOLD_ROWS);
-  const defaultHeight=Math.max(1, Number(opts&&opts.defaultHeight)||MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT);
+  const defaultHeight=Math.max(1, Number(opts&&opts.defaultHeight)||_messageVirtualDefaultHeightForRole('default'));
   const bufferPx=Math.max(0, Number(opts&&opts.bufferPx)||MESSAGE_VIRTUAL_BUFFER_PX);
   const viewportHeight=Math.max(defaultHeight, Number(opts&&opts.viewportHeight)||defaultHeight*6);
   const keepTailCount=Math.max(0, Number(opts&&opts.keepTailCount)||0);
   const tailStart=Math.max(0, total-keepTailCount);
   const heights=Array.isArray(opts&&opts.heights)?opts.heights:[];
+  const roleForIdx=typeof (opts&&opts.roleForIdx)==='function'?opts.roleForIdx:null;
   const rowHeightFor=(idx)=>{
     const cached=Number(heights[idx]);
-    return Number.isFinite(cached)&&cached>0?cached:defaultHeight;
+    if(Number.isFinite(cached)&&cached>0) return cached;
+    return roleForIdx?Math.max(1,_messageVirtualDefaultHeightForRole(roleForIdx(idx))):defaultHeight;
   };
   if(total<=Math.max(threshold, keepTailCount)){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
@@ -524,6 +555,10 @@ function _messageVirtualMeasurementCycleKeyFor(windowMetrics){
   ].join(':');
 }
 function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
+  if(_messageVirtualScrollActive){
+    _messageVirtualDeferredMeasurement=windowMetrics;
+    return;
+  }
   const cycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
   if(_messageVirtualMeasurementCycleKey!==cycleKey){
     _messageVirtualMeasurementCycleKey=cycleKey;
@@ -609,15 +644,38 @@ function _syncMessageVirtualHeightCache(visWithIdx){
   _messageVirtualHeightCacheLen=S.messages.length;
   _messageVirtualHeightCacheSrc=S.messages;
 }
+function _messageVirtualRoleForEntry(entry){
+  const m=entry&&entry.m;
+  if(!m) return 'default';
+  if(m.role==='user') return 'user';
+  if(m.role==='assistant'){
+    if((Array.isArray(m.tool_calls)&&m.tool_calls.length>0)||
+       (Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use'))||
+       (Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0))
+      return 'tool_call';
+    return 'assistant';
+  }
+  return 'default';
+}
 function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
   _syncMessageVirtualHeightCache(visWithIdx);
   const container=$('messages');
+  // #4325 opt-out: when the user disables transcript virtualization, always
+  // render the full transcript (no windowing). Mirrors the <=threshold path so
+  // every downstream consumer (render, anchor, prepend-delta) treats it as a
+  // plain non-virtualized list.
+  if(typeof window!=='undefined' && window._virtualizeTranscript===false){
+    const total=visWithIdx.length;
+    const tailStart=Math.max(0, total-Math.max(0, Number(keepTailCount)||0));
+    return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
+  }
   return _messageVirtualWindow({
     total:visWithIdx.length,
     scrollTop:container?container.scrollTop:0,
     viewportHeight:container?container.clientHeight:(_messageVirtualEstimatedRowHeight*6),
     heights:_messageVirtualHeightCache,
     defaultHeight:_messageVirtualEstimatedRowHeight,
+    roleForIdx:idx=>_messageVirtualRoleForEntry(visWithIdx[idx]),
     keepTailCount,
   });
 }
@@ -631,7 +689,7 @@ function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
   let total=0;
   for(let i=0;i<limit;i++){
     const cached=Number(_messageVirtualHeightCache[i]);
-    total+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualEstimatedRowHeight;
+    total+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
   }
   return Math.max(0,Math.round(total));
 }
@@ -649,7 +707,7 @@ function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container
   let offset=0;
   for(let i=0;i<limit;i++){
     const cached=Number(_messageVirtualHeightCache[i]);
-    offset+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualEstimatedRowHeight;
+    offset+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
   }
   const viewport=container?Math.max(0,Number(container.clientHeight)||0):0;
   return Math.max(0,Math.round(offset-(viewport*0.35)));
@@ -686,6 +744,36 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   container.scrollTop+=(rect.top-containerRect.top)-targetTop;
   requestAnimationFrame(()=>{ _programmaticScroll=false; });
   return true;
+}
+function _compensateScrollForMeasurementDelta(renderFn){
+  const container=$('messages');
+  if(!container) return renderFn();
+  const anchorBefore=_captureMessageViewportAnchor();
+  const scrollTopBefore=container.scrollTop;
+  renderFn();
+  if(!anchorBefore) return;
+  const row=container.querySelector(`[data-msg-idx="${anchorBefore.rawIdx}"]`);
+  if(!row) return;
+  const containerRect=container.getBoundingClientRect();
+  const rowRect=row.getBoundingClientRect();
+  const actualOffset=rowRect.top-containerRect.top;
+  const delta=actualOffset-anchorBefore.topOffset;
+  if(Math.abs(delta)<2) return;
+  _programmaticScroll=true;
+  container.scrollTop=scrollTopBefore+delta;
+  _lastScrollTop=container.scrollTop;
+  requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
+}
+function _messageViewportIntersectsRenderedRow(){
+  const container=$('messages');
+  if(!container) return true;
+  const containerRect=container.getBoundingClientRect();
+  const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
+  for(const row of rows){
+    const rect=row.getBoundingClientRect();
+    if(rect.bottom>containerRect.top+1&&rect.top<containerRect.bottom-1) return true;
+  }
+  return false;
 }
 function _measureMessageVirtualRow(inner, entry){
   if(!inner||!entry) return 0;
@@ -751,7 +839,7 @@ function _scheduleMessageVirtualizedRender(force){
     const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_messageVirtualKeepTailCount());
     const liveKey=_messageVirtualWindowKeyFor(liveWindow);
     if(!force&&liveKey===_messageVirtualWindowKey) return;
-    renderMessages({ preserveScroll:true });
+    _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
   });
 }
 
@@ -1511,14 +1599,28 @@ function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   // rebuild should preserve the loaded session model or the user's current
   // in-page selection when it still exists in the refreshed catalog.
   const shouldApplyBootDefault=!!(opts&&opts.preferProfileDefaultOnFreshBoot);
+
+  // Helper: apply the requested model, but if it is missing from the current
+  // catalog (cross-provider selection after a partial/timed-out rebuild), inject
+  // it as a custom option instead of returning null and letting the browser
+  // silently snap to the first <option>. _ensureModelOptionInDropdown already
+  // tries _applyModelToDropdown first, so delegate to it (single scan) and keep
+  // the plain-apply fallback for the unlikely case it is unavailable.
+  const _applyOrEnsure = function(modelId, providerId) {
+    if (typeof _ensureModelOptionInDropdown === 'function') {
+      return _ensureModelOptionInDropdown(modelId, sel, providerId);
+    }
+    return _applyModelToDropdown(modelId, sel, providerId);
+  };
+
   if(shouldApplyBootDefault && data&&data.default_model && !(activeSession&&activeSession.model)){
-    return _applyModelToDropdown(data.default_model,sel,data.active_provider||null);
+    return _applyOrEnsure(data.default_model, data.active_provider||null);
   }
   if(activeSession&&activeSession.model){
-    return _applyModelToDropdown(activeSession.model,sel,activeSession.model_provider||null);
+    return _applyOrEnsure(activeSession.model, activeSession.model_provider||null);
   }
   if(previousState&&previousState.model){
-    return _applyModelToDropdown(previousState.model,sel,previousState.model_provider||null);
+    return _applyOrEnsure(previousState.model, previousState.model_provider||null);
   }
   return null;
 }
@@ -1848,7 +1950,7 @@ async function populateModelDropdown(opts={}){
         opt.value=m.id;
         opt.textContent=m.label;
         og.appendChild(opt);
-        _dynamicModelLabels[m.id]=m.id;
+        _dynamicModelLabels[m.id]=m.label||m.id;
       }
       // Hydrate the label map from extra_models too (the catalog tail that
       // doesn't render as <option> entries when the picker is capped — see
@@ -1857,8 +1959,9 @@ async function populateModelDropdown(opts={}){
       // persisted-localStorage value renderable with its proper label
       // instead of falling back to the bare ID. #1567.
       if(Array.isArray(g.extra_models)){
+        try{ og.dataset.extraModels=JSON.stringify(g.extra_models); }catch(_e){ og.dataset.extraModels='[]'; }
         for(const m of g.extra_models){
-          if(m && m.id) _dynamicModelLabels[m.id]=m.id;
+          if(m && m.id) _dynamicModelLabels[m.id]=m.label||m.id;
         }
       }
       sel.appendChild(og);
@@ -2113,37 +2216,137 @@ function _positionModelDropdown(){
   dd.style.left=`${left}px`;
 }
 
+function _readModelOverflowData(group){
+  if(!group||!group.dataset||!group.dataset.extraModels) return [];
+  try{
+    const parsed=JSON.parse(group.dataset.extraModels);
+    return Array.isArray(parsed)?parsed.filter(m=>m&&m.id):[];
+  }catch(_e){
+    return [];
+  }
+}
+
+function _appendOverflowOptionsToGroup(group, extraModels){
+  if(!group||!Array.isArray(extraModels)||!extraModels.length) return 0;
+  // The selected model may already have been injected into the <select> (e.g. a
+  // hidden overflow model picked from search via _ensureModelOptionInDropdown).
+  // Appending it again here would create a duplicate row once the group expands,
+  // so reuse/move any existing option with the same value instead of re-creating it. (#3691)
+  const parentSelect=(group.parentNode&&group.parentNode.tagName==='SELECT')?group.parentNode:null;
+  const existingByValue=new Map();
+  if(parentSelect){
+    for(const opt of Array.from(parentSelect.querySelectorAll('option'))){
+      if(opt&&typeof opt.value==='string') existingByValue.set(opt.value,opt);
+    }
+  }
+  let appended=0;
+  for(const m of extraModels){
+    if(!m||!m.id) continue;
+    const existing=existingByValue.get(m.id);
+    if(existing){
+      // Move the already-present option into this group rather than duplicating it.
+      if(existing.parentNode!==group) group.appendChild(existing);
+      continue;
+    }
+    const opt=document.createElement('option');
+    opt.value=m.id;
+    opt.textContent=m.label||m.id;
+    group.appendChild(opt);
+    appended++;
+  }
+  if(group.dataset){
+    group.dataset.extraModels='[]';
+    group.dataset.overflowExpanded='1';
+  }
+  return appended;
+}
+
 function renderModelDropdown(){
   const dd=$('composerModelDropdown');
   const sel=$('modelSelect');
   if(!dd||!sel) return;
-  // Store model data for filtering
+  // Group(s) that must render OPEN even though they aren't the selected group —
+  // set when the user expands a group's overflow via "Show more" so a later full
+  // re-render doesn't re-collapse it (_groupOpenState is rebuilt per render, so
+  // this cross-render intent persists on a global). Resolved as a function-local
+  // so renderModelDropdown stays self-contained when eval'd in isolation (the
+  // #3691 node test driver evals the function body without module scope).
+  const _forceOpenGroups=(()=>{
+    const _g=(typeof window!=='undefined')?window:(typeof globalThis!=='undefined'?globalThis:{});
+    if(!_g.__modelGroupForceOpen) _g.__modelGroupForceOpen=new Set();
+    return _g.__modelGroupForceOpen;
+  })();
   const _modelData=[];
+  const _groupMeta=new Map();
+  const _groupOrder=[];
   const _badgeMap=window._configuredModelBadges||{};
+  const _ensureGroupMeta=(groupKey,groupLabel,providerId,optgroup)=>{
+    if(!_groupMeta.has(groupKey)){
+      _groupMeta.set(groupKey,{
+        key:groupKey,
+        label:groupLabel||'',
+        providerId:providerId||'',
+        optgroup:optgroup||null,
+        modelsEndpointError:null,
+        modelCount:0,
+        hiddenCount:0,
+        endpointErrorOnly:false,
+      });
+      _groupOrder.push(groupKey);
+    }
+    return _groupMeta.get(groupKey);
+  };
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
       const providerId=child.dataset&&child.dataset.provider?child.dataset.provider:'';
+      const groupKey=providerId||child.label||`group-${_groupOrder.length}`;
+      const groupMeta=_ensureGroupMeta(groupKey,child.label||'',providerId,child);
       let modelsEndpointError=null;
       if(child.dataset&&child.dataset.modelsEndpointError){
         try{ modelsEndpointError=JSON.parse(child.dataset.modelsEndpointError); }catch(_e){ modelsEndpointError=null; }
       }
+      groupMeta.modelsEndpointError=modelsEndpointError;
       for(const opt of Array.from(child.children)){
         const rawValue=String(opt.value||'');
         const displayName=rawValue.startsWith('@custom:')
           ? getModelLabel(rawValue)
           : (opt.textContent||getModelLabel(rawValue));
-        _modelData.push({value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
+        const entry={value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',groupKey,providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId),hiddenByDefault:false};
+        _modelData.push(entry);
+        groupMeta.modelCount++;
       }
-      if(modelsEndpointError && !child.children.length){
-        _modelData.push({value:`__models_endpoint_error__:${providerId||child.label||''}`,name:'',id:'',group:child.label||'',providerId,modelsEndpointError,endpointErrorOnly:true});
+      for(const overflowModel of _readModelOverflowData(child)){
+        const displayName=overflowModel.id.startsWith('@custom:')
+          ? getModelLabel(overflowModel.id)
+          : (overflowModel.label||getModelLabel(overflowModel.id));
+        _modelData.push({
+          value:overflowModel.id,
+          name:esc(displayName),
+          id:esc(overflowModel.id),
+          group:child.label||'',
+          groupKey,
+          providerId,
+          modelsEndpointError,
+          badge:_getConfiguredModelBadge(overflowModel.id,_badgeMap,providerId),
+          hiddenByDefault:true,
+        });
+        groupMeta.modelCount++;
+        groupMeta.hiddenCount++;
+      }
+      if(modelsEndpointError && !child.children.length && !groupMeta.hiddenCount){
+        groupMeta.endpointErrorOnly=true;
+        _modelData.push({value:`__models_endpoint_error__:${providerId||child.label||''}`,name:'',id:'',group:child.label||'',groupKey,providerId,modelsEndpointError,endpointErrorOnly:true});
       }
     }
     if(child.tagName==='OPTION'){
+      const groupKey='__ungrouped__';
+      _ensureGroupMeta(groupKey,'','',null);
       const rawValue=String(child.value||'');
       const displayName=rawValue.startsWith('@custom:')
         ? getModelLabel(rawValue)
         : (child.textContent||getModelLabel(rawValue));
-      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
+      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:'',badge:_getConfiguredModelBadge(child.value,_badgeMap),hiddenByDefault:false});
+      _groupMeta.get(groupKey).modelCount++;
     }
   }
   const _existingConfiguredKeys=new Set(_modelData.map(existing=>_normalizeConfiguredModelKey(existing.value)));
@@ -2185,9 +2388,145 @@ function renderModelDropdown(){
     }
     return 500;
   };
-  // Filter function (defined AFTER _searchRow and _cust* are created)
+  const _renderProviderEndpointHint=(entry,parent)=>{
+    if(!entry||!entry.label||!entry.modelsEndpointError) return;
+    const hint=document.createElement('div');
+    hint.className='model-provider-hint';
+    hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
+    (parent||dd).appendChild(hint);
+  };
+  // Build a single model-option row (mirrors the main render loop's row markup),
+  // used both by the main render and by the in-place overflow reveal below.
+  const _buildModelRow=(m,sel,withProviderChip)=>{
+    const row=document.createElement('div');
+    row.className='model-opt'+(m.value===sel.value?' active':'');
+    const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+    const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
+    const providerChip=(_plainGroup&&withProviderChip)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
+    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+    row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
+    return row;
+  };
+  const _expandOverflowGroup=(groupMetaEntry)=>{
+    if(!groupMetaEntry||!groupMetaEntry.optgroup) return;
+    const og=groupMetaEntry.optgroup;
+    const groupKey=groupMetaEntry.key;
+    const extraModels=_readModelOverflowData(og);
+    // Nothing to reveal — no overflow tail advertised.
+    if(!extraModels.length) return;
+    // Append the overflow models to the source <select> so the dropdown's state
+    // stays the source of truth (search, re-render, selection all see them).
+    // NOTE: guard on extraModels.length (above), NOT on the append return value —
+    // _appendOverflowOptionsToGroup returns the count of NEWLY-created <option>s
+    // and returns 0 (while still clearing dataset.extraModels) when every overflow
+    // model already existed as an option. Bailing on a 0 return would leave those
+    // already-present-but-hidden rows unrevealed and the expander dead (#bug3).
+    _appendOverflowOptionsToGroup(og,extraModels);
+    // Full re-render fallback — the proven path. Used when the in-place reveal
+    // can't run (minimal/headless DOM without CSS.escape/rAF/insertBefore, or any
+    // unexpected failure). Produces the same end state: overflow appended,
+    // expander gone, search term reapplied.
+    const _fullReRender=()=>{
+      const _term=(_si&&_si.value)||'';
+      renderModelDropdown();
+      const ns=dd.querySelector('.model-search-input');
+      if(ns){ ns.value=_term; (ns._listeners&&ns._listeners.input)?ns._listeners.input():ns.dispatchEvent(new Event('input')); }
+    };
+    // IN-PLACE reveal: build the newly-revealed rows and insert them directly into
+    // the existing group wrapper (before the "Show more" expander), then remove
+    // the expander. No full re-render — so the group stays open, every other
+    // group keeps its collapsed/open state, and the scroll position is preserved.
+    // The user lands on the first new row. Falls back to a full re-render if the
+    // runtime lacks the DOM APIs this needs.
+    const _canInPlace = typeof CSS!=='undefined' && CSS && typeof CSS.escape==='function'
+      && typeof dd.querySelector==='function';
+    if(!_canInPlace){ _fullReRender(); return; }
+    let wrap, moreEl;
+    try{
+      wrap=dd.querySelector(`.model-group-body[data-group="${CSS.escape(groupKey)}"]`);
+      moreEl=wrap?wrap.querySelector('.model-opt-more'):null;
+    }catch(_){ _fullReRender(); return; }
+    if(!wrap||!moreEl||typeof wrap.insertBefore!=='function'){
+      _fullReRender();
+      return;
+    }
+    try{
+      const _plainLabel=String(groupMetaEntry.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,'');
+      const _alreadyShown=new Set(Array.from(wrap.querySelectorAll('.model-opt .model-opt-id')).map(el=>el.textContent));
+      let firstNewRow=null;
+      for(const m of extraModels){
+        if(!m||!m.id) continue;
+        if(_alreadyShown.has(esc(m.id))) continue;
+        const row=_buildModelRow({value:m.id,name:m.label||m.id,id:m.id,group:_plainLabel,groupKey,providerId:(og.dataset&&og.dataset.provider)||''},$('modelSelect'),false);
+        wrap.insertBefore(row,moreEl);
+        if(!firstNewRow) firstNewRow=row;
+      }
+      // Sync the in-memory model data so a later _filterModels() re-render (e.g.
+      // after a search is typed and cleared) keeps the group fully expanded
+      // instead of snapping back to the capped view + a fresh "Show more". The
+      // overflow rows were just appended to the live <select>, so flip their
+      // _modelData entries to no-longer-hidden and zero the group's hidden count.
+      for(const _md of _modelData){
+        if(_md && _md.groupKey===groupKey && _md.hiddenByDefault){
+          _md.hiddenByDefault=false;
+        }
+      }
+      if(groupMetaEntry && typeof groupMetaEntry.hiddenCount==='number'){
+        groupMetaEntry.hiddenCount=0;
+      }
+      // The group is now fully expanded — drop the "Show more" expander, and bump
+      // the heading count to the full total. Also force the group OPEN (the user
+      // just asked to see more of it) regardless of any prior collapsed state.
+      moreEl.remove();
+      wrap.style.display='';
+      _forceOpenGroups.add(groupKey);
+      const heading=wrap.previousElementSibling;
+      if(heading&&heading.classList&&heading.classList.contains('model-group')){
+        const _total=wrap.querySelectorAll('.model-opt').length;
+        heading.textContent=_total>1?`${_plainLabel} (${_total})`:_plainLabel;
+        heading.classList.add('collapsible','open');
+      }
+      // Scroll so the first newly-revealed row sits near the top of the dropdown
+      // viewport — the user asked to "land on the new models" after Show more,
+      // not be reset to the top of the list and not have it jump unpredictably.
+      if(firstNewRow && typeof firstNewRow.offsetTop==='number' && typeof requestAnimationFrame==='function'){
+        const _targetTop=Math.max(0,firstNewRow.offsetTop-48);
+        const _doScroll=()=>{ try{ dd.scrollTop=_targetTop; }catch(_){} };
+        _doScroll();                                   // immediate
+        requestAnimationFrame(()=>{ _doScroll(); requestAnimationFrame(_doScroll); });
+        if(typeof setTimeout==='function') setTimeout(_doScroll,80); // after any refocus settles
+      }
+    }catch(_err){
+      // Any unexpected DOM failure — fall back to the proven full re-render so
+      // the overflow still gets revealed.
+      _fullReRender();
+    }
+  };
+  // Collapsible group state — persists across _filterModels calls
+  const _groupOpenState={};
+  let _prevHasSearch=false;  // tracks search->empty transition to reset open-state
+  let _groupWrappers={};
+  // The group that owns the currently-selected model. Groups start COLLAPSED by
+  // default (#4279); the selected provider's group is the one exception so the
+  // user always sees their active model without expanding anything. (#4279 + UX)
+  const _selectedGroupKey=(()=>{
+    const _selVal=String((sel&&sel.value)||'');
+    if(!_selVal) return null;
+    const _hit=_modelData.find(m=>m&&!m.endpointErrorOnly&&String(m.value||'')===_selVal);
+    return _hit?_hit.groupKey:null;
+  })();
   const _filterModels=(term)=>{
     term=term.trim().toLowerCase();
+    const hasSearch=!!term;
+    // On a fresh search, expand all groups so every match is visible (#collapse).
+    if(hasSearch) for(const k in _groupOpenState) _groupOpenState[k]=true;
+    // When a search is CLEARED (search -> empty), reset the per-group open state
+    // so the collapsed-except-selected default re-applies — otherwise every group
+    // the search auto-expanded would stay open, defeating the collapse UX. Groups
+    // the user explicitly expanded via "Show more" (_forceOpenGroups) and the
+    // selected group remain open through the defaulting logic below.
+    else if(_prevHasSearch){ for(const k in _groupOpenState) delete _groupOpenState[k]; }
+    _prevHasSearch=hasSearch;
     const found=new Set();
     for(const m of _modelData){
       const name=m.name.toLowerCase();
@@ -2230,9 +2569,13 @@ function renderModelDropdown(){
         return a.name.localeCompare(b.name);
       });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
-    // Clear and rebuild
+    const configuredSemanticKeys=new Set(configuredModels.map(m=>`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`));
+    const _effectiveHiddenCount=(groupKey)=>_modelData.filter(m=>
+      m.groupKey===groupKey
+      && m.hiddenByDefault
+      && !configuredSemanticKeys.has(`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`)
+    ).length;
     dd.innerHTML='';
-    // Add search and custom elements first (CRITICAL: must be before models)
     dd.appendChild(_scopeNote);
     dd.appendChild(_searchRow);
     dd.appendChild(_custSep);
@@ -2268,45 +2611,115 @@ function renderModelDropdown(){
         dd.appendChild(row);
       }
     }
-    // Add remaining models matching filter
-    let _lastGroup=null;
-    // Count models per group for heading labels (#1425)
-    const _groupCounts={};
-    for(const m of _modelData){
-      if(configuredIds.has(m.value)) continue;
-      if(m.group&&!m.endpointErrorOnly) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
-    }
-    const _renderProviderEndpointHint=(groupName)=>{
-      if(!groupName) return;
-      const entry=_modelData.find(m=>m.group===groupName&&m.modelsEndpointError);
-      if(!entry||!entry.modelsEndpointError) return;
-      const hint=document.createElement('div');
-      hint.className='model-provider-hint';
-      hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
-      dd.appendChild(hint);
-    };
-    for(const m of _modelData){
-      if(configuredIds.has(m.value)||!matches(m)) continue;
-      if(m.group&&m.group!==_lastGroup){
+    for(const groupKey of _groupOrder){
+      const meta=_groupMeta.get(groupKey);
+      if(!meta) continue;
+      const hiddenCount=_effectiveHiddenCount(groupKey);
+      const groupRows=_modelData.filter(m=>
+        m.groupKey===groupKey
+        && !configuredIds.has(m.value)
+        && !m.endpointErrorOnly
+        && matches(m)
+        && (!m.hiddenByDefault || !!term)
+      );
+      const shouldRenderHeading=!!meta.label&&(groupRows.length||meta.endpointErrorOnly||(!term&&hiddenCount));
+      if(shouldRenderHeading){
         const heading=document.createElement('div');
         heading.className='model-group';
-        const count=_groupCounts[m.group]||0;
-        heading.textContent=count>1?`${m.group} (${count})`:m.group;
+        // When COLLAPSED (hiddenCount>0) keep the backend-decorated label verbatim
+        // ("Nous (2 of 4)") so the overflow count shows. When EXPANDED, strip that
+        // decoration and append the rendered-row count, otherwise the heading reads
+        // "Nous (2 of 4) (4)" (double count). Count rendered rows, not modelCount,
+        // so hoisted-configured models aren't double-counted. (#3691)
+        const count=hiddenCount?0:groupRows.length;
+        const _plainLabel=String(meta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,'');
+        heading.textContent=count>1?`${_plainLabel} (${count})`:meta.label;
         dd.appendChild(heading);
-        _renderProviderEndpointHint(m.group);
-        _lastGroup=m.group;
+        const wrapper=document.createElement('div');
+        wrapper.className='model-group-body';
+        wrapper.dataset.group=groupKey;
+        // A group carrying a provider endpoint-error hint must stay visible by
+        // default — otherwise the "models endpoint unreachable" warning is hidden
+        // inside a collapsed body and the user never sees it. (#2540 surface)
+        const _hasEndpointError=!!(meta&&(meta.modelsEndpointError||meta.endpointErrorOnly));
+        if(hasSearch) _groupOpenState[groupKey]=true;
+        else if(_forceOpenGroups.has(groupKey)) _groupOpenState[groupKey]=true;
+        else if(_hasEndpointError) _groupOpenState[groupKey]=true;
+        else if(!(groupKey in _groupOpenState)) _groupOpenState[groupKey]=(groupKey===_selectedGroupKey);
+        if(!_groupOpenState[groupKey]) wrapper.style.display='none';
+        else heading.classList.add('open');
+        heading.classList.add('collapsible');
+        dd.appendChild(wrapper);
+        _groupWrappers[groupKey]=wrapper;
+        // Render the provider endpoint-error hint inside the collapsible group
+        // so it collapses/expands with it (the group is force-opened above when
+        // an error is present, so the hint stays visible by default).
+        _renderProviderEndpointHint(meta,wrapper);
+        heading.addEventListener('click',(e)=>{
+          e.stopPropagation();
+          const w=dd.querySelector(`.model-group-body[data-group="${CSS.escape(groupKey)}"]`);
+          if(!w) return;
+          const closed=w.style.display==='none';
+          w.style.display=closed?'':'none';
+          _groupOpenState[groupKey]=closed;
+          // Keep the cross-render force-open intent in sync with manual toggles:
+          // collapsing a previously overflow-expanded group should let it
+          // re-collapse on the next render too.
+          if(closed) _forceOpenGroups.add(groupKey); else _forceOpenGroups.delete(groupKey);
+          heading.classList.toggle('open',closed);
+        });
       }
-      if(m.endpointErrorOnly) continue;
-      const row=document.createElement('div');
-      row.className='model-opt'+(m.value===sel.value?' active':'');
-      const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
-      // Inline provider chip on every row that has a group (#1425)
-      const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
-      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-      row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
-      dd.appendChild(row);
+      for(const m of groupRows){
+        const row=document.createElement('div');
+        row.className='model-opt'+(m.value===sel.value?' active':'');
+        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+        // The group heading carries the overflow count ("Provider (15 of 30)"); the
+        // per-row provider chip must show the PLAIN provider label only — otherwise
+        // the count is stamped redundantly on every row and reads as nonsense after
+        // "Show all" expands the group (e.g. row 30 still showing "(15 of 30)"). (#3691)
+        const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
+        // Only show the per-row provider chip when the row is NOT already under its
+        // own provider heading — i.e. it's a flat/hoisted row appended straight to
+        // the dropdown (no group wrapper). Repeating the provider name on every row
+        // beneath its own "PROVIDER" heading is pure visual noise. The chip still
+        // orients hoisted/configured rows and search results that render flat.
+        const _underOwnHeading=shouldRenderHeading&&!!(m.groupKey&&_groupWrappers[m.groupKey]);
+        const providerChip=(_plainGroup&&!_underOwnHeading)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
+        if(m.groupKey&&_groupWrappers[m.groupKey]){
+          _groupWrappers[m.groupKey].appendChild(row);
+        }else{
+          dd.appendChild(row);
+        }
+      }
+      if(!term&&hiddenCount){
+        const showAll=document.createElement('div');
+        showAll.className='model-opt-more';
+        showAll.tabIndex=0;
+        showAll.setAttribute('role','button');
+        const _moreLabel=esc(t('model_show_all_models',hiddenCount)||`Show ${hiddenCount} more`);
+        showAll.innerHTML=`<span class="model-opt-more-chevron" aria-hidden="true"></span><span class="model-opt-more-label">${_moreLabel}</span>`;
+        const _doExpand=()=>{
+          // The reveal itself (in-place row insert + open + scroll-to-new) is
+          // handled by _expandOverflowGroup; just trigger it.
+          _expandOverflowGroup(meta);
+        };
+        showAll.onclick=(e)=>{
+          if(e&&typeof e.stopPropagation==='function') e.stopPropagation();
+          _doExpand();
+        };
+        showAll.addEventListener('keydown',e=>{
+          if(e.key==='Enter'||e.key===' '){
+            e.preventDefault();
+            _doExpand();
+          }
+        });
+        // Keep the expander inside the collapsible group so it hides/shows with it.
+        if(_groupWrappers[groupKey]) _groupWrappers[groupKey].appendChild(showAll);
+        else dd.appendChild(showAll);
+      }
     }
-    // Show "No results" if filtered and nothing matched
     if(term&&found.size===0){
       const noResult=document.createElement('div');
       noResult.className='model-search-no-results';
@@ -2316,13 +2729,11 @@ function renderModelDropdown(){
       noResult.style.textAlign='center';
       dd.appendChild(noResult);
     }
-    // Restore focus to search input
     _si.focus();
   };
-  // Event handlers for search input
   _si.addEventListener('input',()=>_filterModels(_si.value));
   // Keyboard navigation through filtered model rows (#2791).
-  const _visibleModelRows=()=>Array.from(dd.querySelectorAll('.model-opt'));
+  const _visibleModelRows=()=>Array.from(dd.querySelectorAll('.model-opt,.model-opt-more')).filter(el=>!el.closest('.model-group-body')||el.closest('.model-group-body').style.display!=='none');
   const _activeRowIndex=(rows)=>rows.findIndex(r=>r.classList.contains('is-highlighted'));
   const _highlightRow=(rows,idx)=>{
     for(const r of rows) r.classList.remove('is-highlighted');
@@ -2347,20 +2758,16 @@ function renderModelDropdown(){
     }
   });
   _si.addEventListener('click',e=>e.stopPropagation());
-  // Event handlers for clear button
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
-  // Event handlers for custom input
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
   _cb.onclick=_applyCustom;
   _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
-  // Add search and custom elements to dropdown (initial render)
   dd.appendChild(_scopeNote);
   dd.appendChild(_searchRow);
   dd.appendChild(_custSep);
   dd.appendChild(_custRow);
-  // Apply initial filter (empty shows all)
   _filterModels('');
 }
 
@@ -2612,7 +3019,8 @@ document.addEventListener('click',function(e){
 });
 
 // ── Session toolsets chip (#493) ───────────────────────────────────────────
-let _currentSessionToolsets = null; // null = global, array = custom list
+let _currentSessionToolsets = null; // null = active profile defaults, array = custom list
+let _toolsetsCatalog = null;
 
 function _applyToolsetsChip(toolsets) {
   _currentSessionToolsets = toolsets;
@@ -2634,9 +3042,9 @@ function _applyToolsetsChip(toolsets) {
     chip.classList.add('has-custom');
     chip.title = t('session_toolsets') + ': ' + toolsets.join(', ');
   } else {
-    label.textContent = t('session_toolsets_global');
+    label.textContent = t('session_toolsets_profile_defaults');
     chip.classList.remove('has-custom');
-    chip.title = t('session_toolsets');
+    chip.title = t('session_toolsets') + ': ' + t('session_toolsets_profile_defaults');
   }
 }
 
@@ -2652,6 +3060,115 @@ function syncToolsetsChip() {
   _syncToolsetsChip();
 }
 
+function _normalizeToolsetsCatalog(payload) {
+  const servers = payload && Array.isArray(payload.servers) ? payload.servers : [];
+  const seen = new Set();
+  const names = [];
+  servers.forEach(function(server) {
+    const name = String((server && server.name) || '').trim();
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    names.push(name);
+  });
+  return names;
+}
+
+function _loadToolsetsCatalog() {
+  if (Array.isArray(_toolsetsCatalog)) return Promise.resolve(_toolsetsCatalog);
+  return api('/api/mcp/servers')
+    .then(function(payload) {
+      _toolsetsCatalog = _normalizeToolsetsCatalog(payload);
+      return _toolsetsCatalog;
+    })
+    .catch(function() {
+      _toolsetsCatalog = false;
+      return [];
+    });
+}
+
+function invalidateToolsetsCatalog(payload) {
+  _toolsetsCatalog = payload && Array.isArray(payload.servers) ? _normalizeToolsetsCatalog(payload) : null;
+}
+if (typeof window !== 'undefined') window.invalidateToolsetsCatalog = invalidateToolsetsCatalog;
+
+function _toolsetsInputList(input) {
+  if (!input) return [];
+  return input.value.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function _ensureToolsetsPresetSection() {
+  const dd = $('composerToolsetsDropdown');
+  if (!dd) return null;
+  let section = $('toolsetsPresetSections');
+  if (section) return section;
+  section = document.createElement('div');
+  section.id = 'toolsetsPresetSections';
+  section.className = 'toolsets-preset-sections';
+  const inputRow = dd.querySelector('.toolsets-dropdown-input-row');
+  if (inputRow) dd.insertBefore(section, inputRow);
+  else dd.appendChild(section);
+  return section;
+}
+
+function _appendToolsetsLabel(section, text) {
+  const label = document.createElement('div');
+  label.className = 'toolsets-dropdown-desc';
+  label.textContent = text;
+  section.appendChild(label);
+}
+
+function _renderToolsetsPresetSections(opts) {
+  const state = opts && opts.state;
+  const input = opts && opts.input;
+  const section = _ensureToolsetsPresetSection();
+  if (!section || !state || !input) return;
+  const selected = _toolsetsInputList(input);
+  const selectedSet = new Set(selected);
+  const hasCustom = selected.length > 0;
+  state.textContent = hasCustom
+    ? '🔧 ' + selected.join(', ')
+    : '👤 ' + t('session_toolsets_profile_defaults');
+
+  section.innerHTML = '';
+  const defaultsBtn = document.createElement('button');
+  defaultsBtn.type = 'button';
+  defaultsBtn.id = 'toolsetsProfileDefaultsBtn';
+  defaultsBtn.className = 'toolsets-action-btn toolsets-clear-btn';
+  defaultsBtn.textContent = t('session_toolsets_use_profile_defaults');
+  section.appendChild(defaultsBtn);
+
+  _appendToolsetsLabel(section, t('session_toolsets_configured_servers'));
+  if (_toolsetsCatalog === null) {
+    _appendToolsetsLabel(section, t('session_toolsets_loading_servers'));
+    return;
+  }
+  if (_toolsetsCatalog === false) {
+    _appendToolsetsLabel(section, t('mcp_load_failed'));
+    return;
+  }
+  if (!Array.isArray(_toolsetsCatalog) || !_toolsetsCatalog.length) {
+    _appendToolsetsLabel(section, t('session_toolsets_no_configured_servers'));
+    return;
+  }
+  _toolsetsCatalog.forEach(function(name) {
+    const row = document.createElement('label');
+    row.className = 'toolsets-server-option';
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '6px';
+    row.style.margin = '4px 0';
+    row.style.fontSize = '12px';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'toolsets-server-checkbox';
+    checkbox.value = name;
+    checkbox.checked = selectedSet.has(name);
+    row.appendChild(checkbox);
+    row.appendChild(document.createTextNode(name));
+    section.appendChild(row);
+  });
+}
+
 function _populateToolsetsDropdown() {
   const desc = $('toolsetsDropdownDesc');
   const state = $('toolsetsDropdownState');
@@ -2665,14 +3182,14 @@ function _populateToolsetsDropdown() {
   input.placeholder = t('session_toolsets_placeholder');
   // Escape key handler for toolsets input
   input.onkeydown = function(e) { if(e.key === 'Escape') closeToolsetsDropdown(); };
+  input.oninput = function() { _renderToolsetsPresetSections({ state, input }); };
   const hasCustom = Array.isArray(_currentSessionToolsets) && _currentSessionToolsets.length > 0;
   if (hasCustom) {
-    state.textContent = '🔧 ' + _currentSessionToolsets.join(', ');
     input.value = _currentSessionToolsets.join(', ');
   } else {
-    state.textContent = '🌍 ' + t('session_toolsets_global');
     input.value = '';
   }
+  _renderToolsetsPresetSections({ state, input });
 }
 
 function _positionToolsetsDropdown() {
@@ -2708,6 +3225,14 @@ function toggleToolsetsDropdown() {
   if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
   _syncToolsetsChip();
   _populateToolsetsDropdown();
+  _loadToolsetsCatalog().then(function() {
+    const stillOpen = dd && dd.classList.contains('open');
+    if (stillOpen) {
+      const state = $('toolsetsDropdownState');
+      const input = $('toolsetsInput');
+      _renderToolsetsPresetSections({ state, input });
+    }
+  });
   dd.classList.add('open');
   _positionToolsetsDropdown();
   chip.classList.add('active');
@@ -2753,6 +3278,12 @@ document.addEventListener('click', function(e) {
     !e.target.closest('#composerToolsetsChip') &&
     !e.target.closest('#composerToolsetsDropdown')
   ) closeToolsetsDropdown();
+  // Active profile defaults button
+  if (e.target.closest('#toolsetsProfileDefaultsBtn')) {
+    _applySessionToolsets(null);
+    closeToolsetsDropdown();
+    return;
+  }
   // Apply button
   if (e.target.closest('#toolsetsApplyBtn')) {
     const input = $('toolsetsInput');
@@ -2775,6 +3306,21 @@ document.addEventListener('click', function(e) {
     _applySessionToolsets(null);
     closeToolsetsDropdown();
   }
+});
+
+document.addEventListener('change', function(e) {
+  if (!e.target.closest('#toolsetsPresetSections')) return;
+  if (!e.target.classList.contains('toolsets-server-checkbox')) return;
+  const input = $('toolsetsInput');
+  const state = $('toolsetsDropdownState');
+  if (!input) return;
+  const checked = Array.from(document.querySelectorAll('#toolsetsPresetSections .toolsets-server-checkbox:checked'))
+    .map(el => String(el.value || '').trim())
+    .filter(Boolean);
+  const catalogSet = new Set(Array.isArray(_toolsetsCatalog) ? _toolsetsCatalog : []);
+  const manual = _toolsetsInputList(input).filter(name => !catalogSet.has(name));
+  input.value = checked.concat(manual).join(', ');
+  _renderToolsetsPresetSections({ state, input });
 });
 
 // Position toolsets dropdown on resize, OR close it if the chip is no longer
@@ -3057,6 +3603,7 @@ if(typeof window!=='undefined'){
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     if(_programmaticScroll) return; // ignore scrolls we triggered ourselves
+    _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
       const top=el.scrollTop;
@@ -5459,6 +6006,10 @@ function speakMessage(btn){
   if(!clean) return;
 
   const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  if(engine==='elevenlabs'){
+    _playElevenLabsTts(clean, btn);
+    return;
+  }
   if(engine==='edge'){
     _playEdgeTtsChunked(clean, btn);
     return;
@@ -5480,13 +6031,88 @@ function speakMessage(btn){
   speechSynthesis.speak(utter);
 }
 
+function _playElevenLabsTts(text, btn){
+  if(btn) btn.dataset.speaking='1';
+  _ttsSpeaking=true;
+  const _fail=function(msg){
+    _ttsSpeaking=false;_playingEdgeAudio=null;
+    if(btn)btn.dataset.speaking='0';
+    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+  };
+  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:text, engine:'elevenlabs'})
+  })
+  .then(function(r){
+    if(!r.ok){
+      return r.json().catch(function(){return {};}).then(function(j){
+        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+      });
+    }
+    return r.arrayBuffer();
+  })
+  .then(function(buf){
+    return _playAudioBuf(buf, btn, 'ElevenLabs TTS');
+  })
+  .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
+}
+
+// ── Shared AudioContext for TTS playback (no blob URLs needed) ──
+let _ttsAudioCtx=null;
+function _getTtsAudioCtx(){
+  if(!_ttsAudioCtx){
+    const C=window.AudioContext||window.webkitAudioContext;
+    if(!C) return null;
+    _ttsAudioCtx=new C();
+  }
+  if(_ttsAudioCtx.state==='suspended') _ttsAudioCtx.resume();
+  return _ttsAudioCtx;
+}
+
+function _playAudioBuf(arrayBuffer, btn, label){
+  const ctx=_getTtsAudioCtx();
+  if(!ctx){
+    if(btn)btn.dataset.speaking='0';
+    _ttsSpeaking=false;
+    showToast(label+': Web Audio API not available');
+    return;
+  }
+  return new Promise(function(resolve){
+    ctx.decodeAudioData(arrayBuffer.slice(0), function(audioBuffer){
+      const src=ctx.createBufferSource();
+      src.buffer=audioBuffer;
+      src.connect(ctx.destination);
+      _playingEdgeAudio=src;
+      const _cleanup=function(){
+        _ttsSpeaking=false;_playingEdgeAudio=null;
+        if(btn)btn.dataset.speaking='0';
+        try{src.stop();src.disconnect();}catch(_){}
+        resolve();
+      };
+      src.onended=_cleanup;
+      src.start(0);
+    }, function(e){
+      _ttsSpeaking=false;
+      if(btn)btn.dataset.speaking='0';
+      showToast(label+' error: '+(e&&e.message||e));
+      resolve(); // prevent permanently pending Promise on decode failure
+    });
+  });
+}
 function stopTTS(){
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
-  // Stop Edge TTS audio
+  // Stop Web Audio API playback (AudioBufferSourceNode)
   if(_playingEdgeAudio){
-    try{ _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0; }catch(_){}
+    try{
+      if(typeof _playingEdgeAudio.stop==='function'){
+        _playingEdgeAudio.stop(); _playingEdgeAudio.disconnect();
+      }else{
+        _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0;
+      }
+    }catch(_){}
     _playingEdgeAudio=null;
   }
   _ttsSpeaking=false;
@@ -5511,6 +6137,10 @@ function autoReadLastAssistant(){
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
+  if(engine==='elevenlabs'){
+    _playElevenLabsTts(clean, null);
+    return;
+  }
   if(engine==='edge'){
     _playEdgeTtsChunked(clean, null);
     return;
@@ -6101,7 +6731,7 @@ async function refreshSession() {
 }
 // ── Update banner ──
 function _formatUpdateTargetStatus(label,info){
-  if(!info||!(info.behind>0)) return null;
+  if(!info||info.no_git||!(info.behind>0)) return null;
   const release=(info.release_based&&info.latest_version)
     ?` (${info.current_version||'unknown'} -> ${info.latest_version})`
     :(info.branch?` (${info.branch})`:'');
@@ -9174,6 +9804,7 @@ function _captureMessageScrollSnapshot(){
   if(!el) return null;
   const bottom=Math.max(0,el.scrollHeight-el.scrollTop-el.clientHeight);
   return {
+    anchor:(typeof _captureMessageViewportAnchor==='function')?_captureMessageViewportAnchor():null,
     top:el.scrollTop,
     bottom,
     scrollHeight:el.scrollHeight,
@@ -9185,8 +9816,13 @@ function _restoreMessageScrollSnapshot(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
-  _programmaticScroll=true;
-  el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  const restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
+    ? _restoreMessageViewportAnchor(snapshot.anchor,0)
+    : false;
+  if(!restoredViaAnchor){
+    _programmaticScroll=true;
+    el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  }
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
   const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
@@ -9199,18 +9835,42 @@ function _restoreMessageScrollSnapshot(snapshot){
     _scrollPinned=true;
     _nearBottomCount=2;
   }
-  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  if(!restoredViaAnchor){
+    requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  }
 }
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
-  const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
-  const bottom=Number(snapshot.bottom);
-  const target=(snapshot.pinned===true&&Number.isFinite(bottom))
-    ? maxTop-Math.max(0,bottom)
-    : Number(snapshot.top)||0;
-  _programmaticScroll=true;
-  el.scrollTop=Math.max(0,Math.min(target,maxTop));
+  let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
+    ? _restoreMessageViewportAnchor(snapshot.anchor,0)
+    : false;
+  if(!restoredViaAnchor&&snapshot.anchor&&snapshot.anchor.rawIdx!=null&&
+     !el.querySelector(`[data-msg-idx="${snapshot.anchor.rawIdx}"]`)&&
+     typeof _getVisibleMessagesWithIdx==='function'&&
+     typeof _messageVisibleIndexForRawIdx==='function'&&
+     typeof _messageVirtualScrollTopForVisibleIdx==='function'){
+    const visWithIdx=_getVisibleMessagesWithIdx();
+    const visIdx=_messageVisibleIndexForRawIdx(snapshot.anchor.rawIdx,visWithIdx);
+    if(visIdx>=0){
+      _programmaticScroll=true;
+      el.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx,visIdx,el);
+      _messageVirtualWindowKey='';
+      renderMessages({preserveScroll:true});
+      restoredViaAnchor=(typeof _restoreMessageViewportAnchor==='function')
+        ? _restoreMessageViewportAnchor(snapshot.anchor,0)
+        : false;
+    }
+  }
+  if(!restoredViaAnchor){
+    const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+    const bottom=Number(snapshot.bottom);
+    const target=(snapshot.pinned===true&&Number.isFinite(bottom))
+      ? maxTop-Math.max(0,bottom)
+      : Number(snapshot.top)||0;
+    _programmaticScroll=true;
+    el.scrollTop=Math.max(0,Math.min(target,maxTop));
+  }
   _lastScrollTop=el.scrollTop;
   if(snapshot.pinned===true){
     _messageUserUnpinned=false;
@@ -9221,7 +9881,9 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
     _scrollPinned=false;
     _nearBottomCount=0;
   }
-  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  if(!restoredViaAnchor){
+    requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  }
 }
 function _renderMessagesWithScrollSnapshot(options){
   const scrollSnapshot=_captureMessageScrollSnapshot();
@@ -9290,8 +9952,20 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   scrollToBottom();
 }
 
+function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow){
+  if(!preserveScroll||!virtualWindow||!virtualWindow.virtualized||!!(options&&options._virtualFallback)) return false;
+  if(_messageViewportIntersectsRenderedRow()) return false;
+  if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){
+    _sessionHtmlCache.delete(_sessionHtmlCacheSid);
+  }
+  _messageVirtualWindowKey='';
+  renderMessages({preserveScroll:true,_virtualFallback:true});
+  return true;
+}
+
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
+  const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when Auto-follow is
   // off and the user has scrolled up — both need to restore the reader's position
   // after the DOM rebuild rather than snap to the bottom. (Codex #4006 r3.)
@@ -9313,7 +9987,9 @@ function renderMessages(options){
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
   $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
-  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
+  const virtualWindow=virtualFallback
+    ? {virtualized:false,start:0,end:visWithIdx.length,topPad:0,bottomPad:0,total:visWithIdx.length,tailStart:visWithIdx.length}
+    : _currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
   const renderWindowKey=_messageVirtualWindowKeyFor(virtualWindow);
   const windowStart=virtualWindow.start;
   const windowEnd=virtualWindow.end;
@@ -9349,6 +10025,7 @@ function renderMessages(options){
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
       requestAnimationFrame(()=>postProcessRenderedMessages(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
@@ -10506,6 +11183,7 @@ function renderMessages(options){
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+  if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>postProcessRenderedMessages(inner));
   // Refresh todo panel if it's currently open
@@ -11827,25 +12505,43 @@ function loadPdfInline(container){
         })
         .then(pdf=>{
           if(!pdf) return;
-          pdf.getPage(1).then(page=>{
-            const canvas=document.createElement('canvas');
-            const scale=1.5;
-            const viewport=page.getViewport({scale});
-            canvas.width=viewport.width;
-            canvas.height=viewport.height;
-            canvas.className='pdf-preview-canvas';
-            page.render({canvasContext:canvas.getContext('2d'),viewport}).promise.then(()=>{
-              // Canvas bitmap is runtime state, not part of HTML serialization.
-              // Attach the canvas as a DOM node — interpolating its serialized
-              // form into a template string parses back as an empty canvas.
-              const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-              const wrap=document.createElement('div');
-              wrap.className='pdf-preview-wrap';
-              wrap.innerHTML=`<div class="pdf-preview-header"><span>📄 ${esc(fname)}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body"></div>`;
-              wrap.querySelector('.pdf-preview-body').appendChild(canvas);
-              el.replaceWith(wrap);
-            });
-          });
+          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          const total=pdf.numPages;
+          const pagesLabel=total>1?` · ${total} pages`:'';
+          const wrap=document.createElement('div');
+          wrap.className='pdf-preview-wrap';
+          wrap.innerHTML=`<div class="pdf-preview-header"><span>📄 ${esc(fname)}${pagesLabel}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body"></div>`;
+          const body=wrap.querySelector('.pdf-preview-body');
+          el.replaceWith(wrap);
+          // Render every page (capped) sequentially to limit memory; the
+          // canvases stack vertically in the scrollable preview body.
+          const MAX_PAGES=20;
+          const n=Math.min(total,MAX_PAGES);
+          if(total>MAX_PAGES){
+            const notice=document.createElement('div');
+            notice.className='pdf-preview-truncated';
+            notice.textContent=t('pdf_truncated',MAX_PAGES,total);
+            body.appendChild(notice);
+          }
+          // On a per-page failure, skip that page and continue so one malformed
+          // page can't silently halt the preview or surface an unhandled
+          // promise rejection (renderPage runs outside the outer .catch chain).
+          const renderPage=(i)=>{
+            if(i>n) return;
+            pdf.getPage(i).then(page=>{
+              const canvas=document.createElement('canvas');
+              const scale=1.5;
+              const viewport=page.getViewport({scale});
+              canvas.width=viewport.width;
+              canvas.height=viewport.height;
+              canvas.className='pdf-preview-canvas';
+              // Attach only after a successful render, so a render rejection
+              // (corrupt page data, null 2d context) can't leave a blank canvas
+              // behind — the .catch then simply skips to the next page.
+              return page.render({canvasContext:canvas.getContext('2d'),viewport}).promise.then(()=>{ body.appendChild(canvas); });
+            }).then(()=>renderPage(i+1)).catch(()=>renderPage(i+1));
+          };
+          renderPage(1);
         })
         .catch(()=>{
           const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
@@ -12684,6 +13380,12 @@ function _bindWorkspaceMoveDropTarget(el,destDir){
   };
 }
 
+function elideMiddle(str, maxLen = 60) {
+  if (str.length <= maxLen) return str;
+  const half = Math.floor((maxLen - 3) / 2);
+  return str.slice(0, half) + '...' + str.slice(str.length - half);
+}
+
 function _renderTreeItems(container, entries, depth){
   for(const item of entries){
     const el=document.createElement('div');el.className='file-item';
@@ -12694,7 +13396,12 @@ function _renderTreeItems(container, entries, depth){
     el.ondragstart=(e)=>{e.dataTransfer.setData('application/ws-path',item.path);e.dataTransfer.setData('application/ws-type',item.type);e.dataTransfer.effectAllowed='copy';el.classList.add('dragging');};
     el.ondragend=()=>{el.classList.remove('dragging');_clearWorkspaceMoveDragOver();};
 
-    if(item.type==='dir'){
+    const isLk = item.type === 'symlink';
+    const isDirLike = item.type === 'dir' || (isLk && item.is_dir);
+    const isFileLike = !isDirLike;
+    el.dataset.wsIsDir = String(isDirLike);
+
+    if(isDirLike){
       // Toggle arrow for directories
       const arrow=document.createElement('span');
       arrow.className='file-tree-toggle';
@@ -12712,7 +13419,10 @@ function _renderTreeItems(container, entries, depth){
 
     // Icon
     const iconEl=document.createElement('span');
-    iconEl.className='file-icon';iconEl.innerHTML=fileIcon(item.name,item.type);
+    iconEl.className='file-icon';
+    iconEl.innerHTML = isDirLike
+      ? (isLk ? li('link', 14) : li('folder', 14))
+      : (isLk ? li('link', 14) : fileIcon(item.name, item.type));
     el.appendChild(iconEl);
 
     // Name
@@ -12721,7 +13431,10 @@ function _renderTreeItems(container, entries, depth){
     // Tooltip only on FILES — dblclick renames them. On directories, dblclick
     // navigates into the folder; rename lives in the right-click context menu
     // (the "Double-click to rename" hint here would be misleading). #1710.
-    if(item.type!=='dir')nameEl.title=t('double_click_rename');
+    if(isLk && item.target)
+      nameEl.title = t('symlink_link_to').replace('{target}', () => elideMiddle(item.target));
+    else if(!isDirLike)
+      nameEl.title = t('double_click_rename');
     // Single-click opens (file) or expand-toggles (dir) but is debounced 300ms so a
     // double-click can cancel it and trigger rename instead. Without the debounce, the
     // click bubbles to el.onclick before dblclick can fire — that's #1698. Without the
@@ -12740,7 +13453,7 @@ function _renderTreeItems(container, entries, depth){
       e.stopPropagation();
       if(_nameClickTimer){clearTimeout(_nameClickTimer);_nameClickTimer=null;}
       // For directories, double-click navigates (breadcrumb view)
-      if(item.type==='dir'){loadDir(item.path);return;}
+      if(isDirLike){loadDir(item.path);return;}
       const inp=document.createElement('input');
       inp.className='file-rename-input';inp.value=item.name;
       inp.onclick=(e2)=>e2.stopPropagation();
@@ -12755,7 +13468,7 @@ function _renderTreeItems(container, entries, depth){
               })});
               showToast(t('renamed_to')+newName);
               // Update expanded dirs cache key if renaming a directory
-              if(item.type==='dir'&&S._expandedDirs){
+              if(isDirLike&&S._expandedDirs){
                 S._expandedDirs.delete(item.path);
                 const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
                 const newPath=parent==='.'?newName:parent+'/'+newName;
@@ -12785,28 +13498,28 @@ function _renderTreeItems(container, entries, depth){
     };
     el.appendChild(nameEl);
 
-    // Size -- only for files
-    if(item.type==='file'&&item.size){
+    // Size -- for real files and symlinks that resolve to files
+    if(isFileLike&&item.size){
       const sizeEl=document.createElement('span');
       sizeEl.className='file-size';
       sizeEl.textContent=`${(item.size/1024).toFixed(1)}k`;
       el.appendChild(sizeEl);
     }
 
-    // Delete button -- for files and directories
-    if(item.type==='file'){
+    // Delete button -- for file-like rows and directory-like rows
+    if(isFileLike){
       const del=document.createElement('button');
       del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
       del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceFile(item.path,item.name);};
       el.appendChild(del);
-    }else if(item.type==='dir'){
+    }else if(isDirLike){
       const del=document.createElement('button');
       del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
       del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceDir(item.path,item.name);};
       el.appendChild(del);
     }
 
-    if(item.type==='dir'){
+    if(isDirLike){
       _bindWorkspaceMoveDropTarget(el,item.path);
       _bindWorkspaceOsUploadDropTarget(el,item.path);
       // Single-click toggles expand/collapse
@@ -12836,7 +13549,7 @@ function _renderTreeItems(container, entries, depth){
     container.appendChild(el);
 
     // Render children if directory is expanded
-    if(item.type==='dir'&&S._expandedDirs.has(item.path)){
+    if(isDirLike&&S._expandedDirs.has(item.path)){
       const children=_visibleWorkspaceEntries(S._dirCache[item.path]||[]);
       if(children.length){
         _renderTreeItems(container, children, depth+1);
@@ -12874,7 +13587,8 @@ function _showFileContextMenu(e, item){
   const vw=window.innerWidth,vh=window.innerHeight;
   menu.style.left=(e.clientX+140>vw?e.clientX-150:e.clientX)+'px';
   menu.style.top=(e.clientY+100>vh?e.clientY-100:e.clientY)+'px';
-  const targetDir=item.type==='dir' ? item.path : _workspaceParentDir(item.path);
+  const isDirLike=item.type==='dir'||(item.type==='symlink'&&item.is_dir);
+  const targetDir=isDirLike ? item.path : _workspaceParentDir(item.path);
 
   menu.appendChild(_workspaceContextMenuItem(t('new_file'),async()=>{
     menu.remove();
@@ -12953,7 +13667,7 @@ function _showFileContextMenu(e, item){
   };
   menu.appendChild(copyPathItem);
 
-  if(item.type==='dir'){
+  if(isDirLike){
     const dlItem=document.createElement('div');
     dlItem.textContent=t('download_folder');
     dlItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
@@ -12976,7 +13690,7 @@ function _showFileContextMenu(e, item){
   delItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--error,#e94560);';
   delItem.onmouseenter=()=>delItem.style.background='var(--hover-bg)';
   delItem.onmouseleave=()=>delItem.style.background='';
-  delItem.onclick=()=>{menu.remove();if(item.type==='dir')deleteWorkspaceDir(item.path,item.name);else deleteWorkspaceFile(item.path,item.name);};
+  delItem.onclick=()=>{menu.remove();if(isDirLike)deleteWorkspaceDir(item.path,item.name);else deleteWorkspaceFile(item.path,item.name);};
   menu.appendChild(delItem);
 
   document.body.appendChild(menu);
@@ -12986,6 +13700,7 @@ function _showFileContextMenu(e, item){
 
 async function _inlineRenameFileItem(item){
   if(!S.session)return;
+  const isDirLike=item.type==='dir'||(item.type==='symlink'&&item.is_dir);
   // Pre-fill the input with the current name and select just the stem
   // (everything before the last '.') so the user can immediately retype the
   // basename while preserving the extension — matches macOS Finder. For
@@ -12995,15 +13710,15 @@ async function _inlineRenameFileItem(item){
     message:t('rename_prompt'),
     value:item.name,
     confirmLabel:t('rename_title'),
-    selectStem:item.type!=='dir',
-    selectAll:item.type==='dir'
+    selectStem:!isDirLike,
+    selectAll:isDirLike
   });
   if(!newName||newName===item.name)return;
   try{
     await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
     showToast(t('renamed_to')+newName);
     // Update expanded dirs cache key if renaming a directory
-    if(item.type==='dir'&&S._expandedDirs){
+    if(isDirLike&&S._expandedDirs){
       S._expandedDirs.delete(item.path);
       const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
       const newPath=parent==='.'?newName:parent+'/'+newName;

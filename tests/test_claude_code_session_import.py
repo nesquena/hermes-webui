@@ -198,8 +198,8 @@ def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, t
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
     monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
-    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: messages if _sid == sid else [])
-    monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None: [meta])
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid, profile=None: messages if _sid == sid else [])
+    monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [meta])
     monkeypatch.setattr(routes, "get_last_workspace", lambda: tmp_path / "workspace")
     monkeypatch.setattr(routes, "import_cli_session", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("read-only import must not persist")))
 
@@ -263,8 +263,16 @@ def test_session_import_cli_queues_generated_title_for_writable_default_cli_titl
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
     monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
-    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: messages if _sid == sid else [])
-    monkeypatch.setattr(routes, "get_cli_sessions", lambda: [cli_meta])
+    monkeypatch.setattr(
+        routes,
+        "get_cli_session_messages",
+        lambda _sid, profile=None: messages if _sid == sid else [],
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_cli_sessions",
+        lambda source_filter=None, all_profiles=False: [cli_meta],
+    )
     monkeypatch.setattr(routes, "import_cli_session", lambda *args, **kwargs: imported)
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda reason, profile=None: published.append((reason, profile)))
     monkeypatch.setattr(routes, "_queue_generated_title_for_imported_session", lambda session, meta: queued.append((session, meta.copy())))

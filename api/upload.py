@@ -457,6 +457,13 @@ def _stt_provider_capability_from_module(stt):
             # non-WAV input through ffmpeg before invoking the command.
             return has_local_command() and has_browser_audio_converter()
 
+        def command_provider_available(provider):
+            resolver = getattr(stt, "_resolve_command_stt_provider_config", None)
+            try:
+                return callable(resolver) and resolver(provider, cfg_dict) is not None
+            except Exception:
+                return False
+
         def resolve_provider(provider):
             if provider == "local":
                 if bool(getattr(stt, "_HAS_FASTER_WHISPER", False)):
@@ -485,6 +492,8 @@ def _stt_provider_capability_from_module(stt):
                     return "none"
             if provider == "elevenlabs":
                 return "elevenlabs" if bool(env("ELEVENLABS_API_KEY")) else "none"
+            if command_provider_available(provider):
+                return provider
             return "none"
 
         explicit = "provider" in cfg_dict
@@ -494,6 +503,12 @@ def _stt_provider_capability_from_module(stt):
             return provider != "none", provider if provider != "none" else configured
 
         for candidate in ("local", "local_command", "groq", "openai", "mistral", "xai", "elevenlabs"):
+            # Command (custom) STT providers are intentionally omitted from this
+            # auto-detect tuple to mirror the agent's _get_provider() (transcription_tools.py),
+            # which only auto-selects local > groq > openai and never auto-picks a command
+            # provider. A command-backed STT activates only via an explicit stt.provider.
+            # Do NOT add command providers here without matching the agent, or the WebUI
+            # probe will diverge from what the agent actually resolves.
             provider = resolve_provider(candidate)
             if provider != "none":
                 return True, provider

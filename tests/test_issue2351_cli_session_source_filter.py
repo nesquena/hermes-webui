@@ -110,6 +110,67 @@ def test_webui_source_overrides_stale_cli_flag_even_with_default_title():
     assert _normalize_sidebar_source_flags(stale_webui)["is_cli_session"] is False
 
 
+def test_webui_state_db_source_overrides_stale_cli_detail_payload():
+    from api.routes import _reconcile_session_detail_source_flags
+
+    detail_payload = {
+        "session_id": "webui-tip",
+        "title": "Long WebUI session",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "session_source": "cli",
+        "source_label": "CLI",
+        "is_cli_session": True,
+        "read_only": True,
+        "message_count": 24,
+    }
+    state_db_row = {
+        "session_id": "webui-tip",
+        "source_tag": "webui",
+        "raw_source": "webui",
+        "session_source": "webui",
+        "source_label": "WebUI",
+        "message_count": 26,
+    }
+
+    reconciled = _reconcile_session_detail_source_flags(detail_payload, state_db_row)
+
+    assert reconciled["is_cli_session"] is False
+    assert reconciled["read_only"] is False
+    assert reconciled["source_tag"] == "webui"
+    assert reconciled["raw_source"] == "webui"
+    assert reconciled["session_source"] == "webui"
+    assert reconciled["source_label"] == "WebUI"
+    assert reconciled["message_count"] == 26
+
+
+def test_real_cli_source_survives_detail_source_reconcile():
+    from api.routes import _reconcile_session_detail_source_flags
+
+    detail_payload = {
+        "session_id": "cli-tip",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "session_source": "cli",
+        "source_label": "CLI",
+        "is_cli_session": True,
+        "read_only": True,
+    }
+    state_db_row = {
+        "session_id": "cli-tip",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "session_source": "cli",
+        "source_label": "CLI",
+    }
+
+    reconciled = _reconcile_session_detail_source_flags(detail_payload, state_db_row)
+
+    assert reconciled["is_cli_session"] is True
+    assert reconciled["read_only"] is True
+    assert reconciled["source_tag"] == "cli"
+
+
 def test_real_cli_sidebar_cli_flag_is_preserved_before_frontend_response():
     from api.routes import _normalize_sidebar_source_flags
 
@@ -125,3 +186,74 @@ def test_real_cli_sidebar_cli_flag_is_preserved_before_frontend_response():
     )
 
     assert normalized["is_cli_session"] is True
+
+
+def test_tui_state_db_rows_are_cli_sidebar_rows():
+    """Hermes TUI state.db rows belong in the CLI/agent sidebar bucket.
+
+    TUI sessions are projected from state.db with raw/source_tag='tui'. If they
+    stay session_source='other' and is_cli_session=false, the two-tab sidebar
+    partition can make active TUI continuations disappear from both the WebUI
+    and CLI views.
+    """
+    from api.agent_sessions import is_cli_session_row, normalize_agent_session_source
+    from api.routes import _normalize_sidebar_source_flags
+
+    normalized_source = normalize_agent_session_source("tui")
+    assert normalized_source["session_source"] == "cli"
+    assert normalized_source["source_label"] == "TUI"
+
+    tui_row = {
+        "session_id": "tui-tip",
+        "title": "Podcast work #17",
+        "source_tag": "tui",
+        "raw_source": "tui",
+        "session_source": "other",
+        "source_label": "Tui",
+        "message_count": 281,
+    }
+
+    assert is_cli_session_row(tui_row) is True
+    assert _normalize_sidebar_source_flags(tui_row)["is_cli_session"] is True
+
+
+def test_tui_continuation_projection_uses_latest_tip_title():
+    """TUI continuation rows should surface under the latest segment title."""
+    from api.agent_sessions import _project_agent_session_rows
+
+    rows = [
+        {
+            "id": "tui_parent",
+            "source": "tui",
+            "title": "Podcast work #6",
+            "started_at": 100.0,
+            "last_activity": 150.0,
+            "message_count": 10,
+            "actual_message_count": 10,
+            "actual_user_message_count": 5,
+            "parent_session_id": None,
+            "ended_at": 199.0,
+            "end_reason": "cli_close",
+        },
+        {
+            "id": "tui_tip",
+            "source": "tui",
+            "title": "Podcast work #17",
+            "started_at": 200.0,
+            "last_activity": 250.0,
+            "message_count": 8,
+            "actual_message_count": 8,
+            "actual_user_message_count": 4,
+            "parent_session_id": "tui_parent",
+            "ended_at": None,
+            "end_reason": None,
+        },
+    ]
+
+    projected = _project_agent_session_rows(rows)
+
+    assert len(projected) == 1
+    assert projected[0]["id"] == "tui_tip"
+    assert projected[0]["title"] == "Podcast work #17"
+    assert projected[0]["_lineage_root_id"] == "tui_parent"
+    assert projected[0]["_lineage_tip_id"] == "tui_tip"

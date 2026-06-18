@@ -38,6 +38,7 @@ from api.config import (
     load_settings,
     parse_reasoning_effort,
     coerce_reasoning_effort_for_model,
+    _main_model_request_overrides,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -165,11 +166,17 @@ def _apply_profile_provider_context_to_streaming_model(
 
     profile_provider_normalized = _normalize_provider_id(profile_provider)
     model_lower = (model or "").lower()
-    for prefix in ("gpt", "claude", "gemini"):
-        if model_lower.startswith(prefix):
-            if _normalize_provider_id(prefix) != profile_provider_normalized:
-                return profile_default_model, provider_context, True
-            return model, provider_context, False
+    # Only run the bare-prefix family match on un-namespaced model ids. A custom
+    # namespace like "gemini_cli/..." or "claude-relay/..." merely *starts with* a
+    # first-party token; matching it here would clobber the model to the profile
+    # default on the send path (the #4278 collision — the slash-qualified branch
+    # below routes through the fixed _normalize_provider_id instead).
+    if "/" not in model_lower:
+        for prefix in ("gpt", "claude", "gemini"):
+            if model_lower.startswith(prefix):
+                if _normalize_provider_id(prefix) != profile_provider_normalized:
+                    return profile_default_model, provider_context, True
+                return model, provider_context, False
 
     if "/" in model_lower:
         slash_prefix = model_lower.split("/", 1)[0]
@@ -1529,6 +1536,31 @@ def _bind_turn_session_identity(session_id: str):
         _reset_turn_session_identity(tokens)
 
 
+def _stale_completion_max_age_seconds() -> float:
+    """Max age (seconds) a background-process completion may sit in the queue
+    before the WebUI drain treats it as stale and drops it instead of
+    prepending it to the user's next turn.
+
+    Completions older than this are silently consumed (not requeued) so a
+    notification that finally fires long after the user moved on cannot
+    contaminate an unrelated later turn. See nesquena/hermes-webui#4029.
+
+    Configurable via HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS. A value of
+    0 (or negative) disables age-gating and restores the legacy drain-all
+    behavior. Defaults to 6 hours.
+    """
+    raw = os.environ.get("HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS=%r; using default",
+                raw,
+            )
+    return 6 * 60 * 60  # 6 hours
+
+
 def _format_process_notification(evt: dict) -> str:
     """Format a completed background process notification for agent input."""
     if not isinstance(evt, dict):
@@ -1577,6 +1609,10 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
     if completion_queue is None:
         return []
 
+    # Computed once per drain (not per event): reads/validates the env cap a
+    # single time so an invalid value logs at most one warning per drain.
+    stale_completion_max_age = _stale_completion_max_age_seconds()
+
     while True:
         try:
             evt = completion_queue.get_nowait()
@@ -1599,6 +1635,25 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
         if getattr(proc, 'session_key', None) != session_id:
             skipped_events.append(evt)
             continue
+
+        # Age-gate stale completions: a completion that fires long after the
+        # user moved on must not be prepended to an unrelated later turn
+        # (nesquena/hermes-webui#4029). Drop (consume, do not requeue) any
+        # completion whose enqueue time is older than the configured cap.
+        # Events without a 'completed_at' (older agent builds) are never
+        # dropped here, preserving backward-compatible behavior.
+        if stale_completion_max_age > 0 and isinstance(evt, dict):
+            completed_at = evt.get('completed_at')
+            if isinstance(completed_at, (int, float)) and completed_at > 0:
+                age = time.time() - completed_at
+                if age > stale_completion_max_age:
+                    logger.info(
+                        "Dropping stale background-process completion for "
+                        "session %s (age %.0fs > cap %.0fs)",
+                        evt_sid, age, stale_completion_max_age,
+                    )
+                    _mark_process_completion_consumed(process_registry, evt_sid)
+                    continue
 
         notification = _format_process_notification(evt)
         if notification:
@@ -3771,24 +3826,69 @@ def _strip_replayed_context_items(existing_messages, candidates):
     return cleaned
 
 
-def _dedupe_replayed_context_messages(previous_context, result_messages):
+def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None):
     """Keep model context append-only without replayed blocks/summaries."""
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not previous_context or not result_messages:
         return result_messages
+    previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
     if not _messages_have_prefix(result_messages, previous_context):
+        # Agent-side role-sequence repair can replace the last prior user row
+        # with a repaired current-user row. In that shape the result no longer
+        # has `previous_context` as an exact prefix, but it should still be
+        # merged as: previous context + clean current turn + assistant/tool delta.
+        if (
+            msg_text
+            and len(previous_context) >= 1
+            and len(result_messages) >= len(previous_context)
+            and _messages_have_prefix(result_messages, previous_context[:-1])
+        ):
+            boundary_idx = len(previous_context) - 1
+            boundary_row = result_messages[boundary_idx]
+            is_stale_merge = bool(
+                previous_user_tail
+                and _detect_stale_user_merge(
+                    boundary_row,
+                    msg_text,
+                    previous_user_tail,
+                    previous_context=previous_context,
+                )
+            )
+            if is_stale_merge or _looks_like_current_user_turn(boundary_row, msg_text):
+                if is_stale_merge:
+                    # Clean only the stale-merged boundary row; leave all prior
+                    # history in previous_context untouched.
+                    cleaned_boundary = copy.deepcopy(boundary_row)
+                    cleaned_boundary['content'] = msg_text
+                    candidates = [cleaned_boundary] + result_messages[boundary_idx + 1:]
+                else:
+                    candidates = result_messages[boundary_idx:]
+                candidates = _strip_replayed_prefix(previous_context, candidates)
+                if candidates:
+                    candidates = _strip_replayed_context_items(previous_context, candidates)
+                return previous_context + candidates
         return result_messages
     candidates = result_messages[len(previous_context):]
+    # Strip stale merges only from the new-turn candidate slice so that
+    # legitimate historical user rows in the already-committed previous_context
+    # prefix are never rewritten.
+    if msg_text and previous_user_tail:
+        candidates = _strip_stale_user_merge_from_messages(
+            candidates,
+            msg_text,
+            previous_user_tail,
+            previous_context=previous_context,
+        )
     candidates = _strip_replayed_prefix(previous_context, candidates)
     if candidates:
         candidates = _strip_replayed_context_items(previous_context, candidates)
     return previous_context + candidates
 
 
-def _dedupe_replayed_active_context(previous_context, result_messages):
+def _dedupe_replayed_active_context(previous_context, result_messages, msg_text=None):
     """Keep model context append-only without re-appending a replayed tail."""
-    return _dedupe_replayed_context_messages(previous_context, result_messages)
+    return _dedupe_replayed_context_messages(previous_context, result_messages, msg_text)
 
 
 def _is_context_compression_marker(msg):
@@ -3884,6 +3984,215 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
     if current_user_key and _message_identity(history[-1]) == current_user_key:
         return history[:-1]
     return history
+
+
+def _strip_workspace_prefixes_for_compare(text: str) -> str:
+    """Remove WebUI workspace sentinels anywhere before text comparison."""
+    value = _strip_workspace_prefix(text, include_legacy=True)
+    for pattern in (_WORKSPACE_PREFIX_ANY_RE, _LEGACY_WORKSPACE_PREFIX_ANY_RE):
+        value = pattern.sub('', value)
+    return value.strip()
+
+
+def _normalize_user_text(text):
+    """Collapse whitespace and strip workspace sentinels for tail comparisons."""
+    if not isinstance(text, str):
+        return ""
+    return " ".join(_strip_workspace_prefixes_for_compare(text).split())
+
+
+def _raw_message_text(value) -> str:
+    """Extract text from a message content payload without stripping markup.
+
+    Used for the stale-user-merge detector so the literal boundary between
+    the prior tail and the current turn survives into the comparison. The
+    thinking-markup strip in ``_message_text`` collapses newlines, which
+    would defeat the boundary check.
+    """
+    if isinstance(value, list):
+        return ' '.join(
+            str(p.get('text') or p.get('content') or '')
+            for p in value
+            if isinstance(p, dict)
+        )
+    return str(value or '')
+
+
+def _stale_user_tail_candidate(msg):
+    """Return normalized text if msg is a user row that could be a stale tail."""
+    if not isinstance(msg, dict) or msg.get('role') != 'user':
+        return None
+    raw = _raw_message_text(msg.get('content', ''))
+    if not raw.strip():
+        return None
+    return _normalize_user_text(raw)
+
+
+def _last_user_row(messages):
+    """Return the last user-role row in `messages`, or None."""
+    for msg in reversed(list(messages or [])):
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            return msg
+    return None
+
+
+def _stale_prefix_matches_prior_user_context(stale_prefix, stale_segments, previous_context):
+    """Return True when a stale prefix is explainable by prior user context.
+
+    First-generation repair usually produces segments matching consecutive
+    prior user rows. Once a session is already contaminated, later repair can
+    replay a stable stale prefix from an older polluted row even after newer
+    clean user turns have moved the context tail forward. Handle both shapes
+    while still requiring all evidence to come from prior user-role rows.
+    """
+    prior_rows = [
+        _stale_user_tail_candidate(msg)
+        for msg in previous_context or []
+    ]
+    prior_rows = [row for row in prior_rows if row]
+    if not prior_rows:
+        return False
+
+    if stale_segments:
+        segment_count = len(stale_segments)
+        for start in range(0, len(prior_rows) - segment_count + 1):
+            if prior_rows[start:start + segment_count] == stale_segments:
+                return True
+
+        # Already-polluted sessions may replay paragraphs from older polluted
+        # rows after newer clean turns have advanced the context tail. In that
+        # shape the stale paragraphs are still all prior user content, but they
+        # are substrings within older merged rows rather than standalone rows.
+        #
+        # NOTE: this substring match is intentionally loose (a stale segment can
+        # coincidentally appear inside an unrelated prior row). Correctness does
+        # NOT depend on it being precise — the caller (_detect_stale_user_merge)
+        # only reaches here once the row's suffix already normalizes to the
+        # ENTIRE submitted turn, so anything this branch flags has a prefix that
+        # is extra-to-the-submission. Cleaning therefore only ever rewrites the
+        # row to the user's actual current turn; it can never drop legitimate
+        # current-turn content even on a coincidental substring hit.
+        row_index = 0
+        row_offset = 0
+        matched_all_segments = True
+        for segment in stale_segments:
+            matched_segment = False
+            while row_index < len(prior_rows):
+                row = prior_rows[row_index]
+                pos = row.find(segment, row_offset)
+                if pos >= 0:
+                    row_offset = pos + len(segment)
+                    matched_segment = True
+                    break
+                row_index += 1
+                row_offset = 0
+            if not matched_segment:
+                matched_all_segments = False
+                break
+        if matched_all_segments:
+            return True
+
+    prefix_norm = _normalize_user_text(stale_prefix)
+    if not prefix_norm:
+        return False
+    for row in prior_rows:
+        if row == prefix_norm or row.startswith(f'{prefix_norm} '):
+            return True
+    return False
+
+
+def _detect_stale_user_merge(message, msg_text, previous_user_tail, previous_context=None):
+    """Return True if `message` is the current user turn with a stale prefix merged in.
+
+    The agent's defensive repair path can concatenate prior user context with
+    the submitted current turn as ``<stale>\\n\\n<current>``. The stale portion
+    can be either the immediate prior user tail or a replayed prefix from an
+    older already-polluted user row. The literal ``\\n\\n`` boundary must survive
+    into the comparison; a single-newline or space-only join is not the repair
+    shape and must not match. Workspace sentinels may be present on either or
+    both halves and are stripped before comparison.
+    """
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    current_norm = _normalize_user_text(msg_text)
+    if not current_norm:
+        return False
+
+    merged = _raw_message_text(message.get('content', '')).replace("\r\n", "\n")
+    if "\n\n" not in merged:
+        return False
+
+    # The user's current turn can itself contain paragraph breaks. Find a repair
+    # boundary whose suffix normalizes to the *entire* submitted turn, then treat
+    # only the prefix as stale context. A plain split-and-last-segment check would
+    # miss ``<stale>\n\n<current paragraph A>\n\n<current paragraph B>``.
+    stale_segments = []
+    stale_prefix = ''
+    search_end = len(merged)
+    while search_end > 0:
+        boundary_idx = merged.rfind("\n\n", 0, search_end)
+        if boundary_idx < 0:
+            break
+        suffix = merged[boundary_idx + 2:]
+        if _normalize_user_text(suffix) == current_norm:
+            prefix = merged[:boundary_idx]
+            candidate_segments = [
+                _normalize_user_text(segment)
+                for segment in prefix.split("\n\n")
+            ]
+            if candidate_segments and all(candidate_segments):
+                stale_segments = candidate_segments
+                stale_prefix = prefix
+                break
+            # The suffix matched the submitted turn, but this boundary leaves
+            # blank prefix segments; try the next candidate boundary to the left.
+        search_end = boundary_idx
+    if not stale_segments:
+        return False
+
+    if previous_context is not None and _stale_prefix_matches_prior_user_context(
+        stale_prefix,
+        stale_segments,
+        previous_context,
+    ):
+        return True
+
+    return bool(
+        previous_context is None
+        and len(stale_segments) == 1
+        and _normalize_user_text(previous_user_tail) == stale_segments[0]
+    )
+
+
+def _strip_stale_user_merge_from_messages(
+    messages,
+    msg_text,
+    previous_user_tail,
+    previous_context=None,
+):
+    """Return messages with stale-prefixed current user turns replaced by clean ones.
+
+    Both context-merge (model-facing) and display-merge (visible transcript)
+    callers funnel through this so a single detection rule governs persistence.
+    The current user row is replaced with a clean copy using `msg_text` so the
+    displayed bubble matches what the human submitted, never the polluted pair.
+    """
+    if not messages or not msg_text:
+        return messages
+    out = []
+    for msg in messages:
+        if _detect_stale_user_merge(
+            msg,
+            msg_text,
+            previous_user_tail,
+            previous_context=previous_context,
+        ):
+            cleaned = copy.deepcopy(msg) if isinstance(msg, dict) else {'role': 'user', 'content': msg_text}
+            cleaned['content'] = msg_text
+            out.append(cleaned)
+        else:
+            out.append(msg)
+    return out
 
 
 def _save_streaming_checkpoint(session):
@@ -4094,6 +4403,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     result_messages = list(result_messages or [])
     if not result_messages:
         return previous_display
+    previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
 
     # ── Backfill normal turns from previous_context that are missing from
     # previous_display.  After context compression recovery, previous_context
@@ -4116,6 +4426,19 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         _has_context_only_turns = bool(_context_id_set - _display_id_set)
         if _has_context_only_turns:
             context_keys = [_message_identity(m) for m in previous_context]
+            # Precompute display keys once; avoids repeated json.dumps calls inside
+            # the inner any() loop (was O(D²·C) — see perf fix below).
+            _display_keys = [_message_identity(m) for m in previous_display]
+            # Multiset mirror of context_keys[_cursor:] kept in sync as _cursor
+            # advances. Enables O(1) membership tests in the any() check instead
+            # of an O(N) list scan, while preserving EXACT list-slice semantics:
+            # _message_identity intentionally returns duplicate keys for
+            # identical-content turns (and None for empty rows), so a plain set
+            # would drop a key still present later in the slice. A count-keyed
+            # dict (including None) matches `in context_keys[_cursor:]` exactly.
+            _remaining_ck_counts = {}
+            for _ck in context_keys:
+                _remaining_ck_counts[_ck] = _remaining_ck_counts.get(_ck, 0) + 1
             _backfilled = []
             # #3300 fix: track ONLY context rows we splice in, so the
             # visible-display backbone is never suppressed. Sharing one set
@@ -4127,7 +4450,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             _context_inserted = set()
             _cursor = 0
             for _display_idx, _dmsg in enumerate(previous_display):
-                _dkey = _message_identity(_dmsg)
+                _dkey = _display_keys[_display_idx]
                 if _dkey is not None:
                     _j = _cursor
                     while _j < len(context_keys) and context_keys[_j] != _dkey:
@@ -4139,10 +4462,20 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                             if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not _is_context_compression_marker(_cmsg):
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _context_inserted.add(_ckey)
+                        # Sync multiset: decrement keys consumed by advancing
+                        # the cursor to _j+1 (delete at zero so membership matches
+                        # the list slice exactly).
+                        for _k in range(_cursor, _j + 1):
+                            _consumed_ck = context_keys[_k]
+                            _ck_n = _remaining_ck_counts.get(_consumed_ck, 0) - 1
+                            if _ck_n <= 0:
+                                _remaining_ck_counts.pop(_consumed_ck, None)
+                            else:
+                                _remaining_ck_counts[_consumed_ck] = _ck_n
                         _cursor = _j + 1
                     elif not any(
-                        _message_identity(_future_dmsg) in context_keys[_cursor:]
-                        for _future_dmsg in previous_display[_display_idx + 1:]
+                        _display_keys[_fi] in _remaining_ck_counts
+                        for _fi in range(_display_idx + 1, len(_display_keys))
                     ):
                         for _k in range(_cursor, len(context_keys)):
                             _ckey = context_keys[_k]
@@ -4151,6 +4484,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _context_inserted.add(_ckey)
                         _cursor = len(context_keys)
+                        _remaining_ck_counts.clear()
                 # The display row is the visible backbone — always preserve it,
                 # in order, even when an earlier (identical-content) turn or a
                 # backfilled context row shares its timestamp-less identity.
@@ -4173,6 +4507,15 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
 
     if _messages_have_prefix(result_messages, previous_context):
         candidates = result_messages[len(previous_context):]
+        # Normalize stale merges only in the new-turn slice; never rewrite
+        # historical rows in the already-committed previous_context prefix.
+        if msg_text and previous_user_tail:
+            candidates = _strip_stale_user_merge_from_messages(
+                candidates,
+                msg_text,
+                previous_user_tail,
+                previous_context=previous_context,
+            )
         candidates = _strip_replayed_prefix(previous_display, candidates)
         candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
@@ -4182,6 +4525,14 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             if _is_context_compression_marker(m)
         ]
         turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
+        # Normalize stale merges only in the current-turn slice.
+        if msg_text and previous_user_tail:
+            turn_candidates = _strip_stale_user_merge_from_messages(
+                turn_candidates,
+                msg_text,
+                previous_user_tail,
+                previous_context=previous_context,
+            )
         candidates = marker_candidates + turn_candidates
 
     merged = previous_display[:]
@@ -6189,6 +6540,7 @@ def _run_agent_streaming(
             _prefill_context = _load_webui_prefill_context(_cfg)
             _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
             _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
+            _main_request_overrides = _main_model_request_overrides(_cfg)
             put('context_status', {
                 'session_id': session_id,
                 'prefill': _public_prefill_context_status(_prefill_context),
@@ -6370,6 +6722,8 @@ def _run_agent_streaming(
                 _agent_kwargs['max_iterations'] = _max_iterations_cfg
             if 'max_tokens' in _agent_params and _max_tokens_cfg is not None:
                 _agent_kwargs['max_tokens'] = _max_tokens_cfg
+            if 'request_overrides' in _agent_params and _main_request_overrides:
+                _agent_kwargs['request_overrides'] = _main_request_overrides
             # Params added in newer hermes-agent — skip if not supported
             if 'api_mode' in _agent_params:
                 _agent_kwargs['api_mode'] = _rt.get('api_mode')
@@ -6411,6 +6765,7 @@ def _run_agent_streaming(
                     _fallback_resolved or {},
                     sorted(_toolsets) if _toolsets else [],
                     _reasoning_config or {},
+                    _main_request_overrides or {},
                     _public_prefill_context_status(_prefill_context),
                     # #1897: profile_home is part of the agent's identity because
                     # AIAgent caches `_cached_system_prompt` from `load_soul_md()`
@@ -6823,6 +7178,7 @@ def _run_agent_streaming(
                 _next_context_messages = _dedupe_replayed_context_messages(
                     _previous_context_messages,
                     _next_context_messages,
+                    msg_text,
                 )
                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                 s.messages = _merge_display_messages_after_agent_result(
@@ -7114,6 +7470,7 @@ def _run_agent_streaming(
                                 _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
+                                    msg_text,
                                 )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
@@ -8093,6 +8450,7 @@ def _run_agent_streaming(
                                 _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
+                                    msg_text,
                                 )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(

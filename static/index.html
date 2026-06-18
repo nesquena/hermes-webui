@@ -348,6 +348,16 @@
         <span data-i18n="tab_settings">Settings</span>
       </div>
       <div class="side-menu" id="settingsMenu">
+        <div class="settings-search sidebar-search">
+          <svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="8"/>
+            <path d="M21 21l-4.35-4.35"/>
+          </svg>
+          <input id="settingsSearch" data-i18n-placeholder="settings_search_placeholder"
+            placeholder="Search settings…" oninput="filterSettings(this.value)" autocomplete="off">
+          <div id="settingsSearchResults" class="settings-search-results" style="display:none"></div>
+        </div>
         <button type="button" class="side-menu-item active" data-settings-section="conversation" onclick="switchSettingsSection('conversation')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           <span data-i18n="settings_tab_conversation">Conversation</span>
@@ -554,6 +564,7 @@
       <div class="queue-pill-outer">
         <button id="queuePill" class="queue-pill" aria-label="Show queued messages" type="button"></button>
       </div>
+      <div id="composerSelectionChips" class="composer-selection-chips" hidden aria-live="polite"></div>
       <div class="composer-box" id="composerBox">
         <div class="cmd-dropdown" id="cmdDropdown"></div>
         <div class="drop-hint" id="dropHint">
@@ -1056,7 +1067,10 @@
             </div>
             <div class="settings-field">
               <label for="settingsModel" data-i18n="settings_label_model">Default Model</label>
-              <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+              <div class="model-advanced-row">
+                <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+                <button type="button" id="mainAdvancedBtn" class="model-advanced-btn" title="Advanced options" aria-label="Advanced options for main model"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+              </div>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_model">Used for new conversations. Existing conversations keep their selected model.</div>
             </div>
             <div class="settings-field">
@@ -1074,6 +1088,13 @@
                 <span data-i18n="settings_label_hide_suggestions">Hide new-chat suggestions</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_hide_suggestions">Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsVirtualizeTranscript" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_virtualize_transcript">Virtualize long transcripts (experimental)</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_virtualize_transcript">Experimental. Renders only the visible portion of very long chat transcripts (over 80 messages) to speed up scrolling. Off by default because it can cause scroll flicker on long sessions with large tool-call blocks. Turn it on to try it; leave it off for the full transcript to render at once (and so the browser's Find (Ctrl+F) matches the whole conversation).</div>
             </div>
             <div class="settings-field">
               <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
@@ -1129,7 +1150,7 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_raw_audio">Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram's voice message behavior.</div>
             </div>
             <div class="settings-field">
-              <label for="settingsTtsEngine" data-i18n="settings_label_tts_engine">TTS Engine</label><select id="settingsTtsEngine" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="browser">Browser speech synthesis</option><option value="edge">Edge TTS (server)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_engine">Choose speech engine. Edge TTS uses Microsoft neural voices via the server.</div></div><div class="settings-field"><label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
+              <label for="settingsTtsEngine" data-i18n="settings_label_tts_engine">TTS Engine</label><select id="settingsTtsEngine" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="browser">Browser speech synthesis</option><option value="edge">Edge TTS (server)</option><option value="elevenlabs">ElevenLabs (server)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_engine">Choose speech engine. Edge TTS uses Microsoft neural voices via the server.</div></div><div class="settings-field"><label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
               <select id="settingsTtsVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="">Default system voice</option>
               </select>
@@ -1156,7 +1177,9 @@
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_notifications">Show a system notification when a response completes while the app is in the background.</div>
               <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
-                <button type="button" class="sm-btn" onclick="requestNotificationPermission()" style="padding:5px 10px;font-size:12px" data-i18n="notifications_enable_btn">Enable notifications</button>
+                <span id="notificationPermissionButtonWrap" style="display:inline-flex">
+                  <button type="button" class="sm-btn" id="notificationPermissionButton" onclick="requestNotificationPermission()" style="padding:5px 10px;font-size:12px" data-i18n="notifications_enable_btn">Enable notifications</button>
+                </span>
                 <button type="button" class="sm-btn" onclick="sendBrowserNotification('Hermes test','Notifications are ready.',{force:true});" style="padding:5px 10px;font-size:12px" data-i18n="notifications_test_btn">Send test</button>
                 <span id="notificationPermissionStatus" style="font-size:11px;color:var(--muted)"></span>
               </div>

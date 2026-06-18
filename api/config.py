@@ -981,6 +981,45 @@ def _resolve_provider_alias(name: str) -> str:
     return _PROVIDER_ALIASES.get(raw, name)
 
 
+def _is_known_model_provider(provider_id: str) -> bool:
+    """True when *provider_id* names a model provider WebUI can render.
+
+    The credential pool (``auth.json`` → ``credential_pool``) stores keys for
+    BOTH model providers (whose API keys belong in the model picker) and
+    non-model platform plugins.  The Photon iMessage plugin, for example,
+    writes ``photon`` / ``photon_project`` / ``photon_user`` pool entries that
+    are messaging-platform credentials, not LLM API keys.  Only the former
+    should surface as provider groups.
+
+    Without this gate, #4247's pool-detection loop added *every* pool key to
+    ``detected_providers``; unknown ids then fell through to the global
+    auto-detected catalog and each phantom provider was painted with the full
+    model list (#4324).  ``provider_id`` is expected to be the canonical slug
+    (post ``_resolve_provider_alias``); the lookup is case-insensitive.
+
+    A provider is "known" when it is a configured custom-provider slug
+    (``custom:*``), appears in WebUI's static ``_PROVIDER_DISPLAY`` /
+    ``_PROVIDER_MODELS`` tables, or is a registered model-provider plugin.
+    """
+    pid = (provider_id or "").strip().lower()
+    if not pid:
+        return False
+    if pid.startswith("custom:"):
+        return True
+    if pid in _PROVIDER_DISPLAY or pid in _PROVIDER_MODELS:
+        return True
+    try:
+        if _is_plugin_model_provider(pid):
+            return True
+    except Exception:
+        # A transient failure here (import/IO hiccup in the plugin registry) makes
+        # a real plugin-backed provider briefly look unknown and drop from the
+        # picker until the next successful check. Surface at warning so it's
+        # visible in default production logs rather than silently swallowed.
+        logger.warning("plugin model-provider check failed for %s", pid, exc_info=True)
+    return False
+
+
 def _custom_provider_slug_from_name(name: object) -> str:
     raw = str(name or "").strip().lower()
     if not raw:
@@ -1569,6 +1608,9 @@ def _format_nous_label(mid: str) -> str:
 # without one vendor dominating.
 _NOUS_FEATURED_THRESHOLD = 25
 _NOUS_FEATURED_TARGET = 15
+_MODEL_PICKER_OVERFLOW_THRESHOLD = _NOUS_FEATURED_THRESHOLD
+_MODEL_PICKER_VISIBLE_TARGET = _NOUS_FEATURED_TARGET
+_OPENROUTER_FREE_TIER_AUGMENT_CAP = 30
 
 # Vendor-prefix priority order for featured selection. Lower index = picked
 # earlier when sampling the live catalog. Reflects which vendors users have
@@ -1676,6 +1718,71 @@ def _build_nous_featured_set(
     return chosen, extras
 
 
+def _strip_picker_provider_hint(model_id: str) -> str:
+    mid = str(model_id or "").strip()
+    if mid.startswith("@") and ":" in mid:
+        return mid[mid.index(":") + 1 :]
+    return mid
+
+
+def _model_matches_picker_selection(
+    model_id: str,
+    selected_model_id: str | None,
+    provider_id: str | None = None,
+) -> bool:
+    selected = str(selected_model_id or "").strip()
+    candidate = str(model_id or "").strip()
+    if not selected or not candidate:
+        return False
+    if candidate == selected:
+        return True
+
+    selected_bare = _strip_picker_provider_hint(selected)
+    candidate_bare = _strip_picker_provider_hint(candidate)
+    if selected_bare != candidate_bare:
+        return False
+
+    selected_provider = ""
+    if selected.startswith("@") and ":" in selected:
+        selected_provider = selected[1 : selected.index(":")].lower()
+    candidate_provider = str(provider_id or "").strip().lower()
+    if candidate.startswith("@") and ":" in candidate:
+        candidate_provider = candidate[1 : candidate.index(":")].lower()
+
+    return not selected_provider or not candidate_provider or selected_provider == candidate_provider
+
+
+def _split_picker_overflow_models(
+    ordered_models: list[dict],
+    *,
+    selected_model_id: str | None = None,
+    provider_id: str | None = None,
+    threshold: int = _MODEL_PICKER_OVERFLOW_THRESHOLD,
+    target: int = _MODEL_PICKER_VISIBLE_TARGET,
+) -> tuple[list[dict], list[dict]]:
+    """Split an ordered picker catalog into visible rows plus an overflow tail."""
+    models = [copy.deepcopy(m) for m in (ordered_models or []) if isinstance(m, dict) and m.get("id")]
+    if len(models) <= threshold:
+        return models, []
+
+    visible = models[:target]
+    extras = models[target:]
+    if not selected_model_id:
+        return visible, extras
+
+    if any(_model_matches_picker_selection(m.get("id", ""), selected_model_id, provider_id) for m in visible):
+        return visible, extras
+
+    for idx, model in enumerate(extras):
+        if not _model_matches_picker_selection(model.get("id", ""), selected_model_id, provider_id):
+            continue
+        displaced = visible[-1]
+        visible[-1] = model
+        extras[idx] = displaced
+        break
+    return visible, extras
+
+
 def _apply_provider_prefix(
     raw_models: list[dict],
     provider_id: str,
@@ -1730,22 +1837,25 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
     if not groups:
         return
 
-    # Collect {model_id: [(group_idx, model_idx), ...]} in alphabetical
-    # provider_id order so that the "first occurrence stays unchanged" rule is
-    # deterministic across config edits (adding/removing/reordering providers).
+    # Collect {model_id: [(group_idx, bucket_name, model_idx), ...]} in
+    # alphabetical provider_id order so that the "first occurrence stays
+    # unchanged" rule is deterministic across config edits
+    # (adding/removing/reordering providers). Include ``extra_models`` too:
+    # slash-command resolution and picker filtering consume the full catalog.
     sorted_group_indices = sorted(
         range(len(groups)),
         key=lambda i: groups[i].get("provider_id", ""),
     )
-    id_map: dict[str, list[tuple[int, int]]] = {}
+    id_map: dict[str, list[tuple[int, str, int]]] = {}
     for gi in sorted_group_indices:
         group = groups[gi]
-        for mi, model in enumerate(group.get("models", [])):
-            mid = str(model.get("id", "") or "").strip()
-            # Skip IDs that are already provider-qualified.
-            if not mid or mid.startswith("@"):
-                continue
-            id_map.setdefault(mid, []).append((gi, mi))
+        for bucket_name in ("models", "extra_models"):
+            for mi, model in enumerate(group.get(bucket_name, []) or []):
+                mid = str(model.get("id", "") or "").strip()
+                # Skip IDs that are already provider-qualified.
+                if not mid or mid.startswith("@"):
+                    continue
+                id_map.setdefault(mid, []).append((gi, bucket_name, mi))
 
     # For any ID appearing in 2+ groups, prefix all but the first occurrence.
     # This handles N>2 providers correctly: the loop iterates over all
@@ -1753,9 +1863,9 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
     for original_id, locations in id_map.items():
         if len(locations) < 2:
             continue
-        for gi, mi in locations[1:]:
+        for gi, bucket_name, mi in locations[1:]:
             group = groups[gi]
-            model = group["models"][mi]
+            model = group[bucket_name][mi]
             pid = group.get("provider_id", "")
             model["id"] = f"@{pid}:{original_id}"
             provider_name = group.get("provider", pid)
@@ -3056,7 +3166,78 @@ def set_reasoning_effort(
     )
 
 
-def set_hermes_default_model(model_id: str) -> dict:
+def _public_advanced_model_options(model_cfg: dict) -> dict:
+    """Return write-only-safe advanced options from a model config block."""
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    return {
+        "base_url": str(model_cfg.get("base_url") or "").strip(),
+        "timeout": model_cfg.get("timeout", ""),
+        "download_timeout": model_cfg.get("download_timeout", ""),
+        "max_concurrency": model_cfg.get("max_concurrency", ""),
+        "extra_body": model_cfg.get("extra_body") if isinstance(model_cfg.get("extra_body"), dict) else {},
+        "api_key_set": bool(str(model_cfg.get("api_key") or "").strip()),
+    }
+
+
+def _main_model_request_overrides(config_data: dict) -> dict:
+    """Return supported runtime request overrides for the main chat model."""
+    if not isinstance(config_data, dict):
+        return {}
+    model_cfg = config_data.get("model", {})
+    if not isinstance(model_cfg, dict):
+        return {}
+    overrides = {}
+    extra_body = model_cfg.get("extra_body")
+    if isinstance(extra_body, dict) and extra_body:
+        overrides["extra_body"] = copy.deepcopy(extra_body)
+    return overrides
+
+
+def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> None:
+    """Apply supported advanced model options to a config block in-place."""
+    if advanced is None:
+        return
+    if not isinstance(advanced, dict):
+        raise ValueError("advanced model options must be an object")
+    if "base_url" in advanced:
+        base_url = str(advanced.get("base_url") or "").strip().rstrip("/")
+        if base_url:
+            model_cfg["base_url"] = base_url
+        else:
+            model_cfg.pop("base_url", None)
+    for field in ("timeout", "download_timeout", "max_concurrency"):
+        if field in advanced:
+            coerced = _coerce_optional_positive_int(advanced.get(field), field)
+            if coerced == "":
+                model_cfg.pop(field, None)
+            elif coerced is not None:
+                model_cfg[field] = coerced
+    if "extra_body" in advanced:
+        extra_body = advanced.get("extra_body")
+        if isinstance(extra_body, str):
+            text = extra_body.strip()
+            try:
+                extra_body = json.loads(text) if text else {}
+            except json.JSONDecodeError as exc:
+                raise ValueError("extra_body must be valid JSON") from exc
+        if extra_body in (None, ""):
+            model_cfg.pop("extra_body", None)
+        elif isinstance(extra_body, dict):
+            if extra_body:
+                model_cfg["extra_body"] = extra_body
+            else:
+                model_cfg.pop("extra_body", None)
+        else:
+            raise ValueError("extra_body must be a JSON object")
+    if advanced.get("api_key_clear"):
+        model_cfg.pop("api_key", None)
+    api_key = str(advanced.get("api_key") or "").strip()
+    if api_key:
+        model_cfg["api_key"] = api_key
+
+
+def set_hermes_default_model(model_id: str, advanced: dict | None = None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
     if not selected_model:
@@ -3107,6 +3288,8 @@ def set_hermes_default_model(model_id: str) -> dict:
             elif not persisted_provider.startswith("custom:"):
                 model_cfg.pop("base_url", None)
 
+        _apply_advanced_model_options(model_cfg, advanced)
+
         config_data["model"] = model_cfg
         _save_yaml_config_file(config_path, config_data)
     # Reload outside the lock — reload_config() acquires _cfg_lock itself.
@@ -3133,6 +3316,9 @@ AUX_TASK_SLOTS: tuple[str, ...] = (
  "mcp",
  "title_generation",
  "curator",
+ "kanban_decomposer",
+ "profile_describer",
+ "triage_specifier",
 )
 
 
@@ -3169,18 +3355,46 @@ def get_auxiliary_models() -> dict:
             "provider": str(entry.get("provider") or "auto").strip(),
             "model": str(entry.get("model") or "").strip(),
             "base_url": str(entry.get("base_url") or "").strip(),
+            "timeout": entry.get("timeout", ""),
+            "download_timeout": entry.get("download_timeout", ""),
+            "max_concurrency": entry.get("max_concurrency", ""),
+            "extra_body": entry.get("extra_body") if isinstance(entry.get("extra_body"), dict) else {},
+            "api_key_set": bool(str(entry.get("api_key") or "").strip()),
         })
 
     return {
         "tasks": tasks,
-        "main": {"provider": main_provider, "model": main_model},
+        "main": {
+            "provider": main_provider,
+            "model": main_model,
+            **_public_advanced_model_options(model_cfg),
+        },
     }
 
 
-def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
+def _coerce_optional_positive_int(value, field: str):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return ""
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a positive integer") from exc
+    if number < 1:
+        raise ValueError(f"{field} must be a positive integer")
+    return number
+
+
+def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | None = None) -> dict:
     """Persist an auxiliary model assignment in config.yaml.
 
     Special case: task='__reset__' clears all auxiliary slots.
+    ``advanced`` may update per-slot fields surfaced behind the WebUI gear menu.
+    Sensitive api_key values are write-only: get_auxiliary_models() only reports
+    whether one is set.
     """
     if task != "__reset__" and task not in AUX_TASK_SLOTS:
         raise ValueError(
@@ -3220,6 +3434,12 @@ def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
                         slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
                 except Exception:
                     pass
+            if advanced is not None:
+                try:
+                    _apply_advanced_model_options(slot_cfg, advanced)
+                except ValueError as exc:
+                    msg = str(exc).replace("advanced model options", "advanced auxiliary options")
+                    raise ValueError(msg) from exc
             aux_cfg[task] = slot_cfg
             config_data["auxiliary"] = aux_cfg
 
@@ -3855,7 +4075,63 @@ def _static_models_catalog_without_live_probes() -> dict:
 # session is expensive (~10s for zai due to endpoint probing).  The credential pool
 # only changes when the user adds/removes credentials, which is rare; a 24h TTL
 # is plenty safe and ensures get_available_models() cold paths are fast.
-_CREDENTIAL_POOL_CACHE: dict[str, tuple[float, "CredentialPool"]] = {}  # noqa: F821  forward-ref string annotation, resolved at runtime  # pid -> (ts, pool)
+_CREDENTIAL_POOL_CACHE: dict[tuple[str, str], tuple[float, "CredentialPool"]] = {}  # noqa: F821  forward-ref string annotation, resolved at runtime  # (profile_tag, pid) -> (ts, pool)
+
+
+def _credential_pool_profile_tag() -> str:
+    """Active-profile identity for the credential-pool cache key.
+
+    The credential pool is per-Hermes-profile (it lives in that profile's
+    auth.json). Keying the process-global cache by provider id ALONE lets a
+    pool loaded under profile A satisfy a lookup under profile B in the same
+    server process — so a custom provider configured only in A would falsely
+    report configured in B (and then 401 at request time). Scoping every
+    cache key by the active profile's auth-store path keeps pools from
+    crossing profile boundaries.
+    """
+    try:
+        return str(_get_auth_store_path())
+    except Exception:
+        return ""
+
+
+def _has_explicit_pool_credentials(provider_id: str) -> bool:
+    """Return True when the credential pool has at least one non-ambient entry
+    for *provider_id* (i.e. not a gh-cli / GITHUB_TOKEN auto-detect).
+
+    Reuses ``_CREDENTIAL_POOL_CACHE`` so that callers on hot paths (provider
+    detection, model listing, live-model fetch) don't pay the ~10s load_pool
+    cost more than once per TTL window.
+    """
+    try:
+        from agent.credential_pool import load_pool as _load_pool
+
+        _pid = _resolve_provider_alias(provider_id)
+        _ck = (_credential_pool_profile_tag(), _pid)
+        _cached = _CREDENTIAL_POOL_CACHE.get(_ck)
+        if _cached is not None:
+            _cp_ts, _cp_pool = _cached
+            if (time.time() - _cp_ts) < 86400.0:
+                _all_entries = _cp_pool.entries()
+            else:
+                _cp_pool = _load_pool(_pid)
+                _CREDENTIAL_POOL_CACHE[_ck] = (time.time(), _cp_pool)
+                _all_entries = _cp_pool.entries()
+        else:
+            _cp_pool = _load_pool(_pid)
+            _CREDENTIAL_POOL_CACHE[_ck] = (time.time(), _cp_pool)
+            _all_entries = _cp_pool.entries()
+
+        return any(
+            not _is_ambient_gh_cli_entry(
+                str(getattr(e, "source", "") or ""),
+                str(getattr(e, "label", "") or ""),
+                str(getattr(e, "key_source", "") or ""),
+            )
+            for e in _all_entries
+        )
+    except ImportError:
+        return False
 _provider_models_invalidated_ts: dict[str, float] = {}  # provider_id -> timestamp of last invalidation
 
 # Disk-backed in-memory cache for get_available_models().
@@ -4344,10 +4620,10 @@ def invalidate_models_cache():
         _available_models_cache_source_fingerprint = None
         _cache_build_in_progress = False
         _cache_build_cv.notify_all()
-        # Clear the credential pool cache too. The cache key is provider_id
-        # only, so without this, tests (and live provider key edits) see a
-        # stale CredentialPool from a prior auth_store payload — the test_
-        # credential_pool_providers suite was hitting this directly.
+        # Clear the credential pool cache too (all profiles). Without this,
+        # tests (and live provider key edits) see a stale CredentialPool from a
+        # prior auth_store payload — the test_credential_pool_providers suite was
+        # hitting this directly. A full reset is intentionally profile-wide.
         _CREDENTIAL_POOL_CACHE.clear()
     # Also delete the disk cache so the next cold build starts fresh.
     # Disk delete is outside the lock — file I/O shouldn't block other readers.
@@ -4368,8 +4644,9 @@ def invalidate_credential_pool_cache(provider_id: str):
     """
     global _CREDENTIAL_POOL_CACHE
     with _available_models_cache_lock:
-        _CREDENTIAL_POOL_CACHE.pop(provider_id, None)
-        _CREDENTIAL_POOL_CACHE.pop(_resolve_provider_alias(provider_id), None)
+        _cp_tag = _credential_pool_profile_tag()
+        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, provider_id), None)
+        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, _resolve_provider_alias(provider_id)), None)
     try:
         # api.providers imports from api.config; keep this lazy to avoid
         # import-cycle/module-initialization issues.
@@ -4401,9 +4678,11 @@ def invalidate_provider_models_cache(provider_id: str):
         _provider_models_invalidated_ts[provider_id] = time.time()
         # Also evict the credential pool so the next cold path re-loads it.
         # Must evict both the original key and its canonical form (load_pool
-        # may be called with either, and both paths cache under their own key).
-        _CREDENTIAL_POOL_CACHE.pop(provider_id, None)
-        _CREDENTIAL_POOL_CACHE.pop(_resolve_provider_alias(provider_id), None)
+        # may be called with either, and both paths cache under their own key),
+        # scoped to the active profile's cache key.
+        _cp_tag = _credential_pool_profile_tag()
+        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, provider_id), None)
+        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, _resolve_provider_alias(provider_id)), None)
     _delete_models_cache_on_disk()
 
 
@@ -4763,8 +5042,10 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     for _pid in list(_pool.keys()):
                         try:
                             _canonical_pid = _resolve_provider_alias(str(_pid))
-                            # Check credential pool cache first
-                            _cached = _CREDENTIAL_POOL_CACHE.get(_pid)
+                            # Check credential pool cache first (profile-scoped key
+                            # so a pool loaded under another profile can't leak in).
+                            _ck = (_credential_pool_profile_tag(), _pid)
+                            _cached = _CREDENTIAL_POOL_CACHE.get(_ck)
                             if _cached is not None:
                                 _cp_ts, _cp_pool = _cached
                                 if (time.time() - _cp_ts) < 86400.0:
@@ -4772,12 +5053,12 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                                 else:
                                     _lp_t0 = time.monotonic()
                                     _cp_pool = _load_pool(_pid)
-                                    _CREDENTIAL_POOL_CACHE[_pid] = (time.time(), _cp_pool)
+                                    _CREDENTIAL_POOL_CACHE[_ck] = (time.time(), _cp_pool)
                                     _all_entries = _cp_pool.entries()
                             else:
                                 _lp_t0 = time.monotonic()
                                 _cp_pool = _load_pool(_pid)
-                                _CREDENTIAL_POOL_CACHE[_pid] = (time.time(), _cp_pool)
+                                _CREDENTIAL_POOL_CACHE[_ck] = (time.time(), _cp_pool)
                                 _all_entries = _cp_pool.entries()
                             _explicit = [
                                 e for e in _all_entries
@@ -4787,7 +5068,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                                     str(getattr(e, "key_source", "") or ""),
                                 )
                             ]
-                            if _explicit:
+                            if _explicit and _is_known_model_provider(_canonical_pid):
                                 detected_providers.add(_canonical_pid)
                         except Exception:
                             logger.debug("credential_pool.load_pool(%s) failed", _pid)
@@ -4805,7 +5086,9 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                             for _entry in _entries
                         )
                         if _has_explicit_cred:
-                            detected_providers.add(_resolve_provider_alias(str(_pid)))
+                            _canonical_pid = _resolve_provider_alias(str(_pid))
+                            if _is_known_model_provider(_canonical_pid):
+                                detected_providers.add(_canonical_pid)
         except Exception:
             logger.debug("Failed to inspect credential_pool from auth store")
 
@@ -5245,13 +5528,30 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     _named_custom_groups[_slug] = (_cp_name, [])
 
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
-                if _slug and _cp_base_url:
-                    _cp_api_key = str(_cp.get("api_key") or "").strip()
-                    if not _cp_api_key:
-                        _cp_key_env = str(_cp.get("key_env") or "").strip()
-                        if _cp_key_env:
-                            _cp_api_key = str(os.getenv(_cp_key_env) or "").strip()
+                _cp_api_key = str(_cp.get("api_key") or "").strip()
+                if not _cp_api_key:
+                    _cp_key_env = str(_cp.get("key_env") or "").strip()
+                    if _cp_key_env:
+                        _cp_api_key = str(os.getenv(_cp_key_env) or "").strip()
+                # Fallback: check credential pool for both api_key and base_url
+                if (not _cp_api_key or not _cp_base_url) and _slug:
+                    try:
+                        from api.config import _has_explicit_pool_credentials
+                        if _has_explicit_pool_credentials(_slug):
+                            from agent.credential_pool import load_pool
+                            _resolved = _resolve_provider_alias(_slug)
+                            _pool = load_pool(_resolved)
+                            if _pool:
+                                _entry = _pool.select()
+                                if _entry:
+                                    if not _cp_api_key:
+                                        _cp_api_key = getattr(_entry, "runtime_api_key", "") or ""
+                                    if not _cp_base_url:
+                                        _cp_base_url = str(getattr(_entry, "base_url", "") or "").strip()
+                    except ImportError:
+                        pass
 
+                if _slug and _cp_base_url:
                     # Check if user has configured models in config.yaml —
                     # configured models take priority over live /v1/models
                     # discovery (same as hermes-agent model_switch.py Section 4
@@ -5395,6 +5695,47 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
 
         # 5. Build model groups
         if detected_providers:
+            _picker_selected_model_id = (
+                (model_cfg.get("model") if isinstance(model_cfg, dict) else None)
+                or default_model
+                or None
+            )
+
+            def _append_picker_group(
+                provider_label: str,
+                provider_id: str,
+                raw_models: list[dict] | None,
+                *,
+                models_endpoint_error: dict | None = None,
+                apply_prefix: bool = True,
+                decorate_overflow_label: bool = False,
+                allow_empty: bool = False,
+            ) -> None:
+                picker_models = copy.deepcopy(raw_models or [])
+                if apply_prefix:
+                    picker_models = _apply_provider_prefix(picker_models, provider_id, active_provider)
+                visible_models, extra_models = _split_picker_overflow_models(
+                    picker_models,
+                    selected_model_id=_picker_selected_model_id,
+                    provider_id=provider_id,
+                )
+                if not (visible_models or extra_models or models_endpoint_error or allow_empty):
+                    return
+                group_entry = {
+                    "provider": provider_label,
+                    "provider_id": provider_id,
+                    "models": visible_models,
+                }
+                if decorate_overflow_label and extra_models:
+                    group_entry["provider"] = (
+                        f"{provider_label} ({len(visible_models)} of {len(visible_models) + len(extra_models)})"
+                    )
+                if extra_models:
+                    group_entry["extra_models"] = extra_models
+                if models_endpoint_error:
+                    group_entry["models_endpoint_error"] = models_endpoint_error
+                groups.append(group_entry)
+
             for pid in sorted(detected_providers):
                 # Custom-provider PIDs are populated above via the
                 # _named_custom_groups branch (or skipped intentionally).
@@ -5420,10 +5761,13 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         if not _nc_models:
                             _nc_models = auto_detected_models_by_provider.get(pid, [])
                         if _nc_models or pid in _named_custom_errors:
-                            group = {"provider": _nc_display, "provider_id": pid, "models": _nc_models}
-                            if pid in _named_custom_errors:
-                                group["models_endpoint_error"] = _named_custom_errors[pid]
-                            groups.append(group)
+                            _append_picker_group(
+                                _nc_display,
+                                pid,
+                                _nc_models,
+                                models_endpoint_error=_named_custom_errors.get(pid),
+                                apply_prefix=False,
+                            )
                     continue
                 provider_name = _effective_provider_display_name(pid, _PROVIDER_DISPLAY)
                 if pid == "openrouter":
@@ -5463,10 +5807,10 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                             "https://openrouter.ai/api/v1/models",
                             headers={"Accept": "application/json"},
                         )
+                        free_tier_models = []
+                        selected_free_tier_model = None
                         with _urlreq.urlopen(_req, timeout=8.0) as _resp:
                             _payload = json.loads(_resp.read().decode())
-                        _free_count = 0
-                        _free_cap = 30  # don't drown the picker — top 30 free tier
                         for _item in _payload.get("data", []) or []:
                             if not isinstance(_item, dict):
                                 continue
@@ -5492,11 +5836,27 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                             _label = _name.split("/")[-1] if "/" in _name else _name
                             if "(free)" not in _label.lower():
                                 _label = f"{_label} (free)"
-                            seen_ids.add(_mid)
-                            raw_models.append({"id": _mid, "label": _label})
-                            _free_count += 1
-                            if _free_count >= _free_cap:
-                                break
+                            _entry = {"id": _mid, "label": _label}
+                            free_tier_models.append(_entry)
+                            if _model_matches_picker_selection(
+                                _mid,
+                                _picker_selected_model_id,
+                                "openrouter",
+                            ):
+                                selected_free_tier_model = _entry
+                        if len(free_tier_models) > _OPENROUTER_FREE_TIER_AUGMENT_CAP:
+                            free_tier_models = free_tier_models[:_OPENROUTER_FREE_TIER_AUGMENT_CAP]
+                            if (
+                                selected_free_tier_model
+                                and not any(
+                                    m.get("id") == selected_free_tier_model.get("id")
+                                    for m in free_tier_models
+                                )
+                            ):
+                                free_tier_models[-1] = selected_free_tier_model
+                        for _entry in free_tier_models:
+                            seen_ids.add(_entry["id"])
+                            raw_models.append(_entry)
                     except Exception:
                         logger.debug("OpenRouter free-tier live fetch unavailable; using fallback")
 
@@ -5510,13 +5870,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                             if m.get("provider") == "OpenRouter"
                         ]
 
-                    groups.append(
-                        {
-                            "provider": "OpenRouter",
-                            "provider_id": "openrouter",
-                            "models": raw_models,
-                        }
-                    )
+                    _append_picker_group("OpenRouter", "openrouter", raw_models)
                 elif pid == "ollama-cloud":
                     raw_models = []
                     try:
@@ -5530,14 +5884,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         logger.warning("Failed to load Ollama Cloud models from hermes_cli")
 
                     if raw_models:
-                        models = _apply_provider_prefix(raw_models, pid, active_provider)
-                        groups.append(
-                            {
-                                "provider": provider_name,
-                                "provider_id": pid,
-                                "models": models,
-                            }
-                        )
+                        _append_picker_group(provider_name, pid, raw_models)
                 elif pid == "openai-codex":
                     # Codex account catalogs drift faster than WebUI releases
                     # (for example gpt-5.3-codex-spark in #1680). Ask the
@@ -5567,14 +5914,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get("openai-codex", []))
 
                     if raw_models:
-                        models = _apply_provider_prefix(raw_models, pid, active_provider)
-                        groups.append(
-                            {
-                                "provider": provider_name,
-                                "provider_id": pid,
-                                "models": models,
-                            }
-                        )
+                        _append_picker_group(provider_name, pid, raw_models)
                 elif pid == "nous":
                     # Nous Portal exposes a curated catalog (~30 models on most
                     # accounts, up to several hundred for enterprise tiers) via
@@ -5591,8 +5931,6 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     # decorated with the truncation count so users know more
                     # exists.
                     raw_models = []
-                    extra_models: list[dict] = []
-                    truncated_label_suffix = ""
                     live_fetch_failed = False
                     try:
                         from hermes_cli.models import provider_model_ids as _provider_model_ids
@@ -5604,39 +5942,15 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         live_fetch_failed = True
 
                     if live_ids:
-                        # Sticky-selection signal: prefer the explicitly-active
-                        # model from cfg["model"]["model"] (what the user is
-                        # currently using) over cfg["model"]["default"] (the
-                        # configured default suggestion). Falls back to the
-                        # latter so first-load before any selection still works.
-                        _model_cfg = cfg.get("model", {})
-                        _selected = (
-                            (isinstance(_model_cfg, dict) and _model_cfg.get("model"))
-                            or default_model
-                            or None
-                        )
                         featured_ids, extras_ids = _build_nous_featured_set(
                             live_ids,
-                            selected_model_id=_selected,
+                            selected_model_id=_picker_selected_model_id,
                         )
-                        # Prefix every live id with "@nous:" so routing matches
-                        # the explicit-provider-hint branch of resolve_model_provider
-                        # (same convention as the curated static list — see
-                        # tests/test_nous_portal_routing.py for the invariant).
+                        ordered_ids = featured_ids + extras_ids
                         raw_models = [
                             {"id": f"@nous:{mid}", "label": _format_nous_label(mid)}
-                            for mid in featured_ids
+                            for mid in ordered_ids
                         ]
-                        extra_models = [
-                            {"id": f"@nous:{mid}", "label": _format_nous_label(mid)}
-                            for mid in extras_ids
-                        ]
-                        if extras_ids:
-                            # Show "(15 of 397)" so the user understands the picker
-                            # is showing a featured subset, not a broken short list.
-                            truncated_label_suffix = (
-                                f" ({len(featured_ids)} of {len(live_ids)})"
-                            )
                     elif not live_fetch_failed:
                         # Live-fetch returned an empty list AND did not raise —
                         # the user is gated as authenticated by detection above
@@ -5660,18 +5974,13 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get("nous", []))
 
                     if raw_models:
-                        models = _apply_provider_prefix(raw_models, pid, active_provider)
-                        # Apply the same prefix transform to extras so /model
-                        # autocomplete sees consistent IDs across the two lists.
-                        extras = _apply_provider_prefix(extra_models, pid, active_provider) if extra_models else []
-                        group_entry = {
-                            "provider": provider_name + truncated_label_suffix,
-                            "provider_id": pid,
-                            "models": models,
-                        }
-                        if extras:
-                            group_entry["extra_models"] = extras
-                        groups.append(group_entry)
+                        _append_picker_group(
+                            provider_name,
+                            pid,
+                            raw_models,
+                            apply_prefix=False,
+                            decorate_overflow_label=True,
+                        )
                 elif pid == "lmstudio":
                     # LM Studio is a local server — fetch live loaded models via
                     # the OpenAI-compatible /v1/models endpoint (#WebUI).
@@ -5720,14 +6029,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                                 logger.debug("LM Studio /models fetch failed at %s", endpoint)
 
                     if raw_models:
-                        models = _apply_provider_prefix(raw_models, pid, active_provider)
-                        groups.append(
-                            {
-                                "provider": provider_name,
-                                "provider_id": pid,
-                                "models": models,
-                            }
-                        )
+                        _append_picker_group(provider_name, pid, raw_models)
                 elif (
                     pid in _PROVIDER_MODELS
                     or pid in _canonical_to_raw_provider_key
@@ -5768,19 +6070,12 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     detected_models = auto_detected_models_by_provider.get(pid, [])
                     if detected_models and not raw_models:
                         raw_models = copy.deepcopy(detected_models)
-                    models = _apply_provider_prefix(raw_models, pid, active_provider)
-                    groups.append(
-                        {
-                            "provider": provider_name,
-                            "provider_id": pid,
-                            "models": models,
-                        }
-                    )
+                    _append_picker_group(provider_name, pid, raw_models)
                 else:
                     detected_models = auto_detected_models_by_provider.get(pid)
                     if detected_models:
                         models_for_group = copy.deepcopy(detected_models)
-                    elif auto_detected_models:
+                    elif auto_detected_models and (pid == "custom" or _is_known_model_provider(pid)):
                         # Don't fall back to the global auto_detected_models
                         # list for the bare "custom" PID when the active
                         # provider is something concrete (e.g. ai-gateway,
@@ -5793,6 +6088,17 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         else:
                             models_for_group = copy.deepcopy(auto_detected_models)
                     else:
+                        # An unrecognized provider id with no catalog of its
+                        # own must NOT be painted with the global
+                        # auto_detected_models list. Otherwise a non-model
+                        # credential_pool key (the Photon plugin's
+                        # photon/photon_project/photon_user entries, #4324) or
+                        # any future unknown id renders as a phantom provider
+                        # carrying the active endpoint's entire model catalog.
+                        # Such ids are dropped upstream by
+                        # _is_known_model_provider() in the pool-detection
+                        # loop; this omission is belt-and-braces matching the
+                        # #1572/#7372 "omit rather than misattribute" posture.
                         models_for_group = []
                     if models_for_group:
                         # Per-group deep copy so subsequent mutation by
@@ -5804,25 +6110,26 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                         # see every group's id rewritten to the FIRST
                         # provider's prefix, and labels accumulated every
                         # provider's name).
-                        groups.append(
-                            {
-                                "provider": provider_name,
-                                "provider_id": pid,
-                                "models": models_for_group,
-                            }
+                        _append_picker_group(
+                            provider_name,
+                            pid,
+                            models_for_group,
+                            apply_prefix=False,
                         )
                     elif pid == "custom" and cfg_base_url:
                         # Anonymous custom endpoint: /v1/models probe may have
                         # failed (e.g. llama-server, lightweight relay), but the
-                        # chat endpoint itself may still work.  Add the group
+                        # chat endpoint itself may still work. Add the group
                         # with an empty model list so the user can type a model
                         # ID manually rather than being blocked by a silent
                         # probe failure (#2542).
-                        groups.append({
-                            "provider": provider_name,
-                            "provider_id": pid,
-                            "models": [],
-                        })
+                        groups.append(
+                            {
+                                "provider": provider_name,
+                                "provider_id": pid,
+                                "models": [],
+                            }
+                        )
         else:
             if default_model:
                 label = _get_label_for_model(default_model, groups)
@@ -5851,7 +6158,12 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     default_model,
                 )
             else:
-                all_ids_norm = {_norm_model_id(m["id"]) for g in groups for m in g.get("models", [])}
+                all_ids_norm = {
+                    _norm_model_id(m["id"])
+                    for g in groups
+                    for bucket_name in ("models", "extra_models")
+                    for m in g.get(bucket_name, [])
+                }
                 if _norm_model_id(default_model) not in all_ids_norm:
                     label = _get_label_for_model(default_model, groups)
                     target_display = (
@@ -6310,6 +6622,66 @@ STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
 
+# ── Gateway capability cache ─────────────────────────────────────────────────
+# Probes /v1/capabilities once per base_url/api-key pair and caches the result
+# for 60 s so guarded-turn routing decisions do not add latency on every chat
+# turn.
+_GATEWAY_CAPS_CACHE: dict[tuple[str, str], dict] = {}
+_GATEWAY_CAPS_LOCK = threading.Lock()
+_GATEWAY_CAPS_TTL_S: float = 60.0
+
+
+def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
+    """Return cached gateway capability flags, probing /v1/capabilities if stale."""
+    base_url = str(base_url or "").rstrip("/")
+    cache_key = (base_url, str(api_key or ""))
+    now = time.time()
+    probe_started_at = now
+    with _GATEWAY_CAPS_LOCK:
+        cached = _GATEWAY_CAPS_CACHE.get(cache_key)
+        if cached and now - cached.get("fetched_at", 0) < _GATEWAY_CAPS_TTL_S:
+            return cached
+    caps = {"approval_events": False, "run_approval_response": False, "fetched_at": 0.0}
+    try:
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = urllib.request.Request(f"{base_url}/v1/capabilities", headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body = json.loads(resp.read(65536))
+        features = body.get("features") if isinstance(body, dict) else {}
+        if not isinstance(features, dict):
+            features = {}
+        caps["approval_events"] = bool(features.get("approval_events"))
+        caps["run_approval_response"] = bool(features.get("run_approval_response"))
+    except Exception:
+        pass
+    with _GATEWAY_CAPS_LOCK:
+        current = _GATEWAY_CAPS_CACHE.get(cache_key)
+        if current and current.get("fetched_at", 0) > probe_started_at:
+            return current
+        caps["fetched_at"] = time.time()
+        _GATEWAY_CAPS_CACHE[cache_key] = caps
+    return caps
+
+
+def gateway_supports_approval(base_url: str, api_key: str = "") -> bool:
+    """True only when the gateway advertises both approval_events and run_approval_response."""
+    caps = get_gateway_caps(base_url, api_key)
+    return bool(caps.get("approval_events") and caps.get("run_approval_response"))
+
+
+def invalidate_gateway_caps(base_url: str | None = None) -> None:
+    """Evict capability cache for base_url, or all entries when base_url is None."""
+    with _GATEWAY_CAPS_LOCK:
+        if base_url is None:
+            _GATEWAY_CAPS_CACHE.clear()
+        else:
+            normalized = str(base_url or "").rstrip("/")
+            for cache_key in [key for key in _GATEWAY_CAPS_CACHE if key[0] == normalized]:
+                _GATEWAY_CAPS_CACHE.pop(cache_key, None)
+
+
 # ── notify_on_complete agent-wakeup wiring ─────────────────────────────────
 # When terminal(notify_on_complete=true, background=true) fires, the process
 # registry pushes a completion event onto tools.process_registry.completion_queue.
@@ -6503,6 +6875,8 @@ _SETTINGS_DEFAULTS = {
     "show_quota_chip": False,  # show ambient provider quota chip in composer footer (default off; wide desktop only when enabled, see style.css @media)
     "show_conversation_outline": False,  # show opt-in desktop jump-to-question outline panel
     "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
+    "virtualize_transcript": False,  # #4343: virtualize long (>80 msg) transcripts. EXPERIMENTAL, opt-IN (default OFF). Was opt-out/default-on in #4325 but caused scroll-up flicker on long sessions with tall tool-call rows (variable-height anchor oscillation) — flipped off for everyone in #4343; re-enabling requires an explicit opt-in (see virtualize_transcript_optin migration in load_settings).
+    "virtualize_transcript_optin": False,  # #4343 migration marker: True only once the user explicitly enables virtualize_transcript AFTER the default-off flip. A stored virtualize_transcript=True WITHOUT this marker is a stale pre-flip value and is reset to False on load (force-off-for-everyone migration).
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
     "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": True,  # merge CLI/TUI/messaging sessions from state.db into the sidebar by default (#3988); established installs are grandfathered OFF by the load_settings backfill
@@ -6667,6 +7041,18 @@ def load_settings() -> dict:
                     bool(stored.get("onboarding_completed")) or _established_keys
                 ):
                     settings["show_cli_sessions"] = False
+                # Force-off-for-everyone migration for virtualize_transcript (#4343).
+                # The feature shipped opt-OUT/default-on in #4325, then proved to
+                # cause scroll-up flicker on long sessions (variable-height anchor
+                # oscillation). It is now EXPERIMENTAL/opt-IN (default off). Any
+                # stored virtualize_transcript=True from the #4325 window is a stale
+                # pre-flip value and must be reset to off, so 100% of existing users
+                # land on off — re-enabling requires an explicit opt-in made AFTER
+                # the flip, which writes virtualize_transcript_optin=True alongside.
+                # Honor a stored True only when that marker is present.
+                if not bool(stored.get("virtualize_transcript_optin")):
+                    settings["virtualize_transcript"] = False
+
         except Exception:
             logger.debug("Failed to load settings from %s", SETTINGS_FILE)
     settings["theme"], settings["skin"] = _normalize_appearance(
@@ -6710,6 +7096,8 @@ _SETTINGS_BOOL_KEYS = {
     "show_quota_chip",
     "show_conversation_outline",
     "hide_empty_state_suggestions",
+    "virtualize_transcript",
+    "virtualize_transcript_optin",
     "show_tps",
     "fade_text_effect",
     "show_cli_sessions",

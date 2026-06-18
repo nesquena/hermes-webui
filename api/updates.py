@@ -651,9 +651,17 @@ def _check_repo(path, name):
     tag used to silently report "Up to date" with no remediation affordance, so
     the Settings panel reads this flag to offer ``apply_force_update`` (issue
     #4085).
+
+    When ``.git`` is absent (Docker images, pip installs), returns a minimal dict
+    with ``no_git: True`` and ``behind: None`` so the frontend can distinguish
+    "can't check" from "up to date" (issue #4356).
     """
     if path is None or not (path / '.git').exists():
-        return None
+        return {
+            'name': name,
+            'behind': None,
+            'no_git': True,
+        }
 
     # Fetch tags first so update prompts track published releases, not every
     # development commit that lands on master/main after the latest release.

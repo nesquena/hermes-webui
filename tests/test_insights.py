@@ -149,6 +149,8 @@ def test_insights_frontend_renders_daily_token_chart_and_model_usage_table():
     assert "insights_model_tokens" in PANELS_JS
     assert "insights_model_cost" in PANELS_JS
     assert "insights_model_share" in PANELS_JS
+    assert "insights_model_team" not in PANELS_JS
+    assert "m.profile || m.team" not in PANELS_JS
     assert "insights_no_usage_data" in PANELS_JS
 
 
@@ -162,6 +164,7 @@ def test_insights_frontend_has_daily_chart_styles_and_range_switching_hooks():
     assert ".insights-daily-token-chart" in STYLE_CSS
     assert ".insights-daily-bar-output" in STYLE_CSS
     assert ".insights-model-cost" in STYLE_CSS
+    assert ".insights-model-team" not in STYLE_CSS
 
 
 def _make_daily_rows(n):

@@ -145,8 +145,10 @@ def _cheap_change_fingerprint(db_path: Path) -> str | None:
 
 # ── DB resolution (shared pattern with state_sync.py) ──────────────────────
 
-def _get_state_db_path() -> Path:
+def _get_state_db_path(hermes_home: Path | None = None) -> Path:
     """Resolve state.db path for the active profile."""
+    if hermes_home is not None:
+        return Path(hermes_home).expanduser().resolve() / 'state.db'
     try:
         from api.profiles import get_active_hermes_home
         hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
@@ -155,11 +157,11 @@ def _get_state_db_path() -> Path:
     return hermes_home / 'state.db'
 
 
-def _get_agent_sessions_from_db() -> list:
+def _get_agent_sessions_from_db(db_path: Path | None = None) -> list:
     """Read all non-webui sessions from state.db.
     Returns list of session dicts, or empty list on any error.
     """
-    db_path = _get_state_db_path()
+    db_path = Path(db_path) if db_path is not None else _get_state_db_path()
     if not db_path.exists():
         return []
 
@@ -200,11 +202,24 @@ class GatewayWatcher:
     POLL_INTERVAL = 5  # seconds between polls
     SUBSCRIBER_TIMEOUT = 30  # seconds before sending keepalive comment
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        hermes_home: Path | None = None,
+        profile_name: str | None = None,
+        state_db_path: Path | None = None,
+    ):
         self._subscribers: list[queue.Queue] = []
         self._sub_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._hermes_home = Path(hermes_home).expanduser().resolve() if hermes_home else None
+        self._state_db_path = (
+            Path(state_db_path).expanduser().resolve()
+            if state_db_path is not None
+            else _get_state_db_path(self._hermes_home) if self._hermes_home is not None else _get_state_db_path()
+        )
+        self.profile_name = profile_name or ""
         self._last_hash: str = ''
         self._last_sessions: list = []
         # Cheap sessions-only fingerprint from the previous poll. When it is
@@ -255,6 +270,16 @@ class GatewayWatcher:
         q = queue.Queue(maxsize=10)
         with self._sub_lock:
             self._subscribers.append(q)
+            # Stop-race safety: if stop() already ran (set _stop_event and drained
+            # the then-current subscriber list) before we appended, this queue would
+            # never receive the sentinel and the SSE loop would hang open with
+            # keepalives but no events. Enqueue the sentinel ourselves so the handler
+            # closes and reconnects to the live registry watcher. (#3629 / Codex gate)
+            if self._stop_event.is_set():
+                try:
+                    q.put_nowait(None)
+                except Exception:
+                    logger.debug("Failed to send stop sentinel to late subscriber")
         return q
 
     def unsubscribe(self, q: queue.Queue):
@@ -303,7 +328,7 @@ class GatewayWatcher:
                 # of message rows every 5 seconds (issue #3506). A None
                 # fingerprint (error / unreadable db) forces the full read so we
                 # never silently skip a real change.
-                db_path = _get_state_db_path()
+                db_path = self._state_db_path
                 cheap_fp = _cheap_change_fingerprint(db_path) if db_path.exists() else ''
                 if cheap_fp is not None and cheap_fp == self._last_cheap_fp:
                     # Nothing changed in the sidebar-visible session set; skip
@@ -311,7 +336,7 @@ class GatewayWatcher:
                     pass
                 else:
                     # Phase 2: only now pay for the full projection.
-                    sessions = _get_agent_sessions_from_db()
+                    sessions = _get_agent_sessions_from_db(db_path)
                     current_hash = _snapshot_hash(sessions)
                     if cheap_fp is not None:
                         self._last_cheap_fp = cheap_fp
@@ -330,31 +355,125 @@ class GatewayWatcher:
                 time.sleep(0.1)
 
 
-# ── Module-level singleton ─────────────────────────────────────────────────
+# ── Module-level watcher registry ──────────────────────────────────────────
 
-_watcher: GatewayWatcher | None = None
+_watchers: dict[str, GatewayWatcher] = {}
 _watcher_lock = threading.Lock()
 
+def _resolve_watcher_target(
+    *,
+    profile_name: str | None = None,
+    hermes_home: Path | None = None,
+) -> tuple[str, Path | None]:
+    """Resolve the watcher profile/home pair for the current request context."""
+    resolved_profile = str(profile_name or "").strip()
+    resolved_home = Path(hermes_home).expanduser().resolve() if hermes_home is not None else None
 
-def start_watcher():
-    """Start the global gateway watcher (idempotent)."""
-    global _watcher
+    try:
+        from api.profiles import get_active_profile_name, get_hermes_home_for_profile
+
+        if not resolved_profile:
+            resolved_profile = get_active_profile_name() or "default"
+        if resolved_home is None and resolved_profile:
+            resolved_home = Path(get_hermes_home_for_profile(resolved_profile)).expanduser().resolve()
+    except Exception:
+        if resolved_home is None:
+            try:
+                resolved_home = _get_state_db_path().parent.resolve()
+            except Exception:
+                resolved_home = None
+
+    return resolved_profile, resolved_home
+
+
+def _watcher_registry_key(profile_name: str | None = None, hermes_home: Path | None = None) -> str:
+    """Return the stable registry key for a watcher target."""
+    if hermes_home is not None:
+        return str(Path(hermes_home).expanduser().resolve())
+    return str(profile_name or "").strip() or "__default__"
+
+
+def _watcher_has_subscribers(watcher: GatewayWatcher) -> bool:
+    subscribers = getattr(watcher, "_subscribers", None)
+    sub_lock = getattr(watcher, "_sub_lock", None)
+    if subscribers is None or sub_lock is None:
+        return False
+    with sub_lock:
+        return bool(subscribers)
+
+
+def _pop_idle_watchers_locked(*, exclude_key: str) -> list[GatewayWatcher]:
+    stale: list[GatewayWatcher] = []
+    for key, watcher in list(_watchers.items()):
+        if key == exclude_key or _watcher_has_subscribers(watcher):
+            continue
+        if _watchers.get(key) is watcher:
+            stale.append(_watchers.pop(key))
+    return stale
+
+
+def start_watcher(*, profile_name: str | None = None, hermes_home: Path | None = None):
+    """Start the watcher for the resolved profile home (idempotent)."""
+    resolved_profile, resolved_home = _resolve_watcher_target(
+        profile_name=profile_name,
+        hermes_home=hermes_home,
+    )
+    key = _watcher_registry_key(resolved_profile, resolved_home)
     with _watcher_lock:
-        if _watcher is None:
-            _watcher = GatewayWatcher()
-            _watcher.start()
+        watcher = _watchers.get(key)
+        if watcher is None or not watcher.is_alive():
+            if watcher is not None:
+                watcher.stop()
+            watcher = GatewayWatcher(profile_name=resolved_profile, hermes_home=resolved_home)
+            watcher.start()
+            _watchers[key] = watcher
+        return watcher
 
 
-def stop_watcher():
-    """Stop the global gateway watcher."""
-    global _watcher
+def stop_watcher(*, profile_name: str | None = None, hermes_home: Path | None = None):
+    """Stop either one profile watcher or the entire registry."""
     with _watcher_lock:
-        if _watcher is not None:
-            _watcher.stop()
-            _watcher = None
+        if profile_name is None and hermes_home is None:
+            watchers = list(_watchers.values())
+            _watchers.clear()
+        else:
+            resolved_profile, resolved_home = _resolve_watcher_target(
+                profile_name=profile_name,
+                hermes_home=hermes_home,
+            )
+            key = _watcher_registry_key(resolved_profile, resolved_home)
+            watcher = _watchers.pop(key, None)
+            watchers = [watcher] if watcher is not None else []
+    for watcher in watchers:
+        watcher.stop()
 
 
-def get_watcher() -> GatewayWatcher | None:
-    """Get the global watcher instance (or None if not started)."""
+def restart_watcher_for_profile(name: str):
+    """Restart only the watcher pinned to the target profile home."""
+    from api.profiles import get_hermes_home_for_profile
+
+    hermes_home = Path(get_hermes_home_for_profile(name)).expanduser().resolve()
+    key = _watcher_registry_key(name, hermes_home)
+    watcher = GatewayWatcher(profile_name=name, hermes_home=hermes_home)
+    watcher.start()
     with _watcher_lock:
-        return _watcher
+        existing = _watchers.pop(key, None)
+        stale_watchers = [] if existing is not None else _pop_idle_watchers_locked(exclude_key=key)
+        _watchers[key] = watcher
+    for old_watcher in ([existing] if existing is not None else stale_watchers):
+        old_watcher.stop()
+    return watcher
+
+
+def get_watcher(*, profile_name: str | None = None, hermes_home: Path | None = None) -> GatewayWatcher | None:
+    """Get or lazily start the watcher for the resolved request profile."""
+    resolved_profile, resolved_home = _resolve_watcher_target(
+        profile_name=profile_name,
+        hermes_home=hermes_home,
+    )
+    key = _watcher_registry_key(resolved_profile, resolved_home)
+    with _watcher_lock:
+        watcher = _watchers.get(key)
+    if watcher is None or not watcher.is_alive():
+        watcher = start_watcher(profile_name=resolved_profile, hermes_home=resolved_home)
+    return watcher

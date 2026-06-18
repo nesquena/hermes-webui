@@ -161,13 +161,26 @@ def _safe_write(handler, body: bytes) -> None:
         )
 
 
-def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
+def _json_response_body(payload, *, pretty: bool = True) -> bytes:
+    """Serialize API JSON responses.
+
+    Sidebar/session endpoints can return thousands of rows on large installs.
+    Pretty-printing large list responses inflates both CPU and wire bytes. Keep
+    the public helper default stable for existing tests/callers; hot paths can
+    opt into compact JSON with ``pretty=False``.
+    """
+    if pretty:
+        return _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+    return _json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+
+
+def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True) -> None:
     """Send a JSON response.
 
     *extra_headers*: optional dict of additional headers to include
     (e.g., {'Set-Cookie': '...'}).  Headers are sent before end_headers().
     """
-    body = _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+    body = _json_response_body(payload, pretty=pretty)
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')
 

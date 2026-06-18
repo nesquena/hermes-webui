@@ -64,6 +64,9 @@ def test_oauth_write_auth_json_uses_chmod_0600_before_rename(monkeypatch, tmp_pa
         os.umask(old_umask)
 
     assert fake_path.exists(), "auth.json was not written"
+    if os.name == "nt":
+        assert fake_path.is_file(), "auth.json was not written as a file"
+        return
     mode = stat.S_IMODE(fake_path.stat().st_mode)
     # The file must be chmod 0600 — owner read/write only.
     assert mode == 0o600, (
