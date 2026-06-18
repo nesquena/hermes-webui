@@ -1163,6 +1163,7 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     later unwind through the silent-failure or exception path. Those paths must
     not append a misleading provider no-response error after an explicit cancel.
     """
+    _msg_count_before = len(getattr(session, 'messages', None) or [])
     _materialize_pending_user_turn_before_error(session)
     session.active_stream_id = None
     session.pending_user_message = None
@@ -1178,6 +1179,18 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
             'provider_details_label': 'Cancellation details',
             'timestamp': int(time.time()),
         })
+    # Mirror appended messages to context_messages so that _recovered/_error
+    # flags survive the state.db round-trip.  Without this, the next turn's
+    # reconciled_state_db_messages_for_session(prefer_context=True) finds the
+    # stale messages as state.db deltas (without flags), and
+    # _sanitize_messages_for_api cannot filter them — causing the interrupted
+    # turn's user message to be prepended to every subsequent turn (#4283).
+    ctx = getattr(session, 'context_messages', None)
+    if isinstance(ctx, list):
+        new_msgs = (getattr(session, 'messages', None) or [])[_msg_count_before:]
+        for msg in new_msgs:
+            if isinstance(msg, dict):
+                ctx.append(dict(msg))
 
 
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
