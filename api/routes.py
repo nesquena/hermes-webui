@@ -6037,9 +6037,12 @@ def _llm_wiki_last_writer(
         if not _within_wiki(candidate):
             continue  # skip symlinks resolving outside the wiki
         try:
-            mtime = candidate.stat().st_mtime
+            st_candidate = candidate.stat()
         except Exception:
             continue
+        if identity is not None and (st_candidate.st_dev, st_candidate.st_ino) != identity:
+            continue
+        mtime = st_candidate.st_mtime
         if mtime > latest_mtime:
             latest_mtime = mtime
             latest_page = candidate
@@ -6078,17 +6081,27 @@ def _llm_wiki_last_writer(
     log_path = wiki_path / "log.md"
     if _within_wiki(log_path) and log_path.is_file():
         try:
-            with open(log_path, encoding="utf-8", errors="replace") as fh:
-                for _ in range(5000):  # cap the heading scan
-                    line = fh.readline()
-                    if line == "":
-                        break
-                    stripped = line.strip()
-                    if not stripped.startswith("## [") or "|" not in stripped:
-                        continue
-                    tail = stripped.split("]", 1)[1].strip() if "]" in stripped else ""
-                    action = tail.split()[0] if tail else "update"
-                    return f"ai-agent ({action})"
+            log_stat = log_path.stat()
+            fd = os.open(str(log_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                st_open = os.fstat(fd)
+                if (st_open.st_dev, st_open.st_ino) != (log_stat.st_dev, log_stat.st_ino):
+                    raise FileNotFoundError("wiki log changed before open")
+                with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+                    fd = None
+                    for _ in range(5000):  # cap the heading scan
+                        line = fh.readline()
+                        if line == "":
+                            break
+                        stripped = line.strip()
+                        if not stripped.startswith("## [") or "|" not in stripped:
+                            continue
+                        tail = stripped.split("]", 1)[1].strip() if "]" in stripped else ""
+                        action = tail.split()[0] if tail else "update"
+                        return f"ai-agent ({action})"
+            finally:
+                if fd is not None:
+                    os.close(fd)
         except Exception:
             pass
 
@@ -6122,8 +6135,17 @@ def _build_llm_wiki_status() -> dict:
             return base
 
         allowlisted_entries = _llm_wiki_allowlisted_entries(wiki_path)
-        page_entries = list(allowlisted_entries.values())
-        page_files = [target for target, _ in page_entries]
+        verified_page_entries: list[tuple[Path, tuple[int, int], os.stat_result]] = []
+        for target, identity in allowlisted_entries.values():
+            try:
+                st = target.stat()
+            except Exception:
+                continue
+            if (st.st_dev, st.st_ino) != identity:
+                continue
+            verified_page_entries.append((target, identity, st))
+        page_entries = [(target, identity) for target, identity, _ in verified_page_entries]
+        page_files = [target for target, _, _ in verified_page_entries]
         status_files = [p for p in (wiki_path / "SCHEMA.md", wiki_path / "index.md", wiki_path / "log.md") if p.exists() and p.is_file()]
         status_files.extend(page_files)
         latest = None
@@ -6139,7 +6161,7 @@ def _build_llm_wiki_status() -> dict:
             "enabled": True,
             "status": "ready" if page_files else "empty",
             "entry_count": len(page_files),
-            "page_count": len(page_files),
+            "page_count": len(page_entries),
             "raw_source_count": _llm_wiki_count_files(wiki_path / "raw"),
             "last_updated": _llm_wiki_safe_iso(latest),
             "last_writer": _llm_wiki_last_writer(wiki_path, page_entries),
@@ -7368,10 +7390,12 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Wiki not configured or directory not found", status=404)
         allowlisted_entries = _llm_wiki_allowlisted_entries(Path(wiki_root))
         pages = []
-        for rel_path, (fp, _) in sorted(allowlisted_entries.items(), key=lambda item: item[0].lower()):
+        for rel_path, (fp, identity) in sorted(allowlisted_entries.items(), key=lambda item: item[0].lower()):
             try:
                 st = fp.stat()
             except OSError:
+                continue
+            if (st.st_dev, st.st_ino) != identity:
                 continue
             pages.append({"name": Path(rel_path).name, "path": rel_path, "size": st.st_size, "mtime": int(st.st_mtime)})
         return j(handler, {"pages": pages})

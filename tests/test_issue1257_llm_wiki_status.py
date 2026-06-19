@@ -184,8 +184,37 @@ def test_llm_wiki_status_last_writer_rechecks_identity(monkeypatch, tmp_path):
 
     status = routes._build_llm_wiki_status()
 
+    assert status["page_count"] == 0
+    assert status["last_updated"] is None
     assert status["last_writer"] == "ai-agent"
     assert "hidden-author" not in repr(status)
+
+
+def test_llm_wiki_status_log_heading_rechecks_identity(monkeypatch, tmp_path):
+    import os as _os
+    import api.routes as routes
+
+    wiki = tmp_path / "wiki"
+    _write(wiki / "log.md", "## [2026-06-19] update | safe\n",)
+    _write(wiki / ".env", "## [2026-06-19] leak | hidden\n")
+
+    monkeypatch.setenv("WIKI_PATH", str(wiki))
+
+    original_open = routes.os.open
+    swapped = {"done": False}
+
+    def fake_open(path, flags, mode=0o777):
+        if not swapped["done"] and Path(path) == wiki / "log.md":
+            swapped["done"] = True
+            (wiki / "log.md").unlink()
+            (wiki / "log.md").symlink_to(_os.path.join(".env"))
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(routes.os, "open", fake_open)
+
+    status = routes._build_llm_wiki_status()
+
+    assert status["last_writer"] == "ai-agent"
 
 
 def test_last_writer_rejects_symlink_outside_wiki(tmp_path):

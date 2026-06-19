@@ -86,7 +86,10 @@ def test_wiki_browse_skips_pages_that_disappear_during_listing(monkeypatch, tmp_
     monkeypatch.setattr(
         routes,
         "_llm_wiki_allowlisted_entries",
-        lambda root: {"gone.md": (missing, (0, 0)), "ok.md": (ok, (0, 0))},
+        lambda root: {
+            "gone.md": (missing, (0, 0)),
+            "ok.md": (ok, (ok.stat().st_dev, ok.stat().st_ino)),
+        },
     )
 
     handler = _FakeHandler()
@@ -310,6 +313,36 @@ def test_wiki_browse_drops_cached_entry_replaced_by_directory(monkeypatch, tmp_p
 
     page.unlink()
     page.mkdir()
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/browse"))
+
+    assert handler.status == 200
+    assert handler.get_json()["pages"] == []
+
+
+def test_wiki_browse_rechecks_identity_after_allowlist_snapshot(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    page = wiki_root / "concepts" / "real.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# real\n", encoding="utf-8")
+    (wiki_root / ".env").write_text("DONOTLEAK=post_snapshot_marker\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    original = routes._llm_wiki_allowlisted_entries
+
+    def swapped(root):
+        entries = original(root)
+        page.unlink()
+        page.symlink_to(_os.path.join("..", ".env"))
+        return entries
+
+    monkeypatch.setattr(routes, "_llm_wiki_allowlisted_entries", swapped)
 
     handler = _FakeHandler()
     routes.handle_get(handler, urlparse("http://example.com/api/wiki/browse"))
