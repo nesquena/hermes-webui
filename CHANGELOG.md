@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.514] — 2026-06-19 — Release RY (no footer jitter during virtual-scroll measurement)
+
+### Fixed
+
+- **Message footers no longer flicker while scrolling through a long virtualized transcript (#4346).** During the virtual-window measurement re-render (the compensation pass added in v0.51.511), the scroll container now carries a transient `vscroll-measuring` class that suppresses CSS transitions on the message footer, actions, and timestamp (applied in a `try/finally` so it is always cleared), and stable user-row DOM nodes are recycled across the measurement pass instead of rebuilt. This stops the `.msg-actions` opacity fade from re-triggering on rows re-rendered under the cursor. Thanks @rodboev.
+
 ## [v0.51.513] — 2026-06-19 — Release RX (credential-pool quota status for all pooled providers)
 
 ### Added
