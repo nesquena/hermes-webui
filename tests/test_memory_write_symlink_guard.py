@@ -65,10 +65,12 @@ def test_memory_write_read_only_soul_returns_403(tmp_path, monkeypatch):
     """A read-only SOUL.md write must return an actionable 403, not bubble as 500."""
     home = tmp_path / "home"
     home.mkdir()
+    target = home / "SOUL.md"
+    target.write_text("original", encoding="utf-8")
     original_write_text = Path.write_text
 
     def fake_write_text(self, *args, **kwargs):
-        if self.name == "SOUL.md":
+        if self == target:
             raise PermissionError("read-only test file")
         return original_write_text(self, *args, **kwargs)
 
@@ -84,6 +86,7 @@ def test_memory_write_read_only_soul_returns_403(tmp_path, monkeypatch):
     assert cap["bad"][1] == 403
     assert "SOUL.md" in cap["bad"][0]
     assert "writable" in cap["bad"][0].lower()
+    assert "chmod 644" in cap["bad"][0]
 
 
 def test_memory_write_allows_symlinked_memories_directory(tmp_path, monkeypatch):

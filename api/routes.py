@@ -17714,7 +17714,19 @@ def _handle_memory_write(handler, body):
     try:
         target.write_text(body["content"], encoding="utf-8")
     except PermissionError:
-        return bad(handler, f"{target.name} is not writable: {target}", 403)
+        mode_hint = ""
+        try:
+            mode_hint = f" (mode {target.stat().st_mode & 0o777:o})"
+        except OSError:
+            pass
+        return bad(
+            handler,
+            (
+                f"{target.name} is not writable{mode_hint}: {target}. "
+                "Run chmod 644 on the file or fix ownership on the shared volume."
+            ),
+            403,
+        )
     return j(handler, {"ok": True, "section": section, "path": str(target)})
 
 
