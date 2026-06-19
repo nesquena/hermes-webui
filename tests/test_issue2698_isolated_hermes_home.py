@@ -256,6 +256,22 @@ class TestIsolatedRuntimePinning:
         assert Path(os.environ["HERMES_HOME"]) == temp_single_profile
         assert reloaded == [temp_single_profile]
 
+    def test_get_active_hermes_home_keeps_profiles_default_pinned(self, temp_hermes_home, monkeypatch):
+        """An isolated profiles/default path must not collapse back to the base home."""
+        isolated_default = temp_hermes_home / "profiles" / "default"
+        isolated_default.mkdir()
+        for subdir in ["memories", "sessions", "skills", "skins", "logs", "plans", "workspace", "cron"]:
+            (isolated_default / subdir).mkdir(exist_ok=True)
+
+        monkeypatch.setenv("HERMES_HOME", str(isolated_default))
+        monkeypatch.setenv("HERMES_BASE_HOME", "")
+        monkeypatch.setattr(_profiles_mod, "_DEFAULT_HERMES_HOME", temp_hermes_home)
+        monkeypatch.setattr(_profiles_mod, "_INITIAL_HERMES_HOME", str(isolated_default))
+        monkeypatch.setattr(_profiles_mod, "_active_profile", "other_profile")
+
+        assert get_active_profile_name() == "default"
+        assert get_active_hermes_home() == isolated_default
+
 
 class TestProfileMutationsInIsolatedMode:
     """Test that create/delete/switch are rejected (403) in isolated mode."""

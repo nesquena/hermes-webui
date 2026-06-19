@@ -388,6 +388,8 @@ def get_active_hermes_home() -> Path:
     Uses get_active_profile_name() so per-request TLS context (issue #798)
     is respected, not just the process-level global.
     """
+    if _is_isolated_profile_mode():
+        return Path(_INITIAL_HERMES_HOME).expanduser()
     return _resolve_profile_home_for_name(get_active_profile_name())
 
 
