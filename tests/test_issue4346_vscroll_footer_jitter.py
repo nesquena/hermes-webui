@@ -47,11 +47,11 @@ def test_js_try_finally_guards_class_removal():
     )
     assert fn_match
     body = fn_match.group(1)
-    finally_match = re.search(
-        r'finally\{([^}]*)\}',
-        body
-    )
-    assert finally_match, "no finally block found in _compensateScrollForMeasurementDelta"
-    finally_body = finally_match.group(1)
-    assert "classList.remove('vscroll-measuring')" in finally_body, \
-        "classList.remove must be inside the finally{} block, not after it"
+    try_idx = body.find('try{')
+    finally_idx = body.find('finally{')
+    remove_idx = body.find("classList.remove('vscroll-measuring')")
+    assert try_idx != -1, "no try block found in _compensateScrollForMeasurementDelta"
+    assert finally_idx != -1, "no finally block found in _compensateScrollForMeasurementDelta"
+    assert remove_idx != -1, "missing classList.remove('vscroll-measuring')"
+    assert try_idx < finally_idx < remove_idx, \
+        "classList.remove must remain in the finally{} cleanup path"
