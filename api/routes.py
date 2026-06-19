@@ -2837,6 +2837,9 @@ def _run_journal_live_snapshot(stream_id: str | None) -> dict | None:
         last_seq = summary_last_seq
         last_event_id = summary.get("last_event_id") or events[-1].get("event_id")
 
+    # Keep returning a live snapshot even when the journal has events but no
+    # projected message/tool rows yet. The frontend treats the empty activity
+    # scene as "nothing renderable yet" while preserving the live cursor.
     return {
         "session_id": session_id,
         "stream_id": stream_id,
