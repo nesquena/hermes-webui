@@ -399,6 +399,109 @@ def test_mobile_overlay_present():
         ".mobile-overlay CSS rule missing from style.css"
 
 
+def test_mobile_conversations_fab_present():
+    """Phone chat needs a thumb-reachable conversations drawer affordance."""
+    assert 'id="mobileConversationsBtn"' in HTML, \
+        "#mobileConversationsBtn missing from index.html"
+    assert 'class="mobile-conversations-fab"' in HTML, \
+        "mobile conversations button must use .mobile-conversations-fab"
+    assert HTML.index('id="mobileConversationsBtn"') < HTML.index('id="scrollToBottomBtn"'), \
+        "mobile conversations button should live in the messages shell before scroll controls"
+    assert 'onclick="toggleMobileConversationsSidebar()"' not in HTML, \
+        "button should be wired by boot.js so long-press can suppress the follow-up click"
+    assert 'aria-controls="panelChat"' in HTML, \
+        "mobile conversations button should advertise the conversations panel target"
+    assert 'aria-haspopup="menu"' in HTML, \
+        "mobile conversations button should advertise its long-press shortcut menu"
+
+
+def test_mobile_conversations_fab_is_phone_only_and_send_aligned():
+    """The floating conversations button should stack above the down control/send button."""
+    assert ".mobile-conversations-fab{display:none;}" in CSS, \
+        "mobile conversations button must be hidden outside the phone breakpoint"
+    mobile_css = "\n".join(_max_width_media_blocks(640))
+    match = re.search(r'\.mobile-conversations-fab\{([^}]*)\}', mobile_css)
+    assert match, "Missing .mobile-conversations-fab rule inside @media(max-width:640px)"
+    block = match.group(1)
+    assert "display:inline-flex" in block, \
+        "phone breakpoint must show the conversations button"
+    assert "position:absolute" in block, \
+        "button should anchor to the messages shell, not the viewport/composer"
+    assert "right:20px" in block, \
+        "button should align with the bottom-right down/send stack"
+    assert "left:" not in block, \
+        "button should not be left-anchored"
+    assert "bottom:60px" in block, \
+        "button should stack above the existing bottom-right scroll affordance"
+    assert "min-width:44px" in block and "min-height:44px" in block, \
+        "button must preserve a touch-friendly 44px hit target"
+    assert ".mobile-conversations-fab.mobile-conversations-fab--drawer-open" in mobile_css, \
+        "button should hide when a mobile drawer overlay is open"
+
+
+def test_mobile_conversations_fab_uses_native_chat_drawer():
+    """The floating button should reuse the existing mobile sidebar drawer path."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "function toggleMobileConversationsSidebar" in boot_js, \
+        "toggleMobileConversationsSidebar() missing from static/boot.js"
+    assert "if(_isDesktopWidth())return false" in boot_js, \
+        "floating conversations button must no-op at desktop/tablet rail widths"
+    assert "switchPanel('chat',{fromRailClick:true})" in boot_js, \
+        "button should switch to the Chat/conversations panel before opening the drawer"
+    assert "function _openMobileSidebarDrawer" in boot_js, \
+        "shared mobile drawer helper missing"
+    assert "syncMobileConversationsButton" in boot_js, \
+        "button aria-expanded state should stay in sync with drawer open/close"
+    assert "mobile-conversations-fab--drawer-open" in boot_js, \
+        "button should hide while the conversations drawer is already open"
+
+
+def test_mobile_conversations_fab_long_press_menu_actions():
+    """Long-pressing the mobile conversations button should expose shortcut actions."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "const MOBILE_CONVERSATIONS_LONG_PRESS_DELAY_MS=400;" in boot_js
+    assert "function openMobileConversationsMenu" in boot_js
+    assert "mobile-conversations-fab--pressing" in boot_js
+    assert "let _mobileConversationsIgnoreClickUntil=0;" in boot_js
+    assert "function _ignoreNextMobileConversationsClick" in boot_js
+    assert "function _consumeIgnoredMobileConversationsClick" in boot_js
+    assert "function _clearMobileConversationsClickIgnore" in boot_js
+    assert "Date.now()+700" in boot_js
+    assert "if(_consumeIgnoredMobileConversationsClick())return;" in boot_js
+    contextmenu_start = boot_js.index("btn.addEventListener('contextmenu'")
+    contextmenu_end = boot_js.index("  });", contextmenu_start)
+    assert "_clearMobileConversationsPressTimer();" in boot_js[contextmenu_start:contextmenu_end], \
+        "contextmenu path must cancel the pending long-press timer before opening the menu"
+    assert "_mobileConversationsSuppressClick" not in boot_js
+    assert "_mobileConversationsSuppressTimer" not in boot_js
+    assert "setTimeout(()=>{_mobileConversationsSuppressClick=false;},0);" not in boot_js
+    assert "_installMobileConversationsButton();" in boot_js
+    assert "opt.setAttribute('role','menuitem');" in boot_js
+    assert "menu.setAttribute('role','menu');" in boot_js
+    assert "menu.addEventListener('keydown',_mobileConversationsMenuKeydown);" in boot_js
+    assert "function _mobileConversationsMenuKeydown" in boot_js
+    # Capture handler must be the sole Escape path and must restore focus to the trigger button
+    assert "window.addEventListener('keydown',_mobileConversationsKeyClose,true);" in boot_js
+    assert "function _mobileConversationsKeyClose" in boot_js
+    assert "if(btn&&typeof btn.focus==='function')btn.focus({preventScroll:true});" in boot_js
+    key_close_start = boot_js.index("function _mobileConversationsKeyClose")
+    menu_keydown_start = boot_js.index("function _mobileConversationsMenuKeydown", key_close_start)
+    resize_start = boot_js.index("function _mobileConversationsResizeClose", menu_keydown_start)
+    assert "e.key==='Escape'" in boot_js[key_close_start:menu_keydown_start]
+    assert "e.key==='Escape'" not in boot_js[menu_keydown_start:resize_start], \
+        "Escape focus restoration belongs in the window capture handler, not the menu bubble handler"
+    assert "if(typeof switchPanel==='function'&&_currentPanel!=='chat')await switchPanel('chat');" in boot_js
+    assert "_openMobileSidebarDrawer();" in boot_js
+    for label in ("Open sidebar", "Go to top", "Go to last message"):
+        assert label in boot_js
+    assert "_mobileConversationsNewConversation" in boot_js
+    assert "_mobileConversationsOpenSidebar" in boot_js
+    assert "_mobileConversationsGoTop" in boot_js
+    assert "_mobileConversationsGoLast" in boot_js
+    mobile_css = "\n".join(_max_width_media_blocks(640))
+    assert ".mobile-conversations-menu .ws-opt-action{min-height:44px;}" in mobile_css
+
+
 def test_sidebar_nav_present():
     """Sidebar top navigation tabs must be present."""
     assert 'class="sidebar-nav"' in HTML, \

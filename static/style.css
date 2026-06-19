@@ -2237,6 +2237,7 @@
   /* ── Desktop: hide mobile-only elements ── */
   .mobile-hamburger{display:none;}
   .mobile-files-btn{display:none!important;}
+  .mobile-conversations-fab{display:none;}
   .mobile-overlay{display:none;}
 
   @media(min-width:901px){
@@ -2361,6 +2362,13 @@
     .mobile-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
       z-index:199;-webkit-tap-highlight-color:transparent;}
     .mobile-overlay.visible{display:block;}
+    .mobile-conversations-fab{position:absolute;right:20px;bottom:60px;z-index:12;width:44px;height:44px;min-width:44px;min-height:44px;border-radius:999px;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);display:inline-flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25);cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation;transition:color .12s,border-color .12s,background .12s,transform .12s;}
+    .mobile-conversations-fab:hover,.mobile-conversations-fab:focus-visible{color:var(--text);border-color:var(--border);background:var(--hover-bg);outline:none;}
+    .mobile-conversations-fab:active{transform:translateY(1px) scale(.98);}
+    .mobile-conversations-fab.active,.mobile-conversations-fab.mobile-conversations-fab--pressing{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
+    .mobile-conversations-fab svg{display:block;}
+    .mobile-conversations-fab.mobile-conversations-fab--drawer-open{display:none;}
+    .mobile-conversations-menu .ws-opt-action{min-height:44px;}
     /* Files button in topbar */
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     /* Right panel: slide-over from right */

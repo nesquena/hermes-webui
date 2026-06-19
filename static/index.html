@@ -409,6 +409,9 @@
     </div>
     <div id="mainChat" class="main-view">
     <div class="messages-shell">
+      <button class="mobile-conversations-fab" id="mobileConversationsBtn" type="button" aria-label="Open conversations" aria-controls="panelChat" aria-haspopup="menu" aria-expanded="false" title="Conversations">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      </button>
       <button id="jumpToSessionStartBtn" class="session-jump-btn session-jump-btn--start" aria-label="Jump to beginning of session" data-i18n-aria-label="session_jump_start_label" data-i18n-title="session_jump_start_label" onclick="jumpToSessionStart()" style="display:none"><span aria-hidden="true">↑</span><span data-i18n="session_jump_start">Start</span></button>
       <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" style="display:none" onclick="scrollToBottom()" aria-label="Scroll to bottom" data-i18n-aria-label="session_jump_end_label" data-i18n-title="session_jump_end_label"><span aria-hidden="true">↓</span><span class="session-jump-btn__text" data-i18n="session_jump_end">End</span></button>
       <button id="outlineToggleBtn" type="button" hidden

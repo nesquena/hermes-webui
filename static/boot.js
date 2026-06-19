@@ -253,18 +253,266 @@ function syncWorkspacePanelUI(){
 
 function toggleMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
-  const overlay=$('mobileOverlay');
   if(!sidebar)return;
   const isOpen=sidebar.classList.contains('mobile-open');
   if(isOpen){closeMobileSidebar();}
-  else{sidebar.classList.add('mobile-open');if(overlay)overlay.classList.add('visible');}
+  else{_openMobileSidebarDrawer();}
 }
 function closeMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
   if(sidebar)sidebar.classList.remove('mobile-open');
   if(overlay)overlay.classList.remove('visible');
+  syncMobileConversationsButton();
 }
+function syncMobileConversationsButton(){
+  const btn=$('mobileConversationsBtn');
+  if(!btn)return;
+  const isOpen=!!document.querySelector('.sidebar')?.classList.contains('mobile-open');
+  btn.classList.toggle('mobile-conversations-fab--drawer-open',isOpen);
+  btn.setAttribute('aria-expanded',isOpen?'true':'false');
+  btn.setAttribute('aria-label',isOpen?'Close conversations':'Open conversations');
+  btn.title=isOpen?'Close conversations':'Conversations';
+}
+function _openMobileSidebarDrawer(){
+  if(_isDesktopWidth())return;
+  const sidebar=document.querySelector('.sidebar');
+  const overlay=$('mobileOverlay');
+  if(!sidebar)return;
+  const layout=document.querySelector('.layout');
+  if(layout)layout.classList.remove('sidebar-collapsed');
+  sidebar.classList.remove('sidebar-collapsed');
+  try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
+  sidebar.classList.add('mobile-open');
+  if(overlay)overlay.classList.add('visible');
+  syncMobileConversationsButton();
+}
+async function toggleMobileConversationsSidebar(){
+  if(_isDesktopWidth())return false;
+  closeMobileConversationsMenu();
+  const sidebar=document.querySelector('.sidebar');
+  if(sidebar&&sidebar.classList.contains('mobile-open')&&_currentPanel==='chat'){
+    closeMobileSidebar();
+    return false;
+  }
+  if(typeof switchPanel==='function'){
+    await switchPanel('chat',{fromRailClick:true});
+  }else{
+    _openMobileSidebarDrawer();
+  }
+  syncMobileConversationsButton();
+  return true;
+}
+
+const MOBILE_CONVERSATIONS_LONG_PRESS_DELAY_MS=400;
+let _mobileConversationsMenu=null;
+let _mobileConversationsPressTimer=null;
+let _mobileConversationsIgnoreClickUntil=0;
+let _mobileConversationsPressX=0;
+let _mobileConversationsPressY=0;
+
+function _ignoreNextMobileConversationsClick(){
+  _mobileConversationsIgnoreClickUntil=Date.now()+700;
+}
+function _consumeIgnoredMobileConversationsClick(){
+  if(!_mobileConversationsIgnoreClickUntil)return false;
+  if(Date.now()>_mobileConversationsIgnoreClickUntil){
+    _mobileConversationsIgnoreClickUntil=0;
+    return false;
+  }
+  _mobileConversationsIgnoreClickUntil=0;
+  return true;
+}
+function _clearMobileConversationsClickIgnore(){
+  _mobileConversationsIgnoreClickUntil=0;
+}
+
+function closeMobileConversationsMenu(){
+  if(_mobileConversationsMenu){
+    _mobileConversationsMenu.remove();
+    _mobileConversationsMenu=null;
+  }
+  const btn=$('mobileConversationsBtn');
+  if(btn){
+    btn.classList.remove('active','mobile-conversations-fab--pressing');
+    btn.setAttribute('aria-haspopup','menu');
+    btn.setAttribute('aria-expanded',document.querySelector('.sidebar')?.classList.contains('mobile-open')?'true':'false');
+  }
+  document.removeEventListener('pointerdown',_mobileConversationsOutsidePointer,true);
+  document.removeEventListener('scroll',_mobileConversationsScrollClose,true);
+  window.removeEventListener('keydown',_mobileConversationsKeyClose,true);
+  window.removeEventListener('resize',_mobileConversationsResizeClose);
+}
+function _mobileConversationSvg(name,fallback){
+  if(typeof li==='function') return li(name,16);
+  return fallback||'';
+}
+function _mobileConversationAction(label,meta,icon,onSelect){
+  const opt=document.createElement('button');
+  opt.type='button';
+  opt.className='ws-opt session-action-opt mobile-conversations-menu-opt';
+  opt.setAttribute('role','menuitem');
+  opt.tabIndex=-1;
+  if(meta) opt.title=meta;
+  opt.innerHTML='<span class="ws-opt-action"><span class="ws-opt-icon">'+icon+'</span><span class="session-action-copy"><span class="ws-opt-name">'+esc(label)+'</span></span></span>';
+  opt.addEventListener('click',async(e)=>{
+    e.preventDefault();
+    e.stopPropagation();
+    closeMobileConversationsMenu();
+    await onSelect();
+  });
+  return opt;
+}
+function _positionMobileConversationsMenu(menu,anchor){
+  if(!menu||!anchor)return;
+  const rect=anchor.getBoundingClientRect();
+  const menuW=Math.min(280,Math.max(220,menu.scrollWidth||220));
+  let left=rect.right-menuW;
+  if(left<8)left=8;
+  if(left+menuW>window.innerWidth-8)left=window.innerWidth-menuW-8;
+  menu.style.left=left+'px';
+  menu.style.maxHeight='';
+  const menuH=menu.offsetHeight||0;
+  const margin=8;
+  let top=rect.top-menuH-8;
+  if(top<margin)top=rect.bottom+8;
+  if(top+menuH>window.innerHeight-margin)top=Math.max(margin,window.innerHeight-margin-menuH);
+  menu.style.top=top+'px';
+}
+async function _mobileConversationsNewConversation(){
+  const btn=$('btnNewChat');
+  if(btn){btn.click();return;}
+  if(typeof newSession==='function'){
+    await newSession();
+    if(typeof renderSessionList==='function')await renderSessionList();
+    const msg=$('msg');
+    if(msg)msg.focus();
+  }
+}
+async function _mobileConversationsOpenSidebar(){
+  if(typeof switchPanel==='function'&&_currentPanel!=='chat')await switchPanel('chat');
+  _openMobileSidebarDrawer();
+}
+async function _mobileConversationsGoTop(){
+  if(typeof jumpToSessionStart==='function'&&S&&S.session){await jumpToSessionStart();return;}
+  const messages=$('messages');
+  if(messages)messages.scrollTop=0;
+}
+function _mobileConversationsGoLast(){
+  if(typeof scrollToBottom==='function')scrollToBottom();
+  else{
+    const messages=$('messages');
+    if(messages)messages.scrollTop=messages.scrollHeight;
+  }
+}
+function openMobileConversationsMenu(anchor){
+  if(_isDesktopWidth())return false;
+  const btn=anchor||$('mobileConversationsBtn');
+  if(!btn)return false;
+  if(typeof closeSessionActionMenu==='function')closeSessionActionMenu();
+  closeMobileConversationsMenu();
+  const menu=document.createElement('div');
+  menu.className='session-action-menu mobile-conversations-menu';
+  menu.setAttribute('role','menu');
+  menu.setAttribute('aria-label','Conversation shortcuts');
+  menu.appendChild(_mobileConversationAction(t('new_conversation')||'New conversation','New conversation',_mobileConversationSvg('plus'),_mobileConversationsNewConversation));
+  menu.appendChild(_mobileConversationAction('Open sidebar','Open conversations sidebar',_mobileConversationSvg('message-square'),_mobileConversationsOpenSidebar));
+  menu.appendChild(_mobileConversationAction('Go to top','Go to top of this conversation',_mobileConversationSvg('arrow-up'),_mobileConversationsGoTop));
+  menu.appendChild(_mobileConversationAction('Go to last message','Go to latest message',_mobileConversationSvg('chevron-down'),_mobileConversationsGoLast));
+  document.body.appendChild(menu);
+  _mobileConversationsMenu=menu;
+  menu.addEventListener('keydown',_mobileConversationsMenuKeydown);
+  btn.classList.add('active');
+  btn.setAttribute('aria-haspopup','menu');
+  btn.setAttribute('aria-expanded','true');
+  _positionMobileConversationsMenu(menu,btn);
+  const first=menu.querySelector('[role="menuitem"]');
+  if(first&&typeof first.focus==='function')setTimeout(()=>first.focus({preventScroll:true}),0);
+  if(typeof _playSessionActionMenuEntrance==='function')_playSessionActionMenuEntrance(menu);
+  document.addEventListener('pointerdown',_mobileConversationsOutsidePointer,true);
+  document.addEventListener('scroll',_mobileConversationsScrollClose,true);
+  window.addEventListener('keydown',_mobileConversationsKeyClose,true);
+  window.addEventListener('resize',_mobileConversationsResizeClose);
+  return true;
+}
+function _mobileConversationsOutsidePointer(e){
+  const btn=$('mobileConversationsBtn');
+  if(_mobileConversationsMenu&&_mobileConversationsMenu.contains(e.target))return;
+  if(btn&&btn.contains(e.target))return;
+  closeMobileConversationsMenu();
+}
+function _mobileConversationsScrollClose(e){
+  if(_mobileConversationsMenu&&_mobileConversationsMenu.contains(e.target))return;
+  closeMobileConversationsMenu();
+}
+function _mobileConversationsKeyClose(e){
+  if(e.key==='Escape'){
+    e.preventDefault();
+    closeMobileConversationsMenu();
+    const btn=$('mobileConversationsBtn');
+    if(btn&&typeof btn.focus==='function')btn.focus({preventScroll:true});
+  }
+}
+function _mobileConversationsMenuKeydown(e){
+  if(!_mobileConversationsMenu)return;
+  const items=Array.from(_mobileConversationsMenu.querySelectorAll('[role="menuitem"]'));
+  if(!items.length)return;
+  const current=items.indexOf(document.activeElement);
+  let next=-1;
+  if(e.key==='ArrowDown')next=(current+1+items.length)%items.length;
+  else if(e.key==='ArrowUp')next=(current-1+items.length)%items.length;
+  else if(e.key==='Home')next=0;
+  else if(e.key==='End')next=items.length-1;
+  if(next>=0){
+    e.preventDefault();
+    items[next].focus({preventScroll:true});
+  }
+}
+function _mobileConversationsResizeClose(){closeMobileConversationsMenu();}
+function _clearMobileConversationsPressTimer(){
+  if(_mobileConversationsPressTimer){clearTimeout(_mobileConversationsPressTimer);_mobileConversationsPressTimer=null;}
+  const btn=$('mobileConversationsBtn');
+  if(btn)btn.classList.remove('mobile-conversations-fab--pressing');
+}
+function _installMobileConversationsButton(){
+  const btn=$('mobileConversationsBtn');
+  if(!btn||btn._mobileConversationsWired)return;
+  btn._mobileConversationsWired=true;
+  btn.addEventListener('click',async(e)=>{
+    e.preventDefault();
+    e.stopPropagation();
+    if(_consumeIgnoredMobileConversationsClick())return;
+    await toggleMobileConversationsSidebar();
+  });
+  btn.addEventListener('pointerdown',(e)=>{
+    if(_isDesktopWidth())return;
+    if(e.pointerType==='mouse'||(e.button&&e.button!==0))return;
+    _clearMobileConversationsPressTimer();
+    _clearMobileConversationsClickIgnore();
+    _mobileConversationsPressX=e.clientX;
+    _mobileConversationsPressY=e.clientY;
+    btn.classList.add('mobile-conversations-fab--pressing');
+    _mobileConversationsPressTimer=setTimeout(()=>{
+      _mobileConversationsPressTimer=null;
+      _ignoreNextMobileConversationsClick();
+      btn.classList.remove('mobile-conversations-fab--pressing');
+      openMobileConversationsMenu(btn);
+    },MOBILE_CONVERSATIONS_LONG_PRESS_DELAY_MS);
+  });
+  btn.addEventListener('pointermove',(e)=>{
+    if(!_mobileConversationsPressTimer)return;
+    if(Math.abs(e.clientX-_mobileConversationsPressX)>10||Math.abs(e.clientY-_mobileConversationsPressY)>10)_clearMobileConversationsPressTimer();
+  });
+  ['pointerup','pointercancel','pointerleave'].forEach(ev=>btn.addEventListener(ev,_clearMobileConversationsPressTimer));
+  btn.addEventListener('contextmenu',(e)=>{
+    if(_isDesktopWidth())return;
+    e.preventDefault();
+    _clearMobileConversationsPressTimer();
+    _ignoreNextMobileConversationsClick();
+    openMobileConversationsMenu(btn);
+  });
+}
+_installMobileConversationsButton();
 
 const _PWA_SIDEBAR_SWIPE_EDGE=80;
 const _PWA_SIDEBAR_SWIPE_TRIGGER=64;
@@ -286,15 +534,7 @@ function _isInteractiveSwipeTarget(target){
 
 function _openMobileSidebarFromGesture(){
   if(_isDesktopWidth())return;
-  const sidebar=document.querySelector('.sidebar');
-  const overlay=$('mobileOverlay');
-  if(!sidebar)return;
-  const layout=document.querySelector('.layout');
-  if(layout)layout.classList.remove('sidebar-collapsed');
-  sidebar.classList.remove('sidebar-collapsed');
-  try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
-  sidebar.classList.add('mobile-open');
-  if(overlay)overlay.classList.add('visible');
+  _openMobileSidebarDrawer();
 }
 
 function _onPwaSidebarSwipeStart(e){
@@ -435,12 +675,7 @@ function mobileSwitchPanel(name){
   if(name==='chat'){
     closeMobileSidebar();
   } else {
-    const sidebar=document.querySelector('.sidebar');
-    const overlay=$('mobileOverlay');
-    if(sidebar){
-      sidebar.classList.add('mobile-open');
-      if(overlay)overlay.classList.add('visible');
-    }
+    _openMobileSidebarDrawer();
   }
 }
 

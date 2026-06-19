@@ -299,10 +299,14 @@ async function switchPanel(name, opts = {}) {
     loadSettingsPanel();
   }
   if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
-    const sidebar = document.querySelector('.sidebar');
-    const overlay = document.getElementById('mobileOverlay');
-    if (sidebar) sidebar.classList.add('mobile-open');
-    if (overlay) overlay.classList.add('visible');
+    if (typeof _openMobileSidebarDrawer === 'function') {
+      _openMobileSidebarDrawer();
+    } else {
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.getElementById('mobileOverlay');
+      if (sidebar) sidebar.classList.add('mobile-open');
+      if (overlay) overlay.classList.add('visible');
+    }
   }
   _resyncChatSidebarAfterPanelSwitch();
   if (nextPanel === 'chat' && typeof syncTopbar === 'function') syncTopbar();
