@@ -287,9 +287,17 @@ if [ "A${whoami}" == "Aroot" ]; then
     fi
   done
 
-  # restart the script as hermeswebui set with the correct UID/GID this time
-  echo "-- Restarting as hermeswebui user with UID ${WANTED_UID} GID ${WANTED_GID}"
-  exec su -s /bin/bash -c "exec \"${script_fullname}\"" hermeswebui || error_exit "subscript failed"
+  # When WANTED_UID=0, the runtime user IS root. Dropping via \`su hermeswebui\`
+  # would re-enter this same root branch (whoami still resolves to root for uid 0),
+  # causing an infinite restart loop. Instead, fall through and run as root so the
+  # WebUI can share a HERMES_HOME owned by a root-running agent container.
+  if [ "${WANTED_UID}" = "0" ] && [ "${WANTED_GID}" = "0" ]; then
+    echo "-- WANTED_UID=0: running WebUI as root (no privilege drop)"
+  else
+    # restart the script as hermeswebui set with the correct UID/GID this time
+    echo "-- Restarting as hermeswebui user with UID ${WANTED_UID} GID ${WANTED_GID}"
+    exec su -s /bin/bash -c "exec \"${script_fullname}\"" hermeswebui || error_exit "subscript failed"
+  fi
 fi
 
 # If we are here, the script is started as an unprivileged runtime user.
