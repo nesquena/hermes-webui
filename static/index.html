@@ -19,6 +19,7 @@
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
 <script>(function(){try{var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,graphite:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1,zeus:1,'verdigris':1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.classList.add('dark');}})()</script>
 <script>(function(){try{var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;}catch(e){}})()</script>
+<script>(function(){try{var kl=localStorage.getItem('hermes-kanban-layout');if(kl)document.documentElement.dataset.kanbanLayout=kl;}catch(e){}})()</script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
 <meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#141425" media="(prefers-color-scheme: dark)">
@@ -1111,6 +1112,14 @@
             <div class="settings-field">
               <label for="settingsLanguage" data-i18n="settings_label_language">Language</label>
               <select id="settingsLanguage" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+            </div>
+            <div class="settings-field">
+              <label for="settingsKanbanLayout" data-i18n="settings_label_kanban_layout">Kanban Layout</label>
+              <select id="settingsKanbanLayout" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="webui" data-i18n="settings_kanban_layout_webui">WebUI (default)</option>
+                <option value="dashboard" data-i18n="settings_kanban_layout_dashboard">Dashboard (compact)</option>
+              </select>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_kanban_layout">Choose the kanban board layout. "Dashboard" uses a compact board style similar to the Hermes dashboard plugin.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">

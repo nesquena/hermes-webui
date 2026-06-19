@@ -1893,7 +1893,8 @@ function _kanbanRenderBoard(){
     board.innerHTML = _kanbanEmptyBoardHtml();
     return;
   }
-  board.innerHTML = _kanbanLanesByProfile ? _kanbanRenderProfileLanes(columns) : columns.map(_kanbanRenderColumn).join('');
+  const isDashboard = document.documentElement.dataset.kanbanLayout === 'dashboard';
+  board.innerHTML = (!isDashboard && _kanbanLanesByProfile) ? _kanbanRenderProfileLanes(columns) : columns.map(_kanbanRenderColumn).join('');
 }
 
 function _kanbanCard(task, status){
@@ -1905,12 +1906,20 @@ function _kanbanCard(task, status){
   const stale = _kanbanCardStalenessClass(task);
   const body = _kanbanTaskBody(task);
   const assignee = task.assignee ? `<span class="kanban-card-assignee">@${esc(task.assignee)}</span>` : `<span class="kanban-card-unassigned">${esc(t('kanban_unassigned'))}</span>`;
-  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, '${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
-    <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
+  const progress = task.progress || task.link_counts;
+  const isDashboard = document.documentElement.dataset.kanbanLayout === 'dashboard';
+  const progressHtml = (isDashboard && progress && progress.done !== undefined && progress.total !== undefined)
+    ? `<span class="kanban-progress${progress.done === progress.total ? ' kanban-progress--full' : ''}" title="${progress.done} of ${progress.total} child tasks done">${progress.done}/${progress.total}</span>`
+    : '';
+  const inner = `
+    <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${progressHtml}${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
     <div class="kanban-card-title">${esc(_kanbanTaskTitle(task))}</div>
     ${body ? `<div class="kanban-card-body">${_kanbanRenderMarkdown(body)}</div>` : ''}
-    <div class="kanban-card-meta">${assignee}${comments ? `<span class="kanban-card-metric">💬 ${comments}</span>` : ''}${linkTotal ? `<span class="kanban-card-metric">↔ ${linkTotal}</span>` : ''}${age ? `<span class="kanban-card-age">${esc(age)}</span>` : ''}</div>
-    ${_kanbanCardQuickActions(task)}
+    <div class="kanban-card-row kanban-card-meta">${assignee}${comments ? `<span class="kanban-card-metric">💬 ${comments}</span>` : ''}${linkTotal ? `<span class="kanban-card-metric">↔ ${linkTotal}</span>` : ''}${age ? `<span class="kanban-card-age">${esc(age)}</span>` : ''}</div>
+    ${_kanbanCardQuickActions(task)}`;
+  const content = isDashboard ? `<div class="kanban-card-content">${inner}</div>` : inner;
+  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, '${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
+    ${content}
   </article>`;
 }
 
@@ -7168,6 +7177,19 @@ async function loadSettingsPanel(){
       langSel.addEventListener('change',function(){
         if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();}
         _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    // Kanban layout preference (UI-only, stored in localStorage)
+    const kanbanLayoutSel=$('settingsKanbanLayout');
+    if(kanbanLayoutSel){
+      const savedLayout=localStorage.getItem('hermes-kanban-layout')||'webui';
+      kanbanLayoutSel.value=savedLayout;
+      document.documentElement.dataset.kanbanLayout=savedLayout;
+      kanbanLayoutSel.addEventListener('change',function(){
+        const layout=this.value;
+        localStorage.setItem('hermes-kanban-layout',layout);
+        document.documentElement.dataset.kanbanLayout=layout;
+        if(typeof _kanbanRenderBoard==='function' && _kanbanBoard) _kanbanRenderBoard();
       },{once:false});
     }
     const showUsageCb=$('settingsShowTokenUsage');
