@@ -526,16 +526,18 @@ def test_session_import_default_profile_remains_default_owned():
         captured["json"] = {"data": data, "status": status}
         return captured["json"]
 
+    sessions = OrderedDict()
     with patch("api.routes.get_active_profile_name", return_value="default"), \
          patch("api.routes.resolve_trusted_workspace", return_value=Path("/tmp/default-workspace")), \
          patch("api.routes.Session", side_effect=lambda **kwargs: _ImportedSessionStub(**kwargs)), \
-         patch.object(routes, "SESSIONS", OrderedDict()), \
+         patch.object(routes, "SESSIONS", sessions), \
          patch("api.routes.publish_session_list_changed"), \
          patch("api.routes.j", side_effect=fake_j):
         routes._handle_session_import(SimpleNamespace(headers={}), body)
 
     session = captured["json"]["data"]["session"]
     assert session["profile"] == "default"
+    assert sessions["imported_profile_001"].profile == "default"
 
 
 def _profile_state_db_path(profile: str | None = None) -> Path:
