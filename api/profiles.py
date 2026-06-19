@@ -1355,7 +1355,7 @@ def list_profiles_api() -> list:
     # In isolated profile mode, return only the active (isolated) profile
     if _is_isolated_profile_mode():
         active = _isolated_profile_name()
-        hermes_home = get_active_hermes_home()
+        hermes_home = Path(_INITIAL_HERMES_HOME).expanduser()
         try:
             from hermes_cli.profiles import list_profiles
             infos = list_profiles()
