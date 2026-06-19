@@ -160,11 +160,12 @@ if(typeof document !== 'undefined'){
 }
 
 function switchWorkspacePanelTab(tab){
-  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : tab === 'todos' ? 'todos' : 'files';
+  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : tab === 'todos' ? 'todos' : tab === 'kanban-task' ? 'kanban-task' : 'files';
   _setWorkspacePanelTabDataset();
   const filesTab = $('workspaceFilesTab');
   const artifactsTab = $('workspaceArtifactsTab');
   const todosTab = $('workspaceTodosTab');
+  const kanbanTaskTab = $('workspaceKanbanTaskTab');
   if(filesTab){
     filesTab.classList.toggle('active', _workspacePanelActiveTab === 'files');
     filesTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'files' ? 'true' : 'false');
@@ -177,10 +178,18 @@ function switchWorkspacePanelTab(tab){
     todosTab.classList.toggle('active', _workspacePanelActiveTab === 'todos');
     todosTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'todos' ? 'true' : 'false');
   }
+  if(kanbanTaskTab){
+    kanbanTaskTab.classList.toggle('active', _workspacePanelActiveTab === 'kanban-task');
+    kanbanTaskTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'kanban-task' ? 'true' : 'false');
+  }
   const artifacts = $('workspaceArtifacts');
   if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
   const todosPanel = $('workspaceTodosPanel');
   if(todosPanel) todosPanel.hidden = _workspacePanelActiveTab !== 'todos';
+  const fileTree = $('fileTree');
+  if(fileTree) fileTree.hidden = _workspacePanelActiveTab !== 'files';
+  const kanbanTask = $('workspaceKanbanTask');
+  if(kanbanTask) kanbanTask.hidden = _workspacePanelActiveTab !== 'kanban-task';
   if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
   if(_workspacePanelActiveTab === 'todos') _loadWorkspacePanelTodos();
 }
