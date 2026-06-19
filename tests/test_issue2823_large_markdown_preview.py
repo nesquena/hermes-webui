@@ -54,12 +54,14 @@ def test_markdown_render_helper_runs_render_md_and_katex():
     assert end != -1, "renderMarkdownPreviewContent() helper end not found"
     helper = WORKSPACE_JS[start:end]
 
-    render_pos = helper.find("$('previewMd').innerHTML=renderMd(data.content)")
+    target_pos = helper.find("const target=data&&data.el?data.el:$('previewMd')")
+    render_pos = helper.find("target.innerHTML=renderMd(data.content)")
     katex_pos = helper.rfind("renderKatexBlocks")
-    assert "showPreview('md')" in helper
+    assert target_pos != -1, "Helper must honor an explicit markdown render target"
+    assert "if(!data||!data.el) showPreview('md')" in helper
     assert render_pos != -1, "Helper must rich-render markdown"
     assert katex_pos != -1, "Helper must preserve KaTeX enhancement"
-    assert katex_pos > render_pos
+    assert target_pos < render_pos < katex_pos
 
 
 def test_large_markdown_fallback_sets_raw_content_before_size_gate():

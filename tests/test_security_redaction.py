@@ -304,6 +304,34 @@ def test_redact_session_data_todo_state_sidecar():
     assert result["todo_state"]["todos"][0]["status"] == "pending"
 
 
+def test_redact_session_data_runtime_journal_snapshot():
+    """redact_session_data masks credentials in active run-journal snapshots."""
+    from api.helpers import redact_session_data
+    session = {
+        "session_id": "journal-redact",
+        "messages": [],
+        "tool_calls": [],
+        "runtime_journal_snapshot": {
+            "messages": [
+                {"role": "assistant", "content": f"token echoed: {_FAKE_GITHUB_PAT}"},
+            ],
+            "tool_calls": [
+                {
+                    "name": "terminal",
+                    "preview": f"using {_FAKE_SK_KEY}",
+                    "args": {"command": f"export TOKEN={_FAKE_GITHUB_PAT}"},
+                },
+            ],
+            "last_assistant_text": f"assistant saw {_FAKE_HF_TOKEN}",
+            "last_reasoning_text": f"reasoning saw {_FAKE_AWS_KEY}",
+        },
+    }
+    result = redact_session_data(session)
+    dump = json.dumps(result)
+    _assert_no_plaintext_credentials(dump, "runtime_journal_snapshot redaction")
+    assert result["runtime_journal_snapshot"]["tool_calls"][0]["name"] == "terminal"
+
+
 def test_redact_session_data_multiple_cred_types():
     """redact_session_data handles sk-, ghp_, hf_, and AKIA keys."""
     from api.helpers import redact_session_data
@@ -337,7 +365,7 @@ def test_redact_session_data_non_sensitive_unchanged():
 
 
 # ── API-level tests (require running test server started by conftest.py) ─────
-# Run via `start.sh && pytest tests/test_security_redaction.py -v`
+# Run via `./scripts/test.sh tests/test_security_redaction.py -v`
 
 def _create_session_with_credentials() -> str:
     """Write a session file with credential-containing messages directly to disk.
@@ -467,12 +495,19 @@ def test_fix_credential_permissions_corrects_loose_files(tmp_path, monkeypatch):
     fix_credential_permissions()
 
     import stat
-    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600, ".env not fixed to 600"
-    assert stat.S_IMODE(google_file.stat().st_mode) == 0o600, "google_token.json not fixed to 600"
+    assert env_file.exists(), ".env missing after permission repair"
+    assert google_file.exists(), "google_token.json missing after permission repair"
+    if os.name != "nt":
+        assert stat.S_IMODE(env_file.stat().st_mode) == 0o600, ".env not fixed to 600"
+        assert stat.S_IMODE(google_file.stat().st_mode) == 0o600, "google_token.json not fixed to 600"
+    # Windows CI cannot assert a POSIX mode-bit repair here; keeping the files
+    # present after the repair pass is the strongest portable contract for now.
 
 
 def test_fix_credential_permissions_skips_correct_files(tmp_path, monkeypatch):
     """fix_credential_permissions() does not alter already-strict files."""
+    import os
+
     env_file = tmp_path / ".env"
     env_file.write_text("SECRET=abc")
     env_file.chmod(0o600)
@@ -483,4 +518,6 @@ def test_fix_credential_permissions_skips_correct_files(tmp_path, monkeypatch):
     fix_credential_permissions()
 
     import stat
-    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert env_file.exists(), ".env missing after strict-permission check"
+    if os.name != "nt":
+        assert stat.S_IMODE(env_file.stat().st_mode) == 0o600

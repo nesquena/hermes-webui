@@ -19,6 +19,7 @@ Pins three invariants:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -250,5 +251,54 @@ def test_docker_init_excludes_egg_info_during_staging():
     )
     assert "--exclude='__pycache__'" in stage_block, (
         "rsync staging must --exclude='__pycache__' to keep the copy minimal."
+    )
+
+
+def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
+    """Regression test for the docker-init "could not create hermes_agent.egg-info:
+    Permission denied" failure on :ro multi-container mounts.
+
+    `rsync -a` / `cp -a` preserve the source tree's mode bits, so a hermes-agent
+    source mounted mode 555 leaves the staged copy also mode 555 even though the
+    staging dir itself was created writable by hermeswebui. setuptools then can't
+    create `<pkg>.egg-info/` next to the package and dies with "Permission denied"
+    during `uv pip install`. The fix is a `chmod -R u+w` on the staged tree AFTER
+    both copy paths and BEFORE the install. This test pins that ordering and the
+    `u+w` form (so the staged tree isn't accidentally made world-writable).
+    """
+    src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
+
+    stage_idx = src.index("_stage_src=")
+    install_idx = src.index("uv pip install", stage_idx)
+    stage_block = src[stage_idx:install_idx]
+
+    # The fix MUST add owner-write to the staged tree after the rsync/cp copy.
+    # A naked `chmod` call that strips 0555 (or equivalent) would also work,
+    # but `u+w` is the minimal-permission form and matches the rest of the
+    # docker-init.bash style (never widen perms beyond what the operator needs).
+    assert re.search(r"chmod\s+-R\s+u\+w\s+\"?\\?\$?_stage_src\"?", stage_block), (
+        "docker_init.bash staging block must `chmod -R u+w \"$_stage_src\"` "
+        "after the rsync/cp copy. Without it, a :ro hermes-agent mount leaves "
+        "the staged tree mode 555 and `uv pip install` fails with "
+        "'could not create hermes_agent.egg-info: Permission denied' under "
+        "PEP 517 build isolation."
+    )
+
+    # The chmod must live in the SHARED tail (after `fi`), not inside either
+    # branch — otherwise dropping back to cp -a (when rsync is missing) would
+    # silently re-introduce the bug.
+    assert "chmod -R u+w \"$_stage_src\"" in stage_block, (
+        "the post-staging chmod must use the exact `chmod -R u+w \"$_stage_src\"` "
+        "form so the substring-check pattern below matches both code paths."
+    )
+
+    # Both copy branches (rsync and cp -a) close with `fi`; the chmod must
+    # come AFTER the closing `fi` so it covers whichever path was taken.
+    fi_idx = stage_block.rindex("\n    fi\n")
+    chmod_idx = stage_block.index("chmod -R u+w")
+    assert chmod_idx > fi_idx, (
+        "chmod must live AFTER the rsync/cp if/else closes — putting it "
+        "inside one branch means the other copy path skips it and the "
+        ":ro mount perm leak returns."
     )
 

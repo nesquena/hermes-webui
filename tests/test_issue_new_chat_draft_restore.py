@@ -18,6 +18,15 @@ def _btn_new_chat_handler() -> str:
     return BOOT_JS[start:end]
 
 
+def _load_session_clear_block() -> str:
+    start = SESSIONS_JS.find("async function loadSession(")
+    clear_start = SESSIONS_JS.find("if (currentSid !== sid || forceReload) {", start)
+    clear_end = SESSIONS_JS.find("// Phase 1: Load metadata only", clear_start)
+    assert start != -1, "loadSession not found"
+    assert clear_start != -1 and clear_end != -1, "loadSession clear block not found"
+    return SESSIONS_JS[start:clear_end]
+
+
 def test_new_session_remembers_regular_empty_session_id():
     start = SESSIONS_JS.find("async function newSession(")
     end = SESSIONS_JS.find("async function loadSession(", start)
@@ -74,9 +83,7 @@ def test_pre_switch_draft_flush_rechecks_stale_loading_guard():
     freshly-loaded C state. The guard is `if (_loadingSessionId !== sid) return;`
     placed AFTER the awaited save and BEFORE the `S.messages = []` clear
     (Codex pre-release CORE catch, #3471)."""
-    start = SESSIONS_JS.find("async function loadSession(")
-    assert start != -1, "loadSession not found"
-    body = SESSIONS_JS[start:start + 4000]
+    body = _load_session_clear_block()
     await_idx = body.find("await _saveComposerDraftNow(currentSid")
     guard_idx = body.find("if (_loadingSessionId !== sid) return;", await_idx)
     clear_idx = body.find("S.messages = [];", await_idx)
@@ -109,4 +116,20 @@ def test_clear_composer_draft_forgets_same_new_chat_candidate():
     body = SESSIONS_JS[start:end]
     assert "_clearRememberedNewChatDraftSession(sid);" in body, (
         "sending a draft must stop New Chat from restoring that now-cleared candidate"
+    )
+
+
+def test_boot_restore_preserves_zero_message_session_with_composer_draft():
+    """A hard refresh should not discard a zero-message session that owns unsent draft text/files."""
+    marker = "const _restoredInFlight = S.session && ("
+    start = BOOT_JS.find(marker)
+    end = BOOT_JS.find("// Restore the panel from localStorage", start)
+    assert start != -1 and end != -1, "boot restored-session cleanup block not found"
+    body = BOOT_JS[start:end]
+    assert "const _restoredDraft = (S.session && S.session.composer_draft) || {};" in body
+    assert "const _restoredDraftText = String(_restoredDraft.text||'').trim();" in body
+    assert "const _restoredDraftFiles = Array.isArray(_restoredDraft.files)" in body
+    assert "const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles.length);" in body
+    assert "&& !_restoredInFlight && !_restoredHasDraft" in body, (
+        "zero-message restored sessions should only be dropped when they have no draft"
     )

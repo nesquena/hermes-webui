@@ -86,6 +86,8 @@ class TestCancelStreamEagerRelease:
         mock_session.pending_user_message = "hello"
         mock_session.pending_attachments = ["file.txt"]
         mock_session.pending_started_at = 1234567890.0
+        mock_session.pending_user_source = "process_wakeup"
+        mock_session.messages = []
 
         STREAMS[stream_id] = queue.Queue()
         CANCEL_FLAGS[stream_id] = threading.Event()
@@ -102,6 +104,14 @@ class TestCancelStreamEagerRelease:
             "cancel_stream() should clear session.pending_attachments"
         assert mock_session.pending_started_at is None, \
             "cancel_stream() should clear session.pending_started_at"
+        assert mock_session.pending_user_source is None, \
+            "cancel_stream() should clear session.pending_user_source"
+        assert any(
+            isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and msg.get("_source") == "process_wakeup"
+            for msg in mock_session.messages
+        ), "cancel_stream() should preserve process_wakeup source on recovered user turns"
         mock_session.save.assert_called_once()
 
     def test_cancel_without_agent_still_pops_streams(self):

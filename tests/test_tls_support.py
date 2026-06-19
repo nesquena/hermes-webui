@@ -16,6 +16,9 @@ import unittest
 from contextlib import suppress
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from conftest import requires_fcntl
+
 ROOT = Path(__file__).parent.parent
 
 
@@ -190,6 +193,7 @@ class TestTLSEndToEnd(unittest.TestCase):
         self.assertEqual(data.get("status"), "ok")
         conn.close()
 
+    @requires_fcntl
     def test_tls_startup_failure_fallback_to_http(self):
         """Bad cert paths should print a warning and start HTTP anyway."""
         port = _find_free_port()

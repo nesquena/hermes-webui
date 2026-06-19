@@ -108,7 +108,7 @@ def _apply(driver_path, value):
     import json as _json
     result = subprocess.run(
         [NODE, driver_path, str(UI_JS_PATH), _json.dumps(value)],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")

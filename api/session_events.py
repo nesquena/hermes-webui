@@ -2,10 +2,14 @@
 
 import queue
 import threading
+import logging
+
+logger = logging.getLogger(__name__)
 
 _SESSION_EVENTS_LOCK = threading.Lock()
 _SESSION_EVENTS_SUBSCRIBERS: set[queue.Queue] = set()
 _SESSION_EVENTS_VERSION = 0
+_SESSION_LIST_CHANGED_LISTENERS: set[callable] = set()
 
 
 def _profile_is_root_alias(profile: str | None) -> bool:
@@ -27,6 +31,7 @@ def _sessions_changed_payload(
     reason: str,
     version: int,
     profile: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     payload = {
         "type": "sessions_changed",
@@ -38,11 +43,20 @@ def _sessions_changed_payload(
     # renamed-root alias, and an unscoped refresh preserves the old fail-safe.
     if normalized_profile and not _profile_is_root_alias(normalized_profile):
         payload["profile"] = normalized_profile
+    normalized_session_id = str(session_id or "").strip()
+    if normalized_session_id:
+        payload["session_id"] = normalized_session_id
     return payload
 
 
 def _payload_profile(payload: dict | None) -> str | None:
     value = payload.get("profile") if isinstance(payload, dict) else None
+    value = str(value or "").strip()
+    return value or None
+
+
+def _payload_session_id(payload: dict | None) -> str | None:
+    value = payload.get("session_id") if isinstance(payload, dict) else None
     value = str(value or "").strip()
     return value or None
 
@@ -60,15 +74,23 @@ def _coalesced_sessions_changed_payload(pending: dict | None, incoming: dict) ->
     pending_profile = _payload_profile(pending)
     incoming_profile = _payload_profile(incoming)
     if pending_profile == incoming_profile:
-        return incoming
+        pending_session_id = _payload_session_id(pending)
+        incoming_session_id = _payload_session_id(incoming)
+        if pending_session_id == incoming_session_id:
+            return incoming
+        merged = dict(incoming)
+        merged.pop("session_id", None)
+        return merged
     merged = dict(incoming)
     merged.pop("profile", None)
+    merged.pop("session_id", None)
     return merged
 
 
 def publish_session_list_changed(
     reason: str = "session_changed",
     profile: str | None = None,
+    session_id: str | None = None,
 ) -> None:
     """Notify connected browsers that the session sidebar may be stale."""
     global _SESSION_EVENTS_VERSION
@@ -78,8 +100,10 @@ def publish_session_list_changed(
             reason=reason,
             version=_SESSION_EVENTS_VERSION,
             profile=profile,
+            session_id=session_id,
         )
         subscribers = list(_SESSION_EVENTS_SUBSCRIBERS)
+        listeners = list(_SESSION_LIST_CHANGED_LISTENERS)
     for q in subscribers:
         try:
             q.put_nowait(payload)
@@ -93,6 +117,25 @@ def publish_session_list_changed(
                 q.put_nowait(_coalesced_sessions_changed_payload(pending, payload))
             except queue.Full:
                 pass
+    for listener in listeners:
+        try:
+            listener(profile)
+        except Exception:
+            logger.debug("Session-list changed listener failed", exc_info=True)
+
+
+def add_session_list_changed_listener(listener) -> None:
+    """Register a callback for /api/sessions cache invalidation hooks."""
+    if not callable(listener):
+        return
+    with _SESSION_EVENTS_LOCK:
+        _SESSION_LIST_CHANGED_LISTENERS.add(listener)
+
+
+def remove_session_list_changed_listener(listener) -> None:
+    """Unregister a callback previously added for session cache invalidation."""
+    with _SESSION_EVENTS_LOCK:
+        _SESSION_LIST_CHANGED_LISTENERS.discard(listener)
 
 
 def subscribe_session_events() -> queue.Queue:

@@ -696,6 +696,40 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     return env
 
 
+# Match Hermes Agent gateway behavior: profile-scoped WebUI runs should
+# project intended runtime vars (credentials, HERMES_HOME, TERMINAL_*)
+# without allowing profile env to override core shell identity variables
+# like HOME or PATH.
+_BLOCKED_RUNTIME_ENV_KEYS = {
+    'HOME',
+    'PATH',
+    'PWD',
+    'SHELL',
+    'USER',
+    'LOGNAME',
+    'SHLVL',
+    'OLDPWD',
+    'PYTHONPATH',
+    'VIRTUAL_ENV',
+    'LD_LIBRARY_PATH',
+}
+
+
+def filter_runtime_env_for_gateway_parity(env: dict[str, str]) -> dict[str, str]:
+    """Return a profile runtime env filtered to mimic Hermes gateway semantics."""
+    filtered: dict[str, str] = {}
+    for key, value in (env or {}).items():
+        k = str(key).strip()
+        if not k:
+            continue
+        if k in _BLOCKED_RUNTIME_ENV_KEYS:
+            continue
+        if k.startswith('XDG_'):
+            continue
+        filtered[k] = value
+    return filtered
+
+
 @contextmanager
 def profile_env_for_background_worker(
     session,
@@ -724,6 +758,7 @@ def profile_env_for_background_worker(
 
         profile_home_path = Path(get_hermes_home_for_profile(profile))
         runtime_env = get_profile_runtime_env(profile_home_path)
+        safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
     except Exception:
         log.debug(
             "Failed to resolve profile env for %s profile %s; falling back to current env",
@@ -734,7 +769,7 @@ def profile_env_for_background_worker(
         yield
         return
 
-    thread_env = dict(runtime_env)
+    thread_env = dict(safe_runtime_env)
     thread_env["HERMES_HOME"] = str(profile_home_path)
     # Hybrid profile routing: keep the broad runtime env in WebUI's thread-local
     # channel for WebUI helpers, and also mirror it into process env for the
@@ -749,11 +784,11 @@ def profile_env_for_background_worker(
     try:
         _set_thread_env(**thread_env)
         with _ENV_LOCK:
-            old_runtime_env = {key: os.environ.get(key) for key in runtime_env}
+            old_runtime_env = {key: os.environ.get(key) for key in safe_runtime_env}
             had_hermes_home = "HERMES_HOME" in os.environ
             old_hermes_home = os.environ.get("HERMES_HOME")
             skill_home_snapshot = snapshot_skill_home_modules()
-            os.environ.update(runtime_env)
+            os.environ.update(safe_runtime_env)
             os.environ["HERMES_HOME"] = str(profile_home_path)
             try:
                 patch_skill_home_modules(profile_home_path)
@@ -782,6 +817,86 @@ def profile_env_for_background_worker(
                 os.environ.pop("HERMES_HOME", None)
             if skill_home_snapshot is not None:
                 restore_skill_home_modules(skill_home_snapshot)
+
+
+@contextmanager
+def profile_env_for_active_request(
+    purpose: str = "provider/model read",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Apply the active per-request profile's env around a read-only API call (#3957).
+
+    WebUI profile switching is per-client/cookie scoped (issue #798): a browser
+    on a named profile sets a ``hermes_profile`` cookie, which ``server.py``
+    turns into a thread-local via ``set_request_profile()``.  But the per-client
+    switch deliberately does NOT reload the profile's ``.env`` into
+    ``os.environ`` (that would mutate process-global state shared with other
+    clients).  So read-only endpoints that resolve provider credentials through
+    ``os.environ`` / ``HERMES_HOME`` — ``/api/providers`` (``get_auth_status``
+    probes) and ``/api/models`` (``provider_model_ids`` / custom-key lookup) —
+    resolve against the *default* profile's credentials instead of the active
+    one.  Symptoms: Settings → Providers times out and the model picker shows
+    only the default profile's models.
+
+    This mirrors what streaming already does for the duration of an agent run
+    (``profile_env_for_background_worker``): it temporarily applies the active
+    profile's ``.env`` + terminal config for the duration of the wrapped read,
+    then restores the previous env under ``_ENV_LOCK``.
+
+    No-ops (zero overhead, byte-identical behavior) for the default/root profile
+    — the overwhelmingly common single-profile deployment is unaffected.
+    """
+    profile = (get_active_profile_name() or "").strip()
+    if not profile or _is_root_profile(profile):
+        yield
+        return
+    with profile_env_for_background_worker(
+        profile, purpose, logger_override=logger_override
+    ):
+        yield
+
+
+@contextmanager
+def profile_scope_for_detached_worker(
+    profile_name,
+    purpose: str = "detached worker",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Bind BOTH the per-request profile TLS and the profile env on a NEW thread (#3957).
+
+    A detached worker thread (e.g. the ``models-catalog-rebuild`` daemon that
+    ``get_available_models`` spawns for a bounded rebuild) inherits neither the
+    spawning request's profile thread-local (issue #798) nor its ``os.environ``.
+    Without re-establishing both, the worker resolves the *default* profile:
+      - profile-keyed paths (``_get_models_cache_path`` / ``_get_config_path`` /
+        ``_get_auth_store_path`` / ``_models_cache_source_fingerprint``) read the
+        per-request profile via ``get_active_profile_name()`` — needs the TLS;
+      - credential lookups (``provider_model_ids`` / ``_lookup_custom_api_key_env``)
+        read ``os.environ`` — needs the profile ``.env`` applied.
+
+    Pass the profile name CAPTURED on the spawning thread (where the TLS is
+    valid) into the worker, then enter this scope at the top of the worker body.
+    It sets the request-profile TLS for this (worker) thread and applies the
+    profile env via ``profile_env_for_background_worker``, restoring both on exit.
+    No-op for the default/root profile.
+
+    Unlike ``profile_env_for_active_request`` (which reads the *current* thread's
+    TLS and must NOT clear it — the request thread keeps using it after the call),
+    this sets and then CLEARS the TLS, which is correct for a dedicated worker
+    thread that has no other use for it.
+    """
+    name = (profile_name or "").strip()
+    if not name or _is_root_profile(name):
+        yield
+        return
+    set_request_profile(name)
+    try:
+        with profile_env_for_background_worker(
+            name, purpose, logger_override=logger_override
+        ):
+            yield
+    finally:
+        clear_request_profile()
 
 
 def _set_hermes_home(home: Path):

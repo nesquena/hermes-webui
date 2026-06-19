@@ -16,7 +16,22 @@ HERMES_WEBUI_LOG_DIR="${HERMES_WEBUI_LOG_DIR:-${HOME}/.hermes/webui/logs}"
 HERMES_WEBUI_HOST="${HERMES_WEBUI_HOST:-127.0.0.1}"
 HERMES_WEBUI_PORT="${HERMES_WEBUI_PORT:-8787}"
 HERMES_WEBUI_HEALTH_HOST="${HERMES_WEBUI_HEALTH_HOST:-127.0.0.1}"
-HERMES_WEBUI_HEALTH_URL="${HERMES_WEBUI_HEALTH_URL:-http://${HERMES_WEBUI_HEALTH_HOST}:${HERMES_WEBUI_PORT}/health}"
+
+# Shared TLS-aware probe (mirrors the server scheme; handles self-signed certs
+# and the HTTP-fallback contract).
+# shellcheck source=../lib/health_probe.sh
+. "${SCRIPT_DIR}/../lib/health_probe.sh"
+
+# Scheme-aware default health URL (https when TLS_CERT/KEY are set). When the
+# user explicitly sets HERMES_WEBUI_HEALTH_URL, it remains the authoritative
+# probe target (documented override) — see webui_healthy() below. Otherwise the
+# generated default is used for both the probe and human-readable log messages.
+if [[ -n "${HERMES_WEBUI_HEALTH_URL:-}" ]]; then
+  _HERMES_WEBUI_HEALTH_URL_EXPLICIT=1
+else
+  _HERMES_WEBUI_HEALTH_URL_EXPLICIT=0
+fi
+HERMES_WEBUI_HEALTH_URL="${HERMES_WEBUI_HEALTH_URL:-$(hermes_webui_probe_scheme)://${HERMES_WEBUI_HEALTH_HOST}:${HERMES_WEBUI_PORT}/health}"
 HERMES_WEBUI_PID_FILE="${HERMES_WEBUI_PID_FILE:-${HERMES_WEBUI_LOG_DIR}/hermes-webui.pid}"
 HERMES_WEBUI_LOCK_FILE="${HERMES_WEBUI_LOCK_FILE:-/tmp/hermes-webui-autostart.lock}"
 AUTOSTART_LOG="${HERMES_WEBUI_LOG_DIR}/webui_autostart.log"
@@ -33,8 +48,21 @@ log() {
 }
 
 webui_healthy() {
-  command -v curl >/dev/null 2>&1 \
-    && curl -fsS --max-time 3 "${HERMES_WEBUI_HEALTH_URL}" >/dev/null 2>&1
+  # Honor an explicit HERMES_WEBUI_HEALTH_URL override (documented escape hatch):
+  # probe that exact URL. The shared TLS-aware helper is used for the generated
+  # default, which mirrors the server scheme and handles self-signed certs + the
+  # HTTP-fallback contract.
+  if [[ "${_HERMES_WEBUI_HEALTH_URL_EXPLICIT}" == "1" ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsS -k --max-time 3 "${HERMES_WEBUI_HEALTH_URL}" >/dev/null 2>&1
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO- --no-check-certificate --timeout=3 --tries=1 "${HERMES_WEBUI_HEALTH_URL}" >/dev/null 2>&1
+    else
+      return 1
+    fi
+    return $?
+  fi
+  hermes_webui_probe_health "${HERMES_WEBUI_HEALTH_HOST}" "${HERMES_WEBUI_PORT}" "/health" 3 >/dev/null 2>&1
 }
 
 pid_is_alive() {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -40,7 +41,7 @@ def test_wsl_autostart_launcher_has_safe_duplicate_prevention_and_exports_runtim
     assert "flock -n" in script
     assert "HERMES_WEBUI_LOCK_FILE" in script
     assert "HERMES_WEBUI_PID_FILE" in script
-    assert "curl -fsS --max-time 3" in script
+    assert "hermes_webui_probe_health" in script
     assert "bash \"${HERMES_WEBUI_REPO}/start.sh\" --foreground" in script
     assert "nohup" in script
 
@@ -54,6 +55,22 @@ def test_wsl_autostart_launcher_has_safe_duplicate_prevention_and_exports_runtim
 
 def test_wsl_autostart_launcher_passes_bash_syntax_check():
     subprocess.run(["bash", "-n", str(WSL_SCRIPT)], check=True, cwd=REPO_ROOT)
+
+
+def test_wsl_autostart_honors_explicit_health_url_override():
+    """#4412 regression: an explicitly-set HERMES_WEBUI_HEALTH_URL must remain the
+    actual probe target (documented escape hatch), not be silently ignored in
+    favor of the TLS-aware HOST/PORT helper after the probe refactor.
+    """
+    script = _read(WSL_SCRIPT)
+    # The override must be detected and used for the probe, not just for logging.
+    assert "_HERMES_WEBUI_HEALTH_URL_EXPLICIT" in script
+    # webui_healthy must branch on the explicit flag and probe the exact URL.
+    assert re.search(
+        r'_HERMES_WEBUI_HEALTH_URL_EXPLICIT.*==.*"1"',
+        script,
+    )
+    assert '"${HERMES_WEBUI_HEALTH_URL}"' in script
 
 
 def test_windows_task_scheduler_helper_is_idempotent_and_validates_wsl_script_path():
@@ -76,9 +93,9 @@ def test_windows_task_scheduler_helper_is_idempotent_and_validates_wsl_script_pa
 def test_powershell_helper_passes_parser_when_pwsh_is_available():
     pwsh = None
     for candidate in ("pwsh", "powershell"):
-        result = subprocess.run(["bash", "-lc", f"command -v {candidate}"], capture_output=True, text=True)
-        if result.returncode == 0:
-            pwsh = result.stdout.strip()
+        resolved = shutil.which(candidate)
+        if resolved:
+            pwsh = resolved
             break
     if not pwsh:
         # Linux CI often does not include PowerShell. The source-string tests

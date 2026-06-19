@@ -59,6 +59,7 @@ _STALE_TMP_AGE_SECONDS = 3600  # 1 hour
 _INDEX_WRITE_LOCK = threading.RLock()
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
+_SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
 
 # Path-safety contract for session IDs.  Accept alphanumerics, underscore, and
 # hyphen so API/gateway-issued ids (``api-*``, ``reachy-voice-*``) round-trip
@@ -146,26 +147,46 @@ def _session_dir_has_persisted_session_files() -> bool:
         return False
 
 
-def _rebuild_session_index_background() -> None:
+def _rebuild_session_index_background(expected_session_dir: Path, expected_index_file: Path) -> None:
+    global _SESSION_INDEX_REBUILD_THREAD, _SESSION_INDEX_REBUILD_THREAD_TARGET
     try:
-        _write_session_index(updates=None)
+        with _SESSION_INDEX_REBUILD_LOCK:
+            if SESSION_DIR != expected_session_dir or SESSION_INDEX_FILE != expected_index_file:
+                return
+        _write_session_index(
+            updates=None,
+            session_dir=expected_session_dir,
+            session_index_file=expected_index_file,
+        )
     except Exception:
         logger.debug("Background session-index rebuild failed", exc_info=True)
+    finally:
+        with _SESSION_INDEX_REBUILD_LOCK:
+            if _SESSION_INDEX_REBUILD_THREAD_TARGET == (
+                expected_session_dir,
+                expected_index_file,
+            ):
+                _SESSION_INDEX_REBUILD_THREAD = None
+                _SESSION_INDEX_REBUILD_THREAD_TARGET = None
 
 
 def _start_session_index_rebuild_thread() -> None:
     """Start one background full-index rebuild if the index is missing."""
-    global _SESSION_INDEX_REBUILD_THREAD
+    global _SESSION_INDEX_REBUILD_THREAD, _SESSION_INDEX_REBUILD_THREAD_TARGET
+    target = (SESSION_DIR, SESSION_INDEX_FILE)
     with _SESSION_INDEX_REBUILD_LOCK:
         if SESSION_INDEX_FILE.exists():
             return
         if (
             _SESSION_INDEX_REBUILD_THREAD is not None
             and _SESSION_INDEX_REBUILD_THREAD.is_alive()
+            and _SESSION_INDEX_REBUILD_THREAD_TARGET == target
         ):
             return
+        _SESSION_INDEX_REBUILD_THREAD_TARGET = target
         _SESSION_INDEX_REBUILD_THREAD = threading.Thread(
             target=_rebuild_session_index_background,
+            args=target,
             name="session-index-rebuild",
             daemon=True,
         )
@@ -191,7 +212,7 @@ def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
     return p.exists()
 
 
-def _write_session_index(updates=None):
+def _write_session_index(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
     """Update the session index file.
 
     When *updates* is provided (a list of Session objects whose compact
@@ -202,18 +223,20 @@ def _write_session_index(updates=None):
     LOCK protects in-memory state snapshots and payload construction only;
     disk I/O (write/flush/fsync/replace) always runs outside LOCK.
     """
-    _tmp = SESSION_INDEX_FILE.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+    session_dir = session_dir or SESSION_DIR
+    session_index_file = session_index_file or SESSION_INDEX_FILE
+    _tmp = session_index_file.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
 
     with _INDEX_WRITE_LOCK:
         # Lazy full-rebuild path — used when index doesn't exist yet.
-        if updates is None or not SESSION_INDEX_FILE.exists():
+        if updates is None or not session_index_file.exists():
             _cleanup_stale_tmp_files()  # best-effort sweep on startup / first call
             entry_map: dict[str, dict] = {}
-            for p in SESSION_DIR.glob('*.json'):
+            for p in session_dir.glob('*.json'):
                 if p.name.startswith('_'):
                     continue
                 try:
-                    s = Session.load(p.stem)
+                    s = _load_session_from_path(p)
                     if s:
                         c = s.compact()
                         sid = c.get('session_id')
@@ -243,7 +266,7 @@ def _write_session_index(updates=None):
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(_tmp, SESSION_INDEX_FILE)
+                os.replace(_tmp, session_index_file)
             except Exception:
                 # Best-effort cleanup of stale tmp on failure
                 try:
@@ -261,7 +284,7 @@ def _write_session_index(updates=None):
             # on-disk IDs once before entering the critical section.
             on_disk_ids = _persisted_session_ids_snapshot()
             with LOCK:
-                existing = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+                existing = json.loads(session_index_file.read_text(encoding='utf-8'))
                 in_memory_ids = set(SESSIONS.keys())
 
                 existing = [
@@ -289,7 +312,7 @@ def _write_session_index(updates=None):
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(_tmp, SESSION_INDEX_FILE)
+                os.replace(_tmp, session_index_file)
             except Exception:
                 try:
                     _tmp.unlink(missing_ok=True)
@@ -300,8 +323,16 @@ def _write_session_index(updates=None):
             _fallback = True
 
     if _fallback:
-        # Corrupt or missing index — fall back to full rebuild (called outside LOCK to avoid deadlock)
-        _write_session_index(updates=None)
+        # Corrupt or missing index — fall back to full rebuild (called outside LOCK to avoid deadlock).
+        # Propagate the resolved target so a rebuild scoped to a specific session dir
+        # (the background rebuild thread) falls back to rebuilding THAT dir's index,
+        # not the global SESSION_DIR (Opus advisor, stage-344 — defensive; today the
+        # only kwargs-caller passes updates=None and never reaches the fast path).
+        _write_session_index(
+            updates=None,
+            session_dir=session_dir,
+            session_index_file=session_index_file,
+        )
 
 
 def prune_session_from_index(session_id: str) -> None:
@@ -385,10 +416,19 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
         'timestamp': recovered_ts,
         '_recovered': True,
     }
+    pending_source = getattr(session, 'pending_user_source', None)
+    if pending_source and pending_source != 'webui':
+        recovered['_source'] = pending_source
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)
     _append_recovered_turn_to_context(session, recovered)
+    # The new user turn is now committed to messages (#3831): retire a positive
+    # truncation watermark from a prior retry/undo/edit so it can't freeze at the
+    # old edit boundary and drop these post-edit turns on a later empty-sidecar
+    # reconcile. None, never 0.0 (the truncate-to-empty sentinel, #2914).
+    if getattr(session, 'truncation_watermark', None):
+        session.truncation_watermark = None
     return recovered
 
 
@@ -511,6 +551,16 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     return None
 
 
+def _load_session_from_path(path: Path) -> "Session | None":
+    """Load a session from an explicit JSON path without consulting SESSION_DIR."""
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+    data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+    return Session(**data)
+
+
 def _lookup_index_message_count(session_id):
     """Return the indexed message count without loading the full session file."""
     return _index_message_count_map().get(str(session_id))
@@ -574,6 +624,7 @@ class Session:
                  pending_user_message: str=None,
                  pending_attachments=None,
                  pending_started_at=None,
+                 pending_user_source: str=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -621,6 +672,7 @@ class Session:
         self.pending_user_message = pending_user_message
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
+        self.pending_user_source = pending_user_source
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -696,7 +748,7 @@ class Session:
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
-            'pending_user_message', 'pending_attachments', 'pending_started_at',
+            'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
@@ -740,6 +792,20 @@ class Session:
                 except (json.JSONDecodeError, ValueError):
                     existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(self.messages or [])
+                if (
+                    existing_msg_count > 0
+                    and incoming_msg_count == 0
+                    and (self.active_stream_id or self.pending_user_message)
+                ):
+                    logger.warning(
+                        "refusing to overwrite session %s messages with empty active/pending snapshot "
+                        "(existing=%s, incoming=%s, stream=%s)",
+                        self.session_id,
+                        existing_msg_count,
+                        incoming_msg_count,
+                        self.active_stream_id,
+                    )
+                    return
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
                     # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
@@ -1374,6 +1440,30 @@ def _append_journaled_partial_output(
         # A stream can start with tools before any text. Keep those tools
         # visible after restart with an empty recovered assistant anchor instead
         # of inventing synthetic progress prose.
+        #
+        # Dedup guard (#3875): reuse an existing empty recovered anchor for THIS
+        # stream instead of appending a fresh one. The lazy read-side retry path
+        # (_retry_journal_recovery_in_place) re-runs this recovery on repeated
+        # get_session() calls, and a tool-first stream that never emitted text
+        # has no content to dedup on (flush_assistant() returns early on empty),
+        # so without this guard each retry — and each distinct interrupted stream
+        # over the session's life — appends another empty anchor. A session that
+        # was interrupted-and-recovered many times then accumulates thousands of
+        # empty content-less assistant rows, bloating the file and (combined with
+        # the render path) painting the transcript blank. One anchor per stream
+        # is all that's needed to host its recovered tool cards.
+        for _existing_idx in range(len(session.messages) - 1, -1, -1):
+            _m = session.messages[_existing_idx]
+            if not isinstance(_m, dict):
+                continue
+            if (
+                _m.get('_recovered_from_run_journal')
+                and _m.get('_recovered_stream_id') == stream_id
+                and _m.get('role') == 'assistant'
+                and not str(_m.get('content') or '').strip()
+            ):
+                current_assistant_idx = _existing_idx
+                return _existing_idx
         session.messages.append({
             'role': 'assistant',
             'content': '',
@@ -1806,6 +1896,7 @@ def _apply_core_sync_or_error_marker(
             session.pending_user_message = None
             session.pending_attachments = []
             session.pending_started_at = None
+            session.pending_user_source = None
             session.save(touch_updated_at=touch_updated_at)
             logger.info(
                 "Session %s: cleared stale pending state for completed stream %s without error marker",
@@ -1832,6 +1923,7 @@ def _apply_core_sync_or_error_marker(
         session.pending_user_message = None
         session.pending_attachments = []
         session.pending_started_at = None
+        session.pending_user_source = None
         session.messages.append(
             _build_recovery_marker_with_retry_hook(
                 recovered_output=recovered_output,
@@ -1886,6 +1978,7 @@ def _apply_core_sync_or_error_marker(
             session.pending_user_message = None
             session.pending_attachments = []
             session.pending_started_at = None
+            session.pending_user_source = None
             if recovered_output:
                 session.messages.append(
                     _interrupted_recovery_marker(
@@ -1933,6 +2026,7 @@ def _apply_core_sync_or_error_marker(
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
+    session.pending_user_source = None
     session.messages.append(
         _build_recovery_marker_with_retry_hook(
             recovered_output=recovered_output,
@@ -2365,7 +2459,7 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None):
+def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -2418,6 +2512,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_branch=wt.get('branch') if wt else None,
         worktree_repo_root=wt.get('repo_root') if wt else None,
         worktree_created_at=wt.get('created_at') if wt else None,
+        enabled_toolsets=enabled_toolsets,
     )
     with LOCK:
         SESSIONS[s.session_id] = s
@@ -2452,9 +2547,18 @@ def _sidebar_message_count(session: dict) -> int:
 
 def _sidebar_lineage_root_id(session: dict, sessions_by_id: dict[str, dict]) -> str:
     sid = str(session.get('session_id') or '')
+    explicit = str(session.get('_lineage_root_id') or '').strip()
+    if explicit:
+        return explicit
+    relationship_type = str(session.get('relationship_type') or '').strip().lower()
+    if relationship_type == 'child_session':
+        return sid
     root = sid
     parent = session.get('parent_session_id')
+    source = str(session.get('session_source') or '').strip().lower()
     seen = {sid}
+    if source == 'fork':
+        return root
     while parent and parent not in seen and parent in sessions_by_id:
         root = str(parent)
         seen.add(root)
@@ -2622,6 +2726,13 @@ def _prefer_fuller_snapshots_for_sidebar(sessions: list[dict]) -> list[dict]:
         if newest_visible_ts > snapshot_ts:
             continue
 
+        messageful_visible = [
+            session for session in visible
+            if _sidebar_message_count(session) > 0
+        ]
+        if len(messageful_visible) > 1:
+            continue
+
         continuation_ids_to_hide.update(
             str(session.get('session_id'))
             for session in visible
@@ -2646,6 +2757,14 @@ def _prefer_fuller_snapshots_for_sidebar(sessions: list[dict]) -> list[dict]:
 def _strip_sidebar_internal_flags(sessions: list[dict]) -> None:
     for session in sessions:
         session.pop('_show_pre_compression_snapshot', None)
+
+
+def _looks_like_stale_zero_message_row(session: dict) -> bool:
+    """Return True for indexed rows that likely need sidecar metadata repair."""
+    return bool(
+        int(session.get('message_count') or 0) == 0
+        and int(session.get('user_message_count') or 0) > 0
+    )
 
 
 def _row_may_need_sidecar_metadata_refresh(
@@ -2682,12 +2801,37 @@ def _row_may_need_sidecar_metadata_refresh(
         # so only true continuations are eligible.
         if str(session.get('session_source') or '').strip().lower() == 'fork':
             return False
+        if session.get('message_count') is None or session.get('last_message_at') is None:
+            return True
+        # Lineage fields are enriched from state.db in a batched pass later in
+        # all_sessions(). A complete indexed lineage row must not be reloaded
+        # from its sidecar merely because the filesystem mtime is newer than the
+        # logical message timestamp; that pattern is common after compression
+        # and turns each /api/sessions poll into hundreds of JSON prefix scans.
+        # Keep the mtime repair path only for rows whose counters are known bad
+        # or incomplete enough that the index cannot be trusted.
         lineage_shaped = bool(
             session.get('parent_session_id')
             or session.get('_lineage_root_id')
             or session.get('_compression_segment_count')
         )
-        return bool(lineage_shaped and sid and _sidecar_mtime_after_index_timestamp(session))
+        needs_mtime_check = bool(
+            sid
+            and (
+                _looks_like_stale_zero_message_row(session)
+                or (lineage_shaped and session.get('user_message_count') is None)
+            )
+        )
+        if needs_mtime_check and _sidecar_mtime_after_index_timestamp(session):
+            return True
+        return False
+    if (
+        sid
+        and _looks_like_stale_zero_message_row(session)
+        and str(session.get('session_source') or '').strip().lower() != 'fork'
+        and _sidecar_mtime_after_index_timestamp(session)
+    ):
+        return True
     if session.get('message_count') is None or session.get('last_message_at') is None:
         return True
     return bool(sid and stale_snapshot_ids and sid in stale_snapshot_ids)
@@ -2742,6 +2886,19 @@ def _stale_snapshot_metadata_refresh_ids(sessions: list[dict]) -> set[str]:
             if not sid:
                 continue
             if _sidebar_message_count(snapshot) > best_visible_count:
+                continue
+            # Modern index rows already carry enough sidebar summary data to
+            # decide snapshot visibility. Only legacy/incomplete rows need the
+            # sidecar mtime rescue; otherwise every historical snapshot whose
+            # file mtime is newer than its logical timestamp is re-read on every
+            # sidebar poll. Treat stale-zero-message rows as incomplete even
+            # when user_message_count/last_message_at are present; their sidecar
+            # may hold the real count that makes the snapshot visible.
+            if (
+                snapshot.get('user_message_count') is not None
+                and int(snapshot.get('message_count') or 0) > 0
+                and snapshot.get('last_message_at') is not None
+            ):
                 continue
             if _sidecar_mtime_after_index_timestamp(snapshot):
                 refresh_ids.add(sid)
@@ -3108,6 +3265,8 @@ def all_sessions(diag=None):
                 and not s.get('has_pending_user_message')
                 and not s.get('worktree_path')
             )]
+            _diag_stage(diag, "all_sessions.lineage_metadata")
+            _enrich_sidebar_lineage_metadata(result)
             result = _prefer_fuller_snapshots_for_sidebar(result)
             sidebar_candidates = result
             visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
@@ -3119,8 +3278,6 @@ def all_sessions(diag=None):
             for s in result:
                 if not s.get('profile'):
                     s['profile'] = 'default'
-            _diag_stage(diag, "all_sessions.lineage_metadata")
-            _enrich_sidebar_lineage_metadata(result)
             return result
         except Exception:
             logger.debug("Failed to load session index, falling back to full scan")
@@ -3149,6 +3306,8 @@ def all_sessions(diag=None):
         and not s.pending_user_message
         and not getattr(s, 'worktree_path', None)
     )]
+    _diag_stage(diag, "all_sessions.lineage_metadata")
+    _enrich_sidebar_lineage_metadata(result)
     result = _prefer_fuller_snapshots_for_sidebar(result)
     sidebar_candidates = result
     visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
@@ -3158,8 +3317,6 @@ def all_sessions(diag=None):
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
-    _diag_stage(diag, "all_sessions.lineage_metadata")
-    _enrich_sidebar_lineage_metadata(result)
     return result
 
 
@@ -3371,6 +3528,15 @@ CLAUDE_CODE_MAX_FILES = 200
 CLAUDE_CODE_MAX_FILE_BYTES = 10 * 1024 * 1024
 CLAUDE_CODE_MAX_MESSAGES_PER_FILE = 1000
 CLAUDE_CODE_MAX_CONTENT_CHARS = 200_000
+
+
+def _normalize_cli_session_source_filter(source_filter) -> str | None:
+    normalized = str(source_filter or '').strip().lower()
+    if not normalized or normalized in {'all', 'any', '*'}:
+        return None
+    if normalized == 'claude-code':
+        return CLAUDE_CODE_SOURCE
+    return normalized
 
 
 def _default_claude_code_projects_dir() -> Path | None:
@@ -3624,16 +3790,92 @@ def _path_stat_cache_key(path):
         return None
 
 
+def _sqlite_content_fingerprint(db_path: Path):
+    """Return a commit-reliable content fingerprint for a state.db.
+
+    The stat-only key below (mtime_ns + size of the .db/-wal/-shm files) is NOT
+    reliable for cache invalidation: in WAL mode a commit lands in the -wal file,
+    and under fast sequential writes the (mtime_ns, size) of the sidecars can
+    COLLIDE with a previously cached stamp (same nanosecond bucket + a WAL frame
+    that lands at the same offset/size after a prior checkpoint truncation), so a
+    freshly-committed gateway/CLI session is intermittently served from the stale
+    Python cache. PRAGMA data_version does NOT help here either — read from a
+    fresh per-request connection it always reports that connection's own initial
+    value and never advances (verified). A cheap content fingerprint over the
+    sessions/messages tables, read on a fresh connection, DOES advance on every
+    commit (incl. external gateway writes) and is immune to mtime granularity.
+    Cost is a pair of indexed COUNT/MAX queries (sub-ms), far cheaper than the
+    full uncached session scan this key gates.
+    """
+    try:
+        if not Path(db_path).exists():
+            return None
+    except OSError:
+        return None
+    try:
+        import sqlite3
+        # Read-only + a tiny busy timeout: a fingerprint read must NEVER stall the
+        # /api/sessions hot path when state.db is briefly locked by a writer.
+        # On lock (or any error) we return None and the caller falls back to the
+        # cheap file-stat stamp, so correctness degrades gracefully to the prior
+        # behavior rather than blocking for the default multi-second busy timeout.
+        try:
+            conn = sqlite3.connect(
+                f"file:{db_path}?mode=ro", uri=True, timeout=0.05
+            )
+        except Exception:
+            return None
+        try:
+            conn.execute("PRAGMA busy_timeout=50")
+            parts = []
+            for table in ("sessions", "messages"):
+                try:
+                    # MAX(rowid) is an O(1) index lookup (no table scan) and
+                    # advances on every INSERT. Pair it with the table's largest
+                    # rowid + a count-free total: we deliberately avoid COUNT(*)
+                    # which forces a full SCAN on large messages tables (~tens of
+                    # ms per sidebar refresh on a big store). MAX(rowid) misses a
+                    # pure DELETE-without-insert, but the file-stat fallback in
+                    # _sqlite_file_stat_cache_key still moves on a delete commit,
+                    # and a delete never makes a MISSING row appear (the flake we
+                    # fix is an ADDED row not showing up). It also misses a plain
+                    # `UPDATE sessions SET title/message_count` with no message
+                    # insert (state_sync.py sync) — those fall back to the stat
+                    # stamp + 5s TTL, i.e. the prior behavior (a title-only rename
+                    # can lag <=5s); no regression vs the old stat-only key.
+                    row = conn.execute(
+                        f"SELECT MAX(rowid) FROM {table}"
+                    ).fetchone()
+                    parts.append(row[0] if row else None)
+                except Exception:
+                    parts.append(None)
+            return tuple(parts)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        return None
+
+
 def _sqlite_file_stat_cache_key(db_path: Path):
-    """Return a cheap invalidation key for a SQLite DB and WAL sidecars."""
+    """Return a commit-reliable invalidation key for a SQLite DB.
+
+    Combines a content fingerprint (the authoritative signal — advances on every
+    commit, immune to mtime-granularity collisions that flaked the gateway_sync
+    test) with the cheap file stat stamps as a belt-and-suspenders fallback for
+    the case where the fingerprint can't be read.
+    """
     return (
+        _sqlite_content_fingerprint(db_path),
         _path_stat_cache_key(db_path),
         _path_stat_cache_key(Path(f"{db_path}-wal")),
         _path_stat_cache_key(Path(f"{db_path}-shm")),
     )
 
 
-def _resolve_cli_sessions_context():
+def _resolve_cli_sessions_context(source_filter=None):
     # Use the active WebUI profile's HERMES_HOME to find state.db.
     # The active profile is determined by what the user has selected in the UI
     # (stored in the server's runtime config). This means:
@@ -3660,6 +3902,7 @@ def _resolve_cli_sessions_context():
         str(hermes_home),
         str(cli_profile or ''),
         str(db_path),
+        str(source_filter or ''),
         _sqlite_file_stat_cache_key(db_path),
         _path_cache_key(projects_dir),
         _path_stat_cache_key(projects_dir),
@@ -3668,12 +3911,94 @@ def _resolve_cli_sessions_context():
     return hermes_home, db_path, cli_profile, cache_key
 
 
-def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) -> list:
-    cli_sessions = []
+def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], tuple]:
+    """Return per-profile CLI scan contexts plus a cache key fragment."""
     try:
-        cli_sessions.extend(get_claude_code_sessions())
+        from api.profiles import (
+            _profiles_root,
+            get_active_profile_name,
+            get_hermes_home_for_profile,
+            list_profiles_api,
+        )
     except Exception:
-        logger.debug("Claude Code session scan failed", exc_info=True)
+        return [], ()
+
+    contexts: list[tuple[Path, Path, str | None]] = []
+    cache_entries: list[tuple[str, str, object]] = []
+    seen_homes: set[str] = set()
+
+    def _add_context(profile_name) -> None:
+        try:
+            hermes_home = Path(get_hermes_home_for_profile(profile_name)).expanduser().resolve()
+        except Exception:
+            return
+        home_key = _path_cache_key(hermes_home)
+        if not home_key or home_key in seen_homes:
+            return
+        seen_homes.add(home_key)
+        db_path = hermes_home / 'state.db'
+        profile_value = str(profile_name or 'default').strip() or 'default'
+        contexts.append((hermes_home, db_path, profile_value))
+        cache_entries.append((home_key, profile_value, _sqlite_file_stat_cache_key(db_path)))
+
+    try:
+        _add_context(get_active_profile_name())
+    except Exception:
+        pass
+    try:
+        for row in list_profiles_api():
+            if not isinstance(row, dict):
+                continue
+            _add_context(row.get('name'))
+    except Exception:
+        logger.debug("All-profiles CLI context enumeration failed", exc_info=True)
+    try:
+        for entry in _profiles_root().iterdir():
+            if not entry.is_dir():
+                continue
+            _add_context(entry.name)
+    except Exception:
+        logger.debug("All-profiles CLI directory enumeration failed", exc_info=True)
+
+    return contexts, tuple(cache_entries)
+
+
+def _state_projection_sidecar_metadata(sid: str) -> dict:
+    """Return UI-owned metadata for a state.db-projected sidebar row."""
+    metadata = {"title": None, "archived": False}
+    try:
+        webui_meta = Session.load_metadata_only(sid)
+    except Exception:
+        return metadata
+    if not webui_meta:
+        return metadata
+    title = getattr(webui_meta, 'title', None)
+    if title:
+        metadata["title"] = title
+    metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
+    return metadata
+
+
+def _load_cli_sessions_uncached(
+    hermes_home: Path,
+    db_path: Path,
+    _cli_profile,
+    source_filter=None,
+    *,
+    visible_session_limit: int | None = None,
+    cron_project_limit: int | None | bool = CRON_PROJECT_CHIP_LIMIT,
+    include_claude_code: bool = True,
+) -> list:
+    cli_sessions = []
+    if source_filter in (None, CLAUDE_CODE_SOURCE) and include_claude_code:
+        try:
+            cli_sessions.extend(get_claude_code_sessions())
+        except Exception:
+            logger.debug("Claude Code session scan failed", exc_info=True)
+
+    if source_filter == CLAUDE_CODE_SOURCE:
+        return cli_sessions
+
 
     if not db_path.exists():
         return cli_sessions
@@ -3687,17 +4012,19 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
             _cron_pid_cache[0] = ensure_cron_project()
         return _cron_pid_cache[0]
 
+    profile_value = _cli_profile or 'default'
     for row in read_importable_agent_session_rows(
         db_path,
-        limit=CLI_VISIBLE_SESSION_LIMIT,
+        limit=visible_session_limit if visible_session_limit is not None else (CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron' else CLI_VISIBLE_SESSION_LIMIT),
         log=logger,
-        exclude_sources=("cron",),
+        exclude_sources=("cron",) if source_filter is None else None,
+        include_sources=None if source_filter is None else (source_filter,),
     ):
         sid = row['id']
         raw_ts = row['last_activity'] or row['started_at']
         # Prefer the CLI session's own profile from the DB; fall back to
         # the active CLI profile so sidebar filtering works either way.
-        profile = _cli_profile  # CLI DB has no profile column; use active profile
+        profile = profile_value  # CLI DB has no profile column; use active profile
 
         _source = row['source'] or 'cli'
         _title = row['title']
@@ -3719,15 +4046,14 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
                 except Exception:
                     pass  # degrade gracefully
         # If a WebUI JSON file exists for this session (e.g. previously
-        # imported or renamed in the sidebar), prefer its title over the
-        # state.db title.  This fixes rename-not-persisting for CLI sessions
-        # after compression chain extension (#1486).
-        try:
-            _webui_meta = Session.load_metadata_only(sid)
-            if _webui_meta and getattr(_webui_meta, 'title', None):
-                _title = _webui_meta.title
-        except Exception:
-            pass
+        # imported or renamed in the sidebar), prefer its UI-owned metadata over
+        # the state.db projection. This keeps archived cron/tool/API runs hidden
+        # even when all_sessions() omits the hidden sidecar and the state row is
+        # re-injected from Hermes state.db (#4397).
+        _sidecar_meta = _state_projection_sidecar_metadata(sid)
+        if _sidecar_meta.get('title'):
+            _title = _sidecar_meta['title']
+        _archived = bool(_sidecar_meta.get('archived'))
         _display_title = _title or f'{_source.title()} Session'
         cli_sessions.append({
             'session_id': sid,
@@ -3738,7 +4064,7 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
             'created_at': row['started_at'],
             'updated_at': raw_ts,
             'pinned': False,
-            'archived': False,
+            'archived': _archived,
             'project_id': _cron_pid() if is_cron_session(sid, _source) else None,
             'profile': profile,
             'source_tag': _source,
@@ -3765,6 +4091,9 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
             'is_cli_session': is_cli_session_row(row),
         })
 
+    if source_filter is not None:
+        return cli_sessions
+
     # --- Second pass: fetch cron sessions that may have been squeezed out
     # of the default window by more-recent non-cron sessions.
     # The normal sidebar query caps at CLI_VISIBLE_SESSION_LIMIT (20) rows;
@@ -3772,99 +4101,126 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
     # before _include_project_hidden_background_sidebar_sessions can rescue
     # them (#3172).  A separate, higher-capped cron-only pass ensures they
     # stay addressable under their project chip.
-    existing_sids = {s['session_id'] for s in cli_sessions}
-    try:
-        cron_excluded = tuple(
-            s for s in ('webui', 'claude-code')  # keep only 'cron'
-        )
-        for row in read_importable_agent_session_rows(
-            db_path,
-            limit=CRON_PROJECT_CHIP_LIMIT,
-            log=logger,
-            exclude_sources=cron_excluded,
-        ):
-            sid = row['id']
-            if sid in existing_sids:
-                continue
-            _source = row['source'] or 'cli'
-            if _source != 'cron':
-                continue
-            raw_ts = row['last_activity'] or row['started_at']
-            _title = row['title']
-            if not _title and sid.startswith('cron_'):
-                parts = sid.split('_')
-                if len(parts) >= 3:
-                    _job_id = parts[1]
-                    try:
-                        _jobs_path = hermes_home / 'cron' / 'jobs.json'
-                        if _jobs_path.exists():
-                            import json as _json
-                            _jobs_data = _json.loads(_jobs_path.read_text())
-                            for _j in _jobs_data.get('jobs', []):
-                                if _j.get('id') == _job_id:
-                                    _title = _j.get('name') or _title
-                                    break
-                    except Exception:
-                        pass
-            try:
-                _webui_meta = Session.load_metadata_only(sid)
-                if _webui_meta and getattr(_webui_meta, 'title', None):
-                    _title = _webui_meta.title
-            except Exception:
-                pass
-            _display_title = _title or 'Cron Session'
-            cli_sessions.append({
-                'session_id': sid,
-                'title': _display_title,
-                'workspace': str(get_last_workspace()),
-                'model': row['model'] or None,
-                'message_count': row['message_count'] or row['actual_message_count'] or 0,
-                'created_at': row['started_at'],
-                'updated_at': raw_ts,
-                'pinned': False,
-                'archived': False,
-                'project_id': _cron_pid(),
-                'profile': _cli_profile,
-                'source_tag': 'cron',
-                'raw_source': row.get('raw_source'),
-                'user_id': row.get('user_id'),
-                'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
-                'chat_type': row.get('chat_type'),
-                'thread_id': row.get('thread_id'),
-                'session_key': row.get('session_key'),
-                'platform': row.get('platform'),
-                'session_source': row.get('session_source'),
-                'source_label': row.get('source_label'),
-                'parent_session_id': row.get('parent_session_id'),
-                'parent_title': row.get('parent_title'),
-                'parent_source': row.get('parent_source'),
-                'relationship_type': row.get('relationship_type'),
-                '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
-                'end_reason': row.get('end_reason'),
-                'actual_message_count': row.get('actual_message_count'),
-                'user_message_count': row.get('actual_user_message_count'),
-                '_lineage_root_id': row.get('_lineage_root_id'),
-                '_lineage_tip_id': row.get('_lineage_tip_id'),
-                '_compression_segment_count': row.get('_compression_segment_count'),
-                'is_cli_session': is_cli_session_row(row),
-            })
-            existing_sids.add(sid)
-    except Exception:
-        logger.debug("Cron project-chip second pass failed", exc_info=True)
+    if cron_project_limit is not False:
+        existing_sids = {s['session_id'] for s in cli_sessions}
+        try:
+            for row in read_importable_agent_session_rows(
+                db_path,
+                limit=cron_project_limit,
+                log=logger,
+                exclude_sources=None,
+                include_sources=("cron",),
+            ):
+                sid = row['id']
+                if sid in existing_sids:
+                    continue
+                _source = row['source'] or 'cli'
+                if _source != 'cron':
+                    continue
+                raw_ts = row['last_activity'] or row['started_at']
+                _title = row['title']
+                if not _title and sid.startswith('cron_'):
+                    parts = sid.split('_')
+                    if len(parts) >= 3:
+                        _job_id = parts[1]
+                        try:
+                            _jobs_path = hermes_home / 'cron' / 'jobs.json'
+                            if _jobs_path.exists():
+                                import json as _json
+                                _jobs_data = _json.loads(_jobs_path.read_text())
+                                for _j in _jobs_data.get('jobs', []):
+                                    if _j.get('id') == _job_id:
+                                        _title = _j.get('name') or _title
+                                        break
+                        except Exception:
+                            pass
+                _sidecar_meta = _state_projection_sidecar_metadata(sid)
+                if _sidecar_meta.get('title'):
+                    _title = _sidecar_meta['title']
+                _archived = bool(_sidecar_meta.get('archived'))
+                _display_title = _title or 'Cron Session'
+                cli_sessions.append({
+                    'session_id': sid,
+                    'title': _display_title,
+                    'workspace': str(get_last_workspace()),
+                    'model': row['model'] or None,
+                    'message_count': row['message_count'] or row['actual_message_count'] or 0,
+                    'created_at': row['started_at'],
+                    'updated_at': raw_ts,
+                    'pinned': False,
+                    'archived': _archived,
+                    'project_id': _cron_pid(),
+                    'profile': profile_value,
+                    'source_tag': 'cron',
+                    'raw_source': row.get('raw_source'),
+                    'user_id': row.get('user_id'),
+                    'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
+                    'chat_type': row.get('chat_type'),
+                    'thread_id': row.get('thread_id'),
+                    'session_key': row.get('session_key'),
+                    'platform': row.get('platform'),
+                    'session_source': row.get('session_source'),
+                    'source_label': row.get('source_label'),
+                    'parent_session_id': row.get('parent_session_id'),
+                    'parent_title': row.get('parent_title'),
+                    'parent_source': row.get('parent_source'),
+                    'relationship_type': row.get('relationship_type'),
+                    '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
+                    'end_reason': row.get('end_reason'),
+                    'actual_message_count': row.get('actual_message_count'),
+                    'user_message_count': row.get('actual_user_message_count'),
+                    '_lineage_root_id': row.get('_lineage_root_id'),
+                    '_lineage_tip_id': row.get('_lineage_tip_id'),
+                    '_compression_segment_count': row.get('_compression_segment_count'),
+                    'is_cli_session': is_cli_session_row(row),
+                })
+                existing_sids.add(sid)
+        except Exception:
+            logger.debug("Cron project-chip second pass failed", exc_info=True)
 
     return cli_sessions
 
 
-def get_cli_sessions() -> list:
+def get_cli_sessions(source_filter=None, *, all_profiles: bool = False) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
 
     Returns empty list if the SQLite DB is missing or any error occurs -- the
     bridge is purely additive and never crashes the WebUI.
     """
-    hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context()
+    source_filter = _normalize_cli_session_source_filter(source_filter)
+    if all_profiles:
+        contexts, context_cache_key = _all_profiles_cli_contexts()
+        cache_key = (
+            'all_profiles',
+            source_filter or '',
+            context_cache_key,
+            _path_cache_key(_default_claude_code_projects_dir()),
+            _path_stat_cache_key(_default_claude_code_projects_dir()),
+            _path_stat_cache_key(SESSION_INDEX_FILE),
+        )
+    else:
+        hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context(source_filter)
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
+
+    def _load_sessions():
+        if all_profiles:
+            merged: list[dict] = []
+            for idx, (ctx_home, ctx_db_path, ctx_profile) in enumerate(contexts):
+                merged.extend(
+                    _load_cli_sessions_uncached(
+                        ctx_home,
+                        ctx_db_path,
+                        ctx_profile,
+                        source_filter=source_filter,
+                        visible_session_limit=None,
+                        cron_project_limit=None,
+                        include_claude_code=(idx == 0),
+                    )
+                )
+            return merged
+        return _load_cli_sessions_uncached(hermes_home, db_path, cli_profile, source_filter=source_filter)
 
     if ttl > 0:
         with _CLI_SESSIONS_CACHE_LOCK:
@@ -3875,11 +4231,11 @@ def get_cli_sessions() -> list:
                     return _copy_cli_sessions(cached_sessions)
                 _CLI_SESSIONS_CACHE.pop(cache_key, None)
             try:
-                sessions = _load_cli_sessions_uncached(hermes_home, db_path, cli_profile)
+                sessions = _load_sessions()
             except Exception as _cli_err:
                 logger.warning(
                     "get_cli_sessions() failed — check state.db schema or path (%s): %s",
-                    db_path, _cli_err,
+                    "all profiles" if all_profiles else db_path, _cli_err,
                 )
                 return []
             _CLI_SESSIONS_CACHE[cache_key] = (
@@ -3889,11 +4245,11 @@ def get_cli_sessions() -> list:
             return _copy_cli_sessions(sessions)
 
     try:
-        return _load_cli_sessions_uncached(hermes_home, db_path, cli_profile)
+        return _load_sessions()
     except Exception as _cli_err:
         logger.warning(
             "get_cli_sessions() failed — check state.db schema or path (%s): %s",
-            db_path, _cli_err,
+            "all profiles" if all_profiles else db_path, _cli_err,
         )
         return []
 
@@ -4267,10 +4623,20 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     if not sidecar_context or not state_messages:
         return state_messages
 
+    # Recovered interrupted turns are special: the visible interruption marker
+    # is synthetic, so the recovered user turn should still count as a mirrored
+    # prefix when it is the actual aligned prefix row.
+    allow_single_row_prefix = bool(
+        isinstance(sidecar_context[0], dict)
+        and sidecar_context[0].get('_recovered')
+        and str(sidecar_context[0].get('role') or '') == 'user'
+    )
+
     sidecar_keys = [_session_message_content_key(m) for m in sidecar_context]
     state_keys = [_session_message_content_key(m) for m in state_messages]
     max_offset = min(len(sidecar_keys), len(state_keys))
     best_len = 0
+    best_offset = 0
     for offset in range(max_offset):
         length = 0
         while (
@@ -4281,12 +4647,13 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
             length += 1
         if length > best_len:
             best_len = length
+            best_offset = offset
 
     # Require at least two mirrored rows. A single repeated short user message
     # is not enough evidence that state.db starts with a mirrored context
     # segment, but small recovered contexts often contain only a compact summary
     # and one follow-up row; those should still use the delta path.
-    if best_len < 2:
+    if best_len < (1 if allow_single_row_prefix and best_offset == 0 else 2):
         return state_messages
 
     # Drop only rows that can be aligned with the remaining sidecar context in
@@ -4302,6 +4669,89 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     if sidecar_index == len(sidecar_keys):
         return state_messages[state_index:]
     return state_messages[best_len:]
+
+
+def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
+    """Insert a state.db-only row before newer sidecar rows when safe.
+
+    Returns False when the only chronological slot would resurrect an old state
+    row before the sidecar/context begins. This keeps no-watermark compression
+    display paths from reintroducing rows that were already compacted out.
+    """
+    timestamp = _message_timestamp_as_float(msg)
+    if timestamp is None:
+        messages.append(msg)
+        return True
+    idx = 0
+    while idx < len(messages):
+        existing = messages[idx]
+        existing_timestamp = _message_timestamp_as_float(existing)
+        should_insert = existing_timestamp is not None and (
+            existing_timestamp > timestamp
+            or (
+                existing_timestamp == timestamp
+                and msg.get("role") == "user"
+                and existing.get("role") == "assistant"
+            )
+        )
+        if not should_insert:
+            idx += 1
+            continue
+        if idx == 0 and existing_timestamp is not None and existing_timestamp > timestamp:
+            # With no surviving sidecar/context row before this slot, a real
+            # interruption rescue is indistinguishable from a compacted-out old
+            # prompt; prefer avoiding no-watermark resurrection in that shape.
+            return False
+        # Advance the insertion point past two kinds of slots that must not be
+        # split, applied to a fixpoint so they compose in any order at an
+        # equal-timestamp collision:
+        #   (a) an assistant(tool_calls) -> tool result block — inserting inside
+        #       it would split the tool call from its result (provider 400 /
+        #       corrupt tool context);
+        #   (b) a slot whose left neighbour shares this message's role at the
+        #       same timestamp — inserting there would re-order an already-matched
+        #       same-role turn (e.g. user, <inserted user>, assistant). The agent
+        #       core merges adjacent users before send, so (b) is benign in
+        #       practice, but advancing keeps the merged transcript correctly
+        #       ordered and alternation-clean regardless.
+        # Looping to a fixpoint guarantees the same-role guard can't strand the
+        # insert back inside a tool-pair (and vice versa).
+        while True:
+            advanced = False
+            # (a) Skip past a complete assistant(tool_calls) -> tool result
+            # block. Advance over ALL contiguous tool rows that belong to the
+            # preceding assistant's tool_calls, not just the first — a multi-tool
+            # turn has several adjacent tool results, and inserting between any of
+            # them splits the block (assistant, tool, <insert>, tool).
+            if (
+                idx < len(messages)
+                and messages[idx].get("role") == "tool"
+                and idx > 0
+                and messages[idx - 1].get("role") == "assistant"
+                and messages[idx - 1].get("tool_calls")
+            ):
+                while idx < len(messages) and messages[idx].get("role") == "tool":
+                    idx += 1
+                    advanced = True
+            # (b) Skip past an equal-timestamp run whose left neighbour shares
+            # this message's role — inserting there would re-order an
+            # already-matched same-role turn (user, <inserted user>, assistant).
+            # The agent core merges adjacent users before send, so this is benign
+            # in practice, but advancing keeps the merged transcript ordered.
+            while (
+                idx < len(messages)
+                and idx > 0
+                and messages[idx - 1].get("role") == msg.get("role")
+                and _message_timestamp_as_float(messages[idx]) == timestamp
+            ):
+                idx += 1
+                advanced = True
+            if not advanced:
+                break
+        messages.insert(idx, msg)
+        return True
+    messages.append(msg)
+    return True
 
 
 def merge_session_messages_append_only(
@@ -4497,6 +4947,13 @@ def merge_session_messages_append_only(
                 else:
                     continue
             else:
+                if msg.get("role") == "user" and _session_message_content_key(msg) not in seen_content_keys:
+                    if _insert_state_message_chronologically(merged_messages, msg):
+                        seen_message_keys.add(key)
+                        seen_dedup_keys.add(dedup_key)
+                        seen_content_keys.add(_session_message_content_key(msg))
+                        seen_visible_keys.add(visible_key)
+                    continue
                 continue
         seen_message_keys.add(key)
         seen_dedup_keys.add(dedup_key)
@@ -4530,7 +4987,7 @@ def reconciled_state_db_messages_for_session(
     )
 
 
-def get_cli_session_messages(sid) -> list:
+def get_cli_session_messages(sid, *, profile=None) -> list:
     """Read messages for a single CLI/external-agent session.
 
     Preserve tool-call/result and reasoning metadata from the agent state.db so
@@ -4541,7 +4998,7 @@ def get_cli_session_messages(sid) -> list:
     """
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
-    return get_state_db_session_messages(sid, stitch_continuations=True)
+    return get_state_db_session_messages(sid, stitch_continuations=True, profile=profile)
 
 
 def count_conversation_rounds(sid: str, since: float | None = None) -> int:

@@ -34,13 +34,15 @@ class TestFolderTooltipGated:
 
     def test_tooltip_assignment_is_guarded_by_item_type(self):
         block = _name_block()
-        # We expect the tooltip line to be wrapped in an `if(item.type!=='dir')` guard.
-        # The pre-fix shape was `nameEl.title=t('double_click_rename');` unconditionally.
-        # Find every line that assigns nameEl.title and confirm at least one is gated.
-        gated = "if(item.type!=='dir')nameEl.title=t('double_click_rename')"
+        # The tooltip must NOT appear on directories. The original guard was
+        # ``if(item.type!=='dir')``. After the symlink PR the guard became
+        # ``else if(!isDirLike)`` (preceded by a symlink tooltip branch).
+        # Accept either form.
+        gated_legacy = "if(item.type!=='dir')nameEl.title=t('double_click_rename')"
+        gated_symlink = "if(!isDirLike)"
         unguarded = "    nameEl.className='file-name';nameEl.textContent=item.name;nameEl.title=t('double_click_rename');"
-        assert gated in block, (
-            "tooltip assignment must be guarded by `if(item.type!=='dir')` so directories "
+        assert gated_legacy in block or gated_symlink in block, (
+            "tooltip assignment must be guarded so directories "
             "do not show the misleading 'Double-click to rename' hint (#1701)"
         )
         assert unguarded not in block, (
@@ -49,9 +51,15 @@ class TestFolderTooltipGated:
         )
 
     def test_dir_dblclick_still_navigates_not_renames(self):
-        """Sanity: directory dblclick path is unchanged — must still call loadDir()."""
+        """Sanity: directory dblclick path is unchanged — must still call loadDir().
+
+        After the symlink PR, ``item.type==='dir'`` was replaced by the
+        ``isDirLike`` helper (covers real dirs and directory-symlinks).
+        """
         block = _name_block()
-        assert "if(item.type==='dir'){loadDir(item.path);return;}" in block, (
+        legacy = "if(item.type==='dir'){loadDir(item.path);return;}"
+        symlink_aware = "if(isDirLike){loadDir(item.path);return;}"
+        assert legacy in block or symlink_aware in block, (
             "directory dblclick must still navigate (call loadDir); the rename-only "
             "tooltip gating depends on this contract being unchanged"
         )

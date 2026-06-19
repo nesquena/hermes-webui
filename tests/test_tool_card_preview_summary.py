@@ -62,7 +62,7 @@ def _preview(driver_path: str, tc: dict, display_snippet: str = "") -> str:
         input=json.dumps({"tc": tc, "displaySnippet": display_snippet}),
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr)

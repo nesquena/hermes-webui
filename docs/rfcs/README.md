@@ -53,6 +53,10 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
   — #3820 opt-in display mode for power users who need a transparent,
   chronological Thinking / progress / tool-call stream alongside the default
   Compact Worklog model.
+- [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md) — #3926
+  proposed frontend presentation/reconciliation model for anchoring live
+  assistant activity, settled final answers, replay, and Compact/Transparent
+  render modes to one assistant turn.
 - [`canonical-session-resolution.md`](canonical-session-resolution.md) — #2361
   focused contract for resolving URL, query parameter, localStorage, sidebar,
   and compression-lineage session IDs to one canonical visible chat target.

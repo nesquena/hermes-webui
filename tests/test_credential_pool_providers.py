@@ -49,6 +49,9 @@ def _install_fake_hermes_cli(monkeypatch, *, with_load_pool: bool = False, pool_
                 self.label = d.get("label", "")
                 self.key_source = d.get("key_source", "")
                 self.id = d.get("id", "")
+                self.runtime_api_key = (d.get("runtime_api_key") or d.get("access_token") or "")
+                self.access_token = (d.get("access_token") or "")
+                self.base_url = d.get("base_url", "")
 
         class _FakePool:
             def __init__(self, entries_list):
@@ -56,6 +59,9 @@ def _install_fake_hermes_cli(monkeypatch, *, with_load_pool: bool = False, pool_
 
             def entries(self):
                 return self._entries
+
+            def select(self):
+                return self._entries[0] if self._entries else None
 
         def _fake_load_pool(pid):
             # Return ALL entries without filtering — mirrors the real load_pool()
@@ -593,3 +599,354 @@ def test_fallback_path_resolves_alias_when_load_pool_unavailable(monkeypatch, tm
     assert "Google" not in groups, (
         f"Raw alias name must not leak when fallback path runs; got {list(groups)}"
     )
+
+
+# ── New tests for credential-pool changes (code-review #4247 follow-ups) ──
+
+
+# --- Regression: ambient gh_cli MUST NOT mark copilot as configured ---
+
+
+def test_ambient_gh_cli_not_detectable_by_provider_has_key(monkeypatch, tmp_path):
+    """Regression: _provider_has_key('copilot') must return False when only
+    ambient gh auth token (gh_cli) is in the pool."""
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        "copilot": [
+            {"id": "ambient-1", "label": "gh auth token", "source": "gh_cli", "auth_type": "api_key"},
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    from api.providers import _provider_has_key
+
+    assert _provider_has_key("copilot") is False, (
+        "copilot must NOT be marked as configured when only ambient gh_cli token exists"
+    )
+
+
+def test_ambient_gh_env_not_detectable_by_provider_has_key(monkeypatch, tmp_path):
+    """Regression: _provider_has_key('copilot') must return False when only
+    GITHUB_TOKEN env-variable entry is in the pool."""
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        "copilot": [
+            {"id": "env-1", "label": "env-token", "source": "env:github_token", "auth_type": "api_key"},
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    from api.providers import _provider_has_key
+
+    assert _provider_has_key("copilot") is False, (
+        "copilot must NOT be marked as configured when only GITHUB_TOKEN env entry exists"
+    )
+
+
+def test_ambient_key_source_not_detectable_by_provider_has_key(monkeypatch, tmp_path):
+    """Regression: _provider_has_key('copilot') must return False when only
+    key_source='gh auth token' entries exist."""
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        "copilot": [
+            {
+                "id": "key-src-1", "label": "copilot-pat",
+                "source": "manual", "key_source": "gh auth token",
+                "auth_type": "api_key",
+            },
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    from api.providers import _provider_has_key
+
+    assert _provider_has_key("copilot") is False, (
+        "copilot must NOT be marked as configured when only key_source=gh auth token entry exists"
+    )
+
+
+# --- Positive: custom:* providers with explicit credentials are detected ---
+
+
+def test_custom_provider_explicit_credential_detected_by_provider_has_key(monkeypatch, tmp_path):
+    """Positive: custom:bothub with explicit manual entry must show _provider_has_key=True."""
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        "custom:bothub": [
+            {
+                "id": "bothub-1",
+                "label": "bothub-key",
+                "source": "manual",
+                "auth_type": "api_key",
+                "runtime_api_key": "sk-bh...test",
+                "base_url": "https://bothub.chat/v1",
+            },
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    from api.providers import _provider_has_key
+
+    assert _provider_has_key("custom:bothub") is True, (
+        "custom:bothub with explicit pool entry must be detected as configured"
+    )
+
+
+def test_custom_provider_detected_by_get_providers(monkeypatch, tmp_path):
+    """Positive: custom:bothub must appear in get_providers() with has_key=True."""
+    config._CREDENTIAL_POOL_CACHE.clear()
+
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        "custom:bothub": [
+            {
+                "id": "bothub-prov-1",
+                "label": "bothub-key",
+                "source": "manual",
+                "auth_type": "api_key",
+                "runtime_api_key": "sk-bh...test",
+                "base_url": "https://bothub.chat/v1",
+            },
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    # Custom providers need to be in config.yaml for get_providers() to list them
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    config.cfg.clear()
+    config.cfg["model"] = {"provider": "custom:bothub"}
+    config.cfg["custom_providers"] = [
+        {
+            "name": "bothub",
+            "api_key": "sk-bh...test",
+            "base_url": "https://bothub.chat/v1",
+            "display_name": "Bothub",
+        },
+    ]
+    try:
+        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+    except Exception:
+        config._cfg_mtime = 0.0
+    config.invalidate_models_cache()
+
+    try:
+        from api.providers import get_providers
+
+        providers = get_providers()
+        bothub = None
+        for p in providers["providers"]:
+            if p["id"] == "custom:bothub":
+                bothub = p
+                break
+        assert bothub is not None, (
+            f"custom:bothub must appear in get_providers(); "
+            f"got {[p['id'] for p in providers['providers']]}"
+        )
+        assert bothub["has_key"] is True, "custom:bothub must show has_key=True"
+    finally:
+        config.invalidate_models_cache()
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
+
+
+def test_custom_provider_detected_by_get_available_models(monkeypatch, tmp_path):
+    """Positive: custom provider with explicit pool credentials must appear as a group."""
+    config._CREDENTIAL_POOL_CACHE.clear()
+
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        "custom:bothub": [
+            {
+                "id": "bothub-mod-1",
+                "label": "bothub-key",
+                "source": "manual",
+                "auth_type": "api_key",
+                "runtime_api_key": "sk-bh...test",
+                "base_url": "https://bothub.chat/v1",
+            },
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    # Need both auth.json (for pool) and custom_providers config (for model enumeration)
+    (tmp_path / "auth.json").write_text(json.dumps({
+        "version": 1,
+        "providers": {},
+        "active_provider": "openai-codex",
+    }), encoding="utf-8")
+
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    config.cfg.clear()
+    config.cfg["model"] = {}
+    config.cfg["custom_providers"] = [
+        {
+            "name": "bothub",
+            "api_key": "sk-bh...test",
+            "base_url": "https://bothub.chat/v1",
+            "display_name": "Bothub",
+        },
+    ]
+    try:
+        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+    except Exception:
+        config._cfg_mtime = 0.0
+    config.invalidate_models_cache()
+
+    try:
+        result = config.get_available_models()
+    finally:
+        config.invalidate_models_cache()
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
+
+    groups = _group_by_provider(result)
+    assert "bothub" in groups, (
+        f"Bothub must appear as a group in get_available_models; got {list(groups)}"
+    )
+    # Models may be empty since there's no real endpoint in test — the key is
+    # that the group appears at all (credential pool detection works).
+
+
+# --- OAuth token order: runtime_api_key must be preferred over access_token ---
+
+
+def test_get_provider_api_key_prefers_runtime_api_key_over_access_token(monkeypatch, tmp_path):
+    """_get_provider_api_key must return runtime_api_key when both access_token
+    and runtime_api_key are present (runtime_api_key has priority)."""
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        "custom:bothub": [
+            {
+                "id": "tok-order-1",
+                "label": "bothub-key",
+                "source": "manual",
+                "auth_type": "api_key",
+                "access_token": "sk-old-access-token",
+                "runtime_api_key": "sk-preferred-runtime-key",
+                "base_url": "https://bothub.chat/v1",
+            },
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    from api.providers import _get_provider_api_key
+
+    key = _get_provider_api_key("custom:bothub")
+    assert key == "sk-preferred-runtime-key", (
+        f"runtime_api_key must take priority; got {key!r}"
+    )
+
+
+def test_get_provider_api_key_falls_back_to_access_token(monkeypatch, tmp_path):
+    """_get_provider_api_key must fall back to access_token when runtime_api_key is absent."""
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        "custom:bothub": [
+            {
+                "id": "tok-fallback-1",
+                "label": "bothub-key",
+                "source": "manual",
+                "auth_type": "api_key",
+                "access_token": "sk-fallback-access-token",
+                "base_url": "https://bothub.chat/v1",
+            },
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    from api.providers import _get_provider_api_key
+
+    key = _get_provider_api_key("custom:bothub")
+    assert key == "sk-fallback-access-token", (
+        f"access_token must be used when runtime_api_key absent; got {key!r}"
+    )
+
+
+# --- _has_explicit_pool_credentials unit tests ---
+
+
+def test_has_explicit_pool_credentials_ambient_only_is_false(monkeypatch, tmp_path):
+    """_has_explicit_pool_credentials must return False when only ambient entries exist."""
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        "copilot": [
+            {"id": "u-amb-1", "label": "gh auth token", "source": "gh_cli", "auth_type": "api_key"},
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    config._CREDENTIAL_POOL_CACHE.clear()
+
+    from api.config import _has_explicit_pool_credentials
+
+    assert _has_explicit_pool_credentials("copilot") is False
+
+
+def test_has_explicit_pool_credentials_explicit_is_true(monkeypatch, tmp_path):
+    """_has_explicit_pool_credentials must return True when at least one explicit entry exists."""
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        "custom:bothub": [
+            {
+                "id": "u-exp-1", "label": "bothub-key", "source": "manual",
+                "auth_type": "api_key", "runtime_api_key": "sk-test",
+                "base_url": "https://bothub.chat/v1",
+            },
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    config._CREDENTIAL_POOL_CACHE.clear()
+
+    from api.config import _has_explicit_pool_credentials
+
+    assert _has_explicit_pool_credentials("custom:bothub") is True
+
+
+def test_has_explicit_pool_credentials_mixed_is_true(monkeypatch, tmp_path):
+    """_has_explicit_pool_credentials must return True when both ambient and explicit entries exist."""
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        "copilot": [
+            {"id": "u-mix-amb", "label": "gh auth token", "source": "gh_cli", "auth_type": "api_key"},
+            {
+                "id": "u-mix-exp", "label": "explicit-pat", "source": "manual",
+                "auth_type": "api_key", "runtime_api_key": "sk-pat",
+                "base_url": "https://api.githubcopilot.com",
+            },
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    config._CREDENTIAL_POOL_CACHE.clear()
+
+    from api.config import _has_explicit_pool_credentials
+
+    assert _has_explicit_pool_credentials("copilot") is True
+
+
+def test_has_explicit_pool_credentials_resolves_alias(monkeypatch, tmp_path):
+    """_has_explicit_pool_credentials must resolve provider aliases (google -> gemini)."""
+    _install_fake_hermes_cli(monkeypatch, with_load_pool=True, pool_data={
+        # Pool data is stored under canonical ID 'gemini' after alias resolution
+        "gemini": [
+            {
+                "id": "u-alias-1", "label": "gemini-key", "source": "manual",
+                "auth_type": "api_key", "runtime_api_key": "sk-gemini",
+                "base_url": "https://generativelanguage.googleapis.com",
+            },
+        ],
+    })
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    config._CREDENTIAL_POOL_CACHE.clear()
+
+    # Should work with both alias 'google' and canonical 'gemini'
+    from api.config import _has_explicit_pool_credentials
+
+    assert _has_explicit_pool_credentials("google") is True, (
+        "alias 'google' should resolve to canon 'gemini' and find pool entry"
+    )
+    assert _has_explicit_pool_credentials("gemini") is True, (
+        "canon 'gemini' should find pool entry directly"
+    )
+
+
+def test_has_explicit_pool_credentials_import_error_is_false(monkeypatch, tmp_path):
+    """_has_explicit_pool_credentials must return False when load_pool not available."""
+    _install_fake_hermes_cli(monkeypatch)  # no with_load_pool — agent.credential_pool is removed
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    config._CREDENTIAL_POOL_CACHE.clear()
+
+    from api.config import _has_explicit_pool_credentials
+
+    assert _has_explicit_pool_credentials("copilot") is False

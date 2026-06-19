@@ -63,10 +63,24 @@ def _render(markdown: str) -> str:
 
 
 def test_workspace_markdown_renders_mailto_and_tel_links():
-    html = _render("[email](mailto:foo@example.test) and [phone](tel:+15551212)")
+    html = _render("[email](mailto:foo@example.test) and [phone](tel:+155****1212)")
 
     assert '<a href="mailto:foo@example.test" target="_blank" rel="noopener">email</a>' in html
-    assert '<a href="tel:+15551212" target="_blank" rel="noopener">phone</a>' in html
+    assert '<a href="tel:+155****1212" target="_blank" rel="noopener">phone</a>' in html
+
+
+def test_workspace_markdown_renders_message_scheme_links():
+    """macOS Mail `message:` links must render clickable (#4319) — same OS-handled
+    class as mailto:/tel: — while `javascript:` stays blocked even when a
+    `message:`-style label is attached."""
+    html = _render(
+        "[mail](message://%3Cabc@example.test%3E) "
+        "and [x](javascript:alert(1))"
+    )
+
+    assert '<a href="message://%3Cabc@example.test%3E" target="_blank" rel="noopener">mail</a>' in html
+    # The javascript: scheme must NOT produce an executable href.
+    assert "javascript:alert(1)" not in html or 'href="javascript:' not in html
 
 
 def test_workspace_html_iframe_allows_links_to_escape_sandbox():

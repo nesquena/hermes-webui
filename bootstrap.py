@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import venv
 import webbrowser
@@ -79,6 +80,10 @@ DEFAULT_PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 
 def info(msg: str) -> None:
     print(f"[bootstrap] {msg}", flush=True)
+
+
+def warn(msg: str) -> None:
+    print(f"[bootstrap] [warn] {msg}", file=sys.stderr, flush=True)
 
 
 def is_wsl() -> bool:
@@ -281,19 +286,97 @@ def install_hermes_agent() -> None:
     )
 
 
-def wait_for_health(url: str, timeout: float = 25.0) -> bool:
-    deadline = time.time() + timeout
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _tls_probe_enabled() -> bool:
+    """Mirror api.config.TLS_ENABLED: HTTPS when both cert and key are set."""
+    return bool(os.getenv("HERMES_WEBUI_TLS_CERT", "").strip()) and bool(
+        os.getenv("HERMES_WEBUI_TLS_KEY", "").strip()
+    )
+
+
+def _health_ok(url: str, verify: bool = True) -> bool:
+    """Single /health request. Returns True iff the server answered with ok.
+
+    ``verify=False`` disables TLS certificate verification (self-signed certs).
+    """
     # Validate URL scheme to prevent file:// and other dangerous schemes
     if not url.startswith(("http://", "https://")):
         raise ValueError(f"Invalid health check URL: {url}")
+    context = None
+    if url.startswith("https://") and not verify:
+        import ssl
+
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(url, timeout=2, context=context) as response:  # nosec B310
+            return b'"status": "ok"' in response.read()
+    except Exception:
+        return False
+
+
+def wait_for_health(url: str, timeout: float = 25.0) -> str:
+    """Poll /health until the server answers ok or the timeout elapses.
+
+    Returns the scheme that actually answered ("https" or "http") on success,
+    or "" on timeout. The scheme string is truthy on success, so existing
+    ``if not wait_for_health(...)`` / ``assert wait_for_health(...)`` callers
+    keep working unchanged.
+
+    TLS-aware: when TLS is configured (HERMES_WEBUI_TLS_CERT/KEY set) the server
+    serves HTTPS, so probe HTTPS first. Self-signed certs are handled by a
+    second, unverified attempt (with a one-line warning). server.py falls back
+    to plain HTTP when the cert/key are unloadable
+    (tests/test_tls_support.py::test_tls_startup_failure_fallback_to_http), so
+    HTTP is probed last to honor that contract instead of polling HTTPS forever.
+    The returned scheme reflects that fallback, so callers print the URL the
+    server is actually reachable on.
+
+    HERMES_WEBUI_TLS_INSECURE_PROBE=1 is an explicit opt-in that skips the
+    verified attempt and stays silent by contract.
+    """
+    # Validate URL scheme to prevent file:// and other dangerous schemes
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"Invalid health check URL: {url}")
+    deadline = time.time() + timeout
+    https = _tls_probe_enabled()
+    insecure_optin = _truthy(os.getenv("HERMES_WEBUI_TLS_INSECURE_PROBE"))
+    # Derive host:port/path from the passed URL, then build scheme-correct URLs.
+    parsed = urllib.parse.urlsplit(url)
+    authority = parsed.netloc
+    path = parsed.path or "/health"
+    https_url = f"https://{authority}{path}"
+    http_url = f"http://{authority}{path}"
+    warned = False
     while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=2) as response:  # nosec B310
-                if b'"status": "ok"' in response.read():
-                    return True
-        except Exception:
-            time.sleep(0.4)
-    return False
+        if not https:
+            if _health_ok(http_url, verify=True):
+                return "http"
+        else:
+            if insecure_optin:
+                if _health_ok(https_url, verify=False):
+                    return "https"
+            else:
+                if _health_ok(https_url, verify=True):
+                    return "https"
+                if _health_ok(https_url, verify=False):
+                    if not warned:
+                        warned = True
+                        warn(
+                            f"Health probe: TLS certificate at {https_url} is "
+                            "self-signed or not trusted; proceeding without "
+                            "verification."
+                        )
+                    return "https"
+            # server.py may have fallen back to plain HTTP (cert/key unloadable).
+            if _health_ok(http_url, verify=True):
+                return "http"
+        time.sleep(0.4)
+    return ""
 
 
 def open_browser(url: str) -> None:
@@ -424,6 +507,8 @@ def main() -> int:
 
     server_cwd = str(agent_dir or REPO_ROOT)
     server_path = str(REPO_ROOT / "server.py")
+    # Scheme the server will advertise (HTTPS when TLS cert+key are configured).
+    scheme = "https" if _tls_probe_enabled() else "http"
 
     # --foreground (or auto-detected supervisor): replace this process with the
     # server. The supervisor sees the long-lived server as the original child,
@@ -432,7 +517,7 @@ def main() -> int:
     foreground_reason = "--foreground" if args.foreground else _detect_supervisor()
     if foreground_reason:
         info(
-            f"Starting Hermes Web UI on http://{args.host}:{args.port} "
+            f"Starting Hermes Web UI on {scheme}://{args.host}:{args.port} "
             f"(foreground mode: {foreground_reason})"
         )
         try:
@@ -472,7 +557,7 @@ def main() -> int:
     # /health, then return. Suitable for an interactive `bash start.sh` run.
     log_path = state_dir / f"bootstrap-{args.port}.log"
 
-    info(f"Starting Hermes Web UI on http://{args.host}:{args.port}")
+    info(f"Starting Hermes Web UI on {scheme}://{args.host}:{args.port}")
     with log_path.open("ab") as log_file:
         proc = subprocess.Popen(
             [python_exe, server_path],
@@ -483,17 +568,22 @@ def main() -> int:
             start_new_session=True,
         )
 
-    health_url = f"http://{args.host}:{args.port}/health"
-    if not wait_for_health(health_url):
+    health_url = f"{scheme}://{args.host}:{args.port}/health"
+    healthy_scheme = wait_for_health(health_url)
+    if not healthy_scheme:
         raise RuntimeError(
             f"Web UI did not become healthy at {health_url}. "
             f"Check the log at {log_path}. Server PID: {proc.pid}"
         )
 
+    # server.py falls back to plain HTTP when the cert/key are unloadable, so the
+    # scheme that actually answered the probe is the one the server is reachable
+    # on — use it for the ready URL and browser-open, not the configured scheme.
+    ready_scheme = healthy_scheme or scheme
     app_url = (
-        f"http://localhost:{args.port}"
+        f"{ready_scheme}://localhost:{args.port}"
         if args.host in ("127.0.0.1", "localhost")
-        else f"http://{args.host}:{args.port}"
+        else f"{ready_scheme}://{args.host}:{args.port}"
     )
     info(f"Web UI is ready: {app_url}")
     info(f"Log file: {log_path}")

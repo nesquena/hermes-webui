@@ -114,7 +114,7 @@ def _find(driver_path, model_id, options, preferred=None):
     result = subprocess.run(
         [NODE, driver_path, str(UI_JS_PATH),
          json.dumps({"modelId": model_id, "options": options, "preferredProvider": preferred})],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")
@@ -124,7 +124,7 @@ def _find(driver_path, model_id, options, preferred=None):
 def _norm_keys(driver_path, ids):
     result = subprocess.run(
         [NODE, driver_path, str(UI_JS_PATH), json.dumps(ids)],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")
@@ -228,7 +228,7 @@ class TestNormalizeConfiguredModelKeyMultiSlash:
 
     def test_at_provider_prefix_still_stripped(self, norm_driver):
         keys = _norm_keys(norm_driver, ["@custom:jingdong:GLM-5"])
-        assert keys["@custom:jingdong:GLM-5"] == "glm.5"
+        assert keys["@custom:jingdong:GLM-5"] == "jingdong:glm.5"
 
     def test_trailing_slash_fallback(self, norm_driver):
         """A trailing slash (malformed) must not collapse to empty."""

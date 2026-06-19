@@ -116,7 +116,8 @@ def test_session_with_tool_calls_in_json_loads_ok(cleanup_test_sessions):
     sid = make_session(cleanup_test_sessions)
 
     # Manually inject tool_calls into the session's JSON file
-    sessions_dir = pathlib.Path(os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(pathlib.Path.home() / ".hermes" / "webui-mvp-test"))) / "sessions"
+    from tests._pytest_port import TEST_STATE_DIR
+    sessions_dir = pathlib.Path(os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(TEST_STATE_DIR))) / "sessions"
     session_file = sessions_dir / f"{sid}.json"
     if session_file.exists():
         d = json.loads(session_file.read_text())
@@ -134,17 +135,16 @@ def test_session_with_tool_calls_in_json_loads_ok(cleanup_test_sessions):
     cleanup_test_sessions.clear()
 
 
-# ── R4: has_pending not imported in streaming.py (Sprint 10 split regression) ─
+# ── R4: approval check not imported in streaming.py (Sprint 10 split regression) ─
 
 def test_streaming_py_imports_has_pending(cleanup_test_sessions):
-    """R4: api/streaming.py must import or define has_pending.
+    """R4: api/streaming.py must import an approval-check function.
     When missing, the approval check mid-stream caused NameError.
     """
     src = (REPO_ROOT / "api/streaming.py").read_text()
-    assert "has_pending" in src, "has_pending not found in api/streaming.py"
-    # Verify it's imported (not just used)
-    assert "import" in src and "has_pending" in src, \
-        "has_pending must be imported in api/streaming.py"
+    assert "has_blocking_approval" in src, "has_blocking_approval not found in api/streaming.py"
+    assert "import" in src and "has_blocking_approval" in src, \
+        "has_blocking_approval must be imported in api/streaming.py"
 
 
 def test_aiagent_imported_in_streaming(cleanup_test_sessions):
@@ -426,7 +426,10 @@ def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
     # INFLIGHT branch must call appendLiveToolCard
-    inflight_idx = src.find("if(INFLIGHT[sid]){")
+    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
+    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
+    # grab the wrong one. (rfind = the substantive restore branch.)
+    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+4200]
     assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
@@ -647,22 +650,28 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
     session switch.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    inflight_idx = src.find("if(INFLIGHT[sid]){")
+    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
+    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
+    # grab the wrong one. (rfind = the substantive restore branch.)
+    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+4200]
-    busy_pos = inflight_block.find("S.busy=true;")
+    busy_pos = inflight_block.find("S.busy=")
     # #3326 added an optional {preserveScroll} arg to the INFLIGHT-branch render
     # call, so match the call form rather than the bare `renderMessages();`.
     render_pos = inflight_block.find("renderMessages(")
-    assert busy_pos >= 0, "loadSession INFLIGHT branch must set S.busy=true"
+    assert busy_pos >= 0, "loadSession INFLIGHT branch must set S.busy"
     assert render_pos >= 0, "loadSession INFLIGHT branch must call renderMessages()"
     assert busy_pos < render_pos, \
-        "loadSession must set S.busy=true before renderMessages() to avoid duplicate tool cards"
+        "loadSession must set S.busy before renderMessages() to avoid duplicate tool cards"
 
 
 def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test_sessions):
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    inflight_idx = src.find("if(INFLIGHT[sid]){")
+    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
+    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
+    # grab the wrong one. (rfind = the substantive restore branch.)
+    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+1200]
 
@@ -756,7 +765,10 @@ def test_loadSession_inflight_sets_active_stream_before_replaying_live_tool_card
     counter drops the previously-seen tools after a focus change.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    inflight_idx = src.find("if(INFLIGHT[sid]){")
+    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
+    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
+    # grab the wrong one. (rfind = the substantive restore branch.)
+    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+4200]
     active_pos = inflight_block.find("S.activeStreamId=activeStreamId;")
@@ -917,7 +929,7 @@ def test_ui_js_does_not_hide_anchor_segments_that_contain_thinking(cleanup_test_
         "provider reasoning metadata should feed the Worklog Thinking Card after exact duplicate suppression"
     assert "data-worklog-thinking-card" in src, \
         "Thinking Cards should be explicit Worklog items, not tool cards"
-    assert "_thinkingActivityNode(thinkingText, false)" in src, \
+    assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey)" in src, \
         "settled reasoning should render as a collapsed Worklog Thinking Card"
 
 

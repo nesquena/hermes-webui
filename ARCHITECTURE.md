@@ -145,7 +145,7 @@ Environment variables controlling behavior:
 Test isolation environment variables (set by conftest.py):
 
     HERMES_WEBUI_TEST_PORT=...                         Optional pinned test port
-    HERMES_WEBUI_TEST_STATE_DIR=~/.hermes/webui-test-* Optional pinned test state
+    HERMES_WEBUI_TEST_STATE_DIR=/tmp/hermes-webui-tests/* Optional pinned test state (default: OS temp dir; must be outside ~/.hermes)
     HERMES_WEBUI_DEFAULT_WORKSPACE=.../test-workspace  Isolated test workspace
 
 Tests NEVER talk to the production server (port 8787).

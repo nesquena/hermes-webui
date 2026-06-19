@@ -11,6 +11,16 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CTL = REPO_ROOT / "ctl.sh"
+HEALTH_PROBE = REPO_ROOT / "scripts" / "lib" / "health_probe.sh"
+
+
+def _seed_ctl_repo(repo_root: Path) -> None:
+    """Copy ctl.sh plus its sourced dependencies into an isolated repo dir."""
+    shutil.copy2(CTL, repo_root / "ctl.sh")
+    lib_dir = repo_root / "scripts" / "lib"
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(HEALTH_PROBE, lib_dir / "health_probe.sh")
+
 
 
 def run_ctl(
@@ -242,7 +252,7 @@ def test_start_uses_nohup_so_daemon_survives_launcher_exit():
 def test_start_can_ignore_repo_dotenv_for_authoritative_test_env(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    shutil.copy2(CTL, repo_root / "ctl.sh")
+    _seed_ctl_repo(repo_root)
     (repo_root / "bootstrap.py").write_text("# fake bootstrap target\n", encoding="utf-8")
     (repo_root / ".env").write_text(
         f"HERMES_WEBUI_STATE_DIR={tmp_path / 'host-specific-webui'}\n",
@@ -279,7 +289,7 @@ def test_start_can_ignore_repo_dotenv_for_authoritative_test_env(tmp_path):
 def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    shutil.copy2(CTL, repo_root / "ctl.sh")
+    _seed_ctl_repo(repo_root)
     (repo_root / "bootstrap.py").write_text("# fake bootstrap target\n", encoding="utf-8")
 
     fake_python = tmp_path / "fake-python"

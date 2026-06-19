@@ -24,6 +24,9 @@ def test_sync_topbar_does_not_count_only_loaded_tail_messages():
     assert "const metaText=_topbarMessageMetaText();" in block
     assert "t('n_messages',vis.length)" not in block
     assert "S.messages.filter(m=>m&&m.role&&m.role!=='tool')" not in block
+    assert "document.title=sessionTitle+' \\u2014 '+assistantDisplayName();" in block
+    assert "document.title='● '+document.title;" in block
+    assert "const pendingPrefix=(typeof activeSessionHasPendingPromptAttention==='function'&&activeSessionHasPendingPromptAttention())?'● ':'';" not in block
 
     sessions_js = (ROOT / "static" / "sessions.js").read_text()
     fn = sessions_js[

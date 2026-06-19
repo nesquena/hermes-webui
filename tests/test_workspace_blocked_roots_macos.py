@@ -124,7 +124,7 @@ class TestUserTmpPrefixes:
         """Carve-outs must not let /etc or other strict roots through."""
         for tmp in _USER_TMP_PREFIXES:
             # tmp paths are under /var or /private/var, never under /etc, /usr, /bin, etc.
-            assert str(tmp).startswith('/var/') or str(tmp).startswith('/private/var/')
+            assert tmp.as_posix().startswith('/var/') or tmp.as_posix().startswith('/private/var/')
 
 
 # ── Other roots: literal == resolved on both platforms ─────────────────────
@@ -173,3 +173,15 @@ class TestMacOSSystemAndLibraryBlocked:
         """Paths under /Library and /System must be blocked regardless of platform."""
         from api.workspace import _is_blocked_workspace_path
         assert _is_blocked_workspace_path(Path(path))
+
+
+class TestPosixShapeNormalization:
+    def test_etc_parent_escape_is_not_falsely_blocked(self):
+        from api.workspace import _is_blocked_workspace_path
+
+        assert not _is_blocked_workspace_path(Path('/home/user'), '/etc/../home/user')
+
+    def test_dot_prefixed_etc_path_is_still_blocked(self):
+        from api.workspace import _is_blocked_workspace_path
+
+        assert _is_blocked_workspace_path(Path('/etc/ssh'), '/./etc/ssh')

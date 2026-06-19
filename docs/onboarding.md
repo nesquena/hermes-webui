@@ -93,7 +93,7 @@ The setup step groups providers by how much information they usually need.
 | Group | Examples | What you usually enter |
 |---|---|---|
 | Easy start | OpenRouter, Anthropic, OpenAI | API key and model. |
-| Open / self-hosted | Ollama, LM Studio, custom OpenAI-compatible | Base URL, model, optional API key. |
+| Open / self-hosted | Ollama, LM Studio, custom OpenAI-compatible, AIML API | Base URL, model, optional API key. |
 | Specialized | Gemini, DeepSeek, Xiaomi MiMo, Z.AI / GLM, NVIDIA NIM, Mistral, xAI | Provider API key and default model. |
 
 For API-key providers, the wizard writes the key to the active Hermes `.env`
@@ -103,6 +103,15 @@ For local providers, the API key field can be blank when the server is keyless.
 Most LM Studio, Ollama, vLLM, llama-server, and TabbyAPI installs run this way.
 Use **Test connection** to verify the Base URL and populate the model list
 before continuing.
+
+AIML API uses the existing custom OpenAI-compatible setup path, not a
+first-class built-in Hermes provider id. Configure it under the
+custom-provider flow with Base URL `https://api.aimlapi.com/v1`, then use
+either the normal custom-provider API key field or a config entry that points
+at `AIMLAPI_API_KEY` if you want the custom provider to read its key from the
+environment. Create or manage keys at `https://aimlapi.com/app/keys`. Model
+discovery comes from the live `/v1/models` response for that endpoint, not from
+a static WebUI-maintained model list.
 
 Advanced provider flows such as Nous Portal and GitHub Copilot are still
 terminal-first. OpenAI Codex and Anthropic Claude Code OAuth can be started in

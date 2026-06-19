@@ -71,14 +71,16 @@ def _cleanup_session(sid):
 # ── GET /api/personalities ────────────────────────────────────────────────────
 
 def test_personalities_empty_when_none_exist():
-    """GET /api/personalities returns empty list when no personalities exist."""
+    """GET /api/personalities returns built-in personalities when no files exist."""
     p_dir = _personalities_dir()
     for child in list(p_dir.iterdir()):
         if child.is_dir() and not child.is_symlink():
             shutil.rmtree(child)
     d, status = get("/api/personalities")
     assert status == 200
-    assert d.get("personalities") == []
+    personalities = d.get("personalities") or []
+    assert len(personalities) == 14
+    assert {"name": "helpful", "description": "You are a helpful, friendly AI assistant."} in personalities
 
 
 def test_personalities_lists_from_config():

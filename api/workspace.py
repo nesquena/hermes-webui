@@ -11,11 +11,12 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import shutil
 import stat
 import subprocess
 import concurrent.futures
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,77 @@ def _last_workspace_file() -> Path:
     return _profile_state_dir() / 'last_workspace.txt'
 
 
+def _expanduser_path(path: str | Path) -> Path:
+    """Return *path* after shell-style home expansion.
+
+    ``Path.expanduser()`` on Windows does not consistently honor a monkeypatched
+    ``HOME`` in tests, which makes host-native replay diverge from the repo's
+    portability expectations. Use ``os.path.expanduser`` as the expansion source,
+    then wrap it back into ``Path``.
+    """
+    raw = str(path)
+    if raw.startswith('~'):
+        home = (
+            os.environ.get('HOME')
+            or os.environ.get('USERPROFILE')
+            or (
+                (os.environ.get('HOMEDRIVE') or '') + (os.environ.get('HOMEPATH') or '')
+            )
+            or str(Path.home())
+        )
+        if raw in ('~', '~/', '~\\'):
+            return Path(home)
+        if raw.startswith('~/') or raw.startswith('~\\'):
+            return Path(home) / raw[2:]
+        # NOTE: ``~user`` / ``~root`` forms are intentionally NOT expanded here.
+        # Master deliberately does not block ``/root`` (#510/#521 — Hermes commonly
+        # runs as root, where ``/root`` is the legitimate home and is allowed via
+        # the home carve-out). Expanding ``~root`` -> ``/root`` for a NON-root
+        # deployment would let it register root's home; leaving the literal form
+        # (resolved relative to cwd, then rejected if it escapes) is the safer
+        # behavior and matches the current security model.
+    return Path(raw)
+
+
+def _resolve_path(path: str | Path) -> Path:
+    """Resolve *path* after env-aware home expansion, without raising."""
+    return _safe_resolve(_expanduser_path(path))
+
+
+def _home_path() -> Path:
+    """Return the current effective home directory with env-aware expansion."""
+    return _resolve_path("~")
+
+
+def _as_posix_path(path: str | Path | None) -> PurePosixPath | None:
+    if path in (None, ""):
+        return None
+    raw = _strip_surrounding_quotes(str(path)).strip().replace('\\', '/')
+    # Reject embedded null bytes here rather than letting them survive normpath
+    # and crash later at .resolve() with an uncaught ValueError (surfaces as a
+    # 500). Fail-closed: treat as an invalid path.
+    if '\x00' in raw:
+        return None
+    if not raw.startswith('/'):
+        return None
+    return PurePosixPath(posixpath.normpath(raw))
+
+
+def _posix_is_within(path: PurePosixPath, root: PurePosixPath) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _normalize_posix_path(path: str | Path | None) -> str | None:
+    candidate = _as_posix_path(path)
+    if candidate is None:
+        return None
+    return candidate.as_posix()
+
+
 def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
     """Return True when the active terminal backend runs outside this WebUI host."""
     if not isinstance(terminal_cfg, dict):
@@ -91,8 +163,20 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
     raw = _strip_surrounding_quotes(str(path)).strip()
     if not raw:
         return None
-    candidate = Path(raw).expanduser().resolve()
-    base = Path(cwd).expanduser().resolve()
+    if '\x00' in raw or '\x00' in cwd:
+        return None
+    normalized_raw = _normalize_posix_path(raw)
+    normalized_cwd = _normalize_posix_path(cwd)
+    if normalized_raw is not None and normalized_cwd is not None:
+        posix_candidate = PurePosixPath(normalized_raw)
+        posix_base = PurePosixPath(normalized_cwd)
+        if _is_blocked_workspace_path(Path(normalized_raw), normalized_raw) or _is_blocked_workspace_path(Path(normalized_cwd), normalized_cwd):
+            return None
+        if posix_candidate == posix_base or _posix_is_within(posix_candidate, posix_base):
+            return _resolve_path(normalized_raw)
+        return None
+    candidate = _resolve_path(raw)
+    base = _resolve_path(cwd)
     if _is_blocked_workspace_path(candidate, raw) or _is_blocked_workspace_path(base, cwd):
         return None
     if candidate == base or _is_within(candidate, base):
@@ -124,14 +208,18 @@ def _profile_default_workspace() -> str:
         for key in ('workspace', 'default_workspace'):
             ws = cfg.get(key)
             if ws:
-                p = Path(str(ws)).expanduser().resolve()
+                if remote_terminal:
+                    return str(ws).strip()
+                p = _resolve_path(str(ws))
                 if remote_terminal or p.is_dir():
                     return str(p)
         # Fall through to terminal.cwd — the agent's configured working directory
         if isinstance(terminal_cfg, dict):
             cwd = terminal_cfg.get('cwd', '')
             if cwd and str(cwd) not in ('.', ''):
-                p = Path(str(cwd)).expanduser().resolve()
+                if remote_terminal:
+                    return str(cwd).strip()
+                p = _resolve_path(str(cwd))
                 if remote_terminal or p.is_dir():
                     return str(p)
     except (ImportError, Exception):
@@ -139,9 +227,9 @@ def _profile_default_workspace() -> str:
     try:
         from api.config import DEFAULT_WORKSPACE as _LIVE_DEFAULT_WORKSPACE
 
-        return str(Path(_LIVE_DEFAULT_WORKSPACE).expanduser().resolve())
+        return str(_resolve_path(_LIVE_DEFAULT_WORKSPACE))
     except Exception:
-        return str(Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve())
+        return str(_resolve_path(_BOOT_DEFAULT_WORKSPACE))
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
@@ -156,14 +244,14 @@ def _clean_workspace_list(workspaces: list) -> list:
       confusion with the 'default' profile name).
     Returns the cleaned list (may be empty).
     """
-    hermes_profiles = (Path.home() / '.hermes' / 'profiles').resolve()
+    hermes_profiles = (_home_path() / '.hermes' / 'profiles').resolve()
     result = []
     for w in workspaces:
         path = w.get('path', '')
         name = w.get('name', '')
         if not path:
             continue
-        p = _safe_resolve(Path(path).expanduser())
+        p = _safe_resolve(_expanduser_path(path))
         # Skip paths inside a DIFFERENT profile's directory (cross-profile leak).
         # Allow paths inside the CURRENT profile's own directory (e.g. test workspaces
         # created under ~/.hermes/profiles/webui/webui-mvp-test/).
@@ -199,6 +287,11 @@ def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does 
         st = candidate.stat()
     except FileNotFoundError:
         return f"{missing_label}: {candidate}"
+    except ValueError as exc:
+        # Embedded null byte (or similar invalid path) — .stat() raises ValueError,
+        # not OSError. Report as an access error rather than letting it surface as
+        # an uncaught 500.
+        return f"Cannot access path: {candidate!r}. Invalid path ({exc})."
     except PermissionError as exc:
         return (
             f"Cannot access path: {candidate}. The server process could not inspect "
@@ -322,7 +415,10 @@ def _safe_resolve(p: Path) -> Path:
     """Path.resolve() that never raises — falls back to the input path on error."""
     try:
         return p.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
+        # ValueError covers embedded-null-byte paths, which .resolve() raises on
+        # — fail-closed to the raw path so the downstream block-list gate rejects
+        # it cleanly instead of surfacing a 500.
         return p
 
 
@@ -382,6 +478,46 @@ def _workspace_blocked_roots() -> tuple[Path, ...]:
     return tuple(_out)
 
 
+def _is_blocked_posix_workspace_path(raw_path: str | Path | None) -> bool:
+    """Detect blocked POSIX-style system roots even on non-POSIX hosts."""
+    candidate = _as_posix_path(raw_path)
+    if candidate is None:
+        return False
+    if candidate == PurePosixPath('/'):
+        return True
+    carveouts = (
+        PurePosixPath('/var/folders'),
+        PurePosixPath('/private/var/folders'),
+        PurePosixPath('/var/tmp'),
+        PurePosixPath('/private/var/tmp'),
+    )
+    for tmp in carveouts:
+        if _posix_is_within(candidate, tmp):
+            return False
+    blocked_roots = (
+        PurePosixPath('/etc'),
+        PurePosixPath('/usr'),
+        PurePosixPath('/var'),
+        PurePosixPath('/bin'),
+        PurePosixPath('/sbin'),
+        PurePosixPath('/boot'),
+        PurePosixPath('/proc'),
+        PurePosixPath('/sys'),
+        PurePosixPath('/dev'),
+        PurePosixPath('/lib'),
+        PurePosixPath('/lib64'),
+        PurePosixPath('/opt/homebrew'),
+        PurePosixPath('/System'),
+        PurePosixPath('/Library'),
+        PurePosixPath('/private/etc'),
+        PurePosixPath('/private/var'),
+    )
+    for blocked in blocked_roots:
+        if _posix_is_within(candidate, blocked):
+            return True
+    return False
+
+
 def _is_blocked_system_path(candidate: Path) -> bool:
     """Return True if *candidate* falls under a blocked system root.
 
@@ -435,9 +571,14 @@ def _is_blocked_workspace_path(candidate: Path, raw_path: str | Path | None = No
     raw = None
     if raw_path not in (None, ""):
         try:
-            raw = Path(raw_path).expanduser()
+            normalized_posix = _normalize_posix_path(raw_path)
+            raw = Path(normalized_posix) if normalized_posix is not None else _expanduser_path(raw_path)
         except Exception:
             raw = None
+
+    posix_probe = raw_path if raw_path not in (None, "") else candidate.as_posix()
+    if _is_blocked_posix_workspace_path(posix_probe):
+        return True
 
     exact = _workspace_blocked_exact_roots()
     if candidate in exact or (raw is not None and raw in _workspace_blocked_roots()):
@@ -487,7 +628,7 @@ def _trusted_workspace_roots() -> list[Path]:
         if candidate in (None, ""):
             return
         try:
-            p = Path(candidate).expanduser().resolve()
+            p = _resolve_path(candidate)
         except Exception:
             return
         if not p.exists() or not p.is_dir():
@@ -497,7 +638,7 @@ def _trusted_workspace_roots() -> list[Path]:
         if p not in roots:
             roots.append(p)
 
-    add(Path.home())
+    add(_home_path())
     add(_BOOT_DEFAULT_WORKSPACE)
     for w in load_workspaces():
         add(w.get("path"))
@@ -525,14 +666,14 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
         return [str(p) for p in roots[:limit]]
 
     if raw.startswith("~"):
-        target = Path(raw).expanduser()
+        target = _expanduser_path(raw)
     elif Path(raw).is_absolute():
         target = Path(raw)
     else:
-        target = Path.home() / raw
+        target = _home_path() / raw
 
     try:
-        match_target = target.expanduser().resolve()
+        match_target = _resolve_path(target)
     except Exception:
         match_target = target
 
@@ -542,7 +683,7 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
     home_root: Path | None = None
     if preserve_tilde:
         try:
-            home_root = Path.home().expanduser().resolve()
+            home_root = _home_path()
         except Exception:
             home_root = None
     suggestions: list[str] = []
@@ -584,7 +725,7 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
     show_hidden = leaf.startswith('.')
 
     try:
-        parent_resolved = parent.expanduser().resolve()
+        parent_resolved = _resolve_path(parent)
     except Exception:
         return suggestions[:limit]
 
@@ -634,9 +775,9 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     trusted (it was validated at server startup).
     """
     if path in (None, ""):
-        return Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve()
+        return _resolve_path(_BOOT_DEFAULT_WORKSPACE)
 
-    candidate = Path(path).expanduser().resolve()
+    candidate = _resolve_path(path)
 
     access_error = _workspace_access_error(candidate)
     remote_candidate = _remote_terminal_workspace_candidate(path)
@@ -653,7 +794,7 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
     # (A) Trusted if under the user's home directory — cross-platform via Path.home()
     # Must be checked before system roots to allow symlinks like /var/home.
-    _home = Path.home().resolve()
+    _home = _home_path()
     if _home != Path("/"):
         try:
             candidate.relative_to(_home)
@@ -661,14 +802,13 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         except ValueError:
             pass
 
-    # Block known system roots and their children.
     if _is_blocked_workspace_path(candidate, path):
         raise ValueError(f"Path points to a system directory: {candidate}")
 
     # (B) Trusted if already in the saved workspace list — covers non-home installs
     try:
         saved = load_workspaces()
-        saved_paths = {Path(w["path"]).resolve() for w in saved if w.get("path")}
+        saved_paths = {_resolve_path(w["path"]) for w in saved if w.get("path")}
         if candidate in saved_paths:
             return candidate
     except Exception:
@@ -680,7 +820,7 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     #     was already validated at server startup, so any sub-path of it is safe
     #     without requiring the user to add it to the workspace list manually.
     try:
-        boot_default = Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve()
+        boot_default = _resolve_path(_BOOT_DEFAULT_WORKSPACE)
         candidate.relative_to(boot_default)
         return candidate
     except ValueError:
@@ -729,7 +869,7 @@ def validate_workspace_to_add(path: str) -> Path:
     and users routinely paste those into the Add Space input.
     """
     path = _strip_surrounding_quotes(path)
-    candidate = Path(path).expanduser().resolve()
+    candidate = _resolve_path(path)
 
     access_error = _workspace_access_error(candidate)
     remote_candidate = _remote_terminal_workspace_candidate(path)
@@ -745,11 +885,10 @@ def validate_workspace_to_add(path: str) -> Path:
 
     # Home directory is always trusted regardless of where it lives on disk
     # (e.g. /var/home/... on systemd-homed Fedora/RHEL).
-    _home = Path.home().resolve()
+    _home = _home_path()
     if _home != Path("/") and _is_within(candidate, _home):
         return candidate
 
-    # Block known system roots and their immediate children.
     if _is_blocked_workspace_path(candidate, path):
         raise ValueError(f"Path points to a system directory: {candidate}")
 

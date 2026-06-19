@@ -119,7 +119,7 @@
 <body>
 <header class="app-titlebar" role="banner">
   <button class="app-titlebar-hamburger has-tooltip has-tooltip--bottom" id="btnHamburger" onclick="toggleMobileSidebar()" type="button" data-tooltip="Menu" aria-label="Menu">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
   </button>
   <div class="app-titlebar-inner">
     <span class="app-titlebar-icon" aria-hidden="true">
@@ -348,6 +348,16 @@
         <span data-i18n="tab_settings">Settings</span>
       </div>
       <div class="side-menu" id="settingsMenu">
+        <div class="settings-search sidebar-search">
+          <svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="8"/>
+            <path d="M21 21l-4.35-4.35"/>
+          </svg>
+          <input id="settingsSearch" data-i18n-placeholder="settings_search_placeholder"
+            placeholder="Search settings…" oninput="filterSettings(this.value)" autocomplete="off">
+          <div id="settingsSearchResults" class="settings-search-results" style="display:none"></div>
+        </div>
         <button type="button" class="side-menu-item active" data-settings-section="conversation" onclick="switchSettingsSection('conversation')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           <span data-i18n="settings_tab_conversation">Conversation</span>
@@ -401,6 +411,11 @@
     <div class="messages-shell">
       <button id="jumpToSessionStartBtn" class="session-jump-btn session-jump-btn--start" aria-label="Jump to beginning of session" data-i18n-aria-label="session_jump_start_label" data-i18n-title="session_jump_start_label" onclick="jumpToSessionStart()" style="display:none"><span aria-hidden="true">↑</span><span data-i18n="session_jump_start">Start</span></button>
       <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" style="display:none" onclick="scrollToBottom()" aria-label="Scroll to bottom" data-i18n-aria-label="session_jump_end_label" data-i18n-title="session_jump_end_label"><span aria-hidden="true">↓</span><span class="session-jump-btn__text" data-i18n="session_jump_end">End</span></button>
+      <button id="outlineToggleBtn" type="button" hidden
+        onclick="toggleOutlinePanel()"
+        title="Conversation outline"
+        aria-label="Toggle conversation outline"
+        aria-controls="outlinePanelWrapper">&#9776;</button>
     <div class="messages" id="messages">
       <div class="empty-state" id="emptyState">
         <div class="empty-logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="80" height="80" aria-label="Hermes caduceus">
@@ -554,6 +569,7 @@
       <div class="queue-pill-outer">
         <button id="queuePill" class="queue-pill" aria-label="Show queued messages" type="button"></button>
       </div>
+      <div id="composerSelectionChips" class="composer-selection-chips" hidden aria-live="polite"></div>
       <div class="composer-box" id="composerBox">
         <div class="cmd-dropdown" id="cmdDropdown"></div>
         <div class="drop-hint" id="dropHint">
@@ -730,7 +746,6 @@
             <div class="reasoning-option" data-effort="medium">Medium</div>
             <div class="reasoning-option" data-effort="high">High</div>
             <div class="reasoning-option" data-effort="xhigh">Extra High</div>
-            <div class="reasoning-option" data-effort="max">Max</div>
           </div>
           <div class="composer-toolsets-dropdown" id="composerToolsetsDropdown">
             <div class="toolsets-dropdown-desc" id="toolsetsDropdownDesc"></div>
@@ -993,6 +1008,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsWorkspaceTodosTab" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_workspace_todos_tab">Show Todos tab in workspace panel</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_workspace_todos_tab">When enabled, a Todos tab appears in the workspace panel (right side). The sidebar Todos panel remains available regardless.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsSessionJumpButtons" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_session_jump_buttons">Show session jump buttons</span>
               </label>
@@ -1006,11 +1028,34 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_session_endless_scroll">When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.</div>
             </div>
             <div class="settings-field" style="margin-top:8px">
+              <label id="settingsChatActivityDisplayModeLabel" for="settingsChatActivityDisplayMode" data-i18n="settings_label_chat_activity_display_mode">Activity display</label>
+              <div class="chat-activity-mode-toggle" role="group" aria-labelledby="settingsChatActivityDisplayModeLabel">
+                <button type="button" class="chat-activity-mode-btn active" data-chat-activity-mode="compact_worklog" onclick="_pickChatActivityDisplayMode('compact_worklog')">
+                  <span data-i18n="settings_option_compact_worklog">Compact Worklog</span>
+                </button>
+                <button type="button" class="chat-activity-mode-btn" data-chat-activity-mode="transparent_stream" onclick="_pickChatActivityDisplayMode('transparent_stream')">
+                  <span data-i18n="settings_option_transparent_stream">Transparent Stream</span>
+                </button>
+              </div>
+              <select id="settingsChatActivityDisplayMode" style="display:none">
+                <option value="compact_worklog" data-i18n="settings_option_compact_worklog">Compact Worklog</option>
+                <option value="transparent_stream" data-i18n="settings_option_transparent_stream">Transparent Stream</option>
+              </select>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_chat_activity_display_mode">Compact Worklog groups supporting activity into a quiet summary. Transparent Stream keeps each thinking/tool event as its own chronological expandable row.</div>
+            </div>
+            <div class="settings-field" style="margin-top:8px">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-                <input type="checkbox" id="settingsActivityFeedExpandedDefault" style="width:15px;height:15px;accent-color:var(--accent)">
-                <span data-i18n="settings_label_activity_feed_expanded_default">Expand activity feed by default</span>
+                <input type="checkbox" id="settingsAutoScrollFollow" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_auto_scroll_follow">Auto-follow new content</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_activity_feed_expanded_default">Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_auto_scroll_follow">When enabled, the view scrolls to the bottom as new tokens stream in. When disabled, you control the scroll position manually.</div>
+            </div>
+            <div class="settings-field" style="margin-top:8px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsWorklogDetailsExpandedDefault" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_worklog_details_expanded_default">Open Worklog details automatically</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_worklog_details_expanded_default">When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.</div>
             </div>
             <div class="settings-field">
               <label id="tabVisibilityLabel" data-i18n="settings_label_tab_visibility">Sidebar tabs</label>
@@ -1028,7 +1073,10 @@
             </div>
             <div class="settings-field">
               <label for="settingsModel" data-i18n="settings_label_model">Default Model</label>
-              <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+              <div class="model-advanced-row">
+                <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+                <button type="button" id="mainAdvancedBtn" class="model-advanced-btn" title="Advanced options" aria-label="Advanced options for main model"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+              </div>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_model">Used for new conversations. Existing conversations keep their selected model.</div>
             </div>
             <div class="settings-field">
@@ -1046,6 +1094,13 @@
                 <span data-i18n="settings_label_hide_suggestions">Hide new-chat suggestions</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_hide_suggestions">Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsVirtualizeTranscript" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_virtualize_transcript">Virtualize long transcripts (experimental)</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_virtualize_transcript">Experimental. Renders only the visible portion of very long chat transcripts (over 80 messages) to speed up scrolling. Off by default because it can cause scroll flicker on long sessions with large tool-call blocks. Turn it on to try it; leave it off for the full transcript to render at once (and so the browser's Find (Ctrl+F) matches the whole conversation).</div>
             </div>
             <div class="settings-field">
               <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
@@ -1101,7 +1156,7 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_raw_audio">Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram's voice message behavior.</div>
             </div>
             <div class="settings-field">
-              <label for="settingsTtsEngine" data-i18n="settings_label_tts_engine">TTS Engine</label><select id="settingsTtsEngine" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="browser">Browser speech synthesis</option><option value="edge">Edge TTS (server)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_engine">Choose speech engine. Edge TTS uses Microsoft neural voices via the server.</div></div><div class="settings-field"><label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
+              <label for="settingsTtsEngine" data-i18n="settings_label_tts_engine">TTS Engine</label><select id="settingsTtsEngine" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="browser">Browser speech synthesis</option><option value="edge">Edge TTS (server)</option><option value="elevenlabs">ElevenLabs (server)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_engine">Choose speech engine. Edge TTS uses Microsoft neural voices via the server.</div></div><div class="settings-field"><label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
               <select id="settingsTtsVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="">Default system voice</option>
               </select>
@@ -1126,7 +1181,14 @@
                 <input type="checkbox" id="settingsNotificationsEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_notifications">Browser notifications</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_notifications">Show a system notification when a response completes while the tab is in the background.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_notifications">Show a system notification when a response completes while the app is in the background.</div>
+              <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+                <span id="notificationPermissionButtonWrap" style="display:inline-flex">
+                  <button type="button" class="sm-btn" id="notificationPermissionButton" onclick="requestNotificationPermission()" style="padding:5px 10px;font-size:12px" data-i18n="notifications_enable_btn">Enable notifications</button>
+                </span>
+                <button type="button" class="sm-btn" onclick="sendBrowserNotification('Hermes test','Notifications are ready.',{force:true});" style="padding:5px 10px;font-size:12px" data-i18n="notifications_test_btn">Send test</button>
+                <span id="notificationPermissionStatus" style="font-size:11px;color:var(--muted)"></span>
+              </div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1144,6 +1206,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowConversationOutline" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_conversation_outline">Show conversation outline</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_conversation_outline">Show a desktop-only jump list for user questions in the current conversation. Off by default.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowTps" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_token_speed">Show token speed (TPS)</span>
               </label>
@@ -1155,13 +1224,6 @@
                 <span data-i18n="settings_label_fade_text_effect">Fade text effect</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_fade_text_effect">Fade newly streamed words in while the assistant is responding. Similar to OpenWebUI; off by default for maximum performance.</div>
-            </div>
-            <div class="settings-field">
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-                <input type="checkbox" id="settingsSimplifiedToolCalling" style="width:15px;height:15px;accent-color:var(--accent)">
-                <span>Compact tool activity</span>
-              </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px">Show thinking and tool calls as compact inline activity while preserving the agent timeline.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1317,7 +1379,7 @@
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
             <div class="settings-field" id="shutdownServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="settings_label_shutdown">Stop the Hermes WebUI server</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_shutdown">Gracefully stops the local WebUI server. Useful if you launched via <code>./ctl.sh start</code> and want to stop without switching to a terminal. You'll need to relaunch the server (<code>./ctl.sh start</code> or the native app) before the WebUI is reachable again.</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px"><span data-i18n="settings_desc_shutdown_before_cmd">Gracefully stops the local WebUI server. Useful if you launched via </span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_between_cmds"> and want to stop without switching to a terminal. You'll need to relaunch the server (</span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_after_cmd"> or the native app) before the WebUI is reachable again.</span></div>
               <button class="sm-btn" id="btnShutdownServer" onclick="shutdownServer()" style="width:100%;padding:8px;font-weight:600;color:#e74c3c;border-color:rgba(231,76,60,.3)" data-i18n="settings_btn_shutdown">Stop server</button>
             </div>
             <div class="settings-field" id="passkeysSettingsBlock" style="display:none;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
@@ -1415,7 +1477,7 @@
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnUpDir" data-tooltip="Parent directory" onclick="navigateUp()" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFile" data-tooltip="New file" onclick="promptNewFile()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFolder" data-tooltip="New folder" onclick="promptNewFolder()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
-        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnRefreshPanel" data-tooltip="Refresh" onclick="if(S.session)loadDir(S.currentDir)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg></button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnRefreshPanel" data-tooltip="Refresh" onclick="if(S.session)refreshWorkspacePanel()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnUploadWorkspace" data-tooltip="Upload file" onclick="triggerWorkspaceUpload()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnWorkspacePrefs" data-tooltip="Workspace options" data-i18n-title="workspace_options" aria-haspopup="true" aria-expanded="false" onclick="toggleWorkspacePrefsMenu(event)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg><span class="workspace-prefs-dot" id="workspacePrefsDot" hidden></span></button>
         <button class="panel-icon-btn close-preview has-tooltip has-tooltip--bottom" id="btnClearPreview" data-tooltip="Close preview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
@@ -1425,10 +1487,12 @@
     <div class="workspace-panel-tabs" role="tablist" aria-label="Workspace panel views">
       <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button" onclick="switchWorkspacePanelTab('files')" role="tab" aria-selected="true">Files</button>
       <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false">Artifacts <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
+      <button class="workspace-panel-tab" id="workspaceTodosTab" type="button" onclick="switchWorkspacePanelTab('todos')" role="tab" aria-selected="false" hidden data-i18n="tab_todos">Todos</button>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree"></div>
     <div class="workspace-artifacts" id="workspaceArtifacts" hidden></div>
+    <div class="workspace-todos" id="workspaceTodosPanel" hidden style="flex:1;overflow-y:auto;padding:8px 12px"></div>
     <div id="wsEmptyState" style="display:none;flex:1;align-items:center;justify-content:center;padding:24px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6"></div>
     <div class="preview-area" id="previewArea">
       <div class="preview-path" id="previewPath">
@@ -1494,6 +1558,7 @@
 <div class="toast" id="toast"></div>
 <script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
@@ -1503,6 +1568,7 @@
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/outline.js?v=__WEBUI_VERSION__" defer></script>
 
 <!-- Kanban: create/rename board modal — used for both flows. -->
 <div class="kanban-modal-overlay" id="kanbanBoardModal" hidden onclick="if(event.target===this)closeKanbanBoardModal()">
@@ -1578,12 +1644,34 @@
       <input type="text" id="kanbanTaskModalTenant" list="kanbanTaskModalTenantList" maxlength="64" autocomplete="off" data-i18n-placeholder="kanban_tenant_placeholder" placeholder="Optional — project or team slug">
       <datalist id="kanbanTaskModalTenantList"></datalist>
     </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanTaskModalWorkspaceKind" data-i18n="kanban_workspace_kind">Workspace kind</label>
+      <select id="kanbanTaskModalWorkspaceKind" onchange="_kanbanOnWorkspaceKindChange()">
+        <option value="scratch" data-i18n="kanban_workspace_scratch">Scratch</option>
+        <option value="worktree" data-i18n="kanban_workspace_worktree">Worktree</option>
+        <option value="dir" data-i18n="kanban_workspace_dir">Directory</option>
+      </select>
+    </div>
+    <div class="kanban-modal-row" id="kanbanTaskModalWorkspacePathRow" style="display:none">
+      <label for="kanbanTaskModalWorkspacePath" data-i18n="kanban_workspace_path">Workspace path</label>
+      <input type="text" id="kanbanTaskModalWorkspacePath" maxlength="255" autocomplete="off" data-i18n-placeholder="kanban_workspace_path_placeholder" placeholder="Path to workspace">
+    </div>
     <div class="kanban-modal-error" id="kanbanTaskModalError" aria-live="polite"></div>
     <div class="kanban-modal-actions">
       <button type="button" class="btn secondary" onclick="closeKanbanTaskModal()" data-i18n="cancel">Cancel</button>
       <button type="button" class="btn primary" id="kanbanTaskModalSubmit" onclick="submitKanbanTaskModal()" data-i18n="create">Create</button>
     </div>
   </div>
+</div>
+<div id="outlinePanelWrapper" hidden
+  role="navigation" aria-label="Conversation outline">
+  <div class="outline-header">
+    <span data-i18n="outline_title">Outline</span>
+    <button class="outline-close-btn" type="button"
+      onclick="toggleOutlinePanel()"
+      aria-label="Close outline">&#215;</button>
+  </div>
+  <div id="outlinePanel"></div>
 </div>
 </body>
 </html>

@@ -52,10 +52,14 @@ docs/AGENTS.md
 docs/CLAUDE.md
 docs/.cursorrules
 docs/.windsurfrules
+.specify/
+AGENT_TRACE.yaml
+EXECUTION_LOG.md
 
 # Local-only PR review harness: rendering drivers, sample bank, fixtures.
 # Used by Claude during deep reviews; never shared in the repo.
 .local-review/
+.review-crops/
 graphify-out/
 .graphify_cached.json
 .graphify_uncached.txt
@@ -65,3 +69,4 @@ graphify-out/
 # Dev-only lint tooling (ESLint runtime-error guard) — see TESTING.md
 node_modules/
 package-lock.json
+docs/ui-ux/review-shots/

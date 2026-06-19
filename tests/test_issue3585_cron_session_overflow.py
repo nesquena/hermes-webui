@@ -123,6 +123,10 @@ def test_cron_sessions_recovered_by_second_pass(tmp_path):
     _make_state_db(db, cron_count=15, discord_count=5)
 
     with (
+        mock.patch(
+            "api.models.read_importable_agent_session_rows",
+            wraps=models.read_importable_agent_session_rows,
+        ) as read_rows,
         mock.patch("api.models.get_claude_code_sessions", return_value=[]),
         mock.patch("api.models.get_last_workspace", return_value=tmp_path),
         mock.patch("api.models.ensure_cron_project", return_value="cron-project-id"),
@@ -132,6 +136,9 @@ def test_cron_sessions_recovered_by_second_pass(tmp_path):
 
     cron_sessions = [s for s in result if s["source_tag"] == "cron"]
     assert len(cron_sessions) > 0, "Cron sessions should be recovered by the second pass"
+    assert len(read_rows.call_args_list) == 2
+    assert read_rows.call_args_list[1].kwargs["exclude_sources"] is None
+    assert read_rows.call_args_list[1].kwargs["include_sources"] == ("cron",)
 
 
 def test_webui_sidecarless_sessions_not_excluded(tmp_path):

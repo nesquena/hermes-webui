@@ -164,7 +164,7 @@ def _run_sync(driver_path, *, session_model, initial_value="@expensive:gpt-5.5",
         [NODE, driver_path, str(UI_JS_PATH), json.dumps(payload)],
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")

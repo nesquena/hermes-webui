@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 import time
 
@@ -15,7 +16,9 @@ def test_login_attempts_persist_failed_attempts(tmp_path, monkeypatch):
     data = json.loads(attempts_file.read_text(encoding="utf-8"))
     assert "203.0.113.10" in data
     assert len(data["203.0.113.10"]) == 1
-    assert stat.S_IMODE(attempts_file.stat().st_mode) == 0o600
+    assert attempts_file.exists()
+    if os.name != "nt":
+        assert stat.S_IMODE(attempts_file.stat().st_mode) == 0o600
 
 
 def test_login_attempts_load_prunes_expired_entries(tmp_path, monkeypatch):

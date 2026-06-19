@@ -135,6 +135,16 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 
 `ctl.sh start` runs the bootstrap in foreground/no-browser mode behind the daemon wrapper, writes logs to `~/.hermes/webui.log`, and respects `.env` plus inline overrides such as `HERMES_WEBUI_HOST=0.0.0.0 ./ctl.sh start`.
 
+> **Stopping the server.** Each launch method has its own stop path because only `ctl.sh start` writes a PID file (`~/.hermes/webui.pid`):
+>
+> | Launch method | How to stop |
+> |---|---|
+> | `python3 bootstrap.py` | **Ctrl-C** in the terminal (runs in the foreground) |
+> | `./ctl.sh start` | `./ctl.sh stop` (sends SIGTERM, waits, then SIGKILL) |
+> | Detached `bootstrap.py` (no `--foreground`) or `./start.sh` | Find the PID via `lsof -i :8787` (or `ss -tlnp`) and `kill` it |
+>
+> `./ctl.sh stop` cannot stop a server launched by `bootstrap.py` or `start.sh` directly — it only manages processes it started itself.
+
 ### Advanced: dynamic recall prefill & Gateway-backed chat
 
 Two optional, self-hosted-deployment features — attaching dynamic **session-recall prefill** to browser turns (Joplin/Obsidian/Notion/llm-wiki routers), and routing browser chat through a running **Hermes Gateway** — are documented in [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md). Most users need neither.
@@ -332,6 +342,7 @@ Full list of environment variables:
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
 | `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the report-only CSP `connect-src` directive for reverse-proxy or tunnel deployments |
+| `HERMES_WEBUI_SSE_CHUNKED` | *(unset)* | Set truthy (`1`/`true`/`yes`/`on`) to send SSE with `Transfer-Encoding: chunked`. Needed behind buffering reverse proxies (e.g. `jupyter-server-proxy`) that otherwise buffer the whole stream; harmless but unnecessary for directly-served deployments |
 | `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
 | `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` | *(unset)* | Optional comma-separated same-origin stylesheet URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
@@ -463,17 +474,30 @@ For the deep dive on each of these, see [`docs/docker.md`](docs/docker.md).
 ## Running tests
 
 Tests discover the repo and the Hermes agent dynamically -- no hardcoded paths.
+Use the repo test runner so local runs do not accidentally use an unsupported
+system Python. It creates/uses `.venv` with Python 3.11, 3.12, or 3.13 and
+installs the dev test dependencies from `requirements-dev.txt` when missing.
 
 ```bash
 cd hermes-webui
-pytest tests/ -v --timeout=60
+./scripts/test.sh
 ```
 
-Or using the agent venv explicitly:
+Pass normal pytest arguments after the script for focused runs:
 
 ```bash
-/path/to/hermes-agent/venv/bin/python -m pytest tests/ -v
+./scripts/test.sh tests/test_regressions.py -v
 ```
+
+Or seed the repo `.venv` from an explicit supported base interpreter:
+
+```bash
+HERMES_WEBUI_TEST_PYTHON=/path/to/python3.12 ./scripts/test.sh tests/ -v
+```
+
+The override selects the Python used to create or rebuild `.venv`; dependencies
+are still installed into the repo-local virtual environment, not into the
+system/Homebrew interpreter.
 
 Tests run against an isolated server with a separate state directory.
 Production data and real cron jobs are never touched. Current snapshot:
@@ -594,43 +618,45 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 
 Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, absorbed into a batch release, or salvaged from a larger proposal — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
-Over **190 contributors** have shipped code that landed in a release tag. The full,
-continuously-updated credit roll — including everyone with one or two PRs and the
-special-thanks roll for design and architectural work — lives in
-[`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
+<!-- BEGIN GENERATED CONTRIBUTORS -->
+Over **280 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
 
 ### Top contributors (by PR count, including absorbed/batch-released work)
 
 | # | Contributor | PRs | First → latest release |
 |---|---|---:|---|
-| 1 | [@franksong2702](https://github.com/franksong2702) | 148 | `v0.49.3` → `v0.51.153` |
-| 2 | [@Michaelyklam](https://github.com/Michaelyklam) | 117 | `v0.50.240` → `v0.51.139` |
-| 3 | [@bergeouss](https://github.com/bergeouss) | 70 | `v0.48.0` → `v0.51.46` |
-| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 67 | `v0.50.279` → `v0.51.190` |
-| 5 | [@dso2ng](https://github.com/dso2ng) | 25 | `v0.50.227` → `v0.51.153` |
-| 6 | [@AJV20](https://github.com/AJV20) | 24 | `v0.51.93` → `v0.51.188` |
-| 7 | [@starship-s](https://github.com/starship-s) | 19 | `v0.50.123` → `v0.51.153` |
-| 8 | [@jasonjcwu](https://github.com/jasonjcwu) | 16 | `v0.50.227` → `v0.51.132` |
-| 9 | [@dobby-d-elf](https://github.com/dobby-d-elf) | 15 | `v0.51.38` → `v0.51.161` |
-| 10 | [@Jordan-SkyLF](https://github.com/Jordan-SkyLF) | 12 | `v0.50.18` → `v0.51.66` |
+| 1 | [@franksong2702](https://github.com/franksong2702) | 244 | `v0.49.3` → `v0.51.492` |
+| 2 | [@rodboev](https://github.com/rodboev) | 189 | `v0.51.223` → `v0.51.511` |
+| 3 | [@Michaelyklam](https://github.com/Michaelyklam) | 157 | `v0.50.240` → `v0.51.198` |
+| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 115 | `v0.50.279` → `v0.51.482` |
+| 5 | [@bergeouss](https://github.com/bergeouss) | 77 | `v0.48.0` → `v0.51.505` |
+| 6 | [@AJV20](https://github.com/AJV20) | 57 | `v0.51.93` → `v0.51.346` |
+| 7 | [@dso2ng](https://github.com/dso2ng) | 41 | `v0.50.227` → `v0.51.488` |
+| 8 | [@Sanjays2402](https://github.com/Sanjays2402) | 26 | `v0.50.292` → `v0.51.484` |
+| 9 | [@starship-s](https://github.com/starship-s) | 23 | `v0.50.123` → `v0.51.473` |
+| 10 | [@Hinotoi-agent](https://github.com/Hinotoi-agent) | 21 | `v0.50.10` → `v0.51.497` |
 
-See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 194 contributors, including everyone with one or two PRs and the special-thanks roll for design and architectural contributions.
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 280 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
+<!-- END GENERATED CONTRIBUTORS -->
 
 ### Notable contributions
 
-**[@franksong2702](https://github.com/franksong2702)** — Most prolific external contributor (148 PRs, `v0.49.3` → `v0.51.153`)
+**[@franksong2702](https://github.com/franksong2702)** — Most prolific external contributor (180 PRs, `v0.49.3` → `v0.51.384`)
 Across the longest tenure of any external contributor: the session title guard (#301), breadcrumb workspace navigation (#302), embedded workspace terminal (#1099), worktree-backed session creation (#2053), onboarding documentation (#2052), composer footer container queries, streaming-session sidebar exemption (#1327), session sidecar repair, cron output preservation (#1295), profile default workspace persistence, manual `/compress` async start/status endpoints (#2128), worktree status surface (#2109) + guarded remove (#2156) for the lifecycle umbrella #2057, session post-render dedup (#2166), native-WebUI fast path (#2170), tail-window response trim (#2171), stale-stream guard extension (#2158), CSP report collector (#2160), and a long tail of polish across mobile/responsive, the session sidebar, and the workspace state machine.
 
-**[@Michaelyklam](https://github.com/Michaelyklam)** — Most prolific contributor of recent releases (117 PRs, `v0.50.240` → `v0.51.139`)
+**[@Michaelyklam](https://github.com/Michaelyklam)** — Most prolific contributor of recent releases (118 PRs, `v0.50.240` → `v0.51.198`)
 Production Docker hardening (#1921, drops sudo-capable staging user), profile-scoped skills endpoints (#1903), gateway PID resolution under profile-scoped HERMES_HOME (#1901), profile-aware AIAgent cache (#1898/#1904), backslash LaTeX delimiters (#1848), Codex quota error surfacing (#1770), shell-route HTML 503 (#1836), stale Kanban client recovery (#1828), context auto-compression toast lifetime (#1988), `/goal` command (#1866), Kanban detail-view scrolling (#1916), CLI session tool metadata preservation (#1778), Traditional Chinese kanban locale backfill (#1979), v0.51.51 mobile Insights bucketing/layout (#2120/#2121), Hermes run adapter RFC (#2105 for #1925), fork-from-here absolute index (#2198 for #2184), opencode-go custom-provider overlap routing (#2204 for #1894).
 
-**[@bergeouss](https://github.com/bergeouss)** — Provider management UI + Docker hardening (70 PRs, `v0.48.0` → `v0.51.46`)
+**[@rodboev](https://github.com/rodboev)** — Windows / cross-platform correctness + test reliability (83 PRs, `v0.51.223` → `v0.51.384`)
+A broad, sustained sweep with a strong focus on making the project work outside Linux: the `ctl.sh` Windows process-tree-kill fix (#3670), the local Windows full-suite signal/orphan-process work, slash-command autocomplete polish, and a long tail of frontend and infrastructure fixes shipped across dozens of release batches.
+
+**[@bergeouss](https://github.com/bergeouss)** — Provider management UI + Docker hardening (70 PRs, `v0.48.0` → `v0.51.385`)
 Provider management UI for adding/editing custom providers from Settings, OAuth provider status detection (#1552), two-container Docker setup, profile isolation hardening (per-profile `.env` secrets), the bulk of what users see when they touch Settings → Providers, Reveal-in-Finder context menu (#1551), gateway status card (#1552), auto-assign session to active project filter (#1550), "What's new?" link in update banner (#1549), OpenRouter free-tier live fetch (#1548), credential pool 401 self-heal (#1553), inline provider chip + group model count in model picker (#1644).
 
-**[@ai-ag2026](https://github.com/ai-ag2026)** — Session recovery + audit infrastructure (67 PRs, `v0.50.279` → `v0.51.190`)
+**[@ai-ag2026](https://github.com/ai-ag2026)** — Session recovery + audit infrastructure (75 PRs, `v0.50.279` → `v0.51.367`)
 Autonomous-AI contributor (Hermes Agent-driven) focused on durability: `state.db`-backed sidecar reconciliation (#2041), orphan `.json.bak` recovery on startup (#2035), read-only session recovery audit endpoints (#2036, #2040), active run lifecycle in `/health` (#2039), crash-safe turn-journal RFC at `docs/rfcs/turn-journal.md` (#2042), append-only turn-journal helper (#2059), lifecycle events layer (#2062), `Content-Security-Policy-Report-Only` header (#2084), per-cron toast toggle (#2100), fork-session compression lineage isolation (#2014).
 
-**[@dso2ng](https://github.com/dso2ng)** — Session lineage + diagnostics (25 PRs, `v0.50.227` → `v0.51.153`)
+**[@dso2ng](https://github.com/dso2ng)** — Session lineage + diagnostics (30 PRs, `v0.50.227` → `v0.51.327`)
 `/api/session/lineage-report/<sid>` endpoint for bounded session graph diagnostics (#2012), stale Mermaid render error cleanup (#1337), `session_source="fork"` continuation-chain isolation (#2063), lazy lineage-report fetch on sidebar badge expand (#2130), and a long tail of frontend reliability fixes around session loading.
 
 **[@jasonjcwu](https://github.com/jasonjcwu)** — Composer + transcript polish (16 PRs, `v0.50.227` → `v0.51.132`)

@@ -229,27 +229,41 @@ class TestBusySendButton:
         )
 
     def test_send_refreshes_primary_button_after_chat_start_stream_id(self):
-        """send() must call updateSendBtn in the chat/start try block after assigning streamId.
+        """send() must call updateSendBtn after streamId is assigned and before attachLiveStream.
 
-        setBusy(true) already ran updateSendBtn while activeStreamId was still null, so the
-        Stop affordance did not appear until something else (e.g. typing) called
-        updateSendBtn again.
+        setBusy(true) runs before the API request with activeStreamId still null.  The
+        Stop affordance must be refreshed as soon as we have streamId so it cannot be
+        skipped by optional post-start UI failures.
         """
         send_start = MESSAGES_JS.find("async function send(")
         assert send_start >= 0, "send() not found in messages.js"
         send_end = MESSAGES_JS.find("const LIVE_STREAMS={}", send_start)
         assert send_end > send_start, "could not find end of send() body"
         send_body = MESSAGES_JS[send_start:send_end]
+        api_idx = send_body.find("const startData=await api('/api/chat/start'")
+        assert api_idx >= 0, "send() should issue /api/chat/start"
+        catch_idx = send_body.find("}catch(e){", api_idx)
+        assert catch_idx >= 0, "send() should have API error catch after /api/chat/start"
         assign = "S.activeStreamId = streamId;"
         apos = send_body.find(assign)
         assert apos >= 0, "send() must assign S.activeStreamId from startData"
-        after_assign = send_body[apos:]
-        end_try = after_assign.find("  }catch(e){")
-        assert end_try > 0, "send() outer try/catch not found after stream id assign"
-        try_after_assign = after_assign[:end_try]
-        assert "updateSendBtn" in try_after_assign, (
-            "send() must call updateSendBtn() in the chat/start try block after assigning "
-            "streamId so the primary button switches to Stop without waiting for composer input"
+        assert apos > catch_idx, (
+            "send() must assign S.activeStreamId only after /api/chat/start succeeds"
+        )
+        update_idx = send_body.find("updateSendBtn();", apos)
+        assert update_idx >= 0, "send() must call updateSendBtn() after assigning streamId"
+        assert update_idx > apos, (
+            "send() should call updateSendBtn() after S.activeStreamId is assigned"
+        )
+        attach_idx = send_body.find("attachLiveStream(activeSid, streamId, uploadedNames);")
+        assert attach_idx > update_idx, (
+            "send() should refresh primary button before opening SSE stream attach"
+        )
+        optional_idx = send_body.find("_runOptionalPostStartUiStep('post-start ui/bookkeeping'", apos)
+        assert optional_idx >= 0, "send() should run optional post-start UI/bookkeeping"
+        assert optional_idx > update_idx, (
+            "send() must call updateSendBtn() before entering optional post-start helper so optional failures "
+            "cannot skip it."
         )
 
 
@@ -284,7 +298,7 @@ class TestSendBusyBranchDispatch:
 
 
     def test_slash_commands_intercepted_before_busymode_routing(self):
-        """The three busy-control slash commands (/steer /interrupt /queue) must be
+        """Busy-control slash commands (/steer /interrupt /queue /yolo) must be
         intercepted at the TOP of the busy block — before the busyMode routing — so
         they execute immediately while the agent is running.
 
@@ -298,22 +312,26 @@ class TestSendBusyBranchDispatch:
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
         assert busy_start >= 0, "busy block not found"
         # The intercept must appear BEFORE the busyMode assignment
-        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue'", busy_start)
+        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
         assert intercept_idx >= 0, (
-            "send() must intercept /steer /interrupt /queue before the busyMode "
+            "send() must intercept /steer /interrupt /queue /terminal /goal /yolo before the busyMode "
             "routing block — otherwise they queue instead of executing immediately"
         )
         assert intercept_idx < busymode_idx, (
             "The slash-command intercept must come BEFORE the busyMode routing "
             "so /steer executes while the agent is running, not after the turn ends"
         )
+        intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
+        assert "'yolo'" in intercept_block, (
+            "The busy-mode slash-command allowlist must include /yolo"
+        )
 
     def test_steer_intercept_calls_handler_directly(self):
         """The busy-intercept must dispatch via _bc.fn(_pc.args), not queue the text."""
         send_idx = MESSAGES_JS.find("async function send(")
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
-        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue'", busy_start)
+        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         assert intercept_idx >= 0
         # Get the intercept block (up to the next busyMode assignment)
         busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
@@ -335,7 +353,7 @@ class TestSendBusyBranchDispatch:
         """
         send_idx = MESSAGES_JS.find("async function send(")
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
-        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue'", busy_start)
+        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
         intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
         clear_idx = intercept_block.find("$('msg').value=''")

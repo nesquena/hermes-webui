@@ -16,7 +16,11 @@ can't accidentally drop the model.base_url fallback again.
 """
 from __future__ import annotations
 
+import sys
+import types
+
 import api.config as config
+import pytest
 
 
 class _RestoreCfg:
@@ -25,11 +29,49 @@ class _RestoreCfg:
     def __enter__(self):
         import copy
         self._snapshot = copy.deepcopy(config.cfg)
+        self._cfg_mtime = config._cfg_mtime
         return self
 
     def __exit__(self, *exc):
         config.cfg.clear()
         config.cfg.update(self._snapshot)
+        config._cfg_mtime = self._cfg_mtime
+
+
+def _set_cfg(cfg_dict: dict):
+    config.cfg.clear()
+    config.cfg.update(cfg_dict)
+    try:
+        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+    except Exception:
+        config._cfg_mtime = 0.0
+
+
+def _groups_by_provider_id(result: dict) -> dict:
+    return {group["provider_id"]: group for group in result["groups"]}
+
+
+def _stub_hermes_cli(monkeypatch):
+    fake_models = types.ModuleType("hermes_cli.models")
+    fake_models.list_available_providers = lambda: []
+    fake_models.provider_model_ids = lambda _pid: []
+    fake_auth = types.ModuleType("hermes_cli.auth")
+    fake_auth.get_auth_status = lambda _pid: {"key_source": "none"}
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+    monkeypatch.setattr(
+        config,
+        "_get_auth_store_path",
+        lambda: config.Path("/tmp/does-not-exist-auth.json"),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_models_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
+    config.invalidate_models_cache()
+    yield
+    config.invalidate_models_cache()
 
 
 def test_get_provider_base_url_finds_explicit_providers_entry():
@@ -127,6 +169,34 @@ def test_get_provider_base_url_explicit_wins_over_model_fallback():
         assert config._get_provider_base_url("lmstudio") == "http://correct:1234/v1"
 
 
+def test_get_provider_base_url_treats_list_providers_as_unconfigured():
+    """List-shaped providers must behave like a missing providers map."""
+    with _RestoreCfg():
+        for providers_cfg in ([], ["lmstudio"]):
+            _set_cfg({
+                "model": {
+                    "provider": "lmstudio",
+                    "base_url": "http://192.168.1.22:1234/v1",
+                },
+                "providers": providers_cfg,
+            })
+            assert config._get_provider_base_url("lmstudio") == "http://192.168.1.22:1234/v1"
+            assert config._get_provider_base_url("openai") is None
+
+
+def test_get_provider_base_url_treats_malformed_provider_entry_as_unconfigured():
+    """Truth-y non-dict provider entries must not reach ``.get("base_url")``."""
+    with _RestoreCfg():
+        _set_cfg({
+            "model": {
+                "provider": "lmstudio",
+                "base_url": "http://192.168.1.22:1234/v1",
+            },
+            "providers": {"lmstudio": "enabled"},
+        })
+        assert config._get_provider_base_url("lmstudio") == "http://192.168.1.22:1234/v1"
+
+
 
 def test_lmstudio_fallback_works_when_hermes_cli_unavailable(tmp_path, monkeypatch):
     """The lmstudio branch must populate models from the urlopen fallback even
@@ -142,7 +212,6 @@ def test_lmstudio_fallback_works_when_hermes_cli_unavailable(tmp_path, monkeypat
     """
     import json as _json
     import socket as _socket
-    import sys
     import urllib.request as _urlreq
 
     import api.config as config
@@ -218,3 +287,153 @@ providers:
             sys.meta_path.remove(blocker)
         except ValueError:
             pass
+
+
+def test_lmstudio_fallback_handles_malformed_providers_list(tmp_path, monkeypatch):
+    """LM Studio fallback must ignore list-shaped providers instead of crashing."""
+    import json as _json
+    import socket as _socket
+    import urllib.request as _urlreq
+
+    blocked_modules = [name for name in list(sys.modules) if name == "hermes_cli" or name.startswith("hermes_cli.")]
+    for name in blocked_modules:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    class _Blocker:
+        def find_module(self, name, path=None):
+            if name == "hermes_cli" or name.startswith("hermes_cli."):
+                return self
+            return None
+
+        def load_module(self, name):
+            raise ImportError(f"hermes_cli blocked for test: {name}")
+
+    blocker = _Blocker()
+    sys.meta_path.insert(0, blocker)
+    try:
+        cfgfile = tmp_path / "config.yaml"
+        cfgfile.write_text(
+            """
+model:
+  provider: lmstudio
+  default: qwen3.6-35b-a3b@q6_k
+  base_url: http://10.0.0.5:1234/v1
+providers:
+  - lmstudio
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: cfgfile)
+        config.reload_config()
+        config.invalidate_models_cache()
+
+        class _ModelsResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self):
+                return _json.dumps(
+                    {"data": [{"id": "qwen3.6-35b-a3b@q6_k"}, {"id": "another-model"}]}
+                ).encode()
+
+        monkeypatch.setattr(_urlreq, "urlopen", lambda *_a, **_kw: _ModelsResponse())
+        monkeypatch.setattr(
+            _socket,
+            "getaddrinfo",
+            lambda *_a, **_kw: [
+                (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))
+            ],
+        )
+
+        result = config.get_available_models()
+        groups = _groups_by_provider_id(result)
+
+        assert "lmstudio" in groups, (
+            f"lmstudio group missing for malformed providers list; groups={list(groups)}"
+        )
+        model_ids = {model["id"] for model in groups["lmstudio"]["models"]}
+        assert "qwen3.6-35b-a3b@q6_k" in model_ids
+        assert "another-model" in model_ids
+    finally:
+        try:
+            sys.meta_path.remove(blocker)
+        except ValueError:
+            pass
+
+
+def test_provider_catalog_treats_malformed_providers_as_unconfigured(monkeypatch):
+    """Catalog lookup must not crash when providers is a non-dict value."""
+    _stub_hermes_cli(monkeypatch)
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
+
+    with _RestoreCfg():
+        _set_cfg({
+            "model": {
+                "default": "claude-sonnet-4-5",
+                "provider": "anthropic",
+            },
+            "providers": ["anthropic"],
+        })
+        config.invalidate_models_cache()
+
+        result = config.get_available_models()
+
+    groups = _groups_by_provider_id(result)
+    assert "anthropic" in groups, f"Expected anthropic group, got: {list(groups)}"
+    assert groups["anthropic"]["models"], "anthropic group should still fall back to models"
+
+
+def test_provider_catalog_preserves_dict_shaped_raw_key_lookup(monkeypatch):
+    """Dict-shaped providers must still resolve configured models through the raw key."""
+    _stub_hermes_cli(monkeypatch)
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
+
+    with _RestoreCfg():
+        _set_cfg({
+            "model": {
+                "default": "my-model",
+                "provider": "CLIPpoxy",
+            },
+            "providers": {
+                "CLIPpoxy": {
+                    "models": ["my-model", "another-model"],
+                },
+            },
+        })
+        config.invalidate_models_cache()
+
+        result = config.get_available_models()
+
+    groups = _groups_by_provider_id(result)
+    assert "clippoxy" in groups, f"Expected clippoxy group, got: {list(groups)}"
+    model_ids = []
+    for model in groups["clippoxy"]["models"]:
+        mid = model["id"]
+        model_ids.append(mid.split(":", 1)[-1] if mid.startswith("@") and ":" in mid else mid)
+    assert "my-model" in model_ids
+    assert "another-model" in model_ids
+
+
+def test_provider_catalog_treats_malformed_provider_entry_as_unconfigured(monkeypatch):
+    """Provider catalog raw-key lookup must ignore truth-y non-dict entries."""
+    _stub_hermes_cli(monkeypatch)
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
+
+    with _RestoreCfg():
+        _set_cfg({
+            "model": {
+                "default": "claude-sonnet-4-5",
+                "provider": "anthropic",
+            },
+            "providers": {"anthropic": "enabled"},
+        })
+        config.invalidate_models_cache()
+
+        result = config.get_available_models()
+
+    groups = _groups_by_provider_id(result)
+    assert "anthropic" in groups, f"Expected anthropic group, got: {list(groups)}"
+    assert groups["anthropic"]["models"], "anthropic group should still fall back to models"

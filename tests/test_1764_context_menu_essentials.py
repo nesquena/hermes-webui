@@ -137,8 +137,10 @@ class TestSessionRenameMenuItem:
         src = SESSIONS.read_text(encoding="utf-8")
         # Row-attached closure invocation.
         assert "row._startRename" in src
-        # Row lookup by data-sid.
+        # Row lookup by data-sid must include nested fork rows too.
+        assert "function _findSessionRenameRow(" in src
         assert ".session-item[data-sid=" in src
+        assert ".session-child-session[data-sid=" in src
 
     def test_row_exposes_start_rename(self):
         """The session row builder must attach `_startRename` to the row
@@ -272,8 +274,7 @@ class TestFilePathEndpointBehaviour:
         body, status = _post("/api/file/path", {"session_id": sid, "path": "."})
         assert status == 200, body
         assert body.get("ok") is True
-        # Path should be absolute (starts with /).
-        assert body.get("path", "").startswith("/"), body
+        assert Path(body.get("path", "")).is_absolute(), body
 
     def test_does_not_404_on_missing_file(self):
         """Copy-path on a stale-but-recently-deleted file must still

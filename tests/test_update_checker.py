@@ -322,3 +322,34 @@ class TestApplyUpdateDiagnostics:
         assert 'could not reach' in result['message'].lower() or \
                'internet' in result['message'].lower() or \
                'remote' in result['message'].lower()
+
+
+# Issue #4085 regression: a dirty install at-or-past the latest release tag
+# must surface `dirty: True` on the check payload so the Settings panel can
+# offer `apply_force_update` instead of the silent "Up to date" state.
+class TestCheckRepoDirtyFlag:
+    def test_dirty_tree_surfaces_dirty_true(self, tmp_path):
+        """A dirty tree on a network-failed check must still carry dirty=True.
+
+        The Settings panel needs the dirty flag on every payload shape so a
+        user can always recover from a local-modifications state, even when
+        the latest remote cannot be reached.
+        """
+        (tmp_path / '.git').mkdir()
+
+        def fake_git(args, cwd, timeout=10):
+            if args == ['diff-index', '--quiet', 'HEAD', '--']:
+                return '', False  # dirty
+            if args == ['fetch', 'origin', '--tags', '--force']:
+                return 'network unavailable', False  # fail fast
+            if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+                return '', True
+            raise AssertionError(f'unexpected git args: {args!r}')
+
+        from api import updates
+        with patch(f'{_MODULE}._run_git', side_effect=fake_git):
+            info = updates._check_repo(tmp_path, 'webui')
+
+        assert info is not None
+        assert info['dirty'] is True
+        assert info['stale_check'] is True

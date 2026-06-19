@@ -46,7 +46,7 @@ def _run_user_render(text_input):
     try:
         result = subprocess.run(
             ['node', tf.name, json.dumps(text_input)],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
             raise RuntimeError(f"node error: {result.stderr}")

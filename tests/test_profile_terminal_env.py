@@ -52,8 +52,44 @@ def test_streaming_applies_profile_runtime_env_to_agent_run():
 
     assert "get_profile_runtime_env" in src
     assert "_profile_runtime_env" in src
+    assert "_safe_profile_runtime_env" in src
     assert "old_profile_env" in src
-    assert "os.environ.update(_profile_runtime_env)" in src
+    assert "filter_runtime_env_for_gateway_parity" in src
+    assert "os.environ.update(_safe_profile_runtime_env)" in src
+    assert "os.environ.update(_profile_runtime_env)" not in src
+
+
+def test_filter_runtime_env_for_gateway_parity_blocks_shell_identity_vars():
+    from api.profiles import filter_runtime_env_for_gateway_parity
+
+    env = {
+        "HOME": "/tmp/fake-home",
+        "PATH": "/tmp/fake-bin:/usr/bin",
+        "PWD": "/tmp/fake-pwd",
+        "SHELL": "/bin/zsh",
+        "OPENAI_API_KEY": "test-key",
+        "TERMINAL_ENV": "ssh",
+        "TERMINAL_CWD": "/workspace",
+    }
+
+    filtered = filter_runtime_env_for_gateway_parity(env)
+
+    assert "HOME" not in filtered
+    assert "PATH" not in filtered
+    assert "PWD" not in filtered
+    assert "SHELL" not in filtered
+    assert filtered["OPENAI_API_KEY"] == "test-key"
+    assert filtered["TERMINAL_ENV"] == "ssh"
+    assert filtered["TERMINAL_CWD"] == "/workspace"
+
+
+def test_profile_background_worker_uses_gateway_parity_runtime_env_filter():
+    src = Path("api/profiles.py").read_text(encoding="utf-8")
+
+    assert "filter_runtime_env_for_gateway_parity" in src
+    assert "safe_runtime_env" in src
+    assert "os.environ.update(safe_runtime_env)" in src
+    assert "os.environ.update(runtime_env)" not in src
 
 
 def test_streaming_thread_env_allows_profile_terminal_cwd_override():

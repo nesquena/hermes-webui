@@ -350,17 +350,28 @@ def _truncate(text: str, limit: int) -> str:
     return s[:limit] + "\n…(truncated)"
 
 
-def format_wakeup_prompt(evt: dict) -> str:
+def format_wakeup_prompt(evt: object) -> str | None:
     """Build the synthetic [IMPORTANT: …] message the agent will see.
 
     Mirrors ``cli._format_process_notification`` so wakeup payloads look the
     same in CLI and WebUI sessions.
     """
+    if not isinstance(evt, dict) or not evt:
+        return None
+
     evt_type = evt.get("type", "completion")
-    sid = evt.get("session_id", "unknown")
-    cmd = evt.get("command", "unknown")
+    sid = str(evt.get("session_id") or "").strip()
+    cmd = str(evt.get("command") or "").strip()
+    # The current server-side wakeup drain drops global watch-overflow events
+    # before this formatter because they intentionally carry no session_key.
+    # Keep this branch defensive so any future routable overflow summary is not
+    # mis-rendered as a fake process completion.
+    if evt_type in {"watch_overflow_tripped", "watch_overflow_released"}:
+        msg = str(evt.get("message") or "").strip()
+        return f"[IMPORTANT: {msg}]" if msg else None
     if evt_type == "watch_disabled":
-        return f"[IMPORTANT: {evt.get('message', '')}]"
+        msg = str(evt.get("message") or "").strip()
+        return f"[IMPORTANT: {msg}]" if msg else None
     if evt_type == "watch_match":
         pat = evt.get("pattern", "?")
         out = _truncate(evt.get("output", ""), 4000)
@@ -373,6 +384,12 @@ def format_wakeup_prompt(evt: dict) -> str:
         if sup:
             body += f"\n({sup} earlier matches were suppressed by rate limit)"
         return body + "]"
+    if evt_type != "completion":
+        return None
+
+    if not (sid or cmd or "exit_code" in evt or evt.get("output")):
+        return None
+
     # Default: completion event
     exit_code = evt.get("exit_code", "?")
     out = _truncate(evt.get("output", ""), 4000)
@@ -880,7 +897,8 @@ def _process_one(evt: dict) -> None:
         # `{session_id, task_id, completed_at, summary?, event_id}`, so
         # we derive the prompt directly from the evt here (same source the
         # prior _build_payload used).
-        wakeup_prompt = format_wakeup_prompt(evt).strip()
+        wakeup_prompt_raw = format_wakeup_prompt(evt)
+        wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
         if wakeup_prompt:
             if _session_has_active_turn(session_id):
                 # Defer-path fix: persist the prompt so a turn-teardown
