@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two- and three-container Docker examples now point the WebUI at the gateway service by default (#4483).** The compose files set `HERMES_API_URL=http://hermes-agent:8642`, and the Docker docs clarify that cron listing is local while scheduled ticking and gateway status need a reachable gateway URL. The docs also warn that enabling the agent API server requires `API_SERVER_KEY`, not just `API_SERVER_ENABLED`.
+
 ## [v0.51.513] — 2026-06-19 — Release RX (credential-pool quota status for all pooled providers)
 
 ### Added
