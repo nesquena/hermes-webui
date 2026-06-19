@@ -33,6 +33,14 @@ _PROFILE_DIRS = [
 ]
 _CLONE_CONFIG_FILES = ['config.yaml', '.env', 'SOUL.md']
 
+# ── Snapshot initial HERMES_HOME before init_profile_state() mutates it ──────
+# _is_isolated_profile_mode() needs to detect whether HERMES_HOME *at startup*
+# points to a profile subdirectory (e.g., ~/.hermes/profiles/user1), not the
+# base home (~/.hermes). But init_profile_state() overwrites HERMES_HOME to the
+# base home, which would disable isolation detection. Snapshot it here at import
+# time (before init_profile_state runs) and use the snapshot in the detector.
+_INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
+
 # ── Module state ────────────────────────────────────────────────────────────
 _active_profile = 'default'
 _profile_lock = threading.Lock()
@@ -126,12 +134,16 @@ def _is_isolated_profile_mode() -> bool:
 
     HERMES_BASE_HOME env var, if set, overrides and forces non-isolated mode
     (allows deployments to explicitly opt out of isolation detection).
+
+    Uses _INITIAL_HERMES_HOME (snapshotted at import time) to detect isolation,
+    not the current os.environ value. init_profile_state() overwrites HERMES_HOME
+    at startup, which would disable isolation detection if we read it here.
     """
     # Explicit HERMES_BASE_HOME opt-out takes precedence
     if os.getenv('HERMES_BASE_HOME', '').strip():
         return False
 
-    hermes_home = os.getenv('HERMES_HOME', '').strip()
+    hermes_home = _INITIAL_HERMES_HOME
     if not hermes_home:
         return False
 
