@@ -9,6 +9,7 @@ Verifies that:
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -82,7 +83,14 @@ def test_wiki_browse_skips_pages_that_disappear_during_listing(monkeypatch, tmp_
     missing = wiki_root / "gone.md"
 
     monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
-    monkeypatch.setattr(routes, "_llm_wiki_page_files", lambda root: [missing, ok])
+    monkeypatch.setattr(
+        routes,
+        "_llm_wiki_allowlisted_entries",
+        lambda root: {
+            "gone.md": (missing, (0, 0)),
+            "ok.md": (ok, (ok.stat().st_dev, ok.stat().st_ino)),
+        },
+    )
 
     handler = _FakeHandler()
     routes.handle_get(handler, urlparse("http://example.com/api/wiki/browse"))
@@ -105,31 +113,10 @@ def test_wiki_page_vanished_between_check_and_read_returns_404_not_500(monkeypat
 
     wiki_root = tmp_path / "wiki"
     wiki_root.mkdir()
+    missing = (wiki_root / "gone.md").resolve()
 
     monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
-
-    # Path resolves inside the root and passes the containment guard, but the
-    # read itself raises FileNotFoundError (simulating a vanished/racing file).
-    class _GonePath(type(wiki_root)):
-        def is_file(self):  # noqa: D401 - test stub
-            return True
-
-        def read_text(self, *a, **k):
-            raise FileNotFoundError("vanished between list and read")
-
-    real_path_join = routes.os.path.join
-
-    monkeypatch.setattr(routes, "_skill_path_within", lambda root, p: True)
-
-    orig_Path = routes.Path
-
-    def _fake_Path(arg):
-        # Only wrap the wiki page target; leave the root resolution alone.
-        if isinstance(arg, str) and arg == real_path_join(str(wiki_root), "gone.md"):
-            return _GonePath(arg)
-        return orig_Path(arg)
-
-    monkeypatch.setattr(routes, "Path", _fake_Path)
+    monkeypatch.setattr(routes, "_llm_wiki_allowlisted_entries", lambda root: {"gone.md": (missing, (0, 0))})
 
     handler = _FakeHandler()
     routes.handle_get(handler, urlparse("http://example.com/api/wiki/page?path=gone.md"))
@@ -232,6 +219,281 @@ def test_wiki_symlink_to_hidden_same_section_target_blocked(monkeypatch, tmp_pat
     assert b"hidden_marker_q" not in h_page.body, "hidden secret leaked via symlink"
 
 
+def test_wiki_page_cached_nested_entry_rechecks_resolved_containment(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    section = wiki_root / "concepts"
+    nested = section / "sub"
+    nested.mkdir(parents=True)
+    page = nested / "real.md"
+    page.write_text("# real\n", encoding="utf-8")
+    secret = wiki_root / ".env"
+    secret.write_text("DONOTLEAK=stale_cache_marker\n", encoding="utf-8")
+
+    try:
+        page.unlink()
+        page.symlink_to(_os.path.join("..", "..", ".env"))
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not supported on this platform")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    # Prime the cached name list while the nested page is still valid, then
+    # swap only the nested entry so the top-level section signature stays stale.
+    page.unlink()
+    page.write_text("# real\n", encoding="utf-8")
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+    sig_before = routes._llm_wiki_page_files_cache_signature(wiki_root.resolve())
+
+    page.unlink()
+    page.symlink_to(_os.path.join("..", "..", ".env"))
+    sig_after = routes._llm_wiki_page_files_cache_signature(wiki_root.resolve())
+    assert sig_after == sig_before
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/page?path=concepts/sub/real.md"))
+
+    assert handler.status == 404, f"stale cached nested symlink swap must 404, got {handler.status}"
+    assert b"stale_cache_marker" not in handler.body, "stale cached nested symlink leaked hidden content"
+
+
+def test_wiki_page_cached_entry_rejects_hardlink_swap_to_outside(monkeypatch, tmp_path):
+    """A hardlink swap to an outside file within the TTL must not leak (#4375).
+
+    O_NOFOLLOW + inode-identity cannot distinguish a hardlink at a clean page
+    name from the real page, so multi-link (st_nlink > 1) page files are
+    rejected by both the allowlist walk and the read-path revalidation. Prime
+    the cache with a real page, replace it with a hardlink to an outside secret
+    within the TTL, and assert the read 404s without leaking the secret.
+    """
+    import os as _os
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    section = wiki_root / "concepts"
+    section.mkdir(parents=True)
+    page = section / "page.md"
+    page.write_text("# real\n", encoding="utf-8")
+    outside = tmp_path / "outside_secret"
+    outside.write_text("DONOTLEAK=hardlink_cache_marker\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    # Prime the cached name list while the page is a genuine single-link file.
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+
+    # Swap the listed page name to a hardlink pointing at the outside secret,
+    # within the TTL window (cache still warm for the page NAME).
+    page.unlink()
+    try:
+        _os.link(outside, page)
+    except (OSError, NotImplementedError, AttributeError):
+        import pytest
+        pytest.skip("hardlinks not supported on this platform")
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/page?path=concepts/page.md"))
+
+    assert handler.status == 404, f"cached page hardlinked to outside file must 404, got {handler.status}"
+    assert b"hardlink_cache_marker" not in handler.body, "hardlink swap leaked outside content"
+
+
+def test_wiki_browse_cached_entry_rechecks_resolved_containment(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    section = wiki_root / "concepts"
+    nested = section / "sub"
+    nested.mkdir(parents=True)
+    page = nested / "real.md"
+    page.write_text("# real\n", encoding="utf-8")
+    env_file = wiki_root / ".env"
+    env_file.write_text("DONOTLEAK=browse_cache_marker\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+
+    page.unlink()
+    try:
+        page.symlink_to(_os.path.join("..", "..", ".env"))
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not supported on this platform")
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/browse"))
+
+    assert handler.status == 200
+    assert handler.get_json()["pages"] == []
+
+
+def test_wiki_browse_drops_cached_entry_replaced_by_directory(monkeypatch, tmp_path):
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    section = wiki_root / "concepts"
+    nested = section / "sub"
+    nested.mkdir(parents=True)
+    page = nested / "real.md"
+    page.write_text("# real\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+
+    page.unlink()
+    page.mkdir()
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/browse"))
+
+    assert handler.status == 200
+    assert handler.get_json()["pages"] == []
+
+
+def test_wiki_browse_rechecks_identity_after_allowlist_snapshot(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    page = wiki_root / "concepts" / "real.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# real\n", encoding="utf-8")
+    (wiki_root / ".env").write_text("DONOTLEAK=post_snapshot_marker\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    original = routes._llm_wiki_allowlisted_entries
+
+    def swapped(root):
+        entries = original(root)
+        page.unlink()
+        page.symlink_to(_os.path.join("..", ".env"))
+        return entries
+
+    monkeypatch.setattr(routes, "_llm_wiki_allowlisted_entries", swapped)
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/browse"))
+
+    assert handler.status == 200
+    assert handler.get_json()["pages"] == []
+
+
+def test_wiki_page_cached_entry_cannot_jump_sections(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    page = wiki_root / "concepts" / "sub" / "real.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# real\n", encoding="utf-8")
+    external_doc = wiki_root / "drafts" / "page.md"
+    external_doc.parent.mkdir(parents=True)
+    external_doc.write_text("cross_section_marker", encoding="utf-8")
+
+    try:
+        page.unlink()
+        page.symlink_to(_os.path.join("..", "..", "drafts", "page.md"))
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not supported on this platform")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    page.unlink()
+    page.write_text("# real\n", encoding="utf-8")
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+
+    page.unlink()
+    page.symlink_to(_os.path.join("..", "..", "drafts", "page.md"))
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/page?path=concepts/sub/real.md"))
+
+    assert handler.status == 404, f"stale cached cross-section swap must 404, got {handler.status}"
+    assert b"cross_section_marker" not in handler.body, "stale cached page leaked another section's content"
+
+
+def test_wiki_page_cached_entry_cannot_jump_to_other_allowlisted_page(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    page = wiki_root / "concepts" / "sub" / "real.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# real\n", encoding="utf-8")
+    sibling = wiki_root / "entities" / "page.md"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_text("allowlisted_elsewhere_marker", encoding="utf-8")
+
+    try:
+        page.unlink()
+        page.symlink_to(_os.path.join("..", "..", "entities", "page.md"))
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not supported on this platform")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    page.unlink()
+    page.write_text("# real\n", encoding="utf-8")
+    assert set(routes._llm_wiki_page_files(wiki_root)) == {page, sibling}
+
+    page.unlink()
+    page.symlink_to(_os.path.join("..", "..", "entities", "page.md"))
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/page?path=concepts/sub/real.md"))
+
+    assert handler.status == 404, f"stale cached swap to another allowlisted page must 404, got {handler.status}"
+    assert b"allowlisted_elsewhere_marker" not in handler.body, "listed page leaked another allowlisted page's content"
+
+
+def test_wiki_page_read_with_symlinked_root(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    real_root = tmp_path / "real-wiki"
+    (real_root / "concepts").mkdir(parents=True)
+    page = real_root / "concepts" / "real.md"
+    page.write_text("# real\n", encoding="utf-8")
+    link_root = tmp_path / "link-wiki"
+
+    try:
+        _os.symlink(real_root, link_root, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("directory symlinks not supported on this platform")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (link_root, None, None))
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/page?path=concepts/real.md"))
+
+    assert handler.status == 200, f"listed page should stay readable through symlinked wiki root, got {handler.status}"
+    assert handler.get_json()["content"] == "# real\n"
+
+
 def test_wiki_symlinked_section_cannot_expose_outside_tree(monkeypatch, tmp_path):
     """A symlinked SECTION dir (concepts -> /tmp/outside) must not expose files
     outside the real wiki root."""
@@ -273,6 +535,21 @@ def test_wiki_legit_filename_with_dotdot_substring_opens(monkeypatch, tmp_path):
     assert "diff notes" in h.get_json()["content"]
 
 
+def test_wiki_page_alias_spellings_are_rejected(monkeypatch, tmp_path):
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    (wiki_root / "concepts").mkdir(parents=True)
+    (wiki_root / "concepts" / "real.md").write_text("# real\n", encoding="utf-8")
+
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    for alias in ("concepts/./real.md", "concepts//real.md", "concepts/real.md/", "concepts%5Creal.md"):
+        handler = _FakeHandler()
+        routes.handle_get(handler, urlparse(f"http://example.com/api/wiki/page?path={alias}"))
+        assert handler.status == 400, f"alias spelling {alias!r} must be rejected, got {handler.status}"
+
+
 def test_i18n_wiki_keys_in_all_locales():
     src = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
     required_keys = [
@@ -297,3 +574,92 @@ def test_i18n_wiki_keys_in_all_locales():
                 f"i18n key '{key}' missing from locale block {i + 1} "
                 f"(position ~{lang_positions[i]})"
             )
+
+
+def test_wiki_page_files_documents_hardlink_trust_boundary():
+    from api import routes
+
+    doc = routes._llm_wiki_page_files.__doc__ or ""
+    assert "hardlink" in doc.lower()
+    assert "trusted" in doc.lower() or "operator-controlled" in doc.lower()
+
+
+def test_wiki_page_files_reuses_cache_with_unchanged_section_mtime(monkeypatch, tmp_path):
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    (wiki_root / "concepts").mkdir(parents=True)
+    page = wiki_root / "concepts" / "one.md"
+    page.write_text("# one\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+
+    calls = []
+
+    def fake_uncached(root):
+        calls.append(root)
+        return [page]
+
+    monkeypatch.setattr(routes, "_llm_wiki_page_files_uncached", fake_uncached)
+
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+    assert len(calls) == 1
+
+
+def test_wiki_page_files_cache_invalidates_when_section_mtime_changes(monkeypatch, tmp_path):
+    import time as _time
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    section = wiki_root / "concepts"
+    section.mkdir(parents=True)
+    first = section / "one.md"
+    second = section / "two.md"
+    first.write_text("# one\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+
+    calls = []
+
+    def fake_uncached(root):
+        calls.append(root)
+        return [first] if len(calls) == 1 else [first, second]
+
+    monkeypatch.setattr(routes, "_llm_wiki_page_files_uncached", fake_uncached)
+
+    assert routes._llm_wiki_page_files(wiki_root) == [first]
+    second.write_text("# two\n", encoding="utf-8")
+    _time.sleep(0.02)  # Ensure mtime granularity is sufficient on Windows
+    os.utime(str(section), None)
+    assert routes._llm_wiki_page_files(wiki_root) == [first, second]
+    assert len(calls) == 2
+
+
+def test_wiki_page_files_cache_expires_after_ttl(monkeypatch, tmp_path):
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    (wiki_root / "concepts").mkdir(parents=True)
+    page = wiki_root / "concepts" / "one.md"
+    page.write_text("# one\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 1.0)
+
+    calls = []
+    ticks = iter([100.0, 100.5, 101.5])
+    monkeypatch.setattr(routes.time, "monotonic", lambda: next(ticks))
+
+    def fake_uncached(root):
+        calls.append(root)
+        return [page]
+
+    monkeypatch.setattr(routes, "_llm_wiki_page_files_uncached", fake_uncached)
+
+    routes._llm_wiki_page_files(wiki_root)   # miss → rebuild (t=100.0)
+    routes._llm_wiki_page_files(wiki_root)   # hit (t=100.5 < 101.0)
+    routes._llm_wiki_page_files(wiki_root)   # miss → rebuild (t=101.5 > 101.0)
+    assert len(calls) == 2

@@ -3,6 +3,16 @@
 
 ## [Unreleased]
 
+## [v0.51.523] — 2026-06-19 — Release SH (cache trusted wiki page listings on browser reads)
+
+### Changed
+
+- **The LLM Wiki browse/read endpoints no longer re-walk the entire wiki tree on every request (#4375).** `/api/wiki/page` and `/api/wiki/browse` rebuilt the trusted page allowlist by walking up to 10k files (with a `stat` each) on every call (#3576 hardening). The walk result is now memoized in a short-TTL (5s) in-process cache keyed on the resolved wiki root with a section-dir change signature. The cache only memoizes which page names are candidates — the per-request read path still re-resolves each entry, re-asserts containment under the real wiki root (with dotfile exclusion), and gates the actual read behind the existing `O_NOFOLLOW` open + inode-identity check, so a cached entry can never bypass a containment check the fresh walk would apply.
+
+### Security
+
+- **Hardlinked wiki page files are now rejected from the allowlist and read revalidation (#4375).** `O_NOFOLLOW` plus inode-identity cannot distinguish a hardlink at a clean `*.md` page name from the real page, so a multi-link file at a listed name could carry an arbitrary inode (including one outside the wiki) through the read check. Any page file with `st_nlink > 1` is now excluded during both the allowlist walk and the read-path revalidation. Thanks @rodboev.
+
 ## [v0.51.522] — 2026-06-19 — Release SG (live model lookups never forward another provider's key)
 
 ### Security
