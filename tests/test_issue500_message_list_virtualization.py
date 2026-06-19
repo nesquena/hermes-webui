@@ -872,6 +872,7 @@ const container = {
   set scrollTop(v){ scrollTopWasMutated = true; scrollTopValue = v; },
   getBoundingClientRect(){ return {top: 0}; },
   querySelector(){ return null; },
+  classList: { add(){}, remove(){} },
 };
 function $(id){ return id === 'messages' ? container : null; }
 function _captureMessageViewportAnchor(){ return null; }
@@ -902,6 +903,7 @@ const container = {
   get scrollTop(){ return scrollTopValue; },
   set scrollTop(v){ scrollHistory.push(v); scrollTopValue = v; },
   getBoundingClientRect(){ return {top: 50, bottom: 650}; },
+  classList: { add(){}, remove(){} },
   querySelector(selector){
     if(selector === '[data-msg-idx="42"]'){
       // After render, the row moved from relative offset 100 to 150 (50px shift)
@@ -948,6 +950,7 @@ const container = {
   get scrollTop(){ return scrollTopValue; },
   set scrollTop(v){ scrollHistory.push(v); scrollTopValue = v; },
   getBoundingClientRect(){ return {top: 50, bottom: 650}; },
+  classList: { add(){}, remove(){} },
   querySelector(selector){
     if(selector === '[data-msg-idx="42"]'){
       // Row moved by only 1px, within tolerance
@@ -996,6 +999,7 @@ const container = {
     scrollTopValue = v;
   },
   getBoundingClientRect(){ return {top: 50, bottom: 650}; },
+  classList: { add(){}, remove(){} },
   querySelector(selector){
     if(selector === '[data-msg-idx="42"]'){
       return {

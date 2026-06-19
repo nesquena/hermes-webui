@@ -20,6 +20,10 @@ def test_css_vscroll_measuring_guard():
         r'\.vscroll-measuring\s+\.msg-actions.*transition\s*:\s*none\s*!important',
         CSS, re.DOTALL
     ), "missing transition:none !important for .vscroll-measuring .msg-actions"
+    assert re.search(
+        r'\.vscroll-measuring\s+\.msg-time.*transition\s*:\s*none\s*!important',
+        CSS, re.DOTALL
+    ), "missing transition:none !important for .vscroll-measuring .msg-time"
 
 
 def test_js_compensate_adds_vscroll_measuring():
@@ -36,15 +40,18 @@ def test_js_compensate_adds_vscroll_measuring():
 
 
 def test_js_try_finally_guards_class_removal():
-    """The classList.remove is in a finally block so the class is always cleared."""
+    """The classList.remove is inside the finally{} block, not after it."""
     fn_match = re.search(
         r'function _compensateScrollForMeasurementDelta\(renderFn\)\{(.+?)^(?=function )',
         JS, re.DOTALL | re.MULTILINE
     )
     assert fn_match
     body = fn_match.group(1)
-    add_pos = body.find("classList.add('vscroll-measuring')")
-    try_pos = body.find('try{', add_pos) if add_pos != -1 else -1
-    finally_pos = body.find('finally{', try_pos) if try_pos != -1 else -1
-    remove_pos = body.find("classList.remove('vscroll-measuring')", finally_pos) if finally_pos != -1 else -1
-    assert remove_pos != -1, "classList.remove must be inside a finally block after classList.add"
+    finally_match = re.search(
+        r'finally\{([^}]*)\}',
+        body
+    )
+    assert finally_match, "no finally block found in _compensateScrollForMeasurementDelta"
+    finally_body = finally_match.group(1)
+    assert "classList.remove('vscroll-measuring')" in finally_body, \
+        "classList.remove must be inside the finally{} block, not after it"

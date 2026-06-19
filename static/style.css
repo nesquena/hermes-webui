@@ -2640,7 +2640,8 @@
 .msg-actions{display:flex;align-items:center;gap:2px;opacity:0;transition:opacity .15s;margin-left:auto;}
 .msg-row:hover .msg-actions{opacity:1;}
 .vscroll-measuring .msg-foot,
-.vscroll-measuring .msg-actions{transition:none !important;}
+.vscroll-measuring .msg-actions,
+.vscroll-measuring .msg-time{transition:none !important;}
 .msg-action-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 5px;border-radius:5px;transition:color .12s,background .12s;line-height:1;}
 .msg-action-btn:hover{color:var(--accent-text);background:var(--accent-bg);}
 .selected-text-reply-btn{position:fixed;z-index:1200;display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border:2px solid var(--accent);border-radius:999px;background:var(--bg);color:var(--text);box-shadow:0 8px 24px rgba(0,0,0,.26),0 0 0 1px var(--surface);font-size:12px;font-weight:700;line-height:1;cursor:pointer;opacity:0;pointer-events:none;transform:translateY(4px);transition:opacity .12s ease,transform .12s ease,background .12s ease,border-color .12s ease;user-select:none;}
