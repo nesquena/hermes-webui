@@ -319,6 +319,9 @@ def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp
 
     # The bounded guard should treat it as stale and NOT report it as blocking.
     assert routes._active_run_stream_for_session(session.session_id) is None
+    # It must also reconcile the zombie registry entry immediately so health /
+    # recovery polling does not keep advertising a half-alive run forever.
+    assert stale_stream_id not in config.ACTIVE_RUNS
 
     class NoopThread:
         def __init__(self, *args, **kwargs):
