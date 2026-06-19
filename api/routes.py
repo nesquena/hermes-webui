@@ -16,6 +16,7 @@ import platform
 import shlex
 import shutil
 import sqlite3
+import stat as _stat
 import subprocess
 import sys
 import threading
@@ -5994,6 +5995,33 @@ def _llm_wiki_allowlisted_entries(wiki_path: Path) -> dict[str, tuple[Path, tupl
     return entries
 
 
+def _llm_wiki_verified_status_file_stat(wiki_path: Path, path: Path) -> os.stat_result | None:
+    """Return identity-checked metadata for a top-level wiki status file."""
+    try:
+        wiki_root = wiki_path.resolve()
+    except OSError:
+        wiki_root = wiki_path
+    try:
+        path.resolve().relative_to(wiki_root)
+        st_entry = path.lstat()
+    except (OSError, ValueError):
+        return None
+    if not _stat.S_ISREG(st_entry.st_mode):
+        return None
+    fd = None
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        st_open = os.fstat(fd)
+        if (st_open.st_dev, st_open.st_ino) != (st_entry.st_dev, st_entry.st_ino):
+            return None
+        return st_open
+    except OSError:
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _llm_wiki_last_writer(
     wiki_path: Path,
     page_files: list[Path] | list[tuple[Path, tuple[int, int]]],
@@ -6150,12 +6178,10 @@ def _build_llm_wiki_status() -> dict:
         page_files = [target for target, _, _ in verified_page_entries]
         status_files: list[tuple[Path, float]] = []
         for path in (wiki_path / "SCHEMA.md", wiki_path / "index.md", wiki_path / "log.md"):
-            if not path.exists() or not path.is_file() or path.is_symlink():
+            st_status = _llm_wiki_verified_status_file_stat(wiki_path, path)
+            if st_status is None:
                 continue
-            try:
-                status_files.append((path, path.stat().st_mtime))
-            except Exception:
-                continue
+            status_files.append((path, st_status.st_mtime))
         status_files.extend((target, st.st_mtime) for target, _, st in verified_page_entries)
         latest = None
         for _, mtime in status_files:

@@ -217,6 +217,42 @@ def test_llm_wiki_status_log_heading_rechecks_identity(monkeypatch, tmp_path):
     assert status["last_writer"] == "ai-agent"
 
 
+def test_llm_wiki_status_last_updated_rechecks_status_file_identity(monkeypatch, tmp_path):
+    import os as _os
+    import api.routes as routes
+
+    wiki = tmp_path / "wiki"
+    log_path = _write(wiki / "log.md", "## [2026-06-19] update | safe\n")
+    hidden = _write(wiki / ".env", "PRIVATE=1\n")
+
+    try:
+        log_path.unlink()
+        log_path.symlink_to(hidden.name)
+        log_path.unlink()
+        log_path.write_text("## [2026-06-19] update | safe\n", encoding="utf-8")
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not supported on this platform")
+
+    monkeypatch.setenv("WIKI_PATH", str(wiki))
+
+    original_stat = Path.stat
+    swapped = {"done": False}
+
+    def fake_stat(self, *args, **kwargs):
+        if not swapped["done"] and self == log_path:
+            swapped["done"] = True
+            log_path.unlink()
+            log_path.symlink_to(hidden.name)
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+
+    status = routes._build_llm_wiki_status()
+
+    assert status["last_updated"] is None
+
+
 def test_last_writer_rejects_symlink_outside_wiki(tmp_path):
     """#3455 review (Codex): a symlinked .md page resolving OUTSIDE the wiki must
     not be read — its frontmatter must never leak into the status card."""
