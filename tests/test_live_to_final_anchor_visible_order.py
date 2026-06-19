@@ -163,6 +163,16 @@ def test_live_processed_anchor_rekeys_when_stream_id_is_known():
     assert compact_idx < legacy_idx < timer_idx
 
 
+def test_live_processed_anchor_timer_falls_back_after_real_started_at():
+    timer = _function_body(UI_JS, "_startActivityElapsedTimer")
+
+    set_idx = timer.index("_setActivityElapsedStartedAt(group);")
+    fallback_idx = timer.index("if(!group.getAttribute('data-turn-started-at'))")
+    update_idx = timer.index("_updateActiveActivityElapsedTimer();")
+    assert set_idx < fallback_idx < update_idx
+    assert "String(_activityNowSeconds())" in timer
+
+
 def test_server_started_turn_also_creates_processed_anchor_before_stop_button_refresh():
     listener = _event_listener_body(MESSAGES_JS, "server_turn_started")
 

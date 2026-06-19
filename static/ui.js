@@ -3875,6 +3875,8 @@ function _updateActiveActivityElapsedTimer(){
 function _startActivityElapsedTimer(group){
   if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
   _setActivityElapsedStartedAt(group);
+  // Last-resort fallback for recovered live renders that arrive before session metadata.
+  if(!group.getAttribute('data-turn-started-at')) group.setAttribute('data-turn-started-at',String(_activityNowSeconds()));
   if(_activityElapsedTimerGroup&&_activityElapsedTimerGroup!==group)_clearActivityElapsedTimer();
   _activityElapsedTimerGroup=group;
   _updateActiveActivityElapsedTimer();
