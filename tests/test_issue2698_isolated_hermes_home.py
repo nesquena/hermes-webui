@@ -6,7 +6,6 @@ the WebUI should pin to that single profile: list only it, reject create/switch/
 of other profiles, and hide multi-profile UI affordances.
 """
 
-import json
 import os
 import tempfile
 from pathlib import Path
@@ -19,7 +18,6 @@ from api.profiles import (
     list_profiles_api,
     create_profile_api,
     delete_profile_api,
-    _DEFAULT_HERMES_HOME,
 )
 
 
@@ -65,7 +63,6 @@ class TestIsolatedProfileModeDetection:
     def test_isolated_mode_when_hermes_home_is_profile_subdir(self, temp_single_profile):
         """Isolated mode when HERMES_HOME points to ~/.hermes/profiles/user1."""
         # Ensure we're in the fixture context where temp_single_profile exists
-        base_home = temp_single_profile.parent.parent
         assert temp_single_profile.exists(), f"Test fixture path doesn't exist: {temp_single_profile}"
         assert temp_single_profile.parent.name == "profiles", f"Parent not named 'profiles': {temp_single_profile.parent}"
 
@@ -207,8 +204,6 @@ class TestNormalModePreservation:
 
     def test_normal_mode_profile_operations_work(self, temp_hermes_home):
         """Normal mode allows profile creation and deletion."""
-        profiles_root = temp_hermes_home / "profiles"
-
         with mock.patch.dict(os.environ, {"HERMES_HOME": str(temp_hermes_home)}):
             with mock.patch("api.profiles._DEFAULT_HERMES_HOME", temp_hermes_home):
                 with mock.patch("api.profiles._is_isolated_profile_mode", return_value=False):
