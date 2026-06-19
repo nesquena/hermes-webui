@@ -5992,7 +5992,10 @@ def _llm_wiki_allowlisted_entries(wiki_path: Path) -> dict[str, tuple[Path, tupl
     return entries
 
 
-def _llm_wiki_last_writer(wiki_path: Path, page_files: list[Path]) -> str:
+def _llm_wiki_last_writer(
+    wiki_path: Path,
+    page_files: list[Path] | list[tuple[Path, tuple[int, int]]],
+) -> str:
     """Best-effort last-writer detection for the LLM Wiki status card.
 
     Closes the gap left by the original panel (commit 2684d6fa, Issue #1257):
@@ -6027,8 +6030,10 @@ def _llm_wiki_last_writer(wiki_path: Path, page_files: list[Path]) -> str:
 
     # Priority 1: most recent page frontmatter (resolved-path must stay in-wiki)
     latest_page: Path | None = None
+    latest_identity: tuple[int, int] | None = None
     latest_mtime = -1.0
-    for candidate in page_files:
+    for item in page_files:
+        candidate, identity = item if isinstance(item, tuple) else (item, None)
         if not _within_wiki(candidate):
             continue  # skip symlinks resolving outside the wiki
         try:
@@ -6038,23 +6043,34 @@ def _llm_wiki_last_writer(wiki_path: Path, page_files: list[Path]) -> str:
         if mtime > latest_mtime:
             latest_mtime = mtime
             latest_page = candidate
+            latest_identity = identity
     if latest_page is not None:
         try:
-            with open(latest_page, encoding="utf-8", errors="replace") as fh:
-                first = fh.readline()
-                if first.strip() == "---":
-                    # Read only the frontmatter block, bounded to a small line cap.
-                    for _ in range(200):
-                        line = fh.readline()
-                        if line == "" or line.strip() == "---":
-                            break  # EOF or end of frontmatter — never touch the body
-                        stripped = line.strip()
-                        lower = stripped.lower()
-                        for key in ("updated_by", "writer", "author"):
-                            if lower.startswith(f"{key}:"):
-                                value = stripped.split(":", 1)[1].strip()
-                                if value:
-                                    return value
+            fd = os.open(str(latest_page), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                if latest_identity is not None:
+                    st_open = os.fstat(fd)
+                    if (st_open.st_dev, st_open.st_ino) != latest_identity:
+                        raise FileNotFoundError("wiki page changed after allowlist snapshot")
+                with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+                    fd = None
+                    first = fh.readline()
+                    if first.strip() == "---":
+                        # Read only the frontmatter block, bounded to a small line cap.
+                        for _ in range(200):
+                            line = fh.readline()
+                            if line == "" or line.strip() == "---":
+                                break  # EOF or end of frontmatter — never touch the body
+                            stripped = line.strip()
+                            lower = stripped.lower()
+                            for key in ("updated_by", "writer", "author"):
+                                if lower.startswith(f"{key}:"):
+                                    value = stripped.split(":", 1)[1].strip()
+                                    if value:
+                                        return value
+            finally:
+                if fd is not None:
+                    os.close(fd)
         except Exception:
             pass
 
@@ -6106,7 +6122,8 @@ def _build_llm_wiki_status() -> dict:
             return base
 
         allowlisted_entries = _llm_wiki_allowlisted_entries(wiki_path)
-        page_files = [target for target, _ in allowlisted_entries.values()]
+        page_entries = list(allowlisted_entries.values())
+        page_files = [target for target, _ in page_entries]
         status_files = [p for p in (wiki_path / "SCHEMA.md", wiki_path / "index.md", wiki_path / "log.md") if p.exists() and p.is_file()]
         status_files.extend(page_files)
         latest = None
@@ -6125,7 +6142,7 @@ def _build_llm_wiki_status() -> dict:
             "page_count": len(page_files),
             "raw_source_count": _llm_wiki_count_files(wiki_path / "raw"),
             "last_updated": _llm_wiki_safe_iso(latest),
-            "last_writer": _llm_wiki_last_writer(wiki_path, page_files),
+            "last_writer": _llm_wiki_last_writer(wiki_path, page_entries),
         })
         return base
     except Exception as exc:

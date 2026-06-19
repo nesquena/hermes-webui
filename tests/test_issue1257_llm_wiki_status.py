@@ -161,6 +161,33 @@ def test_llm_wiki_status_drops_cached_entry_replaced_by_directory(monkeypatch, t
     assert status["last_writer"] == "ai-agent"
 
 
+def test_llm_wiki_status_last_writer_rechecks_identity(monkeypatch, tmp_path):
+    import os as _os
+    import api.routes as routes
+
+    wiki = tmp_path / "wiki"
+    page = _write(wiki / "concepts" / "real.md", "---\nauthor: public\n---\nbody\n")
+    _write(wiki / ".env", "---\nauthor: hidden-author\n---\nPRIVATE=1\n")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setenv("WIKI_PATH", str(wiki))
+
+    original = routes._llm_wiki_allowlisted_entries
+
+    def swapped(root):
+        entries = original(root)
+        page.unlink()
+        page.symlink_to(_os.path.join("..", ".env"))
+        return entries
+
+    monkeypatch.setattr(routes, "_llm_wiki_allowlisted_entries", swapped)
+
+    status = routes._build_llm_wiki_status()
+
+    assert status["last_writer"] == "ai-agent"
+    assert "hidden-author" not in repr(status)
+
+
 def test_last_writer_rejects_symlink_outside_wiki(tmp_path):
     """#3455 review (Codex): a symlinked .md page resolving OUTSIDE the wiki must
     not be read — its frontmatter must never leak into the status card."""
