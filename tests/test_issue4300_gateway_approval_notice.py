@@ -15,8 +15,8 @@ def test_gateway_chat_has_approval_notice_emitted_attribute_check():
 
 
 def test_gateway_chat_emits_approval_gateway_unsupported_event():
-    """Verify put_gateway_event is called with approval_gateway_unsupported type."""
-    assert "put_gateway_event(\"apperror\"" in GATEWAY_CHAT
+    """Verify put_gateway_event is called with approval_gateway_unsupported type on non-terminal channel."""
+    assert "put_gateway_event(\"warning\"" in GATEWAY_CHAT
     assert "\"type\": \"approval_gateway_unsupported\"" in GATEWAY_CHAT
 
 
@@ -33,16 +33,15 @@ def test_gateway_chat_once_per_session_guard_pattern():
     assert hasattr_pos < flag_check_pos < flag_set_pos
 
 
-def test_gateway_chat_event_payload_contains_type_label_message():
-    """Verify the event payload has all required fields."""
+def test_gateway_chat_event_payload_contains_type_and_message():
+    """Verify the event payload has type and message fields."""
     assert "\"type\": \"approval_gateway_unsupported\"" in GATEWAY_CHAT
-    assert "\"label\": \"Approvals not supported\"" in GATEWAY_CHAT
     assert "\"message\": \"Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this.\"" in GATEWAY_CHAT
 
 
 def test_messages_js_handles_approval_gateway_unsupported_event():
-    """Verify client-side handler recognizes the event type in conditional chain."""
-    assert "isApprovalGatewayUnsupported=d.type==='approval_gateway_unsupported'" in MESSAGES_JS
+    """Verify client-side warning handler recognizes the event type."""
+    assert "d.type==='approval_gateway_unsupported'" in MESSAGES_JS
 
 
 def test_messages_js_references_i18n_key_for_approval_gateway_unsupported():

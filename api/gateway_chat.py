@@ -587,9 +587,8 @@ def _run_gateway_chat_streaming(
             if not hasattr(s, "_approval_notice_emitted"):
                 s._approval_notice_emitted = False
             if not s._approval_notice_emitted:
-                put_gateway_event("apperror", {
+                put_gateway_event("warning", {
                     "type": "approval_gateway_unsupported",
-                    "label": "Approvals not supported",
                     "message": "Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this.",
                 })
                 s._approval_notice_emitted = True
