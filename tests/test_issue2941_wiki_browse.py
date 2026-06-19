@@ -313,6 +313,69 @@ def test_wiki_page_cached_entry_cannot_jump_sections(monkeypatch, tmp_path):
     assert b"cross_section_marker" not in handler.body, "stale cached page leaked another section's content"
 
 
+def test_wiki_page_cached_entry_cannot_jump_to_other_allowlisted_page(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    page = wiki_root / "concepts" / "sub" / "real.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# real\n", encoding="utf-8")
+    sibling = wiki_root / "entities" / "page.md"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_text("allowlisted_elsewhere_marker", encoding="utf-8")
+
+    try:
+        page.unlink()
+        page.symlink_to(_os.path.join("..", "..", "entities", "page.md"))
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not supported on this platform")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    page.unlink()
+    page.write_text("# real\n", encoding="utf-8")
+    assert set(routes._llm_wiki_page_files(wiki_root)) == {page, sibling}
+
+    page.unlink()
+    page.symlink_to(_os.path.join("..", "..", "entities", "page.md"))
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/page?path=concepts/sub/real.md"))
+
+    assert handler.status == 404, f"stale cached swap to another allowlisted page must 404, got {handler.status}"
+    assert b"allowlisted_elsewhere_marker" not in handler.body, "listed page leaked another allowlisted page's content"
+
+
+def test_wiki_page_read_with_symlinked_root(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    real_root = tmp_path / "real-wiki"
+    (real_root / "concepts").mkdir(parents=True)
+    page = real_root / "concepts" / "real.md"
+    page.write_text("# real\n", encoding="utf-8")
+    link_root = tmp_path / "link-wiki"
+
+    try:
+        _os.symlink(real_root, link_root, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("directory symlinks not supported on this platform")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (link_root, None, None))
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/page?path=concepts/real.md"))
+
+    assert handler.status == 200, f"listed page should stay readable through symlinked wiki root, got {handler.status}"
+    assert handler.get_json()["content"] == "# real\n"
+
+
 def test_wiki_symlinked_section_cannot_expose_outside_tree(monkeypatch, tmp_path):
     """A symlinked SECTION dir (concepts -> /tmp/outside) must not expose files
     outside the real wiki root."""

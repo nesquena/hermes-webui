@@ -7358,15 +7358,14 @@ def handle_get(handler, parsed) -> bool:
         def _wiki_read_relpath_is_clean(rel: Path) -> bool:
             return not any(part.startswith(".") for part in rel.parts)
 
-        allowed_identity: dict[Path, tuple] = {}
+        allowed_identity: dict[str, tuple[Path, tuple[int, int]]] = {}
         try:
-            wiki_path = Path(wiki_root)
-            for _p in _llm_wiki_page_files(wiki_path):
+            for _p in _llm_wiki_page_files(wiki_real):
                 try:
-                    rel_listed = _p.relative_to(wiki_path)
+                    rel_listed = _p.relative_to(wiki_real)
                     if not rel_listed.parts or not _wiki_read_relpath_is_clean(rel_listed):
                         continue
-                    section_real = (wiki_path / rel_listed.parts[0]).resolve()
+                    section_real = (wiki_real / rel_listed.parts[0]).resolve()
                     section_real.relative_to(wiki_real)
                     rp = _p.resolve()
                     rp.relative_to(section_real)
@@ -7374,7 +7373,7 @@ def handle_get(handler, parsed) -> bool:
                     if not _wiki_read_relpath_is_clean(rel):
                         continue
                     st0 = rp.stat()
-                    allowed_identity[rp] = (st0.st_dev, st0.st_ino)
+                    allowed_identity[rel_listed.as_posix()] = (rp, (st0.st_dev, st0.st_ino))
                 except (OSError, ValueError):
                     continue
         except Exception:
@@ -7383,7 +7382,12 @@ def handle_get(handler, parsed) -> bool:
             resolved_target = full_path.resolve()
         except OSError:
             return bad(handler, "Page not found", status=404)
-        if resolved_target not in allowed_identity:
+        requested_rel = Path(page_path.replace("\\", "/"))
+        requested_entry = allowed_identity.get(requested_rel.as_posix())
+        if requested_entry is None:
+            return bad(handler, "Page not found", status=404)
+        allowlisted_target, allowlisted_identity = requested_entry
+        if resolved_target != allowlisted_target:
             return bad(handler, "Page not found", status=404)
         # Read the ALREADY-RESOLVED, allowlisted real path with O_NOFOLLOW so a
         # symlink swapped in for the final component between the allowlist check
@@ -7396,7 +7400,7 @@ def handle_get(handler, parsed) -> bool:
             fd = os.open(str(resolved_target), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             try:
                 st_open = os.fstat(fd)
-                if (st_open.st_dev, st_open.st_ino) != allowed_identity[resolved_target]:
+                if (st_open.st_dev, st_open.st_ino) != allowlisted_identity:
                     return bad(handler, "Page not found", status=404)
                 raw = os.read(fd, _LLM_WIKI_MAX_PAGE_BYTES + 1)
             finally:
