@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- **Imported sessions are now stamped with the active Hermes profile instead of being saved as root/default-owned.** This keeps JSON imports performed from a named profile inside that profile boundary, so default-profile export and file APIs cannot later treat the imported session as their own.
+
 ## [v0.51.513] — 2026-06-19 — Release RX (credential-pool quota status for all pooled providers)
 
 ### Added
