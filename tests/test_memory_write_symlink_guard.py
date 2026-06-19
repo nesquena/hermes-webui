@@ -12,6 +12,7 @@ setup); only the concrete target file is guarded.
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,31 @@ def test_memory_write_rejects_symlinked_memory_file(tmp_path, monkeypatch):
     assert "Cannot write to a symlinked memory file" in cap["bad"][0]
     # The symlink target outside the memories dir must be untouched.
     assert outside.read_text(encoding="utf-8") == "important"
+
+
+def test_memory_write_read_only_soul_returns_403(tmp_path, monkeypatch):
+    """A read-only SOUL.md write must return an actionable 403, not bubble as 500."""
+    home = tmp_path / "home"
+    home.mkdir()
+    original_write_text = Path.write_text
+
+    def fake_write_text(self, *args, **kwargs):
+        if self.name == "SOUL.md":
+            raise PermissionError("read-only test file")
+        return original_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fake_write_text)
+
+    cap = _patch_memory_routes(monkeypatch, home)
+    routes._handle_memory_write(
+        _FakeHandler(),
+        {"section": "soul", "content": "# Soul\n"},
+    )
+
+    assert "bad" in cap, f"expected 403, got {cap}"
+    assert cap["bad"][1] == 403
+    assert "SOUL.md" in cap["bad"][0]
+    assert "writable" in cap["bad"][0].lower()
 
 
 def test_memory_write_allows_symlinked_memories_directory(tmp_path, monkeypatch):

@@ -17711,7 +17711,10 @@ def _handle_memory_write(handler, body):
     # (#4217/#4234/#4240).
     if target.is_symlink():
         return bad(handler, "Cannot write to a symlinked memory file")
-    target.write_text(body["content"], encoding="utf-8")
+    try:
+        target.write_text(body["content"], encoding="utf-8")
+    except PermissionError:
+        return bad(handler, f"{target.name} is not writable: {target}", 403)
     return j(handler, {"ok": True, "section": section, "path": str(target)})
 
 

@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Memory writes now return actionable 403 errors for read-only `SOUL.md`, `MEMORY.md`, or `USER.md` targets (#4480).** The memory editor no longer turns permission failures into an opaque 500; the response names the target file so users can fix ownership or permissions on the shared volume.
+
 ## [v0.51.513] — 2026-06-19 — Release RX (credential-pool quota status for all pooled providers)
 
 ### Added
