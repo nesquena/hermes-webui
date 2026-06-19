@@ -276,6 +276,39 @@ def test_wiki_page_cached_nested_entry_rechecks_resolved_containment(monkeypatch
     assert b"stale_cache_marker" not in handler.body, "stale cached nested symlink leaked hidden content"
 
 
+def test_wiki_browse_cached_entry_rechecks_resolved_containment(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    section = wiki_root / "concepts"
+    nested = section / "sub"
+    nested.mkdir(parents=True)
+    page = nested / "real.md"
+    page.write_text("# real\n", encoding="utf-8")
+    env_file = wiki_root / ".env"
+    env_file.write_text("DONOTLEAK=browse_cache_marker\n", encoding="utf-8")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+
+    page.unlink()
+    try:
+        page.symlink_to(_os.path.join("..", "..", ".env"))
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not supported on this platform")
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/browse"))
+
+    assert handler.status == 200
+    assert handler.get_json()["pages"] == []
+
+
 def test_wiki_page_cached_entry_cannot_jump_sections(monkeypatch, tmp_path):
     import os as _os
     from api import routes
@@ -415,6 +448,21 @@ def test_wiki_legit_filename_with_dotdot_substring_opens(monkeypatch, tmp_path):
     routes.handle_get(h, urlparse("http://example.com/api/wiki/page?path=concepts/v1..v2.md"))
     assert h.status == 200, f"legit filename with '..' substring should open, got {h.status}"
     assert "diff notes" in h.get_json()["content"]
+
+
+def test_wiki_page_alias_spellings_are_rejected(monkeypatch, tmp_path):
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    (wiki_root / "concepts").mkdir(parents=True)
+    (wiki_root / "concepts" / "real.md").write_text("# real\n", encoding="utf-8")
+
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    for alias in ("concepts/./real.md", "concepts//real.md", "concepts/real.md/"):
+        handler = _FakeHandler()
+        routes.handle_get(handler, urlparse(f"http://example.com/api/wiki/page?path={alias}"))
+        assert handler.status == 400, f"alias spelling {alias!r} must be rejected, got {handler.status}"
 
 
 def test_i18n_wiki_keys_in_all_locales():

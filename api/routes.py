@@ -5956,6 +5956,39 @@ def _llm_wiki_clear_page_files_cache() -> None:
         _wiki_allowlist_cache.clear()
 
 
+def _llm_wiki_allowlisted_entries(wiki_path: Path) -> dict[str, tuple[Path, tuple[int, int]]]:
+    """Return listed relpaths mapped to resolved targets plus stable identity."""
+    try:
+        wiki_real = wiki_path.resolve()
+    except OSError:
+        return {}
+
+    def _wiki_read_relpath_is_clean(rel: Path) -> bool:
+        return bool(rel.parts) and not any(part.startswith(".") for part in rel.parts)
+
+    entries: dict[str, tuple[Path, tuple[int, int]]] = {}
+    try:
+        for listed_path in _llm_wiki_page_files(wiki_real):
+            try:
+                rel_listed = listed_path.relative_to(wiki_real)
+                if not _wiki_read_relpath_is_clean(rel_listed):
+                    continue
+                section_real = (wiki_real / rel_listed.parts[0]).resolve()
+                section_real.relative_to(wiki_real)
+                resolved_target = listed_path.resolve()
+                resolved_target.relative_to(section_real)
+                rel_resolved = resolved_target.relative_to(wiki_real)
+                if not _wiki_read_relpath_is_clean(rel_resolved):
+                    continue
+                st0 = resolved_target.stat()
+                entries[rel_listed.as_posix()] = (resolved_target, (st0.st_dev, st0.st_ino))
+            except (OSError, ValueError):
+                continue
+    except Exception:
+        return {}
+    return entries
+
+
 def _llm_wiki_last_writer(wiki_path: Path, page_files: list[Path]) -> str:
     """Best-effort last-writer detection for the LLM Wiki status card.
 
@@ -6069,7 +6102,8 @@ def _build_llm_wiki_status() -> dict:
             base["status"] = "not_directory"
             return base
 
-        page_files = _llm_wiki_page_files(wiki_path)
+        allowlisted_entries = _llm_wiki_allowlisted_entries(wiki_path)
+        page_files = [target for target, _ in allowlisted_entries.values()]
         status_files = [p for p in (wiki_path / "SCHEMA.md", wiki_path / "index.md", wiki_path / "log.md") if p.exists() and p.is_file()]
         status_files.extend(page_files)
         latest = None
@@ -7312,19 +7346,14 @@ def handle_get(handler, parsed) -> bool:
         wiki_root, _, _ = _llm_wiki_resolve_path()
         if not wiki_root or not os.path.isdir(wiki_root):
             return bad(handler, "Wiki not configured or directory not found", status=404)
-        page_paths = _llm_wiki_page_files(wiki_root)
-        wiki_root = Path(wiki_root).resolve()
+        allowlisted_entries = _llm_wiki_allowlisted_entries(Path(wiki_root))
         pages = []
-        for fp in sorted(page_paths, key=lambda p: str(p).lower()):
-            try:
-                rel = fp.relative_to(wiki_root)
-            except ValueError:
-                continue
+        for rel_path, (fp, _) in sorted(allowlisted_entries.items(), key=lambda item: item[0].lower()):
             try:
                 st = fp.stat()
             except OSError:
                 continue
-            pages.append({"name": fp.name, "path": str(rel).replace("\\", "/"), "size": st.st_size, "mtime": int(st.st_mtime)})
+            pages.append({"name": Path(rel_path).name, "path": rel_path, "size": st.st_size, "mtime": int(st.st_mtime)})
         return j(handler, {"pages": pages})
     if parsed.path == "/api/wiki/page":
         wiki_root, _, _ = _llm_wiki_resolve_path()
@@ -7335,8 +7364,11 @@ def handle_get(handler, parsed) -> bool:
         # substring — a legitimate listed filename like `v1..v2.md` contains
         # ".." without being traversal. Containment + the resolved-allowlist
         # membership check below are the actual security boundary.
-        _page_parts = page_path.replace("\\", "/").split("/")
+        requested_key = page_path.replace("\\", "/")
+        _page_parts = requested_key.split("/")
         if os.path.isabs(page_path) or any(part == ".." for part in _page_parts):
+            return bad(handler, "Invalid path", status=400)
+        if any(part in ("", ".") for part in _page_parts):
             return bad(handler, "Invalid path", status=400)
         full_path = Path(os.path.join(wiki_root, page_path))
         if not _skill_path_within(Path(wiki_root), full_path):
@@ -7355,35 +7387,12 @@ def handle_get(handler, parsed) -> bool:
         # allowlist check (TOCTOU write-race, Codex finding) — a pathname re-open
         # alone can't, since O_NOFOLLOW only guards the final component, not a
         # swapped parent directory.
-        def _wiki_read_relpath_is_clean(rel: Path) -> bool:
-            return not any(part.startswith(".") for part in rel.parts)
-
-        allowed_identity: dict[str, tuple[Path, tuple[int, int]]] = {}
-        try:
-            for _p in _llm_wiki_page_files(wiki_real):
-                try:
-                    rel_listed = _p.relative_to(wiki_real)
-                    if not rel_listed.parts or not _wiki_read_relpath_is_clean(rel_listed):
-                        continue
-                    section_real = (wiki_real / rel_listed.parts[0]).resolve()
-                    section_real.relative_to(wiki_real)
-                    rp = _p.resolve()
-                    rp.relative_to(section_real)
-                    rel = rp.relative_to(wiki_real)
-                    if not _wiki_read_relpath_is_clean(rel):
-                        continue
-                    st0 = rp.stat()
-                    allowed_identity[rel_listed.as_posix()] = (rp, (st0.st_dev, st0.st_ino))
-                except (OSError, ValueError):
-                    continue
-        except Exception:
-            allowed_identity = {}
+        allowed_identity = _llm_wiki_allowlisted_entries(wiki_real)
         try:
             resolved_target = full_path.resolve()
         except OSError:
             return bad(handler, "Page not found", status=404)
-        requested_rel = Path(page_path.replace("\\", "/"))
-        requested_entry = allowed_identity.get(requested_rel.as_posix())
+        requested_entry = allowed_identity.get(requested_key)
         if requested_entry is None:
             return bad(handler, "Page not found", status=404)
         allowlisted_target, allowlisted_identity = requested_entry
