@@ -5,7 +5,7 @@
 // legacy reverse-scan over S.messages — that keeps new clients working
 // against old servers (Phase 1 may not yet be deployed everywhere).
 // See api/todo_state.py for the wire contract.
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null,_pendingSessionToolsets:null};
 
 function assistantDisplayName(){
   if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
@@ -3092,10 +3092,16 @@ function _applyToolsetsChip(toolsets) {
   // callers regardless of UI visibility. (#1431)
   wrap.style.display = '';
   const hasCustom = Array.isArray(toolsets) && toolsets.length > 0;
+  const isStaged = hasCustom
+    && typeof S !== 'undefined'
+    && S
+    && !S.session
+    && Array.isArray(S._pendingSessionToolsets);
   if (hasCustom) {
-    label.textContent = toolsets.join(', ');
+    const stagedSuffix = isStaged ? ' (staged)' : '';
+    label.textContent = toolsets.join(', ') + stagedSuffix;
     chip.classList.add('has-custom');
-    chip.title = t('session_toolsets') + ': ' + toolsets.join(', ');
+    chip.title = t('session_toolsets') + ': ' + toolsets.join(', ') + stagedSuffix;
   } else {
     label.textContent = t('session_toolsets_profile_defaults');
     chip.classList.remove('has-custom');
@@ -3105,7 +3111,10 @@ function _applyToolsetsChip(toolsets) {
 
 function _syncToolsetsChip() {
   if (typeof S === 'undefined' || !S || !S.session) {
-    _applyToolsetsChip(null);
+    const stagedToolsets = (typeof S !== 'undefined' && S && Array.isArray(S._pendingSessionToolsets))
+      ? S._pendingSessionToolsets
+      : null;
+    _applyToolsetsChip(stagedToolsets);
     return;
   }
   _applyToolsetsChip(S.session.enabled_toolsets || null);
@@ -3268,7 +3277,6 @@ function toggleToolsetsDropdown() {
   const dd = $('composerToolsetsDropdown');
   const chip = $('composerToolsetsChip');
   if (!dd || !chip) return;
-  if (typeof S === 'undefined' || !S || !S.session) return;
   // Don't open when the chip itself is hidden by responsive CSS (#1431).
   // offsetParent === null catches display:none on the element or any ancestor.
   if (chip.offsetParent === null) return;
@@ -3303,7 +3311,17 @@ function closeToolsetsDropdown() {
 }
 
 function _applySessionToolsets(toolsets) {
-  if (typeof S === 'undefined' || !S || !S.session) return;
+  if (typeof S === 'undefined' || !S) return;
+  if (!S.session) {
+    S._pendingSessionToolsets = toolsets;
+    _applyToolsetsChip(toolsets);
+    if (Array.isArray(toolsets) && toolsets.length) {
+      showToast('🔧 ' + t('session_toolsets_applied') + ': ' + toolsets.join(', '));
+    } else {
+      showToast('🌍 ' + t('session_toolsets_cleared'));
+    }
+    return;
+  }
   const sid = S.session.session_id;
   api('/api/session/toolsets', {
     method: 'POST',
@@ -13806,7 +13824,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
     if(!ws) return;
     try{
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
-      if(r&&r.session){S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -13833,7 +13851,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
     if(!ws) return;
     try{
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
-      if(r&&r.session){S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;
