@@ -53,15 +53,13 @@ def test_messages_js_references_i18n_key_for_approval_gateway_unsupported():
 
 def test_i18n_js_has_approval_gateway_unsupported_key():
     """Verify the i18n key exists in at least the English locale (first occurrence)."""
-    # Find the English locale definition (first occurrence without locale prefix)
     assert "approval_gateway_unsupported: 'Approvals require a newer gateway" in I18N_JS
-    # Verify it appears at least once at the start (English locale)
     lines = I18N_JS.split("\n")
-    found_in_english = False
-    for i, line in enumerate(lines):
-        if "approval_gateway_unsupported:" in line and i < 200:  # Early in file = English
-            found_in_english = True
-            break
+    en_end = next(i for i, l in enumerate(lines) if l.strip().startswith("zh:"))
+    found_in_english = any(
+        "approval_gateway_unsupported:" in l
+        for l in lines[:en_end]
+    )
     assert found_in_english, "approval_gateway_unsupported key not found in English i18n locale"
 
 
