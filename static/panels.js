@@ -2213,8 +2213,24 @@ function closeKanbanTaskDetail(){
     preview.style.display = 'none';
     preview.innerHTML = '';
   }
+  if (document.documentElement.dataset.kanbanLayout === 'dashboard') {
+    _kanbanHideWorkspaceTaskDetail();
+  }
   const board = $('kanbanBoard');
   if (board) board.querySelectorAll('.kanban-card').forEach(card => card.classList.remove('selected'));
+}
+
+function _kanbanHideWorkspaceTaskDetail(){
+  const kanbanTaskTab = $('workspaceKanbanTaskTab');
+  const kanbanTask = $('workspaceKanbanTask');
+  if (kanbanTaskTab) kanbanTaskTab.hidden = true;
+  if (kanbanTask) {
+    kanbanTask.innerHTML = '';
+    kanbanTask.hidden = true;
+  }
+  if (document.documentElement.dataset.workspacePanel === 'open' && typeof switchWorkspacePanelTab === 'function') {
+    switchWorkspacePanelTab('files');
+  }
 }
 
 function _kanbanFormatTimestamp(value){
@@ -2795,7 +2811,7 @@ async function addKanbanComment(taskId){
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
 
-function _kanbanRenderTaskDetail(data){
+function _kanbanRenderTaskDetail(data, mode='preview'){
   const task = data.task || {};
   const log = data.log || {};
   const title = _kanbanTaskTitle(task);
@@ -2805,16 +2821,14 @@ function _kanbanRenderTaskDetail(data){
   const events = data.events || [];
   const links = data.links || {};
   const runs = data.runs || [];
-  // Note: 'running' is intentionally absent — entering 'running' is the
-  // dispatcher/claim_task path's responsibility, not a user UI write. The
-  // bridge rejects PATCH status='running' with HTTP 400 to match the agent
-  // dashboard plugin's contract. UI users want to claim/promote a ready task
-  // via the dispatcher Nudge button, not flip it to running by hand.
   const statusButtons = ['triage', 'todo', 'ready', 'blocked', 'done', 'archived'].map(status =>
     `<button class="btn secondary" onclick="updateKanbanTask('${esc(task.id)}',{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
   ).join('') + `<button class="btn secondary" onclick="blockKanbanTask('${esc(task.id)}')">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask('${esc(task.id)}')">${esc(t('kanban_unblock'))}</button>`;
+  const closeAction = mode === 'workspace'
+    ? `<button class="btn secondary kanban-back-btn" onclick="closeKanbanTaskDetail()">${esc(t('kanban_close') || 'Close')}</button>`
+    : `<button class="btn secondary kanban-back-btn" onclick="closeKanbanTaskDetail()">${esc(t('kanban_back_to_board'))}</button>`;
   return `<div class="kanban-task-preview-header">
-      <button class="btn secondary kanban-back-btn" onclick="closeKanbanTaskDetail()">${esc(t('kanban_back_to_board'))}</button>
+      ${closeAction}
       <div class="kanban-task-preview-title">${esc(title)}</div>
       <button class="btn secondary kanban-edit-btn" onclick="openKanbanEdit('${esc(task.id)}')" data-i18n="kanban_edit_task" title="${esc(t('kanban_edit_task') || 'Edit task')}">${esc(t('kanban_edit_task') || 'Edit task')}</button>
     </div>
@@ -2847,10 +2861,23 @@ async function loadKanbanTask(taskId){
       board.querySelectorAll('.kanban-card').forEach(card => card.classList.remove('selected'));
       Array.from(board.querySelectorAll('.kanban-card')).find(card => card.dataset.kanbanTaskId === taskId)?.classList.add('selected');
     }
-    const preview = $('kanbanTaskPreview');
-    if (preview) {
-      preview.style.display = '';
-      preview.innerHTML = _kanbanRenderTaskDetail(data);
+    const isDashboard = document.documentElement.dataset.kanbanLayout === 'dashboard';
+    if (isDashboard) {
+      const wsTask = $('workspaceKanbanTask');
+      const wsTaskTab = $('workspaceKanbanTaskTab');
+      if (wsTask && wsTaskTab) {
+        wsTask.innerHTML = `<div class="kanban-task-preview">${_kanbanRenderTaskDetail(data, 'workspace')}</div>`;
+        wsTask.hidden = false;
+        wsTaskTab.hidden = false;
+        if (typeof toggleWorkspacePanel === 'function') toggleWorkspacePanel(true);
+        if (typeof switchWorkspacePanelTab === 'function') switchWorkspacePanelTab('kanban-task');
+      }
+    } else {
+      const preview = $('kanbanTaskPreview');
+      if (preview) {
+        preview.style.display = '';
+        preview.innerHTML = _kanbanRenderTaskDetail(data, 'preview');
+      }
     }
     showToast(`${t('kanban_task')}: ${title}`);
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
@@ -6720,6 +6747,7 @@ async function loadSettingsPanel(){
         const layout=this.value;
         localStorage.setItem('hermes-kanban-layout',layout);
         document.documentElement.dataset.kanbanLayout=layout;
+        if(typeof closeKanbanTaskDetail==='function') closeKanbanTaskDetail();
         if(typeof _kanbanRenderBoard==='function' && _kanbanBoard) _kanbanRenderBoard();
       },{once:false});
     }
