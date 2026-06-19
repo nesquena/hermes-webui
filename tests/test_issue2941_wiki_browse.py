@@ -273,7 +273,44 @@ def test_wiki_page_cached_nested_entry_rechecks_resolved_containment(monkeypatch
     routes.handle_get(handler, urlparse("http://example.com/api/wiki/page?path=concepts/sub/real.md"))
 
     assert handler.status == 404, f"stale cached nested symlink swap must 404, got {handler.status}"
-    assert b"stale_cache_marker" not in handler.body, "stale cached nested symlink leaked secret content"
+    assert b"stale_cache_marker" not in handler.body, "stale cached nested symlink leaked hidden content"
+
+
+def test_wiki_page_cached_entry_cannot_jump_sections(monkeypatch, tmp_path):
+    import os as _os
+    from api import routes
+
+    wiki_root = tmp_path / "wiki"
+    page = wiki_root / "concepts" / "sub" / "real.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# real\n", encoding="utf-8")
+    external_doc = wiki_root / "drafts" / "page.md"
+    external_doc.parent.mkdir(parents=True)
+    external_doc.write_text("cross_section_marker", encoding="utf-8")
+
+    try:
+        page.unlink()
+        page.symlink_to(_os.path.join("..", "..", "drafts", "page.md"))
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not supported on this platform")
+
+    routes._llm_wiki_clear_page_files_cache()
+    monkeypatch.setattr(routes, "_WIKI_ALLOWLIST_TTL", 60.0)
+    monkeypatch.setattr(routes, "_llm_wiki_resolve_path", lambda: (wiki_root, None, None))
+
+    page.unlink()
+    page.write_text("# real\n", encoding="utf-8")
+    assert routes._llm_wiki_page_files(wiki_root) == [page]
+
+    page.unlink()
+    page.symlink_to(_os.path.join("..", "..", "drafts", "page.md"))
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/wiki/page?path=concepts/sub/real.md"))
+
+    assert handler.status == 404, f"stale cached cross-section swap must 404, got {handler.status}"
+    assert b"cross_section_marker" not in handler.body, "stale cached page leaked another section's content"
 
 
 def test_wiki_symlinked_section_cannot_expose_outside_tree(monkeypatch, tmp_path):

@@ -7355,13 +7355,23 @@ def handle_get(handler, parsed) -> bool:
         # allowlist check (TOCTOU write-race, Codex finding) — a pathname re-open
         # alone can't, since O_NOFOLLOW only guards the final component, not a
         # swapped parent directory.
+        def _wiki_read_relpath_is_clean(rel: Path) -> bool:
+            return not any(part.startswith(".") for part in rel.parts)
+
         allowed_identity: dict[Path, tuple] = {}
         try:
-            for _p in _llm_wiki_page_files(Path(wiki_root)):
+            wiki_path = Path(wiki_root)
+            for _p in _llm_wiki_page_files(wiki_path):
                 try:
+                    rel_listed = _p.relative_to(wiki_path)
+                    if not rel_listed.parts or not _wiki_read_relpath_is_clean(rel_listed):
+                        continue
+                    section_real = (wiki_path / rel_listed.parts[0]).resolve()
+                    section_real.relative_to(wiki_real)
                     rp = _p.resolve()
+                    rp.relative_to(section_real)
                     rel = rp.relative_to(wiki_real)
-                    if any(part.startswith(".") for part in rel.parts):
+                    if not _wiki_read_relpath_is_clean(rel):
                         continue
                     st0 = rp.stat()
                     allowed_identity[rp] = (st0.st_dev, st0.st_ino)
