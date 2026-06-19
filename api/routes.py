@@ -13204,11 +13204,19 @@ def _handle_live_models(handler, parsed):
                     import urllib.request
                     _providers_cfg = cfg.get("providers", {})
                     _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
-                    # Only use provider-scoped key — never fall back to a top-level
-                    # api_key which may belong to a different provider.
+                    # Only use a provider-scoped key.  A top-level model.api_key
+                    # is safe here only when it belongs to the requested provider;
+                    # otherwise /api/models/live?provider=<other> could forward
+                    # the active provider's credential to the wrong third party.
                     _key = _prov.get("api_key") if isinstance(_prov, dict) else None
                     if not _key:
-                        _key = cfg.get("model", {}).get("api_key")
+                        _model_cfg = cfg.get("model", {})
+                        if isinstance(_model_cfg, dict):
+                            _active_provider = _resolve_provider_alias(
+                                (_model_cfg.get("provider") or "").strip().lower()
+                            )
+                            if _active_provider == provider:
+                                _key = _model_cfg.get("api_key")
                     if _key:
                         _req = urllib.request.Request(
                             f"{_ep}/models",

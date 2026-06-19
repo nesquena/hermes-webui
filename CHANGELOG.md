@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- **Live model discovery no longer forwards a top-level provider API key to a different provider's `/models` endpoint.** The OpenAI-compatible fallback now only uses `model.api_key` when the requested live-model provider matches the active model provider; cross-provider requests fall back to provider-scoped credentials or the static catalog instead.
+
 ## [v0.51.513] — 2026-06-19 — Release RX (credential-pool quota status for all pooled providers)
 
 ### Added
