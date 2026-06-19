@@ -3657,6 +3657,7 @@ if(typeof window!=='undefined'){
   if(!el) return;
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
+    _scheduleMessageVirtualizedRender();
     if(_programmaticScroll) return; // ignore scrolls we triggered ourselves
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
@@ -3693,7 +3694,6 @@ if(typeof window!=='undefined'){
       const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
       _syncScrollToBottomCue(showBottomButton,{newMessage:_newMessageCueVisible});
       if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
-      _scheduleMessageVirtualizedRender();
       // Prefetch older messages before the reader hits the hard top. Prepending
       // then preserving scrollTop is seamless only if there is runway left for
       // the user's continued upward wheel/touch movement.
