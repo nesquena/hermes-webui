@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Agent personality defaults now include the CLI built-ins when `agent.personalities` is missing or malformed.** Fresh config data is hydrated with the same 14 built-in personalities used by CLI, while user-defined names continue to override those defaults. A malformed or non-dict `agent.personalities` section now falls back to the built-in set instead of emptying personality selection. Issue #4465.
+
 ## [v0.51.513] — 2026-06-19 — Release RX (credential-pool quota status for all pooled providers)
 
 ### Added
