@@ -165,11 +165,10 @@ class TestListProfilesInIsolatedMode:
                 with mock.patch("api.profiles._INITIAL_HERMES_HOME", str(temp_single_profile)):
                     # Mock _get_profile_skills_stats to avoid importing agent.skill_utils
                     with mock.patch("api.profiles._get_profile_skills_stats", return_value=(0, 0)):
-                        with mock.patch("api.profiles.get_active_profile_name", return_value="user1"):
-                            profiles = list_profiles_api()
-                            # Should only have user1
-                            assert len(profiles) == 1
-                            assert profiles[0]["name"] == "user1"
+                        profiles = list_profiles_api()
+                        # Should only have user1
+                        assert len(profiles) == 1
+                        assert profiles[0]["name"] == "user1"
 
     def test_list_includes_single_profile_mode_flag(self, temp_single_profile):
         """Response includes single_profile_mode: true in isolated mode."""
@@ -179,13 +178,12 @@ class TestListProfilesInIsolatedMode:
                 with mock.patch("api.profiles._INITIAL_HERMES_HOME", str(temp_single_profile)):
                     with mock.patch("api.profiles._is_isolated_profile_mode", return_value=True):
                         with mock.patch("api.profiles._resolve_base_hermes_home", return_value=base_home):
-                            with mock.patch("api.profiles.get_active_profile_name", return_value="user1"):
-                                # Mock _get_profile_skills_stats to avoid importing agent.skill_utils
-                                with mock.patch("api.profiles._get_profile_skills_stats", return_value=(0, 0)):
-                                    profiles = list_profiles_api()
-                                    # Check for single_profile_mode flag in response structure
-                                    # For now, profiles should be a list; the flag will be in routes.py response
-                                    assert len(profiles) == 1
+                            # Mock _get_profile_skills_stats to avoid importing agent.skill_utils
+                            with mock.patch("api.profiles._get_profile_skills_stats", return_value=(0, 0)):
+                                profiles = list_profiles_api()
+                                # Check for single_profile_mode flag in response structure
+                                # For now, profiles should be a list; the flag will be in routes.py response
+                                assert len(profiles) == 1
 
 
 class TestProfileMutationsInIsolatedMode:
@@ -202,9 +200,8 @@ class TestProfileMutationsInIsolatedMode:
         with mock.patch.dict(os.environ, env_dict, clear=False):
             with mock.patch("api.profiles._DEFAULT_HERMES_HOME", base_home):
                 with mock.patch("api.profiles._INITIAL_HERMES_HOME", str(temp_single_profile)):
-                    with mock.patch("api.profiles.get_active_profile_name", return_value="user1"):
-                        with pytest.raises(PermissionError, match=".*isolated.*|.*single.*"):
-                            create_profile_api("newprofile")
+                    with pytest.raises(PermissionError, match=".*isolated.*|.*single.*"):
+                        create_profile_api("newprofile")
 
     def test_delete_profile_rejected_in_isolated_mode(self, temp_single_profile):
         """delete_profile_api should reject deletion in isolated mode."""
@@ -217,9 +214,8 @@ class TestProfileMutationsInIsolatedMode:
         with mock.patch.dict(os.environ, env_dict, clear=False):
             with mock.patch("api.profiles._DEFAULT_HERMES_HOME", base_home):
                 with mock.patch("api.profiles._INITIAL_HERMES_HOME", str(temp_single_profile)):
-                    with mock.patch("api.profiles.get_active_profile_name", return_value="user1"):
-                        with pytest.raises(PermissionError, match=".*isolated.*|.*single.*"):
-                            delete_profile_api("user1")
+                    with pytest.raises(PermissionError, match=".*isolated.*|.*single.*"):
+                        delete_profile_api("user1")
 
 
 class TestNormalModePreservation:

@@ -155,6 +155,11 @@ def _is_isolated_profile_mode() -> bool:
     return False
 
 
+def _isolated_profile_name() -> str:
+    """Return the profile directory name from _INITIAL_HERMES_HOME."""
+    return Path(_INITIAL_HERMES_HOME).expanduser().name
+
+
 def _resolve_base_hermes_home() -> Path:
     """Return the BASE ~/.hermes directory — the root that contains profiles/.
 
@@ -1034,7 +1039,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
 
     # In isolated profile mode, reject switching to other profiles
     if _is_isolated_profile_mode():
-        active = get_active_profile_name()
+        active = _isolated_profile_name()
         if name != active:
             raise PermissionError(
                 f"Profile switching is not allowed in isolated profile mode. "
@@ -1349,7 +1354,7 @@ def list_profiles_api() -> list:
 
     # In isolated profile mode, return only the active (isolated) profile
     if _is_isolated_profile_mode():
-        active = get_active_profile_name()
+        active = _isolated_profile_name()
         hermes_home = get_active_hermes_home()
         try:
             from hermes_cli.profiles import list_profiles
