@@ -5,6 +5,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 
 import html as _html
 import copy
+import errno
 import io
 import gzip
 import json
@@ -17713,7 +17714,9 @@ def _handle_memory_write(handler, body):
         return bad(handler, "Cannot write to a symlinked memory file")
     try:
         target.write_text(body["content"], encoding="utf-8")
-    except PermissionError:
+    except OSError as exc:
+        if not isinstance(exc, PermissionError) and getattr(exc, "errno", None) != errno.EROFS:
+            raise
         mode_hint = ""
         try:
             mode_hint = f" (mode {target.stat().st_mode & 0o777:o})"
