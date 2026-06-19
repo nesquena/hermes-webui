@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Update failures caused by untracked colliding files now surface the existing force-update recovery path, and force update now cleans untracked files before hard reset (#4310).**
+
 ## [v0.51.513] — 2026-06-19 — Release RX (credential-pool quota status for all pooled providers)
 
 ### Added

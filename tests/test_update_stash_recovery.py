@@ -4,6 +4,113 @@ from unittest.mock import patch
 import api.updates as updates
 
 
+def test_pull_failure_untracked_overwrite_flags_conflict(tmp_path):
+    """Untracked overwrite pull failures must surface the existing force-update path."""
+    (tmp_path / '.git').mkdir()
+    call_log = []
+
+    def fake_git(args, path, timeout=10):
+        call_log.append(args)
+        if args[:2] == ['fetch', 'origin']:
+            return '', True
+        if args == ['status', '--porcelain', '--untracked-files=no']:
+            return '', True
+        if args[:2] == ['pull', '--ff-only']:
+            return (
+                'error: The following untracked working tree files would be overwritten by merge:\n'
+                '\ttests/test_custom_provider_prefix_collisions.py\n'
+                'Please move or remove them before you merge.\n'
+                'Aborting',
+                False,
+            )
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    restart_calls = []
+
+    with (
+        patch.object(updates, 'REPO_ROOT', tmp_path),
+        patch.object(updates, '_run_git', side_effect=fake_git),
+        patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'),
+        patch.object(updates, '_schedule_restart', side_effect=lambda: restart_calls.append(1)),
+    ):
+        result = updates._apply_update_inner('webui')
+
+    assert result['ok'] is False
+    assert result['conflict'] is True
+    assert result['message'].startswith('Pull failed:')
+    assert 'untracked working tree files would be overwritten' in result['message']
+    assert ['stash', 'push', '-m', 'hermes-update-autostash'] not in call_log
+    assert len(restart_calls) == 0
+
+
+def test_apply_force_update_removes_untracked_files_before_reset(tmp_path):
+    """Force update must clear untracked colliders before reset --hard (#4310)."""
+    (tmp_path / '.git').mkdir()
+    call_log = []
+
+    def fake_git(args, path, timeout=10):
+        call_log.append(args)
+        if args[:2] == ['fetch', 'origin']:
+            return '', True
+        if args == ['checkout', '.']:
+            return '', True
+        if args == ['clean', '-fd']:
+            return '', True
+        if args == ['reset', '--hard', 'origin/master']:
+            return '', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    restart_calls = []
+
+    with (
+        patch.object(updates, 'REPO_ROOT', tmp_path),
+        patch.object(updates, '_run_git', side_effect=fake_git),
+        patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'),
+        patch.object(updates, '_schedule_restart', side_effect=lambda: restart_calls.append(1)),
+    ):
+        result = updates.apply_force_update('webui')
+
+    assert result['ok'] is True
+    assert ['checkout', '.'] in call_log
+    assert ['clean', '-fd'] in call_log
+    assert ['reset', '--hard', 'origin/master'] in call_log
+    assert call_log.index(['checkout', '.']) < call_log.index(['clean', '-fd'])
+    assert call_log.index(['clean', '-fd']) < call_log.index(['reset', '--hard', 'origin/master'])
+    assert len(restart_calls) == 1
+
+
+def test_apply_force_update_stops_when_clean_fails(tmp_path):
+    """A failed git clean must not be hidden behind a reset success."""
+    (tmp_path / '.git').mkdir()
+    call_log = []
+
+    def fake_git(args, path, timeout=10):
+        call_log.append(args)
+        if args[:2] == ['fetch', 'origin']:
+            return '', True
+        if args == ['checkout', '.']:
+            return '', True
+        if args == ['clean', '-fd']:
+            return 'permission denied', False
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    restart_calls = []
+
+    with (
+        patch.object(updates, 'REPO_ROOT', tmp_path),
+        patch.object(updates, '_run_git', side_effect=fake_git),
+        patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'),
+        patch.object(updates, '_schedule_restart', side_effect=lambda: restart_calls.append(1)),
+    ):
+        result = updates.apply_force_update('webui')
+
+    assert result['ok'] is False
+    assert 'untracked files' in result['message']
+    assert ['clean', '-fd'] in call_log
+    assert ['reset', '--hard', 'origin/master'] not in call_log
+    assert len(restart_calls) == 0
+
+
 def test_stash_apply_conflict_preserves_stash(tmp_path):
     """On stash-apply conflict, stash is preserved and restart is scheduled."""
     call_log = []

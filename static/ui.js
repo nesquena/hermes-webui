@@ -7168,7 +7168,7 @@ async function forceUpdate(btn){
   if(!target) return;
   const confirmed=await showConfirmDialog({
     title:'Force update '+target+'?',
-    message:'This will discard all local changes in the '+target+' repo and reset to the latest remote version. This cannot be undone.',
+    message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
     confirmLabel:'Force update',
     danger:true,
     focusCancel:true,
