@@ -1435,7 +1435,7 @@ const LOCALES = {
     auth_status_passkey_only: 'Passkey Only',
     auth_status_unauthenticated: 'Unauthenticated',
     auth_warning_badge: 'Auth disabled',
-    auth_acknowledged_label: 'I understand this instance is accessible without authentication.',
+    auth_acknowledged_label: 'I’ve reviewed this risk; lower the nav warning to amber.',
     bg_error_single: (title) => `"${title}" has encountered an error`,
     bg_error_multi: (count) => `${count} sessions have encountered an error`,
     // skill form

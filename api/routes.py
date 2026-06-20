@@ -10350,7 +10350,7 @@ def handle_post(handler, parsed) -> bool:
             body["bot_name"] = (str(body["bot_name"]) or "").strip() or "Hermes"
 
         auth_enabled_before = is_auth_enabled()
-        password_auth_enabled_before = get_password_hash() is not None
+        password_auth_enabled_before = auth_enabled_before and get_password_hash() is not None
         current_cookie = parse_cookie(handler)
         logged_in_before = bool(current_cookie and verify_session(current_cookie))
         requested_password = bool(
