@@ -3,10 +3,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Profiles now load correctly from `/api/profiles` after the recent active-profile route refactor, instead of returning a server-side `UnboundLocalError` and showing `Failed to load profiles` in the WebUI.
-
 ## [v0.51.528] — 2026-06-20 — Release SM (isolated HERMES_HOME single-profile mode)
 
 ### Added
