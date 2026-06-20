@@ -19,6 +19,7 @@ from api.config import (
     STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT,
     _get_session_agent_lock,
+    coerce_reasoning_effort_for_model,
     gateway_supports_approval,
     register_active_run,
     unregister_active_run,
@@ -94,6 +95,22 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
         or ""
     ).strip().lower()
     return raw in ("1", "true", "yes", "on")
+
+
+def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None):
+    """Read and coerce user-configured reasoning effort for a gateway request."""
+    try:
+        cfg_data = cfg if isinstance(cfg, dict) else {}
+        effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
+        effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
+        coerced = coerce_reasoning_effort_for_model(
+            effort_raw,
+            model,
+            provider_id=model_provider,
+        )
+        return None if not coerced else str(coerced)
+    except Exception:
+        return None
 
 
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
@@ -527,6 +544,11 @@ def _run_gateway_chat_streaming(
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
         cfg = get_config()
+        reasoning_effort = _gateway_reasoning_effort_for_request(
+            cfg,
+            model=model,
+            model_provider=model_provider,
+        )
         try:
             from api.streaming import (
                 _load_webui_prefill_context,
@@ -573,6 +595,8 @@ def _run_gateway_chat_streaming(
             body_extras = {}
             if model_provider:
                 body_extras["provider"] = model_provider
+            if reasoning_effort is not None:
+                body_extras["reasoning_effort"] = reasoning_effort
             try:
                 final_text, usage = _run_gateway_runs_api_streaming(
                     session_id, msg_text, model, workspace, stream_id,
@@ -633,6 +657,8 @@ def _run_gateway_chat_streaming(
             }
             if model_provider:
                 body["provider"] = model_provider
+            if reasoning_effort is not None:
+                body["reasoning_effort"] = reasoning_effort
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),
