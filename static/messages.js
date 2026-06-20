@@ -5215,24 +5215,43 @@ async function respondClarify(response) {
   } catch(e) {
     // The server returns 409 with ``stale: true`` for both genuinely-expired
     // prompts and wrong-session/next-prompt-loaded races. In both cases the
-    // server-side ``_pending`` entry is gone, so retrying with the same
-    // ``clarify_id`` can never succeed — the prior keep-card-and-draft
+    // server-side ``_pending`` entry for *this* clarify_id is gone, so
+    // retrying it can never succeed — the prior keep-card-and-draft
     // behavior left the user with a permanently 409-ing card and a locked
     // composer, with no affordance to dismiss it (#4504). Treat 409 as
-    // terminal here: hand the draft to the unlocked composer via
-    // ``hideClarifyCard(true, 'expired')`` (which routes through
-    // ``_stashClarifyDraft('expired')``). If a *new* clarify event is queued
-    // for this session, the SSE/poll path will re-render the card from
-    // scratch via ``showClarifyCard`` with the new ``clarify_id`` — so we do
-    // not lose the next-prompt case from #2639, we just stop pretending the
-    // *current* card is recoverable.
+    // terminal here, but only when the visible card still matches what we
+    // just submitted: mirroring the success path's ``_clarifyId === clarifyId``
+    // guard (codex review P1, #2639) — if a parallel poll already rendered
+    // the *next* queued prompt B while A's response was in flight, we must
+    // not tear B down on A's late 409. The SSE/poll path will re-render the
+    // next prompt's card from scratch via ``showClarifyCard`` either way.
     if (e && e.status === 409) {
-      hideClarifyCard(true, "expired");
-      const errMsg = (e.message || "Clarification prompt expired or not found.");
-      if (typeof setStatus === "function") setStatus("Clarify: " + errMsg);
-      // Suppress the duplicate toast here: ``_stashClarifyDraft('expired')``
-      // already surfaces "Clarification timed out. Your draft was kept in
-      // the composer." via showToast, which is the actionable message.
+      if (_clarifyId === clarifyId) {
+        // Same card still showing — dismiss it and rescue the typed draft.
+        // Order matters: ``_stashClarifyDraft`` (called from
+        // ``hideClarifyCard``) bails when ``#clarifySubmit`` still carries
+        // the ``loading`` class set above. Clear loading first, otherwise
+        // the typed answer is silently dropped (reviewer P1).
+        _clarifySetControlsDisabled(false, false);
+        _clarifySessionId = null;
+        _clarifyId = null;
+        _clearClarifyPendingForSession(sid);
+        hideClarifyCard(true, "expired");
+        const errMsg = (e.message || "Clarification prompt expired or not found.");
+        if (typeof setStatus === "function") setStatus("Clarify: " + errMsg);
+        // ``_stashClarifyDraft('expired')`` already surfaces the actionable
+        // "Clarification timed out. Your draft was kept in the composer."
+        // toast when there is a draft to rescue, so we don't double-toast.
+        return;
+      }
+      // A newer prompt is showing (race between user click and SSE/poll).
+      // Don't dismiss it on this late 409 — just re-enable controls and
+      // surface the error. The user's draft for the now-stale prompt is
+      // dropped intentionally; the next prompt has its own input cycle.
+      _clarifySetControlsDisabled(false, false);
+      if (typeof setStatus === "function") {
+        setStatus("Clarify: previous prompt expired — a newer one is showing.");
+      }
       return;
     }
     // Network / other transient errors — keep the card and draft visible so
