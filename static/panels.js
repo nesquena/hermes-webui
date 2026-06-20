@@ -8338,17 +8338,14 @@ function _updateAuthWarningBadge(authStatus){
   });
 }
 
-async function _updateAuthDisabledWarning(authStatus){
+function _updateAuthDisabledWarning(authStatus){
   const el=$('settingsAuthDisabledWarning');
   if(!el) return;
   const authDisabled=!authStatus||!authStatus.auth_enabled;
   if(!authDisabled){ el.style.display='none'; return; }
   el.style.display='block';
-  try{
-    const settings=await api('/api/settings');
-    const cb=$('settingsAuthDisabledAck');
-    if(cb) cb.checked=!!settings.auth_disabled_acknowledged;
-  }catch(e){}
+  const cb=$('settingsAuthDisabledAck');
+  if(cb) cb.checked=!!(authStatus&&authStatus.auth_disabled_acknowledged);
 }
 
 async function _setAuthDisabledAck(checked){
@@ -8359,7 +8356,7 @@ async function _setAuthDisabledAck(checked){
       _updateAuthWarningBadge(authStatus);
     }catch(e){}
   }catch(e){
-    showToast('Failed to update acknowledgement: '+e.message);
+    showToast(t('auth_ack_save_failed')+e.message);
   }
 }
 
@@ -9010,9 +9007,15 @@ async function saveSettings(andClose){
   body.bot_name=botName||'Hermes';
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
-    const currentPw=($('settingsCurrentPassword')||{}).value;
+    const currentPwField=$('settingsCurrentPassword');
+    const currentPw=(currentPwField||{}).value||'';
+    if(_settingsPasswordAuthEnabled && !currentPw.trim()){
+      if(currentPwField) currentPwField.focus();
+      showToast(t('current_password_required'));
+      return;
+    }
     const payload={...body,_set_password:pw.trim()};
-    if(_settingsPasswordAuthEnabled && currentPw) payload._current_password=currentPw;
+    if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
       const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
       if(modelChanged && model){

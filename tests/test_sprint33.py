@@ -69,6 +69,34 @@ def test_disable_auth_prompt_uses_destructive_label_not_create():
     assert "t('create')" not in body
 
 
+def test_auth_disabled_warning_uses_status_payload_without_extra_settings_fetch():
+    src = read("static/panels.js")
+    match = re.search(r"function _updateAuthDisabledWarning\(authStatus\)\{(.*?)\n\}", src, re.DOTALL)
+    assert match, "_updateAuthDisabledWarning(authStatus) not found"
+    body = match.group(1)
+    assert "authStatus&&authStatus.auth_disabled_acknowledged" in body
+    assert "api('/api/settings')" not in body
+
+
+def test_acknowledgement_save_failure_uses_i18n_toast():
+    src = read("static/panels.js")
+    match = re.search(r"async function _setAuthDisabledAck\(checked\)\{(.*?)\n\}", src, re.DOTALL)
+    assert match, "_setAuthDisabledAck(checked) not found"
+    body = match.group(1)
+    assert "showToast(t('auth_ack_save_failed')+e.message)" in body
+    assert "Failed to update acknowledgement" not in body
+
+
+def test_save_settings_password_change_preflights_current_password_before_api():
+    src = read("static/panels.js")
+    match = re.search(r"async function saveSettings\([^)]*\)\{(.*?)\n\}", src, re.DOTALL)
+    assert match, "saveSettings() not found"
+    body = match.group(1)
+    assert "currentPwField=$('settingsCurrentPassword')" in body
+    assert "showToast(t('current_password_required'))" in body
+    assert body.index("showToast(t('current_password_required'))") < body.index("api('/api/settings'")
+
+
 def test_disable_auth_typed_confirm_locales_show_literal_phrase():
     src = read("static/i18n.js")
     values = re.findall(r"disable_auth_typed_confirm:\s*'([^']*)'", src)
@@ -89,13 +117,13 @@ AUTH_SAFETY_LOCALE_KEYS = (
     "current_password_required",
     "current_password_incorrect",
     "disable_auth_typed_confirm",
-    "auth_status_protected",
     "auth_status_password",
     "auth_status_passkey_only",
     "auth_status_unauthenticated",
     "auth_warning_badge",
     "auth_disabled_warning_message",
     "auth_acknowledged_label",
+    "auth_ack_save_failed",
 )
 
 
