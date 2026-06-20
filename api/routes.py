@@ -3196,18 +3196,7 @@ def _catalog_has_provider(
         provider_raw in raw_provider_ids
         or (provider_normalized and provider_normalized in raw_provider_ids)
         or (provider_normalized and provider_normalized in normalized_provider_ids)
-        # Compound provider IDs like "custom:zenmux-relay" normalize to
-        # "custom" which is a raw catalog provider_id.  The three checks
-        # above compare raw-vs-raw and normalized-vs-normalized but miss
-        # normalized-vs-raw for compound hints.  Without this, a
-        # @custom:relay-name:model selection is silently reverted to the
-        # profile default on every non-explicit turn because the catalog
-        # lookup fails and the fallback branch at line ~3932 fires.
-        or (
-            provider_normalized
-            and ":" in provider_raw
-            and provider_normalized in raw_provider_ids
-        )
+
     )
 
 

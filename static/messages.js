@@ -1281,6 +1281,7 @@ async function send(){
     const _isCrossProviderPick = _modelState.model
       && _modelState.model_provider
       && _defaultModel
+      && _activeProvider
       && _modelState.model !== _defaultModel
       && String(_modelState.model_provider||'') !== String(_activeProvider||'');
     const _explicitPick = _pendingPickMatch || _isCrossProviderPick;
