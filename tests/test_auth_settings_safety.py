@@ -166,6 +166,15 @@ class TestFirstTimePasswordNoCurrentRequired:
         _clear_password_raw()
         _invalidate_password_hash_cache()
 
+    def test_first_time_password_uses_auth_enabled_state_not_stale_hash(self, monkeypatch):
+        """Disabled-auth bootstrap must not be blocked by stale password-hash state."""
+        monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+        monkeypatch.setattr("api.auth.get_password_hash", lambda: "stale-hash")
+        handler = _post_settings({"_set_password": "firstpw"})
+        assert handler.status == 200
+        payload = handler.json_body()
+        assert payload.get("auth_enabled") is False
+
 
 class TestEnvVarPasswordLockStillRejects:
     def test_env_var_lock_rejects_password_change(self):

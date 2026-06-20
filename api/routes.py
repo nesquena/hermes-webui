@@ -10394,7 +10394,7 @@ def handle_post(handler, parsed) -> bool:
 
         # Auth-disable safety: when password auth is currently enabled, require
         # the current password to change, clear, or switch to passwordless.
-        if password_auth_enabled_before and (requested_password or requested_clear_password):
+        if auth_enabled_before and password_auth_enabled_before and (requested_password or requested_clear_password):
             if not isinstance(current_password, str) or not current_password:
                 return bad(
                     handler,
