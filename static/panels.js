@@ -7546,9 +7546,10 @@ const enabled=plugin&&plugin.enabled!==false;
          </label>
        </div>`
     : '');
+  const isProviderActive = isProvider && enabled && activation !== 'disabled';
   let badgeText;
   let badgeClass;
-  if(isProvider){
+  if(isProviderActive){
     badgeText=t('plugins_active_provider');
     badgeClass='plugin-card-badge-provider';
   }else if(activation==='enabled'){

@@ -7,6 +7,7 @@
 
 ### Fixed
 
+- **Disabled provider-category plugins now show the disabled badge in Settings (#4496).** The Plugins panel previously rendered any `provider` / `exclusive` plugin with the green provider badge before checking whether the plugin was disabled, making disabled provider plugins look active. The badge now reflects the actual enabled state: disabled provider plugins use the same grey disabled badge as other disabled plugins.
 - **Desktop notifications no longer get silently dropped when the agent finishes while you're on another tab (#4416).** Chromium throttles a background tab's SSE, so the stream's `done` event is delivered late — after you return to the tab, when `document.hidden` already reads `false` — and the response-complete notification was suppressed by the live visibility check. The WebUI now tracks whether the tab was hidden at *any* point during a stream and notifies on that basis, so a turn you stepped away from still notifies on completion. A turn you watched the whole time stays silent (matching how Slack/Discord/Gmail/Claude behave), and the user's notifications-enabled setting is still honored.
 
 ## [v0.51.526] — 2026-06-19 — Release SK (the "Running" indicator clears when the server is idle)
