@@ -420,7 +420,7 @@ def test_thinking_blocks_persist_after_renderMessages():
     assert inner_sweep in UI_JS
     # The promoted-row guard is the only thing that changed; the rest of
     # the selector must remain intact.
-    head = ".tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking"
+    head = ".tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]):not([data-event-type=\"tool\"]),.agent-activity-thinking"
     tail = ".wl-reason[data-worklog-reason-source=\"reasoning\"]"
     assert head in UI_JS
     assert tail in UI_JS

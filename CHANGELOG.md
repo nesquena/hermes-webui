@@ -12,11 +12,47 @@
 - **Cancelled partial turns no longer permanently suppress later state.db transcript reconciliation.** The cancel replay guard now applies only while a partial assistant response plus cancellation marker are still the visible tail, so later successful turns can merge state.db-only deltas again. Anchor scene index fallback also rejects mismatched final-answer targets instead of persisting a Worklog scene onto the wrong assistant message after a stale ref miss.
 - **Settled Worklog hydration now strips live-only running rows from durable scenes.** If a persisted scene still contains a `live-reasoning:*` running Thinking row after the final answer settles, the server and browser drop it when transcript-backed settled Thinking exists; otherwise live prose/thinking/tool rows are sealed before the scene is rendered or persisted so hard refresh and natural settle do not show stale running activity at the bottom of the Worklog.
 
+## [v0.51.537] — 2026-06-20 — Release SV (queued card clears on session switch)
+
+### Fixed
+
+- **The queued-turn card from one session no longer bleeds into another when switching sessions (#4533).** The card-clear logic was only called for the *active* session's drain; session switch had no explicit clear, so a queued card from session A could persist visually when loading session B. `_clearQueueCardDisplay` is now called during `loadSession` on the session being left. Thanks @rodboev.
+
+## [v0.51.536] — 2026-06-20 — Release SU (transparent-stream tool-call rows persist after settle)
+
+### Fixed
+
+- **The open model picker no longer jumps/rebuilds during streaming when the model hasn't changed (#4531).** Streamed updates reapply the session model through both the start-data path and `syncTopbar()`, which rebuilt the open picker every time even though nothing changed — losing your scroll position in the list. `_applyModelToDropdown` now rebuilds the open picker only when the resolved model or provider actually differs from the current selection, and the live-models-arrived path avoids a duplicate rebuild when the catalog-growth refresh already re-applied the session model (the force-refresh on catalog growth still preserves #1169 — the session model wins over a premature fallback). Thanks @rodboev.
+
+## [v0.51.534] — 2026-06-20 — Release SS (clarify prompt no longer bricks the session on expiry)
+
+### Fixed
+
+- **An expired clarify prompt no longer locks up the session (#4504).** When a clarify prompt's countdown hit zero, the agent cleared server state but the browser kept the clarify card docked and the composer locked, and the only escape — submitting — was rejected with `409 {stale: true}`, leaving the session stuck until a reload. The client now treats a 409 on submit as terminal: it re-enables the composer, hands the typed draft back to it, and dismisses the stale card. The dismissal is guarded by the same `clarify_id` check the success path uses, so a late 409 for an expired prompt can't tear down a newer prompt that already rendered (#2639 preserved); and the composer's loading state is cleared before the draft is stashed so the typed answer is never silently dropped. `clear_pending` also emits an SSE notify for any future stream subscriber. Thanks @Sanjays2402.
+
+## [v0.51.533] — 2026-06-20 — Release SR (restart the gateway from the agent-health alert)
+
+### Added
+
+- **Restart the messaging gateway directly from the WebUI when its heartbeat fails (#3285).** When the agent-health alert appears (the gateway heartbeat stopped), it now offers a "Restart Service" button alongside Dismiss. It calls a new authenticated `POST /api/health/restart` that runs `hermes gateway restart` (graceful drain of in-flight runs) for the active profile's `HERMES_HOME`. The endpoint is guarded by a non-blocking lock (concurrent restarts get a 429), returns quickly when the restart completes fast, and otherwise lets the drain finish in the background with a timeout; the client suppresses health-polling for 15s afterward so the alert doesn't flicker during the restart. Thanks @Chukwuebuka-2003.
+
+## [v0.51.532] — 2026-06-20 — Release SQ (built-in personalities on non-default profiles)
+
+### Fixed
+
+- **Non-default profiles now see the built-in personalities too (follow-up to #4465, closes the #4513 gap).** v0.51.525 hydrated the 14 built-in personalities for the default profile, but `get_config_for_profile_home()` — used by the streaming worker to resolve a non-default profile's config — was a pure file read with no defaults applied, so a fresh non-default profile still resolved `personalities: []`. It now applies the documented config defaults (including the built-ins) to the per-profile read, matching the ambient `get_config()` shape, without mutating any global cache. A non-existent profile home returns an empty dict. Thanks @franksong2702.
+
+## [v0.51.531] — 2026-06-20 — Release SP (plugins panel: correct active-provider badge)
+
+### Fixed
+
+- **The Settings → Plugins panel now shows the green "Active provider" badge only on the provider that's actually selected (#4496).** Exclusive provider plugins (e.g. memory backends) all report `enabled: false` by design, so the panel couldn't tell the *selected* provider from its inactive siblings — it badged any exclusive plugin as the active provider. The payload now carries an `is_active_provider` signal (computed from the category's `<category>.provider` config) and the panel badges only the selected one; unselected exclusive providers render as "Disabled". Flat-key exclusive plugins (where the category can't be inferred) keep the older activation-based badge, so nothing regresses. Thanks @franksong2702.
+
 ## [v0.51.530] — 2026-06-20 — Release SO (fix /api/profiles 500)
 
 ### Fixed
 
-- **`GET /api/profiles` no longer returns a 500 (UnboundLocalError).** A later branch in the request handler imports `get_active_profile_name` as a function-local, which made the name local across the whole handler; the `/api/profiles` branch referenced it before that import ran, so every call to the profiles list endpoint raised `UnboundLocalError`. The branch now imports the name it uses directly. Regression introduced in v0.51.528 and surfaced once the redundant local import was removed there; this restores the profiles list/dropdown. Thanks @TomBanksAU.
+- **`GET /api/profiles` no longer returns a 500 (UnboundLocalError).** A later branch in the request handler imports `get_active_profile_name` as a function-local, which made the name local across the whole handler; the `/api/profiles` branch referenced it before that import ran, so every call to the profiles list endpoint raised `UnboundLocalError`. The branch now imports the name it uses directly. Regression introduced in v0.51.528 and surfaced once the redundant local import was removed there; this restores the profiles list/dropdown. Thanks @MinhoJJang.
 
 ## [v0.51.529] — 2026-06-20 — Release SN (per-response jump button matches the session jump pill)
 

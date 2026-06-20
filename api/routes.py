@@ -433,6 +433,7 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
     _is_isolated_profile_mode,
     get_active_profile_name,
     get_active_profile_name as _get_active_profile_name,
+    get_active_hermes_home,
 )
 
 
@@ -8055,6 +8056,31 @@ def _clean_plugin_visibility_text(value, *, limit=240) -> str:
     return text
 
 
+def _plugin_visibility_category_from_key(key: str) -> str:
+    """Return the config category prefix for nested plugin keys."""
+    raw = str(key or "").strip().replace("\\", "/")
+    if "/" not in raw:
+        return ""
+    category = raw.split("/", 1)[0].strip()
+    return category if category and category not in {".", ".."} else ""
+
+
+def _plugin_visibility_selected_provider(category: str) -> str:
+    """Read ``<category>.provider`` without surfacing config errors."""
+    if not category:
+        return ""
+    try:
+        from api.config import get_config as _get_cfg
+
+        cfg = _get_cfg() or {}
+    except Exception:
+        return ""
+    category_cfg = cfg.get(category, {}) if isinstance(cfg, dict) else {}
+    if not isinstance(category_cfg, dict):
+        return ""
+    return str(category_cfg.get("provider") or "").strip().lower()
+
+
 def _plugin_visibility_payload(manager=None) -> dict:
     """Build a sanitized plugin/hook visibility payload for Settings.
 
@@ -8068,8 +8094,12 @@ def _plugin_visibility_payload(manager=None) -> dict:
     category's ``<category>.provider`` config, not through ``plugins.enabled``.
     Their ``loaded.enabled`` stays False by design and they register hooks
     outside the four visibility hooks below. The payload surfaces ``kind``
-    and ``activation`` so the panel can render them distinctly instead of
-    mislabeling them as "Disabled" with no hooks (issue #2659).
+    and ``activation`` plus ``is_active_provider`` when the plugin key carries a
+    category prefix so the panel can render the selected provider distinctly
+    instead of mislabeling it as "Disabled" with no hooks (issue #2659), while
+    still showing unselected exclusive providers as disabled. Flat-key exclusive
+    plugins omit the new field so older activation-based badge semantics remain
+    intact when the category cannot be inferred.
     """
     manager = manager or _get_plugin_manager_for_visibility()
     manager.discover_and_load(force=False)
@@ -8091,19 +8121,31 @@ def _plugin_visibility_payload(manager=None) -> dict:
         description = _clean_plugin_visibility_text(getattr(manifest, "description", ""), limit=280)
         kind = _clean_plugin_visibility_text(getattr(manifest, "kind", "") or "standalone", limit=40)
         enabled_flag = bool(getattr(loaded, "enabled", False))
+        category = _plugin_visibility_category_from_key(plugin_key)
+        selected_provider = _plugin_visibility_selected_provider(category)
+        plugin_slug = plugin_key.rsplit("/", 1)[-1].strip().lower()
         if kind == "exclusive":
             activation = "exclusive"
         elif kind == "model-provider" and enabled_flag:
             activation = "provider"
         else:
             activation = "enabled" if enabled_flag else "disabled"
+        include_active_provider = True
+        if kind == "exclusive":
+            if category:
+                is_active_provider = bool(selected_provider) and plugin_slug == selected_provider
+            else:
+                include_active_provider = False
+                is_active_provider = False
+        else:
+            is_active_provider = kind == "model-provider" and enabled_flag
         registered = []
         for hook in list(getattr(manifest, "provides_hooks", []) or []) + list(getattr(loaded, "hooks_registered", []) or []):
             hook_name = str(hook or "").strip()
             if hook_name in _PLUGIN_VISIBILITY_HOOK_SET and hook_name not in registered:
                 registered.append(hook_name)
         registered.sort(key=_PLUGIN_VISIBILITY_HOOKS.index)
-        plugins.append({
+        plugin_payload = {
             "name": name,
             "key": plugin_key or name,
             "version": version,
@@ -8114,7 +8156,10 @@ def _plugin_visibility_payload(manager=None) -> dict:
             "kind": kind,
             "activation": activation,
             "hooks": registered,
-        })
+        }
+        if include_active_provider:
+            plugin_payload["is_active_provider"] = bool(is_active_provider)
+        plugins.append(plugin_payload)
 
     return {
         "plugins": plugins,
@@ -8245,6 +8290,122 @@ def _handle_shutdown(handler) -> bool:
 
     threading.Thread(target=_do_shutdown, daemon=True).start()
     return True
+
+
+_RESTART_LOCK = threading.Lock()
+
+
+def _handle_health_restart(handler) -> bool:
+    """Restart the Hermes messaging gateway service."""
+    # Acquire the lock to prevent concurrent restart invocations
+    if not _RESTART_LOCK.acquire(blocking=False):
+        logger.warning("Gateway restart already in progress, rejecting concurrent request.")
+        return j(
+            handler,
+            {"ok": False, "error": "Restart already in progress. Please wait a moment and try again."},
+            status=429
+        )
+
+    lock_released = False
+    try:
+        # 1. Resolve HERMES_HOME for the active profile
+        active_home = get_active_hermes_home()
+
+        # 2. Build the environment dictionary with the correct HERMES_HOME
+        env = os.environ.copy()
+        env["HERMES_HOME"] = str(active_home)
+
+        # 3. Resolve the path to the hermes CLI binary
+        hermes_cmd = shutil.which("hermes")
+        if not hermes_cmd:
+            sys_exe = Path(sys.executable)
+            sibling = sys_exe.parent / "hermes"
+            if sibling.exists():
+                hermes_cmd = str(sibling)
+            else:
+                hermes_cmd = "hermes"
+
+        # 4. Run the restart command
+        logger.info("Restarting gateway service via CLI command: %s gateway restart (HERMES_HOME=%s)", hermes_cmd, active_home)
+        
+        proc = subprocess.Popen(
+            [hermes_cmd, "gateway", "restart"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env
+        )
+        try:
+            # Wait up to 2.0 seconds for the restart command to complete quickly
+            stdout, stderr = proc.communicate(timeout=2.0)
+            # Since it finished quickly, we can release the lock now
+            _RESTART_LOCK.release()
+            lock_released = True
+
+            if proc.returncode == 0:
+                logger.info("Gateway service restarted successfully: %s", stdout)
+                return j(handler, {"ok": True, "message": "Gateway service restarted successfully"})
+            else:
+                logger.error("Gateway service restart failed with code %d: %s", proc.returncode, stderr)
+                return j(
+                    handler,
+                    {"ok": False, "error": f"Restart failed: {stderr.strip() or stdout.strip()}"},
+                    status=500
+                )
+        except subprocess.TimeoutExpired:
+            # If the process doesn't finish within 2 seconds, it is likely draining
+            # in-flight agent runs. We let it continue running in the background.
+            logger.info("Gateway restart is taking longer than 2.0s (likely draining in-flight runs). Letting it run in the background.")
+
+            # Start background threads to consume the stdout/stderr streams to prevent
+            # the child process from blocking on pipe buffer limits when printing logs.
+            import threading
+
+            def consume_stream(stream):
+                try:
+                    while stream.read(4096):
+                        pass
+                except Exception:
+                    pass
+
+            def wait_and_release():
+                try:
+                    proc.wait(timeout=240.0)
+                except subprocess.TimeoutExpired:
+                    logger.error("Gateway restart process timed out after 240.0s. Terminating process.")
+                    try:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5.0)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            try:
+                                proc.wait(timeout=5.0)
+                            except subprocess.TimeoutExpired:
+                                logger.error("Gateway restart process refused to die even after SIGKILL.")
+                    except Exception as e:
+                        logger.exception("Failed to terminate timed out gateway restart process: %s", e)
+                finally:
+                    try:
+                        _RESTART_LOCK.release()
+                    except RuntimeError:
+                        # Already released or similar
+                        pass
+
+            threading.Thread(target=consume_stream, args=(proc.stdout,), daemon=True).start()
+            threading.Thread(target=consume_stream, args=(proc.stderr,), daemon=True).start()
+            # This thread will release the lock when the child process exits
+            threading.Thread(target=wait_and_release, daemon=True).start()
+            
+            # Lock will be released by wait_and_release thread
+            lock_released = True
+
+            return j(handler, {"ok": True, "message": "Gateway service restart initiated (in progress)"})
+    except Exception as exc:
+        if not lock_released:
+            _RESTART_LOCK.release()
+        logger.exception("Failed to run gateway restart command")
+        return j(handler, {"ok": False, "error": f"Internal error running restart: {type(exc).__name__}: {exc}"}, status=500)
 
 
 def _serve_manifest(handler) -> bool:
@@ -9880,6 +10041,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
+
+    if parsed.path == "/api/health/restart":
+        return _handle_health_restart(handler)
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)

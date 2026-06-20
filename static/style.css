@@ -1311,6 +1311,10 @@
   .agent-health-copy span{color:var(--muted);}
   .agent-health-dismiss{flex-shrink:0;padding:6px 12px;border-radius:8px;border:1px solid color-mix(in srgb,var(--error) 45%,var(--surface));background:color-mix(in srgb,var(--error) 10%,var(--surface));color:var(--error);font-size:12px;font-weight:600;cursor:pointer;}
   .agent-health-dismiss:hover{background:color-mix(in srgb,var(--error) 18%,var(--surface));}
+  .agent-health-actions{display:flex;gap:8px;flex-shrink:0;}
+  .agent-health-restart{flex-shrink:0;padding:6px 12px;border-radius:8px;border:1px solid color-mix(in srgb,var(--accent) 55%,var(--surface));background:color-mix(in srgb,var(--accent) 15%,var(--surface));color:var(--accent);font-size:12px;font-weight:600;cursor:pointer;transition:background-color .15s;}
+  .agent-health-restart:hover{background:color-mix(in srgb,var(--accent) 25%,var(--surface));}
+  .agent-health-restart:disabled{opacity:0.5;cursor:not-allowed;}
   /* ── Update banner ── */
   .update-banner{display:none;background:var(--surface);border:1px solid var(--accent);border-radius:10px;padding:10px 16px;margin:10px auto;max-width:780px;width:calc(100% - 24px);box-sizing:border-box;font-size:13px;color:var(--accent-text);align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;overflow-wrap:anywhere;}
   .update-banner.visible{display:flex;}

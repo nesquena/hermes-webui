@@ -1811,14 +1811,23 @@ function _refreshOpenModelDropdown(){
     if(typeof _positionModelDropdown==='function') _positionModelDropdown();
   }
 }
-function _applyModelToDropdown(modelId, sel, preferredProviderId){
+function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
   if(!modelId||!sel) return null;
+  const currentState=(sel.id==='modelSelect'&&typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel, sel.value)
+    : null;
   const resolved=_findModelInDropdown(modelId,sel,preferredProviderId);
   if(resolved){
     sel.value=resolved;
     if(sel.id==='modelSelect'){
+      const resolvedState=typeof _modelStateForSelect==='function'
+        ? _modelStateForSelect(sel, resolved)
+        : {model:resolved,model_provider:preferredProviderId||null};
+      const pickerChanged= !!(opts&&opts.forceRefresh) || !currentState
+        || String(currentState.model||'')!==String(resolvedState.model||'')
+        || String(currentState.model_provider||'')!==String(resolvedState.model_provider||'');
       if(typeof syncModelChip==='function') syncModelChip();
-      _refreshOpenModelDropdown();
+      if(pickerChanged) _refreshOpenModelDropdown();
     }
     return resolved;
   }
@@ -2051,14 +2060,21 @@ function _addLiveModelsToSelect(provider, models, sel){
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
   }
-  const currentProvider=(S.session&&S.session.model_provider)||null;
-  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel, currentProvider);
+  const currentState=(currentVal&&typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel, currentVal)
+    : {model:currentVal||'', model_provider:(S.session&&S.session.model_provider)||null};
+  const currentProvider=currentState&&currentState.model_provider||null;
+  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel, currentProvider, {forceRefresh:true});
   // After live models are added, re-apply the session's model in case it was
   // absent from the static list and syncTopbar() fired before the live fetch
   // completed (#1169). This ensures the session model wins over any premature
   // fallback that may have set sel.value to the first available option.
   if(S.session && S.session.model && sel.id==='modelSelect'){
-    const reapplied=_applyModelToDropdown(S.session.model, sel, S.session.model_provider||null);
+    const sessionProvider=S.session.model_provider||null;
+    const sessionAlreadyRefreshed=added>0 && currentVal
+      && String((currentState&&currentState.model)||'')===String(S.session.model||'')
+      && String((currentState&&currentState.model_provider)||'')===String(sessionProvider||'');
+    const reapplied=_applyModelToDropdown(S.session.model, sel, sessionProvider, {forceRefresh:added>0&&!sessionAlreadyRefreshed});
     if(reapplied && typeof syncModelChip==='function') syncModelChip();
   }
   return added;
@@ -5422,6 +5438,29 @@ function setBusy(v){
 // normal user bubble in the chat — the chip is removed at drain time.
 const _queueRenderKeys={};  // per-session fingerprint to avoid redundant rebuilds
 const _queueCollapsed={};   // per-session: true when user explicitly collapsed the card
+let _queueRenderEpoch=0;
+function _clearQueueCardDisplay(sid){
+  const card=document.getElementById('queueCard');
+  const chips=document.getElementById('queueChips');
+  if(sid) delete _queueRenderKeys[sid];
+  if(card) card.classList.remove('visible');
+  if(chips){
+    const _chips=chips;
+    const _card=card;
+    const _sid=String(sid||'');
+    const _epoch=_chips.getAttribute('data-queue-render-epoch')||'';
+    setTimeout(()=>{
+      if((_card&&!_card.classList.contains('visible'))||!_card){
+        if((_chips.getAttribute('data-queue-render-sid')||'')===_sid&&(_chips.getAttribute('data-queue-render-epoch')||'')===_epoch){
+          _chips.innerHTML='';
+        }
+      }
+    },360);
+  }
+  const _msgsEl=document.getElementById('messages');
+  if(_msgsEl) _msgsEl.classList.remove('queue-open');
+  _updateQueuePill(sid,0);
+}
 
 function _renderQueueChips(sid){
   const card=document.getElementById('queueCard');
@@ -5433,6 +5472,8 @@ function _renderQueueChips(sid){
   // Skip re-render if user is actively editing inside the queue panel
   if(inner.contains(document.activeElement)&&document.activeElement!==inner) return;
   _queueRenderKeys[sid]=key;
+  inner.setAttribute('data-queue-render-sid',sid);
+  inner.setAttribute('data-queue-render-epoch',String(++_queueRenderEpoch));
   inner.innerHTML='';
   if(!q.length){
     card.classList.remove('visible');
@@ -5671,14 +5712,7 @@ function updateQueueBadge(sessionId){
     // Only wipe global DOM if this is the currently active session
     const isActive=S.session&&sid===S.session.session_id;
     if(isActive){
-      const card=document.getElementById('queueCard');
-      const chips=document.getElementById('queueChips');
-      if(card) card.classList.remove('visible');
-      // Defer clear until after slide-out transition so content doesn't vanish mid-animation
-      if(chips){const _chips=chips;const _card=card;setTimeout(()=>{if(!_card||!_card.classList.contains('visible'))_chips.innerHTML='';},360);}
-      const _msgsEl=document.getElementById('messages');
-      if(_msgsEl) _msgsEl.classList.remove('queue-open');
-      _updateQueuePill(sid,0);
+      _clearQueueCardDisplay(sid);
     }
   }
 }
@@ -6738,6 +6772,7 @@ const AGENT_HEALTH_INTERVAL_MS=30000;
 const AGENT_HEALTH_DISMISSED_KEY='agent-health-dismissed';
 let _agentHealthTimer=null;
 let _agentHealthLastState='unknown';
+let _lastGatewayRestartTime=0;
 function _agentHealthDismissed(){
   try{return localStorage.getItem(AGENT_HEALTH_DISMISSED_KEY)==='1';}
   catch(_){return false;}
@@ -6768,8 +6803,35 @@ function dismissAgentHealthAlert(){
   _setAgentHealthDismissed(true);
   _hideAgentHealthAlert();
 }
+async function restartGatewayService(){
+  const btn = $('btnRestartGateway');
+  const dismissBtn = $('agentHealthDismiss');
+  if(!btn) return;
+  btn.disabled = true;
+  if(dismissBtn) dismissBtn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Restarting...';
+  try {
+    const res = await api('/api/health/restart', {method: 'POST'});
+    if(res && res.ok){
+      showToast('Gateway service restarted successfully');
+      _hideAgentHealthAlert();
+      _lastGatewayRestartTime = Date.now();
+      setTimeout(pollAgentHealth, 15000);
+    } else {
+      showToast(res && res.error || 'Failed to restart gateway service');
+    }
+  } catch(e) {
+    showToast('Failed to restart gateway service: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    if(dismissBtn) dismissBtn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
 async function pollAgentHealth(){
   if(document.visibilityState !== 'visible') return;
+  if(Date.now() - _lastGatewayRestartTime < 15000) return;
   try{
     const payload=await api('/api/health/agent',{timeoutToast:false});
     if(payload.alive === true){
@@ -11230,7 +11292,7 @@ function renderMessages(options){
     // regression vs master; same content-loss-on-switch class as #3668). The
     // `:not([data-live-thinking="1"])` / live-card guards below keep the active
     // turn's own live nodes from being double-built.
-    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]):not([data-event-type="tool"]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
     const byActivity = new Map();
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const _assistantAnchorForActivity=(aIdx,segmentSeq,burstId)=>{
@@ -11281,6 +11343,8 @@ function renderMessages(options){
       const hasValue=value!==undefined&&value!==null&&String(value)!==''&&String(value)!=='0';
       return hasValue?String(value):'';
     };
+    const knownBurstIds=new Set();
+    for(const s of assistantSegments.values()) if(s){const b=s.getAttribute('data-activity-burst-id');if(b)knownBurstIds.add(b);}
     for(const tc of (S.toolCalls||[])){
       if(!tc) continue;
       const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
@@ -11288,7 +11352,8 @@ function renderMessages(options){
       if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const segmentSeq=normalizeToken(tc.activitySegmentSeq);
       const burstId=normalizeToken(tc.activityBurstId);
-      const key=segmentSeq?`segment:${segmentSeq}`:(burstId?`burst:${burstId}`:`assistant:${aIdx}`);
+      const burstResolvable=burstId&&knownBurstIds.has(burstId);
+      const key=segmentSeq?`segment:${segmentSeq}`:(burstResolvable?`burst:${burstId}`:`assistant:${aIdx}`);
       const entry=ensureActivityBucket(key,aIdx,segmentSeq,burstId);
       entry.cards.push(tc);
       entry.includeAnchorReason=true;
