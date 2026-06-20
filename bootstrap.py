@@ -497,7 +497,7 @@ def main() -> int:
     state_dir = Path(
         configured_state_dir
         or Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes")) / "webui"
-    ).expanduser()
+    ).expanduser().resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
 
     # Mutate os.environ so child (or post-execv) inherits the resolved values.

@@ -12,6 +12,8 @@ import sys
 import tempfile
 import types
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urlparse
 from unittest import mock
 
 import pytest
@@ -179,9 +181,15 @@ class TestListProfilesInIsolatedMode:
                         assert len(profiles) == 1
                         assert profiles[0]["name"] == "user1"
 
-    def test_list_includes_single_profile_mode_flag(self, temp_single_profile):
-        """Response includes single_profile_mode: true in isolated mode."""
+    def test_profiles_route_includes_single_profile_mode_flag(self, temp_single_profile):
+        """The /api/profiles response exposes single_profile_mode in isolated mode."""
         base_home = temp_single_profile.parent.parent
+        captured = {}
+
+        def fake_j(_handler, data, status=200, **_kwargs):
+            captured["json"] = {"data": data, "status": status}
+            return captured["json"]
+
         with mock.patch.dict(os.environ, {"HERMES_HOME": str(temp_single_profile)}):
             with mock.patch("api.profiles._DEFAULT_HERMES_HOME", base_home):
                 with mock.patch("api.profiles._INITIAL_HERMES_HOME", str(temp_single_profile)):
@@ -189,10 +197,15 @@ class TestListProfilesInIsolatedMode:
                         with mock.patch("api.profiles._resolve_base_hermes_home", return_value=base_home):
                             # Mock _get_profile_skills_stats to avoid importing agent.skill_utils
                             with mock.patch("api.profiles._get_profile_skills_stats", return_value=(0, 0)):
-                                profiles = list_profiles_api()
-                                # Check for single_profile_mode flag in response structure
-                                # For now, profiles should be a list; the flag will be in routes.py response
-                                assert len(profiles) == 1
+                                with mock.patch("api.routes.j", side_effect=fake_j):
+                                    import api.routes as routes
+
+                                    routes.handle_get(SimpleNamespace(headers={}), urlparse("/api/profiles"))
+
+        response = captured["json"]["data"]
+        assert response["single_profile_mode"] is True
+        assert len(response["profiles"]) == 1
+        assert response["profiles"][0]["name"] == "user1"
 
 
 class TestIsolatedRuntimePinning:

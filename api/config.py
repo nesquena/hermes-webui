@@ -70,7 +70,11 @@ TLS_ENABLED = TLS_CERT is not None and TLS_KEY is not None
 
 # ── State directory (env-overridable, never inside repo) ──────────────────────
 _DEFAULT_HERMES_HOME = _platform_default_hermes_home()
-_DEFAULT_STATE_HOME = Path(os.getenv("HERMES_HOME") or _DEFAULT_HERMES_HOME).expanduser()
+_DEFAULT_STATE_HOME = (
+    Path(os.getenv("HERMES_HOME") or _DEFAULT_HERMES_HOME)
+    .expanduser()
+    .resolve()
+)
 _STATE_DIR_ENV = (os.getenv("HERMES_WEBUI_STATE_DIR") or "").strip()
 
 STATE_DIR = (
