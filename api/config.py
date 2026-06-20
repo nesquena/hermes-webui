@@ -511,13 +511,23 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     except Exception:
         return get_config()
     # If the ambient resolver already points at this profile home, defer to
-    # get_config() so in-memory overrides (monkeypatched cfg) are honored.
+    # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
+    # MUST run before the nonexistent-home guard below: a matching ambient home
+    # whose directory doesn't physically exist yet (fresh install, monkeypatched
+    # cfg) must still resolve through get_config(), not return {} (#4516 gate).
     try:
         if _get_config_path().parent == target:
             return get_config()
     except Exception:
         pass
-    return _load_yaml_config_file(target / "config.yaml")
+    if not target.exists():
+        return {}
+    # Read the profile file directly and apply documented defaults locally so the
+    # returned dict matches ambient get_config() shape (including built-in
+    # personalities) without mutating any global cache state.
+    profile_cfg = _load_yaml_config_file(target / "config.yaml")
+    _apply_config_defaults(profile_cfg)
+    return profile_cfg
 
 
 def _config_for_yaml_save(config_data: dict) -> dict:

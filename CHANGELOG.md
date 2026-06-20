@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.532] — 2026-06-20 — Release SQ (built-in personalities on non-default profiles)
+
+### Fixed
+
+- **Non-default profiles now see the built-in personalities too (follow-up to #4465, closes the #4513 gap).** v0.51.525 hydrated the 14 built-in personalities for the default profile, but `get_config_for_profile_home()` — used by the streaming worker to resolve a non-default profile's config — was a pure file read with no defaults applied, so a fresh non-default profile still resolved `personalities: []`. It now applies the documented config defaults (including the built-ins) to the per-profile read, matching the ambient `get_config()` shape, without mutating any global cache. A non-existent profile home returns an empty dict. Thanks @franksong2702.
+
 ## [v0.51.531] — 2026-06-20 — Release SP (plugins panel: correct active-provider badge)
 
 ### Fixed

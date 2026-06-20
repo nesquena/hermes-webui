@@ -69,6 +69,42 @@ def test_config_defaults_replace_non_dict_personality_section_with_builtins():
     assert set(cfg["agent"]["personalities"]) == BUILTIN_NAMES
 
 
+def test_profile_home_config_read_hydrates_builtin_personalities_without_writing(tmp_path):
+    profile_home = tmp_path / "profiles" / "research"
+    profile_home.mkdir(parents=True)
+
+    cfg = config.get_config_for_profile_home(profile_home)
+
+    personalities = cfg["agent"]["personalities"]
+    assert set(personalities) == BUILTIN_NAMES
+    assert personalities["helpful"] == "You are a helpful, friendly AI assistant."
+    assert not (profile_home / "config.yaml").exists()
+
+
+def test_profile_home_config_read_merges_custom_personalities(tmp_path):
+    profile_home = tmp_path / "profiles" / "research"
+    profile_home.mkdir(parents=True)
+    (profile_home / "config.yaml").write_text(
+        "\n".join(
+            [
+                "agent:",
+                "  personalities:",
+                "    helpful: Custom helpful prompt.",
+                "    analyst:",
+                "      system_prompt: Use careful evidence.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = config.get_config_for_profile_home(profile_home)
+
+    personalities = cfg["agent"]["personalities"]
+    assert set(BUILTIN_NAMES).issubset(personalities)
+    assert personalities["helpful"] == "Custom helpful prompt."
+    assert personalities["analyst"]["system_prompt"] == "Use careful evidence."
+
+
 def test_config_save_strips_generated_builtin_personalities(tmp_path):
     cfg = {}
     config._apply_config_defaults(cfg)
