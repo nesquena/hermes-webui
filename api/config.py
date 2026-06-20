@@ -3354,6 +3354,27 @@ def _public_advanced_model_options(model_cfg: dict) -> dict:
     }
 
 
+def _is_openai_family_provider(provider: str | None) -> bool:
+    """Return True when a provider should receive OpenAI-family request overrides."""
+    if not provider:
+        return False
+    resolved = str(_resolve_provider_alias(str(provider).strip().lower()))
+    return resolved in ("openai", "openai-api", "openai-codex")
+
+
+def _public_main_service_tier(model_cfg: dict) -> str:
+    """Return the saved main-model service tier only for OpenAI-family providers."""
+    if not isinstance(model_cfg, dict):
+        return ""
+    provider = str(model_cfg.get("provider") or "").strip().lower()
+    if not provider:
+        _, provider, _ = resolve_model_provider(str(model_cfg.get("default") or ""))
+    if not _is_openai_family_provider(provider):
+        return ""
+    service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
+    return "priority" if service_tier == "priority" else ""
+
+
 def _main_model_request_overrides(config_data: dict) -> dict:
     """Return supported runtime request overrides for the main chat model."""
     if not isinstance(config_data, dict):
@@ -3362,6 +3383,13 @@ def _main_model_request_overrides(config_data: dict) -> dict:
     if not isinstance(model_cfg, dict):
         return {}
     overrides = {}
+    resolved_provider = str(model_cfg.get("provider") or "").strip().lower()
+    if not resolved_provider:
+        _, resolved_provider, _ = resolve_model_provider(str(model_cfg.get("default") or ""))
+    if _is_openai_family_provider(resolved_provider):
+        service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
+        if service_tier == "priority":
+            overrides["service_tier"] = "priority"
     extra_body = model_cfg.get("extra_body")
     if isinstance(extra_body, dict) and extra_body:
         overrides["extra_body"] = copy.deepcopy(extra_body)
@@ -3404,6 +3432,14 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
                 model_cfg.pop("extra_body", None)
         else:
             raise ValueError("extra_body must be a JSON object")
+    if "service_tier" in advanced:
+        service_tier = str(advanced.get("service_tier") or "").strip().lower()
+        if not service_tier or service_tier == "default":
+            model_cfg.pop("service_tier", None)
+        elif service_tier == "priority":
+            model_cfg["service_tier"] = "priority"
+        else:
+            raise ValueError("service_tier must be one of: default, priority")
     if advanced.get("api_key_clear"):
         model_cfg.pop("api_key", None)
     api_key = str(advanced.get("api_key") or "").strip()
@@ -3505,7 +3541,7 @@ def get_auxiliary_models() -> dict:
             {"task": "vision", "provider": "auto", "model": "", "base_url": ""},
             ...
         ],
-        "main": {"provider": "openrouter", "model": "anthropic/claude-opus-4.7"},
+        "main": {"provider": "openrouter", "model": "anthropic/claude-opus-4.7", "service_tier": ""},
     }
     """
     reload_config()
@@ -3541,6 +3577,7 @@ def get_auxiliary_models() -> dict:
         "main": {
             "provider": main_provider,
             "model": main_model,
+            "service_tier": _public_main_service_tier(model_cfg),
             **_public_advanced_model_options(model_cfg),
         },
     }
