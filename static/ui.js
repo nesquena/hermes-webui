@@ -1811,14 +1811,23 @@ function _refreshOpenModelDropdown(){
     if(typeof _positionModelDropdown==='function') _positionModelDropdown();
   }
 }
-function _applyModelToDropdown(modelId, sel, preferredProviderId){
+function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
   if(!modelId||!sel) return null;
+  const currentState=(sel.id==='modelSelect'&&typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel, sel.value)
+    : null;
   const resolved=_findModelInDropdown(modelId,sel,preferredProviderId);
   if(resolved){
     sel.value=resolved;
     if(sel.id==='modelSelect'){
+      const resolvedState=typeof _modelStateForSelect==='function'
+        ? _modelStateForSelect(sel, resolved)
+        : {model:resolved,model_provider:preferredProviderId||null};
+      const pickerChanged= !!(opts&&opts.forceRefresh) || !currentState
+        || String(currentState.model||'')!==String(resolvedState.model||'')
+        || String(currentState.model_provider||'')!==String(resolvedState.model_provider||'');
       if(typeof syncModelChip==='function') syncModelChip();
-      _refreshOpenModelDropdown();
+      if(pickerChanged) _refreshOpenModelDropdown();
     }
     return resolved;
   }
@@ -2051,14 +2060,21 @@ function _addLiveModelsToSelect(provider, models, sel){
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
   }
-  const currentProvider=(S.session&&S.session.model_provider)||null;
-  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel, currentProvider);
+  const currentState=(currentVal&&typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel, currentVal)
+    : {model:currentVal||'', model_provider:(S.session&&S.session.model_provider)||null};
+  const currentProvider=currentState&&currentState.model_provider||null;
+  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel, currentProvider, {forceRefresh:true});
   // After live models are added, re-apply the session's model in case it was
   // absent from the static list and syncTopbar() fired before the live fetch
   // completed (#1169). This ensures the session model wins over any premature
   // fallback that may have set sel.value to the first available option.
   if(S.session && S.session.model && sel.id==='modelSelect'){
-    const reapplied=_applyModelToDropdown(S.session.model, sel, S.session.model_provider||null);
+    const sessionProvider=S.session.model_provider||null;
+    const sessionAlreadyRefreshed=added>0 && currentVal
+      && String((currentState&&currentState.model)||'')===String(S.session.model||'')
+      && String((currentState&&currentState.model_provider)||'')===String(sessionProvider||'');
+    const reapplied=_applyModelToDropdown(S.session.model, sel, sessionProvider, {forceRefresh:added>0&&!sessionAlreadyRefreshed});
     if(reapplied && typeof syncModelChip==='function') syncModelChip();
   }
   return added;

@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.535] — 2026-06-20 — Release ST (open model picker stays stable during stream sync)
+
+### Fixed
+
+- **The open model picker no longer jumps/rebuilds during streaming when the model hasn't changed (#4531).** Streamed updates reapply the session model through both the start-data path and `syncTopbar()`, which rebuilt the open picker every time even though nothing changed — losing your scroll position in the list. `_applyModelToDropdown` now rebuilds the open picker only when the resolved model or provider actually differs from the current selection, and the live-models-arrived path avoids a duplicate rebuild when the catalog-growth refresh already re-applied the session model (the force-refresh on catalog growth still preserves #1169 — the session model wins over a premature fallback). Thanks @rodboev.
+
 ## [v0.51.534] — 2026-06-20 — Release SS (clarify prompt no longer bricks the session on expiry)
 
 ### Fixed
