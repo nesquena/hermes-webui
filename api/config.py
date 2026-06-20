@@ -3499,6 +3499,8 @@ def set_hermes_default_model(model_id: str, advanced: dict | None = None) -> dic
                 model_cfg.pop("base_url", None)
 
         _apply_advanced_model_options(model_cfg, advanced)
+        if not _is_openai_family_provider(persisted_provider):
+            model_cfg.pop("service_tier", None)
 
         config_data["model"] = model_cfg
         _save_yaml_config_file(config_path, config_data)

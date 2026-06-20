@@ -83,3 +83,26 @@ class TestIssue4536ServiceTier:
         payload = config.get_auxiliary_models()
 
         assert payload["main"]["service_tier"] == ""
+
+    def test_switching_main_model_away_from_openai_clears_service_tier(self, monkeypatch, tmp_path):
+        """A non-OpenAI default-model save should remove stale OpenAI service-tier state."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: gpt-5.5\n  service_tier: priority\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(
+            config,
+            "resolve_model_provider",
+            lambda model: (model, "openrouter", None),
+        )
+
+        result = config.set_hermes_default_model("meta-llama/llama-3.1")
+
+        assert result["ok"] is True
+        text = config_path.read_text(encoding="utf-8")
+        assert "service_tier" not in text
