@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Built-in personalities are now hydrated for non-default profiles without writing profile config defaults (#4513).** Profile-specific runtime reads now merge the documented built-in personalities with per-profile customizations from `config.yaml` on each worker read, matching ambient `get_config()` shape and preserving non-default profile isolation.
+
 ## [v0.51.527] — 2026-06-19 — Release SL (completion notifications survive a backgrounded tab)
 
 ### Fixed

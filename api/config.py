@@ -509,6 +509,8 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
         target = Path(profile_home).expanduser()
     except Exception:
         return get_config()
+    if not target.exists():
+        return {}
     # If the ambient resolver already points at this profile home, defer to
     # get_config() so in-memory overrides (monkeypatched cfg) are honored.
     try:
@@ -516,7 +518,12 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
             return get_config()
     except Exception:
         pass
-    return _load_yaml_config_file(target / "config.yaml")
+    # Read the profile file directly and apply documented defaults locally so the
+    # returned dict matches ambient get_config() shape (including built-in
+    # personalities) without mutating any global cache state.
+    profile_cfg = _load_yaml_config_file(target / "config.yaml")
+    _apply_config_defaults(profile_cfg)
+    return profile_cfg
 
 
 def _config_for_yaml_save(config_data: dict) -> dict:
