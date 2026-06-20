@@ -47,6 +47,36 @@ def test_ui_js_exposes_shared_dialog_helpers():
     assert "document.addEventListener('keydown'" in src
 
 
+def test_prompt_dialog_honors_custom_label_and_danger_state():
+    src = read("static/ui.js")
+    assert "confirmBtn.textContent=opts.confirmLabel||t('create')" in src
+    assert "confirmBtn.classList.toggle('danger',!!opts.danger)" in src
+    assert "opts.danger?'alertdialog':'dialog'" in src
+
+
+def test_disable_auth_prompt_uses_destructive_label_not_create():
+    src = read("static/panels.js")
+    match = re.search(r"async function disableAuth\(\)\{(.*?)\n\}", src, re.DOTALL)
+    assert match, "disableAuth() not found"
+    body = match.group(1)
+    assert "const confirmText='DISABLE AUTH'" in body
+    assert "showPromptDialog" in body
+    assert "confirmLabel:t('disable_auth')" in body
+    assert "danger:true" in body
+    assert "t('create')" not in body
+
+
+def test_disable_auth_typed_confirm_locales_show_literal_phrase():
+    src = read("static/i18n.js")
+    values = re.findall(r"disable_auth_typed_confirm:\s*'([^']*)'", src)
+    assert values, "disable_auth_typed_confirm keys missing"
+    missing_literal = [value for value in values if "DISABLE AUTH" not in value]
+    assert not missing_literal, (
+        "Disable-auth prompt must display the exact phrase accepted by "
+        f"disableAuth(), but these translations do not: {missing_literal}"
+    )
+
+
 def test_no_native_confirm_calls_remain_in_static_js():
     for path in (REPO / "static").glob("*.js"):
         src = path.read_text(encoding="utf-8")

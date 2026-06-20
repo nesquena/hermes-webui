@@ -9097,7 +9097,7 @@ async function goPasswordless(){
 
 async function disableAuth(){
   const confirmText='DISABLE AUTH';
-  const userInput=await showPromptDialog({title:t('disable_auth_confirm_title'),message:t('disable_auth_confirm_message')+' '+t('disable_auth_typed_confirm'),placeholder:confirmText,danger:true});
+  const userInput=await showPromptDialog({title:t('disable_auth_confirm_title'),message:t('disable_auth_confirm_message')+' '+t('disable_auth_typed_confirm'),placeholder:confirmText,confirmLabel:t('disable_auth'),danger:true});
   if(!userInput || userInput.trim()!==confirmText) return;
   const currentPw=($('settingsCurrentPassword')||{}).value;
   const payload={_clear_password:true};
