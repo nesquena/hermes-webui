@@ -8595,7 +8595,10 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
-        from api.profiles import list_profiles_api
+        from api.profiles import (
+            get_active_profile_name,
+            list_profiles_api,
+        )
 
         return j(
             handler,
