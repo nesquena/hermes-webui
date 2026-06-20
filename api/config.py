@@ -4612,6 +4612,36 @@ def _load_models_cache_from_disk() -> dict | None:
         return None
 
 
+def _load_stale_models_cache_from_disk() -> dict | None:
+    """Load a shape-valid stale /api/models disk cache for timeout fallback only.
+
+    The main cache loader enforces metadata stamps for a full cold-path cache hit.
+    This helper intentionally does not apply that stricter policy, so we can still
+    recover a useful fallback payload when the strict loader rejected cache because
+    metadata or fingerprint fields are stale.
+    """
+    try:
+        import json as _j
+
+        cache_path = _get_models_cache_path()
+        if not cache_path.exists():
+            return None
+        with open(cache_path, encoding="utf-8") as f:
+            cache = _j.load(f)
+        if not _is_valid_models_cache(cache):
+            return None
+        aliases = cache.get("aliases")
+        return {
+            "active_provider": cache["active_provider"],
+            "default_model": cache["default_model"],
+            "configured_model_badges": cache["configured_model_badges"],
+            "groups": cache["groups"],
+            "aliases": aliases if isinstance(aliases, dict) else {},
+        }
+    except Exception:
+        return None
+
+
 def _save_models_cache_to_disk(cache: dict) -> None:
     """Save cache to disk so it survives server restarts.
 
@@ -6349,8 +6379,11 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
     # Then acquire lock and check memory cache.  Cold path runs inside the lock
     # so only one thread rebuilds while others wait.
     disk_groups = None
+    stale_disk_groups = None
     if _available_models_cache is None:
         disk_groups = _load_models_cache_from_disk()
+        if disk_groups is None:
+            stale_disk_groups = _load_stale_models_cache_from_disk()
 
     with _available_models_cache_lock:
         # If another thread is already building, wait for its result instead
@@ -6371,6 +6404,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
             _available_models_cache_ts = 0.0
             _available_models_cache_source_fingerprint = None
             disk_groups = None
+            stale_disk_groups = None
 
         # Serve from memory cache if fresh
         now = time.monotonic()
@@ -6590,14 +6624,12 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
             logger.warning(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
         else:
             logger.info(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
-        # Note: ``disk_groups``, if non-None, was already consumed by the
-        # cold-path early-return at the "Cold path: disk cache hit" branch
-        # above (line ~4608). Any execution that reaches HERE necessarily
-        # took the live-rebuild branch, which means ``disk_groups is None``
-        # at this point — so we don't re-check it. Per Copilot review on
-        # PR #2971: the previous ``if disk_groups is not None`` branch
-        # here was dead code. Fall back directly to the static minimal
-        # catalog (no second disk read).
+        # ``stale_disk_groups`` is shape-valid but failed the strict metadata
+        # checks required for authoritative cold-path use. It was read before
+        # acquiring _available_models_cache_lock so this over-budget fallback
+        # does not extend the lock hold while the worker is ready to publish.
+        if stale_disk_groups is not None:
+            return copy.deepcopy(stale_disk_groups)
         return copy.deepcopy(_static_models_catalog_without_live_probes())
 
 
