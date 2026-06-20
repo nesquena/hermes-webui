@@ -9,7 +9,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_disabled_provider_plugin_renders_disabled_badge(tmp_path):
+def test_provider_badge_uses_active_provider_payload_state(tmp_path):
     script = tmp_path / "check_plugin_badge.js"
     script.write_text(
         textwrap.dedent(
@@ -50,27 +50,41 @@ def test_disabled_provider_plugin_renders_disabled_badge(tmp_path):
 
             eval(extractFunction('_buildPluginCard'));
 
-            const disabled = _buildPluginCard({{
+            const activeExclusive = _buildPluginCard({{
               key: 'memory',
               name: 'Memory',
-              activation: 'provider',
+              activation: 'exclusive',
+              is_active_provider: true,
               enabled: false,
               hooks: [],
             }}).innerHTML;
-            assert(disabled.includes('plugin-card-badge-disabled'), disabled);
-            assert(!disabled.includes('plugin-card-badge-provider'), disabled);
-            assert(disabled.includes('plugins_disabled'), disabled);
+            assert(activeExclusive.includes('plugin-card-badge-provider'), activeExclusive);
+            assert(!activeExclusive.includes('plugin-card-badge-disabled'), activeExclusive);
+            assert(activeExclusive.includes('plugins_active_provider'), activeExclusive);
 
-            const enabled = _buildPluginCard({{
+            const inactiveExclusive = _buildPluginCard({{
               key: 'memory',
               name: 'Memory',
+              activation: 'exclusive',
+              is_active_provider: false,
+              enabled: false,
+              hooks: [],
+            }}).innerHTML;
+            assert(inactiveExclusive.includes('plugin-card-badge-disabled'), inactiveExclusive);
+            assert(!inactiveExclusive.includes('plugin-card-badge-provider'), inactiveExclusive);
+            assert(inactiveExclusive.includes('plugins_disabled'), inactiveExclusive);
+
+            const activeModelProvider = _buildPluginCard({{
+              key: 'openrouter',
+              name: 'OpenRouter',
               activation: 'provider',
+              is_active_provider: true,
               enabled: true,
               hooks: [],
             }}).innerHTML;
-            assert(enabled.includes('plugin-card-badge-provider'), enabled);
-            assert(!enabled.includes('plugin-card-badge-disabled'), enabled);
-            assert(enabled.includes('plugins_active_provider'), enabled);
+            assert(activeModelProvider.includes('plugin-card-badge-provider'), activeModelProvider);
+            assert(!activeModelProvider.includes('plugin-card-badge-disabled'), activeModelProvider);
+            assert(activeModelProvider.includes('plugins_active_provider'), activeModelProvider);
             """
         ),
         encoding="utf-8",

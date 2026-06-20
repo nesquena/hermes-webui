@@ -7546,7 +7546,9 @@ const enabled=plugin&&plugin.enabled!==false;
          </label>
        </div>`
     : '');
-  const isProviderActive = isProvider && enabled && activation !== 'disabled';
+  const isProviderActive = plugin&&typeof plugin.is_active_provider==='boolean'
+    ? plugin.is_active_provider
+    : isProvider;
   let badgeText;
   let badgeClass;
   if(isProviderActive){
