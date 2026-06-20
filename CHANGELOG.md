@@ -13,7 +13,7 @@
 
 ### Fixed
 
-- **`GET /api/profiles` no longer returns a 500 (UnboundLocalError).** A later branch in the request handler imports `get_active_profile_name` as a function-local, which made the name local across the whole handler; the `/api/profiles` branch referenced it before that import ran, so every call to the profiles list endpoint raised `UnboundLocalError`. The branch now imports the name it uses directly. Regression introduced in v0.51.528 and surfaced once the redundant local import was removed there; this restores the profiles list/dropdown. Thanks @TomBanksAU.
+- **`GET /api/profiles` no longer returns a 500 (UnboundLocalError).** A later branch in the request handler imports `get_active_profile_name` as a function-local, which made the name local across the whole handler; the `/api/profiles` branch referenced it before that import ran, so every call to the profiles list endpoint raised `UnboundLocalError`. The branch now imports the name it uses directly. Regression introduced in v0.51.528 and surfaced once the redundant local import was removed there; this restores the profiles list/dropdown. Thanks @MinhoJJang.
 
 ## [v0.51.529] — 2026-06-20 — Release SN (per-response jump button matches the session jump pill)
 
