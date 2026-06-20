@@ -1582,13 +1582,18 @@ _PROVIDER_MODELS = {
 
 
 def _seed_provider_models_from_core() -> None:
-    """Merge models from hermes_cli.models._PROVIDER_MODELS into the WebUI catalog.
+    """Enrich existing provider model lists with missing IDs from hermes_cli.
 
     The core's _PROVIDER_MODELS is the authoritative curated list of agent-capable
     models per provider.  The WebUI's static dict above is a display-oriented copy
     (with {id, label} entries) that can go stale when new models are added to the
     core without a matching WebUI update.  This function bridges the gap by
-    injecting any missing model IDs from the core at startup.
+    injecting any missing model IDs from the core into **existing** WebUI provider
+    entries.
+
+    Constrains seeding to providers already in the WebUI catalog — does NOT add
+    brand-new providers.  Adding new vendors is a maintainer curation decision.
+    Respects per-provider ID conventions (e.g. nous uses @nous:-prefixed IDs).
 
     Safe to call multiple times; only missing entries are added.  Silently no-ops
     if hermes_cli is not importable (standalone WebUI deployments).
@@ -1630,28 +1635,42 @@ def _seed_provider_models_from_core() -> None:
             webui_list = _PROVIDER_MODELS.get(webui_key)
 
         if webui_list is None:
-            # Provider exists in core but not in WebUI — seed the full list.
-            _PROVIDER_MODELS[provider_id] = [
-                {"id": mid, "label": _get_label_for_model(mid, [])}
-                for mid in core_models
-                if isinstance(mid, str) and mid.strip()
-            ]
+            # Provider exists in core but not in the WebUI catalog.
+            # Do NOT seed — adding new vendors is a maintainer curation
+            # decision, not something the seeder should do implicitly (#4413).
             continue
         if not isinstance(webui_list, list):
             continue
         # Provider exists in both — inject missing model IDs.
-        existing_ids = {
-            (m.get("id") if isinstance(m, dict) else str(m)).replace("-", ".").lower()
+        # Detect per-provider ID prefix convention (e.g. nous uses @nous:).
+        # The merge must respect each provider's existing ID format rather
+        # than injecting the core's raw IDs (#4413).
+        _existing_ids_raw: list[str] = [
+            (m.get("id") if isinstance(m, dict) else str(m)) or ""
             for m in webui_list
             if isinstance(m, dict) and m.get("id")
+        ]
+        _prefix = ""
+        if _existing_ids_raw and all(i.startswith("@") and ":" in i for i in _existing_ids_raw):
+            _prefix = _existing_ids_raw[0].split(":", 1)[0] + ":"
+
+        def _strip_prefix(mid: str, prefix: str = _prefix) -> str:
+            if prefix and mid.startswith(prefix):
+                return mid[len(prefix):]
+            return mid
+
+        existing_ids = {
+            _strip_prefix(mid).replace("-", ".").lower()
+            for mid in _existing_ids_raw
         }
         for mid in core_models:
             if not isinstance(mid, str) or not mid.strip():
                 continue
             normed = mid.strip().replace("-", ".").lower()
             if normed not in existing_ids:
+                inject_id = (_prefix + mid.strip()) if _prefix else mid.strip()
                 webui_list.append({
-                    "id": mid.strip(),
+                    "id": inject_id,
                     "label": _get_label_for_model(mid.strip(), []),
                 })
 

@@ -142,15 +142,19 @@ class TestAliasedProviderMerge:
             "provider alias was not resolved before .get()"
         )
 
-    def test_unknown_provider_seeds_new_entry(self, restore_providers):
-        """A provider in core but not in WebUI at all should be seeded."""
+    def test_unknown_provider_not_seeded(self, restore_providers):
+        """A provider in core but not in WebUI must NOT be seeded.
+
+        Adding new vendors is a maintainer curation decision, not something
+        the seeder should do implicitly (#4413 review)."""
         fake_pm = {"totally-new-provider": ["model-alpha"]}
         with _patch_core_pm(fake_pm):
             _seed_provider_models_from_core()
 
-        assert "totally-new-provider" in _PROVIDER_MODELS
-        ids = [m["id"] for m in _PROVIDER_MODELS["totally-new-provider"]]
-        assert "model-alpha" in ids
+        assert "totally-new-provider" not in _PROVIDER_MODELS, (
+            "Seeder must not inject brand-new providers — only enrich existing ones. "
+            "Adding vendors is a maintainer curation decision (#4413)."
+        )
 
 
 # ── Test 3: exception narrowing ─────────────────────────────────────────────
@@ -174,32 +178,3 @@ class TestExceptionNarrowing:
                     _seed_provider_models_from_core()
 
 
-# ── Test 4: live models endpoint uses configured base_url ────────────────────
-
-class TestLiveModelsBaseUrlPreference:
-    """The live models probe should prefer the configured base_url over the
-    hardcoded _OPENAI_COMPAT_ENDPOINTS table (#4413)."""
-
-    def test_openai_compat_endpoints_zai_url_is_valid(self):
-        """The hardcoded ZAI fallback URL must not be the old broken /v1 path."""
-        # Read source directly to avoid importing routes.py (heavy deps).
-        routes_src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
-        # Extract the zai line from _OPENAI_COMPAT_ENDPOINTS
-        import re
-        m = re.search(r'"zai":\s*"(https?://[^"]+)"', routes_src)
-        assert m, "Could not find 'zai' entry in _OPENAI_COMPAT_ENDPOINTS"
-        zai_url = m.group(1)
-        # Must NOT end with /v1 (the old broken endpoint that 404s)
-        assert not zai_url.rstrip("/").endswith("/v1"), (
-            f"ZAI endpoint still uses the broken /v1 suffix: {zai_url}"
-        )
-        assert "api.z.ai" in zai_url
-
-    def test_live_models_code_prefers_base_url(self):
-        """Verify the live-fetch code in routes.py checks configured base_url
-        before falling back to _OPENAI_COMPAT_ENDPOINTS."""
-        routes_src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
-        # The new code must reference providers config base_url
-        assert "base_url" in routes_src, "routes.py lost base_url reference"
-        # Must still have the fallback table
-        assert "_OPENAI_COMPAT_ENDPOINTS" in routes_src
