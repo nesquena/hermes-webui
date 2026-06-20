@@ -3362,14 +3362,38 @@ def _is_openai_family_provider(provider: str | None) -> bool:
     return resolved in ("openai", "openai-api", "openai-codex")
 
 
+def _main_model_supports_service_tier(
+    model_id: str | None,
+    provider: str | None,
+) -> bool:
+    """Return True when the current main-model selection can use OpenAI service tier."""
+    if not _is_openai_family_provider(provider):
+        return False
+    raw_model = str(model_id or "").strip().lower()
+    if not raw_model:
+        return True
+    if "/" in raw_model:
+        prefix, bare_model = raw_model.split("/", 1)
+        if prefix != "openai":
+            return False
+    else:
+        bare_model = raw_model
+    return (
+        _is_first_party_model("openai", bare_model)
+        or _is_first_party_model("openai-codex", bare_model)
+        or bare_model.startswith(("gpt-", "o1", "o3", "o4"))
+    )
+
+
 def _public_main_service_tier(model_cfg: dict) -> str:
     """Return the saved main-model service tier only for OpenAI-family providers."""
     if not isinstance(model_cfg, dict):
         return ""
+    model_id = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
     provider = str(model_cfg.get("provider") or "").strip().lower()
     if not provider:
-        _, provider, _ = resolve_model_provider(str(model_cfg.get("default") or ""))
-    if not _is_openai_family_provider(provider):
+        _, provider, _ = resolve_model_provider(model_id)
+    if not _main_model_supports_service_tier(model_id, provider):
         return ""
     service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
     return "priority" if service_tier == "priority" else ""
@@ -3383,10 +3407,11 @@ def _main_model_request_overrides(config_data: dict) -> dict:
     if not isinstance(model_cfg, dict):
         return {}
     overrides = {}
+    model_id = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
     resolved_provider = str(model_cfg.get("provider") or "").strip().lower()
     if not resolved_provider:
-        _, resolved_provider, _ = resolve_model_provider(str(model_cfg.get("default") or ""))
-    if _is_openai_family_provider(resolved_provider):
+        _, resolved_provider, _ = resolve_model_provider(model_id)
+    if _main_model_supports_service_tier(model_id, resolved_provider):
         service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
         if service_tier == "priority":
             overrides["service_tier"] = "priority"
@@ -3499,7 +3524,7 @@ def set_hermes_default_model(model_id: str, advanced: dict | None = None) -> dic
                 model_cfg.pop("base_url", None)
 
         _apply_advanced_model_options(model_cfg, advanced)
-        if not _is_openai_family_provider(persisted_provider):
+        if not _main_model_supports_service_tier(persisted_model, persisted_provider):
             model_cfg.pop("service_tier", None)
 
         config_data["model"] = model_cfg

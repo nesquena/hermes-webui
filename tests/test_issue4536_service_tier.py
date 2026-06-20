@@ -69,6 +69,11 @@ class TestIssue4536ServiceTier:
         )
         assert openai_alias_payload == {"service_tier": "priority"}
 
+        stale_openai_payload = config._main_model_request_overrides(
+            {"model": {"provider": "openai", "default": "meta-llama/llama-3.1", "service_tier": "priority"}},
+        )
+        assert stale_openai_payload == {}
+
     def test_auxiliary_payload_hides_service_tier_for_non_openai_main_models(self, monkeypatch, tmp_path):
         """Saved service_tier should not be re-exposed once the main model switches away from OpenAI."""
         from api import config
@@ -97,8 +102,8 @@ class TestIssue4536ServiceTier:
         monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
         monkeypatch.setattr(
             config,
-            "resolve_model_provider",
-            lambda model: (model, "openrouter", None),
+            "cfg",
+            {"model": {"provider": "openai", "default": "gpt-5.5"}},
         )
 
         result = config.set_hermes_default_model("meta-llama/llama-3.1")
