@@ -5213,15 +5213,36 @@ async function respondClarify(response) {
       if (typeof setStatus === "function") setStatus(errMsg);
     }
   } catch(e) {
-    // Stale (409) or network error — keep the card and draft visible so the user can retry.
+    // The server returns 409 with ``stale: true`` for both genuinely-expired
+    // prompts and wrong-session/next-prompt-loaded races. In both cases the
+    // server-side ``_pending`` entry is gone, so retrying with the same
+    // ``clarify_id`` can never succeed — the prior keep-card-and-draft
+    // behavior left the user with a permanently 409-ing card and a locked
+    // composer, with no affordance to dismiss it (#4504). Treat 409 as
+    // terminal here: hand the draft to the unlocked composer via
+    // ``hideClarifyCard(true, 'expired')`` (which routes through
+    // ``_stashClarifyDraft('expired')``). If a *new* clarify event is queued
+    // for this session, the SSE/poll path will re-render the card from
+    // scratch via ``showClarifyCard`` with the new ``clarify_id`` — so we do
+    // not lose the next-prompt case from #2639, we just stop pretending the
+    // *current* card is recoverable.
+    if (e && e.status === 409) {
+      hideClarifyCard(true, "expired");
+      const errMsg = (e.message || "Clarification prompt expired or not found.");
+      if (typeof setStatus === "function") setStatus("Clarify: " + errMsg);
+      // Suppress the duplicate toast here: ``_stashClarifyDraft('expired')``
+      // already surfaces "Clarification timed out. Your draft was kept in
+      // the composer." via showToast, which is the actionable message.
+      return;
+    }
+    // Network / other transient errors — keep the card and draft visible so
+    // the user can retry once connectivity returns.
     _clarifySetControlsDisabled(false, false);
     if (input) {
       input.value = draft;
       input.focus();
     }
-    const errMsg = (e && e.status === 409)
-      ? (e.message || "Clarification prompt expired or not found.")
-      : ((e && e.message) || "Failed to deliver clarification response.");
+    const errMsg = (e && e.message) || "Failed to deliver clarification response.";
     if (typeof setStatus === "function") setStatus("Clarify: " + errMsg);
     if (typeof showToast === "function") showToast(errMsg, 5000);
   }
