@@ -44,6 +44,10 @@ class _FakeHandler:
         if cookie:
             self.headers["Cookie"] = cookie
         self.request = None
+        # First-password setup is gated to local/private clients when auth is
+        # disabled. These in-process settings tests exercise the local bootstrap
+        # path, so model a loopback request explicitly.
+        self.client_address = ("127.0.0.1", 0)
 
     def send_response(self, status):
         self.status = status
