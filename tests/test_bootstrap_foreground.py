@@ -414,6 +414,29 @@ class TestMainForegroundRouting:
         assert os.environ["HERMES_HOME"] == str(hermes_home.resolve())
         assert os.environ["HERMES_WEBUI_STATE_DIR"] == str((hermes_home / "webui").resolve())
 
+    def test_foreground_uses_platform_default_home_without_exporting_hermes_home(self, stub_main_dependencies, clean_env, monkeypatch, tmp_path):
+        bs = stub_main_dependencies
+        hermes_home = tmp_path / "platform-home"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.delenv("HERMES_WEBUI_STATE_DIR", raising=False)
+        monkeypatch.setattr(bs, "_platform_default_hermes_home", lambda: hermes_home)
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground"])
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(os, "chdir", lambda p: None)
+        monkeypatch.setattr(os, "access", lambda path, mode: True)
+
+        def fake_execv(*_args):
+            raise SystemExit(0)
+
+        monkeypatch.setattr(os, "execv", fake_execv)
+
+        with pytest.raises(SystemExit):
+            bs.main()
+
+        assert "HERMES_HOME" not in os.environ
+        assert os.environ["HERMES_WEBUI_STATE_DIR"] == str((hermes_home / "webui").resolve())
+
 
 class TestForegroundEnvAndCwd:
     """The post-execv server.py inherits os.environ and cwd from us."""

@@ -17,6 +17,8 @@ import venv
 import webbrowser
 from pathlib import Path
 
+from api.paths import _platform_default_hermes_home
+
 
 INSTALLER_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
 REPO_ROOT = Path(__file__).resolve().parent
@@ -494,9 +496,10 @@ def main() -> int:
 
     python_exe = ensure_python_has_webui_deps(discover_launcher_python(agent_dir), agent_dir)
     configured_hermes_home = (os.getenv("HERMES_HOME") or "").strip()
-    hermes_home = Path(
-        configured_hermes_home or (Path.home() / ".hermes")
-    ).expanduser().resolve()
+    if configured_hermes_home:
+        hermes_home = Path(configured_hermes_home).expanduser().resolve()
+    else:
+        hermes_home = _platform_default_hermes_home().expanduser().resolve()
     configured_state_dir = (os.getenv("HERMES_WEBUI_STATE_DIR") or "").strip()
     state_dir = Path(
         configured_state_dir
@@ -505,7 +508,10 @@ def main() -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
 
     # Mutate os.environ so child (or post-execv) inherits the resolved values.
-    os.environ["HERMES_HOME"] = str(hermes_home)
+    if configured_hermes_home:
+        os.environ["HERMES_HOME"] = str(hermes_home)
+    else:
+        os.environ.pop("HERMES_HOME", None)
     os.environ["HERMES_WEBUI_HOST"] = args.host
     os.environ["HERMES_WEBUI_PORT"] = str(args.port)
     os.environ["HERMES_WEBUI_STATE_DIR"] = str(state_dir)

@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+- **Isolated single-profile launches now keep their profile home and WebUI state pinned to the intended startup path, even through foreground bootstrap handoff and blank state-dir envs (#2698, folds #4449).** When `HERMES_HOME` points at `$BASE/profiles/<name>`, WebUI now treats that deployment as single-profile: profile/session/project reads stay scoped to that home, cross-profile mutations and aggregate imports are blocked, cron attribution stays on the isolated profile, default `STATE_DIR` follows the pinned home, and `HERMES_WEBUI_SERVER_CWD` lets operators move fallback relative writes out of a read-only agent dir.
+
 ## [v0.51.502] — 2026-06-18 — Release RL (CLI/gateway sessions appear immediately; sidebar-cache invalidation hardened)
 
 ### Fixed
