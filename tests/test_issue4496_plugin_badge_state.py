@@ -62,6 +62,17 @@ def test_provider_badge_uses_active_provider_payload_state(tmp_path):
             assert(!activeExclusive.includes('plugin-card-badge-disabled'), activeExclusive);
             assert(activeExclusive.includes('plugins_active_provider'), activeExclusive);
 
+            const legacyFlatKeyExclusive = _buildPluginCard({{
+              key: 'noema',
+              name: 'Noema',
+              activation: 'exclusive',
+              enabled: false,
+              hooks: [],
+            }}).innerHTML;
+            assert(legacyFlatKeyExclusive.includes('plugin-card-badge-provider'), legacyFlatKeyExclusive);
+            assert(!legacyFlatKeyExclusive.includes('plugin-card-badge-disabled'), legacyFlatKeyExclusive);
+            assert(legacyFlatKeyExclusive.includes('plugins_active_provider'), legacyFlatKeyExclusive);
+
             const inactiveExclusive = _buildPluginCard({{
               key: 'memory',
               name: 'Memory',

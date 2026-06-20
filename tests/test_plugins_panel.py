@@ -198,6 +198,30 @@ class TestPluginsApi:
         assert plugin["enabled"] is False
         assert plugin["is_active_provider"] is False
 
+    def test_api_plugins_omits_active_provider_for_flat_key_exclusive_plugins(self):
+        manager = _FakePluginManager({
+            "noema": _FakeLoadedPlugin(
+                _FakeManifest(
+                    name="noema",
+                    key="noema",
+                    version="0.1.0",
+                    description="Flat-key memory provider",
+                    kind="exclusive",
+                ),
+                enabled=False,
+                hooks_registered=[],
+            )
+        })
+
+        with patch("api.config.get_config", return_value={"memory": {"provider": "noema"}}):
+            payload = self._capture_plugins_response(manager)
+
+        plugin = payload["plugins"][0]
+        assert plugin["kind"] == "exclusive"
+        assert plugin["activation"] == "exclusive"
+        assert plugin["enabled"] is False
+        assert "is_active_provider" not in plugin
+
     def test_api_plugins_marks_active_model_provider(self):
         # model-provider plugins that loaded successfully (loaded.enabled True)
         # get the "provider" activation badge so the panel can distinguish

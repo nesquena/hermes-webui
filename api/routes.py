@@ -7109,10 +7109,12 @@ def _plugin_visibility_payload(manager=None) -> dict:
     category's ``<category>.provider`` config, not through ``plugins.enabled``.
     Their ``loaded.enabled`` stays False by design and they register hooks
     outside the four visibility hooks below. The payload surfaces ``kind``
-    and ``activation`` plus ``is_active_provider`` so the panel can render the
-    selected provider distinctly instead of mislabeling it as "Disabled" with no
-    hooks (issue #2659), while still showing unselected exclusive providers as
-    disabled.
+    and ``activation`` plus ``is_active_provider`` when the plugin key carries a
+    category prefix so the panel can render the selected provider distinctly
+    instead of mislabeling it as "Disabled" with no hooks (issue #2659), while
+    still showing unselected exclusive providers as disabled. Flat-key exclusive
+    plugins omit the new field so older activation-based badge semantics remain
+    intact when the category cannot be inferred.
     """
     manager = manager or _get_plugin_manager_for_visibility()
     manager.discover_and_load(force=False)
@@ -7143,17 +7145,22 @@ def _plugin_visibility_payload(manager=None) -> dict:
             activation = "provider"
         else:
             activation = "enabled" if enabled_flag else "disabled"
-        is_active_provider = (
-            (kind == "exclusive" and bool(selected_provider) and plugin_slug == selected_provider)
-            or (kind == "model-provider" and enabled_flag)
-        )
+        include_active_provider = True
+        if kind == "exclusive":
+            if category:
+                is_active_provider = bool(selected_provider) and plugin_slug == selected_provider
+            else:
+                include_active_provider = False
+                is_active_provider = False
+        else:
+            is_active_provider = kind == "model-provider" and enabled_flag
         registered = []
         for hook in list(getattr(manifest, "provides_hooks", []) or []) + list(getattr(loaded, "hooks_registered", []) or []):
             hook_name = str(hook or "").strip()
             if hook_name in _PLUGIN_VISIBILITY_HOOK_SET and hook_name not in registered:
                 registered.append(hook_name)
         registered.sort(key=_PLUGIN_VISIBILITY_HOOKS.index)
-        plugins.append({
+        plugin_payload = {
             "name": name,
             "key": plugin_key or name,
             "version": version,
@@ -7163,9 +7170,11 @@ def _plugin_visibility_payload(manager=None) -> dict:
             "enabled": enabled_flag,
             "kind": kind,
             "activation": activation,
-            "is_active_provider": bool(is_active_provider),
             "hooks": registered,
-        })
+        }
+        if include_active_provider:
+            plugin_payload["is_active_provider"] = bool(is_active_provider)
+        plugins.append(plugin_payload)
 
     return {
         "plugins": plugins,
