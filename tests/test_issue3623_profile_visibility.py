@@ -5,6 +5,8 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,6 +21,15 @@ def _profile_row(name: str, path: Path, *, is_default: bool = False):
         provider=None,
         has_env=False,
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_profile_rows_cache():
+    import api.profiles as profiles
+
+    profiles._LIST_PROFILES_CACHE = None
+    yield
+    profiles._LIST_PROFILES_CACHE = None
 
 
 def _install_fake_hermes_profiles(monkeypatch, rows):

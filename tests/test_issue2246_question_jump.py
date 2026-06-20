@@ -23,7 +23,7 @@ def test_assistant_footer_gets_completed_turn_question_jump_button():
     assert "const _qJumpTarget=(!isUser&&!m._live)?questionRawIdxByAssistantRawIdx.get(rawIdx):undefined;" in UI_JS
     assert "const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)" in UI_JS
     assert "_questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)" in UI_JS
-    assert "msg-question-jump-btn" in UI_JS
+    assert "msg-question-jump-btn session-jump-btn session-jump-btn--inline" in UI_JS
 
 
 def test_multi_segment_turn_jumps_to_first_assistant_segment():
@@ -48,13 +48,19 @@ def test_question_jump_expands_windowed_history_and_highlights_question():
     assert "msg-question-highlight" in UI_JS
 
 
-def test_question_jump_button_is_quiet_and_compact_on_mobile():
+def test_question_jump_button_matches_bottom_button_size_on_mobile():
     assert ".msg-question-jump-btn" in STYLE_CSS
+    assert ".session-jump-btn--inline" in STYLE_CSS
+    assert "height: 32px;" in STYLE_CSS
+    assert "min-width: 32px;" in STYLE_CSS
+    assert "padding: 0 11px;" in STYLE_CSS
     assert "margin-left: auto;" in STYLE_CSS
     assert ".msg-question-highlight .msg-body" in STYLE_CSS
     assert "@keyframes question-highlight-pulse" in STYLE_CSS
     assert "@media (max-width: 600px)" in STYLE_CSS
-    assert ".msg-question-jump-btn { padding: 3px 4px; }" in STYLE_CSS
+    assert "width: 32px;" in STYLE_CSS
+    assert "max-width: 32px;" in STYLE_CSS
+    assert ".msg-question-jump-btn span:last-child { display: none; }" in STYLE_CSS
 
 
 def test_question_jump_text_is_localized():

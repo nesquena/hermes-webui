@@ -429,6 +429,7 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
 # module keep resolving without per-call-site refactors.
 from api.profiles import (  # noqa: F401, E402  (re-export)
     _profiles_match,
+    _is_isolated_profile_mode,
     get_active_profile_name,
     get_active_profile_name as _get_active_profile_name,
 )
@@ -443,6 +444,11 @@ def _all_profiles_query_flag(parsed_url) -> bool:
     qs = parse_qs(parsed_url.query)
     raw = qs.get('all_profiles', [''])[0].strip().lower()
     return raw in ('1', 'true', 'yes', 'on')
+
+
+def _all_profiles_enabled(parsed_url) -> bool:
+    """Enable aggregate profile reads only when the request asks and mode allows it."""
+    return _all_profiles_query_flag(parsed_url) and not _is_isolated_profile_mode()
 
 
 def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
@@ -1927,7 +1933,7 @@ def _build_session_list_cache_payload(
         other_profile_count = 0
     else:
         scoped = [s for s in merged if _profiles_match(s.get("profile"), active_profile)]
-        other_profile_count = len(merged) - len(scoped)
+        other_profile_count = 0 if _is_isolated_profile_mode() else len(merged) - len(scoped)
     diag_stage("messaging_dedupe")
     scoped = _keep_latest_messaging_session_per_source(
         scoped,
@@ -8175,7 +8181,7 @@ def handle_get(handler, parsed) -> bool:
             show_cron_sessions = bool(settings.get("show_cron_sessions"))
             agent_session_source_filter = settings.get("agent_session_source_filter")
             active_profile = get_active_profile_name()
-            all_profiles = _all_profiles_query_flag(parsed)
+            all_profiles = _all_profiles_enabled(parsed)
             key = _session_list_cache_key(
                 active_profile=active_profile,
                 all_profiles=all_profiles,
@@ -8213,17 +8219,20 @@ def handle_get(handler, parsed) -> bool:
         from api.profiles import get_active_profile_name
         active_profile = get_active_profile_name()
         all_projects = load_projects()
-        all_profiles = _all_profiles_query_flag(parsed)
+        isolated_profile_mode = _is_isolated_profile_mode()
+        all_profiles = _all_profiles_enabled(parsed)
         if all_profiles:
             scoped = all_projects
+            other_profile_count = 0
         else:
             scoped = [p for p in all_projects
                       if _profiles_match(p.get("profile"), active_profile)]
+            other_profile_count = 0 if isolated_profile_mode else len(all_projects) - len(scoped)
         return j(handler, {
             "projects": scoped,
             "all_profiles": all_profiles,
             "active_profile": active_profile,
-            "other_profile_count": len(all_projects) - len(scoped),
+            "other_profile_count": other_profile_count,
         })
 
     if parsed.path == "/api/prompts":
@@ -8586,11 +8595,15 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
-        from api.profiles import list_profiles_api, get_active_profile_name
+        from api.profiles import list_profiles_api
 
         return j(
             handler,
-            {"profiles": list_profiles_api(), "active": get_active_profile_name()},
+            {
+                "profiles": list_profiles_api(),
+                "active": get_active_profile_name(),
+                "single_profile_mode": _is_isolated_profile_mode(),
+            },
         )
 
     if parsed.path == "/api/profile/active":
@@ -10064,6 +10077,8 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, result, extra_headers={
                 'Set-Cookie': build_profile_cookie(name, handler),
             })
+        except PermissionError as e:
+            return bad(handler, _sanitize_error(e), 403)
         except (ValueError, FileNotFoundError) as e:
             return bad(handler, _sanitize_error(e), 404)
         except RuntimeError as e:
@@ -10104,6 +10119,8 @@ def handle_post(handler, parsed) -> bool:
                 model_provider=model_provider,
             )
             return j(handler, {"ok": True, "profile": result})
+        except PermissionError as e:
+            return bad(handler, _sanitize_error(e), 403)
         except (ValueError, FileExistsError, RuntimeError) as e:
             return bad(handler, str(e))
 
@@ -10117,6 +10134,8 @@ def handle_post(handler, parsed) -> bool:
             _validate_profile_name(name)
             result = delete_profile_api(name)
             return j(handler, result)
+        except PermissionError as e:
+            return bad(handler, _sanitize_error(e), 403)
         except (ValueError, FileNotFoundError) as e:
             return bad(handler, _sanitize_error(e))
         except RuntimeError as e:
@@ -11177,7 +11196,7 @@ def _handle_sessions_search(handler, parsed):
     content_search = qs.get("content", ["1"])[0] == "1"
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name()
-    all_profiles = _all_profiles_query_flag(parsed)
+    all_profiles = _all_profiles_enabled(parsed)
     sessions = all_sessions()
     if not all_profiles:
         sessions = [
@@ -18065,6 +18084,8 @@ def _handle_session_import_cli(handler, body):
     if requested_profile == "":
         return bad(handler, "invalid profile", 400)
     allow_all_profiles = _request_wants_all_profiles_import(body)
+    if allow_all_profiles and _is_isolated_profile_mode():
+        return bad(handler, "all_profiles import is not allowed in isolated profile mode", 403)
     if allow_all_profiles and not requested_profile:
         return bad(handler, "profile is required for all_profiles import", 400)
 

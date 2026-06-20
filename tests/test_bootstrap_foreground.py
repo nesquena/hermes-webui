@@ -92,6 +92,9 @@ def clean_env(monkeypatch):
         "HERMES_WEBUI_HOST",
         "HERMES_WEBUI_PORT",
         "HERMES_WEBUI_AGENT_DIR",
+        "HERMES_WEBUI_STATE_DIR",
+        "HERMES_WEBUI_SERVER_CWD",
+        "HERMES_HOME",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -346,6 +349,27 @@ class TestMainForegroundRouting:
             bs.main()
         assert len(execv_calls) == 1
 
+    def test_foreground_defaults_state_dir_to_hermes_home_webui(self, stub_main_dependencies, clean_env, monkeypatch, tmp_path):
+        bs = stub_main_dependencies
+        hermes_home = tmp_path / ".hermes" / "profiles" / "webui"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("HERMES_WEBUI_STATE_DIR", raising=False)
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground"])
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(os, "chdir", lambda p: None)
+        monkeypatch.setattr(os, "access", lambda path, mode: True)
+
+        def fake_execv(*_args):
+            raise SystemExit(0)
+
+        monkeypatch.setattr(os, "execv", fake_execv)
+
+        with pytest.raises(SystemExit):
+            bs.main()
+
+        assert os.environ["HERMES_WEBUI_STATE_DIR"] == str(hermes_home / "webui")
+
 
 class TestForegroundEnvAndCwd:
     """The post-execv server.py inherits os.environ and cwd from us."""
@@ -383,6 +407,49 @@ class TestForegroundEnvAndCwd:
             bs.main()
         assert len(chdir_calls) == 1
         assert chdir_calls[0] == str(agent_dir)
+
+    def test_foreground_chdirs_to_server_cwd_override_before_launch(self, setup, monkeypatch, clean_env, tmp_path):
+        bs, _agent_dir = setup
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.setenv("HERMES_WEBUI_SERVER_CWD", str(workspace))
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground"])
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        chdir_calls = []
+        monkeypatch.setattr(os, "chdir", lambda p: chdir_calls.append(p))
+
+        def fake_execv(*_args):
+            raise SystemExit(0)
+
+        monkeypatch.setattr(os, "execv", fake_execv)
+
+        with pytest.raises(SystemExit):
+            bs.main()
+
+        assert chdir_calls == [str(workspace)]
+
+    def test_windows_foreground_popen_uses_server_cwd_override(self, setup, monkeypatch, clean_env, tmp_path):
+        bs, _agent_dir = setup
+        workspace = tmp_path / "workspace-win"
+        workspace.mkdir()
+        monkeypatch.setenv("HERMES_WEBUI_SERVER_CWD", str(workspace))
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground"])
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(os, "chdir", lambda p: None)
+
+        popen_calls = []
+
+        def fake_popen(*args, **kwargs):
+            popen_calls.append((args, kwargs))
+            return None
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+        with pytest.raises(SystemExit):
+            bs.main()
+
+        assert popen_calls[0][1]["cwd"] == str(workspace)
 
     def test_foreground_exports_resolved_env_vars(self, setup, monkeypatch, clean_env):
         bs, agent_dir = setup

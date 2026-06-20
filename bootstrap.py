@@ -494,7 +494,8 @@ def main() -> int:
 
     python_exe = ensure_python_has_webui_deps(discover_launcher_python(agent_dir), agent_dir)
     state_dir = Path(
-        os.getenv("HERMES_WEBUI_STATE_DIR", str(Path.home() / ".hermes" / "webui"))
+        os.getenv("HERMES_WEBUI_STATE_DIR")
+        or Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes")) / "webui"
     ).expanduser()
     state_dir.mkdir(parents=True, exist_ok=True)
 
@@ -505,7 +506,8 @@ def main() -> int:
     if agent_dir:
         os.environ["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
 
-    server_cwd = str(agent_dir or REPO_ROOT)
+    # Let operators move fallback relative writes out of a read-only agent dir.
+    server_cwd = os.environ.get("HERMES_WEBUI_SERVER_CWD", "").strip() or str(agent_dir or REPO_ROOT)
     server_path = str(REPO_ROOT / "server.py")
     # Scheme the server will advertise (HTTPS when TLS cert+key are configured).
     scheme = "https" if _tls_probe_enabled() else "http"
@@ -547,6 +549,8 @@ def main() -> int:
             # for SO_EXCLUSIVEADDRUSE.
             _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             subprocess.Popen([python_exe, server_path],
+                             cwd=server_cwd,
+                             env=os.environ.copy(),
                              creationflags=_CREATE_NEW_PROCESS_GROUP)
             sys.exit(0)
         os.execv(python_exe, [python_exe, server_path])

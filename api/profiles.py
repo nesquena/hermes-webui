@@ -33,6 +33,15 @@ _PROFILE_DIRS = [
 ]
 _CLONE_CONFIG_FILES = ['config.yaml', '.env', 'SOUL.md']
 
+# ── Snapshot initial HERMES_HOME before init_profile_state() mutates it ──────
+# _is_isolated_profile_mode() needs to detect whether HERMES_HOME *at startup*
+# points to a profile subdirectory (e.g., ~/.hermes/profiles/user1), not the
+# base home (~/.hermes). But init_profile_state() overwrites HERMES_HOME to the
+# base home, which would disable isolation detection. Snapshot it here at import
+# time (before init_profile_state runs) and use the snapshot in the detector.
+_INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
+_ISOLATED_SYMLINK_WARNING_EMITTED = False
+
 # ── Module state ────────────────────────────────────────────────────────────
 _active_profile = 'default'
 _profile_lock = threading.Lock()
@@ -114,6 +123,52 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
     if home.parent.name == 'profiles':
         return home.parent.parent
     return home
+
+
+def _is_isolated_profile_mode() -> bool:
+    """Detect isolated single-profile mode from HERMES_HOME env var.
+
+    Returns True when HERMES_HOME points at a concrete profile subdirectory
+    (e.g., ~/.hermes/profiles/user1) rather than the base home (~/.hermes).
+    This indicates a single-profile deployment where the WebUI should pin to
+    that profile and reject cross-profile operations.
+
+    Isolation is derived only from the literal ``*/profiles/<name>`` shape of
+    HERMES_HOME at startup. A normal multi-profile deployment points
+    HERMES_HOME at the base home (``~/.hermes``), which does not match the
+    shape, so isolation stays off. We deliberately do not key this off
+    HERMES_BASE_HOME: that variable normally points at the base home already,
+    so using it as an opt-out silently disables legitimate isolated-profile
+    deployments.
+
+    Uses _INITIAL_HERMES_HOME (snapshotted at import time) to detect isolation,
+    not the current os.environ value. init_profile_state() overwrites HERMES_HOME
+    at startup, which would disable isolation detection if we read it here.
+    """
+    hermes_home = _INITIAL_HERMES_HOME
+    if not hermes_home:
+        return False
+
+    p = Path(hermes_home).expanduser()
+    # Check if this path looks like ~/.hermes/profiles/<name>
+    # i.e., parent dir is named 'profiles' and grandparent exists
+    if p.parent.name == 'profiles' and p.parent.parent.exists():
+        return True
+    if p.is_symlink():
+        global _ISOLATED_SYMLINK_WARNING_EMITTED
+        if not _ISOLATED_SYMLINK_WARNING_EMITTED:
+            logger.warning(
+                "HERMES_HOME symlink %s does not literally match */profiles/<name>; "
+                "isolated profile mode is disabled unless the literal profile path is used.",
+                p,
+            )
+            _ISOLATED_SYMLINK_WARNING_EMITTED = True
+    return False
+
+
+def _isolated_profile_name() -> str:
+    """Return the profile directory name from _INITIAL_HERMES_HOME."""
+    return Path(_INITIAL_HERMES_HOME).expanduser().name
 
 
 def _resolve_base_hermes_home() -> Path:
@@ -281,9 +336,12 @@ def get_active_profile_name() -> str:
     """Return the currently active profile name.
 
     Priority:
-      1. Thread-local (set per-request from hermes_profile cookie) — issue #798
-      2. Process-level default (_active_profile)
+      1. Isolated-profile deployment name from the configured HERMES_HOME path
+      2. Thread-local (set per-request from hermes_profile cookie) — issue #798
+      3. Process-level default (_active_profile)
     """
+    if _is_isolated_profile_mode():
+        return _isolated_profile_name()
     tls_name = getattr(_tls, 'profile', None)
     if tls_name is not None:
         return tls_name
@@ -318,6 +376,17 @@ def _resolve_profile_home_for_name(name: str) -> Path:
     names fall back to the base home so traversal-shaped cookie values cannot
     influence filesystem paths.
     """
+    # In isolated mode, every logical profile lookup clamps to the configured
+    # startup HERMES_HOME so callers cannot resolve a foreign profile path.
+    if _is_isolated_profile_mode():
+        isolated_name = _isolated_profile_name()
+        isolated_home = Path(_INITIAL_HERMES_HOME).expanduser()
+        if name and not _profiles_match(name, isolated_name):
+            logger.warning(
+                "Ignoring profile lookup %r in isolated profile mode; using pinned profile %r",
+                name, isolated_name,
+            )
+        return isolated_home
     if not name or _is_root_profile(name):
         return _DEFAULT_HERMES_HOME
     if not _PROFILE_ID_RE.fullmatch(name):
@@ -331,6 +400,8 @@ def get_active_hermes_home() -> Path:
     Uses get_active_profile_name() so per-request TLS context (issue #798)
     is respected, not just the process-level global.
     """
+    if _is_isolated_profile_mode():
+        return Path(_INITIAL_HERMES_HOME).expanduser()
     return _resolve_profile_home_for_name(get_active_profile_name())
 
 
@@ -378,6 +449,14 @@ def _home_for_scheduled_cron_job(job: dict) -> Path:
     fall back to the server default rather than crashing every scheduler tick.
     """
     raw = str((job or {}).get('profile') or '').strip()
+    if _is_isolated_profile_mode():
+        active = _isolated_profile_name()
+        if raw and not _profiles_match(raw, active):
+            logger.warning(
+                "Cron job %s references profile %r outside isolated profile %r; falling back to isolated home",
+                (job or {}).get('id', '?'), raw, active,
+            )
+        return get_active_hermes_home()
     if not raw:
         return get_active_hermes_home()
     if _is_root_profile(raw):
@@ -428,6 +507,8 @@ def install_cron_scheduler_profile_isolation() -> None:
                 return original(job, *args, **kwargs)
         finally:
             event_profile = str((job or {}).get("profile") or "").strip() or None
+            if _is_isolated_profile_mode():
+                event_profile = _isolated_profile_name()
             try:
                 publish_session_list_changed("cron_complete", profile=event_profile)
             except TypeError:
@@ -965,8 +1046,12 @@ def init_profile_state() -> None:
     module-level cached paths.  Called once from config.py after imports.
     """
     global _active_profile
-    _active_profile = _read_active_profile_file()
-    home = get_active_hermes_home()
+    if _is_isolated_profile_mode():
+        _active_profile = _isolated_profile_name()
+        home = Path(_INITIAL_HERMES_HOME).expanduser()
+    else:
+        _active_profile = _read_active_profile_file()
+        home = get_active_hermes_home()
     _set_hermes_home(home)
     install_cron_scheduler_profile_isolation()
     _reload_dotenv(home)
@@ -978,6 +1063,9 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     Validates the profile exists, updates process state, patches module caches,
     reloads .env, and reloads config.yaml.
 
+    In isolated profile mode, switching to a different profile is rejected (403).
+    Switching to the isolated profile itself is allowed (idempotent).
+
     Args:
         name: Profile name to switch to.
         process_wide: If True (default), updates the process-global
@@ -985,9 +1073,19 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
             WebUI where the profile is managed via cookie + thread-local (#798).
 
     Returns: {'profiles': [...], 'active': name}
-    Raises ValueError if profile doesn't exist or agent is busy.
+    Raises ValueError when profile doesn't exist, RuntimeError when agent is running,
+    PermissionError in isolated mode for cross-profile switches.
     """
     global _active_profile
+
+    # In isolated profile mode, reject switching to other profiles
+    if _is_isolated_profile_mode():
+        active = _isolated_profile_name()
+        if name != active:
+            raise PermissionError(
+                f"Profile switching is not allowed in isolated profile mode. "
+                f"Currently pinned to profile '{active}'."
+            )
 
     # Import here to avoid circular import at module load
     from api.config import STREAMS, STREAMS_LOCK, reload_config
@@ -1006,7 +1104,9 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
                 )
 
     # Resolve profile directory
-    if _is_root_profile(name):
+    if _is_isolated_profile_mode():
+        home = Path(_INITIAL_HERMES_HOME).expanduser()
+    elif _is_root_profile(name):
         home = _DEFAULT_HERMES_HOME
     else:
         home = _resolve_named_profile_home(name)
@@ -1281,6 +1381,9 @@ def _build_profile_rows_fast() -> list | None:
 def list_profiles_api() -> list:
     """List all profiles with metadata, serialized for JSON response.
 
+    In isolated profile mode (HERMES_HOME points to ~/.hermes/profiles/<name>),
+    returns only that single profile and skips other profiles entirely.
+
     Fast path: build the rows from upstream's cheap per-profile helpers and skip
     ``find_alias_for_profile`` (whose result the WebUI discards) — see
     ``_build_profile_rows_fast``. Results are cached for a short TTL so rapid
@@ -1291,6 +1394,56 @@ def list_profiles_api() -> list:
     import time
     global _LIST_PROFILES_CACHE
     now = time.time()
+
+    # In isolated profile mode, return only the active (isolated) profile
+    if _is_isolated_profile_mode():
+        active = _isolated_profile_name()
+        hermes_home = Path(_INITIAL_HERMES_HOME).expanduser()
+        try:
+            from hermes_cli.profiles import list_profiles
+            infos = list_profiles()
+            # When the isolated profile is literally named "default", upstream
+            # can surface the base-home row first. Only trust a row whose path
+            # resolves to the same directory as the isolated startup home.
+            for p in infos:
+                try:
+                    same_home = Path(p.path).expanduser().resolve() == hermes_home.resolve()
+                except OSError:
+                    same_home = False
+                if p.name == active and same_home:
+                    enabled_count, total_count = _get_profile_skills_stats(p.path)
+                    return [{
+                        'name': p.name,
+                        'path': str(p.path),
+                        'is_default': p.is_default,
+                        'is_active': True,  # Always true in isolated mode
+                        'gateway_running': p.gateway_running,
+                        'model': p.model,
+                        'provider': p.provider,
+                        'has_env': p.has_env,
+                        'visible': _profile_visible_from_meta(p.path),
+                        'skill_count': enabled_count,
+                        'enabled_skills': enabled_count,
+                        'total_skills': total_count,
+                    }]
+        except (ImportError, OSError, PermissionError):
+            pass
+        # Fallback: construct profile dict with actual active name and hermes_home path
+        enabled_count, total_count = _get_profile_skills_stats(hermes_home)
+        return [{
+            'name': active,
+            'path': str(hermes_home),
+            'is_default': active == 'default',
+            'is_active': True,
+            'gateway_running': False,
+            'model': None,
+            'provider': None,
+            'has_env': (hermes_home / '.env').exists(),
+            'visible': _profile_visible_from_meta(hermes_home),
+            'skill_count': enabled_count,
+            'enabled_skills': enabled_count,
+            'total_skills': total_count,
+        }]
 
     with _LIST_PROFILES_CACHE_LOCK:
         cached = _LIST_PROFILES_CACHE
@@ -1709,7 +1862,12 @@ def create_profile_api(name: str, clone_from: str = None,
                        api_key: str = None,
                        default_model: str = None,
                        model_provider: str = None) -> dict:
-    """Create a new profile. Returns the new profile info dict."""
+    """Create a new profile. Returns the new profile info dict.
+
+    In isolated profile mode, profile creation is rejected (403).
+    """
+    if _is_isolated_profile_mode():
+        raise PermissionError("Profile creation is not allowed in isolated profile mode.")
     _validate_profile_name(name)
     # Defense-in-depth: validate clone_from here too, even though routes.py
     # also validates it. Any caller that bypasses the HTTP layer gets protection.
@@ -1808,7 +1966,12 @@ def create_profile_api(name: str, clone_from: str = None,
 
 
 def delete_profile_api(name: str) -> dict:
-    """Delete a profile. Switches to default first if it's the active one."""
+    """Delete a profile. Switches to default first if it's the active one.
+
+    In isolated profile mode, profile deletion is rejected (403).
+    """
+    if _is_isolated_profile_mode():
+        raise PermissionError("Profile deletion is not allowed in isolated profile mode.")
     if _is_root_profile(name):
         raise ValueError("Cannot delete the default profile.")
     _validate_profile_name(name)
