@@ -438,8 +438,17 @@ _USER_TMP_PREFIXES: tuple[Path, ...] = (
 
 
 @functools.lru_cache(maxsize=8)
-def _parse_extra_workspace_roots(raw: str) -> tuple[Path, ...]:
-    """Parse the env value into resolved roots; cached so warnings fire once.
+def _parse_extra_workspace_roots(raw: str) -> tuple[tuple[Path, Path], ...]:
+    """Parse the env value into ``(expanded, resolved)`` root pairs; cached so
+    warnings fire once.
+
+    ``expanded`` is the literal entry after ``~`` expansion; ``resolved`` is its
+    symlink-resolved canonical form. Both are kept because the POSIX probe matches
+    against *raw* (unresolved) input strings: on macOS ``/var`` is a symlink to
+    ``/private/var`` so a ``/var/reana`` entry resolves to ``/private/var/reana``
+    and would miss a literal ``/var/reana/...`` candidate — the static
+    ``_USER_TMP_PREFIXES`` list dodges this by carrying both forms, and the dynamic
+    roots must do the same.
 
     This widens a security boundary via deployment config, so entries are
     validated rather than trusted blindly: each must be absolute (after
@@ -448,7 +457,7 @@ def _parse_extra_workspace_roots(raw: str) -> tuple[Path, ...]:
     surfaces (as a log line) rather than silently failing to carve out and
     leaving the operator with a confusing "still blocked".
     """
-    out: list[Path] = []
+    out: list[tuple[Path, Path]] = []
     for part in raw.split(os.pathsep):
         part = part.strip()
         if not part:
@@ -462,13 +471,43 @@ def _parse_extra_workspace_roots(raw: str) -> tuple[Path, ...]:
             )
             continue
         try:
-            out.append(Path(expanded).resolve())
+            resolved = Path(expanded).resolve()
         except Exception as exc:  # pragma: no cover - resolve() edge cases
             logger.warning(
                 "Ignoring unresolvable HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS entry %r: %s",
                 part,
                 exc,
             )
+            continue
+        out.append((Path(expanded), resolved))
+    return tuple(out)
+
+
+def _extra_workspace_root_pairs() -> tuple[tuple[Path, Path], ...]:
+    """``(expanded, resolved)`` pairs for the configured extra workspace roots."""
+    raw = os.environ.get("HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS", "").strip()
+    if not raw:
+        return ()
+    return _parse_extra_workspace_roots(raw)
+
+
+def _extra_workspace_posix_carveouts() -> tuple[PurePosixPath, ...]:
+    """Both POSIX forms (expanded + resolved) of each extra root, deduped.
+
+    The POSIX probe (``_is_blocked_posix_workspace_path``) matches against raw,
+    *unresolved* path strings, so it needs the literal form as well as the
+    symlink-resolved one — mirroring the static ``/var/folders`` +
+    ``/private/var/folders`` pattern so a ``/var/reana`` carve-out works on macOS
+    where ``/var`` is a symlink to ``/private/var``.
+    """
+    out: list[PurePosixPath] = []
+    seen: set[str] = set()
+    for expanded, resolved in _extra_workspace_root_pairs():
+        for form in (expanded, resolved):
+            posix = form.as_posix()
+            if posix not in seen:
+                seen.add(posix)
+                out.append(PurePosixPath(posix))
     return tuple(out)
 
 
@@ -481,11 +520,12 @@ def _extra_workspace_prefixes() -> tuple[Path, ...]:
     under ``/var/reana/users/<uid>/workflows/<id>/`` — without this carve-out it
     is rejected as a ``/var`` system path and session creation 400s. Entries are
     validated and parsed by ``_parse_extra_workspace_roots``.
+
+    Returns the symlink-resolved form of each root (used by the ``Path``-based
+    gates, whose candidates are themselves resolved). The POSIX probe, which sees
+    raw strings, uses ``_extra_workspace_posix_carveouts`` for both forms.
     """
-    raw = os.environ.get("HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS", "").strip()
-    if not raw:
-        return ()
-    return _parse_extra_workspace_roots(raw)
+    return tuple(resolved for _expanded, resolved in _extra_workspace_root_pairs())
 
 
 def _workspace_carveout_prefixes() -> tuple[Path, ...]:
@@ -552,9 +592,10 @@ def _is_blocked_posix_workspace_path(raw_path: str | Path | None) -> bool:
     # carved out here too — this POSIX probe runs first in _is_blocked_workspace_path,
     # so without it a legitimate workspace under an otherwise-blocked system prefix
     # (e.g. REANA's /var/reana/...) is rejected on the validate/resolve path even
-    # though _is_blocked_system_path honors the carve-out. Single source of truth:
-    # _extra_workspace_prefixes() (also used by _workspace_carveout_prefixes()).
-    carveouts += [PurePosixPath(p.as_posix()) for p in _extra_workspace_prefixes()]
+    # though _is_blocked_system_path honors the carve-out. Both the literal and the
+    # symlink-resolved form are added (macOS /var -> /private/var) since this probe
+    # matches against the raw, unresolved input string.
+    carveouts += list(_extra_workspace_posix_carveouts())
     for tmp in carveouts:
         if _posix_is_within(candidate, tmp):
             return False

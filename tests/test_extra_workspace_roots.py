@@ -13,6 +13,7 @@ from pathlib import Path
 
 from api.workspace import (
     _USER_TMP_PREFIXES,
+    _extra_workspace_posix_carveouts,
     _extra_workspace_prefixes,
     _is_blocked_posix_workspace_path,
     _is_blocked_system_path,
@@ -66,3 +67,29 @@ def test_relative_entries_are_skipped_with_warning(monkeypatch, caplog):
     assert all("relative" not in p.as_posix() for p in prefixes)
     assert _is_blocked_workspace_path(Path(WS), WS) is False
     assert any("non-absolute" in r.getMessage() for r in caplog.records)
+
+
+def test_posix_carveouts_keep_both_symlink_forms(monkeypatch, tmp_path):
+    """The POSIX probe matches raw (unresolved) strings, so a symlinked root must
+    contribute both its literal and resolved forms — the macOS /var -> /private/var
+    case greptile flagged. Simulated with a real symlink so it runs on any OS.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    # A path *under the symlink* resolves to a different (real) prefix.
+    assert Path(link).resolve() == real.resolve()
+    assert link.resolve() != link
+
+    _parse_extra_workspace_roots.cache_clear()
+    monkeypatch.setenv(ENV, str(link))
+    forms = {p.as_posix() for p in _extra_workspace_posix_carveouts()}
+
+    # Both the literal (unresolved) and the resolved form are present, mirroring
+    # the static /var/folders + /private/var/folders pattern.
+    assert link.as_posix() in forms
+    assert real.resolve().as_posix() in forms
+    # And the resolved-only view (_extra_workspace_prefixes) still excludes the link.
+    resolved_only = {p.as_posix() for p in _extra_workspace_prefixes()}
+    assert real.resolve().as_posix() in resolved_only
