@@ -4945,13 +4945,16 @@ main.main > #mainPlugin{display:none;}
   100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); }
 }
 @media (max-width: 600px) {
-  .msg-question-jump-btn { max-width: min(220px,calc(100% - 40px)); }
-  .msg-question-jump-btn span:last-child {
-    display: inline;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .msg-question-jump-btn {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    max-width: 32px;
+    padding: 0;
+    border-radius: 50%;
+    gap: 0;
   }
+  .msg-question-jump-btn span:last-child { display: none; }
 }
 .msg-foot-with-usage {
   justify-content: flex-start;
