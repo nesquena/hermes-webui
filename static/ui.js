@@ -1811,7 +1811,7 @@ function _refreshOpenModelDropdown(){
     if(typeof _positionModelDropdown==='function') _positionModelDropdown();
   }
 }
-function _applyModelToDropdown(modelId, sel, preferredProviderId){
+function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
   if(!modelId||!sel) return null;
   const currentState=(sel.id==='modelSelect'&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel, sel.value)
@@ -1823,7 +1823,7 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId){
       const resolvedState=typeof _modelStateForSelect==='function'
         ? _modelStateForSelect(sel, resolved)
         : {model:resolved,model_provider:preferredProviderId||null};
-      const pickerChanged= !currentState
+      const pickerChanged= !!(opts&&opts.forceRefresh) || !currentState
         || String(currentState.model||'')!==String(resolvedState.model||'')
         || String(currentState.model_provider||'')!==String(resolvedState.model_provider||'');
       if(typeof syncModelChip==='function') syncModelChip();
@@ -2061,13 +2061,13 @@ function _addLiveModelsToSelect(provider, models, sel){
     added++;
   }
   const currentProvider=(S.session&&S.session.model_provider)||null;
-  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel, currentProvider);
+  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel, currentProvider, {forceRefresh:true});
   // After live models are added, re-apply the session's model in case it was
   // absent from the static list and syncTopbar() fired before the live fetch
   // completed (#1169). This ensures the session model wins over any premature
   // fallback that may have set sel.value to the first available option.
   if(S.session && S.session.model && sel.id==='modelSelect'){
-    const reapplied=_applyModelToDropdown(S.session.model, sel, S.session.model_provider||null);
+    const reapplied=_applyModelToDropdown(S.session.model, sel, S.session.model_provider||null, {forceRefresh:added>0});
     if(reapplied && typeof syncModelChip==='function') syncModelChip();
   }
   return added;

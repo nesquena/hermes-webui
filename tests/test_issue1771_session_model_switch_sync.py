@@ -241,6 +241,13 @@ def test_sync_topbar_rerender_count_remains_one_for_preapply_plus_sync(driver_pa
     assert got["calls"]["positionModelDropdown"] == 1
 
 
+def test_live_model_reapply_paths_force_refresh_after_catalog_growth():
+    src = UI_JS_PATH.read_text(encoding="utf-8")
+
+    assert "_applyModelToDropdown(currentVal, sel, currentProvider, {forceRefresh:true})" in src
+    assert "_applyModelToDropdown(S.session.model, sel, S.session.model_provider||null, {forceRefresh:added>0})" in src
+
+
 
 def test_sync_topbar_does_not_persist_correction_while_model_resolution_deferred(driver_path):
     """Regression for stage-310 Opus review: the !hasSessionModel branch must
