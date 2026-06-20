@@ -139,6 +139,13 @@ class TestClearPasswordRequiresCurrentPassword:
         handler = _post_settings({"_clear_password": True, "_current_password": "wrongpw"})
         assert handler.status == 403
 
+    def test_cannot_clear_password_with_non_string_current_password(self):
+        _set_password_raw("oldpassword")
+        handler = _post_settings({"_clear_password": True, "_current_password": 123})
+        assert handler.status == 403
+        payload = handler.json_body()
+        assert "current password" in payload.get("error", "").lower()
+
     def test_can_clear_password_with_correct_current_password(self):
         _set_password_raw("oldpassword")
         handler = _post_settings({"_clear_password": True, "_current_password": "oldpassword"})
