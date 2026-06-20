@@ -12,6 +12,12 @@
 - **Cancelled partial turns no longer permanently suppress later state.db transcript reconciliation.** The cancel replay guard now applies only while a partial assistant response plus cancellation marker are still the visible tail, so later successful turns can merge state.db-only deltas again. Anchor scene index fallback also rejects mismatched final-answer targets instead of persisting a Worklog scene onto the wrong assistant message after a stale ref miss.
 - **Settled Worklog hydration now strips live-only running rows from durable scenes.** If a persisted scene still contains a `live-reasoning:*` running Thinking row after the final answer settles, the server and browser drop it when transcript-backed settled Thinking exists; otherwise live prose/thinking/tool rows are sealed before the scene is rendered or persisted so hard refresh and natural settle do not show stale running activity at the bottom of the Worklog.
 
+## [v0.51.530] — 2026-06-20 — Release SO (fix /api/profiles 500)
+
+### Fixed
+
+- **`GET /api/profiles` no longer returns a 500 (UnboundLocalError).** A later branch in the request handler imports `get_active_profile_name` as a function-local, which made the name local across the whole handler; the `/api/profiles` branch referenced it before that import ran, so every call to the profiles list endpoint raised `UnboundLocalError`. The branch now imports the name it uses directly. Regression introduced in v0.51.528 and surfaced once the redundant local import was removed there; this restores the profiles list/dropdown. Thanks @TomBanksAU.
+
 ## [v0.51.529] — 2026-06-20 — Release SN (per-response jump button matches the session jump pill)
 
 ### Fixed
