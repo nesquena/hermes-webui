@@ -1,6 +1,11 @@
 """Visible-order contract for the first anchor-backed Compact Worklog handoff."""
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +15,7 @@ SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 def _function_body(src, name):
@@ -57,6 +63,121 @@ def _event_listener_body(src, event_name):
             if depth == 0:
                 return src[brace + 1:idx]
     raise AssertionError(f"{event_name} listener did not close")
+
+
+def _run_node_script(script):
+    assert NODE, "node is required for DOM-executed anchor render tests"
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_dom_render_live_compression_row_transitions_to_settled_scene():
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
+function extractFunc(name){{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if(start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start) + 1;
+  let depth = 1;
+  while(depth > 0 && i < src.length){{
+    if(src[i] === '{{') depth += 1;
+    else if(src[i] === '}}') depth -= 1;
+    i += 1;
+  }}
+  return src.slice(start, i);
+}}
+class FakeElement {{
+  constructor(tag){{
+    this.tagName = String(tag || 'div').toUpperCase();
+    this.attributes = Object.create(null);
+    this.dataset = {{}};
+    this.children = [];
+    this.parentNode = null;
+    this.style = {{}};
+    this.className = '';
+    this._innerHTML = '';
+  }}
+  setAttribute(name, value){{
+    this.attributes[name] = String(value);
+    if(name === 'class') this.className = String(value);
+    if(name.startsWith('data-')){{
+      const key = name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      this.dataset[key] = String(value);
+    }}
+  }}
+  getAttribute(name){{ return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }}
+  removeAttribute(name){{ delete this.attributes[name]; }}
+  appendChild(child){{ child.parentNode = this; this.children.push(child); return child; }}
+  querySelector(){{ return null; }}
+  querySelectorAll(){{ return []; }}
+  set innerHTML(value){{ this._innerHTML = String(value); }}
+  get innerHTML(){{ return this._innerHTML; }}
+  set textContent(value){{ this._textContent = String(value); }}
+  get textContent(){{ return this._textContent || ''; }}
+}}
+global.window = {{}};
+global.document = {{ createElement(tag){{ return new FakeElement(tag); }} }};
+const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[ch]));
+const li = name => `<i data-icon="${{name}}"></i>`;
+const renderMd = text => esc(text);
+function buildToolCard(){{ throw new Error('tool branch should not execute'); }}
+function _thinkingActivityNode(){{ throw new Error('thinking branch should not execute'); }}
+function _activityStatusNode(){{ throw new Error('status branch should not execute'); }}
+function _anchorSceneToolRowLogicalKey(){{ return ''; }}
+function _anchorSceneMergeToolRows(_prev, row){{ return row; }}
+eval(extractFunc('_anchorSceneIsSettledSuccessfulCompression'));
+eval(extractFunc('_anchorSceneRowsForRendering'));
+eval(extractFunc('_autoCompressionPreviewText'));
+eval(extractFunc('_autoCompressionWorklogNode'));
+eval(extractFunc('_anchorSceneNodeForRow'));
+const compressing = {{
+  row_id:'compressing-1',
+  role:'lifecycle',
+  kind:'lifecycle_status',
+  source_event_type:'compressing',
+  status:'running',
+  text:'Compressing context',
+}};
+const compressed = {{
+  row_id:'compressed-1',
+  role:'lifecycle',
+  kind:'lifecycle_status',
+  source_event_type:'compressed',
+  status:'completed',
+  text:'Context auto-compressed',
+}};
+const runningRows = _anchorSceneRowsForRendering({{activity_rows:[compressing]}}, {{settled:false}});
+const completedRows = _anchorSceneRowsForRendering({{activity_rows:[compressing, compressed]}}, {{settled:false}});
+const settledRows = _anchorSceneRowsForRendering({{activity_rows:[compressing, compressed]}}, {{settled:true}});
+const runningNode = _anchorSceneNodeForRow(runningRows[0], {{live:true, settled:false}});
+const completedNode = _anchorSceneNodeForRow(completedRows[0], {{live:true, settled:false}});
+process.stdout.write(JSON.stringify({{
+  runningCount: runningRows.length,
+  runningSource: runningRows[0] && runningRows[0].source_event_type,
+  runningRole: runningNode && runningNode.getAttribute('data-anchor-row-role'),
+  runningHtml: runningNode && runningNode.innerHTML,
+  completedCount: completedRows.length,
+  completedSource: completedRows[0] && completedRows[0].source_event_type,
+  completedRole: completedNode && completedNode.getAttribute('data-anchor-row-role'),
+  completedHtml: completedNode && completedNode.innerHTML,
+  settledCount: settledRows.length,
+}}));
+"""
+    data = _run_node_script(script)
+
+    assert data["runningCount"] == 1
+    assert data["runningSource"] == "compressing"
+    assert data["runningRole"] == "lifecycle"
+    assert "auto-compression-divider-done" not in data["runningHtml"]
+    assert data["completedCount"] == 1
+    assert data["completedSource"] == "compressed"
+    assert data["completedRole"] == "lifecycle"
+    assert "auto-compression-divider-done" in data["completedHtml"]
+    assert data["settledCount"] == 0
 
 
 def test_process_prose_is_an_anchor_scene_row_not_a_dom_mirror():
@@ -130,6 +251,7 @@ def test_live_processed_anchor_renders_before_first_activity_row():
     assert "if(!ok){" in live
     assert "_syncToolCallGroupSummary(group);" in live
     assert "_startActivityElapsedTimer(group)" in live
+    assert "turnStartedAt:S.session&&S.session.pending_started_at" in live
     assert "if(!S.session) return null;" in shell
     assert "const activeStreamId=S.activeStreamId||'';" in shell
     assert "_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id, {mode:'compact_worklog'})" in shell

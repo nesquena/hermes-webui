@@ -3494,7 +3494,11 @@ def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         absolute_idx = int(message_offset or 0) + local_idx
-        record = by_ref.get(_assistant_anchor_scene_message_ref(message)) or by_index.get(absolute_idx)
+        record = by_ref.get(_assistant_anchor_scene_message_ref(message))
+        if not record:
+            candidate = by_index.get(absolute_idx)
+            if candidate and _anchor_scene_candidate_matches_scene(message, candidate.get("scene") or {}):
+                record = candidate
         if not record:
             continue
         scene = record.get("scene")

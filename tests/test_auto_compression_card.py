@@ -381,6 +381,10 @@ def test_auto_compression_running_card_completes_on_followup_live_events():
     helper = src.split("function _completeAutomaticCompressionOnLiveProgress", 1)[1].split("source.addEventListener('token'", 1)[0]
     assert "data-live-compression-card=\"1\"][data-compression-started-at]" in helper
     assert "window._compressionUi&&window._compressionUi.automatic&&window._compressionUi.phase==='running'" in helper
+    assert "function _ensureAnchorCompressionCompletedOnLiveProgress" in src
+    assert "_ensureAnchorCompressionCompletedOnLiveProgress(sid);" in helper
+    assert "const eventId=`synthetic:${localId}`;" in src
+    assert "_findAnchorActivityEventByLocalId(localId,'compressed')" in src
     assert "phase:'done'" in helper
     assert "message:'Context auto-compressed'" in helper
     assert "appendLiveCompressionCard({" in helper

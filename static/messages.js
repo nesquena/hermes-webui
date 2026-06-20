@@ -2150,6 +2150,48 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return null;
   }
+  function _latestAnchorCompressionEventIndex(sourceEventType){
+    const events=_anchorActivityEvents();
+    if(!events) return -1;
+    for(let i=events.length-1;i>=0;i--){
+      const event=events[i];
+      if(event&&event.source_event_type===sourceEventType) return i;
+    }
+    return -1;
+  }
+  function _anchorCompressionCompletedAfter(index){
+    const events=_anchorActivityEvents();
+    if(!events) return false;
+    for(let i=events.length-1;i>index;i--){
+      const event=events[i];
+      if(event&&event.source_event_type==='compressed') return true;
+    }
+    return false;
+  }
+  function _ensureAnchorCompressionCompletedOnLiveProgress(sessionId){
+    if(!_anchorRegistry||!_anchorApi) return false;
+    const sid=String(sessionId||activeSid||'');
+    const events=_anchorActivityEvents();
+    const runningIndex=_latestAnchorCompressionEventIndex('compressing');
+    if(runningIndex>=0&&_anchorCompressionCompletedAfter(runningIndex)) return true;
+    const runningEvent=(events&&runningIndex>=0)?events[runningIndex]:null;
+    const basis=String((runningEvent&&(runningEvent.local_id||runningEvent.event_id))||streamId||sid||'compression');
+    const localId=`live-compression-complete:${basis}`;
+    if(_findAnchorActivityEventByLocalId(localId,'compressed')) return true;
+    const eventId=`synthetic:${localId}`;
+    const result=_applyToAnchor('compressed',{
+      event_id:eventId,
+      local_id:localId,
+      session_id:sid,
+      old_session_id:sid,
+      automatic:true,
+      synthetic:true,
+      status:'completed',
+      phase:'done',
+      message:'Context auto-compressed',
+    },{lastEventId:eventId});
+    return !!(result&&(result.applied||result.reason==='duplicate'));
+  }
   function _replaceAnchorActivityEventByLocalId(localId, sourceEventType, patch){
     const events=_anchorActivityEvents();
     if(!events||!localId) return null;
@@ -3574,6 +3616,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const hasRunningLiveCard=!!document.querySelector('[data-live-compression-card="1"][data-compression-started-at]');
     const hasRunningState=!!(window._compressionUi&&window._compressionUi.automatic&&window._compressionUi.phase==='running'&&(!sid||!window._compressionUi.sessionId||String(window._compressionUi.sessionId)===sid));
     if(!hasRunningLiveCard&&!hasRunningState) return false;
+    _ensureAnchorCompressionCompletedOnLiveProgress(sid);
     if(typeof appendLiveCompressionCard==='function'){
       appendLiveCompressionCard({
         sessionId:sid,

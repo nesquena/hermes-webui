@@ -9213,6 +9213,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     collapsed:false,
     activityKey:`live:${streamId||S.activeStreamId||'anchor'}`,
     streamId:streamId||S.activeStreamId||'',
+    turnStartedAt:S.session&&S.session.pending_started_at,
   });
   const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{live:true,settled:false});
   if(!ok){

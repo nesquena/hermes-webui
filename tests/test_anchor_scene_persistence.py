@@ -102,6 +102,36 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
     assert hydrated[1]["_anchor_activity_scene"]["activity_rows"][0]["tool_call_id"] == "call-1"
 
 
+def test_anchor_scene_hydration_rejects_stale_index_fallback_when_final_answer_mismatches():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old final"},
+        {"role": "user", "content": "new question"},
+        {"role": "assistant", "content": "new final"},
+    ]
+    records = {
+        "stale-ref": {
+            "message_index": 3,
+            "message_ref": "missing-ref-after-window-shift",
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "old final",
+                "activity_rows": [
+                    {"row_id": "old-tool", "role": "tool", "tool_call_id": "old-call"}
+                ],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records)
+
+    assert "_anchor_activity_scene" not in hydrated[3]
+
+
 def test_anchor_scene_persistence_rejects_invalid_scene(tmp_path, monkeypatch):
     from api import models, routes
     from api.models import Session
