@@ -3713,6 +3713,15 @@ def _resolve_compatible_session_model_state(
     """
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
+    if model and requested_provider and model.startswith(f"@{requested_provider}:"):
+        try:
+            from api.config import cfg as _active_cfg
+
+            providers_cfg = _active_cfg.get("providers") if isinstance(_active_cfg, dict) else {}
+        except Exception:
+            providers_cfg = {}
+        if isinstance(providers_cfg, dict) and requested_provider in providers_cfg:
+            return model, requested_provider, False
     if model and requested_provider:
         # Only safe when the model itself does not carry an ``@provider:model``
         # qualifier — qualified strings require the catalog to decide whether

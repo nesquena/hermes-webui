@@ -522,6 +522,37 @@ def test_non_openrouter_slash_model_provider_context_stays_unqualified():
     assert runtime_model == "anthropic/claude-sonnet-4.6"
 
 
+def test_configured_provider_slash_model_keeps_provider_context():
+    """Configured OpenAI-compatible providers need explicit context for slash IDs."""
+    import api.config as config
+
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "openai-codex",
+        "default": "gpt-5.5",
+    }
+    config.cfg["providers"] = {
+        "local-llama": {
+            "base_url": "http://127.0.0.1:8088/v1",
+            "api_key": "test-key",
+        },
+    }
+    try:
+        runtime_model = config.model_with_provider_context(
+            "unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL",
+            "local-llama",
+        )
+        model, provider, base_url = config.resolve_model_provider(runtime_model)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert runtime_model == "@local-llama:unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL"
+    assert model == "unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL"
+    assert provider == "local-llama"
+    assert base_url == "http://127.0.0.1:8088/v1"
+
+
 def test_cursor_acp_slash_model_always_gets_provider_hint():
     """ACP subprocess models with '/' must not fall through to config default."""
     import api.config as config

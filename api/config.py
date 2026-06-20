@@ -2515,8 +2515,19 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     if provider == "openrouter":
         return f"@{provider}:{model}"
 
-    # For non-OpenRouter slash IDs, keep the ID intact so existing custom/proxy
-    # base_url routing and portal-provider handling remain in charge.
+    # Explicit providers configured in config.yaml (for example local llama.cpp,
+    # Ollama, LM Studio, vLLM, or other OpenAI-compatible endpoints) must keep
+    # their provider hint even when the model ID is HuggingFace-style and
+    # contains '/'. Otherwise a selected local model such as
+    # 'unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL' inherits the default provider
+    # (e.g. openai-codex) and is sent to the wrong backend.
+    providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else {}
+    if isinstance(providers_cfg, dict) and provider in providers_cfg:
+        return f"@{provider}:{model}"
+
+    # For non-OpenRouter slash IDs without an explicit configured provider,
+    # keep the ID intact so existing custom/proxy base_url routing and
+    # portal-provider handling remain in charge.
     if "/" in model:
         return model
 
