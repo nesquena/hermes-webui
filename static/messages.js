@@ -1267,15 +1267,29 @@ async function send(){
     const _pendingPick=(typeof _readPendingSessionModel==='function')
       ? _readPendingSessionModel(activeSid)
       : null;
-    const _explicitPick=_pendingPick
+    const _pendingPickMatch=_pendingPick
       && _pendingPick.model===_modelState.model
       && String(_pendingPick.model_provider||'')===String(_modelState.model_provider||'');
+    // ── Persisted cross-provider pick (#3737 follow-up) ──
+    // The onchange marker is consumed after the first send, so subsequent sends
+    // lose explicit_model_pick and the server "repairs" the model back to the
+    // profile default.  When the session has a non-default model from a different
+    // provider than the profile's active provider, treat every send as explicit
+    // so the server honors the user's choice across the entire conversation.
+    const _defaultModel=(typeof window!=='undefined' && window._defaultModel)||'';
+    const _activeProvider=(typeof window!=='undefined' && window._activeProvider)||null;
+    const _isCrossProviderPick = _modelState.model
+      && _modelState.model_provider
+      && _defaultModel
+      && _modelState.model !== _defaultModel
+      && String(_modelState.model_provider||'') !== String(_activeProvider||'');
+    const _explicitPick = _pendingPickMatch || _isCrossProviderPick;
     // Consume the pending explicit-pick marker for THIS send only. The marker is
     // recorded on modelSelect.onchange and intentionally kept (not cleared on
     // session-update) so it survives the normal pick→update→send flow; clear it here
     // once read so a later send of an unchanged dropdown isn't treated as an explicit
     // pick. (#3739/#3737, Codex catch)
-    if(_explicitPick && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
+    if(_pendingPickMatch && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
     explicitPickForPostStart=_explicitPick;
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
