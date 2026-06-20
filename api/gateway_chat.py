@@ -260,7 +260,7 @@ def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
-    attachments=None, cfg=None,
+    attachments=None, cfg=None, session=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     url_runs = f"{base_url.rstrip('/')}/v1/runs"
@@ -283,6 +283,15 @@ def _run_gateway_runs_api_streaming(
             message_content = str(msg_text or "")
     instructions_parts = []
     conversation_history = []
+    for entry in getattr(session, "context_messages", None) or []:
+        if not isinstance(entry, dict):
+            continue
+        role = str(entry.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = entry.get("content")
+        if content is not None:
+            conversation_history.append({"role": role, "content": content})
     for entry in prefill_messages or []:
         if not isinstance(entry, dict):
             continue
@@ -572,6 +581,7 @@ def _run_gateway_chat_streaming(
                     cancel_event=cancel_event,
                     attachments=attachments,
                     cfg=cfg,
+                    session=s,
                 )
             except Exception as exc:
                 put_gateway_event("apperror", {

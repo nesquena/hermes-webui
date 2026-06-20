@@ -8903,6 +8903,11 @@ def cancel_stream(stream_id: str) -> bool:
         if active_run_entry and not active_run_session_id:
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
+    # Mark the worker lifecycle registry immediately. The SSE maps may be popped
+    # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
+    # health polling sees during that detached window.
+    update_active_run(stream_id, phase="cancelling")
+
     # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
     # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
     flag = _snap_flag if _snap_flag is not None else cancel_flags.get(stream_id)

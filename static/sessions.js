@@ -381,9 +381,16 @@ function _isServerIdleSessionRow(s) {
 
 function _reconcileActiveSessionIdleStateFromList(serverRows) {
   if (!S || !S.session || !S.session.session_id) return false;
-  if (typeof _sendInProgress !== 'undefined' && _sendInProgress) return false;
   if (!Array.isArray(serverRows)) return false;
   const sid=S.session.session_id;
+  // #4354: clear a stuck indicator when the server reports idle — server
+  // is_streaming/active_stream_id is authoritative. BUT skip the ONE session
+  // that is actively mid-send (#2689 start-race): during the /api/chat/start
+  // round-trip the server row is still idle while the client owns the optimistic
+  // turn, so reconciling it here would blank the just-sent bubble + queue a
+  // spurious force-reload. A long-hung session has _sendInProgress===false, so
+  // it still gets unstuck — only the in-flight start window is protected.
+  if (typeof _sendInProgress !== 'undefined' && _sendInProgress && sid === _sendInProgressSid) return false;
   const serverRow=serverRows.find(s=>s&&s.session_id===sid);
   if (!serverRow) return false;
   if (!_isServerIdleSessionRow(serverRow)) return false;
@@ -435,6 +442,10 @@ function _purgeStaleInflightEntries() {
     }
   }
   for (const sid of Object.keys(INFLIGHT)) {
+    // #4354: purge stale INFLIGHT even for a hung/idle session, BUT skip the one
+    // session actively mid-send (#2689 start-race) — during /api/chat/start the
+    // server row is briefly idle while the client owns the optimistic INFLIGHT
+    // entry; purging it here would drop the in-flight turn's local state.
     if (typeof _sendInProgress !== 'undefined' && _sendInProgress && sid === _sendInProgressSid) {
       continue;
     }
@@ -714,6 +725,8 @@ async function newSession(flash, options={}){
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     if(options&&options.worktree) reqBody.worktree=true;
     if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
+    // Forward a pre-session toolset override only from the empty composer (#4490).
+    if(!S.session && Array.isArray(S._pendingSessionToolsets)) reqBody.enabled_toolsets=S._pendingSessionToolsets;
     // Carry the visible picker selection into the new session. Without this,
     // /api/session/new falls back to config.yaml defaults (e.g. gpt-5.5) even
     // when the user already chose cursor/composer-2.5 in the composer chip.
@@ -769,6 +782,7 @@ async function newSession(flash, options={}){
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=data.session;S.messages=data.session.messages||[];
+    S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
@@ -1089,6 +1103,10 @@ async function loadSession(sid){
     return;
   }
   S.session=data.session;
+  // Loading a real existing session abandons any pre-session toolset override
+  // staged on the empty composer — clear it so it can't leak into a later New
+  // Chat started from this session (#4490 follow-up).
+  S._pendingSessionToolsets=null;
   if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
@@ -1215,7 +1233,7 @@ async function loadSession(sid){
     }
     // Refresh todos from cold-load or persisted INFLIGHT before painting.
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
-    S.busy=true;
+    S.busy=!!activeStreamId;  // #4354: Only assert busy if server confirms active stream.
     // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).

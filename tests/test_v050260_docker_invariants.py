@@ -194,6 +194,23 @@ def test_compose_files_parse_as_valid_yaml():
         assert "services" in data, f"{fname} must define a `services:` block"
 
 
+def test_multi_container_webui_points_at_gateway_service():
+    """REGRESSION (#4483): the multi-container WebUI service needs a compose
+    network URL for the gateway container. Cron listing reads shared state, but
+    scheduled ticking and the Tasks/System gateway health pill need a reachable
+    gateway base URL from inside the WebUI container."""
+    import yaml
+
+    for fname in ("docker-compose.two-container.yml", "docker-compose.three-container.yml"):
+        path = REPO / fname
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        env = data["services"]["hermes-webui"]["environment"]
+        assert "HERMES_API_URL=http://hermes-agent:8642" in env, (
+            f"{fname}: hermes-webui must point at hermes-agent over the compose "
+            "network so gateway health and scheduled ticking work in multi-container setups."
+        )
+
+
 # ── 7: agent vs webui HERMES_HOME_MODE semantic asymmetry ──────────────────
 
 

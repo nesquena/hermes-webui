@@ -18,6 +18,7 @@ import json
 import os
 import sqlite3
 import time
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import patch
 import urllib.request
@@ -450,6 +451,93 @@ def test_session_export_allows_session_from_active_profile():
     assert handler.ended is True
     assert b"same profile content" in handler.body
     assert ("Cache-Control", "no-store") in handler.sent_headers
+
+
+# ── Imported sessions must be stamped with the active profile ───────────────
+
+
+class _ImportedSessionStub:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+        self.session_id = kwargs.get("session_id") or "imported_profile_001"
+        self.profile = kwargs.get("profile")
+        self.messages = kwargs.get("messages") or []
+        self.pinned = False
+
+    def save(self):
+        self.saved = True
+
+    def compact(self):
+        return {
+            "session_id": self.session_id,
+            "profile": self.profile,
+            "workspace": getattr(self, "workspace", None),
+            "message_count": len(self.messages),
+        }
+
+
+def test_session_import_stamps_active_profile():
+    """JSON imports must not create root/default-owned rows from named profiles.
+
+    The import route validates the workspace under the request's active profile.
+    If the new Session is then saved with profile=None, default/root requests can
+    later export the transcript or use the session id to read files from that
+    named-profile workspace. Pin the import-time ownership stamp directly.
+    """
+    import api.routes as routes
+
+    captured = {}
+    body = {
+        "title": "Named profile import",
+        "workspace": "/tmp/named-profile-workspace",
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "named profile secret"}],
+    }
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    sessions = OrderedDict()
+    with patch("api.routes.get_active_profile_name", return_value="poc"), \
+         patch("api.routes.resolve_trusted_workspace", return_value=Path("/tmp/named-profile-workspace")), \
+         patch("api.routes.Session", side_effect=lambda **kwargs: _ImportedSessionStub(**kwargs)), \
+         patch.object(routes, "SESSIONS", sessions), \
+         patch("api.routes.publish_session_list_changed"), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes._handle_session_import(SimpleNamespace(headers={}), body)
+
+    session = captured["json"]["data"]["session"]
+    assert captured["json"]["status"] == 200
+    assert session["profile"] == "poc"
+    assert sessions["imported_profile_001"].profile == "poc"
+
+
+def test_session_import_default_profile_remains_default_owned():
+    """Root/default imports keep the legacy default ownership semantics."""
+    import api.routes as routes
+
+    captured = {}
+    body = {
+        "messages": [{"role": "user", "content": "default profile content"}],
+    }
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    sessions = OrderedDict()
+    with patch("api.routes.get_active_profile_name", return_value="default"), \
+         patch("api.routes.resolve_trusted_workspace", return_value=Path("/tmp/default-workspace")), \
+         patch("api.routes.Session", side_effect=lambda **kwargs: _ImportedSessionStub(**kwargs)), \
+         patch.object(routes, "SESSIONS", sessions), \
+         patch("api.routes.publish_session_list_changed"), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes._handle_session_import(SimpleNamespace(headers={}), body)
+
+    session = captured["json"]["data"]["session"]
+    assert session["profile"] == "default"
+    assert sessions["imported_profile_001"].profile == "default"
 
 
 def _profile_state_db_path(profile: str | None = None) -> Path:

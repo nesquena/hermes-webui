@@ -6,9 +6,11 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 import html as _html
 import copy
 import hashlib
+import errno
 import io
 import gzip
 import json
+from api.sse_chunked import end_sse_headers
 import logging
 import os
 import queue
@@ -17,6 +19,7 @@ import platform
 import shlex
 import shutil
 import sqlite3
+import stat as _stat
 import subprocess
 import sys
 import threading
@@ -6787,6 +6790,9 @@ _LLM_WIKI_MAX_PAGE_BYTES = 2 * 1024 * 1024
 _LLM_WIKI_FORBIDDEN_ROOTS = frozenset(
     str(Path(p).expanduser().resolve()) for p in ("/", "/etc", "/usr", "/var", "/opt", "/sys", "/proc")
 )
+_WIKI_ALLOWLIST_TTL = 5.0  # seconds
+_wiki_allowlist_cache: dict[str, dict[str, object]] = {}
+_wiki_allowlist_cache_lock = threading.Lock()
 
 
 def _llm_wiki_resolve_path() -> tuple[Path, str, bool]:
@@ -6839,7 +6845,28 @@ def _llm_wiki_count_files(root: Path) -> int:
     return count
 
 
-def _llm_wiki_page_files(wiki_path: Path) -> list[Path]:
+def _llm_wiki_page_files_cache_signature(wiki_path: Path) -> tuple:
+    """Return a change-detection signature over the configured wiki sections.
+
+    Reads only the section-level directories (not every page), using
+    st_mtime_ns, st_dev, and st_ino so that quick section replacements and
+    mtime-ns-resolution changes are both caught.  Missing or inaccessible
+    section dirs are represented as ``(section, None)`` so their appearance
+    or disappearance also invalidates the cache.
+    """
+    sig = []
+    for section in _LLM_WIKI_PAGE_DIRS:
+        section_dir = wiki_path / section
+        try:
+            st = section_dir.lstat()
+        except OSError:
+            sig.append((section, None))
+            continue
+        sig.append((section, st.st_dev, st.st_ino, st.st_mtime_ns))
+    return tuple(sig)
+
+
+def _llm_wiki_page_files_uncached(wiki_path: Path) -> list[Path]:
     pages: list[Path] = []
     # Defense in depth: refuse forbidden system roots, and resolve the wiki root
     # ONCE as the single trust base for all containment checks below.
@@ -6875,6 +6902,16 @@ def _llm_wiki_page_files(wiki_path: Path) -> list[Path]:
                 rel = item.relative_to(section)
                 if not item.is_file() or not _is_clean_relpath(rel):
                     continue
+                # Reject multi-link (hardlinked) page files. A hardlink at a
+                # clean *.md name can point at an arbitrary inode (incl. one
+                # outside the wiki); O_NOFOLLOW + inode-identity at read time
+                # cannot tell such a hardlink apart from the real page, so
+                # exclude any file with st_nlink > 1 from the allowlist. (#4375)
+                try:
+                    if item.lstat().st_nlink > 1:
+                        continue
+                except OSError:
+                    continue
                 # Resolve the real target and require it to live under BOTH the
                 # real wiki root and the real section, with no dot-prefixed
                 # segment on the resolved-relative path. This closes symlink
@@ -6892,7 +6929,136 @@ def _llm_wiki_page_files(wiki_path: Path) -> list[Path]:
     return pages
 
 
-def _llm_wiki_last_writer(wiki_path: Path, page_files: list[Path]) -> str:
+def _llm_wiki_page_files(wiki_path: Path) -> list[Path]:
+    """Return all allowlisted wiki page paths under *wiki_path*.
+
+    Trust boundary: the allowlist uses ``(st_dev, st_ino)`` inode identity.
+    A hardlink created at a listed page name *before* this snapshot is taken
+    would carry that page's identity through to the caller's fstat check.
+    This is only exploitable with write access to the wiki directory, which
+    is outside the realistic threat model (the wiki directory is
+    operator-controlled).  Defense-in-depth via an ``openat``-chain with
+    no-follow directory fds would close the gap but is deferred — the inode
+    match already defeats path-swap and symlink races at open time.
+    """
+    try:
+        wiki_root = wiki_path.resolve()
+    except OSError:
+        wiki_root = wiki_path
+
+    key = str(wiki_root)
+    sig = _llm_wiki_page_files_cache_signature(wiki_root)
+    now = time.monotonic()
+
+    with _wiki_allowlist_cache_lock:
+        cached = _wiki_allowlist_cache.get(key)
+        if (
+            cached is not None
+            and cached.get("signature") == sig
+            and now < cached.get("expires_at", 0)
+        ):
+            return list(cached["files"])
+
+    pages = _llm_wiki_page_files_uncached(wiki_root)
+
+    with _wiki_allowlist_cache_lock:
+        _wiki_allowlist_cache[key] = {
+            "signature": sig,
+            "expires_at": now + _WIKI_ALLOWLIST_TTL,
+            "files": tuple(pages),
+        }
+    return list(pages)
+
+
+def _llm_wiki_clear_page_files_cache() -> None:
+    """Clear the allowlist cache; intended for tests only."""
+    with _wiki_allowlist_cache_lock:
+        _wiki_allowlist_cache.clear()
+
+
+def _llm_wiki_allowlisted_entries(wiki_path: Path) -> dict[str, tuple[Path, tuple[int, int]]]:
+    """Return listed relpaths mapped to resolved targets plus stable identity."""
+    try:
+        wiki_real = wiki_path.resolve()
+    except OSError:
+        return {}
+
+    def _wiki_read_relpath_is_clean(rel: Path) -> bool:
+        rel_text = rel.as_posix()
+        return bool(rel.parts) and "\\" not in rel_text and not any(part.startswith(".") for part in rel.parts)
+
+    entries: dict[str, tuple[Path, tuple[int, int]]] = {}
+    try:
+        for listed_path in _llm_wiki_page_files(wiki_real):
+            try:
+                rel_listed = listed_path.relative_to(wiki_real)
+                if not _wiki_read_relpath_is_clean(rel_listed):
+                    continue
+                section_real = (wiki_real / rel_listed.parts[0]).resolve()
+                section_real.relative_to(wiki_real)
+                resolved_target = listed_path.resolve()
+                resolved_target.relative_to(section_real)
+                if not resolved_target.is_file():
+                    continue
+                # Reject hardlinked targets (st_nlink > 1): a multi-link file at
+                # a clean page name can carry an arbitrary inode through the
+                # O_NOFOLLOW + identity read check. Defense in depth alongside
+                # the same rejection in the allowlist walk. (#4375)
+                if resolved_target.stat().st_nlink > 1:
+                    continue
+                rel_resolved = resolved_target.relative_to(wiki_real)
+                if not _wiki_read_relpath_is_clean(rel_resolved):
+                    continue
+                st0 = resolved_target.stat()
+                if listed_path.resolve() != resolved_target:
+                    continue
+                entries[rel_listed.as_posix()] = (resolved_target, (st0.st_dev, st0.st_ino))
+            except (OSError, ValueError):
+                continue
+    except Exception:
+        return {}
+    return entries
+
+
+def _llm_wiki_status_file_entry_stat(wiki_path: Path, path: Path) -> os.stat_result | None:
+    """Return the current top-level status-file entry metadata when it is safe to trust."""
+    try:
+        wiki_root = wiki_path.resolve()
+    except OSError:
+        wiki_root = wiki_path
+    try:
+        path.resolve().relative_to(wiki_root)
+        st_entry = path.lstat()
+    except (OSError, ValueError):
+        return None
+    if not _stat.S_ISREG(st_entry.st_mode):
+        return None
+    return st_entry
+
+
+def _llm_wiki_verified_status_file_stat(wiki_path: Path, path: Path) -> os.stat_result | None:
+    """Return identity-checked metadata for a top-level wiki status file."""
+    st_entry = _llm_wiki_status_file_entry_stat(wiki_path, path)
+    if st_entry is None:
+        return None
+    fd = None
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        st_open = os.fstat(fd)
+        if (st_open.st_dev, st_open.st_ino) != (st_entry.st_dev, st_entry.st_ino):
+            return None
+        return st_open
+    except OSError:
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _llm_wiki_last_writer(
+    wiki_path: Path,
+    page_files: list[Path] | list[tuple[Path, tuple[int, int]]],
+) -> str:
     """Best-effort last-writer detection for the LLM Wiki status card.
 
     Closes the gap left by the original panel (commit 2684d6fa, Issue #1257):
@@ -6927,52 +7093,78 @@ def _llm_wiki_last_writer(wiki_path: Path, page_files: list[Path]) -> str:
 
     # Priority 1: most recent page frontmatter (resolved-path must stay in-wiki)
     latest_page: Path | None = None
+    latest_identity: tuple[int, int] | None = None
     latest_mtime = -1.0
-    for candidate in page_files:
+    for item in page_files:
+        candidate, identity = item if isinstance(item, tuple) else (item, None)
         if not _within_wiki(candidate):
             continue  # skip symlinks resolving outside the wiki
         try:
-            mtime = candidate.stat().st_mtime
+            st_candidate = candidate.stat()
         except Exception:
             continue
+        if identity is not None and (st_candidate.st_dev, st_candidate.st_ino) != identity:
+            continue
+        mtime = st_candidate.st_mtime
         if mtime > latest_mtime:
             latest_mtime = mtime
             latest_page = candidate
+            latest_identity = identity
     if latest_page is not None:
         try:
-            with open(latest_page, encoding="utf-8", errors="replace") as fh:
-                first = fh.readline()
-                if first.strip() == "---":
-                    # Read only the frontmatter block, bounded to a small line cap.
-                    for _ in range(200):
-                        line = fh.readline()
-                        if line == "" or line.strip() == "---":
-                            break  # EOF or end of frontmatter — never touch the body
-                        stripped = line.strip()
-                        lower = stripped.lower()
-                        for key in ("updated_by", "writer", "author"):
-                            if lower.startswith(f"{key}:"):
-                                value = stripped.split(":", 1)[1].strip()
-                                if value:
-                                    return value
+            fd = os.open(str(latest_page), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                if latest_identity is not None:
+                    st_open = os.fstat(fd)
+                    if (st_open.st_dev, st_open.st_ino) != latest_identity:
+                        raise FileNotFoundError("wiki page changed after allowlist snapshot")
+                with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+                    fd = None
+                    first = fh.readline()
+                    if first.strip() == "---":
+                        # Read only the frontmatter block, bounded to a small line cap.
+                        for _ in range(200):
+                            line = fh.readline()
+                            if line == "" or line.strip() == "---":
+                                break  # EOF or end of frontmatter — never touch the body
+                            stripped = line.strip()
+                            lower = stripped.lower()
+                            for key in ("updated_by", "writer", "author"):
+                                if lower.startswith(f"{key}:"):
+                                    value = stripped.split(":", 1)[1].strip()
+                                    if value:
+                                        return value
+            finally:
+                if fd is not None:
+                    os.close(fd)
         except Exception:
             pass
 
     # Priority 2: log.md last entry action verb (heading lines only, bounded)
     log_path = wiki_path / "log.md"
-    if _within_wiki(log_path) and log_path.is_file():
+    log_entry = _llm_wiki_status_file_entry_stat(wiki_path, log_path)
+    if log_entry is not None:
         try:
-            with open(log_path, encoding="utf-8", errors="replace") as fh:
-                for _ in range(5000):  # cap the heading scan
-                    line = fh.readline()
-                    if line == "":
-                        break
-                    stripped = line.strip()
-                    if not stripped.startswith("## [") or "|" not in stripped:
-                        continue
-                    tail = stripped.split("]", 1)[1].strip() if "]" in stripped else ""
-                    action = tail.split()[0] if tail else "update"
-                    return f"ai-agent ({action})"
+            fd = os.open(str(log_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                st_open = os.fstat(fd)
+                if (st_open.st_dev, st_open.st_ino) != (log_entry.st_dev, log_entry.st_ino):
+                    raise FileNotFoundError("wiki log changed before open")
+                with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+                    fd = None
+                    for _ in range(5000):  # cap the heading scan
+                        line = fh.readline()
+                        if line == "":
+                            break
+                        stripped = line.strip()
+                        if not stripped.startswith("## [") or "|" not in stripped:
+                            continue
+                        tail = stripped.split("]", 1)[1].strip() if "]" in stripped else ""
+                        action = tail.split()[0] if tail else "update"
+                        return f"ai-agent ({action})"
+            finally:
+                if fd is not None:
+                    os.close(fd)
         except Exception:
             pass
 
@@ -7005,15 +7197,27 @@ def _build_llm_wiki_status() -> dict:
             base["status"] = "not_directory"
             return base
 
-        page_files = _llm_wiki_page_files(wiki_path)
-        status_files = [p for p in (wiki_path / "SCHEMA.md", wiki_path / "index.md", wiki_path / "log.md") if p.exists() and p.is_file()]
-        status_files.extend(page_files)
-        latest = None
-        for item in status_files:
+        allowlisted_entries = _llm_wiki_allowlisted_entries(wiki_path)
+        verified_page_entries: list[tuple[Path, tuple[int, int], os.stat_result]] = []
+        for target, identity in allowlisted_entries.values():
             try:
-                mtime = item.stat().st_mtime
+                st = target.stat()
             except Exception:
                 continue
+            if (st.st_dev, st.st_ino) != identity:
+                continue
+            verified_page_entries.append((target, identity, st))
+        page_entries = [(target, identity) for target, identity, _ in verified_page_entries]
+        page_files = [target for target, _, _ in verified_page_entries]
+        status_files: list[tuple[Path, float]] = []
+        for path in (wiki_path / "SCHEMA.md", wiki_path / "index.md", wiki_path / "log.md"):
+            st_status = _llm_wiki_verified_status_file_stat(wiki_path, path)
+            if st_status is None:
+                continue
+            status_files.append((path, st_status.st_mtime))
+        status_files.extend((target, st.st_mtime) for target, _, st in verified_page_entries)
+        latest = None
+        for _, mtime in status_files:
             latest = mtime if latest is None else max(latest, mtime)
 
         base.update({
@@ -7021,10 +7225,10 @@ def _build_llm_wiki_status() -> dict:
             "enabled": True,
             "status": "ready" if page_files else "empty",
             "entry_count": len(page_files),
-            "page_count": len(page_files),
+            "page_count": len(page_entries),
             "raw_source_count": _llm_wiki_count_files(wiki_path / "raw"),
             "last_updated": _llm_wiki_safe_iso(latest),
-            "last_writer": _llm_wiki_last_writer(wiki_path, page_files),
+            "last_writer": _llm_wiki_last_writer(wiki_path, page_entries),
         })
         return base
     except Exception as exc:
@@ -8248,34 +8452,41 @@ def handle_get(handler, parsed) -> bool:
         wiki_root, _, _ = _llm_wiki_resolve_path()
         if not wiki_root or not os.path.isdir(wiki_root):
             return bad(handler, "Wiki not configured or directory not found", status=404)
-        page_paths = _llm_wiki_page_files(wiki_root)
+        allowlisted_entries = _llm_wiki_allowlisted_entries(Path(wiki_root))
         pages = []
-        for fp in sorted(page_paths, key=lambda p: str(p).lower()):
-            try:
-                rel = fp.relative_to(wiki_root)
-            except ValueError:
-                continue
+        for rel_path, (fp, identity) in sorted(allowlisted_entries.items(), key=lambda item: item[0].lower()):
             try:
                 st = fp.stat()
             except OSError:
                 continue
-            pages.append({"name": fp.name, "path": str(rel).replace("\\", "/"), "size": st.st_size, "mtime": int(st.st_mtime)})
+            if (st.st_dev, st.st_ino) != identity:
+                continue
+            pages.append({"name": Path(rel_path).name, "path": rel_path, "size": st.st_size, "mtime": int(st.st_mtime)})
         return j(handler, {"pages": pages})
     if parsed.path == "/api/wiki/page":
         wiki_root, _, _ = _llm_wiki_resolve_path()
         page_path = parse_qs(parsed.query or "").get("path", [""])[0]
         if not wiki_root or not page_path:
             return bad(handler, "Wiki not configured or path not provided", status=400)
+        if "\\" in page_path:
+            return bad(handler, "Invalid path", status=400)
         # Reject a real `..` path SEGMENT (or absolute path), not the bare
         # substring — a legitimate listed filename like `v1..v2.md` contains
         # ".." without being traversal. Containment + the resolved-allowlist
         # membership check below are the actual security boundary.
-        _page_parts = page_path.replace("\\", "/").split("/")
+        requested_key = page_path.replace("\\", "/")
+        _page_parts = requested_key.split("/")
         if os.path.isabs(page_path) or any(part == ".." for part in _page_parts):
+            return bad(handler, "Invalid path", status=400)
+        if any(part in ("", ".") for part in _page_parts):
             return bad(handler, "Invalid path", status=400)
         full_path = Path(os.path.join(wiki_root, page_path))
         if not _skill_path_within(Path(wiki_root), full_path):
             return bad(handler, "Invalid path", status=400)
+        try:
+            wiki_real = Path(wiki_root).resolve()
+        except OSError:
+            return bad(handler, "Page not found", status=404)
         # Only serve files the browse/list path would surface (same allowlist:
         # *.md under the wiki page-dirs, no dotfiles, forbidden-roots guard).
         # Without this the read endpoint could return ANY file inside the wiki
@@ -8286,22 +8497,16 @@ def handle_get(handler, parsed) -> bool:
         # allowlist check (TOCTOU write-race, Codex finding) — a pathname re-open
         # alone can't, since O_NOFOLLOW only guards the final component, not a
         # swapped parent directory.
-        allowed_identity: dict[Path, tuple] = {}
-        try:
-            for _p in _llm_wiki_page_files(Path(wiki_root)):
-                try:
-                    rp = _p.resolve()
-                    st0 = rp.stat()
-                    allowed_identity[rp] = (st0.st_dev, st0.st_ino)
-                except OSError:
-                    continue
-        except Exception:
-            allowed_identity = {}
+        allowed_identity = _llm_wiki_allowlisted_entries(wiki_real)
         try:
             resolved_target = full_path.resolve()
         except OSError:
             return bad(handler, "Page not found", status=404)
-        if resolved_target not in allowed_identity:
+        requested_entry = allowed_identity.get(requested_key)
+        if requested_entry is None:
+            return bad(handler, "Page not found", status=404)
+        allowlisted_target, allowlisted_identity = requested_entry
+        if resolved_target != allowlisted_target:
             return bad(handler, "Page not found", status=404)
         # Read the ALREADY-RESOLVED, allowlisted real path with O_NOFOLLOW so a
         # symlink swapped in for the final component between the allowlist check
@@ -8314,7 +8519,7 @@ def handle_get(handler, parsed) -> bool:
             fd = os.open(str(resolved_target), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             try:
                 st_open = os.fstat(fd)
-                if (st_open.st_dev, st_open.st_ino) != allowed_identity[resolved_target]:
+                if (st_open.st_dev, st_open.st_ino) != allowlisted_identity:
                     return bad(handler, "Page not found", status=404)
                 raw = os.read(fd, _LLM_WIKI_MAX_PAGE_BYTES + 1)
             finally:
@@ -9593,6 +9798,16 @@ def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
         return False, "Authentication required", 401
     return True, "", 200
 
+def _validate_session_toolsets_shape(toolsets):
+    """Validate per-session toolset override shape without catalog lookup."""
+    if toolsets is None:
+        return None
+    if not isinstance(toolsets, list) or not toolsets:
+        raise ValueError("toolsets must be a non-empty list or null")
+    if not all(isinstance(t, str) and t for t in toolsets):
+        raise ValueError("each toolset must be a non-empty string")
+    return toolsets
+
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger)
@@ -9758,6 +9973,10 @@ def handle_post(handler, parsed) -> bool:
             body.get("model"),
             body.get("model_provider"),
         )
+        try:
+            enabled_toolsets = _validate_session_toolsets_shape(body.get("enabled_toolsets"))
+        except ValueError as e:
+            return bad(handler, str(e), status=400)
         # Use the profile sent by the client tab (if any) so that two tabs on
         # different profiles never clobber each other via the process-level global.
         # ── Memory lifecycle: commit the previous session before starting a new one ──
@@ -9781,6 +10000,7 @@ def handle_post(handler, parsed) -> bool:
             profile=body.get("profile") or None,
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
+            enabled_toolsets=enabled_toolsets,
         )
         if worktree_info:
             publish_session_list_changed(
@@ -10103,12 +10323,10 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         sid = body["session_id"]
         toolsets = body.get("toolsets")
-        # Validate: if not None, must be a non-empty list of strings
-        if toolsets is not None:
-            if not isinstance(toolsets, list) or not toolsets:
-                return bad(handler, "toolsets must be a non-empty list or null")
-            if not all(isinstance(t, str) and t for t in toolsets):
-                return bad(handler, "each toolset must be a non-empty string")
+        try:
+            toolsets = _validate_session_toolsets_shape(toolsets)
+        except ValueError as e:
+            return bad(handler, str(e), status=400)
         try:
             s = get_session(sid)
         except KeyError:
@@ -12180,7 +12398,7 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
-    handler.end_headers()
+    end_sse_headers(handler)
     cursor_value = cursor
     try:
         while True:
@@ -12240,7 +12458,7 @@ def _handle_sse_stream(handler, parsed):
         handler.send_header("Cache-Control", "no-cache")
         handler.send_header("X-Accel-Buffering", "no")
         handler.send_header("Connection", "close")
-        handler.end_headers()
+        end_sse_headers(handler)
         try:
             _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs, stream_id))
         except _CLIENT_DISCONNECT_ERRORS:
@@ -12256,7 +12474,7 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
-    handler.end_headers()
+    end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
     replay_cutoff_seq = None
     if qs.get("replay", [""])[0] or qs.get("after_seq", [None])[0] not in (None, "") or qs.get("after_event_id", [None])[0]:
@@ -12436,7 +12654,7 @@ def _handle_terminal_output(handler, parsed):
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
-    handler.end_headers()
+    end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
     try:
         while True:
@@ -12522,7 +12740,7 @@ def _handle_gateway_sse_stream(handler, parsed):
     # connect/sessions_changed snapshot/disconnect that thrashes the
     # session list every ~1s. Letting the server close the socket
     # naturally after the stream ends is sufficient.
-    handler.end_headers()
+    end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = watcher.subscribe()
@@ -12557,7 +12775,7 @@ def _handle_session_events_stream(handler):
     handler.send_header('X-Accel-Buffering', 'no')
     # #3103: see _handle_gateway_sse_stream — `Connection: close` causes
     # EventSource reconnect storms in browsers on long-lived SSE.
-    handler.end_headers()
+    end_sse_headers(handler)
 
     q = subscribe_session_events()
     try:
@@ -13698,7 +13916,7 @@ def _handle_approval_sse_stream(handler, parsed):
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
     handler.send_header('Connection', 'close')
-    handler.end_headers()
+    end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     from api.streaming import _sse
@@ -13800,7 +14018,7 @@ def _handle_clarify_sse_stream(handler, parsed):
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
     handler.send_header('Connection', 'close')
-    handler.end_headers()
+    end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     from api.streaming import _sse
@@ -13880,7 +14098,7 @@ def _handle_session_sse_stream(handler, parsed):
         # default, matching the other long-lived SSE handlers (gateway/session
         # events) that fixed the reconnect-storm. An explicit value here is a
         # third, inconsistent approach (greptile flag).
-        handler.end_headers()
+        end_sse_headers(handler)
         _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
         from api.streaming import _sse
@@ -14128,7 +14346,8 @@ def _handle_live_models(handler, parsed):
                 # Fallback: try credential pool for base_url + api_key
                 if (not _base_url or not _api_key) and provider.startswith("custom:"):
                     try:
-                        from api.config import _has_explicit_pool_credentials, _resolve_provider_alias
+                        from api.config import _has_explicit_pool_credentials
+
                         if _has_explicit_pool_credentials(provider):
                             from agent.credential_pool import load_pool as _lpool
                             _resolved = _resolve_provider_alias(provider)
@@ -14208,11 +14427,19 @@ def _handle_live_models(handler, parsed):
                     import urllib.request
                     _providers_cfg = cfg.get("providers", {})
                     _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
-                    # Only use provider-scoped key — never fall back to a top-level
-                    # api_key which may belong to a different provider.
+                    # Only use a provider-scoped key.  A top-level model.api_key
+                    # is safe here only when it belongs to the requested provider;
+                    # otherwise /api/models/live?provider=<other> could forward
+                    # the active provider's credential to the wrong third party.
                     _key = _prov.get("api_key") if isinstance(_prov, dict) else None
                     if not _key:
-                        _key = cfg.get("model", {}).get("api_key")
+                        _model_cfg = cfg.get("model", {})
+                        if isinstance(_model_cfg, dict):
+                            _active_provider = _resolve_provider_alias(
+                                (_model_cfg.get("provider") or "").strip().lower()
+                            )
+                            if _active_provider == provider:
+                                _key = _model_cfg.get("api_key")
                     if _key:
                         _req = urllib.request.Request(
                             f"{_ep}/models",
@@ -15129,8 +15356,17 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     now = time.time()
     try:
         from api import config as _live_config
+        # Snapshot the live-worker set BEFORE taking ACTIVE_RUNS_LOCK (sequential,
+        # not nested, so no lock-ordering/deadlock risk). A long turn whose
+        # active_stream_id was already cleared during final writeback can still be
+        # mid-teardown — its STREAMS entry present — past the age ceiling, so age
+        # alone must NOT pop its lifecycle row (health / background-wakeup /
+        # active-agent-cache consumers read ACTIVE_RUNS as worker-lifecycle truth).
+        with _live_config.STREAMS_LOCK:
+            live_stream_ids = set(_live_config.STREAMS.keys())
+        stale_stream_ids = []
         with _live_config.ACTIVE_RUNS_LOCK:
-            for run_stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
+            for run_stream_id, raw in list((_live_config.ACTIVE_RUNS or {}).items()):
                 stream_id = str((raw or {}).get("stream_id") or run_stream_id or "").strip()
                 run_sid = str((raw or {}).get("session_id") or "").strip()
                 if run_sid != sid or not stream_id:
@@ -15139,11 +15375,19 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
                     started_at = float((raw or {}).get("started_at") or 0)
                 except (TypeError, ValueError):
                     started_at = 0.0
-                # Ignore a stale/wedged entry past the unwind ceiling so it can't
-                # block the session permanently.
+                # Past the unwind ceiling: never block a successor on it (the
+                # anti-permanent-409 guarantee, #3822). Additionally reconcile the
+                # zombie out of ACTIVE_RUNS so health/recovery polling stops seeing a
+                # half-alive run — but ONLY when the worker is truly gone from
+                # STREAMS, so a still-live / still-tearing-down worker keeps its
+                # lifecycle row. Pop by the real dict key. (Codex gate, #4492)
                 if started_at and (now - started_at) > ceiling:
+                    if run_stream_id not in live_stream_ids and stream_id not in live_stream_ids:
+                        stale_stream_ids.append(run_stream_id)
                     continue
                 return stream_id
+            for stale_stream_id in stale_stream_ids:
+                (_live_config.ACTIVE_RUNS or {}).pop(stale_stream_id, None)
     except Exception:
         return None
     return None
@@ -18716,7 +18960,24 @@ def _handle_memory_write(handler, body):
     # (#4217/#4234/#4240).
     if target.is_symlink():
         return bad(handler, "Cannot write to a symlinked memory file")
-    target.write_text(body["content"], encoding="utf-8")
+    try:
+        target.write_text(body["content"], encoding="utf-8")
+    except OSError as exc:
+        if not isinstance(exc, PermissionError) and getattr(exc, "errno", None) != errno.EROFS:
+            raise
+        mode_hint = ""
+        try:
+            mode_hint = f" (mode {target.stat().st_mode & 0o777:o})"
+        except OSError:
+            pass
+        return bad(
+            handler,
+            (
+                f"{target.name} is not writable{mode_hint}: {target}. "
+                "Run chmod 644 on the file or fix ownership on the shared volume."
+            ),
+            403,
+        )
     return j(handler, {"ok": True, "section": section, "path": str(target)})
 
 
@@ -19017,6 +19278,7 @@ def _handle_session_import(handler, body):
         model=model,
         messages=messages,
         tool_calls=body.get("tool_calls", []),
+        profile=get_active_profile_name(),
     )
     s.pinned = body.get("pinned", False)
     with LOCK:

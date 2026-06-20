@@ -319,6 +319,9 @@ def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp
 
     # The bounded guard should treat it as stale and NOT report it as blocking.
     assert routes._active_run_stream_for_session(session.session_id) is None
+    # It must also reconcile the zombie registry entry immediately so health /
+    # recovery polling does not keep advertising a half-alive run forever.
+    assert stale_stream_id not in config.ACTIVE_RUNS
 
     class NoopThread:
         def __init__(self, *args, **kwargs):
@@ -348,6 +351,34 @@ def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp
     finally:
         config.unregister_active_run(stale_stream_id)
         routes.STREAMS.pop("new-stream", None)
+
+
+def test_live_worker_past_ceiling_is_not_reaped_from_active_runs():
+    """A still-live worker (present in STREAMS) past the age ceiling must NOT be
+    popped from ACTIVE_RUNS — only genuinely-gone workers are reconciled (#4492).
+
+    A long turn whose active_stream_id was cleared during final writeback can be
+    mid-teardown past the 180s ceiling while its STREAMS entry is still present;
+    reaping its lifecycle row then would lie to health / background-wakeup /
+    active-agent-cache consumers that read ACTIVE_RUNS as worker-lifecycle truth.
+    """
+    config.STREAMS.clear()
+    config.ACTIVE_RUNS.clear()
+    sid = "live-teardown-session"
+    live_stream_id = "still-alive-stream"
+    config.register_active_run(live_stream_id, session_id=sid, phase="running")
+    # Age the entry past the ceiling AND keep the worker present in STREAMS.
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS[live_stream_id]["started_at"] = time.time() - 600
+    config.STREAMS[live_stream_id] = object()
+    try:
+        # Not reported as blocking (past the ceiling) ...
+        assert routes._active_run_stream_for_session(sid) is None
+        # ... but the lifecycle row is preserved because the worker is still live.
+        assert live_stream_id in config.ACTIVE_RUNS
+    finally:
+        config.STREAMS.pop(live_stream_id, None)
+        config.unregister_active_run(live_stream_id)
 
 
 def test_stale_stream_cleanup_does_not_clobber_concurrent_chat_start(monkeypatch):

@@ -2025,6 +2025,18 @@ class TestForceButtonResetOnRetry:
         )
 
 
+def test_force_update_confirm_discloses_untracked_file_deletion():
+    """#4310: destructive force-update copy must include untracked files."""
+    src = read('static/ui.js')
+    m = re.search(r'async function forceUpdate\b.*?\n\}', src, re.DOTALL)
+    assert m, "forceUpdate() not found"
+    fn = m.group(0)
+    assert 'delete untracked files' in fn, (
+        "forceUpdate confirmation must disclose that git clean -fd deletes "
+        "untracked files before the hard reset"
+    )
+
+
 # ── #785: Manual 'Check for Updates' button ───────────────────────────────────
 
 class TestCheckForUpdatesButton:

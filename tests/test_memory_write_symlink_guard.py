@@ -12,6 +12,8 @@ setup); only the concrete target file is guarded.
 """
 
 import os
+import errno
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +60,61 @@ def test_memory_write_rejects_symlinked_memory_file(tmp_path, monkeypatch):
     assert "Cannot write to a symlinked memory file" in cap["bad"][0]
     # The symlink target outside the memories dir must be untouched.
     assert outside.read_text(encoding="utf-8") == "important"
+
+
+def test_memory_write_read_only_soul_returns_403(tmp_path, monkeypatch):
+    """A read-only SOUL.md write must return an actionable 403, not bubble as 500."""
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "SOUL.md"
+    target.write_text("original", encoding="utf-8")
+    original_write_text = Path.write_text
+
+    def fake_write_text(self, *args, **kwargs):
+        if self == target:
+            raise PermissionError("read-only test file")
+        return original_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fake_write_text)
+
+    cap = _patch_memory_routes(monkeypatch, home)
+    routes._handle_memory_write(
+        _FakeHandler(),
+        {"section": "soul", "content": "# Soul\n"},
+    )
+
+    assert "bad" in cap, f"expected 403, got {cap}"
+    assert cap["bad"][1] == 403
+    assert "SOUL.md" in cap["bad"][0]
+    assert "writable" in cap["bad"][0].lower()
+    assert "chmod 644" in cap["bad"][0]
+
+
+def test_memory_write_read_only_filesystem_returns_403(tmp_path, monkeypatch):
+    """Docker read-only volume writes can raise EROFS instead of PermissionError."""
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "SOUL.md"
+    target.write_text("original", encoding="utf-8")
+    original_write_text = Path.write_text
+
+    def fake_write_text(self, *args, **kwargs):
+        if self == target:
+            raise OSError(errno.EROFS, "read-only file system")
+        return original_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fake_write_text)
+
+    cap = _patch_memory_routes(monkeypatch, home)
+    routes._handle_memory_write(
+        _FakeHandler(),
+        {"section": "soul", "content": "# Soul\n"},
+    )
+
+    assert "bad" in cap, f"expected 403, got {cap}"
+    assert cap["bad"][1] == 403
+    assert "SOUL.md" in cap["bad"][0]
+    assert "chmod 644" in cap["bad"][0]
 
 
 def test_memory_write_allows_symlinked_memories_directory(tmp_path, monkeypatch):

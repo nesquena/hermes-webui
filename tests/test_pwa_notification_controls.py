@@ -25,9 +25,33 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "_sessionUrlForSid(sid)" in MESSAGES_JS
     assert "data:{url}" in MESSAGES_JS
     assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
-    assert "sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{sid:activeSid})" in MESSAGES_JS
+    assert "sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverHidden,sid:activeSid})" in MESSAGES_JS
     assert "sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid})" in MESSAGES_JS
     assert "sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid})" in MESSAGES_JS
+
+
+def test_completion_notification_fires_when_tab_was_hidden_during_stream():
+    """#4416: a throttled background-tab SSE delivers `done` late (after the user
+    returns, document.hidden=false), which silently dropped the completion
+    notification. The done handler now passes forceHidden based on whether the
+    tab was hidden at ANY point during the stream, and sendBrowserNotification
+    bypasses ONLY the live visibility gate (not the user's enabled setting) on
+    forceHidden — so a backgrounded stream notifies, a watched one stays silent."""
+    # The per-stream hidden tracker exists and is wired at attach + done.
+    assert "_STREAM_WAS_HIDDEN" in MESSAGES_JS
+    assert "function _bindStreamHiddenTracker" in MESSAGES_JS
+    # Entries are stream-owned ({streamId, wasHidden}) so a stale entry from a
+    # non-`done` terminal path can't be mis-attributed to a later same-sid stream.
+    assert "const _wasEverHidden=!!(_hiddenEntry&&_hiddenEntry.wasHidden);" in MESSAGES_JS
+    assert "function _clearStreamHidden" in MESSAGES_JS
+    # Cleared on the non-done terminal paths too (belt-and-suspenders alongside
+    # the streamId-ownership guard).
+    assert MESSAGES_JS.count("_clearStreamHidden(activeSid, streamId)") >= 4
+    # sendBrowserNotification honors forceHidden but still respects the
+    # notifications-enabled setting (forceHidden is NOT the test-button force).
+    assert "const forceHidden=!!(options&&options.forceHidden);" in MESSAGES_JS
+    assert "if(!force&&!window._notificationsEnabled) return;" in MESSAGES_JS
+    assert "if(!force&&!forceHidden&&!document.hidden) return;" in MESSAGES_JS
 
 
 def test_service_worker_handles_notification_clicks_without_hijacking_other_sessions():
