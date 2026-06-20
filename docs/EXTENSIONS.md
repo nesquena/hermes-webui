@@ -23,6 +23,7 @@ Extensions can:
 - serve files from one configured local directory at `/extensions/...`
 - inject configured same-origin stylesheets into `<head>`
 - inject configured same-origin scripts before `</body>`
+- read a local JSON manifest that lists bundled scripts/styles to inject
 - call the normal WebUI APIs available to the browser session
 
 Extensions cannot, by themselves:
@@ -53,14 +54,53 @@ export HERMES_WEBUI_EXTENSION_SCRIPT_URLS=/extensions/runtime.js,/extensions/app
 export HERMES_WEBUI_EXTENSION_STYLESHEET_URLS=/extensions/base.css,/extensions/theme.css
 ```
 
+For bundled or multi-extension installs, you may list assets in a manifest file
+inside `HERMES_WEBUI_EXTENSION_DIR` instead of maintaining long comma-separated
+environment variables:
+
+```bash
+cat > ~/.hermes/webui-extension-bundle/extensions.json <<'JSON'
+{
+  "extensions": [
+    {
+      "id": "templates",
+      "scripts": ["templates/templates.js"],
+      "stylesheets": ["templates/templates.css"]
+    },
+    {
+      "id": "sidebar-tools",
+      "scripts": ["sidebar-tools/sidebar-tools.js"],
+      "stylesheets": ["sidebar-tools/sidebar-tools.css"]
+    }
+  ]
+}
+JSON
+
+HERMES_WEBUI_EXTENSION_DIR=~/.hermes/webui-extension-bundle \
+HERMES_WEBUI_EXTENSION_MANIFEST=extensions.json \
+./start.sh
+```
+
+Manifest entries use the same URL safety rules as the environment variables.
+Bare relative entries such as `templates/templates.js` resolve to
+`/extensions/templates/templates.js`; absolute same-origin entries such as
+`/extensions/shared.js` or `/static/theme.css` are also accepted. A manifest may
+be an object with top-level `scripts` / `stylesheets`, an object with an
+`extensions` array, or a top-level array of extension objects. Disabled entries
+may be kept in the manifest with the JSON boolean `"enabled": false`. Explicit
+`HERMES_WEBUI_EXTENSION_SCRIPT_URLS` and
+`HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` still work and are appended after
+manifest assets, with duplicates ignored.
+
 ## URL rules
 
 Injected asset URLs are deliberately restricted:
 
 - must be same-origin paths
-- must start with `/extensions/` or `/static/`
+- must start with `/extensions/` or `/static/` after manifest normalization
 - must not include a URL scheme, host, fragment, quote, angle bracket, newline,
   NUL byte, or backslash
+- must not contain dot-segments or dotfiles after percent-decoding
 
 Allowed examples:
 
@@ -101,6 +141,8 @@ The static handler is sandboxed:
 - dotfiles and dot-directories are not served
 - symlinks that resolve outside the extension directory are rejected
 - missing or invalid extension directories behave as disabled
+- manifest paths must be relative files inside the configured extension directory
+- malformed, missing, or oversized manifests are ignored without enabling unsafe URLs
 - failures return a generic 404 without exposing local filesystem paths
 
 ## Security notes

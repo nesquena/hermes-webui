@@ -7,8 +7,21 @@ The extension surface must stay deliberately small and safe:
 - static assets sandboxed to the configured extension directory
 """
 
+import logging
 from types import SimpleNamespace
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clear_extension_env(monkeypatch):
+    for name in (
+        "HERMES_WEBUI_EXTENSION_DIR",
+        "HERMES_WEBUI_EXTENSION_MANIFEST",
+        "HERMES_WEBUI_EXTENSION_SCRIPT_URLS",
+        "HERMES_WEBUI_EXTENSION_STYLESHEET_URLS",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 class FakeHandler:
     def __init__(self):
@@ -126,6 +139,344 @@ def test_extension_route_remains_behind_webui_auth(monkeypatch):
     static = FakeHandler()
     assert check_auth(static, SimpleNamespace(path="/static/ui.js", query="")) is True
 
+
+
+
+def test_extension_manifest_adds_bundled_assets_before_env_urls(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "manifest.json").write_text(
+        """
+        {
+          "scripts": ["runtime.js"],
+          "stylesheets": ["base.css"],
+          "extensions": [
+            {
+              "id": "templates",
+              "scripts": ["templates/app.js", "/extensions/shared.js"],
+              "stylesheets": ["templates/app.css"]
+            },
+            {
+              "id": "disabled",
+              "enabled": false,
+              "scripts": ["disabled.js"],
+              "stylesheets": ["disabled.css"]
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+    monkeypatch.setenv(
+        "HERMES_WEBUI_EXTENSION_SCRIPT_URLS",
+        "/extensions/templates/app.js, /extensions/env-only.js",
+    )
+    monkeypatch.setenv(
+        "HERMES_WEBUI_EXTENSION_STYLESHEET_URLS",
+        "/extensions/env-only.css",
+    )
+
+    from api.extensions import get_extension_config
+
+    assert get_extension_config() == {
+        "enabled": True,
+        "script_urls": [
+            "/extensions/runtime.js",
+            "/extensions/templates/app.js",
+            "/extensions/shared.js",
+            "/extensions/env-only.js",
+        ],
+        "stylesheet_urls": [
+            "/extensions/base.css",
+            "/extensions/templates/app.css",
+            "/extensions/env-only.css",
+        ],
+    }
+
+
+def test_extension_manifest_reuses_url_safety_rules(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", raising=False)
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "bundle.json").write_text(
+        """
+        {
+          "scripts": [
+            "safe.js",
+            "../escape.js",
+            "/api/session",
+            "https://example.com/evil.js",
+            "/extensions/%252e%252e/api/session"
+          ],
+          "stylesheets": ["safe.css", "nested/../escape.css"]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "bundle.json")
+
+    from api.extensions import get_extension_config
+
+    assert get_extension_config() == {
+        "enabled": True,
+        "script_urls": ["/extensions/safe.js"],
+        "stylesheet_urls": ["/extensions/safe.css"],
+    }
+
+
+def test_extension_manifest_path_must_stay_inside_extension_root(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", raising=False)
+    root = tmp_path / "extensions"
+    root.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"scripts":["outside.js"]}', encoding="utf-8")
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "../outside.json")
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", "/extensions/env.js")
+
+    from api.extensions import get_extension_config
+
+    assert get_extension_config() == {
+        "enabled": True,
+        "script_urls": ["/extensions/env.js"],
+        "stylesheet_urls": [],
+    }
+
+
+def test_extension_manifest_url_list_shares_cap_with_env_urls(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", raising=False)
+    root = tmp_path / "extensions"
+    root.mkdir()
+    scripts = ",".join(f'"script{i}.js"' for i in range(40))
+    (root / "manifest.json").write_text(f'{{"scripts":[{scripts}]}}', encoding="utf-8")
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", "/extensions/env.js")
+
+    from api.extensions import _MAX_URL_LIST, get_extension_config
+
+    config = get_extension_config()
+    assert len(config["script_urls"]) == _MAX_URL_LIST
+    assert config["script_urls"][0] == "/extensions/script0.js"
+    assert config["script_urls"][-1] == f"/extensions/script{_MAX_URL_LIST - 1}.js"
+    assert "/extensions/env.js" not in config["script_urls"]
+
+
+def test_extension_manifest_logs_invalid_json_separately_from_oversize(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+    (root / "manifest.json").write_text('{"scripts": [', encoding="utf-8")
+
+    from api.extensions import get_extension_config
+
+    caplog.set_level(logging.WARNING, logger="api.extensions")
+
+    assert get_extension_config() == {
+        "enabled": True,
+        "script_urls": [],
+        "stylesheet_urls": [],
+    }
+    assert any("not valid JSON" in record.message for record in caplog.records)
+    assert not any("could not be read" in record.message for record in caplog.records)
+    assert not any("exceeds" in record.message for record in caplog.records)
+
+
+def test_extension_manifest_logs_invalid_utf8_as_unreadable(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+    (root / "manifest.json").write_bytes(b"{\xff}")
+
+    from api.extensions import get_extension_config
+
+    caplog.set_level(logging.WARNING, logger="api.extensions")
+
+    assert get_extension_config() == {
+        "enabled": True,
+        "script_urls": [],
+        "stylesheet_urls": [],
+    }
+    assert any("could not be read" in record.message for record in caplog.records)
+    assert not any("exceeds" in record.message for record in caplog.records)
+
+
+def test_extension_manifest_logs_oversize_distinctly(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+
+    from api import extensions
+
+    (root / "manifest.json").write_text(
+        '{"scripts":["pwn.js"]}' + (" " * extensions._MAX_MANIFEST_BYTES),
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="api.extensions")
+
+    assert extensions.get_extension_config() == {
+        "enabled": True,
+        "script_urls": [],
+        "stylesheet_urls": [],
+    }
+    assert any("exceeds" in record.message for record in caplog.records)
+    assert not any("not valid JSON" in record.message for record in caplog.records)
+
+
+def test_extension_manifest_reads_only_bounded_size(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+
+    from api import extensions
+
+    # If the bounded read/cap check is removed, this parses as valid JSON and
+    # would inject /extensions/pwn.js. The trailing padding makes it oversize.
+    oversize = '{"scripts":["pwn.js"]}' + (" " * extensions._MAX_MANIFEST_BYTES)
+    (root / "manifest.json").write_text(oversize, encoding="utf-8")
+
+    assert extensions.get_extension_config() == {
+        "enabled": True,
+        "script_urls": [],
+        "stylesheet_urls": [],
+    }
+
+
+
+def test_extension_manifest_multibyte_payload_is_bounded_by_bytes(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+
+    from api import extensions
+
+    oversize_multibyte = '{"scripts":["pwn.js"]}' + ("€" * extensions._MAX_MANIFEST_BYTES)
+    (root / "manifest.json").write_text(oversize_multibyte, encoding="utf-8")
+
+    assert extensions.get_extension_config() == {
+        "enabled": True,
+        "script_urls": [],
+        "stylesheet_urls": [],
+    }
+
+
+def test_extension_manifest_cap_warning_logs_once_across_many_entries(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    entries = [
+        {
+            "id": f"ext{i}",
+            "scripts": [f"script{i}.js"],
+            "stylesheets": [f"style{i}.css"],
+        }
+        for i in range(40)
+    ]
+    (root / "manifest.json").write_text(
+        __import__("json").dumps({"extensions": entries}), encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+
+    from api.extensions import _MAX_URL_LIST, _warned_urls, get_extension_config
+
+    _warned_urls.clear()
+    caplog.set_level(logging.WARNING, logger="api.extensions")
+
+    config = get_extension_config()
+
+    assert len(config["script_urls"]) == _MAX_URL_LIST
+    assert len(config["stylesheet_urls"]) == _MAX_URL_LIST
+    truncation_records = [
+        record for record in caplog.records
+        if "truncated at" in record.message and "Extension URL list" in record.message
+    ]
+    assert len(truncation_records) == 2
+    assert any("manifest:scripts" in record.message for record in truncation_records)
+    assert any("manifest:stylesheets" in record.message for record in truncation_records)
+
+def test_extension_manifest_ignores_non_list_asset_fields(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "manifest.json").write_text(
+        """
+        {
+          "scripts": "app.js",
+          "stylesheets": {"href": "app.css"},
+          "extensions": {
+            "bad": {"scripts": ["bad.js"]}
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", "/extensions/env.js")
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", raising=False)
+
+    from api.extensions import get_extension_config
+
+    assert get_extension_config() == {
+        "enabled": True,
+        "script_urls": ["/extensions/env.js"],
+        "stylesheet_urls": [],
+    }
+
+
+
+def test_extension_env_only_duplicate_urls_preserve_legacy_behavior(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_MANIFEST", raising=False)
+    monkeypatch.setenv(
+        "HERMES_WEBUI_EXTENSION_SCRIPT_URLS",
+        "/extensions/app.js, /extensions/app.js",
+    )
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", raising=False)
+
+    from api.extensions import get_extension_config
+
+    assert get_extension_config() == {
+        "enabled": True,
+        "script_urls": ["/extensions/app.js", "/extensions/app.js"],
+        "stylesheet_urls": [],
+    }
+
+
+def test_extension_manifest_accepts_top_level_extension_array(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "extensions.json").write_text(
+        """
+        [
+          {"id": "a", "scripts": ["a/a.js"], "stylesheets": ["a/a.css"]},
+          {"id": "b", "scripts": ["b/b.js"]}
+        ]
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", raising=False)
+
+    from api.extensions import get_extension_config
+
+    assert get_extension_config() == {
+        "enabled": True,
+        "script_urls": ["/extensions/a/a.js", "/extensions/b/b.js"],
+        "stylesheet_urls": ["/extensions/a/a.css"],
+    }
 
 def test_extension_static_serving_is_sandboxed(tmp_path, monkeypatch):
     root = tmp_path / "extensions"
