@@ -60,6 +60,9 @@ def test_disable_auth_prompt_uses_destructive_label_not_create():
     assert match, "disableAuth() not found"
     body = match.group(1)
     assert "const confirmText='DISABLE AUTH'" in body
+    assert "currentPwField=$('settingsCurrentPassword')" in body
+    assert "showToast(t('current_password_required'))" in body
+    assert body.index("showToast(t('current_password_required'))") < body.index("showPromptDialog")
     assert "showPromptDialog" in body
     assert "confirmLabel:t('disable_auth')" in body
     assert "danger:true" in body

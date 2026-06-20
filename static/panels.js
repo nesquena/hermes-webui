@@ -9096,12 +9096,18 @@ async function goPasswordless(){
 }
 
 async function disableAuth(){
+  const currentPwField=$('settingsCurrentPassword');
+  const currentPw=(currentPwField||{}).value||'';
+  if(_settingsPasswordAuthEnabled && !currentPw.trim()){
+    if(currentPwField) currentPwField.focus();
+    showToast(t('current_password_required'));
+    return;
+  }
   const confirmText='DISABLE AUTH';
   const userInput=await showPromptDialog({title:t('disable_auth_confirm_title'),message:t('disable_auth_confirm_message')+' '+t('disable_auth_typed_confirm'),placeholder:confirmText,confirmLabel:t('disable_auth'),danger:true});
   if(!userInput || userInput.trim()!==confirmText) return;
-  const currentPw=($('settingsCurrentPassword')||{}).value;
   const payload={_clear_password:true};
-  if(_settingsPasswordAuthEnabled && currentPw) payload._current_password=currentPw;
+  if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
   try{
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
     showToast(t('auth_disabled'));
