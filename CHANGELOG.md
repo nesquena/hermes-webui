@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.552] — 2026-06-21 — Release TK (extension sidecar CSP documentation)
+
+### Changed
+
+- **Documented how extension sidecar assets interact with the Content-Security-Policy.** `docs/EXTENSIONS.md` now explains that same-origin extension scripts/styles load under the existing CSP and what the `connect-src` extra allowance covers, so extension authors know what's permitted without loosening the policy. Adds CSP-enforcement test coverage. Docs and tests only — no runtime change. Thanks @santastabber.
+
 ## [v0.51.551] — 2026-06-21 — Release TJ (manual /compress keeps the visible conversation)
 
 ### Fixed
