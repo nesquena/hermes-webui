@@ -5765,10 +5765,28 @@ def _run_agent_streaming(
                                 try:
                                     from api.routes import (
                                         _context_length_lookup_inputs_for_model as _cli_u,
+                                        _should_accept_session_context_length_refresh as _accept_u,
                                     )
-                                    from api.config import get_config as _gc_u
                                     from agent.model_metadata import get_model_context_length as _g_u
-                                    _cfg_u = _gc_u()
+                                    # Resolve the SESSION's own profile config, not
+                                    # the ambient one. This worker is a detached
+                                    # thread that does NOT inherit the per-request
+                                    # thread-local profile context, so a bare
+                                    # get_config() resolves the process-global
+                                    # (default) profile (#3294) — for a non-default
+                                    # profile that pins a different per-model
+                                    # context_length, that would surface the WRONG
+                                    # profile's window in the live payload. Read the
+                                    # session's profile home explicitly, mirroring
+                                    # the worker's own _cfg resolution below.
+                                    try:
+                                        from api.config import get_config_for_profile_home as _gch_u
+                                        from api.profiles import get_hermes_home_for_profile as _ghp_u
+                                        _ph_u = _ghp_u(getattr(_session_obj, 'profile', None))
+                                        _cfg_u = _gch_u(_ph_u)
+                                    except Exception:
+                                        from api.config import get_config as _gc_u
+                                        _cfg_u = _gc_u()
                                     _lk_u = _cli_u(
                                         _sm_u,
                                         _prov_u,
@@ -5788,14 +5806,28 @@ def _run_agent_streaming(
                                     # window is valid AND disagrees with the
                                     # compressor's cached value. Equal => nothing
                                     # to fix, leave the fast path untouched.
-                                    if _real_u and _real_u != _cc_cl_u:
+                                    # #4248: never let a low-confidence 256k metadata
+                                    # fallback clobber a LARGER cached window — that
+                                    # would reintroduce the very "drops to a smaller
+                                    # window mid-stream" regression this guard fixes.
+                                    # Reuse the exact acceptance gate hydration uses.
+                                    if (
+                                        _real_u and _real_u != _cc_cl_u
+                                        and _accept_u(_cc_cl_u, _real_u)
+                                    ):
                                         _resolved_real = _real_u
                                 except TypeError:
                                     # Older hermes-agent: legacy 2-arg form.
                                     try:
+                                        from api.routes import (
+                                            _should_accept_session_context_length_refresh as _accept2_u,
+                                        )
                                         from agent.model_metadata import get_model_context_length as _g2_u
                                         _real_u = _g2_u(_sm_u, _base_u) or 0
-                                        if _real_u and _real_u != _cc_cl_u:
+                                        if (
+                                            _real_u and _real_u != _cc_cl_u
+                                            and _accept2_u(_cc_cl_u, _real_u)
+                                        ):
                                             _resolved_real = _real_u
                                     except Exception:
                                         pass
