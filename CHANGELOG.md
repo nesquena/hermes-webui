@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+## [v0.51.565] — 2026-06-21 — Release TX (API-server sidecar prune + mic insecure-origin message)
+
 ### Fixed
 
 - **API-server sidecar sessions are now pruned from the sidebar when their backing agent session is deleted.** Previously the orphan-prune path only reconciled imported *CLI* sidecars; an API-server session that was opened in WebUI (creating a read-only sidecar) lingered forever after the backing agent row was deleted outside WebUI, with no delete affordance. The prune now also covers API-server sidecars, while still protecting native WebUI-owned sessions and failing closed (rows are kept if the agent state DB can't be probed). Thanks @franksong2702. (#4619)
