@@ -42,6 +42,9 @@ _EXTENSION_SCRIPT_URLS_ENV = "HERMES_WEBUI_EXTENSION_SCRIPT_URLS"
 _EXTENSION_STYLESHEET_URLS_ENV = "HERMES_WEBUI_EXTENSION_STYLESHEET_URLS"
 _EXTENSION_MANIFEST_ENV = "HERMES_WEBUI_EXTENSION_MANIFEST"
 _ALLOWED_ASSET_PREFIXES = ("/extensions/", "/static/")
+_SIDECAR_WARNING_SOURCE = "manifest:sidecars"
+_DEFAULT_SIDECAR_HEALTH_PATH = "/health"
+_LOOPBACK_SIDECAR_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 _EXTENSION_MIME = {
     "css": "text/css",
@@ -261,6 +264,122 @@ def _manifest_asset_url(value: object) -> str:
     return EXTENSION_ROUTE_PREFIX + item
 
 
+def _manifest_entry_text(entry: Dict[str, object], key: str) -> str:
+    value = entry.get(key)
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _normalize_loopback_sidecar_origin(value: object) -> Optional[str]:
+    """Return a canonical loopback origin or None when unsafe.
+
+    Only browser-addressable loopback HTTP(S) origins are accepted. The returned
+    value is rebuilt from parsed components so rejected raw input is never echoed
+    into diagnostics.
+    """
+    if not isinstance(value, str):
+        return None
+    origin = value.strip()
+    if not origin or any(
+        ch in origin for ch in ("\x00", "\r", "\n", '"', "'", "<", ">", "\\")
+    ):
+        return None
+    parsed = urlsplit(origin)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    if parsed.path or parsed.query or parsed.fragment:
+        return None
+    host = (parsed.hostname or "").lower()
+    if host not in _LOOPBACK_SIDECAR_HOSTS:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    display_host = f"[{host}]" if ":" in host else host
+    return f"{parsed.scheme}://{display_host}{':' + str(port) if port is not None else ''}"
+
+
+def _normalize_sidecar_health_path(value: object) -> Optional[str]:
+    """Return a safe sidecar health path, or None when unsafe.
+
+    Health paths are same-origin paths relative to the validated sidecar origin.
+    Queries are rejected even though they are not cross-origin: health checks are
+    diagnostics, and query strings often accidentally carry tokens.
+    """
+    if not isinstance(value, str):
+        return None
+    path = value.strip()
+    if not path or not path.startswith("/") or path.startswith("//"):
+        return None
+    if any(ch in path for ch in ("\x00", "\r", "\n", '"', "'", "<", ">", "\\")):
+        return None
+    parsed = urlsplit(path)
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        return None
+    decoded_path = _fully_unquote_path(parsed.path)
+    if any(ch in decoded_path for ch in ("\x00", "\r", "\n", '"', "'", "<", ">", "\\")):
+        return None
+    if any(ch.isspace() for ch in decoded_path):
+        return None
+    if not decoded_path.startswith("/") or decoded_path.startswith("//"):
+        return None
+    segments = decoded_path.split("/")[1:]
+    if not segments:
+        return None
+    for segment in segments:
+        if not segment or segment in (".", ".."):
+            return None
+    return decoded_path
+
+
+def _sidecar_from_manifest_entry(
+    entry: Dict[str, object], diagnostics: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, str]]:
+    raw = entry.get("sidecar")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        _add_diagnostic_warning(diagnostics, "sidecar_invalid", _SIDECAR_WARNING_SOURCE)
+        return None
+    if raw.get("type") != "loopback":
+        _add_diagnostic_warning(
+            diagnostics, "sidecar_type_unsupported", _SIDECAR_WARNING_SOURCE
+        )
+        return None
+    origin = _normalize_loopback_sidecar_origin(raw.get("origin"))
+    if origin is None:
+        _add_diagnostic_warning(
+            diagnostics, "sidecar_origin_rejected", _SIDECAR_WARNING_SOURCE
+        )
+        return None
+    if "health_path" in raw:
+        health_path = _normalize_sidecar_health_path(raw.get("health_path"))
+        if health_path is None:
+            # Missing health_path defaults to /health; an explicitly invalid path
+            # rejects the sidecar so the browser does not probe a declaration the
+            # administrator needs to fix.
+            _add_diagnostic_warning(
+                diagnostics, "sidecar_health_path_rejected", _SIDECAR_WARNING_SOURCE
+            )
+            return None
+    else:
+        health_path = _DEFAULT_SIDECAR_HEALTH_PATH
+    sidecar_id = _manifest_entry_text(entry, "id")
+    name = _manifest_entry_text(entry, "name")
+    return {
+        "id": sidecar_id,
+        "name": name,
+        "type": "loopback",
+        "origin": origin,
+        "health_path": health_path,
+        "health_url": f"{origin}{health_path}",
+    }
+
+
 def _iter_manifest_entries(manifest: object) -> List[Tuple[str, object]]:
     entries: List[Tuple[str, object]] = []
     extension_entries: object = []
@@ -294,7 +413,7 @@ def _read_manifest_text(manifest_file: Path) -> str:
 
 def _read_manifest_urls_with_diagnostics(
     root: Path, diagnostics: Optional[Dict[str, Any]] = None
-) -> Tuple[List[str], List[str], Dict[str, Any]]:
+) -> Tuple[List[str], List[str], List[Dict[str, str]], Dict[str, Any]]:
     manifest_file, path_status = _manifest_path_with_status(root)
     manifest_status: Dict[str, Any] = {
         "configured": path_status != "not_configured",
@@ -303,28 +422,29 @@ def _read_manifest_urls_with_diagnostics(
         "entry_count": 0,
         "script_count": 0,
         "stylesheet_count": 0,
+        "sidecar_count": 0,
     }
     if manifest_file is None:
         if path_status == "invalid_path":
             _add_diagnostic_warning(diagnostics, "manifest_invalid_path", "manifest")
-        return [], [], manifest_status
+        return [], [], [], manifest_status
     try:
         if not manifest_file.exists() or not manifest_file.is_file():
             _log.warning("Configured extension manifest was not found")
             manifest_status["status"] = "missing"
             _add_diagnostic_warning(diagnostics, "manifest_missing", "manifest")
-            return [], [], manifest_status
+            return [], [], [], manifest_status
         manifest = json.loads(_read_manifest_text(manifest_file))
     except _ManifestTooLarge:
         _log.warning("Configured extension manifest exceeds %d bytes", _MAX_MANIFEST_BYTES)
         manifest_status["status"] = "oversized"
         _add_diagnostic_warning(diagnostics, "manifest_oversized", "manifest")
-        return [], [], manifest_status
+        return [], [], [], manifest_status
     except json.JSONDecodeError:
         _log.warning("Configured extension manifest is not valid JSON")
         manifest_status["status"] = "malformed"
         _add_diagnostic_warning(diagnostics, "manifest_malformed", "manifest")
-        return [], [], manifest_status
+        return [], [], [], manifest_status
     except RecursionError:
         # A <=64KB but deeply-nested manifest makes json.loads exceed the
         # interpreter recursion limit. Without this, the RecursionError escapes
@@ -332,15 +452,16 @@ def _read_manifest_urls_with_diagnostics(
         _log.warning("Configured extension manifest is too deeply nested")
         manifest_status["status"] = "too_deeply_nested"
         _add_diagnostic_warning(diagnostics, "manifest_too_deeply_nested", "manifest")
-        return [], [], manifest_status
+        return [], [], [], manifest_status
     except (OSError, UnicodeDecodeError):
         _log.warning("Configured extension manifest could not be read")
         manifest_status["status"] = "unreadable"
         _add_diagnostic_warning(diagnostics, "manifest_unreadable", "manifest")
-        return [], [], manifest_status
+        return [], [], [], manifest_status
 
     scripts: List[str] = []
     stylesheets: List[str] = []
+    sidecars: List[Dict[str, str]] = []
     entries = _iter_manifest_entries(manifest)
     manifest_status["entry_count"] = len(entries)
     scripts_full = False
@@ -348,6 +469,15 @@ def _read_manifest_urls_with_diagnostics(
     for _source, entry in entries:
         if not isinstance(entry, dict):
             continue
+        if _source.startswith("manifest.extensions["):
+            sidecar = _sidecar_from_manifest_entry(entry, diagnostics)
+            if sidecar is not None:
+                if len(sidecars) < _MAX_URL_LIST:
+                    sidecars.append(sidecar)
+                else:
+                    _add_diagnostic_warning(
+                        diagnostics, "sidecar_list_truncated", _SIDECAR_WARNING_SOURCE
+                    )
         script_source = "manifest:scripts"
         stylesheet_source = "manifest:stylesheets"
         if not scripts_full:
@@ -370,21 +500,20 @@ def _read_manifest_urls_with_diagnostics(
                 ):
                     stylesheets_full = True
                     break
-        if scripts_full and stylesheets_full:
-            break
     manifest_status.update(
         {
             "loaded": True,
             "status": "loaded",
             "script_count": len(scripts),
             "stylesheet_count": len(stylesheets),
+            "sidecar_count": len(sidecars),
         }
     )
-    return scripts, stylesheets, manifest_status
+    return scripts, stylesheets, sidecars, manifest_status
 
 
 def _read_manifest_urls(root: Path) -> Tuple[List[str], List[str]]:
-    scripts, stylesheets, _ = _read_manifest_urls_with_diagnostics(root)
+    scripts, stylesheets, _, _ = _read_manifest_urls_with_diagnostics(root)
     return scripts, stylesheets
 
 
@@ -417,6 +546,7 @@ def get_extension_status() -> Dict[str, Any]:
         "entry_count": 0,
         "script_count": 0,
         "stylesheet_count": 0,
+        "sidecar_count": 0,
     }
     if dir_configured and not dir_valid:
         _add_diagnostic_warning(diagnostics, "extension_dir_unavailable", "extension_dir")
@@ -428,12 +558,13 @@ def get_extension_status() -> Dict[str, Any]:
             "extension_dir_valid": False,
             "script_urls": [],
             "stylesheet_urls": [],
-            "counts": {"script_urls": 0, "stylesheet_urls": 0},
+            "sidecars": [],
+            "counts": {"script_urls": 0, "stylesheet_urls": 0, "sidecars": 0},
             "manifest": manifest_status,
             "warnings": diagnostics["warnings"],
         }
 
-    manifest_scripts, manifest_stylesheets, manifest_status = _read_manifest_urls_with_diagnostics(
+    manifest_scripts, manifest_stylesheets, sidecars, manifest_status = _read_manifest_urls_with_diagnostics(
         root, diagnostics
     )
     script_urls = _read_url_list(
@@ -452,9 +583,11 @@ def get_extension_status() -> Dict[str, Any]:
         "extension_dir_valid": True,
         "script_urls": script_urls,
         "stylesheet_urls": stylesheet_urls,
+        "sidecars": sidecars,
         "counts": {
             "script_urls": len(script_urls),
             "stylesheet_urls": len(stylesheet_urls),
+            "sidecars": len(sidecars),
         },
         "manifest": manifest_status,
         "warnings": diagnostics["warnings"],
