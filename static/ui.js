@@ -3715,6 +3715,7 @@ if(typeof window!=='undefined'){
             _scrollPinned=true;
             _messageUserUnpinned=false;
           }
+          _nearBottomCount=0;
         }
       }else if(!_messageUserUnpinned){
         if(nearBottom){
