@@ -9071,6 +9071,83 @@ function _anchorSceneNodeForRow(row, opts){
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
   return node;
 }
+function _anchorSceneTransparentNodeForRow(row, opts){
+  const settled=!!(opts&&opts.settled);
+  if(!row) return null;
+  let node=null;
+  const meta={
+    segmentSeq:row.segment_seq||row.segmentSeq||'',
+    burstId:row.activity_burst_id||row.burst_id||row.burstId||'',
+  };
+  if(row.role==='prose'){
+    // The settled assistant segment already owns the FINAL answer prose, so a
+    // prose row whose text matches the final answer must be suppressed here to
+    // avoid duplicating the answer. But INTERMEDIATE progress prose (the
+    // between-tool narration from earlier rounds) is NOT the final answer and
+    // belongs in the chronological transparent history — dropping it loses the
+    // interleaving the user saw live (#4568: tools were restored but mid-turn
+    // prose still vanished on reload). Render intermediate prose as an inline
+    // assistant-segment (same shape _anchorSceneNodeForRow builds), skip only
+    // the final-answer duplicate.
+    const text=String(row.text||'').trim();
+    if(!text) return null;
+    const finalAnswer=String((opts&&opts.finalAnswer)||'').trim();
+    if(finalAnswer&&_anchorSceneProseMatchesFinalAnswer(text,finalAnswer)) return null;
+    node=_anchorSceneNodeForRow(row,{settled});
+    if(!node) return null;
+    node=_decorateTransparentEventRow(node,{type:'prose',text,preview:text,...meta});
+  }else if(row.role==='thinking'){
+    if(window._showThinking===false) return null;
+    const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
+    if(!text) return null;
+    node=_decorateTransparentEventRow(_thinkingActivityNode(text,false,row.row_id||row.local_id||'anchor-thinking'),{
+      type:'thinking',
+      text,
+      preview:text,
+      ...meta,
+    });
+  }else if(row.role==='tool'){
+    const toolCall=_anchorSceneToolCallFromRow(row,{settled});
+    node=_decorateTransparentEventRow(buildToolCard(toolCall),{
+      type:'tool',
+      name:toolCall&&toolCall.name,
+      status:_transparentToolStatus(toolCall,true),
+      toolCall,
+      ...meta,
+    });
+  }else{
+    node=_anchorSceneNodeForRow(row,{settled});
+    node=_decorateTransparentEventRow(node,{
+      type:String(row.role||'activity'),
+      ...meta,
+    });
+  }
+  if(!node) return null;
+  node.setAttribute('data-anchor-scene-row','1');
+  node.setAttribute('data-anchor-settled-scene-row','1');
+  node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
+  node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
+  node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
+  return node;
+}
+// Whitespace-insensitive compare so a scene prose row that IS the final answer
+// (possibly re-wrapped) is recognized and not duplicated against the segment.
+// Codex #4568: the prefix tolerance must NOT be able to suppress a DISTINCT
+// intermediate progress row that merely happens to be a prefix of the final
+// answer (e.g. "I found the issue and I'm applying the fix now." when the final
+// answer starts with that sentence). So require exact normalized equality, with
+// a prefix tolerance allowed ONLY when the two strings are near-equal length
+// (>=0.9 ratio, shorter >=80 chars) — i.e. genuine re-wrap/truncation of the
+// SAME text, never a short intermediate sentence that prefixes a long answer.
+function _anchorSceneProseMatchesFinalAnswer(proseText, finalAnswer){
+  const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim();
+  const a=norm(proseText), b=norm(finalAnswer);
+  if(!a||!b) return false;
+  if(a===b) return true;
+  if(!(a.startsWith(b)||b.startsWith(a))) return false;
+  const shorter=Math.min(a.length,b.length), longer=Math.max(a.length,b.length);
+  return shorter>=80 && (shorter/longer)>=0.9;
+}
 function _anchorSceneWorklogGroup(blocks, opts){
   if(!blocks) return null;
   const live=!!(opts&&opts.live);
@@ -9254,8 +9331,48 @@ if(typeof window!=='undefined'){
   window._projectLiveAnchorActivitySceneForStream=_projectLiveAnchorActivitySceneForStream;
   window.isLiveAnchorActivitySceneOwner=isLiveAnchorActivitySceneOwner;
 }
+function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
+  if(!message||!message._anchor_activity_scene||!segment) return false;
+  const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
+  if(!blocks) return false;
+  const scene=message._anchor_activity_scene;
+  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  if(!rows.length) return false;
+  // The assistant segment owns the final answer; pass it so intermediate prose
+  // rows render but the final-answer-duplicate prose row is suppressed.
+  const finalAnswer=String(
+    (scene&&typeof scene.final_answer==='string'&&scene.final_answer)
+    || _assistantAnchorSceneFinalAnswerText(message)
+    || (typeof msgContent==='function'?msgContent(message):'')
+    || ''
+  );
+  blocks.querySelectorAll('[data-anchor-settled-scene-row="1"],.transparent-event-row[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+  blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
+    const idx=Number(node.getAttribute('data-msg-idx'));
+    if(Number.isFinite(idx)&&idx<rawIdx){
+      node.classList.add('assistant-segment-worklog-source');
+      node.setAttribute('aria-hidden','true');
+    }
+  });
+  let wrote=false;
+  for(const row of rows){
+    const node=_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer});
+    if(!node) continue;
+    if(segment.parentElement===blocks) blocks.insertBefore(node,segment);
+    else blocks.appendChild(node);
+    wrote=true;
+  }
+  if(wrote){
+    const turn=segment.closest('.assistant-turn');
+    if(turn) _syncTransparentEventControls(turn);
+  }
+  return wrote;
+}
 function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
+  if(typeof isTransparentStream==='function'&&isTransparentStream()){
+    return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
+  }
   if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;

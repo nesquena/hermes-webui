@@ -673,6 +673,58 @@ def test_anchor_owned_settled_turn_skips_legacy_worklog_rebuild():
     assert "!anchorOwnedAssistantRawIdxs.has(S.messages.indexOf(m))" in render
 
 
+def test_transparent_stream_renders_persisted_anchor_scene_after_reload():
+    settled = _function_body(UI_JS, "_renderSettledAnchorSceneForMessage")
+    transparent = _function_body(UI_JS, "_renderSettledAnchorSceneTransparentForMessage")
+    row = _function_body(UI_JS, "_anchorSceneTransparentNodeForRow")
+    render = _function_body(UI_JS, "renderMessages")
+
+    assert "if(typeof isTransparentStream==='function'&&isTransparentStream())" in settled
+    assert "return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);" in settled
+    assert "_anchorSceneRowsForRendering(scene,{settled:true})" in transparent
+    assert 'blocks.querySelectorAll(\'[data-anchor-settled-scene-row="1"],.transparent-event-row[data-anchor-scene-row="1"]\')' in transparent
+    # combined fix: the final answer text is computed and threaded into the row
+    # renderer so intermediate prose survives while the final-answer duplicate is dropped.
+    assert "_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer})" in transparent
+    assert "finalAnswer" in transparent
+    assert "blocks.insertBefore(node,segment)" in transparent
+    assert "_syncTransparentEventControls(turn)" in transparent
+    # tool + thinking rows are rendered as transparent event rows
+    assert "_decorateTransparentEventRow(_thinkingActivityNode" in row
+    assert "_decorateTransparentEventRow(buildToolCard(toolCall)" in row
+    assert "_transparentToolStatus(toolCall,true)" in row
+    assert 'data-anchor-settled-scene-row' in row
+    assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;" in render
+
+
+def test_transparent_anchor_intermediate_prose_preserved_only_final_answer_suppressed():
+    """#4568 combined fix: intermediate between-tool progress prose must render in
+    Transparent Stream reload (not be blanket-dropped like the first pass did);
+    ONLY the prose row that duplicates the final answer is suppressed."""
+    row = _function_body(UI_JS, "_anchorSceneTransparentNodeForRow")
+    match = _function_body(UI_JS, "_anchorSceneProseMatchesFinalAnswer")
+    # the prose branch must RENDER intermediate prose via the shared node builder,
+    # gated only on the final-answer match — NOT an unconditional `return null`.
+    assert "row.role==='prose'" in row
+    assert "_anchorSceneProseMatchesFinalAnswer(text,finalAnswer)" in row
+    assert "_anchorSceneNodeForRow(row,{settled})" in row, (
+        "intermediate prose must be rendered as an inline assistant-segment node, "
+        "not dropped"
+    )
+    assert "type:'prose'" in row
+    # the matcher exists and compares whitespace-insensitively; the prefix
+    # tolerance is length-ratio-guarded so a short intermediate sentence that
+    # merely prefixes a long final answer is NOT suppressed (Codex #4568).
+    assert "replace(/\\s+/g,' ')" in match
+    assert "startsWith" in match
+    assert "0.9" in match and ">=80" in match.replace(" ", ""), (
+        "prefix tolerance must be guarded by a near-equal length ratio, not a bare >=40 floor"
+    )
+    # guard against the regression where ALL prose rows were dropped:
+    assert "// avoid duplicating the answer" in row or "duplicates the final answer" in row
+
+
+
 def test_settled_anchor_scene_final_answer_does_not_fold_into_worklog_source():
     belongs = _function_body(UI_JS, "_assistantMessageBelongsInWorklog")
     render = _function_body(UI_JS, "renderMessages")
