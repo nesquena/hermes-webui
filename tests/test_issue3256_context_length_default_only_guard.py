@@ -591,3 +591,43 @@ def test_live_snapshot_guard_honors_256k_clobber_acceptance_gate():
     assert "and _accept2_u(_cc_cl_u, _real_u)" in _STREAMING_SRC, (
         "the legacy 2-arg fallback must also honor the 256k acceptance gate"
     )
+
+
+def test_session_save_path_broadened_to_any_model_window_mismatch():
+    """#4618 (Codex re-gate finding 1): the FINAL session-save stale-compressor
+    guard must also broaden beyond the default-only exact-cap test — otherwise a
+    leftover other-model window (168k) is PERSISTED to s.context_length and a
+    reload shows the wrong window. It must resolve the real window via the same
+    helper and honor the #4248 acceptance gate before skipping the compressor
+    value."""
+    assert "_context_length_lookup_inputs_for_model as _cli_cc" in _STREAMING_SRC, (
+        "save path must resolve the real per-model window via the hydration helper (#4618)"
+    )
+    assert "_should_accept_session_context_length_refresh as _accept_cc" in _STREAMING_SRC
+    assert "if _real_cc and _real_cc != _cc_cl and _accept_cc(_cc_cl, _real_cc):" in _STREAMING_SRC, (
+        "save path must skip the compressor value on ANY accepted real-window "
+        "mismatch, not only the default-model exact-cap case (#4618)"
+    )
+
+
+def test_sse_done_path_broadened_to_any_model_window_mismatch():
+    """#4618 (Codex re-gate finding 2): the terminal `done` SSE usage path must
+    also broaden — otherwise the indicator REVERTS to the stale window on stream
+    end (messages.js overwrites S.lastUsage with the done payload). It must
+    resolve the real window via the same helper and honor the #4248 gate before
+    dropping the compressor value."""
+    assert "_context_length_lookup_inputs_for_model as _cli_sse" in _STREAMING_SRC, (
+        "SSE done path must resolve the real per-model window via the hydration helper (#4618)"
+    )
+    assert "_should_accept_session_context_length_refresh as _accept_sse" in _STREAMING_SRC
+    assert "if _real_sse and _real_sse != _cc_cl_sse and _accept_sse(_cc_cl_sse, _real_sse):" in _STREAMING_SRC, (
+        "SSE done path must drop the compressor value on ANY accepted real-window "
+        "mismatch so the indicator can't snap back to a stale window at turn-end (#4618)"
+    )
+    # The old narrow default-only matcher must be gone from BOTH sibling paths.
+    assert "_model_matches_configured_default as _mmcd_sse" not in _STREAMING_SRC, (
+        "the old default-only SSE matcher (_mmcd_sse) must be removed (#4618)"
+    )
+    assert "_model_matches_configured_default as _mmcd_cc" not in _STREAMING_SRC, (
+        "the old default-only save matcher (_mmcd_cc) must be removed (#4618)"
+    )

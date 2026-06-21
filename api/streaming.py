@@ -7978,25 +7978,48 @@ def _run_agent_streaming(
                     # cap (e.g. 232K) that would clobber the real 1M metadata
                     # on every stream end. In that case skip the compressor
                     # value and let the fallback resolver below recompute.
+                    # #4618: broaden the stale-compressor guard the same way the
+                    # live-usage snapshot does. The OLD test only skipped the
+                    # compressor value when it equalled the config cap EXACTLY
+                    # (a non-default model carrying the global cap). But a
+                    # compressor can hold a DIFFERENT model's window after an
+                    # in-place model switch (e.g. opus-4.5's 168k lingering on an
+                    # opus-4.8 1M session) — that value != the config cap, so the
+                    # old guard let it persist to s.context_length and the SSE
+                    # payload, snapping the indicator back to 168k at turn-end.
+                    # Resolve the real per-model window via the SAME helper the
+                    # live path + hydration use and skip the compressor value
+                    # whenever the real window differs, honoring the #4248
+                    # acceptance gate (never let a low-confidence 256k fallback
+                    # clobber a larger cached window).
                     _skip_cc_cl = False
                     try:
-                        _model_cfg_cc = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
-                        if isinstance(_model_cfg_cc, dict):
-                            _cfg_default_cc = str(_model_cfg_cc.get('default') or '').strip()
-                            _raw_cfg_cl_cc = _model_cfg_cc.get('context_length')
+                        from api.routes import (
+                            _context_length_lookup_inputs_for_model as _cli_cc,
+                            _should_accept_session_context_length_refresh as _accept_cc,
+                        )
+                        from agent.model_metadata import get_model_context_length as _g_cc
+                        _sess_model_cc = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                        if _sess_model_cc and _cc_cl > 0:
+                            _lk_cc = _cli_cc(
+                                _sess_model_cc,
+                                resolved_provider or '',
+                                base_url=getattr(agent, 'base_url', '') or resolved_base_url or '',
+                                api_key=getattr(agent, 'api_key', '') or resolved_api_key or '',
+                                cfg=_cfg if isinstance(_cfg, dict) else {},
+                            )
                             try:
-                                _cfg_cl_cc = int(_raw_cfg_cl_cc) if _raw_cfg_cl_cc is not None else 0
-                            except (TypeError, ValueError):
-                                _cfg_cl_cc = 0
-                            _sess_model_cc = str(getattr(agent, 'model', resolved_model or '') or '').strip()
-                            from api.routes import _model_matches_configured_default as _mmcd_cc
-                            if (
-                                _cfg_cl_cc > 0
-                                and _cc_cl == _cfg_cl_cc
-                                and _cfg_default_cc
-                                and _sess_model_cc
-                                and not _mmcd_cc(_sess_model_cc, _cfg_default_cc, resolved_provider or '')
-                            ):
+                                _real_cc = _g_cc(
+                                    _sess_model_cc,
+                                    _lk_cc.base_url,
+                                    api_key=_lk_cc.api_key,
+                                    config_context_length=_lk_cc.config_context_length,
+                                    provider=_lk_cc.provider or resolved_provider or '',
+                                    custom_providers=_lk_cc.custom_providers,
+                                ) or 0
+                            except TypeError:
+                                _real_cc = _g_cc(_sess_model_cc, _lk_cc.base_url) or 0
+                            if _real_cc and _real_cc != _cc_cl and _accept_cc(_cc_cl, _real_cc):
                                 _skip_cc_cl = True
                     except Exception:
                         pass
@@ -8244,31 +8267,46 @@ def _run_agent_streaming(
                 _orig_cc_cl_sse = _cc_cl_sse
                 _orig_cc_thresh_sse = getattr(_cc, 'threshold_tokens', 0) or 0
                 _dropped_stale_cap_sse = False
-                # Default-only guard (#3256): the agent-side context_compressor
-                # is constructed in agent_init with the global model.context_length
-                # applied unconditionally, so for non-default models its
-                # context_length is the stale global cap (e.g. 232K) — surfacing
-                # it via SSE makes the indicator show the wrong window even
-                # after the session was correctly resized. Drop the compressor
-                # value in that case and let the fallback resolver below recompute.
+                # Default-only guard (#3256), broadened (#4618): the agent-side
+                # context_compressor caches a context_length from the model it
+                # was built/last-updated with. For a non-default model it may be
+                # the stale global cap (e.g. 232K); after an in-place model switch
+                # it may be a DIFFERENT model's window (e.g. opus-4.5's 168k on an
+                # opus-4.8 1M session). Either way, surfacing it via the terminal
+                # `done` SSE makes the indicator REVERT to the wrong window on
+                # stream end (messages.js overwrites S.lastUsage with this payload)
+                # — the exact "send a message reverts to 168k" symptom. Resolve
+                # the real per-model window via the SAME helper the live path +
+                # hydration use; drop the compressor value whenever the real
+                # window differs, honoring the #4248 acceptance gate (never let a
+                # low-confidence 256k fallback clobber a larger cached window).
                 try:
-                    _model_cfg_sse = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
-                    if isinstance(_model_cfg_sse, dict):
-                        _cfg_default_sse = str(_model_cfg_sse.get('default') or '').strip()
-                        _raw_cfg_cl_sse = _model_cfg_sse.get('context_length')
+                    from api.routes import (
+                        _context_length_lookup_inputs_for_model as _cli_sse,
+                        _should_accept_session_context_length_refresh as _accept_sse,
+                    )
+                    from agent.model_metadata import get_model_context_length as _g_sse
+                    _sess_model_sse = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                    if _sess_model_sse and _cc_cl_sse > 0:
+                        _lk_sse = _cli_sse(
+                            _sess_model_sse,
+                            resolved_provider or '',
+                            base_url=getattr(agent, 'base_url', '') or resolved_base_url or '',
+                            api_key=getattr(agent, 'api_key', '') or resolved_api_key or '',
+                            cfg=_cfg if isinstance(_cfg, dict) else {},
+                        )
                         try:
-                            _cfg_cl_sse = int(_raw_cfg_cl_sse) if _raw_cfg_cl_sse is not None else 0
-                        except (TypeError, ValueError):
-                            _cfg_cl_sse = 0
-                        _sess_model_sse = str(getattr(agent, 'model', resolved_model or '') or '').strip()
-                        from api.routes import _model_matches_configured_default as _mmcd_sse
-                        if (
-                            _cfg_cl_sse > 0
-                            and _cc_cl_sse == _cfg_cl_sse
-                            and _cfg_default_sse
-                            and _sess_model_sse
-                            and not _mmcd_sse(_sess_model_sse, _cfg_default_sse, resolved_provider or '')
-                        ):
+                            _real_sse = _g_sse(
+                                _sess_model_sse,
+                                _lk_sse.base_url,
+                                api_key=_lk_sse.api_key,
+                                config_context_length=_lk_sse.config_context_length,
+                                provider=_lk_sse.provider or resolved_provider or '',
+                                custom_providers=_lk_sse.custom_providers,
+                            ) or 0
+                        except TypeError:
+                            _real_sse = _g_sse(_sess_model_sse, _lk_sse.base_url) or 0
+                        if _real_sse and _real_sse != _cc_cl_sse and _accept_sse(_cc_cl_sse, _real_sse):
                             _cc_cl_sse = 0
                             _dropped_stale_cap_sse = True
                 except Exception:
