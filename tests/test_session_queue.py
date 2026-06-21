@@ -230,6 +230,19 @@ if(calls[1].body.id !== 'srv-ghost' || calls[1].body.session_id !== sid){
     )
 
 
+def test_existing_session_load_syncs_backend_queue():
+    src = (pathlib.Path(__file__).parent.parent / "static" / "sessions.js").read_text(
+        encoding="utf-8"
+    )
+    load_start = src.index("async function loadSession(")
+    load_body = src[load_start : src.index("// ── Handoff hint logic", load_start)]
+    assign_pos = load_body.index("S.session=data.session")
+    stream_pos = load_body.index("startSessionStream(S.session.session_id)")
+    sync_pos = load_body.index("syncBackendSessionQueue(S.session.session_id)")
+    active_stream_pos = load_body.index("let activeStreamId=S.session.active_stream_id")
+    assert assign_pos < active_stream_pos < stream_pos < sync_pos
+
+
 def test_drain_for_session_starts_one_backend_owned_turn(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(config, "ACTIVE_RUNS", {})
