@@ -92,8 +92,9 @@ async function api(path,opts={}){
         }
         // ── Offline cache fallback (timeout) ────────────────────────────
         // Weak-signal requests that timeout are the primary use case for
-        // offline caching — check IndexedDB before giving up.
-        const _cachedTimeout=typeof _tryOfflineCacheFallback==='function'?await _tryOfflineCacheFallback(rel):undefined;
+        // offline caching — check IndexedDB before giving up. GET only — never
+        // serve cached data as the apparent result of a POST/PUT/DELETE.
+        const _cachedTimeout=((opts.method||'GET').toUpperCase()==='GET'&&typeof _tryOfflineCacheFallback==='function')?await _tryOfflineCacheFallback(rel):undefined;
         if(_cachedTimeout!==undefined){
           if(typeof window.HermesOfflineCache.showOfflineBanner==='function'){
             window.HermesOfflineCache.showOfflineBanner(_cachedTimeout.__cachedAt||null);
@@ -115,9 +116,9 @@ async function api(path,opts={}){
         continue;
       }
       // ── Offline cache fallback (network error) ────────────────────────
-      // All retries exhausted on a GET — try serving from IndexedDB cache
-      // before giving up. Only applies to canonical full-transcript requests.
-      const _cachedNet=typeof _tryOfflineCacheFallback==='function'?await _tryOfflineCacheFallback(rel):undefined;
+      // All retries exhausted — try serving from IndexedDB cache before
+      // giving up. GET only — never serve cached data for mutations.
+      const _cachedNet=((opts.method||'GET').toUpperCase()==='GET'&&typeof _tryOfflineCacheFallback==='function')?await _tryOfflineCacheFallback(rel):undefined;
       if(_cachedNet!==undefined){
         if(typeof window.HermesOfflineCache.showOfflineBanner==='function'){
           window.HermesOfflineCache.showOfflineBanner(_cachedNet.__cachedAt||null);

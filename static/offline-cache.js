@@ -461,9 +461,15 @@
       // Sort newest-first, evict the tail
       entries.sort(function (a, b) { return b.cachedAt - a.cachedAt; });
       var toEvict = entries.slice(MAX_CACHED_SESSIONS);
+      // Queue ALL delete requests synchronously before awaiting any of them.
+      // IndexedDB transactions auto-commit when the call stack returns to the
+      // event loop with no pending requests — sequential awaits between deletes
+      // cause TransactionInactiveError on strict implementations (iOS Safari).
+      var deletePromises = [];
       for (var i = 0; i < toEvict.length; i++) {
-        await _txDelete(store, toEvict[i].key);
+        deletePromises.push(_txDelete(store, toEvict[i].key));
       }
+      await Promise.all(deletePromises);
     } catch (_) {
       // non-fatal
     }
