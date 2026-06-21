@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+## [v0.51.562] — 2026-06-21 — Release TU (selected-context quote cards)
+
 ### Added
 
 - **Selected chat text now renders as richer "quote cards" instead of plain composer chips.** When you reply with a selection (the named context-blocks feature), the composer shows each block as a card with an accent rail, an editable label (click / Enter / F2 to rename, 120-char cap), a remove button, and a clipped excerpt; in the conversation, a sent message that carries a labeled selection renders the quote as a `<figure>` card. Labels and quoted text are HTML-escaped on every path (no XSS). Thanks @santastabber. (#4380)
