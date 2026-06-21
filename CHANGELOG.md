@@ -3,10 +3,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- **API-server imported sidecars are now pruned when their backing Agent session is gone (#4591).** Read-only API/Gateway sidecar rows no longer accumulate indefinitely in the sidebar after the corresponding `state.db` session is deleted outside WebUI, while native WebUI sessions remain protected.
-
 ## [v0.51.560] — 2026-06-21 — Release TS (recovered run-journal output reaches the model)
 
 ### Fixed
