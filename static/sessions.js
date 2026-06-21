@@ -2032,6 +2032,7 @@ async function loadSession(sid){
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
+  if(typeof syncBackendSessionQueue==='function') syncBackendSessionQueue(S.session.session_id);
 
 
   function _mergePendingSessionMessage(session,messages){
