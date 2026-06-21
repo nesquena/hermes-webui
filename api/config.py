@@ -3400,19 +3400,33 @@ def _public_main_service_tier(model_cfg: dict) -> str:
     return "priority" if service_tier == "priority" else ""
 
 
-def _main_model_request_overrides(config_data: dict) -> dict:
-    """Return supported runtime request overrides for the main chat model."""
+def _main_model_request_overrides(
+    config_data: dict,
+    effective_model: str | None = None,
+    effective_provider: str | None = None,
+) -> dict:
+    """Return supported runtime request overrides for the main chat model.
+
+    When *effective_model* / *effective_provider* are supplied, the
+    service-tier gate checks those instead of the saved default model,
+    so a per-session model switch to a non-OpenAI provider does not
+    leak ``service_tier`` onto an unsupported request.
+    """
     if not isinstance(config_data, dict):
         return {}
     model_cfg = config_data.get("model", {})
     if not isinstance(model_cfg, dict):
         return {}
     overrides = {}
-    model_id = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
-    resolved_provider = str(model_cfg.get("provider") or "").strip().lower()
-    if not resolved_provider:
-        _, resolved_provider, _ = resolve_model_provider(model_id)
-    if _main_model_supports_service_tier(model_id, resolved_provider):
+    gate_model = effective_model
+    gate_provider = effective_provider
+    if not gate_model:
+        gate_model = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
+    if not gate_provider:
+        gate_provider = str(model_cfg.get("provider") or "").strip().lower()
+        if not gate_provider:
+            _, gate_provider, _ = resolve_model_provider(gate_model)
+    if _main_model_supports_service_tier(gate_model, gate_provider):
         service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
         if service_tier == "priority":
             overrides["service_tier"] = "priority"

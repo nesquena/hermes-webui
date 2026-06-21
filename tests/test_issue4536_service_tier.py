@@ -94,6 +94,41 @@ class TestIssue4536ServiceTier:
 
         assert payload["main"]["service_tier"] == ""
 
+    def test_effective_model_gates_service_tier_forwarding(self):
+        """service_tier must be gated on the effective send model, not the saved default."""
+        from api import config
+
+        cfg_priority = {"model": {"provider": "openai", "default": "gpt-5.5", "service_tier": "priority"}}
+
+        openai_effective = config._main_model_request_overrides(
+            cfg_priority, effective_model="gpt-5.5", effective_provider="openai",
+        )
+        assert openai_effective.get("service_tier") == "priority"
+
+        openrouter_effective = config._main_model_request_overrides(
+            cfg_priority, effective_model="meta-llama/llama-3.1", effective_provider="openrouter",
+        )
+        assert openrouter_effective == {}
+
+        custom_effective = config._main_model_request_overrides(
+            cfg_priority, effective_model="my-local-model", effective_provider="custom:local",
+        )
+        assert custom_effective == {}
+
+        codex_effective = config._main_model_request_overrides(
+            cfg_priority, effective_model="gpt-5.3-codex", effective_provider="openai-codex",
+        )
+        assert codex_effective == {}
+
+    def test_no_effective_params_falls_back_to_saved_default(self):
+        """Without effective_model/provider, the function still reads the saved config."""
+        from api import config
+
+        result = config._main_model_request_overrides(
+            {"model": {"provider": "openai", "default": "gpt-5.5", "service_tier": "priority"}},
+        )
+        assert result == {"service_tier": "priority"}
+
     def test_switching_main_model_away_from_openai_clears_service_tier(self, monkeypatch, tmp_path):
         """A non-OpenAI default-model save should remove stale OpenAI service-tier state."""
         from api import config
