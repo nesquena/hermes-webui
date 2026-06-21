@@ -58,7 +58,16 @@ async function api(path,opts={}){
           throw err;
         }
         const ct=res.headers.get('content-type')||'';
-        return ct.includes('application/json')?await res.json():await res.text();
+        const parsed=ct.includes('application/json')?await res.json():await res.text();
+        // ── Offline cache write-through ───────────────────────────────
+        // Cache successful GET responses for session list and individual sessions
+        // so they're available when the connection drops (#offline-cache).
+        if((fetchOpts.method||'GET').toUpperCase()==='GET'&&window.HermesOfflineCache){
+          try{
+            _maybeCacheResponse(rel,parsed);
+          }catch(_){}
+        }
+        return parsed;
       })();
       return useTimeout?await Promise.race([
         requestPromise,
@@ -81,6 +90,18 @@ async function api(path,opts={}){
           if(retryDelayMs) await new Promise(resolve=>setTimeout(resolve,retryDelayMs*Math.pow(2,attempt)));
           continue;
         }
+        // ── Offline cache fallback (timeout) ────────────────────────────
+        // Weak-signal requests that timeout are the primary use case for
+        // offline caching — check IndexedDB before giving up. GET only — never
+        // serve cached data as the apparent result of a POST/PUT/DELETE.
+        const _cachedTimeout=((opts.method||'GET').toUpperCase()==='GET'&&typeof _tryOfflineCacheFallback==='function')?await _tryOfflineCacheFallback(rel):undefined;
+        if(_cachedTimeout!==undefined){
+          if(typeof window.HermesOfflineCache.showOfflineBanner==='function'){
+            window.HermesOfflineCache.showOfflineBanner(_cachedTimeout.__cachedAt||null);
+          }
+          _cachedTimeout.__fromOfflineCache=true;
+          return _cachedTimeout;
+        }
         const err=(e&&e.name==='TimeoutError')?e:new Error('Request timed out. Please try again.');
         err.name='TimeoutError';
         err.timeout=true;
@@ -94,6 +115,17 @@ async function api(path,opts={}){
         if(retryDelayMs) await new Promise(resolve=>setTimeout(resolve,retryDelayMs*Math.pow(2,attempt)));
         continue;
       }
+      // ── Offline cache fallback (network error) ────────────────────────
+      // All retries exhausted — try serving from IndexedDB cache before
+      // giving up. GET only — never serve cached data for mutations.
+      const _cachedNet=((opts.method||'GET').toUpperCase()==='GET'&&typeof _tryOfflineCacheFallback==='function')?await _tryOfflineCacheFallback(rel):undefined;
+      if(_cachedNet!==undefined){
+        if(typeof window.HermesOfflineCache.showOfflineBanner==='function'){
+          window.HermesOfflineCache.showOfflineBanner(_cachedNet.__cachedAt||null);
+        }
+        _cachedNet.__fromOfflineCache=true;
+        return _cachedNet;
+      }
       throw e;
     }finally{
       if(timeoutId) clearTimeout(timeoutId);
@@ -101,6 +133,65 @@ async function api(path,opts={}){
     }
   }
   throw lastErr;
+}
+
+// ── Offline cache helpers ──────────────────────────────────────────────────
+// Match API paths to cache stores and provide read/write/fallback logic.
+// Only cache and serve canonical full transcripts (messages=1, no pagination)
+// to prevent key collisions from different request shapes.
+
+function _maybeCacheResponse(path, data){
+  if(!window.HermesOfflineCache||!data) return;
+  // Session list: /api/sessions (with optional query params)
+  if(path.startsWith('api/sessions')&&path.indexOf('session_id=')===-1){
+    window.HermesOfflineCache.cacheSessionList(data);
+    return;
+  }
+  // Individual session: only cache canonical full transcripts.
+  // Skip pagination params (msg_before, msg_limit) — those are partial tail
+  // loads that would collide with the full transcript under the same session_id key.
+  if(path.startsWith('api/session?')&&path.indexOf('session_id=')!==-1){
+    if(path.indexOf('messages=1')!==-1&&
+       path.indexOf('msg_before')===-1&&
+       path.indexOf('msg_limit')===-1){
+      const m=path.match(/session_id=([^&]+)/);
+      if(m) window.HermesOfflineCache.cacheSession(decodeURIComponent(m[1]),data);
+    }
+  }
+}
+
+// Async fallback — called when network fails and all retries are exhausted.
+// Returns cached data or undefined if not cacheable / not cached.
+// Only serves canonical full transcripts to avoid stale-shape collisions.
+async function _tryOfflineCacheFallback(path){
+  if(!window.HermesOfflineCache) return undefined;
+  // Session list
+  if(path.startsWith('api/sessions')&&path.indexOf('session_id=')===-1){
+    const cached=await window.HermesOfflineCache.getCachedSessionList();
+    if(cached&&cached.data){
+      cached.data.__cachedAt=cached.cachedAt;
+      return cached.data;
+    }
+    return undefined;
+  }
+  // Individual session — only for canonical full-transcript requests
+  if(path.startsWith('api/session?')&&path.indexOf('session_id=')!==-1){
+    if(path.indexOf('messages=1')!==-1&&
+       path.indexOf('msg_before')===-1&&
+       path.indexOf('msg_limit')===-1){
+      const m=path.match(/session_id=([^&]+)/);
+      if(m){
+        const requestedSid=decodeURIComponent(m[1]);
+        const cached=await window.HermesOfflineCache.getCachedSession(requestedSid);
+        // Verify session_id matches before serving — prevents cross-session leakage
+        if(cached&&cached.data&&cached.data.session&&cached.data.session.session_id===requestedSid){
+          cached.data.__cachedAt=cached.cachedAt;
+          return cached.data;
+        }
+      }
+    }
+  }
+  return undefined;
 }
 
 function recordClientSSEError(source, details={}){

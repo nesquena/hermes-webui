@@ -182,8 +182,8 @@ function _patchOfflineFetch(){
 }
 function initOfflineMonitor(){
   _patchOfflineFetch();
-  window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser');});
-  window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();});
+  window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser');updateSendBtn();});
+  window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();updateSendBtn();});
   if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser');
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initOfflineMonitor,{once:true});
@@ -5296,6 +5296,9 @@ function _getExplicitBusyCommandAction(text){
 }
 
 function getComposerPrimaryAction(){
+  // Only disable send on probe-confirmed offline (_offlineVisible is set by
+  // the /health probe, not by the unreliable navigator.onLine signal).
+  if(_offlineVisible) return 'disabled';
   const msg=$('msg');
   const hasContent=_composerHasContent();
   const locked=!!(msg&&msg.disabled);
@@ -5349,8 +5352,8 @@ function updateSendBtn(){
   const _tt=(key,fb)=>{if(typeof t!=='function')return fb;const val=t(key);return val===key?fb:(val||fb);};
   let _btnTitle;
   if(action==='disabled'){
-    const _dmsg=$('msg');
-    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    if(_offlineVisible) _btnTitle=_tt('composer_disabled_offline','Offline — connect to send messages');
+    else if($('msg')&&$('msg').disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
     _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');

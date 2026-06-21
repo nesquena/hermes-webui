@@ -3653,6 +3653,18 @@ function _applySessionListPayload(sessData, projData){
   _sessionListLoadError = null;
   _sessionListHasLoadedOnce = true;
   _markPollingCompletionUnreadTransitions(_allSessions);
+  // ── Offline cache: warm recent sessions + hide banner ────────────────
+  // Skip when serving from cache (sessData.__fromOfflineCache) — the banner
+  // was just shown by the fallback path and warming would fire hanging fetches
+  // on weak signal, which is the exact scenario this cache exists for.
+  if(window.HermesOfflineCache && !sessData.__fromOfflineCache){
+    try{
+      window.HermesOfflineCache.hideOfflineBanner();
+      // Background-warm the 5 most recent sessions for offline reading.
+      // Fire-and-forget — no UI impact, silent failure. No-ops if opt-in disabled.
+      window.HermesOfflineCache.warmRecentSessions(serverSessions);
+    }catch(_){}
+  }
   const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
   if (isStreaming) {
     startStreamingPoll();

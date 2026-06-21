@@ -56,7 +56,7 @@ def test_offline_event_and_startup_false_online_probe_before_browser_banner():
     body = _strip_comments(_fn_body(UI_JS, "function initOfflineMonitor("))
     assert "window.addEventListener('offline',()=>showOfflineBanner('browser'))" not in body
     assert "if(!_browserReportsOnline())showOfflineBanner('browser');" not in body
-    assert "window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser');});" in body
+    assert "window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser');updateSendBtn();});" in body
     assert "if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser');" in body
 
 

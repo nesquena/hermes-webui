@@ -2094,6 +2094,10 @@ function applyBotName(){
   }
   // Fetch active profile
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';S.activeProfileIsDefault=!!p.is_default;}catch(e){S.activeProfile='default';S.activeProfileIsDefault=true;}
+  // Initialize offline cache scope to the active profile (privacy isolation)
+  if(window.HermesOfflineCache&&typeof window.HermesOfflineCache.setScope==='function'){
+    try{await window.HermesOfflineCache.setScope(S.activeProfile);}catch(_){}
+  }
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
