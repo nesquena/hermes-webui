@@ -1921,6 +1921,80 @@ function applyBotName(){
   if(msg) msg.placeholder='Message '+name+'\u2026';
 }
 
+const _COMPOSER_CONTROL_TOGGLE_DEFS=[
+  {key:'hide_composer_attach',label:'Attach',labelKey:'composer_control_attach',selectors:['#btnAttach']},
+  {key:'hide_composer_saved_prompts',label:'Saved prompts',labelKey:'composer_control_saved_prompts',selectors:['#btnSavedPrompts']},
+  {key:'hide_composer_mic',label:'Mic',labelKey:'composer_control_mic',selectors:['#btnMic']},
+  {key:'hide_composer_profile',label:'Profile',labelKey:'composer_control_profile',selectors:['#profileChipWrap']},
+  {key:'hide_composer_workspace',label:'Workspace',labelKey:'composer_control_workspace',selectors:['.composer-ws-wrap','#composerMobileWorkspaceAction']},
+  {key:'hide_composer_model',label:'Model',labelKey:'composer_control_model',selectors:['.composer-model-wrap','#composerMobileModelAction']},
+  {key:'hide_composer_reasoning',label:'Reasoning',labelKey:'composer_control_reasoning',selectors:['#composerReasoningWrap','#composerMobileReasoningAction']},
+  {key:'hide_composer_context',label:'Context',labelKey:'composer_control_context',selectors:['#ctxIndicatorWrap','#composerMobileContextAction']},
+];
+window._COMPOSER_CONTROL_TOGGLE_DEFS=_COMPOSER_CONTROL_TOGGLE_DEFS;
+
+const _COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=[
+  {key:'hide_composer_voice_mode',label:'Voice mode',labelKey:'composer_control_voice_mode',selectors:['#btnVoiceMode']},
+  {key:'hide_composer_yolo',label:'YOLO',labelKey:'composer_control_yolo',selectors:['#yoloPill']},
+  {key:'hide_composer_bg_badge',label:'Background badge',labelKey:'composer_control_bg_badge',selectors:['#bgBadge']},
+  {key:'hide_composer_mobile_config',label:'Mobile config',labelKey:'composer_control_mobile_config',selectors:['#composerMobileConfigBtn']},
+  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip']},
+  {key:'hide_composer_toolsets',label:'Toolsets',labelKey:'composer_control_toolsets',selectors:['#composerToolsetsWrap']},
+  {key:'hide_composer_status',label:'Status',labelKey:'composer_control_status',selectors:['#composerStatus']},
+];
+window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS;
+
+function _allComposerControlToggleDefs(){
+  return _COMPOSER_CONTROL_TOGGLE_DEFS.concat(_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS);
+}
+
+function _composerControlVisibilityFromSettings(settings){
+  const next={};
+  for(const def of _allComposerControlToggleDefs()){
+    next[def.key]=!!(settings&&settings[def.key]);
+  }
+  return next;
+}
+window._composerControlVisibilityFromSettings=_composerControlVisibilityFromSettings;
+
+function _setComposerControlHidden(el, hidden){
+  if(!el) return;
+  el.classList.toggle('composer-control-hidden', !!hidden);
+  if(hidden) el.setAttribute('aria-hidden','true');
+  else el.removeAttribute('aria-hidden');
+}
+
+function _applyComposerFooterVisibilitySettings(){
+  const hidden=window._composerControlVisibility||{};
+  for(const def of _allComposerControlToggleDefs()){
+    const isHidden=!!hidden[def.key];
+    for(const selector of def.selectors){
+      document.querySelectorAll(selector).forEach(el=>_setComposerControlHidden(el,isHidden));
+    }
+  }
+
+  const hideMic=!!hidden.hide_composer_mic;
+  if(hideMic&&window._micActive&&typeof window._stopMic==='function'){
+    try{window._stopMic();}catch(_){ }
+  }
+
+  const hideSavedPrompts=!!hidden.hide_composer_saved_prompts;
+  const savedBtn=$('btnSavedPrompts');
+  const savedPopup=$('savedPromptsPopup');
+  if(hideSavedPrompts&&savedPopup){
+    savedPopup.style.display='none';
+    if(savedBtn) savedBtn.setAttribute('aria-expanded','false');
+  }
+
+  if(hidden.hide_composer_workspace&&typeof closeWsDropdown==='function') closeWsDropdown();
+  if(hidden.hide_composer_profile&&typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(hidden.hide_composer_model&&typeof closeModelDropdown==='function') closeModelDropdown();
+  if(hidden.hide_composer_reasoning&&typeof closeReasoningDropdown==='function') closeReasoningDropdown();
+  if(hidden.hide_composer_toolsets&&typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(hidden.hide_composer_mobile_config&&typeof closeMobileComposerConfig==='function') closeMobileComposerConfig();
+}
+window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
+
 (async()=>{
   // Load send key preference
   let _bootSettings={};
@@ -1973,6 +2047,7 @@ function applyBotName(){
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._autoScrollFollow=s.auto_scroll_follow!==false;
+    window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
     window._botName=s.bot_name||'Hermes';
     if(s.default_model_provider) window._activeProvider=s.default_model_provider;
     if(s.default_model){
@@ -2043,6 +2118,7 @@ function applyBotName(){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
+    _applyComposerFooterVisibilitySettings();
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
@@ -2074,6 +2150,7 @@ function applyBotName(){
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._autoScrollFollow=true;
+    window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
@@ -2083,6 +2160,7 @@ function applyBotName(){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
+    _applyComposerFooterVisibilitySettings();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
   // Non-blocking update check (fire-and-forget, once per tab session)

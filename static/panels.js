@@ -5556,6 +5556,10 @@ function _refreshProfileSwitchBackground(gen){
     if (typeof _setTabOrder === 'function') _setTabOrder(order);
     if (typeof _applyTabOrder === 'function') _applyTabOrder(order);
     if (typeof _applyTabVisibility === 'function') _applyTabVisibility(hidden);
+    _ensureComposerControlVisibilityState(s||{});
+    _renderComposerControlChips();
+    _renderComposerSituationalControlChips();
+    if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
   }).catch(function(){});
 }
 
@@ -6412,6 +6416,82 @@ function _toggleTabVisibilityChip(panel){
   _scheduleAppearanceAutosave();
 }
 
+function _ensureComposerControlVisibilityState(settings){
+  const fromSettings=(typeof _composerControlVisibilityFromSettings==='function')
+    ? _composerControlVisibilityFromSettings(settings||{})
+    : {};
+  if(!window._composerControlVisibility) window._composerControlVisibility={};
+  Object.assign(window._composerControlVisibility, fromSettings);
+}
+
+function _composerControlVisibilityPayload(){
+  const payload={};
+  const baseDefs=Array.isArray(window._COMPOSER_CONTROL_TOGGLE_DEFS)?window._COMPOSER_CONTROL_TOGGLE_DEFS:[];
+  const situationalDefs=Array.isArray(window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS)?window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS:[];
+  const defs=baseDefs.concat(situationalDefs);
+  const state=window._composerControlVisibility||{};
+  defs.forEach(function(def){payload[def.key]=!!state[def.key];});
+  return payload;
+}
+
+function _toggleComposerControlChip(key){
+  if(!window._composerControlVisibility) window._composerControlVisibility={};
+  window._composerControlVisibility[key]=!window._composerControlVisibility[key];
+  if(typeof _renderComposerControlChips==='function') _renderComposerControlChips();
+  if(typeof _renderComposerSituationalControlChips==='function') _renderComposerSituationalControlChips();
+  if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
+  _scheduleAppearanceAutosave();
+}
+
+function _composerControlChipLabel(def){
+  if(!def) return '';
+  if(def.labelKey&&typeof t==='function'){
+    const localized=t(def.labelKey);
+    if(typeof localized==='string'&&localized&&localized!==def.labelKey) return localized;
+  }
+  return def.label||'';
+}
+
+function _renderComposerControlChips(){
+  const container=$('composerControlsChips');
+  if(!container) return;
+  const defs=Array.isArray(window._COMPOSER_CONTROL_TOGGLE_DEFS)?window._COMPOSER_CONTROL_TOGGLE_DEFS:[];
+  const state=window._composerControlVisibility||{};
+  container.innerHTML='';
+  defs.forEach(function(def){
+    const chip=document.createElement('button');
+    chip.type='button';
+    chip.className='tab-visibility-chip';
+    const hidden=!!state[def.key];
+    if(hidden) chip.classList.add('chip-off');
+    chip.textContent=_composerControlChipLabel(def);
+    chip.setAttribute('role','switch');
+    chip.setAttribute('aria-checked',hidden?'false':'true');
+    chip.onclick=function(){_toggleComposerControlChip(def.key);};
+    container.appendChild(chip);
+  });
+}
+
+function _renderComposerSituationalControlChips(){
+  const container=$('composerSituationalControlsChips');
+  if(!container) return;
+  const defs=Array.isArray(window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS)?window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS:[];
+  const state=window._composerControlVisibility||{};
+  container.innerHTML='';
+  defs.forEach(function(def){
+    const chip=document.createElement('button');
+    chip.type='button';
+    chip.className='tab-visibility-chip';
+    const hidden=!!state[def.key];
+    if(hidden) chip.classList.add('chip-off');
+    chip.textContent=_composerControlChipLabel(def);
+    chip.setAttribute('role','switch');
+    chip.setAttribute('aria-checked',hidden?'false':'true');
+    chip.onclick=function(){_toggleComposerControlChip(def.key);};
+    container.appendChild(chip);
+  });
+}
+
 function switchSettingsSection(name,opts){
   // If the main content is not showing settings, just remember the section
   // without force-switching the panel. The section will be applied when the
@@ -6738,6 +6818,7 @@ function _appearancePayloadFromUi(){
     render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
     worklog_details_expanded_default: worklogDetailsExpanded,
     activity_feed_expanded_default: worklogDetailsExpanded,
+    ..._composerControlVisibilityPayload(),
     hidden_tabs: _getHiddenTabs(),
     tab_order: _getTabOrder(),
   };
@@ -6831,6 +6912,12 @@ async function _autosaveAppearanceSettings(payload){
           ? saved.worklog_details_expanded_default
           : saved.activity_feed_expanded_default
       );
+    }
+    if(saved){
+      _ensureComposerControlVisibilityState(saved);
+      _renderComposerControlChips();
+      _renderComposerSituationalControlChips();
+      if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
     }
     _setAppearanceAutosaveStatus('saved');
   }catch(e){
@@ -7120,6 +7207,10 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
+    _ensureComposerControlVisibilityState(settings);
+    _renderComposerControlChips();
+    _renderComposerSituationalControlChips();
+    if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
     // Tab visibility/order chips (dynamically populated from DOM)
     var hiddenTabs=[];
     if(Array.isArray(settings.hidden_tabs)){

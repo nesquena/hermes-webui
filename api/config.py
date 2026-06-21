@@ -7143,6 +7143,21 @@ _SETTINGS_DEFAULTS = {
     "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream
     "auto_scroll_follow": True,  # follow new output to the bottom while streaming (Codex/Claude-Code-style sticky bottom); the user scrolling up unpins and is respected
     "worklog_details_expanded_default": False,  # opt-in: expand Worklog details by default; default remains folded
+    "hide_composer_attach": False,  # hide attach button in composer footer
+    "hide_composer_saved_prompts": False,  # hide saved prompts button in composer footer
+    "hide_composer_mic": False,  # hide dictation mic button in composer footer
+    "hide_composer_voice_mode": False,  # hide hands-free voice-mode button in composer footer
+    "hide_composer_yolo": False,  # hide YOLO chip in composer footer
+    "hide_composer_profile": False,  # hide profile chip in composer footer
+    "hide_composer_workspace": False,  # hide workspace controls in composer footer/mobile config panel
+    "hide_composer_mobile_config": False,  # hide mobile composer config button
+    "hide_composer_model": False,  # hide model chip in composer footer/mobile config panel
+    "hide_composer_quota_chip": False,  # hide provider quota chip in composer footer
+    "hide_composer_reasoning": False,  # hide reasoning chip in composer footer/mobile config panel
+    "hide_composer_toolsets": False,  # hide toolsets chip in composer footer
+    "hide_composer_status": False,  # hide status text in composer footer
+    "hide_composer_context": False,  # hide context indicator in composer footer/mobile config panel
+    "hide_composer_bg_badge": False,  # hide background-jobs badge in composer footer
     "pinned_sessions_limit": 3,  # maximum active pinned sessions shown in the sidebar
     "inflight_state_max_sessions": 8,  # max active-stream recovery snapshots kept in browser localStorage
     "inflight_state_max_messages": 24,  # max recent messages kept per recovery snapshot
@@ -7370,6 +7385,21 @@ _SETTINGS_BOOL_KEYS = {
     "auto_scroll_follow",
     "worklog_details_expanded_default",
     "auth_disabled_acknowledged",
+    "hide_composer_attach",
+    "hide_composer_saved_prompts",
+    "hide_composer_mic",
+    "hide_composer_voice_mode",
+    "hide_composer_yolo",
+    "hide_composer_profile",
+    "hide_composer_workspace",
+    "hide_composer_mobile_config",
+    "hide_composer_model",
+    "hide_composer_quota_chip",
+    "hide_composer_reasoning",
+    "hide_composer_toolsets",
+    "hide_composer_status",
+    "hide_composer_context",
+    "hide_composer_bg_badge",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
