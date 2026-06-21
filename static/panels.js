@@ -1527,7 +1527,8 @@ function _renderScriptsList(scripts) {
       if (expanded && !s._loaded) {
         try {
           const r = await api('/api/scripts/raw?path=' + encodeURIComponent(s.name));
-          sourceEl.querySelector('code').textContent = r.source || '';
+          s.source = r.source || '';
+          sourceEl.querySelector('code').textContent = s.source;
           s._loaded = true;
           if (window.Prism) Prism.highlightElement(sourceEl.querySelector('code'));
         } catch(e) {

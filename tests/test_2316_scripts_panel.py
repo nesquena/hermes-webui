@@ -201,3 +201,21 @@ def test_profile_switch_reloads_scripts_subtab_instead_of_crons():
     assert "else if (_currentPanel === 'tasks') await loadCrons();" in fn, (
         "Jobs subtab reload behavior must stay intact when the Scripts-specific branch is added."
     )
+
+
+def test_scripts_panel_caches_loaded_source_on_the_script_record():
+    """Expanded source must persist on `s` so rerenders don't blank loaded cards."""
+    render_idx = PANELS.find("function _renderScriptsList(scripts) {")
+    assert render_idx != -1, "_renderScriptsList() not found in panels.js"
+    loaded_idx = PANELS.find("s._loaded = true;", render_idx)
+    assert loaded_idx != -1, "scripts load success path not found in _renderScriptsList()"
+    render_block = PANELS[render_idx:loaded_idx + len("s._loaded = true;")]
+
+    assert "s.source = r.source || '';" in render_block, (
+        "Loaded script source must be written back to `s.source`, or rerendering the cards "
+        "after a panel switch leaves an empty code block with `_loaded` already set."
+    )
+    assert "sourceEl.querySelector('code').textContent = s.source;" in render_block, (
+        "The DOM update should read from the cached `s.source` value so the render path "
+        "and the persisted script record stay in sync."
+    )
