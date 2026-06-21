@@ -21670,12 +21670,13 @@ def _handle_session_queue_enqueue(handler, body):
         get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
-    from api.session_queue import enqueue, list_queue
+    from api.session_queue import drain_for_session, enqueue, list_queue
 
     try:
         item = enqueue(sid, body)
     except ValueError as e:
         return bad(handler, str(e), 400)
+    drain_for_session(sid)
     return j(handler, {"ok": True, "session_id": sid, "item": item, "items": list_queue(sid)})
 
 
