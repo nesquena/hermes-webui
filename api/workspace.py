@@ -452,10 +452,18 @@ def _parse_extra_workspace_roots(raw: str) -> tuple[tuple[Path, Path], ...]:
 
     This widens a security boundary via deployment config, so entries are
     validated rather than trusted blindly: each must be absolute (after
-    ``~`` expansion) and resolvable. A bad entry is skipped with a logged
+    ``~`` expansion), resolvable, and bounded (it must sit *strictly below* a
+    blocked system root — see below). A bad entry is skipped with a logged
     warning instead of the old silent ``except: pass`` — a misconfigured value
     surfaces (as a log line) rather than silently failing to carve out and
     leaving the operator with a confusing "still blocked".
+
+    The boundedness check matters because ``Path.resolve()`` collapses ``..``:
+    without it a value like ``/var/reana/..`` (resolves to ``/var``) or
+    ``/var/reana/../..`` (resolves to ``/``) would silently turn a whole system
+    root — up to the entire filesystem — into a trusted workspace root. So an
+    entry is also skipped when it contains ``..`` components, resolves to a
+    filesystem root, or is equal to / a parent of any blocked system root.
     """
     out: list[tuple[Path, Path]] = []
     for part in raw.split(os.pathsep):
@@ -470,6 +478,16 @@ def _parse_extra_workspace_roots(raw: str) -> tuple[tuple[Path, Path], ...]:
                 part,
             )
             continue
+        # Reject '..' components up front: Path.resolve() would collapse them,
+        # so a value like '/var/reana/..' would otherwise sneak past the
+        # below-a-blocked-root check by resolving to a broader prefix.
+        if ".." in Path(expanded).parts:
+            logger.warning(
+                "Ignoring HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS entry %r: '..' path "
+                "components are not allowed (give a fully-resolved absolute path)",
+                part,
+            )
+            continue
         try:
             resolved = Path(expanded).resolve()
         except Exception as exc:  # pragma: no cover - resolve() edge cases
@@ -477,6 +495,29 @@ def _parse_extra_workspace_roots(raw: str) -> tuple[tuple[Path, Path], ...]:
                 "Ignoring unresolvable HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS entry %r: %s",
                 part,
                 exc,
+            )
+            continue
+        if resolved == Path(resolved.anchor):
+            logger.warning(
+                "Ignoring HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS entry %r: a filesystem "
+                "root is too broad to be a trusted workspace root",
+                part,
+            )
+            continue
+        # A configured root must sit strictly below a blocked system root, never
+        # be one of them or an ancestor of one — otherwise the carve-out would
+        # unblock the whole system root (e.g. a bare '/var', or '/' as the parent
+        # of every blocked root).
+        if any(
+            resolved == blocked or resolved in blocked.parents
+            for blocked in _workspace_blocked_roots()
+        ):
+            logger.warning(
+                "Ignoring HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS entry %r (resolves to "
+                "%s): equal to or a parent of a blocked system root; a workspace "
+                "root must sit strictly below one",
+                part,
+                resolved,
             )
             continue
         out.append((Path(expanded), resolved))

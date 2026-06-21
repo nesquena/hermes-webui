@@ -93,3 +93,43 @@ def test_posix_carveouts_keep_both_symlink_forms(monkeypatch, tmp_path):
     # And the resolved-only view (_extra_workspace_prefixes) still excludes the link.
     resolved_only = {p.as_posix() for p in _extra_workspace_prefixes()}
     assert real.resolve().as_posix() in resolved_only
+
+
+def test_over_broad_roots_are_rejected(monkeypatch, caplog):
+    """An over-broad or '..'-laden entry must not widen the boundary to a system
+    root. Path.resolve() collapses '..', so '/var/reana/..' -> /var and
+    '/var/reana/../..' -> / would otherwise silently turn a whole system tree
+    (up to '/') into a trusted workspace root.
+    """
+    import logging
+
+    # (env value, a victim path that must STAY blocked if the entry is rejected)
+    cases = (
+        ("/var/reana/..", "/var/secret"),      # '..' -> resolves to /var
+        ("/var/reana/../..", "/etc/passwd"),   # '..' -> resolves to /
+        ("/", "/etc/passwd"),                  # filesystem root
+        ("/var", "/var/secret"),               # a bare blocked system root
+    )
+    for value, victim in cases:
+        _parse_extra_workspace_roots.cache_clear()
+        monkeypatch.setenv(ENV, value)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            prefixes = _extra_workspace_prefixes()
+        # The entry is dropped entirely — no carve-out is registered …
+        assert prefixes == (), f"{value!r} should be rejected, got {prefixes}"
+        # … so the victim path stays blocked on the gates the carve-out feeds.
+        assert _is_blocked_workspace_path(Path(victim), victim) is True, f"{value!r} -> {victim}"
+        assert _is_blocked_system_path(Path(victim)) is True, f"{value!r} -> {victim}"
+        assert _is_blocked_posix_workspace_path(victim) is True, f"{value!r} -> {victim}"
+        # … and the operator gets a warning rather than a silent over-reach.
+        assert caplog.records, f"{value!r} should log a warning"
+
+
+def test_strict_subdir_of_blocked_root_still_allowed(monkeypatch):
+    """The bounding check must not regress the legitimate case: a root that sits
+    strictly below a blocked system root (the whole point of the feature)."""
+    _parse_extra_workspace_roots.cache_clear()
+    monkeypatch.setenv(ENV, "/var/reana")
+    assert any(p.as_posix() == "/var/reana" for p in _extra_workspace_prefixes())
+    assert _is_blocked_workspace_path(Path(WS), WS) is False
