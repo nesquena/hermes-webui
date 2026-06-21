@@ -261,14 +261,19 @@ Authenticated administrators can inspect sanitized extension configuration at:
 GET /api/extensions/status
 ```
 
-The endpoint is read-only and follows the normal WebUI authentication rules. It
-returns the same public asset URLs that can already be injected into the HTML,
-plus coarse manifest status, asset counts, and warning codes for rejected or
-unavailable configuration. `manifest.script_count` and
+The endpoint is read-only and follows the normal WebUI authentication rules. The
+same sanitized diagnostics are also shown in **Settings → Extensions** for
+operators who prefer to inspect extension state from the browser. The panel does
+not enable, disable, install, or mutate extensions; it only fetches
+`/api/extensions/status` and offers a copy-diagnostics action.
+
+The diagnostics return the same public asset URLs that can already be injected
+into the HTML, plus coarse manifest status, asset counts, and warning codes for
+rejected or unavailable configuration. `manifest.script_count` and
 `manifest.stylesheet_count` count accepted assets from the manifest only;
 `counts.script_urls` and `counts.stylesheet_urls` count the final post-env-merge
 URLs. `manifest.entry_count` counts the loaded top-level manifest object and
 enabled extension entries that were inspected, not every extension object in the
-file. The endpoint does **not** return
+file. The endpoint and Settings panel do **not** return
 `HERMES_WEBUI_EXTENSION_DIR`, resolved manifest paths, raw environment values, or
 rejected URL strings.

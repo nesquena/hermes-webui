@@ -6222,6 +6222,7 @@ let _currentSettingsSection = 'conversation';
 let _settingsIndex = null;
 let _settingsIndexPromise = null;
 let _settingsSearchSeq = 0;
+let _extensionsStatusData = null;
 let _settingsSearchDismissListenerRegistered = false;
 let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
@@ -6420,7 +6421,7 @@ function switchSettingsSection(name,opts){
     _settingsSection = name;
     return;
   }
-  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system'||name==='help')?name:'conversation';
+  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='extensions'||name==='system'||name==='help')?name:'conversation';
   // Deep-linking to the Plugins pane when the tab is hidden (no plugins
   // installed, #3457) falls back to Conversation. Resolve this BEFORE toggling
   // panes/sidebar/dropdown below so every downstream selection uses the
@@ -6432,13 +6433,13 @@ function switchSettingsSection(name,opts){
   }
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System',help:'Help'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',extensions:'Extensions',system:'System',help:'Help'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','system','help'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','plugins','extensions','system','help'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -6451,6 +6452,7 @@ function switchSettingsSection(name,opts){
   if(!(opts&&opts.skipLazyLoad)){
     if(section==='providers') loadProvidersPanel();
     if(section==='plugins') loadPluginsPanel();
+    if(section==='extensions') loadExtensionsPanel();
   }
 }
 
@@ -6461,7 +6463,7 @@ async function _buildSettingsIndex() {
   if (_settingsIndexPromise) return _settingsIndexPromise;
   const promise = (async () => {
     // Ensure lazy-loaded panes are populated before reading the DOM
-    await Promise.all([loadProvidersPanel(), loadPluginsPanel()]);
+    await Promise.all([loadProvidersPanel(), loadPluginsPanel(), loadExtensionsPanel()]);
     const index = [];
     const sectionMap = {
       settingsPaneConversation: 'conversation',
@@ -6469,6 +6471,7 @@ async function _buildSettingsIndex() {
       settingsPanePreferences: 'preferences',
       settingsPaneProviders: 'providers',
       settingsPanePlugins: 'plugins',
+      settingsPaneExtensions: 'extensions',
       settingsPaneSystem: 'system',
       settingsPaneHelp: 'help',
     };
@@ -6529,6 +6532,7 @@ async function filterSettings(query) {
     preferences: t('settings_tab_preferences') || 'Preferences',
     providers: t('providers_tab_title') || 'Providers',
     plugins: t('settings_tab_plugins') || 'Plugins',
+    extensions: t('settings_tab_extensions') || 'Extensions',
     system: t('settings_tab_system') || 'System',
     help: t('settings_tab_help') || 'Help',
   };
@@ -6582,6 +6586,7 @@ function _resolveSettingsField(entry) {
     preferences: 'settingsPanePreferences',
     providers: 'settingsPaneProviders',
     plugins: 'settingsPanePlugins',
+    extensions: 'settingsPaneExtensions',
     system: 'settingsPaneSystem',
     help: 'settingsPaneHelp',
   };
@@ -7488,9 +7493,142 @@ async function loadSettingsPanel(){
     if(typeof loadDashboardSettings==='function') loadDashboardSettings();
     loadProvidersPanel(); // load provider cards in background
     loadPluginsPanel(); // load plugin/hook visibility in background
+    loadExtensionsPanel(); // load extension diagnostics in background
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
+  }
+}
+
+
+// ── Extensions panel (read-only browser-origin diagnostics) ────────────────
+
+function _extensionStatusLabel(value){
+  return value ? 'Enabled' : 'Disabled';
+}
+
+function _extensionBooleanBadge(value){
+  const cls=value?'extension-status-badge-on':'extension-status-badge-off';
+  return `<span class="extension-status-badge ${cls}">${value?'true':'false'}</span>`;
+}
+
+function _extensionAssetList(urls){
+  if(!Array.isArray(urls)||urls.length===0){
+    return '<div class="extension-url-empty">None</div>';
+  }
+  return '<ul class="extension-url-list">'+urls.map(url=>`<li><code>${esc(url)}</code></li>`).join('')+'</ul>';
+}
+
+function _extensionWarningList(warnings){
+  if(!Array.isArray(warnings)||warnings.length===0){
+    return '<div class="extension-url-empty">No warnings.</div>';
+  }
+  return '<ul class="extension-warning-list">'+warnings.map(item=>{
+    const code=esc((item&&item.code)||'unknown_warning');
+    const source=esc((item&&item.source)||'unknown');
+    return `<li><code>${code}</code><span>${source}</span></li>`;
+  }).join('')+'</ul>';
+}
+
+function _extensionCountValue(counts,key,urls){
+  if(counts&&Number.isFinite(Number(counts[key]))) return Number(counts[key]);
+  return Array.isArray(urls)?urls.length:0;
+}
+
+function _renderExtensionsPanel(data){
+  const target=$('extensionsDiagnostics');
+  const copyBtn=$('extensionsCopyDiagnosticsBtn');
+  if(!target) return;
+  _extensionsStatusData=data||null;
+  if(copyBtn) copyBtn.disabled=!data;
+  const manifest=(data&&data.manifest)||{};
+  const counts=(data&&data.counts)||{};
+  const scripts=Array.isArray(data&&data.script_urls)?data.script_urls:[];
+  const styles=Array.isArray(data&&data.stylesheet_urls)?data.stylesheet_urls:[];
+  const statusClass=(data&&data.enabled)?'extension-card-enabled':'extension-card-disabled';
+  const scriptCount=_extensionCountValue(counts,'script_urls',scripts);
+  const styleCount=_extensionCountValue(counts,'stylesheet_urls',styles);
+  target.innerHTML=`
+    <div class="provider-card extension-status-card ${statusClass}">
+      <div class="provider-card-header plugin-card-header">
+        <div class="provider-card-info">
+          <div class="provider-card-name">Extension runtime</div>
+          <div class="provider-card-meta">Read-only status from /api/extensions/status</div>
+        </div>
+        <span class="provider-card-badge ${data&&data.enabled?'':'plugin-card-badge-disabled'}">${_extensionStatusLabel(!!(data&&data.enabled))}</span>
+      </div>
+      <div class="provider-card-body extension-card-body">
+        <div class="extension-summary-grid">
+          <div><span>Extension dir configured</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_configured))}</div>
+          <div><span>Extension dir valid</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_valid))}</div>
+          <div><span>Manifest configured</span>${_extensionBooleanBadge(!!manifest.configured)}</div>
+          <div><span>Manifest loaded</span>${_extensionBooleanBadge(!!manifest.loaded)}</div>
+          <div><span>Manifest status</span><code>${esc(manifest.status||'unknown')}</code></div>
+          <div><span>Manifest entries inspected</span><code>${Number(manifest.entry_count)||0}</code></div>
+          <div><span>Manifest script count</span><code>${Number(manifest.script_count)||0}</code></div>
+          <div><span>Manifest stylesheet count</span><code>${Number(manifest.stylesheet_count)||0}</code></div>
+          <div><span>Final script count</span><code>${scriptCount}</code></div>
+          <div><span>Final stylesheet count</span><code>${styleCount}</code></div>
+        </div>
+      </div>
+    </div>
+    <div class="provider-card extension-assets-card">
+      <div class="provider-card-header plugin-card-header">
+        <div class="provider-card-info">
+          <div class="provider-card-name">Final public asset URLs</div>
+          <div class="provider-card-meta">Same-origin URLs that may be injected into the app shell.</div>
+        </div>
+      </div>
+      <div class="provider-card-body extension-card-body">
+        <div class="provider-card-label">Scripts</div>
+        ${_extensionAssetList(scripts)}
+        <div class="provider-card-label extension-section-label">Stylesheets</div>
+        ${_extensionAssetList(styles)}
+      </div>
+    </div>
+    <div class="provider-card extension-warnings-card">
+      <div class="provider-card-header plugin-card-header">
+        <div class="provider-card-info">
+          <div class="provider-card-name">Sanitized warnings</div>
+          <div class="provider-card-meta">Codes and coarse sources only; paths and rejected values are not shown.</div>
+        </div>
+      </div>
+      <div class="provider-card-body extension-card-body">
+        ${_extensionWarningList(data&&data.warnings)}
+      </div>
+    </div>
+  `;
+}
+
+async function loadExtensionsPanel(){
+  const target=$('extensionsDiagnostics');
+  const copyBtn=$('extensionsCopyDiagnosticsBtn');
+  if(!target) return;
+  if(copyBtn) copyBtn.disabled=true;
+  target.innerHTML='<div class="extensions-loading">Loading extension diagnostics…</div>';
+  try{
+    const data=await api('/api/extensions/status');
+    _renderExtensionsPanel(data);
+  }catch(e){
+    _extensionsStatusData=null;
+    if(copyBtn) copyBtn.disabled=true;
+    target.innerHTML='<div class="extensions-error">Failed to load extension diagnostics: '+esc(e.message||String(e))+'</div>';
+  }
+}
+
+async function copyExtensionsDiagnostics(){
+  if(!_extensionsStatusData) return;
+  const text=JSON.stringify(_extensionsStatusData,null,2);
+  const success=()=>showToast(t('copied')||'Copied!');
+  const fail=()=>showToast(t('copy_failed')||'Copy failed');
+  if(typeof _copyText==='function'){
+    _copyText(text).then(success).catch(fail);
+    return;
+  }
+  if(typeof navigator!=='undefined'&&navigator&&navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(success).catch(fail);
+  }else{
+    fail();
   }
 }
 

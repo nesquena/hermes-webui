@@ -4570,6 +4570,33 @@ main.main > #mainPlugin{display:none;}
 .plugin-open-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;background:transparent;color:var(--accent);border:1px solid var(--accent);border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;}
 .plugin-open-btn:hover{background:var(--accent);color:var(--bg);}
 
+/* ── Extension diagnostics cards ── */
+.extensions-copy-diagnostics-btn{white-space:nowrap;}
+.extensions-copy-diagnostics-btn:disabled{opacity:.45;cursor:not-allowed;}
+.extensions-trust-note{border-color:rgba(245,158,11,.35)!important;background:rgba(245,158,11,.08)!important;}
+#mainSettings .extensions-trust-note > label{color:var(--text);font-size:13px;font-weight:600;}
+.extensions-diagnostics{display:flex;flex-direction:column;gap:12px;margin-top:4px;}
+.extensions-loading,.extensions-error{padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--sidebar);font-size:13px;color:var(--muted);}
+.extensions-error{color:var(--error);border-color:color-mix(in srgb,var(--error) 35%,var(--border));}
+.extension-card-body{display:block;}
+.extension-summary-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}
+.extension-summary-grid>div{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:12px;color:var(--muted);min-width:0;}
+.extension-summary-grid span{min-width:0;overflow-wrap:anywhere;}
+.extension-summary-grid code{font-family:var(--font-mono);font-size:11px;color:var(--text);background:var(--code-bg);border:1px solid var(--border2);border-radius:5px;padding:2px 6px;overflow-wrap:anywhere;}
+.extension-status-badge{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;font-size:10.5px;font-weight:700;font-family:var(--font-mono);line-height:1.45;}
+.extension-status-badge-on{background:rgba(34,197,94,.14);color:#22c55e;}
+.extension-status-badge-off{background:var(--code-bg);color:var(--muted);}
+.extension-section-label{margin-top:14px;}
+.extension-url-list,.extension-warning-list{list-style:none;margin:6px 0 0 0;padding:0;display:flex;flex-direction:column;gap:6px;}
+.extension-url-list li,.extension-warning-list li{display:flex;align-items:center;gap:8px;min-width:0;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:12px;color:var(--muted);}
+.extension-url-list code,.extension-warning-list code{font-family:var(--font-mono);font-size:11px;color:var(--text);overflow-wrap:anywhere;word-break:break-word;}
+.extension-warning-list span{font-size:11px;color:var(--muted);overflow-wrap:anywhere;}
+.extension-url-empty{margin-top:6px;font-size:12px;color:var(--muted);font-style:italic;}
+@media (max-width: 768px){
+  .extensions-copy-diagnostics-btn{width:100%;}
+  .extension-summary-grid{grid-template-columns:1fr;}
+}
+
 /* ── Provider model tags ── */
 .provider-card-models{
   margin-bottom:10px;

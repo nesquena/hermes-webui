@@ -618,6 +618,7 @@ const LOCALES = {
     settings_tab_appearance: 'Appearance',
     settings_tab_preferences: 'Preferences',
     settings_tab_plugins: 'Plugins',
+    settings_tab_extensions: 'Extensions',
     settings_plugins_title: 'Plugins',
     plugins_enable_toggle: 'Enable',
     settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',
@@ -2162,6 +2163,7 @@ const LOCALES = {
     settings_tab_appearance: 'Aspetto',
     settings_tab_preferences: 'Preferenze',
     settings_tab_plugins: 'Plugin',
+    settings_tab_extensions: 'Extensions',  // TODO: translate
     settings_plugins_title: 'Plugins',  // TODO: translate
     plugins_enable_toggle: 'Abilita',
     settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
@@ -3697,6 +3699,7 @@ const LOCALES = {
     settings_tab_appearance: '外観',
     settings_tab_preferences: '環境設定',
     settings_tab_plugins: 'プラグイン',
+    settings_tab_extensions: '拡張機能',
     settings_plugins_title: 'プラグイン',
     plugins_enable_toggle: '有効化',
     settings_plugins_meta: 'インストール済みのHermesプラグインと登録されているライフサイクルフックを確認できます。このパネルは読み取り専用です。',
@@ -5927,6 +5930,7 @@ const LOCALES = {
     settings_tab_conversation: 'Conversation',
     settings_tab_preferences: 'Preferences',
     settings_tab_plugins: 'Плагины',
+    settings_tab_extensions: 'Extensions',  // TODO: translate
     settings_plugins_title: 'Plugins',  // TODO: translate
     plugins_enable_toggle: 'Включить',
     settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
@@ -7387,6 +7391,7 @@ const LOCALES = {
     settings_tab_conversation: 'Conversation',
     settings_tab_preferences: 'Preferences',
     settings_tab_plugins: 'Plugins',
+    settings_tab_extensions: 'Extensions',
     settings_plugins_title: 'Plugins',  // TODO: translate
     plugins_enable_toggle: 'Activar',
     settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
@@ -8532,6 +8537,7 @@ const LOCALES = {
     settings_tab_conversation: 'Conversation',
     settings_tab_preferences: 'Preferences',
     settings_tab_plugins: 'Plugins',
+    settings_tab_extensions: 'Extensions',
     settings_plugins_title: 'Plugins',  // TODO: translate
     plugins_enable_toggle: 'Aktivieren',
     settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
@@ -10342,6 +10348,7 @@ const LOCALES = {
     settings_tab_conversation: '对话',
     settings_tab_preferences: '偏好',
     settings_tab_plugins: '插件',
+    settings_tab_extensions: '扩展',
     settings_tab_system: '系统',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -11121,6 +11128,7 @@ const LOCALES = {
     settings_tab_appearance: '外觀',
     settings_tab_preferences: '偏好設定',
     settings_tab_plugins: '外掛',
+    settings_tab_extensions: '擴充功能',
     settings_plugins_title: '外掛',
     plugins_enable_toggle: '啟用',
     settings_plugins_meta: '檢視已安裝的 Hermes 外掛及其註冊的生命週期掛鉤。此面板為唯讀。',
@@ -12552,6 +12560,7 @@ const LOCALES = {
     settings_tab_appearance: 'Aparência',
     settings_tab_preferences: 'Preferências',
     settings_tab_plugins: 'Plugins',
+    settings_tab_extensions: 'Extensions',
     settings_plugins_title: 'Plugins',  // TODO: translate
     plugins_enable_toggle: 'Ativar',
     settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
@@ -13989,6 +13998,7 @@ const LOCALES = {
     settings_tab_appearance: '외형',
     settings_tab_preferences: '환경설정',
     settings_tab_plugins: '플러그인',
+    settings_tab_extensions: 'Extensions',  // TODO: translate
     settings_plugins_title: 'Plugins',  // TODO: translate
     plugins_enable_toggle: '활성화',
     settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
@@ -15448,6 +15458,7 @@ const LOCALES = {
     settings_tab_appearance: 'Apparence',
     settings_tab_preferences: 'Préférences',
     settings_tab_plugins: 'Plugins',
+    settings_tab_extensions: 'Extensions',
     settings_plugins_title: 'Plugins',  // TODO: translate
     plugins_enable_toggle: 'Activer',
     settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
@@ -17001,6 +17012,7 @@ const LOCALES = {
     settings_tab_appearance: 'Dış görünüş',
     settings_tab_preferences: 'Tercihler',
     settings_tab_plugins: 'Eklentiler',
+    settings_tab_extensions: 'Extensions',  // TODO: translate
     settings_plugins_title: 'Eklentiler',
     plugins_enable_toggle: 'Etkinleştir',
     settings_plugins_meta: 'Yüklü Hermes eklentilerini ve yaşam döngüsü kancalarını görüntüleyin. Bu panel salt okunurdur.',
@@ -18550,6 +18562,7 @@ const LOCALES = {
     settings_tab_appearance: 'Wygląd',
     settings_tab_preferences: 'Preferencje',
     settings_tab_plugins: 'Wtyczki',
+    settings_tab_extensions: 'Extensions',  // TODO: translate
     settings_plugins_title: 'Wtyczki',
     plugins_enable_toggle: 'Włącz',
     settings_plugins_meta: 'Zobacz zainstalowane wtyczki Hermes oraz rejestrowane przez nie haki cyklu życia. Ten panel jest tylko do odczytu.',
