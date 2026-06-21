@@ -7467,8 +7467,13 @@ async function loadSettingsPanel(){
     // Show auth buttons only when auth is active
     try{
       const authStatus=await api('/api/auth/status');
+      _settingsPasswordAuthEnabled=!!authStatus.password_auth_enabled;
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
       _syncPasswordlessButton(authStatus);
+      _renderSettingsAuthStatus(authStatus);
+      _updateCurrentPasswordVisibility();
+      _updateAuthWarningBadge(authStatus);
+      _updateAuthDisabledWarning(authStatus);
     }catch(e){}
     loadPasskeys();
     // #1560: env-var-locked password also disables the Disable Auth button —
@@ -8293,6 +8298,7 @@ async function _refreshProviderModels(providerId, btn){
 }
 
 let _settingsPasswordEnvLocked=false;
+let _settingsPasswordAuthEnabled=false;
 function _setSettingsAuthButtonsVisible(active){
   const signOutBtn=$('btnSignOut');
   if(signOutBtn) signOutBtn.style.display=active?'':'none';
@@ -8307,6 +8313,63 @@ function _syncPasswordlessButton(authStatus){
   const can=!!(authStatus&&authStatus.auth_enabled&&authStatus.password_auth_enabled&&authStatus.passkeys_count>0&&!_settingsPasswordEnvLocked);
   btn.style.display=can?'':'none';
   btn.disabled=!can;
+}
+
+function _renderSettingsAuthStatus(authStatus){
+  const el=$('settingsAuthStatus');
+  if(!el) return;
+  if(!authStatus) { el.style.display='none'; return; }
+  el.style.display='block';
+  let label='',cls='detail-badge ok';
+  if(authStatus.auth_enabled && authStatus.password_auth_enabled){
+    label=t('auth_status_password'); cls='detail-badge ok';
+  }else if(authStatus.auth_enabled && !authStatus.password_auth_enabled){
+    label=t('auth_status_passkey_only'); cls='detail-badge warn';
+  }else{
+    label=t('auth_status_unauthenticated'); cls='detail-badge err';
+  }
+  el.innerHTML='<span class="'+cls+'" style="font-size:11px">'+label+'</span>';
+}
+
+function _updateCurrentPasswordVisibility(){
+  const block=$('settingsCurrentPasswordBlock');
+  if(!block) return;
+  block.style.display=_settingsPasswordAuthEnabled?'block':'none';
+}
+
+function _updateAuthWarningBadge(authStatus){
+  const badges=['authWarningBadgeDesktop','authWarningBadgeMobile'];
+  const authDisabled=!authStatus||!authStatus.auth_enabled;
+  const acknowledged=!!(authStatus&&authStatus.auth_disabled_acknowledged);
+  badges.forEach(function(id){
+    const el=$(id);
+    if(!el) return;
+    if(!authDisabled){ el.style.display='none'; return; }
+    el.style.display='block';
+    el.style.background=acknowledged?'#e8a030':'#e05';
+  });
+}
+
+function _updateAuthDisabledWarning(authStatus){
+  const el=$('settingsAuthDisabledWarning');
+  if(!el) return;
+  const authDisabled=!authStatus||!authStatus.auth_enabled;
+  if(!authDisabled){ el.style.display='none'; return; }
+  el.style.display='block';
+  const cb=$('settingsAuthDisabledAck');
+  if(cb) cb.checked=!!(authStatus&&authStatus.auth_disabled_acknowledged);
+}
+
+async function _setAuthDisabledAck(checked){
+  try{
+    await api('/api/settings',{method:'POST',body:JSON.stringify({_auth_disabled_acknowledged:!!checked})});
+    try{
+      const authStatus=await api('/api/auth/status');
+      _updateAuthWarningBadge(authStatus);
+    }catch(e){}
+  }catch(e){
+    showToast(t('auth_ack_save_failed')+e.message);
+  }
 }
 
 function _b64uToBytes(s){
@@ -8957,8 +9020,17 @@ async function saveSettings(andClose){
   body.bot_name=botName||'Hermes';
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
+    const currentPwField=$('settingsCurrentPassword');
+    const currentPw=(currentPwField||{}).value||'';
+    if(_settingsPasswordAuthEnabled && !currentPw.trim()){
+      if(currentPwField) currentPwField.focus();
+      showToast(t('current_password_required'));
+      return;
+    }
+    const payload={...body,_set_password:pw.trim()};
+    if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
-      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({...body,_set_password:pw.trim()})});
+      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
       if(modelChanged && model){
         try{
           await api('/api/default-model',{method:'POST',body:JSON.stringify({model})});
@@ -8969,6 +9041,16 @@ async function saveSettings(andClose){
       }
       _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
+      const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
+      const pwField=$('settingsPassword'); if(pwField) pwField.value='';
+      _settingsPasswordAuthEnabled=!!saved.password_auth_enabled;
+      _updateCurrentPasswordVisibility();
+      try{
+        const authStatus=await api('/api/auth/status');
+        _renderSettingsAuthStatus(authStatus);
+        _updateAuthWarningBadge(authStatus);
+        _updateAuthDisabledWarning(authStatus);
+      }catch(e){}
       _settingsDirty=false;
       _resetSettingsPanelState();
       if(!andClose) _pendingSettingsTargetPanel = null;
@@ -9009,28 +9091,57 @@ async function signOut(){
 async function goPasswordless(){
   const ok=await showConfirmDialog({title:'Go passwordless?',message:'This removes the password and keeps passkey sign-in enabled. Keep at least one passkey registered or you could lose access.',confirmLabel:'Go passwordless',danger:false,focusCancel:true});
   if(!ok) return;
+  const currentPw=($('settingsCurrentPassword')||{}).value;
+  const payload={_passwordless:true};
+  if(_settingsPasswordAuthEnabled && currentPw) payload._current_password=currentPw;
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({_passwordless:true})});
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
     showToast('Password removed. Passkey sign-in remains enabled.');
     _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
     _syncPasswordlessButton({auth_enabled:saved.auth_enabled,password_auth_enabled:false,passkeys_count:1});
     const pwField=$('settingsPassword'); if(pwField) pwField.value='';
+    const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
+    _settingsPasswordAuthEnabled=false;
+    _updateCurrentPasswordVisibility();
+    try{
+      const authStatus=await api('/api/auth/status');
+      _renderSettingsAuthStatus(authStatus);
+      _updateAuthWarningBadge(authStatus);
+    }catch(e){}
   }catch(e){showToast('Failed to go passwordless: '+e.message);}
 }
 
 async function disableAuth(){
-  const _disAuth=await showConfirmDialog({title:t('disable_auth_confirm_title'),message:t('disable_auth_confirm_message'),confirmLabel:t('disable'),danger:true,focusCancel:true});
-  if(!_disAuth) return;
+  const currentPwField=$('settingsCurrentPassword');
+  const currentPw=(currentPwField||{}).value||'';
+  if(_settingsPasswordAuthEnabled && !currentPw.trim()){
+    if(currentPwField) currentPwField.focus();
+    showToast(t('current_password_required'));
+    return;
+  }
+  const confirmText='DISABLE AUTH';
+  const userInput=await showPromptDialog({title:t('disable_auth_confirm_title'),message:t('disable_auth_confirm_message')+' '+t('disable_auth_typed_confirm'),placeholder:confirmText,confirmLabel:t('disable_auth'),danger:true});
+  if(!userInput || userInput.trim()!==confirmText) return;
+  const payload={_clear_password:true};
+  if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
   try{
-    await api('/api/settings',{method:'POST',body:JSON.stringify({_clear_password:true})});
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
     showToast(t('auth_disabled'));
-    // Hide auth controls since auth is now off
     const disableBtn=$('btnDisableAuth');
     if(disableBtn) disableBtn.style.display='none';
     const signOutBtn=$('btnSignOut');
     if(signOutBtn) signOutBtn.style.display='none';
     _syncPasswordlessButton({auth_enabled:false,password_auth_enabled:false,passkeys_count:0});
+    _settingsPasswordAuthEnabled=false;
+    _updateCurrentPasswordVisibility();
+    const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
     loadPasskeys();
+    try{
+      const authStatus=await api('/api/auth/status');
+      _renderSettingsAuthStatus(authStatus);
+      _updateAuthWarningBadge(authStatus);
+      _updateAuthDisabledWarning(authStatus);
+    }catch(e){}
   }catch(e){
     showToast(t('disable_auth_failed')+e.message);
   }

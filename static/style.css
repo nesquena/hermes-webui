@@ -5267,6 +5267,8 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .detail-alert{border:2px solid rgba(245,158,11,.45);background:rgba(245,158,11,.1);border-radius:8px;padding:12px 14px;margin-bottom:16px;color:var(--text);}
 .detail-alert-title{font-size:12px;font-weight:700;color:var(--error,#e05);text-transform:uppercase;letter-spacing:0;margin-bottom:6px;}
 .detail-alert p{margin:0 0 8px;font-size:13px;line-height:1.45;color:var(--text);}
+.auth-warning-badge{display:none;position:absolute;top:4px;right:4px;width:8px;height:8px;border-radius:50%;background:#e05;pointer-events:none;}
+.nav-tab{position:relative;}
 .detail-alert p:last-child{margin-bottom:0;}
 .detail-alert-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;}
 
