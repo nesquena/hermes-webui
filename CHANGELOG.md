@@ -137,7 +137,6 @@
 ### Fixed
 
 - **The WebUI model picker no longer goes stale relative to the agent's own model catalog (#4413).** The WebUI keeps a display-oriented copy of each provider's model list, which could drift out of date when new models were added to the core (`hermes_cli`) catalog without a matching WebUI update — so a model the CLI/agent already supported wouldn't appear in the picker. At startup the WebUI now enriches each **already-configured** provider's list with any model IDs the core catalog has that the WebUI was missing, respecting each provider's existing ID convention (e.g. `@nous:`-prefixed IDs). It only enriches providers the WebUI already knows — it does not add new provider vendors (that stays a maintainer decision) — and is a no-op for standalone deployments without `hermes_cli`. Thanks @kaishi00.
-
 ## [v0.51.541] — 2026-06-20 — Release SZ (model picker recovers a stale disk cache on catalog timeout)
 
 ### Fixed

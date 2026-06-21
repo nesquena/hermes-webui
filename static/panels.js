@@ -6443,6 +6443,15 @@ function _toggleComposerControlChip(key){
   _scheduleAppearanceAutosave();
 }
 
+function _composerControlChipLabel(def){
+  if(!def) return '';
+  if(def.labelKey&&typeof t==='function'){
+    const localized=t(def.labelKey);
+    if(typeof localized==='string'&&localized&&localized!==def.labelKey) return localized;
+  }
+  return def.label||'';
+}
+
 function _renderComposerControlChips(){
   const container=$('composerControlsChips');
   if(!container) return;
@@ -6455,7 +6464,7 @@ function _renderComposerControlChips(){
     chip.className='tab-visibility-chip';
     const hidden=!!state[def.key];
     if(hidden) chip.classList.add('chip-off');
-    chip.textContent=def.label;
+    chip.textContent=_composerControlChipLabel(def);
     chip.setAttribute('role','switch');
     chip.setAttribute('aria-checked',hidden?'false':'true');
     chip.onclick=function(){_toggleComposerControlChip(def.key);};
@@ -6475,7 +6484,7 @@ function _renderComposerSituationalControlChips(){
     chip.className='tab-visibility-chip';
     const hidden=!!state[def.key];
     if(hidden) chip.classList.add('chip-off');
-    chip.textContent=def.label;
+    chip.textContent=_composerControlChipLabel(def);
     chip.setAttribute('role','switch');
     chip.setAttribute('aria-checked',hidden?'false':'true');
     chip.onclick=function(){_toggleComposerControlChip(def.key);};

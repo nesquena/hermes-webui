@@ -1922,25 +1922,25 @@ function applyBotName(){
 }
 
 const _COMPOSER_CONTROL_TOGGLE_DEFS=[
-  {key:'hide_composer_attach',label:'Attach',selectors:['#btnAttach']},
-  {key:'hide_composer_saved_prompts',label:'Saved prompts',selectors:['#btnSavedPrompts']},
-  {key:'hide_composer_mic',label:'Mic',selectors:['#btnMic']},
-  {key:'hide_composer_profile',label:'Profile',selectors:['#profileChipWrap']},
-  {key:'hide_composer_workspace',label:'Workspace',selectors:['.composer-ws-wrap','#composerMobileWorkspaceAction']},
-  {key:'hide_composer_model',label:'Model',selectors:['.composer-model-wrap','#composerMobileModelAction']},
-  {key:'hide_composer_reasoning',label:'Reasoning',selectors:['#composerReasoningWrap','#composerMobileReasoningAction']},
-  {key:'hide_composer_context',label:'Context',selectors:['#ctxIndicatorWrap','#composerMobileContextAction']},
+  {key:'hide_composer_attach',label:'Attach',labelKey:'composer_control_attach',selectors:['#btnAttach']},
+  {key:'hide_composer_saved_prompts',label:'Saved prompts',labelKey:'composer_control_saved_prompts',selectors:['#btnSavedPrompts']},
+  {key:'hide_composer_mic',label:'Mic',labelKey:'composer_control_mic',selectors:['#btnMic']},
+  {key:'hide_composer_profile',label:'Profile',labelKey:'composer_control_profile',selectors:['#profileChipWrap']},
+  {key:'hide_composer_workspace',label:'Workspace',labelKey:'composer_control_workspace',selectors:['.composer-ws-wrap','#composerMobileWorkspaceAction']},
+  {key:'hide_composer_model',label:'Model',labelKey:'composer_control_model',selectors:['.composer-model-wrap','#composerMobileModelAction']},
+  {key:'hide_composer_reasoning',label:'Reasoning',labelKey:'composer_control_reasoning',selectors:['#composerReasoningWrap','#composerMobileReasoningAction']},
+  {key:'hide_composer_context',label:'Context',labelKey:'composer_control_context',selectors:['#ctxIndicatorWrap','#composerMobileContextAction']},
 ];
 window._COMPOSER_CONTROL_TOGGLE_DEFS=_COMPOSER_CONTROL_TOGGLE_DEFS;
 
 const _COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=[
-  {key:'hide_composer_voice_mode',label:'Voice mode',selectors:['#btnVoiceMode']},
-  {key:'hide_composer_yolo',label:'YOLO',selectors:['#yoloPill']},
-  {key:'hide_composer_bg_badge',label:'Background badge',selectors:['#bgBadge']},
-  {key:'hide_composer_mobile_config',label:'Mobile config',selectors:['#composerMobileConfigBtn']},
-  {key:'hide_composer_quota_chip',label:'Quota chip',selectors:['#providerQuotaChip']},
-  {key:'hide_composer_toolsets',label:'Toolsets',selectors:['#composerToolsetsWrap']},
-  {key:'hide_composer_status',label:'Status',selectors:['#composerStatus']},
+  {key:'hide_composer_voice_mode',label:'Voice mode',labelKey:'composer_control_voice_mode',selectors:['#btnVoiceMode']},
+  {key:'hide_composer_yolo',label:'YOLO',labelKey:'composer_control_yolo',selectors:['#yoloPill']},
+  {key:'hide_composer_bg_badge',label:'Background badge',labelKey:'composer_control_bg_badge',selectors:['#bgBadge']},
+  {key:'hide_composer_mobile_config',label:'Mobile config',labelKey:'composer_control_mobile_config',selectors:['#composerMobileConfigBtn']},
+  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip']},
+  {key:'hide_composer_toolsets',label:'Toolsets',labelKey:'composer_control_toolsets',selectors:['#composerToolsetsWrap']},
+  {key:'hide_composer_status',label:'Status',labelKey:'composer_control_status',selectors:['#composerStatus']},
 ];
 window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS;
 
