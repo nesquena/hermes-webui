@@ -48,6 +48,7 @@ def _clear_profile_cache(monkeypatch):
     fails the secondary shape requirement regardless of the flag.
     """
     monkeypatch.setenv("HERMES_WEBUI_ISOLATED_PROFILE", "1")
+    monkeypatch.setattr(_profiles_mod, "_INITIAL_ISOLATED_PROFILE_OPT_IN", "1")
     _profiles_mod._LIST_PROFILES_CACHE = None
     yield
     _profiles_mod._LIST_PROFILES_CACHE = None
