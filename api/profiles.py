@@ -125,41 +125,71 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
     return home
 
 
-def _is_isolated_profile_mode() -> bool:
-    """Detect isolated single-profile mode from HERMES_HOME env var.
+def _isolated_profile_opt_in() -> bool:
+    """Return True only when isolated single-profile mode is EXPLICITLY enabled.
 
-    Returns True when HERMES_HOME points at a concrete profile subdirectory
-    (e.g., ~/.hermes/profiles/user1) rather than the base home (~/.hermes).
-    This indicates a single-profile deployment where the WebUI should pin to
-    that profile and reject cross-profile operations.
+    Isolated mode is an intentional multi-user deployment posture (each user is
+    pinned to one profile and cross-profile operations are rejected). It must be
+    opted into with ``HERMES_WEBUI_ISOLATED_PROFILE`` — it is NEVER inferred from
+    the ``HERMES_HOME`` shape alone, because a normal single-user who runs under a
+    named profile produces the byte-identical ``*/profiles/<name>`` shape (the
+    Hermes Agent launcher exports ``HERMES_HOME=~/.hermes/profiles/<name>`` for any
+    active named profile). Keying isolation off the shape alone therefore breaks
+    profile switching for ordinary single-user deployments (#4586).
 
-    Isolation is derived only from the literal ``*/profiles/<name>`` shape of
-    HERMES_HOME at startup. A normal multi-profile deployment points
-    HERMES_HOME at the base home (``~/.hermes``), which does not match the
-    shape, so isolation stays off. We deliberately do not key this off
-    HERMES_BASE_HOME: that variable normally points at the base home already,
-    so using it as an opt-out silently disables legitimate isolated-profile
-    deployments.
-
-    Uses _INITIAL_HERMES_HOME (snapshotted at import time) to detect isolation,
-    not the current os.environ value. init_profile_state() overwrites HERMES_HOME
-    at startup, which would disable isolation detection if we read it here.
+    Accepts the usual truthy values; default (unset/empty/falsey) is OFF.
     """
+    return os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower() in (
+        '1', 'true', 'yes', 'on',
+    )
+
+
+def _is_isolated_profile_mode() -> bool:
+    """Detect isolated single-profile mode.
+
+    Returns True only when BOTH conditions hold:
+      1. ``HERMES_WEBUI_ISOLATED_PROFILE`` is explicitly enabled (the PRIMARY
+         gate — see _isolated_profile_opt_in), AND
+      2. HERMES_HOME at startup points at a concrete profile subdirectory
+         (e.g., ~/.hermes/profiles/user1) rather than the base home.
+
+    Why the explicit flag is required (#4586 regression fix): the
+    ``*/profiles/<name>`` shape alone CANNOT distinguish an intentional
+    multi-user isolation deployment from an ordinary single-user running under a
+    named profile — the Hermes Agent launcher sets
+    ``HERMES_HOME=~/.hermes/profiles/<name>`` for any active named profile, so the
+    two cases are byte-identical at the env-var level. Inferring isolation from
+    the shape alone (the v0.51.528 behaviour from #2698) wrongly pinned ordinary
+    single-user deployments to one profile and disabled profile switching. The
+    multi-user wrapper that genuinely wants isolation now sets the explicit flag;
+    everyone else is never caught. The shape stays as a secondary requirement so
+    a stray flag without a profile-shaped HERMES_HOME does not engage isolation.
+
+    Uses _INITIAL_HERMES_HOME (snapshotted at import time) to detect the shape,
+    not the current os.environ value. init_profile_state() overwrites HERMES_HOME
+    at startup, which would disable detection if we read it here.
+    """
+    # PRIMARY gate: explicit opt-in. Default OFF → a normal named-profile launch
+    # is never treated as isolated, so profile switching keeps working (#4586).
+    if not _isolated_profile_opt_in():
+        return False
+
     hermes_home = _INITIAL_HERMES_HOME
     if not hermes_home:
         return False
 
     p = Path(hermes_home).expanduser()
-    # Check if this path looks like ~/.hermes/profiles/<name>
-    # i.e., parent dir is named 'profiles' and grandparent exists
+    # SECONDARY requirement: HERMES_HOME must look like ~/.hermes/profiles/<name>
+    # i.e., parent dir is named 'profiles' and grandparent exists.
     if p.parent.name == 'profiles' and p.parent.parent.exists():
         return True
     if p.is_symlink():
         global _ISOLATED_SYMLINK_WARNING_EMITTED
         if not _ISOLATED_SYMLINK_WARNING_EMITTED:
             logger.warning(
-                "HERMES_HOME symlink %s does not literally match */profiles/<name>; "
-                "isolated profile mode is disabled unless the literal profile path is used.",
+                "HERMES_WEBUI_ISOLATED_PROFILE is set but HERMES_HOME %s does not "
+                "literally match */profiles/<name>; isolated profile mode stays off "
+                "unless the literal profile path is used.",
                 p,
             )
             _ISOLATED_SYMLINK_WARNING_EMITTED = True

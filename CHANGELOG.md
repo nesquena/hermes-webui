@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Hotfix: profile switching works again for normal single-user named profiles (regression since v0.51.528, #4586).** The isolated-single-profile-mode feature (#2698) had been inferring "isolated mode" purely from the *shape* of `HERMES_HOME` (a `~/.hermes/profiles/<name>` path). But the Hermes Agent launcher exports exactly that shape for any active named profile in an ordinary single-user setup, so a regular user running under a named profile was wrongly pinned to a single profile — the Profiles tab showed only one profile and switching was blocked with "Profile switching is not allowed in isolated profile mode." Isolated mode now requires an explicit opt-in, `HERMES_WEBUI_ISOLATED_PROFILE=1` (default off), as the primary gate; the profile-shaped `HERMES_HOME` remains a secondary requirement. Multi-user isolation deployments simply set the flag; everyone else gets normal multi-profile behavior back. Thanks @b3nw for the report.
+
 ## [v0.51.548] — 2026-06-21 — Release TG (extension load diagnostics)
 
 ### Added
