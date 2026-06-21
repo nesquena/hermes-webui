@@ -36,8 +36,8 @@ def test_offline_banner_markup_styles_and_copy_exist():
 def test_offline_monitor_patches_fetch_and_auto_reloads_after_health_probe():
     assert "const OFFLINE_RECHECK_MS=2500" in UI_JS
     assert "window.fetch=async function(...args)" in UI_JS
-    assert "window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser');});" in UI_JS
-    assert "window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();})" in UI_JS
+    assert "window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser');updateSendBtn();});" in UI_JS
+    assert "window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();updateSendBtn();});" in UI_JS
     assert "setInterval(()=>{checkOfflineRecoveryNow();},OFFLINE_RECHECK_MS)" in UI_JS
     assert "new URL('health',document.baseURI||location.href)" in UI_JS
     assert "window.location.reload()" in UI_JS

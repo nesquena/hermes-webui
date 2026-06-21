@@ -1403,6 +1403,17 @@
               <button class="sm-btn" onclick="saveDashboardSettings()" data-i18n="settings_dashboard_save" style="margin-top:8px;width:100%;padding:7px;font-weight:600">Save dashboard link settings</button>
               <div id="settingsDashboardStatus" class="settings-autosave-status" aria-live="polite"></div>
             </div>
+            <!-- Offline Cache Section -->
+            <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label>Offline Conversation Cache</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Cache the session sidebar and recent transcripts in this browser (IndexedDB) so they're readable when the connection drops. Transcripts are profile-scoped and wiped on sign-out. <strong>Off by default.</strong></div>
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:normal;cursor:pointer">
+                <input type="checkbox" id="settingsOfflineCacheEnabled" onchange="toggleOfflineCache(this.checked)" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span>Enable offline conversation cache</span>
+              </label>
+              <button class="sm-btn" onclick="clearOfflineCacheUI()" style="margin-top:8px;width:100%;padding:7px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3)">Clear offline cache now</button>
+              <div id="offlineCacheStatus" class="settings-autosave-status" aria-live="polite"></div>
+            </div>
             <!-- Gateway Status Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="settings_label_gateway_status">Gateway Status</label>
@@ -1562,6 +1573,8 @@
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
+<script>window.__WEBUI_VERSION__='__WEBUI_VERSION__';</script>
+<script src="static/offline-cache.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>

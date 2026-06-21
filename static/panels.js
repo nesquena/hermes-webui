@@ -5862,6 +5862,12 @@ async function switchToProfile(name) {
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
 
+    // Close old profile's offline cache DB and open the new profile's.
+    // Each profile gets its own IndexedDB — Profile B can never read Profile A.
+    if (window.HermesOfflineCache && typeof window.HermesOfflineCache.setScope === 'function') {
+      try { await window.HermesOfflineCache.setScope(S.activeProfile); } catch (_) {}
+    }
+
     // Reconnect the gateway SSE to the NEW profile's watcher. The backend watcher
     // registry is now profile-keyed (#3629), but this tab's existing EventSource is
     // still subscribed to the PREVIOUS profile's watcher — and the probe-based
@@ -6451,6 +6457,7 @@ function switchSettingsSection(name,opts){
   if(!(opts&&opts.skipLazyLoad)){
     if(section==='providers') loadProvidersPanel();
     if(section==='plugins') loadPluginsPanel();
+    if(section==='system' && typeof _syncOfflineCacheCheckbox==='function') _syncOfflineCacheCheckbox();
   }
 }
 
@@ -8987,9 +8994,43 @@ async function saveSettings(andClose){
 async function signOut(){
   try{
     await api('/api/auth/logout',{method:'POST',body:'{}'});
+    // Wipe offline cache before navigating — transcripts live in IndexedDB
+    if(window.HermesOfflineCache && typeof window.HermesOfflineCache.nukeCache==='function'){
+      try{ await window.HermesOfflineCache.nukeCache(); }catch(_){}
+    }
     window.location.href='login';
   }catch(e){
     showToast(t('sign_out_failed')+e.message);
+  }
+}
+
+// ── Offline cache settings ─────────────────────────────────────────────────
+function toggleOfflineCache(enabled){
+  if(window.HermesOfflineCache && typeof window.HermesOfflineCache.setEnabled==='function'){
+    window.HermesOfflineCache.setEnabled(enabled);
+  }
+  var status=$('offlineCacheStatus');
+  if(status){
+    status.textContent=enabled?'Caching enabled — recent transcripts will be cached for offline reading.':'Caching disabled — cache wiped.';
+    setTimeout(function(){if(status)status.textContent='';},3000);
+  }
+}
+
+async function clearOfflineCacheUI(){
+  if(window.HermesOfflineCache && typeof window.HermesOfflineCache.nukeCache==='function'){
+    try{ await window.HermesOfflineCache.nukeCache(); }catch(_){}
+  }
+  var status=$('offlineCacheStatus');
+  if(status){
+    status.textContent='Offline cache cleared.';
+    setTimeout(function(){if(status)status.textContent='';},3000);
+  }
+}
+
+function _syncOfflineCacheCheckbox(){
+  var cb=$('settingsOfflineCacheEnabled');
+  if(cb && window.HermesOfflineCache && typeof window.HermesOfflineCache.isEnabled==='function'){
+    cb.checked=window.HermesOfflineCache.isEnabled();
   }
 }
 
