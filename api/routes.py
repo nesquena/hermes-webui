@@ -20178,13 +20178,17 @@ def _handle_scripts_list(handler) -> None:
         return j(handler, {"scripts": []})
     scripts = []
     for p in sorted(scripts_dir.iterdir()):
-        if not p.is_file():
+        try:
+            target = safe_resolve(scripts_dir, p.name)
+        except ValueError:
             continue
-        if p.suffix.lower() not in (".py", ".sh", ".bash", ".zsh"):
+        if not target.exists() or not target.is_file():
+            continue
+        if target.suffix.lower() not in (".py", ".sh", ".bash", ".zsh"):
             continue
         scripts.append({
             "name": p.name,
-            "description": _parse_script_docstring(p),
+            "description": _parse_script_docstring(target),
         })
     return j(handler, {"scripts": scripts})
 

@@ -6609,7 +6609,8 @@ async function _profileSwitchPanelLoad(){
   _clearCronDetail();
   if (_currentPanel === 'skills') await loadSkills();
   if (_currentPanel === 'memory') await loadMemory();
-  if (_currentPanel === 'tasks') await loadCrons();
+  if (_currentPanel === 'tasks' && _tasksSubtab === 'scripts') await loadScripts();
+  else if (_currentPanel === 'tasks') await loadCrons();
   if (_currentPanel === 'kanban') await loadKanban();
   if (_currentPanel === 'profiles') await loadProfilesPanel();
   if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
@@ -7261,6 +7262,7 @@ async function switchToProfile(name) {
       showToast(t('profile_switched', name));
     }
 
+    _scriptsData = null;
     await _profileSwitchPanelLoad();
     _refreshProfileSwitchBackground(_switchGen);
     return true;
