@@ -501,6 +501,9 @@ function _restoreMessageViewportAnchor(anchor, delta){
 function requestAnimationFrame(fn){ fn(); }
 
 eval(extractFunc('_messageVisibleIndexForRawIdx'));
+eval(extractFunc('_messageSessionIndexBase'));
+eval(extractFunc('_messageSessionIndexForRawIdx'));
+eval(extractFunc('_messageRawIdxForSessionIndex'));
 eval(extractFunc('_messageVirtualScrollTopForVisibleIdx'));
 eval(extractFunc('_remountMessageViewportAnchor'));
 eval(extractFunc('_restoreMessageScrollSnapshotSameFrame'));

@@ -36,27 +36,44 @@ def test_scroll_repin_dead_zone_is_wider_for_mac_app_windows():
     )
 
 
-def test_queue_card_measurement_does_not_force_repin_during_streaming():
+def test_queue_card_measurement_respects_manual_unpin_even_when_idle():
     fn = _extract_function(UI_JS, "_renderQueueChips")
     measurement_idx = fn.find("setTimeout(()=>")
     assert measurement_idx != -1, "queue card measurement timeout not found"
     measurement_block = fn[measurement_idx:measurement_idx + 500]
 
-    assert "S.activeStreamId" in measurement_block
     assert "scrollIfPinned()" in measurement_block
-    assert "!S.activeStreamId" in measurement_block
-    assert "scrollToBottom()" in measurement_block
-    assert measurement_block.find("scrollIfPinned()") < measurement_block.find("scrollToBottom()")
+    assert "scrollToBottom()" not in measurement_block, (
+        "queue-card layout measurement is a background update; it must not clear "
+        "manual _messageUserUnpinned state by calling explicit scrollToBottom()."
+    )
 
 
-def test_queue_pill_click_does_not_force_repin_during_streaming():
+def test_queue_pill_click_respects_manual_unpin_even_when_idle():
     fn = _extract_function(UI_JS, "_updateQueuePill")
     click_idx = fn.find("pill.onclick=()=>")
     assert click_idx != -1, "queue pill click handler not found"
     click_block = fn[click_idx:click_idx + 700]
 
-    assert "S.activeStreamId" in click_block
     assert "scrollIfPinned()" in click_block
-    assert "!S.activeStreamId" in click_block
-    assert "scrollToBottom()" in click_block
-    assert click_block.find("scrollIfPinned()") < click_block.find("scrollToBottom()")
+    assert "scrollToBottom()" not in click_block, (
+        "queue-pill expansion is a layout update, not an explicit transcript jump; "
+        "it must not reset manual unpin state."
+    )
+
+
+def test_idle_render_preserves_manual_unpin_until_explicit_bottom():
+    render_body = _extract_function(UI_JS, "renderMessages")
+    scroll_helper = _extract_function(UI_JS, "_scrollAfterMessageRender")
+
+    assert "preserveScroll||_messageUserUnpinned" in render_body.replace(" ", ""), (
+        "renderMessages() must capture a scroll snapshot whenever the reader is "
+        "manually unpinned, even for idle/non-preserve renders."
+    )
+    assert "if(_messageUserUnpinned){" in scroll_helper.replace(" ", ""), (
+        "idle render must restore the manually-unpinned viewport instead of "
+        "falling through to scrollToBottom()."
+    )
+    manual_unpin_block = scroll_helper[scroll_helper.index("if(_messageUserUnpinned)") : scroll_helper.index("scrollToBottom();")]
+    assert "_restoreMessageScrollSnapshot(scrollSnapshot);" in manual_unpin_block
+    assert "_maybeShowNewMessageScrollCue(scrollSnapshot);" in manual_unpin_block
