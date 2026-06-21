@@ -5811,6 +5811,14 @@ def _run_agent_streaming(
                                     # would reintroduce the very "drops to a smaller
                                     # window mid-stream" regression this guard fixes.
                                     # Reuse the exact acceptance gate hydration uses.
+                                    # NOTE: we deliberately omit model_changed (=False
+                                    # default) here, unlike hydration. The streaming
+                                    # path can't cheaply know if the model changed
+                                    # since the compressor was seeded, so we err
+                                    # toward the LARGER window (auto-compress fires
+                                    # late, not early — the safe direction), and the
+                                    # next GET /api/session hydration self-heals any
+                                    # genuine downward 256k case via model_changed.
                                     if (
                                         _real_u and _real_u != _cc_cl_u
                                         and _accept_u(_cc_cl_u, _real_u)
