@@ -4110,6 +4110,12 @@ function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
   const el=$('ctxIndicator');
   if(!el)return;
+  const ctxHidden=!!(window._composerControlVisibility&&window._composerControlVisibility.hide_composer_context);
+  if(ctxHidden){
+    if(wrap) wrap.style.display='none';
+    _syncMobileCtxDisplay({visible:false});
+    return;
+  }
   // #1436: Use last_prompt_tokens only — NEVER fall back to cumulative
   // input_tokens for the "context window % used" calculation.  input_tokens
   // is summed across all turns, so dividing it by the context window gives a
@@ -4130,7 +4136,12 @@ function _syncCtxIndicator(usage){
     _syncMobileCtxDisplay({visible:false});
     return;
   }
-  if(wrap) wrap.style.display='';
+  if(wrap){
+    // Defensive reset: keep dynamic context display from being stuck hidden.
+    wrap.classList.remove('composer-control-hidden');
+    wrap.removeAttribute('aria-hidden');
+    wrap.style.display='';
+  }
   const hasPromptTok=!!promptTok;
   const rawPct=hasPromptTok?Math.round((promptTok/ctxWindow)*100):0;
   const pct=Math.min(100,rawPct);
@@ -5284,11 +5295,20 @@ function setStatus(t){
 function setComposerStatus(t){
   const el=$('composerStatus');
   if(!el)return;
+  const statusHidden=!!(window._composerControlVisibility&&window._composerControlVisibility.hide_composer_status);
+  if(statusHidden){
+    el.style.display='none';
+    el.textContent='';
+    return;
+  }
   if(!t){
     el.style.display='none';
     el.textContent='';
     return;
   }
+  // Defensive reset: a stale hidden class should never block live status text.
+  el.classList.remove('composer-control-hidden');
+  el.removeAttribute('aria-hidden');
   el.textContent=t;
   el.style.display='';
 }
