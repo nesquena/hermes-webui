@@ -36,6 +36,26 @@ def test_csp_connect_src_includes_valid_extra_origins(monkeypatch):
     ) in policy
 
 
+def test_csp_connect_src_includes_explicit_trusted_sidecar_origin(monkeypatch):
+    from server import Handler
+
+    monkeypatch.setenv(
+        "HERMES_WEBUI_CSP_CONNECT_EXTRA",
+        "http://127.0.0.1:17787 ws://127.0.0.1:17787",
+    )
+
+    report_only = Handler.csp_report_only_policy()
+
+    assert "http://127.0.0.1:17787" in report_only
+    assert "ws://127.0.0.1:17787" in report_only
+
+    from api.helpers import _build_csp_enforced_policy
+
+    enforced = _build_csp_enforced_policy()
+    assert "http://127.0.0.1:17787" in enforced
+    assert "ws://127.0.0.1:17787" in enforced
+
+
 def test_csp_connect_src_rejects_directive_injection(monkeypatch, caplog):
     from server import Handler
 

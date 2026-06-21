@@ -69,6 +69,20 @@ def test_enforcing_csp_honors_valid_extra_connect_origins(monkeypatch):
     ) in policy
 
 
+def test_enforcing_csp_allows_trusted_loopback_sidecars_by_default(monkeypatch):
+    monkeypatch.delenv("HERMES_WEBUI_CSP_CONNECT_EXTRA", raising=False)
+
+    policy = _headers_from_security_helper()["Content-Security-Policy"]
+
+    assert "connect-src" in policy
+    assert "http://127.0.0.1:*" in policy
+    assert "http://localhost:*" in policy
+    assert "http://ipc.localhost" in policy
+    assert "ws://127.0.0.1:*" in policy
+    assert "ws://localhost:*" in policy
+    assert "http://127.0.0.1:17787" not in policy
+
+
 def test_enforcing_and_report_only_csp_share_validated_connect_extra(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_CSP_CONNECT_EXTRA", "https://metrics.example.com")
 
