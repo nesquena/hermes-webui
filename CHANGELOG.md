@@ -3,10 +3,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- **Isolated profile mode now uses the launcher-time opt-in snapshot instead of live profile-mutated environment.** A pinned profile `.env` can no longer silently disable a deployment that started with `HERMES_WEBUI_ISOLATED_PROFILE=1`, even if live `os.environ` is later changed. Profile-shaped `HERMES_HOME` launches without the opt-in now emit a one-time warning that isolation is off and normal multi-profile switching remains enabled. Thanks @nesquena-hermes.
-
 ## [v0.51.560] — 2026-06-21 — Release TS (recovered run-journal output reaches the model)
 
 ### Fixed
