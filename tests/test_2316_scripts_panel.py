@@ -1,6 +1,8 @@
 """Tests for #2316: Scripts panel — list and raw endpoint for ~/.hermes/scripts/."""
 
 import json
+import os
+from pathlib import Path
 import shutil
 import urllib.error
 import urllib.request
@@ -10,6 +12,7 @@ import pytest
 from tests.conftest import TEST_STATE_DIR, TEST_BASE
 
 pytestmark = pytest.mark.usefixtures("test_server")
+PANELS = (Path(__file__).resolve().parents[1] / "static" / "panels.js").read_text(encoding="utf-8")
 
 
 def _clear_scripts_dir():
@@ -76,6 +79,27 @@ def test_scripts_list_filters_non_script_files():
 
     assert len(data["scripts"]) == 1
     assert data["scripts"][0]["name"] == "script.py"
+
+
+def test_scripts_list_skips_symlink_escape():
+    """GET /api/scripts/list must not follow a symlinked entry outside scripts/."""
+    _clear_scripts_dir()
+    scripts_dir = TEST_STATE_DIR / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+
+    outside = TEST_STATE_DIR / "outside-secret.py"
+    outside.write_text('"""Outside."""\npass\n', encoding="utf-8")
+
+    link = scripts_dir / "leak.py"
+    try:
+        os.symlink(str(outside), str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("platform does not support symlinks")
+
+    with urllib.request.urlopen(TEST_BASE + "/api/scripts/list", timeout=5) as r:
+        data = json.loads(r.read())
+
+    assert data["scripts"] == []
 
 
 def test_scripts_raw_returns_source():
@@ -146,3 +170,34 @@ def test_scripts_list_returns_sorted_order():
 
     names = [s["name"] for s in data["scripts"]]
     assert names == ["apple.py", "middle.bash", "zebra.sh"]
+
+
+def test_profile_switch_invalidates_scripts_cache_before_panel_reload():
+    """switchToProfile() must clear the scripts cache before reloading panels."""
+    switch_idx = PANELS.find("async function switchToProfile(name) {")
+    assert switch_idx != -1, "switchToProfile() not found in panels.js"
+    panel_reload_idx = PANELS.find("await _profileSwitchPanelLoad();", switch_idx)
+    assert panel_reload_idx != -1, "_profileSwitchPanelLoad() call not found in switchToProfile()"
+    switch_block = PANELS[switch_idx:panel_reload_idx + len("await _profileSwitchPanelLoad();")]
+
+    assert "_scriptsData = null;" in switch_block, (
+        "Profile switches must invalidate _scriptsData before reloading panel content, "
+        "or the Scripts subtab can keep showing the prior profile's list."
+    )
+
+
+def test_profile_switch_reloads_scripts_subtab_instead_of_crons():
+    """_profileSwitchPanelLoad() must reload Scripts when Tasks is on the scripts subtab."""
+    fn_start = PANELS.find("async function _profileSwitchPanelLoad(){")
+    assert fn_start != -1, "_profileSwitchPanelLoad() not found in panels.js"
+    fn_end = PANELS.find("\n}\n\nfunction _refreshProfileSwitchBackground", fn_start)
+    assert fn_end != -1, "Could not isolate _profileSwitchPanelLoad() body"
+    fn = PANELS[fn_start:fn_end]
+
+    assert "if (_currentPanel === 'tasks' && _tasksSubtab === 'scripts') await loadScripts();" in fn, (
+        "When the Tasks panel is showing the Scripts subtab, a profile switch must refetch "
+        "scripts instead of leaving the previous profile's cached list in place."
+    )
+    assert "else if (_currentPanel === 'tasks') await loadCrons();" in fn, (
+        "Jobs subtab reload behavior must stay intact when the Scripts-specific branch is added."
+    )
