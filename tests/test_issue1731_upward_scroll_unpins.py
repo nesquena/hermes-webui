@@ -106,7 +106,7 @@ def test_wheel_touch_upward_intent_unpins_immediately_inside_messages():
     fn_end = UI_JS.index("function _recentNonMessageScrollIntent", fn_start)
     fn = UI_JS[fn_start:fn_end]
     assert "_messageUserUnpinned=true" in fn.replace(" ", "")
-    assert "e.deltaY<0" in fn and "e.type==='touchmove'" in fn
+    assert "e.deltaY< -30" in fn and "e.type==='touchmove'" in fn
 
 
 def test_downward_path_preserves_macos_momentum_hysteresis():

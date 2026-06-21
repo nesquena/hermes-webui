@@ -95,7 +95,7 @@ def test_user_scroll_cancels_delayed_bottom_settling():
 
     assert "function _cancelBottomSettle" in UI_JS
     assert "_cancelBottomSettle();" in listener_block
-    assert "e.deltaY<0" in record
+    assert "e.deltaY< -30" in record
     assert "_cancelBottomSettle();" in record
     assert "_scrollPinned=false" in record
     assert "if(_messageUserUnpinned) return;" in pinned
