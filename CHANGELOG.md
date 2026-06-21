@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Failed `/steer` delivery no longer cancels the running turn.** When the real steer endpoint returns `accepted:false` (for example because the active agent is not cached, the stream ended, or a transient request failed), WebUI now restores the composer draft and preserves staged files instead of silently queueing the message and calling `cancelStream()`. Explicit Queue/Interrupt remain available when the user really wants a next-turn send or stop-and-send flow.
+
 ## [v0.51.546] — 2026-06-21 — Release TE (fix a flaky gateway-sync CI test)
 
 ### Fixed
@@ -58,6 +62,7 @@
 ### Fixed
 
 - **Approval-gated tools no longer hang forever on standard gateway deployments (#4549).** Gateway deployments that don't set `HERMES_WEBUI_GATEWAY_USE_RUNS_API` (the default, legacy `/v1/chat/completions` path) silently dropped `approval.request` / `hermes.approval.request` events in the SSE relay loop — the agent said "please approve in the UI" but the approval card never rendered and the run hung at "Thinking…" until timeout. #4495 had fixed the runs-API path but left the legacy path untouched. The legacy SSE loop now handles approval events (reusing `_gateway_runs_approval_event` and the polling-state mirror), and records the gateway `run_id` so the user's approve/deny choice relays back to the gateway and actually resumes the parked run (without the run_id the card would render but the response would fall through to the local path and return `{"ok": false}`). Thanks @rodboev.
+
 
 ## [v0.51.537] — 2026-06-20 — Release SV (queued card clears on session switch)
 
