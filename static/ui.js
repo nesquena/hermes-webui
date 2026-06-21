@@ -14200,9 +14200,13 @@ function _renderTreeItems(container, entries, depth){
     el.ondragend=()=>{el.classList.remove('dragging');_clearWorkspaceMoveDragOver();};
 
     const isLk = item.type === 'symlink';
-    const isDirLike = item.type === 'dir' || (isLk && item.is_dir);
-    const isFileLike = !isDirLike;
+    const isExternalLink = isLk && item.target_outside_workspace;
+    // External symlinks are display-only: not expandable, not openable.
+    // The read gate (safe_resolve_ws) still blocks navigation through them.
+    const isDirLike = !isExternalLink && (item.type === 'dir' || (isLk && item.is_dir));
+    const isFileLike = !isExternalLink && !isDirLike;
     el.dataset.wsIsDir = String(isDirLike);
+    if(isExternalLink){el.removeAttribute('draggable');el.ondragstart=null;}
 
     if(isDirLike){
       // Toggle arrow for directories
@@ -14223,9 +14227,11 @@ function _renderTreeItems(container, entries, depth){
     // Icon
     const iconEl=document.createElement('span');
     iconEl.className='file-icon';
-    iconEl.innerHTML = isDirLike
-      ? (isLk ? li('link', 14) : li('folder', 14))
-      : (isLk ? li('link', 14) : fileIcon(item.name, item.type));
+    iconEl.innerHTML = isExternalLink
+      ? li('external-link', 14)
+      : isDirLike
+        ? (isLk ? li('link', 14) : li('folder', 14))
+        : (isLk ? li('link', 14) : fileIcon(item.name, item.type));
     el.appendChild(iconEl);
 
     // Name
@@ -14257,6 +14263,8 @@ function _renderTreeItems(container, entries, depth){
       if(_nameClickTimer){clearTimeout(_nameClickTimer);_nameClickTimer=null;}
       // For directories, double-click navigates (breadcrumb view)
       if(isDirLike){loadDir(item.path);return;}
+      // External symlinks: show informational dialog, not rename
+      if(isExternalLink){if(typeof el.onclick==='function')el.onclick(e);return;}
       const inp=document.createElement('input');
       inp.className='file-rename-input';inp.value=item.name;
       inp.onclick=(e2)=>e2.stopPropagation();
@@ -14344,6 +14352,19 @@ function _renderTreeItems(container, entries, depth){
           }
           renderFileTree();
         }
+      };
+    }else if(isExternalLink){
+      // Display-only: show the resolved target, do NOT call openFile.
+      // The read gate (safe_resolve_ws) blocks navigation through the link.
+      el.onclick=async(e)=>{
+        e.stopPropagation();
+        await showConfirmDialog({
+          title:item.name,
+          message:t('external_link_open_confirm').replace('{target}',()=>elideMiddle(item.target||'')),
+          confirmLabel:t('dialog_confirm_btn'),
+          danger:false,
+          focusCancel:false,
+        });
       };
     }else{
       el.onclick=async()=>openFile(item.path);

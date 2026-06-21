@@ -1220,11 +1220,16 @@ def list_dir(workspace: Path, rel: str='.'):
                 return  # target is under link_target — ancestor → cycle
             except ValueError:
                 pass
-            # Hide symlinks that resolve outside the workspace (can never be opened).
+            # Tag symlinks whose resolved target escapes the workspace root.
+            # Previously silently dropped; now emitted with target_outside_workspace=True
+            # so the workspace tree can show the link exists (display-only — the
+            # read/list gate in safe_resolve_ws / open_anchored_fd still blocks
+            # navigation through it).
+            target_outside_workspace = False
             try:
                 link_target.relative_to(ws_resolved)
             except ValueError:
-                return
+                target_outside_workspace = True
             if _is_blocked_system_path(link_target):
                 return
             is_dir = link_target.is_dir()
@@ -1238,6 +1243,7 @@ def list_dir(workspace: Path, rel: str='.'):
                 'type': 'symlink',
                 'target': str(link_target),
                 'is_dir': is_dir,
+                'target_outside_workspace': target_outside_workspace,
                 'mtime_ns': mtime_ns,
             }
             if not is_dir:
@@ -1381,6 +1387,7 @@ def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = 
             'size': entry.get('size'),
             'mtime_ns': entry.get('mtime_ns'),
             'target': entry.get('target'),
+            'target_outside_workspace': entry.get('target_outside_workspace'),
         })
     raw = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
