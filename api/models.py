@@ -391,10 +391,13 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     context_messages = getattr(session, 'context_messages', None)
     if not isinstance(context_messages, list) or not context_messages:
         return
+    role = str(recovered.get('role') or '')
     recovered_text = " ".join(str(recovered.get('content') or '').split())
+    if not recovered_text and not recovered.get('tool_call_id') and not recovered.get('tool_calls'):
+        return
     if recovered_text:
         for existing in reversed(context_messages[-8:]):
-            if not isinstance(existing, dict) or existing.get('role') != 'user':
+            if not isinstance(existing, dict) or existing.get('role') != role:
                 continue
             existing_text = " ".join(str(existing.get('content') or '').split())
             if existing_text == recovered_text:
@@ -1420,15 +1423,19 @@ def _append_journaled_partial_output(
             if existing_idx is not None:
                 current_assistant_idx = existing_idx
                 assistant_started_at = None
+                if 0 <= existing_idx < len(session.messages):
+                    _append_recovered_turn_to_context(session, session.messages[existing_idx])
                 return existing_idx
         timestamp = int(assistant_started_at or time.time())
-        session.messages.append({
+        recovered_assistant = {
             'role': 'assistant',
             'content': content,
             'timestamp': timestamp,
             '_recovered_from_run_journal': True,
             '_recovered_stream_id': stream_id,
-        })
+        }
+        session.messages.append(recovered_assistant)
+        _append_recovered_turn_to_context(session, recovered_assistant)
         current_assistant_idx = len(session.messages) - 1
         assistant_started_at = None
         appended_any = True

@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recovered output from an interrupted WebUI turn is now included in the next model context.** When a server restart or crash restored already-streamed assistant text from the run journal, the visible transcript showed the recovered progress but the model-facing `context_messages` could stay stale, so the next assistant turn could forget work the user could see. Recovery now backfills recovered assistant rows into `context_messages`, including the dedupe path where the visible row already exists. Adds regression coverage for both fresh recovery and context backfill. Thanks @allenliang2022.
+
 ## [v0.51.556] — 2026-06-21 — Release TO (Indonesian Edge TTS voice + Listen button state fix)
 
 ### Added
