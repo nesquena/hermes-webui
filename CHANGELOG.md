@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The transcript no longer jumps upward while you read an in-progress streamed reply (#4295).** When a live turn rebuilds during streaming, the browser now restores the first visible semantic message anchor before falling back to raw pixel scroll offsets, remounting virtualized anchors when needed and preserving the user's manually-unpinned state. Incoming token, tool, progress, reconnect, and recovery updates should no longer move the reader away from the prompt/live-reply boundary unless they explicitly choose to follow again.
+
 ## [v0.51.546] — 2026-06-21 — Release TE (fix a flaky gateway-sync CI test)
 
 ### Fixed
