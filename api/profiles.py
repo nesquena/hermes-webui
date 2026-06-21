@@ -33,14 +33,16 @@ _PROFILE_DIRS = [
 ]
 _CLONE_CONFIG_FILES = ['config.yaml', '.env', 'SOUL.md']
 
-# ── Snapshot initial HERMES_HOME before init_profile_state() mutates it ──────
-# _is_isolated_profile_mode() needs to detect whether HERMES_HOME *at startup*
-# points to a profile subdirectory (e.g., ~/.hermes/profiles/user1), not the
-# base home (~/.hermes). But init_profile_state() overwrites HERMES_HOME to the
-# base home, which would disable isolation detection. Snapshot it here at import
-# time (before init_profile_state runs) and use the snapshot in the detector.
+# ── Snapshot startup env before profile init / dotenv reload mutates it ───────
+# _is_isolated_profile_mode() needs startup HERMES_HOME, not the value after
+# init_profile_state() rewrites it. The opt-in flag is also an operator-level
+# startup control: a pinned profile's .env may be loaded into live os.environ
+# later, but must not be able to change whether the process is isolated.
 _INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
+_INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
+_ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
+_ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 
 # ── Module state ────────────────────────────────────────────────────────────
 _active_profile = 'default'
@@ -145,17 +147,33 @@ def _isolated_profile_opt_in() -> bool:
 
     Accepts the usual truthy values; default (unset/empty/falsey) is OFF.
 
-    Security: this reads the operator-set env var live, but a pinned profile's
-    ``.env`` can NEVER override it — ``_reload_dotenv()`` explicitly refuses to
-    copy ``HERMES_WEBUI_ISOLATED_PROFILE`` from a profile ``.env`` into
-    ``os.environ`` (see ``_PROTECTED_ENV_KEYS``). Otherwise a contained user could
-    set ``HERMES_WEBUI_ISOLATED_PROFILE=0`` in their own profile ``.env`` and
-    silently escape isolation (#4589). The opt-in is an operator/deployment
-    posture, never a per-profile-file toggle.
+    Security: this reads the startup snapshot, not live ``os.environ``. A pinned
+    profile's ``.env`` is loaded after import, so live env can be profile-owned;
+    the opt-in must remain the operator/launcher posture captured at process
+    start (#4590). ``_reload_dotenv()`` and the runtime env paths still filter the
+    key as defense-in-depth, but detection does not depend on that filtering.
     """
-    return os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower() in (
-        '1', 'true', 'yes', 'on',
+    return _INITIAL_ISOLATED_PROFILE_OPT_IN in _ISOLATED_PROFILE_TRUTHY_VALUES
+
+
+def _warn_if_profile_shape_without_isolated_opt_in() -> None:
+    """Log once when HERMES_HOME looks pinned but startup opt-in is absent."""
+    global _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED
+    if _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED:
+        return
+    hermes_home = _INITIAL_HERMES_HOME
+    if not hermes_home:
+        return
+    p = Path(hermes_home).expanduser()
+    if p.parent.name != 'profiles' or not p.name:
+        return
+    logger.warning(
+        "HERMES_HOME points at a profile directory (%s), but "
+        "HERMES_WEBUI_ISOLATED_PROFILE was not enabled at startup; isolated "
+        "profile mode stays off and normal multi-profile switching remains enabled.",
+        p,
     )
+    _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = True
 
 
 def _is_isolated_profile_mode() -> bool:
@@ -183,9 +201,12 @@ def _is_isolated_profile_mode() -> bool:
     not the current os.environ value. init_profile_state() overwrites HERMES_HOME
     at startup, which would disable detection if we read it here.
     """
-    # PRIMARY gate: explicit opt-in. Default OFF → a normal named-profile launch
-    # is never treated as isolated, so profile switching keeps working (#4586).
+    # PRIMARY gate: explicit startup opt-in. Default OFF → a normal named-profile
+    # launch is never treated as isolated, so profile switching keeps working
+    # (#4586). Read the snapshot, not live os.environ, so profile .env reloads
+    # cannot silently flip the deployment posture (#4590).
     if not _isolated_profile_opt_in():
+        _warn_if_profile_shape_without_isolated_opt_in()
         return False
 
     hermes_home = _INITIAL_HERMES_HOME

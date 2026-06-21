@@ -20,6 +20,7 @@ These tests deliberately set ONLY the profile shape (no flag) and assert NORMAL 
 the exact thing that regressed. They would FAIL on v0.51.528..current and PASS after the fix.
 """
 
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -43,6 +44,7 @@ def _clear_cache_and_force_flag_off(monkeypatch):
     accidentally enable isolation and mask the regression.
     """
     monkeypatch.delenv("HERMES_WEBUI_ISOLATED_PROFILE", raising=False)
+    monkeypatch.setattr(_profiles_mod, "_INITIAL_ISOLATED_PROFILE_OPT_IN", "")
     _profiles_mod._LIST_PROFILES_CACHE = None
     yield
     _profiles_mod._LIST_PROFILES_CACHE = None
@@ -103,6 +105,28 @@ class TestIssue4586NamedProfileIsNotIsolated:
                     "active profile in the Profiles tab (#4586)"
                 )
 
+    def test_profile_shape_without_opt_in_warns_once(self, named_profile_home, monkeypatch, caplog):
+        """A profile-shaped startup HERMES_HOME without opt-in emits one diagnostic."""
+        active = named_profile_home["active"]
+        monkeypatch.setattr(
+            _profiles_mod,
+            "_ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED",
+            False,
+        )
+
+        with mock.patch.dict(os.environ, {"HERMES_HOME": str(active)}, clear=False):
+            with mock.patch("api.profiles._INITIAL_HERMES_HOME", str(active)):
+                with caplog.at_level(logging.WARNING, logger="api.profiles"):
+                    assert _is_isolated_profile_mode() is False
+                    assert _is_isolated_profile_mode() is False
+
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if "HERMES_WEBUI_ISOLATED_PROFILE was not enabled at startup" in record.getMessage()
+        ]
+        assert len(warnings) == 1
+
     def test_switching_to_another_profile_is_allowed(self, named_profile_home):
         """Regressed symptom #2: switching was blocked with PermissionError."""
         base = named_profile_home["base"]
@@ -131,10 +155,14 @@ class TestIssue4586ExplicitOptInStillWorks:
         with mock.patch.dict(os.environ, {"HERMES_HOME": str(active),
                                           "HERMES_WEBUI_ISOLATED_PROFILE": flag}, clear=False):
             with mock.patch("api.profiles._INITIAL_HERMES_HOME", str(active)):
-                assert _isolated_profile_opt_in() is True
-                assert _is_isolated_profile_mode() is True, (
-                    f"explicit opt-in ({flag!r}) + profile shape must still engage isolated mode"
-                )
+                with mock.patch(
+                    "api.profiles._INITIAL_ISOLATED_PROFILE_OPT_IN",
+                    flag.strip().lower(),
+                ):
+                    assert _isolated_profile_opt_in() is True
+                    assert _is_isolated_profile_mode() is True, (
+                        f"explicit opt-in ({flag!r}) + profile shape must still engage isolated mode"
+                    )
 
     def test_flag_without_profile_shape_stays_off(self, named_profile_home):
         """Secondary requirement: a stray flag without a profile-shaped HERMES_HOME = OFF."""
@@ -142,9 +170,10 @@ class TestIssue4586ExplicitOptInStillWorks:
         with mock.patch.dict(os.environ, {"HERMES_HOME": str(base),
                                           "HERMES_WEBUI_ISOLATED_PROFILE": "1"}, clear=False):
             with mock.patch("api.profiles._INITIAL_HERMES_HOME", str(base)):
-                assert _is_isolated_profile_mode() is False, (
-                    "flag set but HERMES_HOME is the base home → isolation must stay off"
-                )
+                with mock.patch("api.profiles._INITIAL_ISOLATED_PROFILE_OPT_IN", "1"):
+                    assert _is_isolated_profile_mode() is False, (
+                        "flag set but HERMES_HOME is the base home → isolation must stay off"
+                    )
 
     @pytest.mark.parametrize("flag", ["", "0", "false", "no", "off", "  "])
     def test_falsey_flag_values_are_off(self, named_profile_home, flag):
@@ -152,29 +181,40 @@ class TestIssue4586ExplicitOptInStillWorks:
         with mock.patch.dict(os.environ, {"HERMES_HOME": str(active),
                                           "HERMES_WEBUI_ISOLATED_PROFILE": flag}, clear=False):
             with mock.patch("api.profiles._INITIAL_HERMES_HOME", str(active)):
-                assert _is_isolated_profile_mode() is False, (
-                    f"falsey flag {flag!r} must not engage isolated mode"
-                )
+                with mock.patch(
+                    "api.profiles._INITIAL_ISOLATED_PROFILE_OPT_IN",
+                    flag.strip().lower(),
+                ):
+                    assert _is_isolated_profile_mode() is False, (
+                        f"falsey flag {flag!r} must not engage isolated mode"
+                    )
 
 
-class TestIssue4589ProfileEnvCannotDisableIsolation:
-    """#4589: a pinned profile's own .env must NOT be able to turn isolation OFF.
+class TestIssue4590ProfileEnvCannotDisableIsolation:
+    """#4590: a pinned profile's own .env must NOT be able to turn isolation OFF.
 
     _reload_dotenv() copies a profile's .env into os.environ. Before the fix, a
     contained user could put HERMES_WEBUI_ISOLATED_PROFILE=0 in their profile .env
-    and escape isolation. The operator flag is now protected from .env override.
+    and escape isolation. The operator flag is now snapshotted at startup.
     """
 
-    def test_profile_env_cannot_clear_isolated_flag(self, named_profile_home):
+    def test_profile_env_cannot_clear_isolated_flag(self, named_profile_home, monkeypatch):
         from api.profiles import _reload_dotenv, _PROTECTED_ENV_KEYS
 
         assert "HERMES_WEBUI_ISOLATED_PROFILE" in _PROTECTED_ENV_KEYS
 
         active = named_profile_home["active"]
+        monkeypatch.setattr(_profiles_mod, "_INITIAL_ISOLATED_PROFILE_OPT_IN", "1")
         # Operator opts the deployment into isolation.
         with mock.patch.dict(os.environ, {"HERMES_HOME": str(active),
                                           "HERMES_WEBUI_ISOLATED_PROFILE": "1"}, clear=False):
             with mock.patch("api.profiles._INITIAL_HERMES_HOME", str(active)):
+                assert _is_isolated_profile_mode() is True
+
+                # Prove the startup snapshot is the authority even if a future
+                # live-env path regresses and lets the profile .env mutate the
+                # operator flag in os.environ.
+                monkeypatch.setattr(_profiles_mod, "_PROTECTED_ENV_KEYS", frozenset())
                 assert _is_isolated_profile_mode() is True
 
                 # The contained user plants HERMES_WEBUI_ISOLATED_PROFILE=0 in their .env.
@@ -183,12 +223,13 @@ class TestIssue4589ProfileEnvCannotDisableIsolation:
                 )
                 try:
                     _reload_dotenv(active)
-                    # The protected flag must NOT have been overridden → still isolated.
-                    assert os.environ.get("HERMES_WEBUI_ISOLATED_PROFILE") == "1", (
-                        "profile .env must not override the operator isolation flag"
+                    # Even if live env is overwritten, the startup snapshot keeps
+                    # the deployment isolated.
+                    assert os.environ.get("HERMES_WEBUI_ISOLATED_PROFILE") == "0", (
+                        "test setup should prove live os.environ was mutated by profile .env"
                     )
                     assert _is_isolated_profile_mode() is True, (
-                        "#4589: a profile .env must not be able to disable isolation"
+                        "#4590: a profile .env must not be able to disable isolation"
                     )
                     # Non-protected keys still load normally.
                     assert os.environ.get("SOME_OTHER_KEY") == "ok"
