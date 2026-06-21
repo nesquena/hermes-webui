@@ -5858,7 +5858,7 @@ main.main > #mainPlugin{display:none;}
 .msg-body code { color: var(--strong); background: var(--code-inline-bg); font-size: var(--message-code-font-size); }
 
 /* ── Unified indent rail — every child of a turn lines up on --msg-rail ── */
-.msg-row { padding: 12px 0; }
+.msg-row { padding: 12px 0; min-width: 0; }
 
 /* On touch devices (iOS/Android PWA), skip layout/paint for off-screen rows
    so streaming performance doesn't degrade as the chat grows. WKWebView is
@@ -5905,13 +5905,27 @@ main.main > #mainPlugin{display:none;}
      WebKit and on Android it re-opens the #4856 / #5338 mobile jump-to-top
      regression the scroll-anchor work fought hard to close. */
 }
-.msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
+.msg-body {
+  padding-left: var(--msg-rail);
+  padding-top: 8px;
+  width: 100%;
+  max-width: min(var(--msg-max), 100%);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.msg-body :where(p, li, blockquote, h1, h2, h3, h4, h5, h6, a, strong, em, span) {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .msg-body code,
 .msg-body pre,
 .msg-body table { font-family: 'SF Mono', ui-monospace, monospace; }
 .msg-body:empty { display: none; }
-.assistant-turn { width: 100%; }
-.assistant-turn-blocks { display: flex; flex-direction: column; }
+.assistant-turn { width: 100%; min-width: 0; }
+.assistant-turn-blocks { display: flex; flex-direction: column; min-width: 0; }
+.assistant-segment { max-width: 100%; min-width: 0; }
 .status-card{margin:8px 0 8px var(--msg-rail);max-width:min(var(--msg-max),760px);border:1px solid var(--border-subtle);background:var(--surface-subtle);border-radius:var(--radius-card);box-shadow:0 10px 24px rgba(0,0,0,.05);overflow:hidden;}
 .status-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--border-subtle);background:linear-gradient(180deg,var(--surface-subtle-hover),var(--surface-subtle));}
 .status-card-title-wrap{min-width:0;}
