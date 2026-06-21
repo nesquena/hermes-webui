@@ -5721,50 +5721,86 @@ def _run_agent_streaming(
                 _cc = getattr(_agent, 'context_compressor', None)
                 if _cc:
                     _cc_cl_u = getattr(_cc, 'context_length', 0) or 0
-                    # Default-only guard (#3256): the agent-side compressor is
-                    # built in agent_init with the global model.context_length
-                    # applied unconditionally — for non-default models that
-                    # value is the stale global cap (e.g. 232K). Drop it here
-                    # so the live usage payload doesn't surface the wrong cap.
-                    # PERF: resolve the real per-model cap at most once per
-                    # stream (cached in _real_ctx_cache). This snapshot runs on
-                    # every metering tick; doing the config read + metadata
-                    # lookup per tick froze non-default-model streams.
+                    # Stale-compressor self-heal (#3256, broadened): the
+                    # agent-side compressor caches a context_length from the
+                    # model it was *built/last-updated* with. After an in-place
+                    # model switch (or when agent_init seeded it with the global
+                    # model.context_length cap), that cached value can be the
+                    # WRONG model's window — e.g. a session on claude-opus-4.8
+                    # (1M / 936k prompt on Copilot) whose compressor still holds
+                    # claude-opus-4.5's 168k. The original guard only corrected
+                    # the narrow case where the cached value equalled the config
+                    # cap exactly; a leftover *other-model* value (168k) slipped
+                    # straight through to the live usage payload. Broaden it:
+                    # ALWAYS resolve the real per-model window for the agent's
+                    # CURRENT model and, when that differs from the cached value,
+                    # surface the real one. Frontend hydration (GET /api/session)
+                    # already does this; this aligns the streaming path with it
+                    # so "refresh shows 1M, send-a-message drops to 168k" can't
+                    # happen.
+                    # PERF: resolve at most once per stream (cached in
+                    # _real_ctx_cache). This snapshot runs on every metering
+                    # tick; doing the config read + metadata lookup per tick
+                    # froze non-default-model streams.
                     if _real_ctx_cache[0] is None:
-                        _resolved_real = 0  # 0 = guard not applicable / failed
+                        _resolved_real = 0  # 0 = no correction / lookup failed
                         try:
-                            from api.config import get_config as _gc_u
-                            _cfg_u = _gc_u()
-                            _mcfg_u = _cfg_u.get('model', {}) if isinstance(_cfg_u, dict) else {}
-                            if isinstance(_mcfg_u, dict):
-                                _def_u = str(_mcfg_u.get('default') or '').strip()
-                                _raw_u = _mcfg_u.get('context_length')
+                            _sm_u = str(getattr(_agent, 'model', '') or '').strip()
+                            _prov_u = str(getattr(_agent, 'provider', '') or '').strip()
+                            _base_u = str(getattr(_agent, 'base_url', '') or '').strip()
+                            _key_u = getattr(_agent, 'api_key', '') or ''
+                            if _sm_u:
+                                # Resolve the real window through the SAME helper
+                                # hydration uses (routes._context_length_lookup_inputs_for_model
+                                # + get_model_context_length). This honors the
+                                # nested per-model config override
+                                # (model.<provider>.models.<model>.context_length,
+                                # e.g. claude-opus-4.8 -> 1,000,000) and custom-
+                                # provider keys, so the streaming/SSE path and the
+                                # GET /api/session path land on the IDENTICAL value.
+                                # Reusing the helper (instead of hand-reading the
+                                # flat top-level model.context_length, which is
+                                # None here) is what prevents a new mismatch like
+                                # "refresh shows 1M, send-a-message shows 936k".
                                 try:
-                                    _cl_u = int(_raw_u) if _raw_u is not None else 0
-                                except (TypeError, ValueError):
-                                    _cl_u = 0
-                                _sm_u = str(getattr(_agent, 'model', '') or '').strip()
-                                from api.routes import _model_matches_configured_default as _mmcd_u
-                                if (
-                                    _cl_u > 0
-                                    and _cc_cl_u == _cl_u
-                                    and _def_u
-                                    and _sm_u
-                                    and not _mmcd_u(_sm_u, _def_u, getattr(_agent, 'provider', '') or '')
-                                ):
-                                    # Recompute from real per-model metadata.
+                                    from api.routes import (
+                                        _context_length_lookup_inputs_for_model as _cli_u,
+                                    )
+                                    from api.config import get_config as _gc_u
+                                    from agent.model_metadata import get_model_context_length as _g_u
+                                    _cfg_u = _gc_u()
+                                    _lk_u = _cli_u(
+                                        _sm_u,
+                                        _prov_u,
+                                        base_url=_base_u,
+                                        api_key=_key_u,
+                                        cfg=_cfg_u if isinstance(_cfg_u, dict) else {},
+                                    )
+                                    _real_u = _g_u(
+                                        _sm_u,
+                                        _lk_u.base_url,
+                                        api_key=_lk_u.api_key,
+                                        config_context_length=_lk_u.config_context_length,
+                                        provider=_lk_u.provider or _prov_u or '',
+                                        custom_providers=_lk_u.custom_providers,
+                                    ) or 0
+                                    # Only treat it as a correction when the real
+                                    # window is valid AND disagrees with the
+                                    # compressor's cached value. Equal => nothing
+                                    # to fix, leave the fast path untouched.
+                                    if _real_u and _real_u != _cc_cl_u:
+                                        _resolved_real = _real_u
+                                except TypeError:
+                                    # Older hermes-agent: legacy 2-arg form.
                                     try:
-                                        from agent.model_metadata import get_model_context_length as _g_u
-                                        _real_u = _g_u(
-                                            _sm_u,
-                                            getattr(_agent, 'base_url', '') or '',
-                                            config_context_length=None,
-                                            provider=getattr(_agent, 'provider', '') or '',
-                                        ) or 0
-                                        if _real_u:
+                                        from agent.model_metadata import get_model_context_length as _g2_u
+                                        _real_u = _g2_u(_sm_u, _base_u) or 0
+                                        if _real_u and _real_u != _cc_cl_u:
                                             _resolved_real = _real_u
                                     except Exception:
                                         pass
+                                except Exception:
+                                    pass
                         except Exception:
                             _resolved_real = 0
                         _real_ctx_cache[0] = _resolved_real
