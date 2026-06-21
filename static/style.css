@@ -5100,6 +5100,38 @@ main.main > #mainPlugin{display:none;}
 .msg-row[data-role="assistant"]:hover .msg-foot,
 .assistant-turn:hover .msg-foot,
 .assistant-turn:focus-within .msg-foot { opacity: 1; }
+/* Desktop/tablet keeps the per-turn jump affordance discoverable without
+   exposing the quieter timestamp/action chrome until hover or keyboard focus. */
+@media (min-width: 641px) {
+  .msg-row[data-role="assistant"] .msg-foot:has(.msg-question-jump-btn),
+  .assistant-turn .msg-foot:has(.msg-question-jump-btn) {
+    opacity: 1;
+  }
+  .msg-row[data-role="assistant"] .msg-foot:has(.msg-question-jump-btn) .msg-time,
+  .msg-row[data-role="assistant"] .msg-foot:has(.msg-question-jump-btn) .msg-actions,
+  .assistant-turn .msg-foot:has(.msg-question-jump-btn) .msg-time,
+  .assistant-turn .msg-foot:has(.msg-question-jump-btn) .msg-actions {
+    opacity: 0;
+    transition: opacity .15s;
+  }
+  .msg-row[data-role="assistant"] .msg-foot:has(.msg-question-jump-btn) .msg-time,
+  .msg-row[data-role="assistant"] .msg-foot:has(.msg-question-jump-btn) .msg-actions,
+  .assistant-turn .msg-foot:has(.msg-question-jump-btn) .msg-time,
+  .assistant-turn .msg-foot:has(.msg-question-jump-btn) .msg-actions {
+    pointer-events: none;
+  }
+  .msg-row[data-role="assistant"]:hover .msg-foot:has(.msg-question-jump-btn) .msg-time,
+  .msg-row[data-role="assistant"]:hover .msg-foot:has(.msg-question-jump-btn) .msg-actions,
+  .msg-row[data-role="assistant"]:focus-within .msg-foot:has(.msg-question-jump-btn) .msg-time,
+  .msg-row[data-role="assistant"]:focus-within .msg-foot:has(.msg-question-jump-btn) .msg-actions,
+  .assistant-turn:hover .msg-foot:has(.msg-question-jump-btn) .msg-time,
+  .assistant-turn:hover .msg-foot:has(.msg-question-jump-btn) .msg-actions,
+  .assistant-turn:focus-within .msg-foot:has(.msg-question-jump-btn) .msg-time,
+  .assistant-turn:focus-within .msg-foot:has(.msg-question-jump-btn) .msg-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
 .assistant-turn .msg-foot-with-usage,
 .msg-row[data-role="assistant"] .msg-foot-with-usage {
   opacity: 1;
