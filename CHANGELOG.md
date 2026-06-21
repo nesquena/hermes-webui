@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.547] — 2026-06-21 — Release TF (re-auth required before disabling password authentication)
+
+### Added
+
+- **You must now re-enter your current password before turning off (or clearing) password authentication.** Previously, an already-open WebUI session could disable the password gate with no challenge. Now any change, clear, or transition-to-passwordless of password auth requires the current password (a "sudo-mode" re-auth on `POST /api/settings`, returning 403 without it). First-time setup and environment-variable-locked instances are unaffected. Also adds an optional "I've reviewed this risk" acknowledgment that downgrades the persistent unauthenticated-instance nav warning to a quieter one. A guard against a hijacked or unattended session silently removing your auth. Thanks @starship-s.
+
 ## [v0.51.546] — 2026-06-21 — Release TE (fix a flaky gateway-sync CI test)
 
 ### Fixed

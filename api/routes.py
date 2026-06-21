@@ -8594,6 +8594,7 @@ def handle_get(handler, parsed) -> bool:
             "passkeys_enabled": bool(passkeys),
             "passkeys_count": len(passkeys),
             "passkey_feature_flag": passkey_flag,
+            "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
         })
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
@@ -8840,6 +8841,21 @@ def handle_get(handler, parsed) -> bool:
         settings["password_env_var"] = bool(
             os.getenv("HERMES_WEBUI_PASSWORD", "").strip()
         )
+        # Auth-state fields for frontend safety badge / confirmation flows
+        from api.auth import get_password_hash, is_auth_enabled
+        settings["auth_enabled"] = is_auth_enabled()
+        settings["password_auth_enabled"] = get_password_hash() is not None
+        try:
+            from api.auth import _passkey_feature_flag_enabled as _pffe
+            from api.passkeys import registered_credentials as _rc
+            if _pffe():
+                settings["passkeys_enabled"] = bool(_rc())
+                settings["passwordless_enabled"] = bool(_rc()) and not settings["password_auth_enabled"]
+            else:
+                settings["passkeys_enabled"] = False
+                settings["passwordless_enabled"] = False
+        except Exception:
+            pass
         # Inject the running version so the UI badge stays in sync with git tags
         # without any manual release step.
         try:
@@ -11346,9 +11362,11 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/settings":
         from api.auth import (
             create_session,
+            get_password_hash,
             is_auth_enabled,
             parse_cookie,
             set_auth_cookie,
+            verify_password,
             verify_session,
         )
 
@@ -11356,6 +11374,7 @@ def handle_post(handler, parsed) -> bool:
             body["bot_name"] = (str(body["bot_name"]) or "").strip() or "Hermes"
 
         auth_enabled_before = is_auth_enabled()
+        password_auth_enabled_before = auth_enabled_before and get_password_hash() is not None
         current_cookie = parse_cookie(handler)
         logged_in_before = bool(current_cookie and verify_session(current_cookie))
         requested_password = bool(
@@ -11366,6 +11385,8 @@ def handle_post(handler, parsed) -> bool:
         requested_clear_password = bool(body.get("_clear_password") or requested_passwordless)
         if requested_passwordless:
             body["_clear_password"] = True
+
+        current_password = body.pop("_current_password", None)
 
         # #1560: HERMES_WEBUI_PASSWORD env var takes precedence in
         # api.auth.get_password_hash(), so writing password_hash to settings.json
@@ -11395,6 +11416,22 @@ def handle_post(handler, parsed) -> bool:
                     403,
                 )
 
+        # Auth-disable safety: when password auth is currently enabled, require
+        # the current password to change, clear, or switch to passwordless.
+        if auth_enabled_before and password_auth_enabled_before and (requested_password or requested_clear_password):
+            if not isinstance(current_password, str) or not current_password:
+                return bad(
+                    handler,
+                    "Current password is required to change or disable authentication.",
+                    403,
+                )
+            if not verify_password(current_password):
+                return bad(
+                    handler,
+                    "Current password is incorrect.",
+                    403,
+                )
+
         if requested_passwordless:
             from api.auth import _passkey_feature_flag_enabled
             from api.passkeys import registered_credentials
@@ -11407,6 +11444,13 @@ def handle_post(handler, parsed) -> bool:
             from api.passkeys import clear_credentials
 
             clear_credentials()
+
+        # Handle auth_disabled_acknowledged setting
+        ack = body.pop("_auth_disabled_acknowledged", None)
+        if ack is not None and not is_auth_enabled():
+            body["auth_disabled_acknowledged"] = bool(ack)
+        elif is_auth_enabled() or requested_password:
+            body["auth_disabled_acknowledged"] = False
 
         saved = save_settings(body)
         saved.pop("password_hash", None)  # never expose hash to client
@@ -11450,8 +11494,20 @@ def handle_post(handler, parsed) -> bool:
             logged_in_after = True
 
         saved["auth_enabled"] = auth_enabled_after
+        saved["password_auth_enabled"] = get_password_hash() is not None
         saved["logged_in"] = logged_in_after
         saved["auth_just_enabled"] = auth_just_enabled
+        try:
+            from api.auth import _passkey_feature_flag_enabled as _pffe
+            from api.passkeys import registered_credentials as _rc
+            if _pffe():
+                saved["passkeys_enabled"] = bool(_rc())
+                saved["passwordless_enabled"] = bool(_rc()) and not saved["password_auth_enabled"]
+            else:
+                saved["passkeys_enabled"] = False
+                saved["passwordless_enabled"] = False
+        except Exception:
+            pass
 
         if not new_cookie:
             return j(handler, saved)

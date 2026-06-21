@@ -5888,8 +5888,11 @@ function showPromptDialog(opts={}){
     input.autocomplete='off';input.spellcheck=false;
   }
   if(cancelBtn) cancelBtn.textContent=opts.cancelLabel||t('cancel');
-  if(confirmBtn){confirmBtn.textContent=opts.confirmLabel||t('create');confirmBtn.classList.remove('danger');}
-  if(dialog) dialog.setAttribute('role','dialog');
+  if(confirmBtn){
+    confirmBtn.textContent=opts.confirmLabel||t('create');
+    confirmBtn.classList.toggle('danger',!!opts.danger);
+  }
+  if(dialog) dialog.setAttribute('role',opts.danger?'alertdialog':'dialog');
   if(overlay){overlay.style.display='flex';overlay.setAttribute('aria-hidden','false');}
   return new Promise(resolve=>{
     APP_DIALOG.resolve=resolve;
