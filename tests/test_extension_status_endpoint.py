@@ -58,7 +58,8 @@ def test_extension_status_disabled_by_default():
         "extension_dir_valid": False,
         "script_urls": [],
         "stylesheet_urls": [],
-        "counts": {"script_urls": 0, "stylesheet_urls": 0},
+        "sidecars": [],
+        "counts": {"script_urls": 0, "stylesheet_urls": 0, "sidecars": 0},
         "manifest": {
             "configured": False,
             "loaded": False,
@@ -66,6 +67,7 @@ def test_extension_status_disabled_by_default():
             "entry_count": 0,
             "script_count": 0,
             "stylesheet_count": 0,
+            "sidecar_count": 0,
         },
         "warnings": [],
     }
@@ -124,7 +126,8 @@ def test_extension_status_reports_loaded_manifest_counts_and_urls(tmp_path, monk
         "/extensions/base.css",
         "/extensions/templates/app.css",
     ]
-    assert status["counts"] == {"script_urls": 3, "stylesheet_urls": 2}
+    assert status["sidecars"] == []
+    assert status["counts"] == {"script_urls": 3, "stylesheet_urls": 2, "sidecars": 0}
     assert status["manifest"] == {
         "configured": True,
         "loaded": True,
@@ -132,6 +135,7 @@ def test_extension_status_reports_loaded_manifest_counts_and_urls(tmp_path, monk
         "entry_count": 2,
         "script_count": 2,
         "stylesheet_count": 2,
+        "sidecar_count": 0,
     }
     assert status["warnings"] == []
 
@@ -163,6 +167,8 @@ def test_extension_status_ignores_non_dict_manifest_extensions_in_entry_count(
     assert status["script_urls"] == ["/extensions/templates/app.js"]
     assert status["manifest"]["entry_count"] == 2
     assert status["manifest"]["script_count"] == 1
+    assert status["manifest"]["sidecar_count"] == 0
+    assert status["sidecars"] == []
     assert status["warnings"] == []
 
 
@@ -330,6 +336,281 @@ def test_extension_status_reports_rejected_env_assets_without_rejected_values(tm
     rendered = repr(status)
     assert "evil.example" not in rendered
     assert "env.js" not in rendered
+
+
+def test_extension_status_reports_sanitized_loopback_sidecars(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "extensions.json").write_text(
+        """
+        {
+          "extensions": [
+            {
+              "id": "desktop-companion",
+              "name": "Desktop Companion",
+              "scripts": ["companion-adapter.js"],
+              "stylesheets": ["companion-adapter.css"],
+              "sidecar": {
+                "type": "loopback",
+                "origin": "http://127.0.0.1:17787",
+                "health_path": "/health"
+              }
+            },
+            {
+              "id": "implicit-health",
+              "sidecar": {
+                "type": "loopback",
+                "origin": "http://localhost:17788"
+              }
+            },
+            {
+              "id": "ipv6-loopback",
+              "sidecar": {
+                "type": "loopback",
+                "origin": "http://[::1]:17789",
+                "health_path": "/ready"
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+
+    from api.extensions import get_extension_status
+
+    status = get_extension_status()
+    assert status["script_urls"] == ["/extensions/companion-adapter.js"]
+    assert status["stylesheet_urls"] == ["/extensions/companion-adapter.css"]
+    assert status["sidecars"] == [
+        {
+            "id": "desktop-companion",
+            "name": "Desktop Companion",
+            "type": "loopback",
+            "origin": "http://127.0.0.1:17787",
+            "health_path": "/health",
+            "health_url": "http://127.0.0.1:17787/health",
+        },
+        {
+            "id": "implicit-health",
+            "name": "",
+            "type": "loopback",
+            "origin": "http://localhost:17788",
+            "health_path": "/health",
+            "health_url": "http://localhost:17788/health",
+        },
+        {
+            "id": "ipv6-loopback",
+            "name": "",
+            "type": "loopback",
+            "origin": "http://[::1]:17789",
+            "health_path": "/ready",
+            "health_url": "http://[::1]:17789/ready",
+        },
+    ]
+    assert status["counts"]["sidecars"] == 3
+    assert status["manifest"]["sidecar_count"] == 3
+    assert status["warnings"] == []
+
+
+def test_extension_status_skips_disabled_sidecar_entries(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "extensions.json").write_text(
+        """
+        {
+          "extensions": [
+            {
+              "id": "off",
+              "enabled": false,
+              "sidecar": {"type": "loopback", "origin": "http://127.0.0.1:17787"}
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+
+    from api.extensions import get_extension_status
+
+    status = get_extension_status()
+    assert status["sidecars"] == []
+    # The top-level manifest object is still inspected; the disabled extension
+    # entry is skipped and must not contribute a sidecar.
+    assert status["manifest"]["entry_count"] == 1
+    assert status["manifest"]["sidecar_count"] == 0
+    assert status["warnings"] == []
+
+
+def test_extension_status_rejects_non_loopback_sidecars_without_raw_value_leak(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "extensions.json").write_text(
+        """
+        {
+          "extensions": [
+            {
+              "id": "bad-origin",
+              "sidecar": {
+                "type": "loopback",
+                "origin": "http://10.0.0.5:17787",
+                "health_path": "/health"
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+
+    from api.extensions import get_extension_status
+
+    status = get_extension_status()
+    assert status["sidecars"] == []
+    assert status["manifest"]["sidecar_count"] == 0
+    assert status["warnings"] == [
+        {"code": "sidecar_origin_rejected", "source": "manifest:sidecars"}
+    ]
+    rendered = repr(status)
+    assert "10.0.0.5" not in rendered
+    assert "17787" not in rendered
+
+
+def test_extension_status_rejects_invalid_sidecar_health_path_without_leak(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "extensions.json").write_text(
+        """
+        {
+          "extensions": [
+            {
+              "id": "bad-health",
+              "sidecar": {
+                "type": "loopback",
+                "origin": "http://127.0.0.1:17787",
+                "health_path": "/../secret-health"
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+
+    from api.extensions import get_extension_status
+
+    status = get_extension_status()
+    assert status["sidecars"] == []
+    assert status["manifest"]["sidecar_count"] == 0
+    assert status["warnings"] == [
+        {"code": "sidecar_health_path_rejected", "source": "manifest:sidecars"}
+    ]
+    assert "secret-health" not in repr(status)
+
+
+def test_extension_status_rejects_decoded_whitespace_sidecar_health_path(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "extensions.json").write_text(
+        """
+        {
+          "extensions": [
+            {
+              "id": "bad-health-space",
+              "sidecar": {
+                "type": "loopback",
+                "origin": "http://127.0.0.1:17787",
+                "health_path": "/health%20check"
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+
+    from api.extensions import get_extension_status
+
+    status = get_extension_status()
+    assert status["sidecars"] == []
+    assert status["warnings"] == [
+        {"code": "sidecar_health_path_rejected", "source": "manifest:sidecars"}
+    ]
+    rendered = repr(status)
+    assert "health check" not in rendered
+    assert "health%20check" not in rendered
+
+
+def test_extension_status_rejects_unsupported_sidecar_type_without_origin_probe(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "extensions.json").write_text(
+        """
+        {
+          "extensions": [
+            {
+              "id": "unsupported",
+              "sidecar": {"type": "unix-socket", "origin": "http://127.0.0.1:17787"}
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+
+    from api.extensions import get_extension_status
+
+    status = get_extension_status()
+    assert status["sidecars"] == []
+    assert status["warnings"] == [
+        {"code": "sidecar_type_unsupported", "source": "manifest:sidecars"}
+    ]
+
+
+def test_extension_status_truncates_many_sidecars_with_sanitized_warning(tmp_path, monkeypatch):
+    import json
+
+    root = tmp_path / "extensions"
+    root.mkdir()
+    entries = [
+        {
+            "id": f"sidecar-{index}",
+            "sidecar": {
+                "type": "loopback",
+                "origin": f"http://127.0.0.1:{18000 + index}",
+            },
+        }
+        for index in range(40)
+    ]
+    (root / "extensions.json").write_text(
+        json.dumps({"extensions": entries}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+
+    from api.extensions import get_extension_status
+
+    status = get_extension_status()
+    assert len(status["sidecars"]) == 32
+    assert status["counts"]["sidecars"] == 32
+    assert status["manifest"]["sidecar_count"] == 32
+    assert status["warnings"] == [
+        {"code": "sidecar_list_truncated", "source": "manifest:sidecars"}
+    ]
+
 
 
 def test_extension_status_route_is_wired(monkeypatch):

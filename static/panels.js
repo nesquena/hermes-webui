@@ -6227,6 +6227,7 @@ let _settingsIndex = null;
 let _settingsIndexPromise = null;
 let _settingsSearchSeq = 0;
 let _extensionsStatusData = null;
+let _extensionsSidecarMonitorSeq = 0;
 let _settingsSearchDismissListenerRegistered = false;
 let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
@@ -7627,7 +7628,84 @@ function _extensionCountValue(counts,key,urls){
   return Array.isArray(urls)?urls.length:0;
 }
 
-function _renderExtensionsPanel(data){
+function _extensionSidecarHealthBadge(status,label){
+  const safeStatus=['checking','healthy','unhealthy','blocked'].includes(status)?status:'checking';
+  return `<span class="extension-sidecar-status-badge extension-sidecar-status-${safeStatus}">${esc(label||safeStatus)}</span>`;
+}
+
+function _extensionSidecarCard(sidecars){
+  const list=Array.isArray(sidecars)?sidecars:[];
+  const body=list.length?`<div class="extension-sidecar-list">${list.map((sidecar,index)=>{
+    const id=(sidecar&&sidecar.id)||'';
+    const name=(sidecar&&sidecar.name)||'';
+    const title=name||id||'Unnamed extension';
+    const meta=(name&&id)?id:(sidecar&&sidecar.type)||'loopback';
+    const origin=(sidecar&&sidecar.origin)||'';
+    const healthPath=(sidecar&&sidecar.health_path)||'';
+    const healthUrl=(sidecar&&sidecar.health_url)||'';
+    return `<div class="extension-sidecar-row" data-sidecar-index="${index}">
+      <div class="extension-sidecar-row-head">
+        <div class="extension-sidecar-title">${esc(title)}</div>
+        <span id="extensionSidecarHealth${index}" data-sidecar-health-index="${index}">${_extensionSidecarHealthBadge('checking','checking')}</span>
+      </div>
+      <div class="extension-sidecar-meta">${esc(meta)}</div>
+      <div class="extension-sidecar-fields">
+        <div><span>Origin</span><code>${esc(origin)}</code></div>
+        <div><span>Health path</span><code>${esc(healthPath)}</code></div>
+        <div><span>Health URL</span><code>${esc(healthUrl)}</code></div>
+      </div>
+    </div>`;
+  }).join('')}</div>`:'<div class="extension-url-empty">No loopback sidecars declared.</div>';
+  return `
+    <div class="provider-card extension-sidecars-card">
+      <div class="provider-card-header plugin-card-header">
+        <div class="provider-card-info">
+          <div class="provider-card-name">Loopback sidecars</div>
+          <div class="provider-card-meta">Declared local companions; health is checked directly from this browser with WebUI credentials omitted.</div>
+        </div>
+      </div>
+      <div class="provider-card-body extension-card-body">
+        ${body}
+      </div>
+    </div>`;
+}
+
+function _setExtensionSidecarHealth(index,status,label){
+  const el=document.querySelector(`[data-sidecar-health-index="${index}"]`);
+  if(el) el.innerHTML=_extensionSidecarHealthBadge(status,label);
+}
+
+async function _checkExtensionSidecarHealth(sidecar,index,seq){
+  const healthUrl=sidecar&&sidecar.health_url;
+  if(!healthUrl){
+    _setExtensionSidecarHealth(index,'blocked','unreachable / blocked');
+    return;
+  }
+  let controller=null;
+  let timeoutId=null;
+  try{
+    if(typeof AbortController!=='undefined'){
+      controller=new AbortController();
+      timeoutId=setTimeout(()=>controller.abort(),2500);
+    }
+    const res=await fetch(healthUrl,{credentials:'omit',cache:'no-store',signal:controller?controller.signal:undefined});
+    if(seq!==_extensionsSidecarMonitorSeq) return;
+    if(res.ok) _setExtensionSidecarHealth(index,'healthy','healthy');
+    else _setExtensionSidecarHealth(index,'unhealthy','unhealthy');
+  }catch(_e){
+    if(seq!==_extensionsSidecarMonitorSeq) return;
+    _setExtensionSidecarHealth(index,'blocked','unreachable / blocked');
+  }finally{
+    if(timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+function _monitorExtensionSidecars(sidecars,seq){
+  if(!Array.isArray(sidecars)||sidecars.length===0) return;
+  sidecars.forEach((sidecar,index)=>_checkExtensionSidecarHealth(sidecar,index,seq));
+}
+
+function _renderExtensionsPanel(data,seq){
   const target=$('extensionsDiagnostics');
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
   if(!target) return;
@@ -7637,9 +7715,11 @@ function _renderExtensionsPanel(data){
   const counts=(data&&data.counts)||{};
   const scripts=Array.isArray(data&&data.script_urls)?data.script_urls:[];
   const styles=Array.isArray(data&&data.stylesheet_urls)?data.stylesheet_urls:[];
+  const sidecars=Array.isArray(data&&data.sidecars)?data.sidecars:[];
   const statusClass=(data&&data.enabled)?'extension-card-enabled':'extension-card-disabled';
   const scriptCount=_extensionCountValue(counts,'script_urls',scripts);
   const styleCount=_extensionCountValue(counts,'stylesheet_urls',styles);
+  const sidecarCount=_extensionCountValue(counts,'sidecars',sidecars);
   target.innerHTML=`
     <div class="provider-card extension-status-card ${statusClass}">
       <div class="provider-card-header plugin-card-header">
@@ -7659,8 +7739,10 @@ function _renderExtensionsPanel(data){
           <div><span>Manifest entries inspected</span><code>${Number(manifest.entry_count)||0}</code></div>
           <div><span>Manifest script count</span><code>${Number(manifest.script_count)||0}</code></div>
           <div><span>Manifest stylesheet count</span><code>${Number(manifest.stylesheet_count)||0}</code></div>
+          <div><span>Manifest sidecar count</span><code>${Number(manifest.sidecar_count)||0}</code></div>
           <div><span>Final script count</span><code>${scriptCount}</code></div>
           <div><span>Final stylesheet count</span><code>${styleCount}</code></div>
+          <div><span>Loopback sidecar count</span><code>${sidecarCount}</code></div>
         </div>
       </div>
     </div>
@@ -7678,6 +7760,7 @@ function _renderExtensionsPanel(data){
         ${_extensionAssetList(styles)}
       </div>
     </div>
+    ${_extensionSidecarCard(sidecars)}
     <div class="provider-card extension-warnings-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
@@ -7690,6 +7773,7 @@ function _renderExtensionsPanel(data){
       </div>
     </div>
   `;
+  _monitorExtensionSidecars(sidecars,seq);
 }
 
 async function loadExtensionsPanel(){
@@ -7697,10 +7781,12 @@ async function loadExtensionsPanel(){
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
   if(!target) return;
   if(copyBtn) copyBtn.disabled=true;
+  const seq=++_extensionsSidecarMonitorSeq;
   target.innerHTML='<div class="extensions-loading">Loading extension diagnostics…</div>';
   try{
     const data=await api('/api/extensions/status');
-    _renderExtensionsPanel(data);
+    if(seq!==_extensionsSidecarMonitorSeq) return;
+    _renderExtensionsPanel(data,seq);
   }catch(e){
     _extensionsStatusData=null;
     if(copyBtn) copyBtn.disabled=true;

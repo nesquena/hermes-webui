@@ -109,14 +109,47 @@ def test_extensions_panel_renders_sanitized_status_payload():
     assert "manifest.entry_count" in render_block
     assert "manifest.script_count" in render_block
     assert "manifest.stylesheet_count" in render_block
+    assert "manifest.sidecar_count" in render_block
     assert "script_urls" in render_block
     assert "stylesheet_urls" in render_block
+    assert "data&&data.sidecars" in render_block
+    assert "_extensionSidecarCard(sidecars)" in render_block
     assert "data&&data.warnings" in render_block
     assert "esc(url)" in asset_block
     assert "esc(manifest.status||'unknown')" in render_block
     assert "esc((item&&item.code)||'unknown_warning')" in warning_block
     assert "esc((item&&item.source)||'unknown')" in warning_block
     assert "Rejected" not in render_block  # rejected values must never be rendered directly
+
+
+def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
+    sidecar_block = _between("function _extensionSidecarCard", "function _setExtensionSidecarHealth")
+    monitor_block = _between("async function _checkExtensionSidecarHealth", "function _renderExtensionsPanel")
+    render_block = _between("function _renderExtensionsPanel", "async function loadExtensionsPanel")
+    load_block = _between("async function loadExtensionsPanel", "async function copyExtensionsDiagnostics")
+
+    assert "Loopback sidecars" in sidecar_block
+    assert "No loopback sidecars declared." in sidecar_block
+    assert "esc(title)" in sidecar_block
+    assert "esc(meta)" in sidecar_block
+    assert "esc(origin)" in sidecar_block
+    assert "esc(healthPath)" in sidecar_block
+    assert "esc(healthUrl)" in sidecar_block
+    assert "fetch(healthUrl,{credentials:'omit',cache:'no-store'" in monitor_block
+    assert "function _monitorExtensionSidecars(sidecars,seq)" in monitor_block
+    assert "const seq=_extensionsSidecarMonitorSeq" not in monitor_block
+    assert "_monitorExtensionSidecars(sidecars,seq)" in render_block
+    assert "function _renderExtensionsPanel(data,seq)" in render_block
+    assert "const seq=++_extensionsSidecarMonitorSeq" in load_block
+    assert "if(seq!==_extensionsSidecarMonitorSeq) return;" in load_block
+    assert "_renderExtensionsPanel(data,seq)" in load_block
+    assert "res.ok" in monitor_block
+    assert "res.text" not in monitor_block
+    assert "res.json" not in monitor_block
+    assert "api('/api/settings'" not in monitor_block
+    assert "api('/extensions/" not in monitor_block
+    assert "sidecar/*" not in monitor_block
+    assert not _contains_post_method(monitor_block)
 
 
 def test_copy_extensions_diagnostics_copies_current_sanitized_payload():
@@ -135,6 +168,8 @@ def test_extensions_styles_are_scoped_to_extensions_panel():
     assert ".extension-summary-grid" in STYLE_CSS
     assert ".extension-warning-list" in STYLE_CSS
     assert ".extension-url-list" in STYLE_CSS
+    assert ".extension-sidecar-list" in STYLE_CSS
+    assert ".extension-sidecar-status-badge" in STYLE_CSS
 
 
 def test_extensions_tab_i18n_key_exists_for_all_locales():
@@ -151,4 +186,8 @@ def test_extensions_docs_mentions_settings_panel_without_mutation_claims():
     assert "Settings → Extensions" in diagnostics_section
     assert "enable, disable, install, or mutate extensions" in diagnostics_section
     assert "`/api/extensions/status`" in diagnostics_section
-    assert "do **not** return" in diagnostics_section
+    assert "sanitized loopback sidecars" in diagnostics_section
+    assert "credentials: 'omit'" in diagnostics_section
+    assert "does **not** proxy sidecar requests" in diagnostics_section
+    assert "do **not**" in diagnostics_section
+    assert "return `HERMES_WEBUI_EXTENSION_DIR`" in diagnostics_section
