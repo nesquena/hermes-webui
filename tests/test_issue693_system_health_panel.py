@@ -131,6 +131,62 @@ def test_system_health_falls_back_to_psutil_when_procfs_is_unavailable(monkeypat
     }
 
 
+def test_system_health_procfs_parse_errors_remain_visible(monkeypatch):
+    from api import system_health
+
+    fake_psutil = SimpleNamespace(
+        cpu_percent=lambda interval=0.0: 42.25,
+        virtual_memory=lambda: SimpleNamespace(total=1000, available=250),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(
+        system_health,
+        "_read_proc_stat_cpu",
+        lambda: (_ for _ in ()).throw(RuntimeError("proc_stat_unavailable")),
+    )
+    monkeypatch.setattr(system_health, "_read_meminfo_kib", lambda: {})
+
+    try:
+        system_health._cpu_percent()
+    except RuntimeError as exc:
+        assert str(exc) == "proc_stat_unavailable"
+    else:  # pragma: no cover - defensive regression clarity
+        raise AssertionError("procfs parse RuntimeError should not fall back to psutil")
+
+    try:
+        system_health._memory_usage()
+    except RuntimeError as exc:
+        assert str(exc) == "meminfo_unavailable"
+    else:  # pragma: no cover - defensive regression clarity
+        raise AssertionError("meminfo invariant RuntimeError should not fall back to psutil")
+
+
+def test_system_health_cpu_second_procfs_read_fallback_does_not_sleep_twice(monkeypatch):
+    from api import system_health
+
+    calls = []
+
+    def fake_read_proc_stat_cpu():
+        calls.append("proc")
+        if len(calls) == 1:
+            return (10, 100)
+        raise FileNotFoundError("/proc/stat disappeared")
+
+    def fake_sleep(seconds):
+        calls.append(("sleep", seconds))
+
+    def fake_cpu_percent(interval=0.0):
+        calls.append(("psutil", interval))
+        return 12.34
+
+    monkeypatch.setattr(system_health, "_read_proc_stat_cpu", fake_read_proc_stat_cpu)
+    monkeypatch.setattr(system_health.time, "sleep", fake_sleep)
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(cpu_percent=fake_cpu_percent))
+
+    assert system_health._cpu_percent() == 12.3
+    assert calls == ["proc", ("sleep", system_health._CPU_SAMPLE_SECONDS), "proc", ("psutil", 0.0)]
+
+
 def test_system_health_route_registered_and_auth_gated(monkeypatch):
     assert 'parsed.path == "/api/system/health"' in ROUTES_PY
     assert "build_system_health_payload()" in ROUTES_PY

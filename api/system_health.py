@@ -1,8 +1,10 @@
-"""Safe aggregate host resource metrics for the WebUI VPS panel (#693).
+"""Safe aggregate host resource metrics for the WebUI system panel (#693).
 
-The browser only needs coarse CPU/RAM/disk usage. Keep this module intentionally
-small and dependency-free: no process lists, command strings, user identities,
-environment variables, or filesystem topology leave the server.
+The browser only needs coarse CPU/RAM/disk usage. Linux uses procfs first;
+platforms without procfs (for example macOS) fall back to psutil for aggregate
+CPU/RAM metrics. Keep the payload intentionally small: no process lists,
+command strings, user identities, environment variables, or filesystem topology
+leave the server.
 """
 
 from __future__ import annotations
@@ -71,12 +73,16 @@ def _cpu_percent() -> float:
     """
     try:
         start = _read_proc_stat_cpu()
-        time.sleep(_CPU_SAMPLE_SECONDS)
-        end = _read_proc_stat_cpu()
-        return _cpu_delta_percent(start, end)
-    except Exception:
+    except OSError:
         psutil = import_module("psutil")
         return _clamp_percent(psutil.cpu_percent(interval=_CPU_SAMPLE_SECONDS))
+    time.sleep(_CPU_SAMPLE_SECONDS)
+    try:
+        end = _read_proc_stat_cpu()
+    except OSError:
+        psutil = import_module("psutil")
+        return _clamp_percent(psutil.cpu_percent(interval=0.0))
+    return _cpu_delta_percent(start, end)
 
 
 def _read_meminfo_kib() -> dict[str, int]:
@@ -99,6 +105,13 @@ def _read_meminfo_kib() -> dict[str, int]:
 def _memory_usage() -> dict[str, int | float]:
     try:
         meminfo = _read_meminfo_kib()
+    except OSError:
+        vm = import_module("psutil").virtual_memory()
+        total = int(getattr(vm, "total", 0) or 0)
+        if total <= 0:
+            raise RuntimeError("memory_unavailable") from None
+        available = max(0, int(getattr(vm, "available", 0) or 0))
+    else:
         total = int(meminfo.get("MemTotal") or 0) * 1024
         if total <= 0:
             raise RuntimeError("meminfo_unavailable")
@@ -112,12 +125,6 @@ def _memory_usage() -> dict[str, int | float]:
                 - meminfo.get("Shmem", 0)
             )
         available = max(0, int(available_kib) * 1024)
-    except Exception:
-        vm = import_module("psutil").virtual_memory()
-        total = int(getattr(vm, "total", 0) or 0)
-        if total <= 0:
-            raise RuntimeError("memory_unavailable") from None
-        available = max(0, int(getattr(vm, "available", 0) or 0))
     used = max(0, min(total, total - available))
     return {
         "used_bytes": used,
