@@ -323,6 +323,12 @@ def _normalize_sidecar_health_path(value: object) -> Optional[str]:
     decoded_path = _fully_unquote_path(parsed.path)
     if any(ch in decoded_path for ch in ("\x00", "\r", "\n", '"', "'", "<", ">", "\\")):
         return None
+    # #4612 (Codex gate): the raw query/fragment ban above runs BEFORE percent-
+    # decoding, so an encoded delimiter (e.g. "/health%3Ftoken=abc" -> "?token=abc"
+    # or "/health%23frag" -> "#frag") would survive into the probed URL despite the
+    # documented query/fragment ban. Re-reject "?" and "#" on the decoded path.
+    if any(ch in decoded_path for ch in ("?", "#")):
+        return None
     if any(ch.isspace() for ch in decoded_path):
         return None
     if not decoded_path.startswith("/") or decoded_path.startswith("//"):

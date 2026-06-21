@@ -11,7 +11,10 @@ def test_csp_connect_src_default_header_unchanged(monkeypatch):
     policy = Handler.csp_report_only_policy()
     expected = (
         "connect-src 'self' http://127.0.0.1:* http://localhost:* "
-        "http://ipc.localhost ws://127.0.0.1:* ws://localhost:* "
+        "http://ipc.localhost "
+        "https://127.0.0.1:* https://localhost:* "
+        "http://[::1]:* https://[::1]:* "
+        "ws://127.0.0.1:* ws://localhost:* "
         "https://cdn.jsdelivr.net; "
     )
 
@@ -30,10 +33,32 @@ def test_csp_connect_src_includes_valid_extra_origins(monkeypatch):
 
     assert (
         "connect-src 'self' http://127.0.0.1:* http://localhost:* "
-        "http://ipc.localhost ws://127.0.0.1:* ws://localhost:* "
+        "http://ipc.localhost "
+        "https://127.0.0.1:* https://localhost:* "
+        "http://[::1]:* https://[::1]:* "
+        "ws://127.0.0.1:* ws://localhost:* "
         "https://cdn.jsdelivr.net "
         "https://metrics.example.com wss://events.example.com:443; "
     ) in policy
+
+
+def test_csp_connect_src_allows_https_and_ipv6_loopback_for_sidecars(monkeypatch):
+    """#4612 (Codex gate): the sidecar origin validator accepts https:// and the
+    IPv6 loopback [::1] in addition to http 127.0.0.1/localhost, but the default
+    CSP connect-src only listed the http v4/localhost forms — so an accepted
+    https/IPv6 loopback sidecar probe would be blocked by CSP. The base policy
+    must allow all the loopback origin forms the validator accepts."""
+    from server import Handler
+
+    monkeypatch.delenv("HERMES_WEBUI_CSP_CONNECT_EXTRA", raising=False)
+    policy = Handler.csp_report_only_policy()
+    for origin in (
+        "https://127.0.0.1:*",
+        "https://localhost:*",
+        "http://[::1]:*",
+        "https://[::1]:*",
+    ):
+        assert origin in policy, f"CSP connect-src must allow {origin} for sidecar health probes"
 
 
 def test_csp_connect_src_includes_explicit_trusted_sidecar_origin(monkeypatch):

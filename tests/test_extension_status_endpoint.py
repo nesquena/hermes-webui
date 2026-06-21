@@ -551,6 +551,47 @@ def test_extension_status_rejects_decoded_whitespace_sidecar_health_path(tmp_pat
     assert "health%20check" not in rendered
 
 
+def test_extension_status_rejects_encoded_query_or_fragment_sidecar_health_path(tmp_path, monkeypatch):
+    """#4612 (Codex gate): the raw query/fragment ban runs BEFORE percent-decoding,
+    so an encoded delimiter ("/health%3Ftoken=abc" -> "?token=abc", "/health%23frag"
+    -> "#frag") must be re-rejected on the decoded path — otherwise a query/fragment
+    survives into the browser-probed health URL despite the documented ban."""
+    for bad_path, leaked in (
+        ("/health%3Ftoken=abc", "token=abc"),
+        ("/health%23frag", "frag"),
+    ):
+        root = tmp_path / f"extensions_{leaked}"
+        root.mkdir()
+        (root / "extensions.json").write_text(
+            """
+            {
+              "extensions": [
+                {
+                  "id": "bad-health-delim",
+                  "sidecar": {
+                    "type": "loopback",
+                    "origin": "http://127.0.0.1:17787",
+                    "health_path": "%s"
+                  }
+                }
+              ]
+            }
+            """ % bad_path,
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+        monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+
+        import importlib
+        import api.extensions as _ext
+        importlib.reload(_ext)
+        status = _ext.get_extension_status()
+        assert status["sidecars"] == [], f"{bad_path} must be rejected, not probed"
+        assert {"code": "sidecar_health_path_rejected", "source": "manifest:sidecars"} in status["warnings"]
+        rendered = repr(status)
+        assert leaked not in rendered, f"rejected {bad_path} must not leak {leaked!r} into status"
+
+
 def test_extension_status_rejects_unsupported_sidecar_type_without_origin_probe(tmp_path, monkeypatch):
     root = tmp_path / "extensions"
     root.mkdir()
