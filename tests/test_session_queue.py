@@ -107,6 +107,32 @@ def test_enqueue_persists_and_lists_session_queue(monkeypatch, tmp_path):
     assert session_queue.list_queue("sid-1") == [item]
 
 
+def test_enqueue_requires_text_even_with_attachments(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+
+    try:
+        session_queue.enqueue("sid-empty", {"attachments": [{"name": "file.txt"}]})
+    except ValueError as exc:
+        assert str(exc) == "text is required"
+    else:  # pragma: no cover - defensive clarity for the regression
+        raise AssertionError("attachments-only backend queue item should be rejected")
+
+
+def test_enqueue_coerces_provider_and_caps_queue(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(session_queue, "_MAX_QUEUE_ITEMS", 3)
+
+    for idx in range(5):
+        session_queue.enqueue(
+            "sid-cap",
+            {"text": f"item {idx}", "model_provider": {"provider": idx}},
+        )
+
+    queued = session_queue.list_queue("sid-cap")
+    assert [item["text"] for item in queued] == ["item 2", "item 3", "item 4"]
+    assert queued[-1]["model_provider"] == "{'provider': 4}"
+
+
 def test_enqueue_handler_attempts_idle_drain(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(routes, "get_session", lambda sid: {"id": sid})
@@ -155,6 +181,50 @@ if(q[1]._server_pending || q[1]._server_owned || q[1]._server_queue_id){
 const shifted = shiftQueuedSessionMessage(sid);
 if(!shifted || shifted.text !== 'orphan after tab close'){
   throw new Error('reset orphan should be browser-drainable: '+JSON.stringify(shifted));
+}
+"""
+    )
+
+
+def test_frontend_sync_hydrates_persisted_queue_before_reconcile():
+    _run_queue_sync_node_script(
+        r"""
+const sid = 'sid-hydrate';
+sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify([
+  {text: ' persisted pending ', _server_pending: true, _client_queue_id: 'persisted-1'},
+]));
+fetch = async () => ({ok: true, json: async () => ({items: [
+  {id: 'srv-hydrated', text: 'persisted pending', attachments: [], created_at: 1700000000},
+]})});
+syncBackendSessionQueue(sid);
+await new Promise(resolve => setTimeout(resolve, 0));
+const q = SESSION_QUEUES[sid];
+if(!q || q.length !== 1 || q[0]._server_queue_id !== 'srv-hydrated' || q[0]._server_pending){
+  throw new Error('persisted pending entry was not hydrated and reconciled: '+JSON.stringify(q));
+}
+"""
+    )
+
+
+def test_frontend_ack_deletes_backend_item_when_local_chip_was_removed():
+    _run_queue_sync_node_script(
+        r"""
+const sid = 'sid-ghost';
+const entry = {text: 'ghost followup', _client_queue_id: 'local-ghost'};
+const calls = [];
+fetch = async (url, opts) => {
+  calls.push({url: String(url), body: opts && opts.body ? JSON.parse(opts.body) : null});
+  if(String(url).includes('/delete')) return {ok: true, json: async () => ({ok: true})};
+  return {ok: true, json: async () => ({item: {id: 'srv-ghost'}})};
+};
+_backendAcknowledgeQueuedMessage(sid, entry);
+await new Promise(resolve => setTimeout(resolve, 0));
+await new Promise(resolve => setTimeout(resolve, 0));
+if(calls.length !== 2 || !String(calls[1].url).includes('api/session/queue/delete')){
+  throw new Error('expected cleanup delete after missing local chip: '+JSON.stringify(calls));
+}
+if(calls[1].body.id !== 'srv-ghost' || calls[1].body.session_id !== sid){
+  throw new Error('delete payload mismatch: '+JSON.stringify(calls[1]));
 }
 """
     )
@@ -212,6 +282,32 @@ def test_drain_requeues_item_when_start_races_active_turn(monkeypatch, tmp_path)
     assert len(queued) == 1
     assert queued[0]["id"] == item["id"]
     assert queued[0]["text"] == "still needed"
+
+
+def test_permanent_start_errors_stop_churning_after_retry_limit(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {})
+    monkeypatch.setattr(session_queue, "_MAX_START_RETRIES", 2)
+
+    item = session_queue.enqueue("sid-bad", {"text": "bad model"})
+    calls = []
+
+    def fake_start_session_turn(session_id, message, **kwargs):
+        calls.append((session_id, message, kwargs))
+        return {"error": "invalid model", "_status": 400}
+
+    _install_fake_routes(monkeypatch, fake_start_session_turn)
+
+    assert session_queue.drain_for_session("sid-bad") == 1
+    assert _wait_until(lambda: session_queue.list_queue("sid-bad") and len(calls) == 1)
+    assert session_queue.drain_for_session("sid-bad") == 1
+    assert _wait_until(lambda: session_queue.list_queue("sid-bad")[0].get("blocked") is True)
+    queued = session_queue.list_queue("sid-bad")
+    assert queued[0]["id"] == item["id"]
+    assert queued[0]["blocked"] is True
+    assert queued[0]["error"] == "invalid model"
+    assert session_queue.drain_for_session("sid-bad") == 0
+    assert len(calls) == 2
 
 
 def test_drain_does_not_claim_while_session_has_active_run(monkeypatch, tmp_path):
