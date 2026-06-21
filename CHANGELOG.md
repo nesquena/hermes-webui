@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Manual `/compress` no longer replaces the visible conversation transcript with the compressed context payload (#3133).** Successful manual compression now stores the compacted payload only in `context_messages`, keeps `messages` as the durable visible transcript for the conversation window and reloads, and computes compression-anchor metadata from that preserved transcript boundary.
+
 ## [v0.51.548] — 2026-06-21 — Release TG (extension load diagnostics)
 
 ### Added
