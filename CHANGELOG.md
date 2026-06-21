@@ -3,6 +3,18 @@
 
 ## [Unreleased]
 
+## [v0.51.551] — 2026-06-21 — Release TJ (manual /compress keeps the visible conversation)
+
+### Fixed
+
+- **Manually compressing a session no longer makes earlier messages disappear from the conversation window (#3133).** The manual `/compress` action was overwriting the visible transcript with the reduced model-facing context (and clearing settled tool history), so messages vanished on screen and after reload even though only the model's context should shrink. It now preserves the visible transcript and tool history and prunes only the model-facing context payload — matching how automatic compression already behaves. Thanks @franksong2702.
+
+## [v0.51.550] — 2026-06-21 — Release TI (Transparent Stream keeps its activity after a turn settles or reloads)
+
+### Fixed
+
+- **In Transparent Stream activity mode, a settled turn no longer loses its tool calls and thinking on reload (#4568).** Previously, once a turn finished — and on every rehydrate path after that (switching away and back, tab hide/show, window blur/focus, hard reload, mid-stream reload) — a turn that settled with a persisted activity scene showed only the final answer; all of its tool-call and thinking activity disappeared. The persisted activity scene is now rendered as transparent event rows on settle and reload (the same persisted scene both display modes already use), with the intermediate progress narration preserved and only the prose that duplicates the final answer suppressed. Compact Worklog mode is unchanged. Thanks @nesquena-hermes (building on @franksong2702's anchor-scene work).
+
 ## [v0.51.549] — 2026-06-21 — Release TH (hotfix: profile switching restored for single-user named profiles)
 
 ### Fixed

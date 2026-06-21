@@ -1331,7 +1331,13 @@ def test_sessions_response_backfills_imported_messaging_source_metadata(cleanup_
     sid = 'gw_legacy_import_weixin_001'
     cleanup_test_sessions.append(sid)
     try:
-        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+        _insert_gateway_session(
+            conn,
+            session_id=sid,
+            source='weixin',
+            title='Weixin Session',
+            session_key='agent:test:weixin:legacy-import-backfill',
+        )
         s = Session(
             session_id=sid,
             title='Legacy Imported Weixin',

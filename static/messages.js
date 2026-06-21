@@ -2496,7 +2496,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _anchorSceneRowLooksLikeFinalAnswer(rowTextKey, finalKey){
     if(!rowTextKey||!finalKey) return false;
     if(rowTextKey===finalKey) return true;
-    return rowTextKey.length>=80&&(finalKey.startsWith(rowTextKey)||rowTextKey.startsWith(finalKey));
+    // #4587: align with the renderer's _anchorSceneProseMatchesFinalAnswer — a
+    // prefix-like overlap only counts as "the final answer" (and is dropped from
+    // the scene) when it's a NEAR-complete match (ratio>=0.9). A shorter
+    // intermediate-prose row that merely happens to be a prefix of the final
+    // answer is legitimate progress narration and must be PRESERVED, not dropped.
+    if(!(finalKey.startsWith(rowTextKey)||rowTextKey.startsWith(finalKey))) return false;
+    const shorter=Math.min(rowTextKey.length,finalKey.length);
+    const longer=Math.max(rowTextKey.length,finalKey.length);
+    return shorter>=80&&longer>0&&(shorter/longer)>=0.9;
   }
   function _anchorSceneRowTextOverlapsExisting(rowTextKey, seenTextKeys){
     if(!rowTextKey||!Array.isArray(seenTextKeys)) return false;
