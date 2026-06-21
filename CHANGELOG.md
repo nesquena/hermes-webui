@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+## [v0.51.566] — 2026-06-21 — Release TY (isolated-profile opt-in hardening)
+
 ### Fixed
 
 - **Isolated-profile mode can no longer be silently disabled by a profile's own `.env`.** Isolated mode is an operator/launcher posture, opted in via `HERMES_WEBUI_ISOLATED_PROFILE` at process start. The opt-in flag is now snapshotted at import time (alongside the startup `HERMES_HOME`) and read from that snapshot, so a pinned profile's `.env` — loaded into the live environment later in the same process — can never flip the isolation posture (defense-in-depth on top of the existing `_reload_dotenv` key filter). Also adds a one-time warning when `HERMES_HOME` points at a profile directory but isolation wasn't enabled at startup. Thanks @franksong2702. (#4620, follow-up to #4590)
