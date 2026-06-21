@@ -6068,6 +6068,7 @@ function _buildBrowserUtterance(text, btn){
 
 function _playEdgeTtsChunked(text, btn){
   _ttsSpeaking=true;
+  if(btn) btn.dataset.speaking='1';
   const chunks=_splitForTTS(text);
   const _playOne=function(idx){
     if(idx>=chunks.length){
