@@ -542,16 +542,30 @@ def main() -> int:
         # spawns a new process instead of replacing (Python calls CreateProcess),
         # orphaning it from any supervisor. Use Popen + exit there instead.
         if sys.platform == "win32":
-            # CREATE_NEW_PROCESS_GROUP only exists in the subprocess module on
-            # Windows; resolve it defensively (0 = no extra flags) so this line
-            # can't AttributeError if reached on a non-Windows interpreter
-            # (e.g. a win32-simulating test) — mirrors the getattr() guard used
-            # for SO_EXCLUSIVEADDRUSE.
-            _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            subprocess.Popen([python_exe, server_path],
-                             cwd=server_cwd,
-                             env=os.environ.copy(),
-                             creationflags=_CREATE_NEW_PROCESS_GROUP)
+            # Mirror the robust pattern from api/updates._schedule_restart:
+            # 1. Prefer pythonw.exe (windowless subsystem) over python.exe
+            #    so the restarted server never creates a visible console window.
+            # 2. DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+            #    suppresses the brief console flash even when python.exe is used.
+            _exe = str(python_exe)
+            if _exe.lower().endswith("python.exe"):
+                _w = _exe[:-4] + "w.exe"  # python.exe -> pythonw.exe
+                if os.path.isfile(_w):
+                    _exe = _w
+            _flags = 0
+            for _attr in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP",
+                          "CREATE_NO_WINDOW"):
+                _flags |= getattr(subprocess, _attr, 0)
+            subprocess.Popen(
+                [_exe, str(server_path)],
+                cwd=str(server_cwd),
+                env=os.environ.copy(),
+                creationflags=_flags,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             sys.exit(0)
         os.execv(python_exe, [python_exe, server_path])
         # Unreachable — execv either replaces the process or raises.

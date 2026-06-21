@@ -1174,12 +1174,33 @@ def _schedule_restart(delay: float = 2.0) -> None:
                         args = sys.argv
                     else:
                         args = [sys.executable] + sys.argv
-                    # Start new process detached, redirect all stdio to
-                    # avoid broken-pipe errors when the parent exits.
+                    # Prefer pythonw.exe over python.exe so the restarted
+                    # server does not create a visible console window.
+                    # sys.executable may point at python.exe (console
+                    # subsystem); substitute pythonw.exe if it exists
+                    # next to python.exe.
+                    _exe = sys.executable
+                    if _exe.lower().endswith('python.exe'):
+                        _w_exe = _exe[:-4] + 'w.exe'  # python.exe -> pythonw.exe
+                        if os.path.isfile(_w_exe):
+                            if getattr(sys, "frozen", False):
+                                args = sys.argv
+                            else:
+                                args = [_w_exe] + sys.argv
+                    # Start new process fully detached with NO console
+                    # window.  DETACHED_PROCESS alone is not sufficient
+                    # on modern Windows — without CREATE_NO_WINDOW a
+                    # python.exe (console-subsystem) child still flashes
+                    # an empty terminal window, which the user then
+                    # manually kills (taking the WebUI with it).
                     subprocess.Popen(
                         args,
                         cwd=os.getcwd(),
-                        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                        creationflags=(
+                            subprocess.DETACHED_PROCESS
+                            | subprocess.CREATE_NEW_PROCESS_GROUP
+                            | subprocess.CREATE_NO_WINDOW
+                        ),
                         close_fds=True,
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL,
