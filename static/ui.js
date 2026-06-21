@@ -2956,6 +2956,7 @@ function _normalizeReasoningEffort(eff){
 
 function _formatReasoningEffortLabel(effort){
   if(effort==='none') return 'None';
+  if(effort==='max') return 'Max';
   if(!effort) return 'Default';
   return effort;
 }
