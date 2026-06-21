@@ -19,6 +19,7 @@ const LOCALES = {
     cancelling: 'Cancelling\u2026',
     cancel_failed: 'Cancel failed: ',
     mic_denied: 'Microphone access denied. Check browser permissions.',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.',
     mic_no_speech: 'No speech detected. Try again.',
     mic_network: 'Speech recognition unavailable.',
     mic_error: 'Voice input error: ',
@@ -1566,6 +1567,7 @@ const LOCALES = {
     cancelling: 'Annullamento\u2026',
     cancel_failed: 'Annullamento fallito: ',
     mic_denied: 'Accesso al microfono negato. Controlla i permessi del browser.',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: 'Nessuna voce rilevata. Riprova.',
     mic_network: 'Riconoscimento vocale non disponibile.',
     mic_error: 'Errore input vocale: ',
@@ -3104,6 +3106,7 @@ const LOCALES = {
     cancelling: 'キャンセル中…',
     cancel_failed: 'キャンセル失敗: ',
     mic_denied: 'マイクへのアクセスが拒否されました。ブラウザの権限を確認してください。',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: '音声が検出されませんでした。もう一度お試しください。',
     mic_network: '音声認識を利用できません。',
     mic_error: '音声入力エラー: ',
@@ -4646,6 +4649,7 @@ const LOCALES = {
     cancelling: 'Отменяю…',
     cancel_failed: 'Не удалось отменить: ',
     mic_denied: 'Доступ к микрофону запрещён. Проверьте разрешения браузера.',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: 'Речь не распознана. Попробуйте ещё раз.',
     mic_network: 'Распознавание речи недоступно.',
     mic_error: 'Ошибка ввода речи: ',
@@ -6127,6 +6131,7 @@ const LOCALES = {
     cancelling: 'Cancelando…',
     cancel_failed: 'Error al cancelar: ',
     mic_denied: 'Acceso al micrófono denegado. Revisa los permisos del navegador.',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: 'No se detectó voz. Inténtalo de nuevo.',
     mic_network: 'El reconocimiento de voz no está disponible.',
     mic_error: 'Error de entrada por voz: ',
@@ -7601,6 +7606,7 @@ const LOCALES = {
     cancelling: 'Wird abgebrochen\u2026',
     cancel_failed: 'Abbrechen fehlgeschlagen: ',
     mic_denied: 'Mikrofonzugriff verweigert. Überprüfen Sie die Browserberechtigungen.',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: 'Keine Sprache erkannt. Versuchen Sie es erneut.',
     mic_network: 'Spracherkennung nicht verfügbar.',
     mic_error: 'Spracheingabefehler: ',
@@ -9079,6 +9085,7 @@ const LOCALES = {
     cancelling: '正在取消...',
     cancel_failed: '取消失败：',
     mic_denied: '麦克风访问被拒绝，请检查浏览器权限。',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: '没有检测到语音，请再试一次。',
     mic_network: '语音识别当前不可用。',
     mic_error: '语音输入出错：',
@@ -10552,6 +10559,7 @@ const LOCALES = {
     cancelling: '正在取消……',
     cancel_failed: '取消失敗：',
     mic_denied: '麥克風存取遭拒。請檢查瀏覽器權限。',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: '未偵測到語音。請再試一次。',
     mic_network: '語音辨識無法使用。',
     mic_error: '語音輸入錯誤：',
@@ -12092,6 +12100,7 @@ const LOCALES = {
     cancelling: 'Cancelando…',
     cancel_failed: 'Falha ao cancelar: ',
     mic_denied: 'Acesso ao microfone negado. Verifique as permissões do navegador.',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: 'Nenhuma fala detectada. Tente novamente.',
     mic_network: 'Reconhecimento de fala indisponível.',
     mic_error: 'Erro no input de voz: ',
@@ -13452,6 +13461,7 @@ const LOCALES = {
     cancelling: '취소 중\u2026',
     cancel_failed: '취소 실패: ',
     mic_denied: '마이크 접근이 거부되었습니다. 브라우저 권한을 확인하세요.',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: '음성이 감지되지 않았습니다. 다시 시도하세요.',
     mic_network: '음성 인식을 사용할 수 없습니다.',
     mic_error: '음성 입력 오류: ',
@@ -14979,6 +14989,7 @@ const LOCALES = {
     cancelling: 'Annulation\u2026',
     cancel_failed: 'Échec de l\'annulation :',
     mic_denied: 'Accès au microphone refusé. Vérifiez les autorisations du navigateur.',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: 'Aucune parole détectée. Essayer à nouveau.',
     mic_network: 'Reconnaissance vocale indisponible.',
     mic_error: 'Erreur de saisie vocale :',
@@ -16457,6 +16468,7 @@ const LOCALES = {
     cancelling: 'İptal ediliyor\u2026',
     cancel_failed: 'İptal başarısız oldu:',
     mic_denied: 'Mikrofon erişimi reddedildi. Tarayıcı izinlerini kontrol edin.',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: 'Konuşma algılanmadı. Tekrar deneyin.',
     mic_network: 'Konuşma tanıma kullanılamıyor.',
     mic_error: 'Ses girişi hatası:',
@@ -17986,6 +17998,7 @@ const LOCALES = {
     cancelling: 'Anulowanie…',
     cancel_failed: 'Anulowanie nie powiodło się: ',
     mic_denied: 'Odmowa dostępu do mikrofonu. Sprawdź uprawnienia przeglądarki.',
+    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
     mic_no_speech: 'Nie wykryto mowy. Spróbuj ponownie.',
     mic_network: 'Rozpoznawanie mowy jest niedostępne.',
     mic_error: 'Błąd wejścia głosowego: ',
@@ -19770,4 +19783,3 @@ function applyLocaleToDOM() {
 
 // Apply saved locale immediately so there's no flash of English on reload.
 loadLocale();
-
