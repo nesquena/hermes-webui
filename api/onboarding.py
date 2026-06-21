@@ -65,6 +65,15 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": list(_PROVIDER_MODELS.get("openai", [])),
         "category": "easy_start",
     },
+    "evolink": {
+        "label": "EvoLink",
+        "env_var": "EVOLINK_API_KEY",
+        "default_model": "gpt-5.5",
+        "default_base_url": "https://direct.evolink.ai/v1",
+        "requires_base_url": False,
+        "models": list(_PROVIDER_MODELS.get("evolink", [])),
+        "category": "easy_start",
+    },
     # ── Open / self-hosted ─────────────────────────────────────────────
     "ollama": {
         "label": "Ollama",

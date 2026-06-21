@@ -1047,6 +1047,7 @@ _PROVIDER_DISPLAY = {
     "openai": "OpenAI",
     "openai-api": "OpenAI API",
     "openai-codex": "OpenAI Codex",
+    "evolink": "EvoLink",
     "xai-oauth": "xAI Grok OAuth",
     "copilot": "GitHub Copilot",
     "cursor-acp": "Cursor ACP",
@@ -1500,6 +1501,10 @@ _PROVIDER_MODELS = {
         {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
+    ],
+    "evolink": [
+        {"id": "gpt-5.5", "label": "GPT-5.5"},
+        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
     ],
     "openai-codex": [
         {"id": "gpt-5.5", "label": "GPT-5.5"},
@@ -5559,6 +5564,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                 "OPENROUTER_API_KEY",
                 "GOOGLE_API_KEY",
                 "GEMINI_API_KEY",
+                "EVOLINK_API_KEY",
                 "GLM_API_KEY",
                 "KIMI_API_KEY",
                 "DEEPSEEK_API_KEY",
@@ -5596,6 +5602,8 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                 detected_providers.add("google")
             if all_env.get("GEMINI_API_KEY"):
                 detected_providers.add("gemini")
+            if all_env.get("EVOLINK_API_KEY"):
+                detected_providers.add("evolink")
             if all_env.get("GLM_API_KEY"):
                 detected_providers.add("zai")
             if all_env.get("KIMI_API_KEY"):
