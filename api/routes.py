@@ -1690,10 +1690,10 @@ def _session_list_cache_path_stamp(path: Path | None) -> tuple[int, int]:
         return (0, 0)
 
 
-def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int]]:
+def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], object, int]:
     _cache_profile, _cache_all_profiles, cache_show_cli_sessions, *_rest = key
     if not cache_show_cli_sessions:
-        return ((0, 0), (0, 0), (0, 0), (0, 0), (0, 0))
+        return ((0, 0), (0, 0), (0, 0), (0, 0), (0, 0), None, 0)
     try:
         state_db_path = Path(_active_state_db_path())
     except Exception:
@@ -1714,6 +1714,11 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
         settings_file = SETTINGS_FILE
     except Exception:
         settings_file = None
+    try:
+        from api.config import _SETTINGS_WRITE_VERSION
+        swv = _SETTINGS_WRITE_VERSION
+    except Exception:
+        swv = 0
     return (
         _session_list_cache_path_stamp(state_db_path),
         _session_list_cache_path_stamp(state_db_wal_path),
@@ -1725,6 +1730,7 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
         # frame size), so without this a freshly-committed CLI/gateway session
         # could be served stale for the cache TTL. Mirrors the models-layer fix.
         _session_list_cache_state_db_fingerprint(state_db_path),
+        swv,
     )
 
 
@@ -11424,6 +11430,11 @@ def handle_post(handler, parsed) -> bool:
         ):
             try:
                 _clear_session_list_cache()
+            except Exception:
+                pass
+            try:
+                from api.models import clear_cli_sessions_cache
+                clear_cli_sessions_cache()
             except Exception:
                 pass
 

@@ -7,6 +7,12 @@
 
 - **Transparent Stream now reloads persisted assistant-turn anchor activity (#4568).** Sessions that had settled with the stable assistant-turn anchor scene could lose their Transparent Stream tool/thinking rows after a hard refresh or session re-entry because the legacy Transparent Stream rebuild correctly skipped anchor-owned turns while only Compact Worklog had a settled anchor-scene renderer. Transparent Stream now renders the persisted anchor activity rows itself while keeping the final answer prose owned by the assistant message, so cross-mode reloads no longer drop the worklog activity.
 
+## [v0.51.546] — 2026-06-21 — Release TE (fix a flaky gateway-sync CI test)
+
+### Fixed
+
+- **Eliminated a non-deterministic CI test flake (#4557).** `test_gateway_sync` could intermittently fail (a session missing from `/api/sessions`) when a settings-visibility toggle rewrote the settings file inside the same `mtime_ns` bucket, colliding two cache layers. The session-list cache source stamp now includes a monotonic per-process settings-write counter (so a same-millisecond rewrite can't reuse a stale cache entry), and the model-layer CLI-sessions cache is now flushed on the visibility toggle. Test-infrastructure reliability only — no runtime behavior change. Thanks @rodboev.
+
 ## [v0.51.545] — 2026-06-20 — Release TD (extension manifest asset bundles)
 
 ### Added

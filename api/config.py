@@ -7372,6 +7372,9 @@ _SETTINGS_BOOL_KEYS = {
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
 
+_SETTINGS_WRITE_VERSION = 0
+_SETTINGS_WRITE_LOCK = __import__("threading").Lock()
+
 
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
@@ -7481,6 +7484,9 @@ def save_settings(settings: dict) -> dict:
         json.dumps(persisted, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    global _SETTINGS_WRITE_VERSION
+    with _SETTINGS_WRITE_LOCK:
+        _SETTINGS_WRITE_VERSION += 1
     # Invalidate the in-memory password hash cache so the next call to
     # get_password_hash() picks up the new value from disk immediately.
     if _password_changed:
