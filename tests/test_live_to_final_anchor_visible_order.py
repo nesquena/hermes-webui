@@ -673,6 +673,27 @@ def test_anchor_owned_settled_turn_skips_legacy_worklog_rebuild():
     assert "!anchorOwnedAssistantRawIdxs.has(S.messages.indexOf(m))" in render
 
 
+def test_transparent_stream_renders_persisted_anchor_scene_after_reload():
+    settled = _function_body(UI_JS, "_renderSettledAnchorSceneForMessage")
+    transparent = _function_body(UI_JS, "_renderSettledAnchorSceneTransparentForMessage")
+    row = _function_body(UI_JS, "_anchorSceneTransparentNodeForRow")
+    render = _function_body(UI_JS, "renderMessages")
+
+    assert "if(typeof isTransparentStream==='function'&&isTransparentStream())" in settled
+    assert "return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);" in settled
+    assert "_anchorSceneRowsForRendering(scene,{settled:true})" in transparent
+    assert 'blocks.querySelectorAll(\'[data-anchor-settled-scene-row="1"],.transparent-event-row[data-anchor-scene-row="1"]\')' in transparent
+    assert "_anchorSceneTransparentNodeForRow(row,{settled:true})" in transparent
+    assert "blocks.insertBefore(node,segment)" in transparent
+    assert "_syncTransparentEventControls(turn)" in transparent
+    assert "return null;" in row and "row.role==='prose'" in row
+    assert "_decorateTransparentEventRow(_thinkingActivityNode" in row
+    assert "_decorateTransparentEventRow(buildToolCard(toolCall)" in row
+    assert "_transparentToolStatus(toolCall,true)" in row
+    assert 'data-anchor-settled-scene-row' in row
+    assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;" in render
+
+
 def test_settled_anchor_scene_final_answer_does_not_fold_into_worklog_source():
     belongs = _function_body(UI_JS, "_assistantMessageBelongsInWorklog")
     render = _function_body(UI_JS, "renderMessages")
