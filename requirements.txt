@@ -1,5 +1,7 @@
 # Hermes Web UI -- minimal Python dependencies
 # The server uses PyYAML plus cryptography for optional local passkey/WebAuthn support.
+# psutil is used only for safe aggregate cross-platform CPU/RAM metrics when
+# Linux procfs is unavailable (for example on macOS).
 # All heavy ML/agent deps live in the Hermes agent venv.
 #
 # OPTIONAL: the Edge TTS speech engine (Settings -> Voice -> TTS Engine -> "Edge TTS")
@@ -8,3 +10,4 @@
 # you want server-side Microsoft neural voices:  pip install edge-tts
 pyyaml>=6.0
 cryptography>=42.0
+psutil>=5.9

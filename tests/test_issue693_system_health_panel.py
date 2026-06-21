@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sys
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -102,6 +103,34 @@ def test_system_health_payload_partial_and_unavailable_are_graceful(monkeypatch)
     assert "/home/user" not in repr(unavailable)
 
 
+def test_system_health_falls_back_to_psutil_when_procfs_is_unavailable(monkeypatch):
+    from api import system_health
+
+    class _MissingProcPath:
+        def open(self, *args, **kwargs):
+            raise FileNotFoundError("/private/proc/path")
+
+    class _FakeMemory:
+        total = 1000
+        available = 250
+        percent = 75.0
+
+    fake_psutil = SimpleNamespace(
+        cpu_percent=lambda interval=0.0: 42.25,
+        virtual_memory=lambda: _FakeMemory(),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(system_health, "_PROC_STAT", _MissingProcPath())
+    monkeypatch.setattr(system_health, "_PROC_MEMINFO", _MissingProcPath())
+
+    assert system_health._cpu_percent() == 42.2
+    assert system_health._memory_usage() == {
+        "used_bytes": 750,
+        "total_bytes": 1000,
+        "percent": 75.0,
+    }
+
+
 def test_system_health_route_registered_and_auth_gated(monkeypatch):
     assert 'parsed.path == "/api/system/health"' in ROUTES_PY
     assert "build_system_health_payload()" in ROUTES_PY
@@ -187,7 +216,6 @@ def test_system_health_frontend_polls_visible_and_renders_progress_labels():
 def test_system_health_backend_uses_no_shell_or_private_process_sources():
     src = (REPO_ROOT / "api" / "system_health.py").read_text(encoding="utf-8")
     assert "import subprocess" not in src
-    assert "import psutil" not in src
     assert "os.environ" not in src
     assert "ps aux" not in src
     assert "/proc/self/environ" not in src

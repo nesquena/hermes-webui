@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import shutil
 import time
+from importlib import import_module
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -61,15 +62,21 @@ def _cpu_delta_percent(start: tuple[int, int], end: tuple[int, int]) -> float:
 
 
 def _cpu_percent() -> float:
-    """Sample aggregate CPU usage without psutil.
+    """Sample aggregate CPU usage.
 
     A short local sample avoids storing cross-request state and returns a stable
-    percentage on the first poll. Unsupported platforms raise a safe error code.
+    percentage on the first poll. Linux uses procfs without extra dependencies;
+    platforms without procfs fall back to psutil when it is already available.
+    Unsupported platforms raise a safe error code.
     """
-    start = _read_proc_stat_cpu()
-    time.sleep(_CPU_SAMPLE_SECONDS)
-    end = _read_proc_stat_cpu()
-    return _cpu_delta_percent(start, end)
+    try:
+        start = _read_proc_stat_cpu()
+        time.sleep(_CPU_SAMPLE_SECONDS)
+        end = _read_proc_stat_cpu()
+        return _cpu_delta_percent(start, end)
+    except Exception:
+        psutil = import_module("psutil")
+        return _clamp_percent(psutil.cpu_percent(interval=_CPU_SAMPLE_SECONDS))
 
 
 def _read_meminfo_kib() -> dict[str, int]:
@@ -90,20 +97,27 @@ def _read_meminfo_kib() -> dict[str, int]:
 
 
 def _memory_usage() -> dict[str, int | float]:
-    meminfo = _read_meminfo_kib()
-    total = int(meminfo.get("MemTotal") or 0) * 1024
-    if total <= 0:
-        raise RuntimeError("meminfo_unavailable")
-    available_kib = meminfo.get("MemAvailable")
-    if available_kib is None:
-        available_kib = (
-            meminfo.get("MemFree", 0)
-            + meminfo.get("Buffers", 0)
-            + meminfo.get("Cached", 0)
-            + meminfo.get("SReclaimable", 0)
-            - meminfo.get("Shmem", 0)
-        )
-    available = max(0, int(available_kib) * 1024)
+    try:
+        meminfo = _read_meminfo_kib()
+        total = int(meminfo.get("MemTotal") or 0) * 1024
+        if total <= 0:
+            raise RuntimeError("meminfo_unavailable")
+        available_kib = meminfo.get("MemAvailable")
+        if available_kib is None:
+            available_kib = (
+                meminfo.get("MemFree", 0)
+                + meminfo.get("Buffers", 0)
+                + meminfo.get("Cached", 0)
+                + meminfo.get("SReclaimable", 0)
+                - meminfo.get("Shmem", 0)
+            )
+        available = max(0, int(available_kib) * 1024)
+    except Exception:
+        vm = import_module("psutil").virtual_memory()
+        total = int(getattr(vm, "total", 0) or 0)
+        if total <= 0:
+            raise RuntimeError("memory_unavailable") from None
+        available = max(0, int(getattr(vm, "available", 0) or 0))
     used = max(0, min(total, total - available))
     return {
         "used_bytes": used,
