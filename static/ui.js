@@ -353,9 +353,10 @@ function syncBackendSessionQueue(sid){
         const id=String(item&&item.id||'');
         if(!id||q.some(e=>e&&e._server_queue_id===id))return;
         const itemText=String(item.text||'');
-        const pendingIdx=q.findIndex(e=>e&&e._server_pending&&!e._server_queue_id&&String(e.text||e.message||e.content||'')===itemText);
+        const itemMatchText=itemText.trim();
+        const pendingIdx=q.findIndex(e=>e&&e._server_pending&&!e._server_queue_id&&String(e.text||e.message||e.content||'').trim()===itemMatchText);
         if(pendingIdx>=0){
-          q[pendingIdx]={...q[pendingIdx],_server_pending:false,_server_owned:true,_server_queue_id:id};
+          q[pendingIdx]={...q[pendingIdx],text:itemText,_server_pending:false,_server_owned:true,_server_queue_id:id};
           changed=true;
           return;
         }
@@ -373,6 +374,12 @@ function syncBackendSessionQueue(sid){
         });
         changed=true;
       });
+      for(let i=0;i<q.length;i++){
+        if(q[i]&&q[i]._server_pending&&!q[i]._server_queue_id){
+          q[i]={...q[i],_server_pending:false,_server_error:'queue_ack_recovered'};
+          changed=true;
+        }
+      }
       if(changed){_persistSessionQueueStorage(sid,q);delete _queueRenderKeys[sid];updateQueueBadge(sid);}
     }).catch(()=>{});
 }
