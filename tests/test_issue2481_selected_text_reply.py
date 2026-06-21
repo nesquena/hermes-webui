@@ -178,3 +178,26 @@ def test_selected_text_reply_queue_path_includes_pending_selection_context():
     assert "_clearComposerAfterQueuedSelectionSend();" in js
     assert "if(!text&&!S.pendingFiles.length&&!_pendingSelections.length)" in js
     assert "_flushSelectionBlocksToComposer();\n  text=$('msg').value.trim();" in js
+
+
+def test_selection_only_reply_enables_primary_send_button():
+    """#4380 (Codex gate): selected context moved out of the textarea into
+    _pendingSelections, so the primary Send button's content check must also
+    recognize pending selections — otherwise a selection-only reply is
+    un-sendable via click/tap/mobile (only desktop Enter, which calls send()
+    directly, would work). Pin the predicate + its wiring."""
+    msgs = read("static/messages.js")
+    ui = read("static/ui.js")
+
+    # messages.js exposes the predicate...
+    assert "window._hasPendingSelections=function(){return _pendingSelections.length>0;};" in msgs, (
+        "messages.js must expose window._hasPendingSelections for the composer content check"
+    )
+    # ...and refreshes the Send button whenever the selection set changes.
+    assert "if(typeof updateSendBtn==='function') updateSendBtn();" in msgs, (
+        "_renderSelectionChips must call updateSendBtn() so add/remove/clear updates the button"
+    )
+    # ui.js _composerHasContent() folds the predicate in.
+    assert "window._hasPendingSelections==='function'&&window._hasPendingSelections()" in ui, (
+        "_composerHasContent() must treat pending selections as sendable content (#4380)"
+    )

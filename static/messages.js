@@ -152,6 +152,12 @@ let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';
 let _pendingSelections=[];  // [{id, name, text}] — named context blocks
 let _selectionIdCounter=0;
+// #4380: expose a pending-selection predicate so the composer's primary-action
+// content check (_composerHasContent in ui.js) treats selection-only replies as
+// sendable content even though they no longer live in the textarea.
+if(typeof window!=='undefined'){
+  window._hasPendingSelections=function(){return _pendingSelections.length>0;};
+}
 let _selectedTextReplyRaf=0;
 const _persistentStateToastSeen=new Set();
 const _thinkPairs=[
@@ -781,6 +787,11 @@ function _renderSelectionChips(){
     card.appendChild(body);
     wrap.appendChild(card);
   });
+  // #4380: pending selection cards are content the primary Send button must
+  // recognize (they were moved out of the textarea into _pendingSelections),
+  // so refresh the button's enabled/disabled state whenever the set changes —
+  // otherwise a selection-only reply can't be sent via click/tap/mobile.
+  if(typeof updateSendBtn==='function') updateSendBtn();
 }
 
 function _editSelectionChipName(id,chip){
