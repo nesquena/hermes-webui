@@ -341,24 +341,33 @@ Authenticated administrators can inspect sanitized extension configuration at:
 GET /api/extensions/status
 ```
 
-The endpoint is read-only and follows the normal WebUI authentication rules. The
-same sanitized diagnostics are also shown in **Settings → Extensions** for
-operators who prefer to inspect extension state from the browser. The panel does
-not enable, disable, install, or mutate extensions; it only fetches
-`/api/extensions/status` and offers a copy-diagnostics action.
+The status endpoint is read-only and follows the normal WebUI authentication
+rules. The same sanitized diagnostics are also shown in **Settings → Extensions**
+for operators who prefer to inspect extension state from the browser. Installed
+manifest entries can be enabled or disabled from that panel through the
+authenticated `POST /api/extensions/toggle` endpoint. The toggle writes only a
+WebUI-managed override in the WebUI state directory; it does not edit extension
+manifests, fetch new extension assets, uninstall files, proxy sidecars, or add
+extension-owned backend routes. Manifest entries with `"enabled": false` remain
+manifest-disabled and cannot be re-enabled from WebUI.
 
 The diagnostics return the same public asset URLs that can already be injected
-into the HTML, plus coarse manifest status, asset counts, sanitized declared
-loopback sidecars, and warning codes for rejected or unavailable configuration.
-`manifest.script_count` and `manifest.stylesheet_count` count accepted assets
-from the manifest only; `manifest.sidecar_count` counts accepted enabled loopback
+into the HTML, plus coarse manifest status, per-extension effective state, asset
+counts, sanitized declared loopback sidecars, and warning codes for rejected or
+unavailable configuration. `manifest.script_count` and
+`manifest.stylesheet_count` count accepted assets from the effectively enabled
+manifest entries only; `manifest.sidecar_count` counts accepted enabled loopback
 sidecars from the manifest. `counts.script_urls` and `counts.stylesheet_urls`
 count the final post-env-merge URLs, while `counts.sidecars` counts the sanitized
-sidecar list returned in `sidecars`. `manifest.entry_count` counts the loaded
-top-level manifest object and enabled extension entries that were inspected, not
+sidecar list returned in `sidecars`. `counts.manifest_extensions` counts
+sanitized manifest extension entries with valid IDs, and `counts.user_disabled`
+counts installed manifest entries currently suppressed by the WebUI-managed
+override. `manifest.entry_count` counts the loaded top-level manifest object and
+effectively enabled extension entries that were inspected for injection, not
 every extension object in the file. The endpoint and Settings panel do **not**
 return `HERMES_WEBUI_EXTENSION_DIR`, resolved manifest paths, raw environment
-values, rejected URL strings, rejected sidecar origins, or rejected health paths.
+values, rejected URL strings, rejected sidecar origins, rejected health paths, or
+the override state-file path.
 
 When sanitized loopback sidecars are present, **Settings → Extensions** renders a
 read-only sidecar monitor card. The browser checks each declared `health_url`

@@ -9,8 +9,10 @@ import html
 import json
 import logging
 import os
+import re
+import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote, urlsplit
 
 from api.helpers import _security_headers, j
@@ -36,6 +38,14 @@ class _ManifestTooLarge(ValueError):
     pass
 
 
+class ExtensionToggleError(Exception):
+    """Sanitized extension mutation error safe to return to the browser."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
 EXTENSION_ROUTE_PREFIX = "/extensions/"
 _EXTENSION_DIR_ENV = "HERMES_WEBUI_EXTENSION_DIR"
 _EXTENSION_SCRIPT_URLS_ENV = "HERMES_WEBUI_EXTENSION_SCRIPT_URLS"
@@ -45,6 +55,12 @@ _ALLOWED_ASSET_PREFIXES = ("/extensions/", "/static/")
 _SIDECAR_WARNING_SOURCE = "manifest:sidecars"
 _DEFAULT_SIDECAR_HEALTH_PATH = "/health"
 _LOOPBACK_SIDECAR_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_EXTENSION_STATE_FILENAME = "extension-overrides.json"
+_MAX_EXTENSION_STATE_BYTES = 32 * 1024
+_MAX_DISABLED_EXTENSION_IDS = 512
+_EXTENSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_EXTENSION_STATE_WARNING_SOURCE = "extension_state"
+_EXTENSION_STATE_LOCK = threading.Lock()
 
 _EXTENSION_MIME = {
     "css": "text/css",
@@ -112,6 +128,117 @@ def _add_diagnostic_warning(
     warning = {"code": code, "source": source}
     if warning not in warnings:
         warnings.append(warning)
+
+
+def _valid_extension_id(value: object) -> bool:
+    return isinstance(value, str) and bool(_EXTENSION_ID_RE.fullmatch(value.strip()))
+
+
+def _extension_state_dir() -> Path:
+    """Return the WebUI-managed state directory for extension overrides."""
+    try:
+        from api.config import STATE_DIR
+
+        return Path(STATE_DIR)
+    except Exception:
+        return Path(os.getenv("HERMES_WEBUI_STATE_DIR", str(Path.home() / ".hermes" / "webui"))).expanduser()
+
+
+def _extension_state_file() -> Path:
+    return _extension_state_dir() / _EXTENSION_STATE_FILENAME
+
+
+def _empty_extension_state() -> Dict[str, Any]:
+    return {"version": 1, "disabled_extensions": []}
+
+
+def _load_extension_state(diagnostics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Load UI-managed extension overrides, failing safe without path leaks."""
+    state_file = _extension_state_file()
+    try:
+        if not state_file.exists() or not state_file.is_file():
+            return _empty_extension_state()
+        with state_file.open("rb") as fh:
+            raw = fh.read(_MAX_EXTENSION_STATE_BYTES + 1)
+        if len(raw) > _MAX_EXTENSION_STATE_BYTES:
+            _add_diagnostic_warning(
+                diagnostics, "extension_state_oversized", _EXTENSION_STATE_WARNING_SOURCE
+            )
+            return _empty_extension_state()
+        parsed = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        _add_diagnostic_warning(
+            diagnostics, "extension_state_unreadable", _EXTENSION_STATE_WARNING_SOURCE
+        )
+        return _empty_extension_state()
+    if not isinstance(parsed, dict):
+        _add_diagnostic_warning(
+            diagnostics, "extension_state_invalid", _EXTENSION_STATE_WARNING_SOURCE
+        )
+        return _empty_extension_state()
+    disabled_raw = parsed.get("disabled_extensions", [])
+    if not isinstance(disabled_raw, list):
+        _add_diagnostic_warning(
+            diagnostics, "extension_state_invalid", _EXTENSION_STATE_WARNING_SOURCE
+        )
+        return _empty_extension_state()
+    disabled: List[str] = []
+    seen: Set[str] = set()
+    invalid = False
+    for value in disabled_raw:
+        if not _valid_extension_id(value):
+            invalid = True
+            continue
+        ext_id = str(value).strip()
+        if ext_id in seen:
+            continue
+        seen.add(ext_id)
+        disabled.append(ext_id)
+        if len(disabled) >= _MAX_DISABLED_EXTENSION_IDS:
+            _add_diagnostic_warning(
+                diagnostics, "extension_state_truncated", _EXTENSION_STATE_WARNING_SOURCE
+            )
+            break
+    if invalid:
+        _add_diagnostic_warning(
+            diagnostics, "extension_state_invalid_entries", _EXTENSION_STATE_WARNING_SOURCE
+        )
+    return {"version": 1, "disabled_extensions": disabled}
+
+
+def _write_extension_state(state: Dict[str, Any]) -> None:
+    """Persist extension overrides with an atomic same-directory replace."""
+    disabled_raw = state.get("disabled_extensions", [])
+    disabled: List[str] = []
+    seen: Set[str] = set()
+    if isinstance(disabled_raw, list):
+        for value in disabled_raw:
+            if not _valid_extension_id(value):
+                continue
+            ext_id = str(value).strip()
+            if ext_id in seen:
+                continue
+            seen.add(ext_id)
+            disabled.append(ext_id)
+            if len(disabled) >= _MAX_DISABLED_EXTENSION_IDS:
+                break
+    payload = {"version": 1, "disabled_extensions": disabled}
+    target = _extension_state_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    try:
+        with tmp.open("wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
 def _fully_unquote_path(path: str) -> str:
@@ -386,21 +513,34 @@ def _sidecar_from_manifest_entry(
     }
 
 
-def _iter_manifest_entries(manifest: object) -> List[Tuple[str, object]]:
-    entries: List[Tuple[str, object]] = []
+def _manifest_extension_entries(manifest: object) -> List[Tuple[str, int, Dict[str, object]]]:
     extension_entries: object = []
     if isinstance(manifest, dict):
-        entries.append(("manifest", manifest))
         extension_entries = manifest.get("extensions", [])
     elif isinstance(manifest, list):
         extension_entries = manifest
+    entries: List[Tuple[str, int, Dict[str, object]]] = []
     if isinstance(extension_entries, list):
         for index, extension in enumerate(extension_entries):
-            if not isinstance(extension, dict):
-                continue
-            if extension.get("enabled", True) is False:
-                continue
-            entries.append((f"manifest.extensions[{index}]", extension))
+            if isinstance(extension, dict):
+                entries.append((f"manifest.extensions[{index}]", index, extension))
+    return entries
+
+
+def _iter_manifest_entries(
+    manifest: object, disabled_ids: Optional[Set[str]] = None
+) -> List[Tuple[str, object]]:
+    disabled_ids = disabled_ids or set()
+    entries: List[Tuple[str, object]] = []
+    if isinstance(manifest, dict):
+        entries.append(("manifest", manifest))
+    for source, _index, extension in _manifest_extension_entries(manifest):
+        if extension.get("enabled", True) is False:
+            continue
+        ext_id = _manifest_entry_text(extension, "id")
+        if _valid_extension_id(ext_id) and ext_id in disabled_ids:
+            continue
+        entries.append((source, extension))
     return entries
 
 
@@ -417,11 +557,8 @@ def _read_manifest_text(manifest_file: Path) -> str:
     return data.decode("utf-8")
 
 
-def _read_manifest_urls_with_diagnostics(
-    root: Path, diagnostics: Optional[Dict[str, Any]] = None
-) -> Tuple[List[str], List[str], List[Dict[str, str]], Dict[str, Any]]:
-    manifest_file, path_status = _manifest_path_with_status(root)
-    manifest_status: Dict[str, Any] = {
+def _empty_manifest_status(path_status: str) -> Dict[str, Any]:
+    return {
         "configured": path_status != "not_configured",
         "loaded": False,
         "status": path_status,
@@ -430,27 +567,35 @@ def _read_manifest_urls_with_diagnostics(
         "stylesheet_count": 0,
         "sidecar_count": 0,
     }
+
+
+def _load_manifest_with_status(
+    root: Path, diagnostics: Optional[Dict[str, Any]] = None
+) -> Tuple[Optional[object], Dict[str, Any]]:
+    """Load the configured manifest once, returning sanitized status/warnings."""
+    manifest_file, path_status = _manifest_path_with_status(root)
+    manifest_status = _empty_manifest_status(path_status)
     if manifest_file is None:
         if path_status == "invalid_path":
             _add_diagnostic_warning(diagnostics, "manifest_invalid_path", "manifest")
-        return [], [], [], manifest_status
+        return None, manifest_status
     try:
         if not manifest_file.exists() or not manifest_file.is_file():
             _log.warning("Configured extension manifest was not found")
             manifest_status["status"] = "missing"
             _add_diagnostic_warning(diagnostics, "manifest_missing", "manifest")
-            return [], [], [], manifest_status
+            return None, manifest_status
         manifest = json.loads(_read_manifest_text(manifest_file))
+        manifest_status.update({"loaded": True, "status": "loaded"})
+        return manifest, manifest_status
     except _ManifestTooLarge:
         _log.warning("Configured extension manifest exceeds %d bytes", _MAX_MANIFEST_BYTES)
         manifest_status["status"] = "oversized"
         _add_diagnostic_warning(diagnostics, "manifest_oversized", "manifest")
-        return [], [], [], manifest_status
     except json.JSONDecodeError:
         _log.warning("Configured extension manifest is not valid JSON")
         manifest_status["status"] = "malformed"
         _add_diagnostic_warning(diagnostics, "manifest_malformed", "manifest")
-        return [], [], [], manifest_status
     except RecursionError:
         # A <=64KB but deeply-nested manifest makes json.loads exceed the
         # interpreter recursion limit. Without this, the RecursionError escapes
@@ -458,17 +603,89 @@ def _read_manifest_urls_with_diagnostics(
         _log.warning("Configured extension manifest is too deeply nested")
         manifest_status["status"] = "too_deeply_nested"
         _add_diagnostic_warning(diagnostics, "manifest_too_deeply_nested", "manifest")
-        return [], [], [], manifest_status
     except (OSError, UnicodeDecodeError):
         _log.warning("Configured extension manifest could not be read")
         manifest_status["status"] = "unreadable"
         _add_diagnostic_warning(diagnostics, "manifest_unreadable", "manifest")
+    return None, manifest_status
+
+
+def _manifest_extension_state(
+    manifest: object, disabled_ids: Set[str], diagnostics: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Return sanitized per-extension state for manifest extension entries."""
+    extension_entries: List[Dict[str, Any]] = []
+    known_ids: Set[str] = set()
+    manifest_disabled_ids: Set[str] = set()
+    seen_ids: Set[str] = set()
+    invalid_seen = False
+    duplicate_seen = False
+    for _source, _index, entry in _manifest_extension_entries(manifest):
+        raw_id = _manifest_entry_text(entry, "id")
+        if not _valid_extension_id(raw_id):
+            invalid_seen = True
+            continue
+        ext_id = raw_id.strip()
+        if ext_id in seen_ids:
+            duplicate_seen = True
+            continue
+        seen_ids.add(ext_id)
+        known_ids.add(ext_id)
+        name = _manifest_entry_text(entry, "name")
+        manifest_enabled = entry.get("enabled", True) is not False
+        user_disabled = ext_id in disabled_ids
+        can_toggle = manifest_enabled
+        effective_enabled = manifest_enabled and not user_disabled
+        if not manifest_enabled:
+            manifest_disabled_ids.add(ext_id)
+        extension_entries.append(
+            {
+                "id": ext_id,
+                "name": name or ext_id,
+                "manifest_enabled": manifest_enabled,
+                "user_enabled": (not user_disabled) if can_toggle else False,
+                "user_disabled": user_disabled,
+                "effective_enabled": effective_enabled,
+                "can_toggle": can_toggle,
+                "reload_required": True,
+                "status": (
+                    "manifest_disabled"
+                    if not manifest_enabled
+                    else ("user_disabled" if user_disabled else "enabled")
+                ),
+            }
+        )
+    if invalid_seen:
+        _add_diagnostic_warning(diagnostics, "manifest_extension_id_invalid", "manifest:extensions")
+    if duplicate_seen:
+        _add_diagnostic_warning(diagnostics, "manifest_extension_id_duplicate", "manifest:extensions")
+    stale_ids = sorted(disabled_ids - known_ids)
+    if stale_ids:
+        _add_diagnostic_warning(diagnostics, "extension_state_unknown_ids", _EXTENSION_STATE_WARNING_SOURCE)
+    return {
+        "extensions": extension_entries,
+        "known_ids": known_ids,
+        "manifest_disabled_ids": manifest_disabled_ids,
+    }
+
+
+def _read_manifest_urls_with_diagnostics(
+    root: Path,
+    diagnostics: Optional[Dict[str, Any]] = None,
+    disabled_ids: Optional[Set[str]] = None,
+    manifest: Optional[object] = None,
+    manifest_status: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[str], List[str], List[Dict[str, str]], Dict[str, Any]]:
+    disabled_ids = disabled_ids or set()
+    if manifest is None or manifest_status is None:
+        manifest, manifest_status = _load_manifest_with_status(root, diagnostics)
+    if manifest is None:
         return [], [], [], manifest_status
 
     scripts: List[str] = []
     stylesheets: List[str] = []
     sidecars: List[Dict[str, str]] = []
-    entries = _iter_manifest_entries(manifest)
+    entries = _iter_manifest_entries(manifest, disabled_ids=disabled_ids)
     manifest_status["entry_count"] = len(entries)
     scripts_full = False
     stylesheets_full = False
@@ -518,8 +735,12 @@ def _read_manifest_urls_with_diagnostics(
     return scripts, stylesheets, sidecars, manifest_status
 
 
-def _read_manifest_urls(root: Path) -> Tuple[List[str], List[str]]:
-    scripts, stylesheets, _, _ = _read_manifest_urls_with_diagnostics(root)
+def _read_manifest_urls(
+    root: Path, disabled_ids: Optional[Set[str]] = None
+) -> Tuple[List[str], List[str]]:
+    scripts, stylesheets, _, _ = _read_manifest_urls_with_diagnostics(
+        root, disabled_ids=disabled_ids
+    )
     return scripts, stylesheets
 
 
@@ -528,7 +749,9 @@ def get_extension_config() -> Dict[str, Any]:
     root = _extension_root()
     if root is None:
         return {"enabled": False, "script_urls": [], "stylesheet_urls": []}
-    manifest_scripts, manifest_stylesheets = _read_manifest_urls(root)
+    state = _load_extension_state()
+    disabled_ids = set(state.get("disabled_extensions") or [])
+    manifest_scripts, manifest_stylesheets = _read_manifest_urls(root, disabled_ids=disabled_ids)
     return {
         "enabled": True,
         "script_urls": _read_url_list(
@@ -540,10 +763,13 @@ def get_extension_config() -> Dict[str, Any]:
     }
 
 
+
 def get_extension_status() -> Dict[str, Any]:
-    """Return sanitized read-only extension diagnostics for administrators."""
+    """Return sanitized extension diagnostics for administrators."""
     diagnostics = _new_diagnostics()
     root, dir_configured, dir_valid = _extension_root_status()
+    state = _load_extension_state(diagnostics)
+    disabled_ids = set(state.get("disabled_extensions") or [])
     manifest_configured = bool(os.getenv(_EXTENSION_MANIFEST_ENV, "").strip())
     manifest_status: Dict[str, Any] = {
         "configured": manifest_configured,
@@ -565,14 +791,34 @@ def get_extension_status() -> Dict[str, Any]:
             "script_urls": [],
             "stylesheet_urls": [],
             "sidecars": [],
-            "counts": {"script_urls": 0, "stylesheet_urls": 0, "sidecars": 0},
+            "counts": {
+                "script_urls": 0,
+                "stylesheet_urls": 0,
+                "sidecars": 0,
+                "manifest_extensions": 0,
+                "user_disabled": 0,
+            },
             "manifest": manifest_status,
+            "extensions": [],
             "warnings": diagnostics["warnings"],
         }
 
+    manifest, manifest_status = _load_manifest_with_status(root, diagnostics)
+    extension_state = _manifest_extension_state(manifest, disabled_ids, diagnostics) if manifest is not None else {
+        "extensions": [],
+        "known_ids": set(),
+        "manifest_disabled_ids": set(),
+    }
     manifest_scripts, manifest_stylesheets, sidecars, manifest_status = _read_manifest_urls_with_diagnostics(
-        root, diagnostics
+        root,
+        diagnostics,
+        disabled_ids=disabled_ids,
+        manifest=manifest,
+        manifest_status=manifest_status,
     )
+    extensions = extension_state["extensions"]
+    known_ids = extension_state["known_ids"]
+    user_disabled_count = len(disabled_ids & known_ids)
     script_urls = _read_url_list(
         _EXTENSION_SCRIPT_URLS_ENV,
         manifest_scripts or None,
@@ -594,10 +840,49 @@ def get_extension_status() -> Dict[str, Any]:
             "script_urls": len(script_urls),
             "stylesheet_urls": len(stylesheet_urls),
             "sidecars": len(sidecars),
+            "manifest_extensions": len(extensions),
+            "user_disabled": user_disabled_count,
         },
         "manifest": manifest_status,
+        "extensions": extensions,
         "warnings": diagnostics["warnings"],
     }
+
+
+def set_extension_user_enabled(extension_id: object, enabled: object) -> Dict[str, Any]:
+    """Set the UI-managed enabled override for an installed manifest extension."""
+    if not _valid_extension_id(extension_id):
+        raise ExtensionToggleError("Invalid extension id", status=400)
+    ext_id = str(extension_id).strip()
+    if not isinstance(enabled, bool):
+        raise ExtensionToggleError("enabled must be a boolean", status=400)
+    root = _extension_root()
+    if root is None:
+        raise ExtensionToggleError("Extensions are not configured", status=404)
+    with _EXTENSION_STATE_LOCK:
+        diagnostics = _new_diagnostics()
+        state = _load_extension_state(diagnostics)
+        disabled_ids = set(state.get("disabled_extensions") or [])
+        manifest, manifest_status = _load_manifest_with_status(root, diagnostics)
+        if manifest is None or not manifest_status.get("loaded", False):
+            raise ExtensionToggleError("Extension manifest is not loaded", status=409)
+        extension_state = _manifest_extension_state(manifest, disabled_ids, diagnostics)
+        known_ids: Set[str] = extension_state["known_ids"]
+        manifest_disabled_ids: Set[str] = extension_state["manifest_disabled_ids"]
+        if ext_id not in known_ids:
+            raise ExtensionToggleError("Extension not found", status=404)
+        if ext_id in manifest_disabled_ids:
+            raise ExtensionToggleError("Extension is disabled by its manifest", status=409)
+        if enabled:
+            disabled_ids.discard(ext_id)
+        else:
+            disabled_ids.add(ext_id)
+        _write_extension_state({"disabled_extensions": sorted(disabled_ids)})
+    # Return a fresh status snapshot after the atomic write is visible. Keeping
+    # the readback outside the lock avoids doing the full manifest/status parse
+    # while blocking other toggles; a concurrent toggle may be reflected too,
+    # which is fine because the UI re-renders from the current effective state.
+    return get_extension_status()
 
 
 def inject_extension_tags(index_html: str) -> str:

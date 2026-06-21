@@ -1,4 +1,4 @@
-"""Regression tests for the read-only Settings → Extensions diagnostics panel."""
+"""Regression tests for the Settings → Extensions diagnostics and toggles."""
 from pathlib import Path
 import re
 
@@ -52,20 +52,21 @@ def test_settings_sidebar_has_extensions_section_and_pane():
     assert 'data-i18n="settings_tab_extensions"' in INDEX_HTML
 
 
-def test_extensions_panel_is_read_only_and_warns_about_trust_model():
+def test_extensions_panel_warns_about_trust_model_and_stays_install_free():
     pane_start = INDEX_HTML.index('id="settingsPaneExtensions"')
     pane_end = INDEX_HTML.index('id="settingsPaneSystem"', pane_start)
     pane = INDEX_HTML[pane_start:pane_end]
 
-    assert "Read-only diagnostics" in pane
+    assert "Diagnostics and enable/disable controls" in pane
     assert "Extensions run in the WebUI browser origin" in pane
     assert "Only load trusted local extension directories" in pane
+    assert "takes effect after reload" in pane
     assert "copyExtensionsDiagnostics()" in pane
     assert "saveSettings(" not in pane
     assert "api('/api/settings'" not in pane
     assert "type=\"checkbox\"" not in pane
-    assert "toggle" not in pane.lower()
-    assert "install" not in pane.lower()
+    assert "Install" not in pane
+    assert "Uninstall" not in pane
     assert "marketplace" not in pane.lower()
 
 
@@ -89,7 +90,7 @@ def test_settings_search_knows_extensions_pane():
     assert "extensions: 'settingsPaneExtensions'" in resolve_block
 
 
-def test_extensions_panel_fetches_status_endpoint_only():
+def test_extensions_panel_fetches_status_endpoint_without_mutating_settings():
     load_block = _function_block("loadExtensionsPanel", extra=900)
 
     assert "api('/api/extensions/status')" in load_block
@@ -113,12 +114,19 @@ def test_extensions_panel_renders_sanitized_status_payload():
     assert "script_urls" in render_block
     assert "stylesheet_urls" in render_block
     assert "data&&data.sidecars" in render_block
+    assert "data&&data.extensions" in render_block
+    assert "counts,'manifest_extensions'" in render_block
+    assert "counts,'user_disabled'" in render_block
+    assert "_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured))" in render_block
     assert "_extensionSidecarCard(sidecars)" in render_block
     assert "data&&data.warnings" in render_block
     assert "esc(url)" in asset_block
     assert "esc(manifest.status||'unknown')" in render_block
-    assert "esc((item&&item.code)||'unknown_warning')" in warning_block
+    assert "const rawCode=(item&&item.code)||'unknown_warning'" in warning_block
+    assert "const code=esc(rawCode)" in warning_block
     assert "esc((item&&item.source)||'unknown')" in warning_block
+    assert "extension_state_unknown_ids" in warning_block
+    assert "Some saved disabled-extension overrides no longer match the current manifest" in warning_block
     assert "Rejected" not in render_block  # rejected values must never be rendered directly
 
 
@@ -152,6 +160,26 @@ def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
     assert not _contains_post_method(monitor_block)
 
 
+def test_extensions_panel_toggle_uses_dedicated_endpoint_without_settings_or_install():
+    installed_block = _between("function _extensionInstalledList", "function _extensionSidecarHealthBadge")
+    toggle_block = _between("async function handleExtensionToggle", "async function loadExtensionsPanel")
+
+    assert "data-extension-toggle-id" in installed_block
+    assert "data-extension-next-enabled" in installed_block
+    assert "No extension directory is configured." in installed_block
+    assert "No manifest extensions are installed in the configured bundle." in installed_block
+    assert "extensionDirConfigured" in installed_block
+    assert "Manifest-disabled entries cannot be enabled from WebUI." in installed_block
+    assert "api('/api/extensions/toggle',{method:'POST',body:JSON.stringify({id,enabled})})" in toggle_block
+    assert "Reload WebUI to apply changes" in toggle_block
+    combined = installed_block + toggle_block
+    assert "api('/api/settings'" not in combined
+    assert ">Install<" not in combined
+    assert "Install extension" not in combined
+    assert "Uninstall" not in combined
+    assert "marketplace" not in combined.lower()
+
+
 def test_copy_extensions_diagnostics_copies_current_sanitized_payload():
     copy_block = _between("function copyExtensionsDiagnostics", "// ── Plugins panel")
 
@@ -168,6 +196,8 @@ def test_extensions_styles_are_scoped_to_extensions_panel():
     assert ".extension-summary-grid" in STYLE_CSS
     assert ".extension-warning-list" in STYLE_CSS
     assert ".extension-url-list" in STYLE_CSS
+    assert ".extension-installed-list" in STYLE_CSS
+    assert ".extension-toggle-btn" in STYLE_CSS
     assert ".extension-sidecar-list" in STYLE_CSS
     assert ".extension-sidecar-status-badge" in STYLE_CSS
 
@@ -180,14 +210,21 @@ def test_extensions_tab_i18n_key_exists_for_all_locales():
     assert not missing, f"Locale(s) missing settings_tab_extensions: {missing}"
 
 
-def test_extensions_docs_mentions_settings_panel_without_mutation_claims():
+def test_extensions_docs_mentions_settings_panel_without_install_or_proxy_claims():
     diagnostics_section = DOCS_EXTENSIONS[DOCS_EXTENSIONS.index("## Diagnostics"):]
 
     assert "Settings → Extensions" in diagnostics_section
-    assert "enable, disable, install, or mutate extensions" in diagnostics_section
-    assert "`/api/extensions/status`" in diagnostics_section
+    assert "`POST /api/extensions/toggle`" in diagnostics_section
+    assert "WebUI-managed override" in diagnostics_section
+    assert "does not edit extension" in diagnostics_section
+    assert "manifests" in diagnostics_section
+    assert "fetch new extension assets" in diagnostics_section
+    assert "uninstall files" in diagnostics_section
+    assert "proxy sidecars" in diagnostics_section
+    assert "GET /api/extensions/status" in diagnostics_section
     assert "sanitized loopback sidecars" in diagnostics_section
     assert "credentials: 'omit'" in diagnostics_section
     assert "does **not** proxy sidecar requests" in diagnostics_section
     assert "do **not**" in diagnostics_section
     assert "return `HERMES_WEBUI_EXTENSION_DIR`" in diagnostics_section
+    assert "override state-file path" in diagnostics_section
