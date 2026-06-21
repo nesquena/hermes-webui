@@ -7,6 +7,12 @@
 
 - **Transparent Stream now reloads persisted assistant-turn anchor activity (#4568).** Sessions that had settled with the stable assistant-turn anchor scene could lose their Transparent Stream tool/thinking rows after a hard refresh or session re-entry because the legacy Transparent Stream rebuild correctly skipped anchor-owned turns while only Compact Worklog had a settled anchor-scene renderer. Transparent Stream now renders the persisted anchor activity rows itself while keeping the final answer prose owned by the assistant message, so cross-mode reloads no longer drop the worklog activity.
 
+## [v0.51.547] — 2026-06-21 — Release TF (re-auth required before disabling password authentication)
+
+### Added
+
+- **You must now re-enter your current password before turning off (or clearing) password authentication.** Previously, an already-open WebUI session could disable the password gate with no challenge. Now any change, clear, or transition-to-passwordless of password auth requires the current password (a "sudo-mode" re-auth on `POST /api/settings`, returning 403 without it). First-time setup and environment-variable-locked instances are unaffected. Also adds an optional "I've reviewed this risk" acknowledgment that downgrades the persistent unauthenticated-instance nav warning to a quieter one. A guard against a hijacked or unattended session silently removing your auth. Thanks @starship-s.
+
 ## [v0.51.546] — 2026-06-21 — Release TE (fix a flaky gateway-sync CI test)
 
 ### Fixed

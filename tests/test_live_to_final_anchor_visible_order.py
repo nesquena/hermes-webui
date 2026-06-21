@@ -180,6 +180,86 @@ process.stdout.write(JSON.stringify({{
     assert data["settledCount"] == 0
 
 
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_transparent_anchor_scene_preserves_intermediate_prose_without_duplicating_final_answer():
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
+function extractFunc(name){{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if(start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start) + 1;
+  let depth = 1;
+  while(depth > 0 && i < src.length){{
+    if(src[i] === '{{') depth += 1;
+    else if(src[i] === '}}') depth -= 1;
+    i += 1;
+  }}
+  return src.slice(start, i);
+}}
+class FakeElement {{
+  constructor(tag){{
+    this.tagName = String(tag || 'div').toUpperCase();
+    this.attributes = Object.create(null);
+    this.dataset = {{}};
+    this.children = [];
+    this.parentNode = null;
+    this.className = '';
+    this._innerHTML = '';
+  }}
+  setAttribute(name, value){{
+    this.attributes[name] = String(value);
+    if(name === 'class') this.className = String(value);
+    if(name.startsWith('data-')){{
+      const key = name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      this.dataset[key] = String(value);
+    }}
+  }}
+  getAttribute(name){{ return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }}
+  appendChild(child){{ child.parentNode = this; this.children.push(child); return child; }}
+  querySelector(){{ return null; }}
+  querySelectorAll(){{ return []; }}
+  set innerHTML(value){{ this._innerHTML = String(value); }}
+  get innerHTML(){{ return this._innerHTML; }}
+}}
+global.window = {{}};
+global.document = {{ createElement(tag){{ return new FakeElement(tag); }} }};
+const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[ch]));
+const renderMd = text => esc(text);
+function buildToolCard(){{ throw new Error('tool branch should not execute'); }}
+function _thinkingActivityNode(){{ throw new Error('thinking branch should not execute'); }}
+function _activityStatusNode(){{ throw new Error('status branch should not execute'); }}
+function _autoCompressionWorklogNode(){{ throw new Error('lifecycle branch should not execute'); }}
+eval(extractFunc('_anchorSceneNodeForRow'));
+eval(extractFunc('_anchorSceneTransparentNodeForRow'));
+const intermediate = _anchorSceneTransparentNodeForRow(
+  {{row_id:'prose-mid', role:'prose', text:'intermediate process note'}},
+  {{settled:true, finalAnswer:'final answer'}}
+);
+const duplicateFinal = _anchorSceneTransparentNodeForRow(
+  {{row_id:'prose-final', role:'prose', text:'final   answer'}},
+  {{settled:true, finalAnswer:'final answer'}}
+);
+process.stdout.write(JSON.stringify({{
+  intermediateExists: !!intermediate,
+  intermediateClass: intermediate && intermediate.className,
+  intermediateRole: intermediate && intermediate.getAttribute('data-anchor-row-role'),
+  intermediateHtml: intermediate && intermediate.innerHTML,
+  intermediateTransparent: intermediate && intermediate.getAttribute('data-transparent-event-row'),
+  duplicateFinalExists: !!duplicateFinal,
+}}));
+"""
+    data = _run_node_script(script)
+
+    assert data["intermediateExists"] is True
+    assert data["intermediateClass"] == "assistant-segment"
+    assert data["intermediateRole"] == "prose"
+    assert "intermediate process note" in data["intermediateHtml"]
+    assert data["intermediateTransparent"] is None
+    assert data["duplicateFinalExists"] is False
+
+
 def test_process_prose_is_an_anchor_scene_row_not_a_dom_mirror():
     schedule = _function_body(MESSAGES_JS, "_scheduleRender")
     flush = _function_body(MESSAGES_JS, "_flushPendingSegmentRender")
@@ -683,10 +763,10 @@ def test_transparent_stream_renders_persisted_anchor_scene_after_reload():
     assert "return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);" in settled
     assert "_anchorSceneRowsForRendering(scene,{settled:true})" in transparent
     assert 'blocks.querySelectorAll(\'[data-anchor-settled-scene-row="1"],.transparent-event-row[data-anchor-scene-row="1"]\')' in transparent
-    assert "_anchorSceneTransparentNodeForRow(row,{settled:true})" in transparent
+    assert "_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer})" in transparent
     assert "blocks.insertBefore(node,segment)" in transparent
     assert "_syncTransparentEventControls(turn)" in transparent
-    assert "return null;" in row and "row.role==='prose'" in row
+    assert "normalize(text)===normalize(finalAnswer)" in row
     assert "_decorateTransparentEventRow(_thinkingActivityNode" in row
     assert "_decorateTransparentEventRow(buildToolCard(toolCall)" in row
     assert "_transparentToolStatus(toolCall,true)" in row

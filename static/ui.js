@@ -5888,8 +5888,11 @@ function showPromptDialog(opts={}){
     input.autocomplete='off';input.spellcheck=false;
   }
   if(cancelBtn) cancelBtn.textContent=opts.cancelLabel||t('cancel');
-  if(confirmBtn){confirmBtn.textContent=opts.confirmLabel||t('create');confirmBtn.classList.remove('danger');}
-  if(dialog) dialog.setAttribute('role','dialog');
+  if(confirmBtn){
+    confirmBtn.textContent=opts.confirmLabel||t('create');
+    confirmBtn.classList.toggle('danger',!!opts.danger);
+  }
+  if(dialog) dialog.setAttribute('role',opts.danger?'alertdialog':'dialog');
   if(overlay){overlay.style.display='flex';overlay.setAttribute('aria-hidden','false');}
   return new Promise(resolve=>{
     APP_DIALOG.resolve=resolve;
@@ -9077,11 +9080,15 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     burstId:row.activity_burst_id||row.burst_id||row.burstId||'',
   };
   if(row.role==='prose'){
-    // The settled assistant segment already owns final prose. Rendering prose
-    // rows here would duplicate the answer in Transparent Stream history.
-    return null;
+    const text=String(row.text||'').trim();
+    const finalAnswer=String(opts&&opts.finalAnswer||'').trim();
+    const normalize=value=>String(value||'').replace(/\s+/g,' ').trim();
+    // The settled assistant segment already owns final prose, but intermediate
+    // multi-round prose was hidden above and must be replayed here.
+    if(finalAnswer&&normalize(text)===normalize(finalAnswer)) return null;
+    node=_anchorSceneNodeForRow(row,{settled});
   }
-  if(row.role==='thinking'){
+  else if(row.role==='thinking'){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     if(!text) return null;
@@ -9304,6 +9311,7 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
   const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  const finalAnswer=String(scene.final_answer||message.content||'').trim();
   if(!rows.length) return false;
   blocks.querySelectorAll('[data-anchor-settled-scene-row="1"],.transparent-event-row[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
@@ -9315,7 +9323,7 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   });
   let wrote=false;
   for(const row of rows){
-    const node=_anchorSceneTransparentNodeForRow(row,{settled:true});
+    const node=_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer});
     if(!node) continue;
     if(segment.parentElement===blocks) blocks.insertBefore(node,segment);
     else blocks.appendChild(node);
