@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
 _SAFE_SESSION_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_MAX_QUEUE_ITEMS = 50
+_MAX_START_RETRIES = 3
 
 
 def _queue_dir() -> Path:
@@ -109,17 +111,29 @@ def _normalize_attachments(raw: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _normalize_model_provider(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _public_item(item: dict[str, Any]) -> dict[str, Any]:
-    return {
+    out = {
         "id": str(item.get("id") or ""),
         "session_id": str(item.get("session_id") or ""),
         "text": str(item.get("text") or ""),
         "attachments": list(item.get("attachments") or []),
         "model": str(item.get("model") or ""),
-        "model_provider": item.get("model_provider"),
+        "model_provider": _normalize_model_provider(item.get("model_provider")),
         "profile": str(item.get("profile") or ""),
         "created_at": float(item.get("created_at") or 0.0),
     }
+    if item.get("blocked"):
+        out["blocked"] = True
+    if item.get("error"):
+        out["error"] = str(item.get("error") or "")
+    return out
 
 
 def list_queue(session_id: str) -> list[dict[str, Any]]:
@@ -131,7 +145,7 @@ def enqueue(session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     text = str(payload.get("text") or payload.get("message") or "").strip()
     if not session_id:
         raise ValueError("session_id is required")
-    if not text and not payload.get("attachments") and not payload.get("files"):
+    if not text:
         raise ValueError("text is required")
     item = {
         "id": uuid.uuid4().hex,
@@ -139,12 +153,14 @@ def enqueue(session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         "text": text,
         "attachments": _normalize_attachments(payload.get("attachments") or payload.get("files") or []),
         "model": str(payload.get("model") or ""),
-        "model_provider": payload.get("model_provider"),
+        "model_provider": _normalize_model_provider(payload.get("model_provider")),
         "profile": str(payload.get("profile") or ""),
         "created_at": time.time(),
     }
     with _LOCK:
         items = _read_items_unlocked(session_id)
+        if len(items) >= _MAX_QUEUE_ITEMS:
+            items = items[-(_MAX_QUEUE_ITEMS - 1) :]
         items.append(item)
         _write_items_unlocked(session_id, items)
     return _public_item(item)
@@ -165,7 +181,11 @@ def update_item(session_id: str, item_id: str, patch: dict[str, Any]) -> dict[st
             if "model" in patch:
                 item["model"] = str(patch.get("model") or "")
             if "model_provider" in patch:
-                item["model_provider"] = patch.get("model_provider")
+                item["model_provider"] = _normalize_model_provider(patch.get("model_provider"))
+            if any(key in patch for key in ("text", "model", "model_provider")):
+                item.pop("blocked", None)
+                item.pop("error", None)
+                item.pop("retry_count", None)
             _write_items_unlocked(session_id, items)
             return _public_item(item)
     return None
@@ -190,7 +210,10 @@ def claim_next(session_id: str) -> dict[str, Any] | None:
         items = _read_items_unlocked(session_id)
         if not items:
             return None
-        item = items.pop(0)
+        idx = next((i for i, existing in enumerate(items) if not existing.get("blocked")), -1)
+        if idx < 0:
+            return None
+        item = items.pop(idx)
         _write_items_unlocked(session_id, items)
         return dict(item)
 
@@ -254,14 +277,21 @@ def drain_for_session(session_id: str) -> int:
             if status == 409:
                 requeue_front(session_id, item)
             elif status >= 400:
+                retry_count = int(item.get("retry_count") or 0) + 1
+                item["retry_count"] = retry_count
+                item["error"] = str((resp or {}).get("error") or f"start_failed_{status}")
+                if status < 500 and retry_count >= _MAX_START_RETRIES:
+                    item["blocked"] = True
                 # Keep user intent instead of dropping it on transient or
-                # configuration errors; the browser can still show/edit/delete
-                # it after reconnect.
+                # configuration errors; blocked items remain editable/deletable
+                # but claim_next will not churn on them every teardown.
                 requeue_front(session_id, item)
                 logger.warning(
-                    "queued follow-up failed for session %s: status=%s err=%r",
+                    "queued follow-up failed for session %s: status=%s retries=%s blocked=%s err=%r",
                     session_id,
                     status,
+                    retry_count,
+                    bool(item.get("blocked")),
                     (resp or {}).get("error"),
                 )
             else:
