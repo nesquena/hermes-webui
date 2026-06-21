@@ -8889,6 +8889,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
 
+    if parsed.path == "/api/extensions/status":
+        from api.extensions import get_extension_status
+
+        return j(handler, get_extension_status())
+
     if parsed.path.startswith("/extensions/"):
         from api.extensions import serve_extension_static
 
