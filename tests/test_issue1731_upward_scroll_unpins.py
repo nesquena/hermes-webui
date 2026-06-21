@@ -126,7 +126,7 @@ def test_repin_threshold_is_still_250px():
     stay. Direction detection is the new lever, not threshold relaxation.
     """
     block = _scroll_listener_block()
-    assert "clientHeight<250" in block, (
+    assert "clientHeight<250" in block or "bottomDistance<250" in block, (
         "The 250px re-pin dead zone must remain — #1360 / #677 require it "
         "for macOS small-window + trackpad momentum cases. The #1731 fix "
         "uses direction detection, not threshold changes."

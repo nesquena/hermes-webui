@@ -3699,7 +3699,8 @@ if(typeof window!=='undefined'){
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
       const top=el.scrollTop;
-      const nearBottom=el.scrollHeight-top-el.clientHeight<250;
+      const bottomDistance=el.scrollHeight-top-el.clientHeight;
+      const nearBottom=bottomDistance<250;
       const movedUp=_lastScrollTop!==null&&top<_lastScrollTop-2;
       const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
       _lastScrollTop=top;
@@ -3711,7 +3712,8 @@ if(typeof window!=='undefined'){
       }else if(movedDown&&nearBottom){
         _nearBottomCount=_nearBottomCount+1;
         if(_nearBottomCount>=2){
-          if(!_messageUserUnpinned){
+          if(!_messageUserUnpinned||bottomDistance<=80){
+            _messageUserUnpinned=false;
             _scrollPinned=true;
           }
           _nearBottomCount=0;
