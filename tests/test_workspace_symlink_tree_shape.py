@@ -96,5 +96,5 @@ class TestSymlinkFileAffordances:
 
     def test_delete_button_uses_isFileLike(self):
         block = _render_block()
-        assert "if(isFileLike){" in block, \
-            "symlink-to-file rows must render the inline delete button"
+        assert "if(isFileLike && !isEscapeLk){" in block, \
+            "symlink-to-file rows must render the inline delete button (escape-target symlinks excluded)"

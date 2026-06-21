@@ -14358,7 +14358,7 @@ function _renderTreeItems(container, entries, depth){
         showConfirmDialog({
           title: t('symlink_link_to').replace('{target}','').replace('→','').trim()||'Symlink',
           message: t('external_link_outside_workspace').replace('{target}', item.target||''),
-          confirmLabel: t('ok')||'OK',
+          confirmLabel: t('dialog_confirm_btn')||'OK',
           focusCancel: false,
         });
       };
