@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
 from api.helpers import _security_headers, j
@@ -78,6 +78,39 @@ def _extension_root() -> Optional[Path]:
     return root
 
 
+def _extension_root_status() -> Tuple[Optional[Path], bool, bool]:
+    """Return (root, configured, valid) without exposing the configured path."""
+    raw = os.getenv(_EXTENSION_DIR_ENV, "").strip()
+    if not raw:
+        return None, False, False
+    root = Path(raw).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        return None, True, False
+    return root, True, True
+
+
+def _new_diagnostics() -> Dict[str, Any]:
+    return {"warnings": []}
+
+
+def _add_diagnostic_warning(
+    diagnostics: Optional[Dict[str, Any]], code: str, source: str
+) -> None:
+    """Record a sanitized diagnostic warning.
+
+    Warnings intentionally carry only stable codes and coarse sources. They never
+    include filesystem paths, raw environment values, or rejected URL strings.
+    """
+    if diagnostics is None:
+        return
+    warnings = diagnostics.setdefault("warnings", [])
+    if not isinstance(warnings, list):
+        return
+    warning = {"code": code, "source": source}
+    if warning not in warnings:
+        warnings.append(warning)
+
+
 def _fully_unquote_path(path: str) -> str:
     """Decode percent-encoding until stable so encoded dot-segments cannot hide.
 
@@ -130,7 +163,12 @@ def _warn_rejected_url(value: str, source: str) -> None:
 
 
 def _append_safe_asset_url(
-    urls: List[str], value: str, source: str, *, dedupe: bool = True
+    urls: List[str],
+    value: str,
+    source: str,
+    *,
+    dedupe: bool = True,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Append a validated URL while preserving order and the global cap.
 
@@ -143,6 +181,7 @@ def _append_safe_asset_url(
         return True
     if not _is_safe_asset_url(value):
         _warn_rejected_url(value, source)
+        _add_diagnostic_warning(diagnostics, "asset_url_rejected", source)
         return True
     if dedupe and value in urls:
         return True
@@ -153,12 +192,18 @@ def _append_safe_asset_url(
                 "Extension URL list %s truncated at %d entries",
                 source, _MAX_URL_LIST,
             )
+        _add_diagnostic_warning(diagnostics, "asset_url_list_truncated", source)
         return False
     urls.append(value)
     return True
 
 
-def _read_url_list(env_name: str, existing: Optional[List[str]] = None) -> List[str]:
+def _read_url_list(
+    env_name: str,
+    existing: Optional[List[str]] = None,
+    *,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> List[str]:
     raw = os.getenv(env_name, "")
     urls = list(existing or [])
     # Preserve legacy env-only behavior: duplicate env URLs injected twice before
@@ -166,28 +211,35 @@ def _read_url_list(env_name: str, existing: Optional[List[str]] = None) -> List[
     # so bundle manifests and explicit overrides do not double-load an asset.
     dedupe = existing is not None
     for item in raw.split(","):
-        if not _append_safe_asset_url(urls, item, env_name, dedupe=dedupe):
+        if not _append_safe_asset_url(
+            urls, item, env_name, dedupe=dedupe, diagnostics=diagnostics
+        ):
             break
     return urls
 
 
-def _manifest_path(root: Path) -> Optional[Path]:
+def _manifest_path_with_status(root: Path) -> Tuple[Optional[Path], str]:
     raw = os.getenv(_EXTENSION_MANIFEST_ENV, "").strip()
     if not raw:
-        return None
+        return None, "not_configured"
     if raw.startswith(("/", "~")):
         _log.warning("Rejected extension manifest path from %s", _EXTENSION_MANIFEST_ENV)
-        return None
+        return None, "invalid_path"
     rel = _fully_unquote_path(raw)
     if not _is_safe_relative_path(rel):
         _log.warning("Rejected extension manifest path from %s", _EXTENSION_MANIFEST_ENV)
-        return None
+        return None, "invalid_path"
     manifest = (root / rel).resolve()
     try:
         manifest.relative_to(root)
     except ValueError:
         _log.warning("Rejected extension manifest path from %s", _EXTENSION_MANIFEST_ENV)
-        return None
+        return None, "invalid_path"
+    return manifest, "configured"
+
+
+def _manifest_path(root: Path) -> Optional[Path]:
+    manifest, _ = _manifest_path_with_status(root)
     return manifest
 
 
@@ -219,7 +271,9 @@ def _iter_manifest_entries(manifest: object) -> List[Tuple[str, object]]:
         extension_entries = manifest
     if isinstance(extension_entries, list):
         for index, extension in enumerate(extension_entries):
-            if isinstance(extension, dict) and extension.get("enabled", True) is False:
+            if not isinstance(extension, dict):
+                continue
+            if extension.get("enabled", True) is False:
                 continue
             entries.append((f"manifest.extensions[{index}]", extension))
     return entries
@@ -238,58 +292,103 @@ def _read_manifest_text(manifest_file: Path) -> str:
     return data.decode("utf-8")
 
 
-def _read_manifest_urls(root: Path) -> Tuple[List[str], List[str]]:
-    manifest_file = _manifest_path(root)
+def _read_manifest_urls_with_diagnostics(
+    root: Path, diagnostics: Optional[Dict[str, Any]] = None
+) -> Tuple[List[str], List[str], Dict[str, Any]]:
+    manifest_file, path_status = _manifest_path_with_status(root)
+    manifest_status: Dict[str, Any] = {
+        "configured": path_status != "not_configured",
+        "loaded": False,
+        "status": path_status,
+        "entry_count": 0,
+        "script_count": 0,
+        "stylesheet_count": 0,
+    }
     if manifest_file is None:
-        return [], []
+        if path_status == "invalid_path":
+            _add_diagnostic_warning(diagnostics, "manifest_invalid_path", "manifest")
+        return [], [], manifest_status
     try:
         if not manifest_file.exists() or not manifest_file.is_file():
             _log.warning("Configured extension manifest was not found")
-            return [], []
+            manifest_status["status"] = "missing"
+            _add_diagnostic_warning(diagnostics, "manifest_missing", "manifest")
+            return [], [], manifest_status
         manifest = json.loads(_read_manifest_text(manifest_file))
     except _ManifestTooLarge:
         _log.warning("Configured extension manifest exceeds %d bytes", _MAX_MANIFEST_BYTES)
-        return [], []
+        manifest_status["status"] = "oversized"
+        _add_diagnostic_warning(diagnostics, "manifest_oversized", "manifest")
+        return [], [], manifest_status
     except json.JSONDecodeError:
         _log.warning("Configured extension manifest is not valid JSON")
-        return [], []
+        manifest_status["status"] = "malformed"
+        _add_diagnostic_warning(diagnostics, "manifest_malformed", "manifest")
+        return [], [], manifest_status
     except RecursionError:
         # A <=64KB but deeply-nested manifest makes json.loads exceed the
         # interpreter recursion limit. Without this, the RecursionError escapes
         # into the app-shell route and every page load 503s. Fail safe.
         _log.warning("Configured extension manifest is too deeply nested")
-        return [], []
+        manifest_status["status"] = "too_deeply_nested"
+        _add_diagnostic_warning(diagnostics, "manifest_too_deeply_nested", "manifest")
+        return [], [], manifest_status
     except (OSError, UnicodeDecodeError):
         _log.warning("Configured extension manifest could not be read")
-        return [], []
+        manifest_status["status"] = "unreadable"
+        _add_diagnostic_warning(diagnostics, "manifest_unreadable", "manifest")
+        return [], [], manifest_status
 
     scripts: List[str] = []
     stylesheets: List[str] = []
+    entries = _iter_manifest_entries(manifest)
+    manifest_status["entry_count"] = len(entries)
     scripts_full = False
     stylesheets_full = False
-    for _source, entry in _iter_manifest_entries(manifest):
+    for _source, entry in entries:
         if not isinstance(entry, dict):
             continue
+        script_source = "manifest:scripts"
+        stylesheet_source = "manifest:stylesheets"
         if not scripts_full:
             for value in _entry_asset_values(entry, "scripts"):
                 if not _append_safe_asset_url(
-                    scripts, _manifest_asset_url(value), "manifest:scripts"
+                    scripts,
+                    _manifest_asset_url(value),
+                    script_source,
+                    diagnostics=diagnostics,
                 ):
                     scripts_full = True
                     break
         if not stylesheets_full:
             for value in _entry_asset_values(entry, "stylesheets"):
                 if not _append_safe_asset_url(
-                    stylesheets, _manifest_asset_url(value), "manifest:stylesheets"
+                    stylesheets,
+                    _manifest_asset_url(value),
+                    stylesheet_source,
+                    diagnostics=diagnostics,
                 ):
                     stylesheets_full = True
                     break
         if scripts_full and stylesheets_full:
             break
+    manifest_status.update(
+        {
+            "loaded": True,
+            "status": "loaded",
+            "script_count": len(scripts),
+            "stylesheet_count": len(stylesheets),
+        }
+    )
+    return scripts, stylesheets, manifest_status
+
+
+def _read_manifest_urls(root: Path) -> Tuple[List[str], List[str]]:
+    scripts, stylesheets, _ = _read_manifest_urls_with_diagnostics(root)
     return scripts, stylesheets
 
 
-def get_extension_config() -> Dict[str, object]:
+def get_extension_config() -> Dict[str, Any]:
     """Return public extension config without exposing filesystem paths."""
     root = _extension_root()
     if root is None:
@@ -303,6 +402,62 @@ def get_extension_config() -> Dict[str, object]:
         "stylesheet_urls": _read_url_list(
             _EXTENSION_STYLESHEET_URLS_ENV, manifest_stylesheets or None
         ),
+    }
+
+
+def get_extension_status() -> Dict[str, Any]:
+    """Return sanitized read-only extension diagnostics for administrators."""
+    diagnostics = _new_diagnostics()
+    root, dir_configured, dir_valid = _extension_root_status()
+    manifest_configured = bool(os.getenv(_EXTENSION_MANIFEST_ENV, "").strip())
+    manifest_status: Dict[str, Any] = {
+        "configured": manifest_configured,
+        "loaded": False,
+        "status": "extension_disabled" if manifest_configured else "not_configured",
+        "entry_count": 0,
+        "script_count": 0,
+        "stylesheet_count": 0,
+    }
+    if dir_configured and not dir_valid:
+        _add_diagnostic_warning(diagnostics, "extension_dir_unavailable", "extension_dir")
+
+    if root is None:
+        return {
+            "enabled": False,
+            "extension_dir_configured": dir_configured,
+            "extension_dir_valid": False,
+            "script_urls": [],
+            "stylesheet_urls": [],
+            "counts": {"script_urls": 0, "stylesheet_urls": 0},
+            "manifest": manifest_status,
+            "warnings": diagnostics["warnings"],
+        }
+
+    manifest_scripts, manifest_stylesheets, manifest_status = _read_manifest_urls_with_diagnostics(
+        root, diagnostics
+    )
+    script_urls = _read_url_list(
+        _EXTENSION_SCRIPT_URLS_ENV,
+        manifest_scripts or None,
+        diagnostics=diagnostics,
+    )
+    stylesheet_urls = _read_url_list(
+        _EXTENSION_STYLESHEET_URLS_ENV,
+        manifest_stylesheets or None,
+        diagnostics=diagnostics,
+    )
+    return {
+        "enabled": True,
+        "extension_dir_configured": True,
+        "extension_dir_valid": True,
+        "script_urls": script_urls,
+        "stylesheet_urls": stylesheet_urls,
+        "counts": {
+            "script_urls": len(script_urls),
+            "stylesheet_urls": len(stylesheet_urls),
+        },
+        "manifest": manifest_status,
+        "warnings": diagnostics["warnings"],
     }
 
 
