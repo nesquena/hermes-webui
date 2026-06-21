@@ -14192,14 +14192,21 @@ function _renderTreeItems(container, entries, depth){
     el.style.paddingLeft=(8+depth*16)+'px';
     el.setAttribute('draggable','true');
     el.dataset.wsType=item.type;
-    el.oncontextmenu=(e)=>{e.preventDefault();e.stopPropagation();_showFileContextMenu(e,item);};
+    el.oncontextmenu=(e)=>{e.preventDefault();e.stopPropagation();if(!isEscapeLk)_showFileContextMenu(e,item);};
     el.ondragstart=(e)=>{e.dataTransfer.setData('application/ws-path',item.path);e.dataTransfer.setData('application/ws-type',item.type);e.dataTransfer.effectAllowed='copy';el.classList.add('dragging');};
     el.ondragend=()=>{el.classList.remove('dragging');_clearWorkspaceMoveDragOver();};
 
     const isLk = item.type === 'symlink';
     const isDirLike = item.type === 'dir' || (isLk && item.is_dir);
     const isFileLike = !isDirLike;
+    const isEscapeLk = isLk && !!item.target_outside_workspace;
     el.dataset.wsIsDir = String(isDirLike);
+
+    if(isEscapeLk){
+      el.removeAttribute('draggable');
+      el.ondragstart=null;
+      el.ondragend=null;
+    }
 
     if(isDirLike){
       // Toggle arrow for directories
@@ -14222,7 +14229,7 @@ function _renderTreeItems(container, entries, depth){
     iconEl.className='file-icon';
     iconEl.innerHTML = isDirLike
       ? (isLk ? li('link', 14) : li('folder', 14))
-      : (isLk ? li('link', 14) : fileIcon(item.name, item.type));
+      : (isEscapeLk ? li('external-link', 14) : (isLk ? li('link', 14) : fileIcon(item.name, item.type)));
     el.appendChild(iconEl);
 
     // Name
@@ -14231,7 +14238,9 @@ function _renderTreeItems(container, entries, depth){
     // Tooltip only on FILES — dblclick renames them. On directories, dblclick
     // navigates into the folder; rename lives in the right-click context menu
     // (the "Double-click to rename" hint here would be misleading). #1710.
-    if(isLk && item.target)
+    if(isEscapeLk && item.target)
+      nameEl.title = t('external_link_outside_workspace').replace('{target}', () => elideMiddle(item.target));
+    else if(isLk && item.target)
       nameEl.title = t('symlink_link_to').replace('{target}', () => elideMiddle(item.target));
     else if(!isDirLike)
       nameEl.title = t('double_click_rename');
@@ -14252,6 +14261,7 @@ function _renderTreeItems(container, entries, depth){
     nameEl.ondblclick=(e)=>{
       e.stopPropagation();
       if(_nameClickTimer){clearTimeout(_nameClickTimer);_nameClickTimer=null;}
+      if(isEscapeLk) return;
       // For directories, double-click navigates (breadcrumb view)
       if(isDirLike){loadDir(item.path);return;}
       const inp=document.createElement('input');
@@ -14307,7 +14317,7 @@ function _renderTreeItems(container, entries, depth){
     }
 
     // Delete button -- for file-like rows and directory-like rows
-    if(isFileLike){
+    if(isFileLike && !isEscapeLk){
       const del=document.createElement('button');
       del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
       del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceFile(item.path,item.name);};
@@ -14341,6 +14351,16 @@ function _renderTreeItems(container, entries, depth){
           }
           renderFileTree();
         }
+      };
+    }else if(isEscapeLk){
+      el.onclick=(e)=>{
+        e.stopPropagation();
+        showConfirmDialog({
+          title: t('symlink_link_to').replace('{target}','').replace('→','').trim()||'Symlink',
+          message: t('external_link_outside_workspace').replace('{target}', item.target||''),
+          confirmLabel: t('ok')||'OK',
+          focusCancel: false,
+        });
       };
     }else{
       el.onclick=async()=>openFile(item.path);
@@ -14379,6 +14399,7 @@ async function deleteWorkspaceDir(relPath, name){
 }
 
 function _showFileContextMenu(e, item){
+  if(item.target_outside_workspace) return;
   document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
   const menu=document.createElement('div');
   menu.className='file-ctx-menu';

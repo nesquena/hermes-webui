@@ -17,7 +17,10 @@ def test_safe_resolve_blocks_external_symlink_directory(tmp_path):
     with pytest.raises(ValueError, match="Path traversal blocked"):
         list_dir(workspace, "escape")
 
-    assert "escape" not in {entry["name"] for entry in list_dir(workspace, ".")}
+    # Escape symlinks are now displayed as rows with target_outside_workspace flag
+    escape_entry = next((e for e in list_dir(workspace, ".") if e["name"] == "escape"), None)
+    assert escape_entry is not None, "Escape symlink should be listed"
+    assert escape_entry.get("target_outside_workspace") is True
 
 
 def test_read_file_blocks_external_symlink_file(tmp_path):
@@ -31,7 +34,10 @@ def test_read_file_blocks_external_symlink_file(tmp_path):
     with pytest.raises(ValueError, match="Path traversal blocked"):
         read_file_content(workspace, "secret-link.txt")
 
-    assert "secret-link.txt" not in {entry["name"] for entry in list_dir(workspace, ".")}
+    # Escape symlinks are now displayed as rows with target_outside_workspace flag
+    secret_link_entry = next((e for e in list_dir(workspace, ".") if e["name"] == "secret-link.txt"), None)
+    assert secret_link_entry is not None, "Escape symlink should be listed"
+    assert secret_link_entry.get("target_outside_workspace") is True
 
 
 def test_internal_symlink_still_resolves_within_workspace(tmp_path):
@@ -226,11 +232,16 @@ def test_list_read_create_work_on_no_dir_fd_fallback(tmp_path, monkeypatch):
     (outside / "s.txt").write_text("x", encoding="utf-8")
     (workspace / "escape").symlink_to(outside)
 
-    names = {e["name"] for e in w.list_dir(workspace, ".")}
+    entries = w.list_dir(workspace, ".")
+    names = {e["name"] for e in entries}
     assert "a.txt" in names
     if w._DIR_FD_OK:
         assert "internal" in names          # legit internal symlink listed
-    assert "escape" not in names        # external symlink hidden
+    # Escape symlinks are now displayed with target_outside_workspace flag
+    assert "escape" in names
+    escape_entry = next((e for e in entries if e["name"] == "escape"), None)
+    assert escape_entry is not None
+    assert escape_entry.get("target_outside_workspace") is True
     assert w.read_file_content(workspace, "a.txt")["content"] == "hi"
 
     fd = w.open_anchored_create_fd(workspace, workspace / "new" / "f.txt")

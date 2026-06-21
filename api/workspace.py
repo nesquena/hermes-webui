@@ -1220,14 +1220,16 @@ def list_dir(workspace: Path, rel: str='.'):
                 return  # target is under link_target — ancestor → cycle
             except ValueError:
                 pass
-            # Hide symlinks that resolve outside the workspace (can never be opened).
+            # Symlinks whose target resolves outside the workspace cannot be opened,
+            # but surface them as display-only rows so users know the link exists.
+            outside_workspace = False
             try:
                 link_target.relative_to(ws_resolved)
             except ValueError:
-                return
+                outside_workspace = True
             if _is_blocked_system_path(link_target):
                 return
-            is_dir = link_target.is_dir()
+            is_dir = False if outside_workspace else link_target.is_dir()
             display_path = name
             if rel and rel != '.':
                 display_path = rel + '/' + display_path
@@ -1240,7 +1242,9 @@ def list_dir(workspace: Path, rel: str='.'):
                 'is_dir': is_dir,
                 'mtime_ns': mtime_ns,
             }
-            if not is_dir:
+            if outside_workspace:
+                entry['target_outside_workspace'] = True
+            elif not is_dir:
                 try:
                     entry['size'] = link_target.stat().st_size
                 except OSError:
