@@ -181,8 +181,8 @@ class TestSymlinkCycleDetection:
         assert link[0]["is_dir"] is False
         assert link[0]["size"] == 11  # len("hello world")
 
-    def test_external_symlink_file_filtered_from_listing(self, cleanup_test_sessions, tmp_path_factory):
-        """External symlink files should be hidden from workspace listings."""
+    def test_external_symlink_file_display_only(self, cleanup_test_sessions, tmp_path_factory):
+        """External symlink files should appear as display-only entries."""
         ws = tmp_path_factory.mktemp("ws")
         real = tmp_path_factory.mktemp("real")
         (real / "data.txt").write_text("hello world")
@@ -190,8 +190,10 @@ class TestSymlinkCycleDetection:
 
         sid, _ = make_session(cleanup_test_sessions, ws)
         listing = get(f"/api/list?session_id={sid}&path=.")
-        names = [e["name"] for e in listing["entries"]]
-        assert "link.txt" not in names
+        link = [e for e in listing["entries"] if e["name"] == "link.txt"]
+        assert len(link) == 1, "Escape symlink file should be listed as display-only"
+        assert link[0].get("target_outside_workspace") is True
+        assert link[0]["is_dir"] is False
 
     def test_path_traversal_still_blocked(self, cleanup_test_sessions, tmp_path_factory):
         """Raw .. traversal must still be blocked even with symlink support."""
