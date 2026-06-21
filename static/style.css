@@ -5922,6 +5922,25 @@ main.main > #mainPlugin{display:none;}
 .msg-body code,
 .msg-body pre,
 .msg-body table { font-family: 'SF Mono', ui-monospace, monospace; }
+.msg-body pre,
+.preview-md pre {
+  white-space: pre-wrap !important;
+  overflow-x: hidden !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+.msg-body pre code,
+.preview-md pre code {
+  white-space: inherit !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+.msg-body pre code .token,
+.preview-md pre code .token {
+  white-space: inherit !important;
+  overflow-wrap: anywhere !important;
+  word-break: inherit !important;
+}
 .msg-body:empty { display: none; }
 .assistant-turn { width: 100%; min-width: 0; }
 .assistant-turn-blocks { display: flex; flex-direction: column; min-width: 0; }

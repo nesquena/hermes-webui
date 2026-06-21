@@ -27,3 +27,11 @@ def test_message_body_wraps_long_inline_terms_after_late_layout_override():
     # Markdown renderers often wrap prose in inline spans/em/strong/a elements;
     # keep the actual prose descendants breakable too, not only the outer body.
     assert ".msg-body :where(p, li, blockquote" in late_layout
+
+    # Desktop code/TEXT blocks should not force a horizontal scrollbar for prose
+    # instructions. The older rule only wrapped pre blocks below the mobile
+    # breakpoint, so desktop screenshots could still clip long lines.
+    assert ".msg-body pre,\n.preview-md pre" in late_layout
+    assert "white-space: pre-wrap !important;" in late_layout
+    assert "overflow-x: hidden !important;" in late_layout
+    assert ".msg-body pre code,\n.preview-md pre code" in late_layout
