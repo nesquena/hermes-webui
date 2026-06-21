@@ -92,6 +92,30 @@ may be kept in the manifest with the JSON boolean `"enabled": false`. Explicit
 `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` still work and are appended after
 manifest assets, with duplicates ignored.
 
+Extension entries may also declare a read-only loopback sidecar for diagnostics:
+
+```json
+{
+  "extensions": [
+    {
+      "id": "desktop-companion",
+      "name": "Desktop Companion",
+      "scripts": ["companion-adapter.js"],
+      "stylesheets": ["companion-adapter.css"],
+      "sidecar": {
+        "type": "loopback",
+        "origin": "http://127.0.0.1:17787",
+        "health_path": "/health"
+      }
+    }
+  ]
+}
+```
+
+Loopback sidecars do **not** change asset injection behavior. They are only
+reported by diagnostics so an operator can see that a local companion service was
+declared and optionally check its health from the browser.
+
 ## URL rules
 
 Injected asset URLs are deliberately restricted:
@@ -124,6 +148,26 @@ javascript:alert(1)
 These restrictions keep the existing Content Security Policy intact and avoid
 turning the extension hook into a third-party script loader. Invalid configured
 URLs are ignored rather than injected.
+
+## Loopback sidecar declarations
+
+Sidecar declarations are sanitized before they appear in diagnostics:
+
+- only `"type": "loopback"` is supported
+- `origin` must be an `http` or `https` origin on `127.0.0.1`, `localhost`, or
+  `[::1]`
+- `origin` must not include a username, password, path, query string, or fragment
+- `health_path` is optional and defaults to `/health`
+- when present, `health_path` must start with `/` and must not contain a scheme,
+  host, query string, fragment, quotes, control characters, backslashes, empty
+  segments, or path traversal
+
+Invalid sidecars are skipped with a stable warning code such as
+`sidecar_origin_rejected`, `sidecar_type_unsupported`,
+`sidecar_health_path_rejected`, or `sidecar_invalid`. Raw rejected origins and
+paths are never returned by the status endpoint. If `health_path` is omitted,
+diagnostics use `/health`; if `health_path` is present but invalid, the sidecar is
+skipped rather than probed.
 
 ## Static file serving
 
@@ -268,12 +312,22 @@ not enable, disable, install, or mutate extensions; it only fetches
 `/api/extensions/status` and offers a copy-diagnostics action.
 
 The diagnostics return the same public asset URLs that can already be injected
-into the HTML, plus coarse manifest status, asset counts, and warning codes for
-rejected or unavailable configuration. `manifest.script_count` and
-`manifest.stylesheet_count` count accepted assets from the manifest only;
-`counts.script_urls` and `counts.stylesheet_urls` count the final post-env-merge
-URLs. `manifest.entry_count` counts the loaded top-level manifest object and
-enabled extension entries that were inspected, not every extension object in the
-file. The endpoint and Settings panel do **not** return
-`HERMES_WEBUI_EXTENSION_DIR`, resolved manifest paths, raw environment values, or
-rejected URL strings.
+into the HTML, plus coarse manifest status, asset counts, sanitized declared
+loopback sidecars, and warning codes for rejected or unavailable configuration.
+`manifest.script_count` and `manifest.stylesheet_count` count accepted assets
+from the manifest only; `manifest.sidecar_count` counts accepted enabled loopback
+sidecars from the manifest. `counts.script_urls` and `counts.stylesheet_urls`
+count the final post-env-merge URLs, while `counts.sidecars` counts the sanitized
+sidecar list returned in `sidecars`. `manifest.entry_count` counts the loaded
+top-level manifest object and enabled extension entries that were inspected, not
+every extension object in the file. The endpoint and Settings panel do **not**
+return `HERMES_WEBUI_EXTENSION_DIR`, resolved manifest paths, raw environment
+values, rejected URL strings, rejected sidecar origins, or rejected health paths.
+
+When sanitized loopback sidecars are present, **Settings → Extensions** renders a
+read-only sidecar monitor card. The browser checks each declared `health_url`
+directly with `fetch(..., { credentials: 'omit', cache: 'no-store' })` and a
+short timeout. WebUI does **not** proxy sidecar requests and does not send WebUI
+cookies to sidecars. A successful HTTP response is shown as healthy, a non-OK
+HTTP response as unhealthy, and CORS/network/timeouts as unreachable or blocked;
+health response bodies are never rendered.
