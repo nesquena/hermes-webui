@@ -266,6 +266,13 @@ function _findQueuedEntryByClientId(sid, clientId){
   const idx=q.findIndex(e=>e&&e._client_queue_id===clientId);
   return {q,idx,entry:idx>=0?q[idx]:null};
 }
+function _deleteBackendQueuedItem(sid, serverId){
+  if(!sid||!serverId||typeof fetch!=='function')return;
+  fetch(new URL('api/session/queue/delete',document.baseURI||location.href).href,{
+    method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:sid,id:serverId}),
+  }).catch(()=>{});
+}
 function _backendAcknowledgeQueuedMessage(sid, entry){
   if(!sid||!entry||entry._server_owned||entry._server_pending)return;
   if(_queuedEntryHasBrowserOnlyFiles(entry))return;
@@ -287,7 +294,10 @@ function _backendAcknowledgeQueuedMessage(sid, entry){
   }).then(r=>r.json().then(data=>({ok:r.ok,data})).catch(()=>({ok:r.ok,data:{}})))
     .then(({ok,data})=>{
       const found=_findQueuedEntryByClientId(sid,entry._client_queue_id);
-      if(found.idx<0)return;
+      if(found.idx<0){
+        if(ok&&data&&data.item&&data.item.id)_deleteBackendQueuedItem(sid,data.item.id);
+        return;
+      }
       if(ok&&data&&data.item&&data.item.id){
         found.q[found.idx]={...found.entry,_server_pending:false,_server_owned:true,_server_queue_id:data.item.id};
       }else{
@@ -341,7 +351,12 @@ function syncBackendSessionQueue(sid){
     .then(r=>r.ok?r.json():null)
     .then(data=>{
       if(!data||!Array.isArray(data.items))return;
-      const q=_getSessionQueue(sid,true);
+      let q=_getSessionQueue(sid,false);
+      if(!q.length){
+        const persisted=_readPersistedSessionQueue(sid);
+        if(persisted.length){SESSION_QUEUES[sid]=persisted;q=persisted;}
+      }
+      if(!q.length)q=_getSessionQueue(sid,true);
       const serverIds=new Set(data.items.map(item=>String(item&&item.id||'')).filter(Boolean));
       let changed=false;
       for(let i=q.length-1;i>=0;i--){
@@ -356,7 +371,7 @@ function syncBackendSessionQueue(sid){
         const itemMatchText=itemText.trim();
         const pendingIdx=q.findIndex(e=>e&&e._server_pending&&!e._server_queue_id&&String(e.text||e.message||e.content||'').trim()===itemMatchText);
         if(pendingIdx>=0){
-          q[pendingIdx]={...q[pendingIdx],text:itemText,_server_pending:false,_server_owned:true,_server_queue_id:id};
+          q[pendingIdx]={...q[pendingIdx],text:itemText,_server_pending:false,_server_owned:true,_server_queue_id:id,_server_error:item.error||'',_server_blocked:!!item.blocked};
           changed=true;
           return;
         }
@@ -371,6 +386,8 @@ function syncBackendSessionQueue(sid){
           _server_owned:true,
           _server_pending:false,
           _server_queue_id:id,
+          _server_error:item.error||'',
+          _server_blocked:!!item.blocked,
         });
         changed=true;
       });
