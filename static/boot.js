@@ -487,7 +487,6 @@ function _micToastKeyForRecognitionError(error){
   const msgs={
     'not-allowed':'mic_denied',
     'service-not-allowed':'mic_denied',
-    'audio-capture':'mic_denied',
     'no-speech':'mic_no_speech',
     'network':'mic_network',
   };
@@ -1000,7 +999,8 @@ window._micPendingSend=window._micPendingSend||false;
       }
       if(event.error==='not-allowed'||event.error==='service-not-allowed'||event.error==='audio-capture'){
         _deactivate();
-        showToast(t(_micToastKeyForRecognitionError(event.error)||'mic_denied'));
+        const messageKey=_micToastKeyForRecognitionError(event.error);
+        showToast(messageKey?t(messageKey):t('mic_error')+event.error);
         return;
       }
       // Other errors — try to restart

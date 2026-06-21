@@ -3,10 +3,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- **Microphone errors on insecure non-local HTTP origins now explain the HTTPS/localhost requirement (#4571).** Browser dictation and hands-free voice mode now distinguish insecure-origin capture failures from normal permission denials, while preserving HTTPS and localhost/loopback behavior.
-
 ## [v0.51.560] — 2026-06-21 — Release TS (recovered run-journal output reaches the model)
 
 ### Fixed

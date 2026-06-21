@@ -10559,7 +10559,7 @@ const LOCALES = {
     cancelling: '正在取消……',
     cancel_failed: '取消失敗：',
     mic_denied: '麥克風存取遭拒。請檢查瀏覽器權限。',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: '語音輸入需要安全連線。請透過 HTTPS 或 localhost 開啟 Hermes 才能使用麥克風。',
     mic_no_speech: '未偵測到語音。請再試一次。',
     mic_network: '語音辨識無法使用。',
     mic_error: '語音輸入錯誤：',

@@ -62,6 +62,7 @@ def test_permission_style_speech_errors_use_insecure_origin_key_only_on_that_bra
         assert error in helper
     assert "_micOriginNeedsSecureContext()" in helper
     assert "return 'mic_insecure_origin';" in helper
+    assert "'audio-capture':'mic_denied'" not in helper
     assert "'network':'mic_network'" in helper
     assert "'no-speech':'mic_no_speech'" in helper
 
@@ -110,4 +111,4 @@ def test_voice_mode_preflights_and_routes_permission_errors_through_shared_helpe
     assert "_micOriginNeedsSecureContext()" in start_body
     assert "showToast(t('mic_insecure_origin'))" in start_body
     assert "_micToastKeyForRecognitionError(event.error)" in start_body
-    assert "showToast(t(_micToastKeyForRecognitionError(event.error)||'mic_denied'))" in start_body
+    assert "messageKey?t(messageKey):t('mic_error')+event.error" in start_body
