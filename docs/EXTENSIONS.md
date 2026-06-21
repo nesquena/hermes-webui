@@ -252,3 +252,23 @@ HERMES_WEBUI_EXTENSION_SCRIPT_URLS=/extensions/app.js \
 ```
 
 Open the WebUI and confirm the badge appears.
+
+## Diagnostics
+
+Authenticated administrators can inspect sanitized extension configuration at:
+
+```text
+GET /api/extensions/status
+```
+
+The endpoint is read-only and follows the normal WebUI authentication rules. It
+returns the same public asset URLs that can already be injected into the HTML,
+plus coarse manifest status, asset counts, and warning codes for rejected or
+unavailable configuration. `manifest.script_count` and
+`manifest.stylesheet_count` count accepted assets from the manifest only;
+`counts.script_urls` and `counts.stylesheet_urls` count the final post-env-merge
+URLs. `manifest.entry_count` counts the loaded top-level manifest object and
+enabled extension entries that were inspected, not every extension object in the
+file. The endpoint does **not** return
+`HERMES_WEBUI_EXTENSION_DIR`, resolved manifest paths, raw environment values, or
+rejected URL strings.

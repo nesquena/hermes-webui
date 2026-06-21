@@ -3,6 +3,18 @@
 
 ## [Unreleased]
 
+## [v0.51.549] — 2026-06-21 — Release TH (hotfix: profile switching restored for single-user named profiles)
+
+### Fixed
+
+- **Profile switching works again for normal single-user named profiles (hotfix #4586).** A regression (since v0.51.528) wrongly treated any single user running under a named profile as an isolated multi-user deployment — because isolated mode was inferred from the `HERMES_HOME` path shape (`*/profiles/<name>`), which the agent launcher exports for any named profile. The Profiles tab showed only one profile and switching was disabled. Isolated single-profile mode now requires an explicit `HERMES_WEBUI_ISOLATED_PROFILE` opt-in and is never inferred from the path shape. The opt-in is also protected from being overridden by a profile's own `.env` (on both the live-env and runtime/background-worker paths), so a pinned profile can't disable its own isolation. Thanks @nesquena-hermes.
+
+## [v0.51.548] — 2026-06-21 — Release TG (extension load diagnostics)
+
+### Added
+
+- **A read-only diagnostics endpoint that reports why an extension didn't load (#4561 follow-up).** When the extension manifest or asset URLs are configured but something isn't showing up, `GET /api/extensions/status` now reports the cause (extension dir missing/invalid, manifest rejected, an asset URL rejected for not being same-origin, final asset counts) using stable diagnostic codes and coarse sources only — it never exposes the configured filesystem path, raw environment values, or rejected URL strings. Authenticated, GET-only, and observational (it doesn't change what loads). Thanks @santastabber.
+
 ## [v0.51.547] — 2026-06-21 — Release TF (re-auth required before disabling password authentication)
 
 ### Added
