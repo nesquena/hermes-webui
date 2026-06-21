@@ -3,10 +3,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- **Escape-target symlinks are now visible in the workspace tree as display-only rows (#4510).** Previously, symlinks whose resolved target sits outside the workspace root were silently dropped by the containment filter. Now they are emitted with a `target_outside_workspace: true` flag and a distinct `external-link` icon. Clicking shows an informational dialog displaying the resolved absolute target — the link cannot be opened or navigated through from the tree. The read/list gate (`safe_resolve_ws` / `open_anchored_fd`) is unchanged and still blocks traversal. Blocked system paths (`/etc`, `/usr`) remain filtered out.
-
 ## [v0.51.547] — 2026-06-21 — Release TF (re-auth required before disabling password authentication)
 
 ### Added

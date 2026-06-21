@@ -5857,7 +5857,10 @@ function showConfirmDialog(opts={}){
   if(title) title.textContent=opts.title||t('dialog_confirm_title');
   if(desc) desc.textContent=opts.message||'';
   if(input){input.style.display='none';input.value='';}
-  if(cancelBtn) cancelBtn.textContent=opts.cancelLabel||t('cancel');
+  if(cancelBtn){
+    if(opts.hideCancel){cancelBtn.style.display='none';}
+    else{cancelBtn.style.display='';cancelBtn.textContent=opts.cancelLabel||t('cancel');}
+  }
   if(confirmBtn){
     confirmBtn.textContent=opts.confirmLabel||t('dialog_confirm_btn');
     confirmBtn.classList.toggle('danger',!!opts.danger);
@@ -14363,6 +14366,7 @@ function _renderTreeItems(container, entries, depth){
           message:t('external_link_open_confirm').replace('{target}',()=>elideMiddle(item.target||'')),
           confirmLabel:t('dialog_confirm_btn'),
           danger:false,
+          hideCancel:true,
           focusCancel:false,
         });
       };
