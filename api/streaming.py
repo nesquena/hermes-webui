@@ -4,6 +4,7 @@ Includes Sprint 10 cancel support via CANCEL_FLAGS.
 """
 import base64
 import contextlib
+import contextvars
 import json
 import logging
 import mimetypes
@@ -84,6 +85,78 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
 _ENV_LOCK = threading.Lock()
 
 _KEYLESS_CUSTOM_API_KEY = "dummy-key"
+
+_STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "webui_streaming_cron_profile_home",
+    default=None,
+)
+_STREAMING_CRONJOB_WRAPPER_INSTALLED = False
+
+
+def _install_streaming_cronjob_profile_wrapper() -> None:
+    """Wrap the agent cronjob tool so calls run under the streaming profile.
+
+    The in-chat agent run already binds per-turn contextvars for other
+    session-scoped state. Cron jobs are special because ``cron.jobs`` snapshots
+    path constants at import time, so the model-facing ``cronjob`` tool must
+    enter the existing WebUI cron profile context at the tool-call boundary.
+    That context uses the cron-specific lock and restores the module caches as
+    soon as the single cron tool call returns, avoiding long-lived global path
+    mutation for the whole agent turn.
+    """
+    global _STREAMING_CRONJOB_WRAPPER_INSTALLED
+    if _STREAMING_CRONJOB_WRAPPER_INSTALLED:
+        return
+    try:
+        from tools.registry import registry
+    except Exception:
+        logger.debug("streaming cronjob wrapper: tools registry unavailable", exc_info=True)
+        return
+
+    entry = registry.get_entry("cronjob")
+    if entry is None:
+        try:
+            import tools.cronjob_tools  # noqa: F401
+        except Exception:
+            logger.debug("streaming cronjob wrapper: cronjob tool import failed", exc_info=True)
+        entry = registry.get_entry("cronjob")
+    if entry is None:
+        logger.debug("streaming cronjob wrapper: cronjob tool not registered")
+        return
+    original_handler = entry.handler
+    if getattr(original_handler, "_webui_streaming_profile_wrapper", False):
+        _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+        return
+
+    # This relies on the agent tool executor's ``propagate_context_to_thread``
+    # using an unfiltered ``contextvars.copy_context()`` so this WebUI-owned
+    # contextvar reaches the sync cronjob handler even when the tool call runs
+    # on the agent's ThreadPoolExecutor worker.
+    def _profile_scoped_cronjob_handler(args, **kwargs):
+        profile_home = _STREAMING_CRON_PROFILE_HOME.get()
+        if not profile_home:
+            return original_handler(args, **kwargs)
+        from api.profiles import cron_profile_context_for_home
+        with cron_profile_context_for_home(Path(profile_home)):
+            return original_handler(args, **kwargs)
+
+    _profile_scoped_cronjob_handler.__dict__["_webui_streaming_profile_wrapper"] = True
+    _profile_scoped_cronjob_handler.__dict__["_webui_original_handler"] = original_handler
+    registry.register(
+        name=entry.name,
+        toolset=entry.toolset,
+        schema=entry.schema,
+        handler=_profile_scoped_cronjob_handler,
+        check_fn=entry.check_fn,
+        requires_env=entry.requires_env,
+        is_async=entry.is_async,
+        description=entry.description,
+        emoji=entry.emoji,
+        max_result_size_chars=entry.max_result_size_chars,
+        dynamic_schema_overrides=entry.dynamic_schema_overrides,
+    )
+    _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+
 
 _PERSISTENT_MEMORY_FILES = (
     ("memory", ("memories", "MEMORY.md")),
@@ -5981,6 +6054,7 @@ def _run_agent_streaming(
     # Placed ABOVE the _checkpoint_stop cluster so that cluster stays adjacent
     # to the `try:` (preserves the Issue #765 static-locator invariant).
     _turn_session_identity_tokens = None
+    _streaming_cron_profile_home_token = None
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -6027,6 +6101,7 @@ def _run_agent_streaming(
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
+            _streaming_cron_profile_home_token = _STREAMING_CRON_PROFILE_HOME.set(_profile_home)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
             _safe_profile_runtime_env = filter_runtime_env_for_gateway_parity(_profile_runtime_env)
         except ImportError:
@@ -6084,6 +6159,7 @@ def _run_agent_streaming(
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
+        _install_streaming_cronjob_profile_wrapper()
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
@@ -6108,9 +6184,12 @@ def _run_agent_streaming(
             os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
-                # Patch module-level caches to match the active profile.
+                # Patch skill module caches to match the active profile.
                 # _set_hermes_home() does this for process-wide switches
-                # but per-request switches skip it (#1700).
+                # but per-request switches skip it (#1700). The in-chat
+                # cronjob tool is wrapped separately at its tool-call boundary
+                # with cron_profile_context_for_home (#4580) so cron.jobs path
+                # caches are not mutated for the entire agent turn.
                 # Modules were prewarmed by _prewarm_skill_tool_modules()
                 # above, so we only do lightweight sys.modules lookups and
                 # attribute assignments here — no first-time import under
@@ -8770,6 +8849,8 @@ def _run_agent_streaming(
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
+        if _streaming_cron_profile_home_token is not None:
+            _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on
         # every exit path so a reused thread-pool worker leaks no identity and
