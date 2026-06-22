@@ -2391,7 +2391,7 @@
     .mobile-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
       z-index:199;-webkit-tap-highlight-color:transparent;}
     .mobile-overlay.visible{display:none;}
-    .pwa-sidebar-edge-guard{display:block;position:fixed;left:0;top:calc(38px + var(--app-titlebar-safe-top));bottom:0;width:24px;z-index:198;background:transparent;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
+    .pwa-sidebar-edge-guard{display:block;position:fixed;left:0;top:calc(38px + var(--app-titlebar-safe-top));bottom:0;width:24px;z-index:198;background:transparent;touch-action:pan-y;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
     /* Files button in topbar */
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     /* Right panel: slide-over from right */

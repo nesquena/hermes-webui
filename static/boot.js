@@ -327,7 +327,12 @@ function _onPwaSidebarSwipeStart(e){
 function _onPwaSidebarEdgeGuardStart(e){
   if(_isDesktopWidth())return;
   if(document.querySelector('.sidebar')?.classList.contains('mobile-open'))return;
-  if(e.cancelable)e.preventDefault();
+  // #4660 review: do NOT preventDefault here. Calling it unconditionally on
+  // touchstart in the left edge strip swallowed legitimate vertical scrolls and
+  // taps that merely STARTED in the strip. Just begin tracking; the move handler
+  // (_onPwaSidebarSwipeMove) calls preventDefault only once a horizontal swipe
+  // intent is established (dx>=_PWA_SIDEBAR_SWIPE_CLAIM and dx dominates dy), and
+  // the guard's CSS uses touch-action:pan-y so vertical panning stays native.
   _onPwaSidebarSwipeStart(e);
 }
 
