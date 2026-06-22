@@ -325,7 +325,7 @@ async function switchPanel(name, opts = {}) {
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
-    switchSettingsSection(_currentSettingsSection,{keepMobileSidebarOpen:true});
+    switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
   }
   if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {

@@ -294,6 +294,10 @@ function _pwaSidebarSwipePoint(e){
   return {clientX:Number(src.clientX)||0,clientY:Number(src.clientY)||0};
 }
 
+function _isTouchPointerEvent(e){
+  return !!(e&&e.pointerType==='touch');
+}
+
 function _openMobileSidebarFromGesture(){
   if(_isDesktopWidth())return;
   const sidebar=document.querySelector('.sidebar');
@@ -310,13 +314,14 @@ function _openMobileSidebarFromGesture(){
 
 function _onPwaSidebarSwipeStart(e){
   if(_isDesktopWidth())return;
+  if(_isTouchPointerEvent(e))return;
   if(e.pointerType==='mouse'||(e.pointerType&&e.pointerType!=='touch'&&e.pointerType!=='pen'))return;
   if(document.querySelector('.sidebar')?.classList.contains('mobile-open'))return;
   const point=_pwaSidebarSwipePoint(e);
   if(!point)return;
   if(point.clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
   if(_isInteractiveSwipeTarget(e.target))return;
-  _pwaSidebarSwipe={startX:point.clientX,startY:point.clientY,active:true,opened:false,claimed:false};
+  _pwaSidebarSwipe={startX:point.clientX,startY:point.clientY,active:true,opened:false};
 }
 
 function _onPwaSidebarEdgeGuardStart(e){
@@ -324,10 +329,10 @@ function _onPwaSidebarEdgeGuardStart(e){
   if(document.querySelector('.sidebar')?.classList.contains('mobile-open'))return;
   if(e.cancelable)e.preventDefault();
   _onPwaSidebarSwipeStart(e);
-  if(_pwaSidebarSwipe)_pwaSidebarSwipe.claimed=true;
 }
 
 function _onPwaSidebarSwipeMove(e){
+  if(_isTouchPointerEvent(e))return;
   const swipe=_pwaSidebarSwipe;
   if(!swipe||!swipe.active||swipe.opened)return;
   const point=_pwaSidebarSwipePoint(e);
@@ -337,7 +342,6 @@ function _onPwaSidebarSwipeMove(e){
   if(dx<0||Math.abs(dy)>_PWA_SIDEBAR_SWIPE_MAX_VERTICAL*1.5){_pwaSidebarSwipe=null;return;}
   if(dx>=_PWA_SIDEBAR_SWIPE_CLAIM&&dx>Math.abs(dy)*1.2){
     if(e.cancelable)e.preventDefault();
-    swipe.claimed=true;
   }
   if(dx>=_PWA_SIDEBAR_SWIPE_TRIGGER&&Math.abs(dy)<=_PWA_SIDEBAR_SWIPE_MAX_VERTICAL&&dx>Math.abs(dy)*1.5){
     if(e.cancelable)e.preventDefault();
@@ -346,8 +350,8 @@ function _onPwaSidebarSwipeMove(e){
   }
 }
 
-function _onPwaSidebarSwipeEnd(){_pwaSidebarSwipe=null;}
-function _onPwaSidebarSwipeCancel(){_pwaSidebarSwipe=null;}
+function _onPwaSidebarSwipeEnd(e){if(_isTouchPointerEvent(e))return;_pwaSidebarSwipe=null;}
+function _onPwaSidebarSwipeCancel(e){if(_isTouchPointerEvent(e))return;_pwaSidebarSwipe=null;}
 
 function _installPwaSidebarSwipeGesture(){
   const guard=document.getElementById('pwaSidebarEdgeGuard');

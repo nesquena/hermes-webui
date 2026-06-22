@@ -708,8 +708,9 @@ def test_mobile_sidebar_detail_selections_share_close_helper():
         )
     settings_body = _js_function_body(panels_js, "switchSettingsSection")
     assert "if(opts&&opts.fromSidebarItem)_closeMobileSidebarAfterPanelSelection()" in settings_body
-    assert "switchSettingsSection(_currentSettingsSection,{keepMobileSidebarOpen:true})" in panels_js, (
-        "Opening Settings panel should not immediately close the mobile sidebar"
+    assert "switchSettingsSection(_currentSettingsSection);" in panels_js
+    assert "mobile-panel-drawer', 'mobile-open'" in panels_js, (
+        "Opening Settings from the rail should keep the mobile drawer available"
     )
     for section in ["conversation", "appearance", "preferences", "providers", "plugins", "extensions", "system", "help"]:
         assert f"switchSettingsSection('{section}',{{fromSidebarItem:true}})" in HTML, (

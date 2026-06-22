@@ -17,6 +17,8 @@ def test_pwa_edge_swipe_gesture_is_registered_for_mobile_sidebar():
     assert "window.addEventListener('pointermove', _onPwaSidebarSwipeMove" in BOOT_JS
     assert "window.addEventListener('pointerup', _onPwaSidebarSwipeEnd" in BOOT_JS
     assert "window.addEventListener('pointercancel', _onPwaSidebarSwipeCancel" in BOOT_JS
+    assert "function _isTouchPointerEvent" in BOOT_JS
+    assert "if(_isTouchPointerEvent(e))return" in BOOT_JS
 
 
 def test_pwa_sidebar_swipe_is_edge_gated_standalone_and_horizontal():
@@ -41,7 +43,7 @@ def test_pwa_sidebar_edge_guard_claims_touchstart_immediately():
     body = BOOT_JS[BOOT_JS.find("function _onPwaSidebarEdgeGuardStart"):BOOT_JS.find("function _onPwaSidebarSwipeMove")]
     assert "if(e.cancelable)e.preventDefault()" in body
     assert "_onPwaSidebarSwipeStart(e)" in body
-    assert "_pwaSidebarSwipe.claimed=true" in body
+    assert ".claimed" not in BOOT_JS
 
 
 def test_pwa_sidebar_swipe_opens_existing_mobile_drawer_without_desktop_collapse():

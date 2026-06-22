@@ -48,7 +48,11 @@ def test_kanban_has_sidebar_panel_and_main_board_mounts():
 
 
 def test_switch_panel_lazy_loads_kanban_and_toggles_main_view():
-    assert "'kanban'" in re.search(r"\[[^\]]+\]\.forEach\(p => \{\s*mainEl\.classList", PANELS).group(0)
+    main_view_panels = re.search(r"const MAIN_VIEW_PANELS = \[([^\]]+)\];", PANELS)
+    assert main_view_panels, "MAIN_VIEW_PANELS should define main-view panels"
+    assert "'kanban'" in main_view_panels.group(1)
+    assert "MAIN_VIEW_PANELS.forEach(p => {" in PANELS
+    assert "mainEl.classList.toggle('showing-' + p, nextPanel === p);" in PANELS
     assert "if (nextPanel === 'kanban') await loadKanban();" in PANELS
     assert "if (_currentPanel === 'kanban') await loadKanban();" in PANELS
 

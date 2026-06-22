@@ -45,7 +45,7 @@ def _contains_post_method(block: str) -> bool:
 
 def test_settings_sidebar_has_extensions_section_and_pane():
     assert 'data-settings-section="extensions"' in INDEX_HTML
-    assert "switchSettingsSection('extensions')" in INDEX_HTML
+    assert "switchSettingsSection('extensions',{fromSidebarItem:true})" in INDEX_HTML
     assert 'id="settingsPaneExtensions"' in INDEX_HTML
     assert 'id="extensionsDiagnostics"' in INDEX_HTML
     assert 'id="extensionsCopyDiagnosticsBtn"' in INDEX_HTML
