@@ -4098,16 +4098,39 @@ function ensureSessionEventsSSE(){
 
 if(typeof window!=='undefined') window.refreshSessionList = refreshSessionList;
 
+let _gatewayPollVisibilityHandler = null; // saved for cleanup in stopGatewayPollFallback
+
 function startGatewayPollFallback(ms){
   const intervalMs = Math.max(5000, Number(ms) || _gatewayFallbackPollMs);
   if(_gatewayPollTimer) clearInterval(_gatewayPollTimer);
-  _gatewayPollTimer = setInterval(() => { renderSessionList({deferWhileInteracting:true}); }, intervalMs);
+  _gatewayPollTimer = setInterval(() => {
+    // Skip poll when tab is hidden or a stream is active — saves CPU
+    // and avoids redundant DOM renders during active streaming (#4704).
+    if(typeof document !== 'undefined' && document.hidden) return;
+    if(typeof S !== 'undefined' && (S.busy || S.activeStreamId)) return;
+    renderSessionList({deferWhileInteracting:true});
+  }, intervalMs);
+  // Visibility catch-up: refresh immediately when tab re-gains focus,
+  // so no gateway updates are dropped during hidden-skip periods.
+  // Save the handler so it can be removed when polling stops (see Greptile review #4730).
+  if(typeof document !== 'undefined' && !_gatewayPollVisibilityHandler){
+    _gatewayPollVisibilityHandler = () => {
+      if(!document.hidden && typeof renderSessionList === 'function'){
+        void renderSessionList({deferWhileInteracting:false});
+      }
+    };
+    document.addEventListener('visibilitychange', _gatewayPollVisibilityHandler);
+  }
 }
 
 function stopGatewayPollFallback(){
   if(_gatewayPollTimer){
     clearInterval(_gatewayPollTimer);
     _gatewayPollTimer = null;
+  }
+  if(_gatewayPollVisibilityHandler && typeof document !== 'undefined'){
+    document.removeEventListener('visibilitychange', _gatewayPollVisibilityHandler);
+    _gatewayPollVisibilityHandler = null;
   }
 }
 
