@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.568] — 2026-06-22 — Release UA (toggle installed extensions)
+
+### Added
+
+- **Enable or disable installed extensions from Settings → Extensions.** You can now toggle already-installed manifest extensions on or off directly in the UI, without editing the extension manifest. The choice is stored in a small WebUI-managed state file (`extension-overrides.json`); a disabled extension's scripts, stylesheets, and loopback sidecars are suppressed end-to-end. Extensions that are disabled in their own manifest stay non-toggleable. The toggle endpoint is authentication- and CSRF-gated, and WebUI never edits extension manifests, fetches their assets, or proxies their sidecars. Thanks @santastabber. (#4637)
+
 ## [v0.51.567] — 2026-06-22 — Release TZ (optional titlebar profile switcher)
 
 ### Added

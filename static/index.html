@@ -1396,13 +1396,13 @@
             <div class="settings-section-head">
               <div>
                 <div class="settings-section-title" data-i18n="settings_tab_extensions">Extensions</div>
-                <div class="settings-section-meta">Read-only diagnostics for configured WebUI extensions.</div>
+                <div class="settings-section-meta">Diagnostics and enable/disable controls for configured WebUI extensions.</div>
               </div>
               <button class="sm-btn extensions-copy-diagnostics-btn" id="extensionsCopyDiagnosticsBtn" type="button" onclick="copyExtensionsDiagnostics()" disabled>Copy diagnostics</button>
             </div>
             <div class="settings-field extensions-trust-note" id="extensionsTrustModel">
               <label>Trust model</label>
-              <div>Extensions run in the WebUI browser origin and can access the same authenticated APIs as this session. Only load trusted local extension directories.</div>
+              <div>Extensions run in the WebUI browser origin and can access the same authenticated APIs as this session. Only load trusted local extension directories; disabling an extension takes effect after reload for already-injected assets.</div>
             </div>
             <div id="extensionsDiagnostics" class="extensions-diagnostics" aria-live="polite">
               <div class="extensions-loading">Loading extension diagnostics…</div>

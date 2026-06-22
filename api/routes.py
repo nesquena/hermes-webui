@@ -10307,6 +10307,20 @@ def handle_post(handler, parsed) -> bool:
 
         return j(handler, check_for_updates(force=force, include_agent=include_agent_updates))
 
+    if parsed.path == "/api/extensions/toggle":
+        from api.extensions import ExtensionToggleError, set_extension_user_enabled
+
+        try:
+            return j(
+                handler,
+                set_extension_user_enabled(body.get("id"), body.get("enabled")),
+            )
+        except ExtensionToggleError as exc:
+            return bad(handler, str(exc), status=exc.status)
+        except Exception:
+            logger.exception("extension toggle failed")
+            return bad(handler, "Failed to update extension state", status=500)
+
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())

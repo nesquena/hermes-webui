@@ -7635,7 +7635,7 @@ async function loadSettingsPanel(){
 }
 
 
-// ── Extensions panel (read-only browser-origin diagnostics) ────────────────
+// ── Extensions panel (browser-origin diagnostics + local enable controls) ──
 
 function _extensionStatusLabel(value){
   return value ? 'Enabled' : 'Disabled';
@@ -7658,15 +7658,63 @@ function _extensionWarningList(warnings){
     return '<div class="extension-url-empty">No warnings.</div>';
   }
   return '<ul class="extension-warning-list">'+warnings.map(item=>{
-    const code=esc((item&&item.code)||'unknown_warning');
+    const rawCode=(item&&item.code)||'unknown_warning';
+    const code=esc(rawCode);
     const source=esc((item&&item.source)||'unknown');
-    return `<li><code>${code}</code><span>${source}</span></li>`;
+    const hint=rawCode==='extension_state_unknown_ids'
+      ? '<span>Some saved disabled-extension overrides no longer match the current manifest; re-added extensions with the same id may stay disabled.</span>'
+      : '';
+    return `<li><code>${code}</code><span>${source}</span>${hint}</li>`;
   }).join('')+'</ul>';
 }
 
 function _extensionCountValue(counts,key,urls){
   if(counts&&Number.isFinite(Number(counts[key]))) return Number(counts[key]);
   return Array.isArray(urls)?urls.length:0;
+}
+
+function _extensionEntryStatusLabel(entry){
+  const status=(entry&&entry.status)||'';
+  if(status==='manifest_disabled') return 'Disabled in manifest';
+  if(status==='user_disabled') return 'Disabled';
+  if(status==='enabled') return 'Enabled';
+  return 'Unknown';
+}
+
+function _extensionEntryBadge(entry){
+  const enabled=!!(entry&&entry.effective_enabled);
+  const cls=enabled?'extension-status-badge-on':'extension-status-badge-off';
+  return `<span class="extension-status-badge ${cls}">${esc(_extensionEntryStatusLabel(entry))}</span>`;
+}
+
+function _extensionInstalledList(extensions,extensionDirConfigured){
+  const list=Array.isArray(extensions)?extensions:[];
+  if(!list.length){
+    if(!extensionDirConfigured) return '<div class="extension-url-empty">No extension directory is configured.</div>';
+    return '<div class="extension-url-empty">No manifest extensions are installed in the configured bundle.</div>';
+  }
+  return `<div class="extension-installed-list">${list.map(entry=>{
+    const id=(entry&&entry.id)||'';
+    const name=(entry&&entry.name)||id||'Unnamed extension';
+    const canToggle=!!(entry&&entry.can_toggle);
+    const userEnabled=!!(entry&&entry.user_enabled);
+    const disabledAttr=canToggle?'':' disabled aria-disabled="true"';
+    const buttonText=userEnabled?'Disable':'Enable';
+    const nextEnabled=userEnabled?'false':'true';
+    const note=canToggle
+      ? 'Toggles the WebUI-managed override for the next app load.'
+      : 'Manifest-disabled entries cannot be enabled from WebUI.';
+    return `<div class="extension-installed-row" data-extension-id="${esc(id)}">
+      <div class="extension-installed-main">
+        <div class="extension-installed-title-row">
+          <div class="extension-installed-title">${esc(name)}</div>
+          ${_extensionEntryBadge(entry)}
+        </div>
+        <div class="extension-installed-meta"><code>${esc(id)}</code><span>${esc(note)}</span></div>
+      </div>
+      <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
+    </div>`;
+  }).join('')}</div>`;
 }
 
 function _extensionSidecarHealthBadge(status,label){
@@ -7757,16 +7805,19 @@ function _renderExtensionsPanel(data,seq){
   const scripts=Array.isArray(data&&data.script_urls)?data.script_urls:[];
   const styles=Array.isArray(data&&data.stylesheet_urls)?data.stylesheet_urls:[];
   const sidecars=Array.isArray(data&&data.sidecars)?data.sidecars:[];
+  const extensions=Array.isArray(data&&data.extensions)?data.extensions:[];
   const statusClass=(data&&data.enabled)?'extension-card-enabled':'extension-card-disabled';
   const scriptCount=_extensionCountValue(counts,'script_urls',scripts);
   const styleCount=_extensionCountValue(counts,'stylesheet_urls',styles);
   const sidecarCount=_extensionCountValue(counts,'sidecars',sidecars);
+  const manifestExtensionCount=_extensionCountValue(counts,'manifest_extensions',extensions);
+  const userDisabledCount=_extensionCountValue(counts,'user_disabled',[]);
   target.innerHTML=`
     <div class="provider-card extension-status-card ${statusClass}">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
           <div class="provider-card-name">Extension runtime</div>
-          <div class="provider-card-meta">Read-only status from /api/extensions/status</div>
+          <div class="provider-card-meta">Status from /api/extensions/status; toggles persist a local override for installed manifest entries.</div>
         </div>
         <span class="provider-card-badge ${data&&data.enabled?'':'plugin-card-badge-disabled'}">${_extensionStatusLabel(!!(data&&data.enabled))}</span>
       </div>
@@ -7784,7 +7835,20 @@ function _renderExtensionsPanel(data,seq){
           <div><span>Final script count</span><code>${scriptCount}</code></div>
           <div><span>Final stylesheet count</span><code>${styleCount}</code></div>
           <div><span>Loopback sidecar count</span><code>${sidecarCount}</code></div>
+          <div><span>Installed manifest extensions</span><code>${manifestExtensionCount}</code></div>
+          <div><span>User-disabled extensions</span><code>${userDisabledCount}</code></div>
         </div>
+      </div>
+    </div>
+    <div class="provider-card extension-installed-card">
+      <div class="provider-card-header plugin-card-header">
+        <div class="provider-card-info">
+          <div class="provider-card-name">Installed manifest extensions</div>
+          <div class="provider-card-meta">Enable or disable already-present local extensions. Reload WebUI to apply injected asset changes to this browser tab.</div>
+        </div>
+      </div>
+      <div class="provider-card-body extension-card-body">
+        ${_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured))}
       </div>
     </div>
     <div class="provider-card extension-assets-card">
@@ -7814,7 +7878,34 @@ function _renderExtensionsPanel(data,seq){
       </div>
     </div>
   `;
+  _bindExtensionToggleButtons(target);
   _monitorExtensionSidecars(sidecars,seq);
+}
+
+function _bindExtensionToggleButtons(root){
+  if(!root) return;
+  root.querySelectorAll('[data-extension-toggle-id]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionToggle(btn));
+  });
+}
+
+async function handleExtensionToggle(btn){
+  if(!btn||btn.disabled) return;
+  const id=btn.dataset.extensionToggleId||'';
+  const enabled=btn.dataset.extensionNextEnabled==='true';
+  if(!id) return;
+  const previousText=btn.textContent;
+  btn.disabled=true;
+  btn.textContent=enabled?'Enabling…':'Disabling…';
+  try{
+    const data=await api('/api/extensions/toggle',{method:'POST',body:JSON.stringify({id,enabled})});
+    showToast(enabled?'Extension enabled. Reload WebUI to apply changes.':'Extension disabled. Reload WebUI to apply changes.');
+    _renderExtensionsPanel(data,++_extensionsSidecarMonitorSeq);
+  }catch(e){
+    btn.disabled=false;
+    btn.textContent=previousText;
+    showToast('Failed to update extension: '+(e&&e.message?e.message:String(e)));
+  }
 }
 
 async function loadExtensionsPanel(){
