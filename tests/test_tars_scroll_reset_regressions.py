@@ -92,14 +92,48 @@ def test_user_scroll_cancels_delayed_bottom_settling():
     listener_block = _scroll_listener_block()
     record = _function_body(UI_JS, "function _recordNonMessageScrollIntent")
     pinned = _function_body(UI_JS, "function scrollIfPinned")
+    final = _function_body(UI_JS, "function _settleFinalScroll")
 
     assert "function _cancelBottomSettle" in UI_JS
     assert "_cancelBottomSettle();" in listener_block
     assert "e.deltaY< -30" in record
     assert "_cancelBottomSettle();" in record
+    assert "_lastNonMessageScrollIntentMs=performance.now();" in record
     assert "_scrollPinned=false" in record
     assert "if(_messageUserUnpinned) return;" in pinned
+    assert "_messageUserUnpinned" in final and "return" in final
     assert "_recentMessageUpwardIntent()" not in pinned
+
+
+def test_external_active_refresh_defers_while_reader_is_manually_unpinned():
+    refresh = _function_body(SESSIONS_JS, "async function refreshActiveSessionIfExternallyUpdated")
+
+    assert "_isMessageReaderUnpinned" in UI_JS
+    assert "_deferActiveSessionExternalRefresh" in SESSIONS_JS
+    assert "typeof _isMessageReaderUnpinned==='function'&&_isMessageReaderUnpinned()" in refresh
+    assert "_deferActiveSessionExternalRefresh(reason||'poll');" in refresh
+    assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});" in refresh
+
+
+def test_session_switch_clears_deferred_active_refresh_reason():
+    load = _function_body(SESSIONS_JS, "async function loadSession")
+    assert "function _clearDeferredActiveSessionExternalRefresh()" in SESSIONS_JS
+    assert "_deferredActiveSessionExternalRefreshReason = '';" in SESSIONS_JS
+    assert "if (currentSid !== sid) {\n    _clearDeferredActiveSessionExternalRefresh();\n  }" in load
+
+
+def test_deferred_active_refresh_keeps_idle_reconcile_over_poll():
+    defer = _function_body(SESSIONS_JS, "function _deferActiveSessionExternalRefresh")
+    assert "const nextReason = reason || 'poll';" in defer
+    assert "_deferredActiveSessionExternalRefreshReason==='idle-reconcile'&&nextReason==='poll'" in defer
+    assert "_deferredActiveSessionExternalRefreshReason = nextReason;" in defer
+
+
+def test_scroll_to_bottom_flushes_deferred_active_refresh_after_explicit_repin():
+    scroll = _function_body(UI_JS, "function scrollToBottom")
+
+    assert "_flushDeferredActiveSessionExternalRefresh" in SESSIONS_JS
+    assert "_flushDeferredActiveSessionExternalRefresh" in scroll
 
 
 def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
@@ -109,7 +143,7 @@ def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
     capture = _function_body(UI_JS, "function _captureMessageScrollSnapshot")
     restore = _function_body(UI_JS, "function _restoreMessageScrollSnapshot")
 
-    snapshot_idx = render.index("const scrollSnapshot=(preserveScroll||(!_autoScrollFollow&&_messageUserUnpinned))?_captureMessageScrollSnapshot():null")
+    snapshot_idx = render.index("const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null")
     inner_idx = render.index("const inner=$('msgInner')")
     final_scroll_idx = render.rindex("_scrollAfterMessageRender(preserveScroll, scrollSnapshot)")
 
@@ -122,7 +156,41 @@ def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
     assert "_shouldFollowMessagesOnDomReplace()" in follow
     assert "scrollToBottom();" in follow
     assert "anchor:(typeof _captureMessageViewportAnchor==='function')?_captureMessageViewportAnchor():null" in capture
+    assert "sessionIdx:Number.isFinite(sessionIdx)?sessionIdx:_messageSessionIndexForRawIdx(rawIdx)" in UI_JS
+    assert "key:row&&row.dataset?String(row.dataset.messageAnchorKey||''):''" in UI_JS
+    assert "row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);" in UI_JS
+    assert "seg.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);" in UI_JS
+    assert "row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);" in UI_JS
+    assert "seg.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);" in UI_JS
+    assert "container.querySelector(`[data-session-msg-idx=\"${sessionIdx}\"]`)" in UI_JS
+    assert "if(!row&&anchorKey) return false;" in UI_JS
+    assert "if(!row&&hasSessionIdx) return false;" in UI_JS
     assert "_restoreMessageViewportAnchor(snapshot.anchor,0)" in restore
     assert "if(!restoredViaAnchor){" in restore
     assert "el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop))" in restore
     assert "_programmaticScroll=true" in restore
+
+
+def test_same_session_reload_anchor_uses_absolute_session_message_index():
+    assert "function _messageSessionIndexBase()" in UI_JS
+    assert "return _messageSessionIndexBase()+n;" in UI_JS
+    assert "return n-_messageSessionIndexBase();" in UI_JS
+    assert "data-session-msg-idx" in UI_JS
+    assert "data-message-anchor-key" in UI_JS
+    assert "function _messageViewportAnchorKeyForMessage" in UI_JS
+    assert "function _messageVisibleIndexForAnchorKey" in UI_JS
+    assert "function _remountMessageViewportAnchor" in UI_JS
+    assert "visibleKeyNode=anchorKey" in UI_JS
+    assert "visIdx=anchorKey?_messageVisibleIndexForAnchorKey(anchorKey,visWithIdx):-1" in UI_JS
+    assert "if(!restoredViaAnchor&&typeof _remountMessageViewportAnchor==='function'&&_remountMessageViewportAnchor(snapshot.anchor))" in UI_JS
+    assert "const rawFromSession=_messageRawIdxForSessionIndex(sessionIdx);" in UI_JS
+
+
+def test_refresh_session_updates_message_window_offset_before_rerender():
+    refresh = _function_body(UI_JS, "function refreshSession")
+    messages_idx = refresh.index("S.messages = data.session.messages || [];")
+    truncated_idx = refresh.index("_messagesTruncated = !!data.session._messages_truncated;")
+    offset_idx = refresh.index("_oldestIdx = data.session._messages_offset || 0;")
+    render_idx = refresh.index("_renderMessagesWithScrollSnapshot();")
+
+    assert messages_idx < truncated_idx < offset_idx < render_idx

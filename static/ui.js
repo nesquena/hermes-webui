@@ -734,6 +734,35 @@ function _messageVisibleIndexForRawIdx(rawIdx, visWithIdx){
   }
   return -1;
 }
+function _messageViewportAnchorKeyForMessage(m){
+  if(typeof _compressionMessageAnchorKey!=='function') return '';
+  const key=_compressionMessageAnchorKey(m);
+  if(!key) return '';
+  return [key.role||'',key.ts??'',key.attachments??0,key.text||''].map(v=>encodeURIComponent(String(v))).join('|');
+}
+function _messageVisibleIndexForAnchorKey(anchorKey, visWithIdx){
+  const key=String(anchorKey||'');
+  if(!key) return -1;
+  const list=Array.isArray(visWithIdx)?visWithIdx:_getVisibleMessagesWithIdx();
+  for(let i=0;i<list.length;i++){
+    if(list[i]&&_messageViewportAnchorKeyForMessage(list[i].m)===key) return i;
+  }
+  return -1;
+}
+function _messageSessionIndexBase(){
+  const n=Number(typeof _oldestIdx!=='undefined'?_oldestIdx:0);
+  return Number.isFinite(n)?Math.max(0,n):0;
+}
+function _messageSessionIndexForRawIdx(rawIdx){
+  const n=Number(rawIdx);
+  if(!Number.isFinite(n)) return null;
+  return _messageSessionIndexBase()+n;
+}
+function _messageRawIdxForSessionIndex(sessionIdx){
+  const n=Number(sessionIdx);
+  if(!Number.isFinite(n)) return null;
+  return n-_messageSessionIndexBase();
+}
 function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container){
   const idx=Math.max(0,Number(visibleIdx)||0);
   _syncMessageVirtualHeightCache(visWithIdx);
@@ -759,7 +788,13 @@ function _captureMessageViewportAnchor(){
     if(!Number.isFinite(rawIdx)) continue;
     const rect=row.getBoundingClientRect();
     if(rect.bottom>containerRect.top+1){
-      return {rawIdx, topOffset:rect.top-containerRect.top};
+      const sessionIdx=Number(row&&row.dataset&&row.dataset.sessionMsgIdx);
+      return {
+        rawIdx,
+        sessionIdx:Number.isFinite(sessionIdx)?sessionIdx:_messageSessionIndexForRawIdx(rawIdx),
+        key:row&&row.dataset?String(row.dataset.messageAnchorKey||''):'',
+        topOffset:rect.top-containerRect.top,
+      };
     }
   }
   return null;
@@ -767,9 +802,16 @@ function _captureMessageViewportAnchor(){
 function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const container=$('messages');
   if(!container||!anchor) return false;
+  const anchorKey=String(anchor.key||'');
+  let row=anchorKey?Array.from(container.querySelectorAll('[data-message-anchor-key]')).find(el=>el&&el.dataset&&el.dataset.messageAnchorKey===anchorKey):null;
+  if(row&&row.getClientRects&&row.getClientRects().length===0) row=null;
+  if(!row&&anchorKey) return false;
+  const sessionIdx=Number(anchor.sessionIdx);
+  const hasSessionIdx=Number.isFinite(sessionIdx);
+  if(!row&&hasSessionIdx) row=container.querySelector(`[data-session-msg-idx="${sessionIdx}"]`);
+  if(!row&&hasSessionIdx) return false;
   const targetIdx=Number(anchor.rawIdx)+Number(rawIdxDelta||0);
-  if(!Number.isFinite(targetIdx)) return false;
-  const row=container.querySelector(`[data-msg-idx="${targetIdx}"]`);
+  if(!row&&Number.isFinite(targetIdx)) row=container.querySelector(`[data-msg-idx="${targetIdx}"]`);
   if(!row) return false;
   const containerRect=container.getBoundingClientRect();
   const rect=row.getBoundingClientRect();
@@ -783,15 +825,27 @@ let _messageViewportAnchorRemounting=false;
 function _remountMessageViewportAnchor(anchor){
   const container=$('messages');
   if(!container||!anchor||_messageViewportAnchorRemounting) return false;
+  const anchorKey=String(anchor.key||'');
+  const visibleKeyNode=anchorKey
+    ? Array.from(container.querySelectorAll('[data-message-anchor-key]')).find(node=>node&&node.dataset&&node.dataset.messageAnchorKey===anchorKey&&(!node.getClientRects||node.getClientRects().length>0))
+    : null;
+  if(visibleKeyNode) return true;
+  const sessionIdx=Number(anchor.sessionIdx);
+  const hasSessionIdx=Number.isFinite(sessionIdx);
+  if(!anchorKey&&hasSessionIdx&&container.querySelector(`[data-session-msg-idx="${sessionIdx}"]`)) return true;
   const targetIdx=Number(anchor.rawIdx);
-  if(!Number.isFinite(targetIdx)) return false;
-  if(container.querySelector(`[data-msg-idx="${targetIdx}"]`)) return true;
+  if(!anchorKey&&!hasSessionIdx&&Number.isFinite(targetIdx)&&container.querySelector(`[data-msg-idx="${targetIdx}"]`)) return true;
   if(typeof _getVisibleMessagesWithIdx!=='function'||
      typeof _messageVisibleIndexForRawIdx!=='function'||
      typeof _messageVirtualScrollTopForVisibleIdx!=='function'||
      typeof renderMessages!=='function') return false;
   const visWithIdx=_getVisibleMessagesWithIdx();
-  const visIdx=_messageVisibleIndexForRawIdx(targetIdx,visWithIdx);
+  let visIdx=anchorKey?_messageVisibleIndexForAnchorKey(anchorKey,visWithIdx):-1;
+  if(visIdx<0&&hasSessionIdx){
+    const rawFromSession=_messageRawIdxForSessionIndex(sessionIdx);
+    if(Number.isFinite(rawFromSession)) visIdx=_messageVisibleIndexForRawIdx(rawFromSession,visWithIdx);
+  }
+  if(visIdx<0&&Number.isFinite(targetIdx)) visIdx=_messageVisibleIndexForRawIdx(targetIdx,visWithIdx);
   if(visIdx<0) return false;
   // A virtualized anchor may be outside the current DOM. Scroll to its virtual
   // row and render once so the semantic restore below has a real target.
@@ -805,7 +859,11 @@ function _remountMessageViewportAnchor(anchor){
     _messageViewportAnchorRemounting=false;
     requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
   }
-  return !!container.querySelector(`[data-msg-idx="${targetIdx}"]`);
+  if(anchorKey){
+    return !!Array.from(container.querySelectorAll('[data-message-anchor-key]')).find(node=>node&&node.dataset&&node.dataset.messageAnchorKey===anchorKey&&(!node.getClientRects||node.getClientRects().length>0));
+  }
+  if(hasSessionIdx) return !!container.querySelector(`[data-session-msg-idx="${sessionIdx}"]`);
+  return Number.isFinite(targetIdx)&&!!container.querySelector(`[data-msg-idx="${targetIdx}"]`);
 }
 function _compensateScrollForMeasurementDelta(renderFn){
   const container=$('messages');
@@ -3625,8 +3683,39 @@ let _settleTimer=0;
 let _settleFinalTimer=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
 let _touchStartY=null;
+let _messageTouchScrollActive=false;
+let _lastMessageTouchScrollIntentMs=-Infinity;
+let _deferredOlderMessagesTimer=0;
+const MESSAGE_TOUCH_SCROLL_SUPPRESS_MS=1200;
 let _newMessageCueVisible=false;
 function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
+function _markMessageTouchScrollIntent(active=true){
+  _messageTouchScrollActive=!!active;
+  _lastMessageTouchScrollIntentMs=performance.now();
+}
+function _recentMessageTouchScrollIntent(){
+  return _messageTouchScrollActive || performance.now()-_lastMessageTouchScrollIntentMs<MESSAGE_TOUCH_SCROLL_SUPPRESS_MS;
+}
+function _isMessageReaderUnpinned(){
+  return !!_messageUserUnpinned;
+}
+function _olderMessagesPrefetchReady(){
+  const el=document.getElementById('messages');
+  if(!el) return false;
+  const olderPrefetchPx=Math.max(600,el.clientHeight*1.5);
+  return _isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function';
+}
+function _scheduleDeferredOlderMessagesLoad(){
+  clearTimeout(_deferredOlderMessagesTimer);
+  _deferredOlderMessagesTimer=setTimeout(()=>{
+    _deferredOlderMessagesTimer=0;
+    if(_recentMessageTouchScrollIntent()){
+      _scheduleDeferredOlderMessagesLoad();
+      return;
+    }
+    if(_olderMessagesPrefetchReady()) _loadOlderMessages();
+  },MESSAGE_TOUCH_SCROLL_SUPPRESS_MS+50);
+}
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
   const target=e&&e.target;
@@ -3634,6 +3723,7 @@ function _recordNonMessageScrollIntent(e){
   if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
   else if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)){
     _cancelBottomSettle();
+    if(e.type==='touchmove') _markMessageTouchScrollIntent(true);
     if(typeof e.deltaY==='number'&&e.deltaY< -30){
       _messageUserUnpinned=true;
       _nearBottomCount=0;
@@ -3700,10 +3790,12 @@ if(typeof document!=='undefined'){
   document.addEventListener('wheel',_recordNonMessageScrollIntent,{capture:true,passive:true});
   document.addEventListener('touchmove',_recordNonMessageScrollIntent,{capture:true,passive:true});
   document.addEventListener('touchstart',function(e){
+    const el=document.getElementById('messages');
     if(e.touches&&e.touches[0]) _touchStartY=e.touches[0].clientY;
+    if(el&&e.target&&el.contains(e.target)) _markMessageTouchScrollIntent(true);
   },{capture:true,passive:true});
-  document.addEventListener('touchend',function(){ _touchStartY=null; },{capture:true,passive:true});
-  document.addEventListener('touchcancel',function(){ _touchStartY=null; },{capture:true,passive:true});
+  document.addEventListener('touchend',function(){ _touchStartY=null; if(_messageTouchScrollActive) _markMessageTouchScrollIntent(false); },{capture:true,passive:true});
+  document.addEventListener('touchcancel',function(){ _touchStartY=null; if(_messageTouchScrollActive) _markMessageTouchScrollIntent(false); },{capture:true,passive:true});
 }
 // Reset hook for session-switch — called from sessions.js loadSession() to
 // prevent the new chat's first scroll comparing against the previous chat's
@@ -3715,6 +3807,10 @@ function _resetScrollDirectionTracker(){
   _scrollPinned=true;
   _nearBottomCount=0;
   _touchStartY=null;
+  _messageTouchScrollActive=false;
+  _lastMessageTouchScrollIntentMs=-Infinity;
+  clearTimeout(_deferredOlderMessagesTimer);
+  _deferredOlderMessagesTimer=0;
 }
 function _resetStreamScrollFollow(){
   _clearNewMessageScrollCue();
@@ -3848,7 +3944,8 @@ if(typeof window!=='undefined'){
       // the user's continued upward wheel/touch movement.
       const olderPrefetchPx=Math.max(600,el.clientHeight*1.5);
       if(_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
-        _loadOlderMessages();
+        if(_recentMessageTouchScrollIntent()) _scheduleDeferredOlderMessagesLoad();
+        else _loadOlderMessages();
       }
     });
   });
@@ -4430,6 +4527,10 @@ function _settleFinalScroll(token){
   if(token!==_bottomSettleToken) return;
   const el=document.getElementById('messages');
   if(!el){ _programmaticScroll=false; return; }
+  if(_messageUserUnpinned||!_scrollPinned||_recentNonMessageScrollIntent()||_recentMessageTouchScrollIntent()){
+    _programmaticScroll=false;
+    return;
+  }
   _programmaticScroll=true;
   el.scrollTop=el.scrollHeight;
   _lastScrollTop=el.scrollTop;
@@ -4460,6 +4561,7 @@ function scrollToBottom(){
   _settleMessageScrollToBottom(false, true);
   _syncScrollToBottomCue(false,{newMessage:false});
   if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+  if(typeof _flushDeferredActiveSessionExternalRefresh==='function') _flushDeferredActiveSessionExternalRefresh();
 }
 
 function _fmtOllamaLabel(mid){
@@ -5633,8 +5735,7 @@ function _renderQueueChips(sid){
       if(!card.classList.contains('visible')) return;
       const h=card.getBoundingClientRect().height;
       if(h>0) _msgs.style.setProperty('--queue-card-height', h+'px');
-      if(S.activeStreamId&&typeof scrollIfPinned==='function') scrollIfPinned();
-      else if(!S.activeStreamId&&typeof scrollToBottom==='function') scrollToBottom();
+      if(typeof scrollIfPinned==='function') scrollIfPinned();
     }, 360);
   }
 
@@ -5824,8 +5925,7 @@ function _updateQueuePill(sid,count){
         }, 360);
       }
       if(pillOuter) pillOuter.classList.remove('show');
-      if(S.activeStreamId&&typeof scrollIfPinned==='function') scrollIfPinned();
-      else if(!S.activeStreamId&&typeof scrollToBottom==='function') scrollToBottom();
+      if(typeof scrollIfPinned==='function') scrollIfPinned();
     };
   } else {
     if(pillOuter) pillOuter.classList.remove('show');
@@ -7030,6 +7130,8 @@ async function refreshSession() {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
     S.session = data.session;
     S.messages = data.session.messages || [];
+    _messagesTruncated = !!data.session._messages_truncated;
+    _oldestIdx = data.session._messages_offset || 0;
     const pendingMsg=getPendingSessionMessage(data.session,S.messages);
     if(pendingMsg) S.messages.push(pendingMsg);
     S.activeStreamId=data.session.active_stream_id||null;
@@ -10856,15 +10958,15 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
     scrollIfPinned();
     return;
   }
-  // Auto-follow OFF + the user has scrolled up: don't yank them to the bottom on
-  // an automatic (non-preserve) re-render. This also covers the send() race where
-  // renderMessages() runs before S.activeStreamId is set, so a stream-start
-  // wouldn't otherwise be caught by the scrollIfPinned() branch above. A fresh
-  // session load (not unpinned) still lands at the bottom as expected. (Codex #4006.)
+  // Manual unpin is sticky: once the reader scrolls away, automatic idle/non-
+  // preserve re-renders must restore their viewport rather than clearing the
+  // unpin state with scrollToBottom(). A fresh session load (not unpinned) still
+  // lands at the bottom as expected. (Codex #4006 follow-up.)
   // renderMessages() captures the pre-wipe snapshot for this case too (see its
   // scrollSnapshot init), so restoring here lands the reader where they were.
-  if(!_autoScrollFollow && _messageUserUnpinned){
+  if(_messageUserUnpinned){
     _restoreMessageScrollSnapshot(scrollSnapshot);
+    _maybeShowNewMessageScrollCue(scrollSnapshot);
     return;
   }
   scrollToBottom();
@@ -10884,10 +10986,10 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
   const virtualFallback=!!(options&&options._virtualFallback);
-  // Capture the pre-wipe scroll position when preserving OR when Auto-follow is
-  // off and the user has scrolled up — both need to restore the reader's position
-  // after the DOM rebuild rather than snap to the bottom. (Codex #4006 r3.)
-  const scrollSnapshot=(preserveScroll||(!_autoScrollFollow&&_messageUserUnpinned))?_captureMessageScrollSnapshot():null;
+  // Capture the pre-wipe scroll position when preserving OR when the reader has
+  // manually unpinned; both need to restore the reader's position after the DOM
+  // rebuild rather than snap to the bottom. (Codex #4006 r3 follow-up.)
+  const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const msgCount=S.messages.length;
@@ -11262,6 +11364,8 @@ function renderMessages(options){
       row.className='msg-row';
       row.id=_userMessageDomId(rawIdx);
       row.dataset.msgIdx=rawIdx;
+      row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+      row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
       row.dataset.role='user';
       row.dataset.rawText=String(displayContent).trim();
       row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
@@ -11277,6 +11381,8 @@ function renderMessages(options){
     const seg=document.createElement('div');
     seg.className='assistant-segment';
     seg.dataset.msgIdx=rawIdx;
+    seg.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+    seg.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
     seg.dataset.rawText=String(content).trim();
     if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
     if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));

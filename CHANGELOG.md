@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.578] — 2026-06-22 — Release UK (preserve reader scroll position across re-render)
+
+### Fixed
+
+- **Your scroll position is preserved when the transcript re-renders or reloads.** Reading earlier in a conversation no longer gets bumped when the message list refreshes (idle re-render, external update, or a tail-window→full-session reload): the view stays unpinned where you left it, with a 3-tier anchor restore and iOS/touch momentum protection, and deferred external refreshes are held until you explicitly return to the bottom. Thanks @dso2ng. (#4613)
+
 ## [v0.51.577] — 2026-06-22 — Release UJ (failed steer no longer cancels active run)
 
 ### Fixed

@@ -421,6 +421,10 @@ function _scheduleActiveSessionIdleReload(sid) {
   setTimeout(async () => {
     if(!S||!S.session||S.session.session_id !== sid) return;
     if(S.busy || S.activeStreamId) return;
+    if(typeof _isMessageReaderUnpinned==='function'&&_isMessageReaderUnpinned()){
+      _deferActiveSessionExternalRefresh('idle-reconcile');
+      return;
+    }
     try{
       await loadSession(sid, {force:true, externalRefreshReason:'idle-reconcile'});
     }catch(_){}
@@ -1128,6 +1132,9 @@ async function loadSession(sid){
   // Same-session force refreshes reuse the current transcript viewport; clearing
   // the sticky-unpin state here makes preserveScroll treat a reader mid-answer
   // as pinned and snap them back to the bottom on the next render.
+  if (currentSid !== sid) {
+    _clearDeferredActiveSessionExternalRefresh();
+  }
   if (currentSid !== sid && typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
     try { window._resetScrollDirectionTracker(); } catch (_) {}
   }
@@ -3815,6 +3822,7 @@ let _streamingPollTimer = null;
 let _sessionTimeRefreshTimer = null;
 let _activeSessionExternalRefreshTimer = null;
 let _activeSessionExternalRefreshInFlight = false;
+let _deferredActiveSessionExternalRefreshReason = '';
 let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
 let _sessionEventsReconnectTimer = 0;
@@ -3852,10 +3860,31 @@ function ensureSessionTimeRefreshPoll(){
   }, _sessionTimeRefreshMs);
 }
 
+function _deferActiveSessionExternalRefresh(reason){
+  const nextReason = reason || 'poll';
+  if(_deferredActiveSessionExternalRefreshReason==='idle-reconcile'&&nextReason==='poll') return;
+  _deferredActiveSessionExternalRefreshReason = nextReason;
+}
+
+function _clearDeferredActiveSessionExternalRefresh(){
+  _deferredActiveSessionExternalRefreshReason = '';
+}
+
+function _flushDeferredActiveSessionExternalRefresh(){
+  const reason = _deferredActiveSessionExternalRefreshReason;
+  if(!reason) return;
+  _deferredActiveSessionExternalRefreshReason = '';
+  void refreshActiveSessionIfExternallyUpdated(reason);
+}
+
 async function refreshActiveSessionIfExternallyUpdated(reason){
   if(_activeSessionExternalRefreshInFlight) return;
   if(!S.session || !S.session.session_id) return;
   if(S.busy || S.activeStreamId) return;
+  if(typeof _isMessageReaderUnpinned==='function'&&_isMessageReaderUnpinned()){
+    _deferActiveSessionExternalRefresh(reason||'poll');
+    return;
+  }
   // #3916: the 30s timer is only a fallback for imported/external sessions.
   // WebUI-native sessions should not keep probing forever when the sidebar SSE
   // is healthy, but they still must reconcile when an actual sessions_changed
