@@ -898,6 +898,7 @@ async function newSession(flash, options={}){
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
+      const _explicitModelProvider=newModelState.model_provider;
       // Fill model_provider for bare slugs to skip cold catalog rebuilds, but leave cross-provider model names on the server slow path.
       const _bareModel=!/[/]/.test(newModelState.model)&&!newModelState.model.startsWith('@');
       // Second guard (#3410-followup): even a bare model can carry a known
@@ -917,7 +918,7 @@ async function newSession(flash, options={}){
         if(s.startsWith('google')||s.startsWith('gemini'))return 'google';return s;};
       const _familyMismatch=_familyProvider&&_fallbackProvider&&_normProv(_fallbackProvider)!==_familyProvider;
       const _fallbackIsNamedCustom=String(_fallbackProvider||'').toLowerCase().startsWith('custom:');
-      reqBody.model_provider=newModelState.model_provider
+      reqBody.model_provider=_explicitModelProvider||newModelState.model_provider
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
