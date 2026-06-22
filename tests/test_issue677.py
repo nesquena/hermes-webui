@@ -132,7 +132,7 @@ class TestScrollPinningFix:
         assert scroll_listener_start != -1, "scroll event listener not found"
         # After #1360 fix, the nearBottom + btn logic lives inside an rAF
         # callback — extend search window to cover the full listener block.
-        listener_block = UI_JS[scroll_listener_start:scroll_listener_start + 1400]
+        listener_block = UI_JS[scroll_listener_start:scroll_listener_start + 1600]
         assert "_syncScrollToBottomCue(showBottomButton" in listener_block, (
             "Scroll listener must show/hide scrollToBottomBtn based on _scrollPinned (#677)"
         )
