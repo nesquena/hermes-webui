@@ -346,6 +346,21 @@ def test_scene_renderer_coalesces_row_updates_and_renders_in_scene_order():
     assert "assistant-segment-worklog-source" in live
 
 
+def test_live_anchor_scene_removes_legacy_interim_collapse_toggle():
+    live = _function_body(UI_JS, "renderLiveAnchorActivityScene")
+    interim = _event_listener_body(MESSAGES_JS, "interim_assistant")
+
+    cleanup_idx = live.index(".interim-collapse-toggle")
+    hide_idx = live.index("blocks.querySelectorAll('[data-live-assistant=\"1\"]')")
+    group_idx = live.index("const group=_anchorSceneWorklogGroup")
+    assert cleanup_idx < hide_idx < group_idx
+
+    guard_idx = interim.index("data-anchor-scene-live-owner")
+    remove_idx = interim.index("blocks.querySelectorAll('.interim-collapse-toggle').forEach(el=>el.remove())")
+    legacy_create_idx = interim.index("let toggle=blocks.querySelector('.interim-collapse-toggle')")
+    assert guard_idx < remove_idx < legacy_create_idx
+
+
 def test_tool_scene_rows_coalesce_by_logical_tool_call_identity():
     rows = _function_body(UI_JS, "_anchorSceneRowsForRendering")
     key = _function_body(UI_JS, "_anchorSceneToolRowLogicalKey")

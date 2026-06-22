@@ -3807,28 +3807,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(visibleInterimSnippets.length>INTERIM_COLLAPSE_THRESHOLD&&assistantRow){
         const blocks=assistantRow.parentElement;
         if(blocks){
-          const allInterim=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
-          const toHide=allInterim.slice(0,allInterim.length-INTERIM_COLLAPSE_THRESHOLD);
-          let toggle=blocks.querySelector('.interim-collapse-toggle');
-          if(!toggle){
-            toggle=document.createElement('span');
-            toggle.className='interim-collapse-toggle';
-            // No per-element listener: clicks are handled by a delegated
-            // document-level handler (see _interimCollapseDelegatedClick) so
-            // the toggle keeps working after a live-turn DOM restore
-            // (snapshotLiveTurnHtmlForSession/restoreLiveTurnHtmlForSession
-            // rebuild via innerHTML, which would drop a direct listener and
-            // leave the collapsed notes permanently unreachable). The
-            // threshold rides on the markup so the handler stays stateless.
-            toggle.dataset.threshold=String(INTERIM_COLLAPSE_THRESHOLD);
-            if(toHide.length) toHide[0].before(toggle);
+          const anchorSceneOwnsLive=!!(blocks.closest&&blocks.closest('[data-anchor-scene-live-owner="1"]'));
+          if(anchorSceneOwnsLive){
+            blocks.querySelectorAll('.interim-collapse-toggle').forEach(el=>el.remove());
+          }else{
+            const allInterim=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
+            const toHide=allInterim.slice(0,allInterim.length-INTERIM_COLLAPSE_THRESHOLD);
+            let toggle=blocks.querySelector('.interim-collapse-toggle');
+            if(!toggle){
+              toggle=document.createElement('span');
+              toggle.className='interim-collapse-toggle';
+              // No per-element listener: clicks are handled by a delegated
+              // document-level handler (see _interimCollapseDelegatedClick) so
+              // the toggle keeps working after a live-turn DOM restore
+              // (snapshotLiveTurnHtmlForSession/restoreLiveTurnHtmlForSession
+              // rebuild via innerHTML, which would drop a direct listener and
+              // leave the collapsed notes permanently unreachable). The
+              // threshold rides on the markup so the handler stays stateless.
+              toggle.dataset.threshold=String(INTERIM_COLLAPSE_THRESHOLD);
+              if(toHide.length) toHide[0].before(toggle);
+            }
+            // Skip re-collapse when the user expanded manually; always update the stored count.
+            if(!toggle.dataset.expanded){
+              toHide.forEach(el=>el.classList.add('interim-collapsed'));
+            }
+            const stillHidden=blocks.querySelectorAll('[data-interim="1"].interim-collapsed').length;
+            if(stillHidden) toggle.textContent='Show '+stillHidden+' earlier update'+(stillHidden===1?'':'s');
           }
-          // Skip re-collapse when the user expanded manually; always update the stored count.
-          if(!toggle.dataset.expanded){
-            toHide.forEach(el=>el.classList.add('interim-collapsed'));
-          }
-          const stillHidden=blocks.querySelectorAll('[data-interim="1"].interim-collapsed').length;
-          if(stillHidden) toggle.textContent='Show '+stillHidden+' earlier update'+(stillHidden===1?'':'s');
         }
       }
       recordActivityBoundary();
