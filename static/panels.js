@@ -476,7 +476,7 @@ function _findCronJob(jobOrId){
 }
 
 function _appendCronProfileToggle(parent){
-  if (!parent || (!_showAllCronProfiles && _cronOtherProfileCount <= 0) && !_showAllCronProfiles) return;
+  if (!parent || (!_showAllCronProfiles && _cronOtherProfileCount <= 0)) return;
   const wrap = document.createElement('div');
   wrap.style.cssText = 'padding:10px 0 0';
   const btn = document.createElement('button');
