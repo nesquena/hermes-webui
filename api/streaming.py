@@ -74,6 +74,11 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     return raw
 
 
+def _compact_for_echo_compare(value: str) -> str:
+    """Normalize visible stream text for duplicate echo detection."""
+    return re.sub(r'\s+', '', str(value or ''))
+
+
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
 # interleave their os.environ writes. This global lock serializes the env
@@ -6346,9 +6351,6 @@ def _run_agent_streaming(
                 stats.setdefault('tps_available', False)
                 stats.setdefault('estimated', False)
                 put('metering', stats)
-
-            def _compact_for_echo_compare(value: str) -> str:
-                return re.sub(r'\s+', ' ', str(value or '')).strip()
 
             def _is_visible_output_echo(text: str) -> bool:
                 candidate = _compact_for_echo_compare(text)

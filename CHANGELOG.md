@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.585] — 2026-06-22 — Release UR (suppress duplicate live process echoes)
+
+### Fixed
+
+- **Live progress text no longer appears twice during streaming.** When the same process prose surfaced through both the visible assistant stream and the live Thinking/interim updates (differing only by paragraph or line-break formatting), it could render duplicated. The server-side visible-output echo detection now ignores all whitespace when comparing, so an `interim_assistant` update that only reformats already-visible token prose is correctly recognized as an echo and suppressed at the source. Thanks @franksong2702. (#4689)
+
 ## [v0.51.584] — 2026-06-22 — Release UQ (freeze /api/sessions cache during streaming)
 
 ### Fixed
