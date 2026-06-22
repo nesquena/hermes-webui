@@ -94,15 +94,18 @@ def test_new_chat_does_not_send_stale_dropdown_model_when_session_has_default_mo
     assert "model_provider:S.session.model_provider||null" in MESSAGES_JS
 
 
-def test_new_session_posts_picker_model_before_server_default():
+def test_new_session_posts_picker_model_before_server_default_only_without_active_session():
     fn = _new_session_function()
-    # Behavior contract: the picker model goes into reqBody so /api/session/new
-    # uses the user's selection before falling back to the server default
-    # (#872). The previous literal-string assertion
+    # Behavior contract: the picker model goes into reqBody only for the empty
+    # composer / pre-session path. Once a session exists, its picker is that
+    # session's model and New Chat must fall back to the profile default instead
+    # of inheriting the previous chat's model. The previous literal-string assertion
     # "reqBody.model_provider=newModelState.model_provider||null" became a
     # change-detector once the #2518 follow-up added a fallback chain; the
     # contract that newModelState.model_provider is the FIRST source of
     # reqBody.model_provider is now verified by substring + ordering.
+    assert "!S.session&&modelSelForNew&&modelSelForNew.value" in fn
+    assert "!S.session&&typeof _readPersistedModelState==='function'" in fn
     assert "reqBody.model=newModelState.model" in fn
     assert "newModelState.model_provider" in fn
     assert "window._activeProvider" in fn, (
@@ -142,7 +145,21 @@ def test_model_picker_persists_without_active_session():
     body = boot_js[boot_js.index("$('modelSelect').onchange=async()=>") : boot_js.index("$('msg').addEventListener", boot_js.index("$('modelSelect').onchange=async()=>"))]
     assert "_writePersistedModelState(modelState.model,modelState.model_provider)" in body
     assert "if(!S.session){" in body
-    assert body.index("if(!S.session){") < body.index("await api('/api/session/update'")
+    assert body.index("if(!S.session){") < body.index("_writePersistedModelState(modelState.model,modelState.model_provider)")
+    assert body.index("_writePersistedModelState(modelState.model,modelState.model_provider)") < body.index("return;")
+    assert body.index("return;") < body.index("await api('/api/session/update'")
+
+
+def test_active_session_model_changes_do_not_update_browser_model_preference():
+    messages_js = Path("static/messages.js").read_text(encoding="utf-8")
+    start = messages_js.index("if(startData&&startData.effective_model && S.session)")
+    branch = messages_js[start : messages_js.index("if(S.session&&typeof startData.pending_started_at", start)]
+    assert "localStorage.setItem('hermes-webui-model'" not in branch
+    assert "_writePersistedModelState" not in branch
+
+    ui_js = Path("static/ui.js").read_text(encoding="utf-8")
+    provider_for_send = _extract_function(ui_js, "function _modelProviderForSend")
+    assert "_readPersistedModelState" not in provider_for_send
 
 
 def test_changelog_mentions_new_chat_default_model_provider_sync():

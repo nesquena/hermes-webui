@@ -731,14 +731,17 @@ async function newSession(flash, options={}){
     if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
     // Forward a pre-session toolset override only from the empty composer (#4490).
     if(!S.session && Array.isArray(S._pendingSessionToolsets)) reqBody.enabled_toolsets=S._pendingSessionToolsets;
-    // Carry the visible picker selection into the new session. Without this,
-    // /api/session/new falls back to config.yaml defaults (e.g. gpt-5.5) even
-    // when the user already chose cursor/composer-2.5 in the composer chip.
+    // Carry the visible picker selection into the new session only when there
+    // is no active session yet (empty composer / boot draft). If an existing
+    // conversation is active, its picker reflects that conversation's own model
+    // and must not become the implicit model for every future New Chat. In that
+    // normal case, /api/session/new intentionally falls back to the profile's
+    // configured default model/provider.
     const modelSelForNew=$('modelSelect');
     let newModelState=null;
-    if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
+    if(!S.session&&modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
       newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
-    }else if(typeof _readPersistedModelState==='function'){
+    }else if(!S.session&&typeof _readPersistedModelState==='function'){
       newModelState=_readPersistedModelState();
     }
     if(newModelState&&newModelState.model){

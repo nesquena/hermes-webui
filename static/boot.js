@@ -1390,9 +1390,13 @@ $('modelSelect').onchange=async()=>{
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
   if(typeof closeModelDropdown==='function') closeModelDropdown();
-  if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
-  else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
   if(!S.session){
+    // Browser-local model state is only a pre-session draft seed. Once a chat
+    // exists, its persisted Session.model / model_provider is authoritative;
+    // writing every in-chat pick to localStorage lets one conversation bleed into
+    // later sessions and hard-refresh restores (#4669 follow-up).
+    if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
+    else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncReasoningChip==='function') syncReasoningChip();
     return;

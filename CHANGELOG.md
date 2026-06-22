@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The model picker is now session-authoritative instead of browser-global.** Changing the model inside an existing conversation updates only that session; it no longer writes the choice into browser `localStorage`, no longer uses stale browser state to infer a provider for later sends, and New Chat falls back to the profile default instead of silently inheriting the previous conversation's model. Pre-session picker choices still seed the first new chat.
+
 ## [v0.51.580] — 2026-06-22 — Release UM (wrap markdown source previews)
 
 ### Fixed

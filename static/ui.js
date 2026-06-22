@@ -1708,14 +1708,6 @@ function _modelProviderForSend(modelId){
       }
     }catch(_){}
   }
-  if(typeof _readPersistedModelState==='function'){
-    try{
-      const persisted=_readPersistedModelState();
-      if(persisted&&String(persisted.model||'').trim()===model){
-        return persisted.model_provider||null;
-      }
-    }catch(_){}
-  }
   return null;
 }
 function _reconcileModelDropdownSelection(sel,data,previousState,opts){
