@@ -1844,10 +1844,57 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
             item["has_pending_user_message"] = bool(
                 getattr(live, "pending_user_message", None)
             )
+            for key in ("pending_started_at", "updated_at", "last_message_at"):
+                current = _session_list_row_numeric_value(item.get(key))
+                raw_live_value = getattr(live, key, None)
+                live_value = _session_list_row_numeric_value(raw_live_value)
+                if live_value > current:
+                    item[key] = raw_live_value
         stream_id = item.get("active_stream_id")
         item["is_streaming"] = bool(stream_id and stream_id in active_stream_ids)
         overlaid.append(item)
+    overlaid.sort(key=_session_list_runtime_sort_key, reverse=True)
     return overlaid
+
+
+def _session_list_row_numeric_value(value) -> float:
+    try:
+        numeric = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return numeric if numeric > 0 else 0.0
+
+
+def _session_list_row_timestamp(row: dict) -> float:
+    if not isinstance(row, dict):
+        return 0.0
+    # Match the frontend `_sessionSortTimestampMs` semantics exactly (#4688 review):
+    # the idle base is the FIRST truthy of last_message_at -> updated_at -> created_at
+    # (NOT a flat max over all of them — a renamed/metadata-touched idle chat bumps
+    # updated_at without new messages and must not outrank a newer chatted session),
+    # then pending_started_at is overlaid only as the runtime promotion.
+    base = 0.0
+    for key in ("last_message_at", "updated_at", "created_at"):
+        base = _session_list_row_numeric_value(row.get(key))
+        if base > 0:
+            break
+    pending = _session_list_row_numeric_value(row.get("pending_started_at"))
+    return max(base, pending)
+
+
+def _session_list_row_is_runtime_active(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if row.get("is_streaming"):
+        return True
+    return bool(row.get("active_stream_id") and row.get("has_pending_user_message"))
+
+
+def _session_list_runtime_sort_key(row: dict) -> tuple[int, float]:
+    return (
+        1 if _session_list_row_is_runtime_active(row) else 0,
+        _session_list_row_timestamp(row),
+    )
 
 
 def _session_list_cache_claim_rebuild(key: tuple) -> tuple[threading.Event, bool]:

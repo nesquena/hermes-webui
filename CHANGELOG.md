@@ -3,6 +3,24 @@
 
 ## [Unreleased]
 
+## [v0.51.587] — 2026-06-22 — Release UT (running-first session ordering in sidebar)
+
+### Fixed
+
+- **Running sessions stay grouped at the top of the sidebar.** A completed conversation could sit between actively-running sessions until the session-list cache rebuilt, because the cached `/api/sessions` payload was sorted before live runtime state was overlaid. The list now overlays live `pending_started_at` / `updated_at` / `last_message_at` onto cached rows and sorts active/running sessions first (then by freshest effective timestamp), applies the same running-first ordering in the frontend renderer, and groups date buckets with the same runtime-aware timestamp so a resumed running session doesn't carry a stale date header. Thanks @franksong2702. (#4688)
+
+## [v0.51.586] — 2026-06-22 — Release US (eliminate iOS button tap delay)
+
+### Fixed
+
+- **No more double-tap delay on buttons on iOS.** On iOS Safari, tapping interactive controls (the send button, icon buttons, approval buttons, etc.) often needed two taps — the first only "selected" the control — because the browser waited ~300ms to disambiguate a double-tap zoom. Those controls now declare `touch-action:manipulation` (with a transparent tap highlight), so they fire on the first tap. Thanks @rodboev. (#4696, fixes #4693)
+
+## [v0.51.585] — 2026-06-22 — Release UR (suppress duplicate live process echoes)
+
+### Fixed
+
+- **Live progress text no longer appears twice during streaming.** When the same process prose surfaced through both the visible assistant stream and the live Thinking/interim updates (differing only by paragraph or line-break formatting), it could render duplicated. The server-side visible-output echo detection now ignores all whitespace when comparing, so an `interim_assistant` update that only reformats already-visible token prose is correctly recognized as an echo and suppressed at the source. Thanks @franksong2702. (#4689)
+
 ## [v0.51.584] — 2026-06-22 — Release UQ (freeze /api/sessions cache during streaming)
 
 ### Fixed
