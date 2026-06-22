@@ -8216,6 +8216,31 @@ function _transparentToolStatus(tc, settled){
   if(tc&&tc.done===false) return settled?'Interrupted':'Running';
   return 'Completed';
 }
+// Quiet one-line summary for a collapsed transparent tool row (#4658).
+// The transparent view overrides the row name to the bare tool name
+// (_toolShortName, e.g. "read_file"/"terminal"), so — unlike the worklog view —
+// it has no action-label carrying the target, and buildToolCard's collapsed
+// preview is blanked for the common arg/shell case (the #4411 suppression that
+// assumes the name carries the target). That left transparent rows showing only
+// the bare tool name with no hint of what each call did. Rebuild a summary from
+// the call's TARGET (path/command/query/skill/...) — NOT the raw result JSON —
+// so it stays consistent with the "keep collapsed previews quiet" intent
+// (test_tool_card_preview_summary.py) while restoring "understand the call
+// without expanding it".
+function _transparentToolSummary(tc){
+  if(!tc||typeof tc!=='object') return '';
+  // Explicit progress text (e.g. subagent_progress) wins while still running.
+  const explicit=String(tc.preview||'').trim();
+  if(tc.done===false&&explicit) return _shortToolLabel(explicit,160);
+  // Target-based summary only (path/command/query/skill). Deliberately NO generic
+  // arg-preview fallback: a call with args but no real target (e.g. `terminal`
+  // with only {workdir} or an unknown tool with {mode:"dry-run"}) must yield an
+  // EMPTY collapsed preview rather than dumping a raw arg snippet — that keeps the
+  // collapsed row quiet and consistent with the no-args case (#4658 review).
+  const target=typeof _toolVisibleTargetLabel==='function'?_toolVisibleTargetLabel(tc,{limit:160}):'';
+  if(target) return target;
+  return '';
+}
 function _copyEventToClipboard(row){
   if(!row) return;
   const type=row.getAttribute('data-event-type');
@@ -8477,6 +8502,22 @@ function _decorateTransparentEventRow(row, opts){
       // also prefix the name with "Running:" — that's the same redundancy class
       // V6 removed from the detail body. (Trifecta r2 #4.)
       if(nameEl) nameEl.textContent=_toolShortName(name);
+      // #4658: restore the collapsed-row inline summary. buildToolCard emits a
+      // `.tool-card-preview` span but blanks its text for the common case, and
+      // the bare _toolShortName above drops the target the worklog view carries
+      // in its action-label name. Populate the preview from a quiet,
+      // target-based summary so each collapsed row says what it did without
+      // expanding. Idempotent across re-decoration (status updates re-run this).
+      const previewEl=header.querySelector('.tool-card-preview');
+      if(previewEl){
+        const summary=_transparentToolSummary(tc);
+        if(summary){
+          previewEl.textContent=summary;
+          previewEl.removeAttribute('hidden');
+        }else{
+          previewEl.textContent='';
+        }
+      }
       let statusEl=header.querySelector('.transparent-event-status');
       if(!statusEl){
         statusEl=document.createElement('span');

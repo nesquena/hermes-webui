@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.574] — 2026-06-22 — Release UG (transparent-stream collapsed tool previews)
+
+### Fixed
+
+- **Collapsed tool rows in the Transparent Stream view show their one-line summary again.** A regression left collapsed tool cards showing only the bare tool name (`read_file`, `terminal`, `search_files`, `skill_view`) with no hint of what each call did — you had to expand every row. Each collapsed row now shows a quiet target-based summary (file path, command, search query, skill name) next to the tool name, without dumping the raw result into the row. Affects both live streaming and reloaded/old sessions (they share the render path). Fixes #4658.
+
 ## [v0.51.573] — 2026-06-22 — Release UF (reasoning request-storm fix)
 
 ### Fixed
