@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.575] — 2026-06-22 — Release UH (session-list perf for long histories)
+
+### Fixed
+
+- **Faster session sidebar for accounts with long or archived conversation histories.** Building the session list did redundant per-session work (lineage/metadata enrichment and filtering) across the full history even when most of it was archived/off-screen, making `GET /api/sessions` slow for heavy users. The route now skips that work for archived histories and applies the cheap state-DB source corrections before filtering, so visible sessions and their child lineage still render correctly while the list builds substantially faster. Thanks @santastabber. (#4597)
+
 ## [v0.51.574] — 2026-06-22 — Release UG (transparent-stream collapsed tool previews)
 
 ### Fixed

@@ -24,6 +24,7 @@ from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
     is_cli_session_row,
+    normalize_agent_session_source,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
@@ -3199,6 +3200,106 @@ def _sidebar_title_is_generic_webui(title: str | None) -> bool:
     return text.startswith(prefix) and text[len(prefix):].isdigit()
 
 
+def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> dict[str, dict]:
+    """Return cheap state.db source/title overrides for sidebar rows.
+
+    This intentionally does not chase lineage parents/children. It is used on
+    the /api/sessions hot path before CLI filtering so state.db can correct
+    stale JSON source flags without paying the full lineage-enrichment cost.
+    """
+    wanted = {str(sid) for sid in (session_ids or set()) if sid}
+    if not wanted or not db_path.exists():
+        return {}
+    try:
+        import sqlite3
+    except ImportError:
+        return {}
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {row[1] for row in cur.fetchall()}
+            if 'id' not in session_cols:
+                return {}
+            source_expr = 's.source' if 'source' in session_cols else 'NULL AS source'
+            session_source_expr = 's.session_source' if 'session_source' in session_cols else 'NULL AS session_source'
+            title_expr = 's.title' if 'title' in session_cols else 'NULL AS title'
+            overrides: dict[str, dict] = {}
+            ids = list(wanted)
+            chunk_size = 500
+            for i in range(0, len(ids), chunk_size):
+                chunk = ids[i:i + chunk_size]
+                placeholders = ','.join('?' * len(chunk))
+                cur.execute(
+                    f"""
+                    SELECT s.id, {source_expr}, {session_source_expr}, {title_expr}
+                    FROM sessions s
+                    WHERE s.id IN ({placeholders})
+                    """,
+                    chunk,
+                )
+                for row in cur.fetchall():
+                    sid = str(row['id'])
+                    entry: dict[str, object] = {}
+                    state_title = str(row['title'] or '').strip()
+                    if state_title:
+                        entry['_state_db_title'] = state_title
+                    state_source = str(row['source'] or '').strip().lower()
+                    if state_source:
+                        entry['_state_db_source'] = state_source
+                        source_meta = normalize_agent_session_source(state_source)
+                        entry['_state_db_source_tag'] = state_source
+                        entry['_state_db_raw_source'] = source_meta.get('raw_source')
+                        entry['_state_db_session_source'] = source_meta.get('session_source')
+                        entry['_state_db_source_label'] = source_meta.get('source_label')
+                    if entry:
+                        overrides[sid] = entry
+            return overrides
+    except Exception:
+        return {}
+
+
+def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
+    """Apply state.db source/title overrides without full lineage enrichment."""
+    try:
+        metadata = _read_state_db_sidebar_overrides(
+            _active_state_db_path(),
+            {str(s.get('session_id')) for s in sessions if s.get('session_id')},
+        )
+    except Exception:
+        return
+    _apply_sidebar_state_db_override_metadata(sessions, metadata)
+
+
+def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: dict[str, dict]) -> None:
+    for session in sessions:
+        sid = session.get('session_id')
+        if sid not in metadata:
+            continue
+        entry = dict(metadata[sid])
+        state_db_title = entry.pop('_state_db_title', None)
+        state_db_source = entry.pop('_state_db_source', None)
+        state_db_source_tag = entry.pop('_state_db_source_tag', None)
+        state_db_raw_source = entry.pop('_state_db_raw_source', None)
+        state_db_session_source = entry.pop('_state_db_session_source', None)
+        state_db_source_label = entry.pop('_state_db_source_label', None)
+        if state_db_source == 'webui':
+            session['source_tag'] = state_db_source_tag
+            session['raw_source'] = state_db_raw_source
+            session['session_source'] = state_db_session_source
+            session['source_label'] = state_db_source_label
+            session['is_cli_session'] = False
+        title = session.get('title')
+        if (
+            state_db_title
+            and state_db_title != title
+            and _sidebar_title_is_generic_webui(title)
+        ):
+            session['_state_db_title'] = state_db_title
+            session['display_title'] = state_db_title
+
+
 def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     """Attach state.db compression lineage metadata used by sidebar collapse.
 
@@ -3227,31 +3328,21 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
         )
     except Exception:
         return
+    _apply_sidebar_state_db_override_metadata(sessions, metadata)
     for session in sessions:
         sid = session.get('session_id')
         if sid in metadata:
             entry = dict(metadata[sid])
-            state_db_title = entry.pop('_state_db_title', None)
-            state_db_source = entry.pop('_state_db_source', None)
-            state_db_source_tag = entry.pop('_state_db_source_tag', None)
-            state_db_raw_source = entry.pop('_state_db_raw_source', None)
-            state_db_session_source = entry.pop('_state_db_session_source', None)
-            state_db_source_label = entry.pop('_state_db_source_label', None)
-            session.update(entry)
-            if state_db_source == 'webui':
-                session['source_tag'] = state_db_source_tag
-                session['raw_source'] = state_db_raw_source
-                session['session_source'] = state_db_session_source
-                session['source_label'] = state_db_source_label
-                session['is_cli_session'] = False
-            title = session.get('title')
-            if (
-                state_db_title
-                and state_db_title != title
-                and _sidebar_title_is_generic_webui(title)
+            for key in (
+                '_state_db_title',
+                '_state_db_source',
+                '_state_db_source_tag',
+                '_state_db_raw_source',
+                '_state_db_session_source',
+                '_state_db_source_label',
             ):
-                session['_state_db_title'] = state_db_title
-                session['display_title'] = state_db_title
+                entry.pop(key, None)
+            session.update(entry)
 
 
 def _diag_stage(diag, name: str) -> None:
@@ -3262,7 +3353,7 @@ def _diag_stage(diag, name: str) -> None:
             pass
 
 
-def all_sessions(diag=None):
+def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
@@ -3356,8 +3447,13 @@ def all_sessions(diag=None):
                 and not s.get('has_pending_user_message')
                 and not s.get('worktree_path')
             )]
-            _diag_stage(diag, "all_sessions.lineage_metadata")
-            _enrich_sidebar_lineage_metadata(result)
+            if include_lineage_metadata:
+                _diag_stage(diag, "all_sessions.lineage_metadata")
+                _enrich_sidebar_lineage_metadata(result)
+            else:
+                _diag_stage(diag, "all_sessions.state_db_overrides")
+                _apply_sidebar_state_db_overrides(result)
+                _diag_stage(diag, "all_sessions.lineage_metadata_skipped")
             result = _prefer_fuller_snapshots_for_sidebar(result)
             sidebar_candidates = result
             visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
@@ -3397,8 +3493,13 @@ def all_sessions(diag=None):
         and not s.pending_user_message
         and not getattr(s, 'worktree_path', None)
     )]
-    _diag_stage(diag, "all_sessions.lineage_metadata")
-    _enrich_sidebar_lineage_metadata(result)
+    if include_lineage_metadata:
+        _diag_stage(diag, "all_sessions.lineage_metadata")
+        _enrich_sidebar_lineage_metadata(result)
+    else:
+        _diag_stage(diag, "all_sessions.state_db_overrides")
+        _apply_sidebar_state_db_overrides(result)
+        _diag_stage(diag, "all_sessions.lineage_metadata_skipped")
     result = _prefer_fuller_snapshots_for_sidebar(result)
     sidebar_candidates = result
     visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]

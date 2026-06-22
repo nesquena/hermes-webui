@@ -453,6 +453,13 @@ def _all_profiles_enabled(parsed_url) -> bool:
     return _all_profiles_query_flag(parsed_url) and not _is_isolated_profile_mode()
 
 
+def _query_flag(parsed_url, name: str) -> bool:
+    """Return True for a truthy query flag value."""
+    qs = parse_qs(parsed_url.query)
+    raw = qs.get(name, [''])[0].strip().lower()
+    return raw in ('1', 'true', 'yes', 'on')
+
+
 def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
     """Return whether a detail-load session belongs to the active profile.
 
@@ -1589,6 +1596,7 @@ def _session_list_cache_key(
     show_cli_sessions: bool,
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
+    include_archived: bool = False,
     source_filter: str | None = None,
 ) -> tuple:
     return (
@@ -1597,6 +1605,7 @@ def _session_list_cache_key(
         bool(show_cli_sessions),
         bool(show_previous_messaging_sessions),
         bool(show_cron_sessions),
+        bool(include_archived),
         source_filter,
     )
 
@@ -1806,17 +1815,32 @@ def _build_session_list_cache_payload(
     show_cli_sessions: bool,
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
+    include_archived: bool = False,
     source_filter: str | None = None,
     diag=None,
 ) -> dict:
     diag_stage = diag.stage if diag is not None else lambda *_a, **_k: None
 
+    def _all_sessions_for_sidebar():
+        try:
+            return all_sessions(diag=diag, include_lineage_metadata=False)
+        except TypeError as exc:
+            message = str(exc)
+            if (
+                "unexpected keyword argument" not in message
+                or "include_lineage_metadata" not in message
+            ):
+                raise
+            # Focused tests and third-party callers sometimes monkeypatch
+            # routes.all_sessions with the historical diag-only signature.
+            return all_sessions(diag=diag)
+
     diag_stage("all_sessions")
-    webui_sessions = all_sessions(diag=diag)
+    webui_sessions = _all_sessions_for_sidebar()
     diag_stage("reconcile_stale_stream_state")
     if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
         diag_stage("all_sessions_after_stale_stream_reconcile")
-        webui_sessions = all_sessions(diag=diag)
+        webui_sessions = _all_sessions_for_sidebar()
     diag_stage("normalize_cli_rows")
     show_cli_sessions = bool(show_cli_sessions)
     show_previous_messaging_sessions = bool(show_previous_messaging_sessions)
@@ -1943,19 +1967,42 @@ def _build_session_list_cache_payload(
         scoped = [s for s in merged if _profiles_match(s.get("profile"), active_profile)]
         other_profile_count = 0 if _is_isolated_profile_mode() else len(merged) - len(scoped)
     diag_stage("messaging_dedupe")
-    scoped = _keep_latest_messaging_session_per_source(
-        scoped,
+    archived_scoped = _keep_latest_messaging_session_per_source(
+        list(scoped),
+        show_previous_messaging_sessions=show_previous_messaging_sessions,
+    )
+    visible_scoped = _keep_latest_messaging_session_per_source(
+        [s for s in scoped if not s.get("archived")],
         show_previous_messaging_sessions=show_previous_messaging_sessions,
     )
     if show_cli_sessions:
         diag_stage("cli_cap")
-        scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+        archived_scoped = _cap_recent_cli_sessions(archived_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+        visible_scoped = _cap_recent_cli_sessions(visible_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+    archived_webui_count = sum(
+        1 for s in archived_scoped
+        if s.get("archived") and not _is_cli_session_for_settings(s)
+    )
+    archived_cli_count = sum(
+        1 for s in archived_scoped
+        if s.get("archived") and _is_cli_session_for_settings(s)
+    )
+    archived_count = archived_webui_count + archived_cli_count
+    scoped = archived_scoped if include_archived else visible_scoped
+    if not include_archived:
+        diag_stage("filter_archived_sessions")
+    diag_stage("visible_lineage_metadata")
+    _enrich_sidebar_lineage_metadata(scoped)
     return {
         "sessions": [
             dict(s) if isinstance(s, dict) else {}
             for s in scoped
         ],
         "cli_count": len(deduped_cli),
+        "archived_count": archived_count,
+        "archived_webui_count": archived_webui_count,
+        "archived_cli_count": archived_cli_count,
+        "include_archived": include_archived,
         "all_profiles": all_profiles,
         "active_profile": active_profile,
         "other_profile_count": other_profile_count,
@@ -1976,6 +2023,10 @@ def _session_list_payload_to_response(payload: dict) -> dict:
     return {
         "sessions": safe_merged,
         "cli_count": int(payload.get("cli_count", 0)),
+        "archived_count": int(payload.get("archived_count", 0)),
+        "archived_webui_count": int(payload.get("archived_webui_count", 0)),
+        "archived_cli_count": int(payload.get("archived_cli_count", 0)),
+        "include_archived": bool(payload.get("include_archived", False)),
         "all_profiles": bool(payload.get("all_profiles", False)),
         "active_profile": payload.get("active_profile"),
         "other_profile_count": int(payload.get("other_profile_count", 0)),
@@ -6320,6 +6371,7 @@ from api.models import (
     get_state_db_session_messages,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
     _session_message_merge_key,
     _session_message_visible_key,
@@ -9553,12 +9605,14 @@ def handle_get(handler, parsed) -> bool:
             agent_session_source_filter = settings.get("agent_session_source_filter")
             active_profile = get_active_profile_name()
             all_profiles = _all_profiles_enabled(parsed)
+            include_archived = _query_flag(parsed, "include_archived")
             key = _session_list_cache_key(
                 active_profile=active_profile,
                 all_profiles=all_profiles,
                 show_cli_sessions=show_cli_sessions,
                 show_previous_messaging_sessions=show_previous_messaging_sessions,
                 show_cron_sessions=show_cron_sessions,
+                include_archived=include_archived,
                 source_filter=agent_session_source_filter,
             )
             # Keep the visible /api/sessions contract unchanged even though the
@@ -9573,6 +9627,7 @@ def handle_get(handler, parsed) -> bool:
                     show_cli_sessions=show_cli_sessions,
                     show_previous_messaging_sessions=show_previous_messaging_sessions,
                     show_cron_sessions=show_cron_sessions,
+                    include_archived=include_archived,
                     source_filter=agent_session_source_filter,
                     diag=diag,
                 ),
