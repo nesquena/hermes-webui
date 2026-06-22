@@ -464,8 +464,14 @@ def are_passkeys_enabled() -> bool:
 
 
 def is_auth_enabled() -> bool:
-    """True if password auth or passkey-only auth is configured."""
-    return is_password_auth_enabled() or are_passkeys_enabled()
+    """True if password auth, passkey-only auth, or multi-user is configured."""
+    if is_password_auth_enabled() or are_passkeys_enabled():
+        return True
+    try:
+        from api.users import is_multi_user_enabled  # lazy import — circular-safe
+        return is_multi_user_enabled()
+    except Exception:
+        return False
 
 
 def verify_password(plain: str) -> bool:
@@ -499,6 +505,13 @@ def verify_password(plain: str) -> bool:
     return False
 
 
+def _session_expiry(session):
+    """Return expiry timestamp from a session value (supports both legacy float and new dict format)."""
+    if isinstance(session, dict):
+        return session.get("exp", 0)
+    return session  # legacy float
+
+
 def create_session(username: str = "") -> str:
     """Create a new auth session. Returns signed cookie value.
     
@@ -520,7 +533,7 @@ def _prune_expired_sessions():
     """Remove all expired session entries to prevent unbounded memory growth."""
     now = time.time()
     with _SESSIONS_LOCK:
-        expired = [t for t, data in _sessions.items() if now > data["exp"]]
+        expired = [t for t, data in _sessions.items() if now > _session_expiry(data)]
         if expired:
             for token in expired:
                 _sessions.pop(token, None)
@@ -544,7 +557,7 @@ def verify_session(cookie_value: str) -> bool:
         return False
     with _SESSIONS_LOCK:
         session = _sessions.get(token)
-        if not session or time.time() > session["exp"]:
+        if not session or time.time() > _session_expiry(session):
             _sessions.pop(token, None)
             _save_sessions(_sessions)
             return False
