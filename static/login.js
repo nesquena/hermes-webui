@@ -11,6 +11,18 @@ document.addEventListener('DOMContentLoaded', function () {
 
   var invalidPw = form.getAttribute('data-invalid-pw') || 'Invalid password';
   var connFailed = form.getAttribute('data-conn-failed') || 'Connection failed';
+  var multiUser = form.getAttribute('data-multi-user') === '1';
+
+  // Show username field in multi-user mode
+  var usernameInput = document.getElementById('username');
+  if (multiUser && usernameInput) {
+    usernameInput.style.display = '';
+    usernameInput.setAttribute('placeholder', 'Username');
+    if (input.hasAttribute('autofocus')) {
+      input.removeAttribute('autofocus');
+      usernameInput.setAttribute('autofocus', '');
+    }
+  }
 
   function showErr(msg) {
     var err = document.getElementById('err');
@@ -38,13 +50,16 @@ document.addEventListener('DOMContentLoaded', function () {
 
   async function doLogin(e) {
     e.preventDefault();
-    var pw = input.value;
     hideErr();
     try {
+      var payload = { password: input.value };
+      if (multiUser && usernameInput) {
+        payload.username = usernameInput.value;
+      }
       var res = await fetch('api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: pw }),
+        body: JSON.stringify(payload),
         credentials: 'include',
       });
       var data = {};
