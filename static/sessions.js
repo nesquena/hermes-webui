@@ -4464,6 +4464,24 @@ function _sessionTimestampMs(session) {
   return Number.isFinite(raw) ? raw * 1000 : 0;
 }
 
+function _sessionSortTimestampMs(session) {
+  const base = _sessionTimestampMs(session);
+  const pending = Number(session && session.pending_started_at);
+  const pendingMs = Number.isFinite(pending) ? pending * 1000 : 0;
+  return Math.max(base, pendingMs);
+}
+
+function _sessionRunningSortRank(session) {
+  if(_isSessionEffectivelyStreaming(session)) return 1;
+  return session && session.active_stream_id && session.has_pending_user_message ? 1 : 0;
+}
+
+function _sessionSidebarSortCompare(a, b) {
+  const activeDelta = _sessionRunningSortRank(b) - _sessionRunningSortRank(a);
+  if(activeDelta) return activeDelta;
+  return _sessionSortTimestampMs(b) - _sessionSortTimestampMs(a);
+}
+
 function _serverNowMs() {
   // Compensate for clock skew between client and server (issue #1144).
   // Returns an approximation of the current server time in ms.
@@ -5557,7 +5575,7 @@ function renderSessionListFromCache(){
     empty.textContent=_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.';
     list.appendChild(empty);
   }
-  const orderedSessions=[...sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
+  const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);
   // Separate pinned from unpinned
   const pinned=orderedSessions.filter(s=>s.pinned);
   const unpinned=orderedSessions.filter(s=>!s.pinned);
@@ -5572,7 +5590,7 @@ function renderSessionListFromCache(){
   let curLabel=null,curItems=[];
   if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
   for(const s of unpinned){
-    const ts=_sessionTimestampMs(s);
+    const ts=_sessionSortTimestampMs(s);
     const label=_sessionTimeBucketLabel(ts, now);
     if(label!==curLabel){
       if(curItems.length) groups.push({label:curLabel,items:curItems});

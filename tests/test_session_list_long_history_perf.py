@@ -1,6 +1,7 @@
 import io
 import json
 import pathlib
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 import api.profiles as profiles
@@ -175,3 +176,83 @@ def test_session_list_fetch_adds_include_archived_only_when_toggle_is_on():
     assert "_archivedWebuiCount" in src
     assert "sessData.archived_webui_count ?? sessData.archived_count ?? 0" in src
     assert "archived_webui_count" in src
+
+
+def test_sessions_api_runtime_overlay_sorts_active_rows_first(monkeypatch):
+    payload = {
+        "sessions": [
+            {
+                "session_id": "newer-complete",
+                "title": "Newer complete",
+                "updated_at": 300,
+                "last_message_at": 300,
+            },
+            {
+                "session_id": "older-running",
+                "title": "Older running",
+                "updated_at": 100,
+                "last_message_at": 100,
+            },
+            {
+                "session_id": "old-complete",
+                "title": "Old complete",
+                "updated_at": 50,
+                "last_message_at": 50,
+            },
+        ],
+        "cli_count": 0,
+        "archived_count": 0,
+        "archived_webui_count": 0,
+        "archived_cli_count": 0,
+        "include_archived": False,
+        "all_profiles": False,
+        "active_profile": "default",
+        "other_profile_count": 0,
+    }
+    live = SimpleNamespace(
+        active_stream_id="stream-running",
+        pending_user_message="go",
+        pending_started_at="400",
+        updated_at="400",
+        last_message_at="400",
+    )
+
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {"stream-running"})
+    with routes.LOCK:
+        previous = routes.SESSIONS.get("older-running")
+        routes.SESSIONS["older-running"] = live
+    try:
+        body = routes._session_list_payload_to_response(payload)
+    finally:
+        with routes.LOCK:
+            if previous is None:
+                routes.SESSIONS.pop("older-running", None)
+            else:
+                routes.SESSIONS["older-running"] = previous
+
+    assert [row["session_id"] for row in body["sessions"]] == [
+        "older-running",
+        "newer-complete",
+        "old-complete",
+    ]
+    assert body["sessions"][0]["is_streaming"] is True
+    assert body["sessions"][0]["updated_at"] == "400"
+
+
+def test_frontend_session_list_sorts_effective_streaming_rows_first():
+    src = (pathlib.Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
+
+    assert "function _sessionSidebarSortCompare(a, b)" in src
+    assert "function _sessionRunningSortRank(session)" in src
+    assert "_isSessionEffectivelyStreaming(session)" in src
+    assert "session.active_stream_id && session.has_pending_user_message" in src
+    assert "const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);" in src
+
+
+def test_frontend_session_date_buckets_use_runtime_sort_timestamp():
+    src = (pathlib.Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
+    loop_start = src.index("for(const s of unpinned){")
+    loop_body = src[loop_start:src.index("if(curItems.length) groups.push", loop_start)]
+
+    assert "const ts=_sessionSortTimestampMs(s);" in loop_body
+    assert "_sessionTimeBucketLabel(ts, now)" in loop_body
