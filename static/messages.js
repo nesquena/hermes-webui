@@ -4300,6 +4300,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
             _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
           }
+          // #4650 review: the agent turn that just completed may have changed
+          // server-side reasoning config (e.g. a `/reasoning <level>` slash
+          // command writes agent.reasoning_effort) WITHOUT changing the model/
+          // provider cache key. Invalidate the reasoning-chip cache once at the
+          // turn boundary so the following syncTopbar() refetches the authoritative
+          // effort exactly once (not per-token — the storm short-circuit is intact).
+          if(typeof _lastReasoningFetchKey!=='undefined') _lastReasoningFetchKey=null;
           syncTopbar();renderMessages({preserveScroll:true});
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);

@@ -5899,6 +5899,12 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // #4650 review: a profile switch can change agent.reasoning_effort (and other
+    // reasoning inputs like base_url) WITHOUT changing the default model/provider,
+    // which is all the reasoning-chip cache key tracks. Force exactly one reasoning
+    // refetch for the new profile so the chip reflects the new profile's effort
+    // (the syncTopbar() calls below route through syncReasoningChip()).
+    if (typeof _lastReasoningFetchKey !== 'undefined') _lastReasoningFetchKey = null;
 
     // Reconnect the gateway SSE to the NEW profile's watcher. The backend watcher
     // registry is now profile-keyed (#3629), but this tab's existing EventSource is
@@ -9226,6 +9232,14 @@ function _openAuxAdvancedOptions(taskKey,cfg){
     if(typeof showToast==='function') showToast(isMain?(t('settings_main_advanced_saved')||'Main model options saved'):(t('settings_aux_advanced_saved')||'Auxiliary options saved'));
     overlay.style.display='none';
     _loadAuxiliaryModels();
+    // #4650 review: a main-model advanced save can change base_url, which
+    // /api/reasoning's answer depends on for some providers (e.g. LM Studio),
+    // WITHOUT changing the model/provider cache key. Invalidate the reasoning
+    // cache and refresh so the chip reflects the new config (one refetch).
+    if(isMain){
+      if(typeof _lastReasoningFetchKey!=='undefined') _lastReasoningFetchKey=null;
+      if(typeof fetchReasoningChip==='function') fetchReasoningChip();
+    }
    }catch(e){
     if(typeof showToast==='function') showToast(isMain?(t('settings_main_advanced_save_failed')||'Failed to save main model options'):(t('settings_aux_advanced_save_failed')||'Failed to save auxiliary options'));
    }
