@@ -5755,6 +5755,10 @@ async function _profileSwitchPanelLoad(){
   // into the next profile when the Tasks panel wasn't the visible panel.
   _showAllCronProfiles = false;
   _cronOtherProfileCount = 0;
+  _cronPreFormDetail = null;
+  _editingCronId = null;
+  _cronIsDuplicate = false;
+  _clearCronDetail();
   if (_currentPanel === 'skills') await loadSkills();
   if (_currentPanel === 'memory') await loadMemory();
   if (_currentPanel === 'tasks') await loadCrons();

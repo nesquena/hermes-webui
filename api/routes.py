@@ -1324,7 +1324,6 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
         names.append(name)
 
     _add_name(active_profile)
-    _add_name("default")
     for row in list_profiles_api():
         if not isinstance(row, dict):
             continue

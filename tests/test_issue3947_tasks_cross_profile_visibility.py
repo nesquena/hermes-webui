@@ -218,6 +218,53 @@ def test_crons_route_dedupes_root_aliases_by_resolved_home(monkeypatch):
     assert [job["owner_profile"] for job in body["jobs"]] == ["rootalias", "beta"]
 
 
+def test_crons_route_skips_hidden_default_profile_when_inactive(monkeypatch):
+    import api.profiles as profiles
+    import api.routes as routes
+
+    current_home = {"value": None}
+    jobs_by_home = {
+        "alpha-home": [{"id": "alpha-job", "name": "Alpha", "profile": None}],
+        "default-home": [{"id": "root-job", "name": "Root", "profile": None}],
+    }
+    _install_cron_jobs(monkeypatch, jobs_by_home, current_home)
+
+    class _Ctx:
+        def __init__(self, home):
+            self.home = str(home)
+            self.prev = None
+
+        def __enter__(self):
+            self.prev = current_home["value"]
+            current_home["value"] = self.home
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            current_home["value"] = self.prev
+            return False
+
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "alpha")
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [
+        {"name": "default", "visible": False},
+        {"name": "alpha", "visible": True},
+    ])
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: Path({"alpha": "alpha-home", "default": "default-home"}[name]),
+    )
+    monkeypatch.setattr(profiles, "cron_profile_context_for_home", _Ctx)
+
+    handler = _JSONHandler()
+    assert routes.handle_get(handler, SimpleNamespace(path="/api/crons", query="all_profiles=1")) is not False
+    body = _payload(handler)
+
+    assert handler.status == 200
+    assert body["all_profiles"] is True
+    assert body["other_profile_count"] == 0
+    assert [job["owner_profile"] for job in body["jobs"]] == ["alpha"]
+
+
 def test_crons_route_ignores_all_profiles_toggle_in_isolated_mode(monkeypatch):
     import api.profiles as profiles
     import api.routes as routes
@@ -261,7 +308,7 @@ def test_crons_route_ignores_all_profiles_toggle_in_isolated_mode(monkeypatch):
     assert body["all_profiles"] is False
     assert body["other_profile_count"] == 0
     assert [job["owner_profile"] for job in body["jobs"]] == ["alpha"]
-    assert lookups == ["alpha", "default"]
+    assert lookups == ["alpha"]
 
 
 def test_panels_toggle_button_flips_state_and_refetches():
@@ -336,25 +383,41 @@ let taskLoads = 0;
 let kanbanLoads = 0;
 let profileLoads = 0;
 let workspaceLoads = 0;
+let clearCronDetailCalls = 0;
+let _editingCronId = 'old-job';
+let _cronPreFormDetail = {{ id: 'old-job' }};
+let _cronIsDuplicate = true;
 async function loadSkills() {{ skillLoads += 1; }}
 async function loadMemory() {{ memoryLoads += 1; }}
 async function loadCrons() {{ taskLoads += 1; }}
 async function loadKanban() {{ kanbanLoads += 1; }}
 async function loadProfilesPanel() {{ profileLoads += 1; }}
 async function loadWorkspacesPanel() {{ workspaceLoads += 1; }}
+function _clearCronDetail() {{ clearCronDetailCalls += 1; }}
 {profile_switch_panel_load}
 (async () => {{
   await _profileSwitchPanelLoad();
   results.chatPanelToggle = _showAllCronProfiles;
   results.chatPanelCount = _cronOtherProfileCount;
   results.chatPanelTaskLoads = taskLoads;
+  results.chatPanelClears = clearCronDetailCalls;
+  results.chatPanelEditing = _editingCronId;
+  results.chatPanelPreForm = _cronPreFormDetail;
+  results.chatPanelDuplicate = _cronIsDuplicate;
   _showAllCronProfiles = true;
   _cronOtherProfileCount = 4;
   _currentPanel = 'tasks';
+  _editingCronId = 'second-job';
+  _cronPreFormDetail = {{ id: 'second-job' }};
+  _cronIsDuplicate = true;
   await _profileSwitchPanelLoad();
   results.tasksPanelToggle = _showAllCronProfiles;
   results.tasksPanelCount = _cronOtherProfileCount;
   results.tasksPanelTaskLoads = taskLoads;
+  results.tasksPanelClears = clearCronDetailCalls;
+  results.tasksPanelEditing = _editingCronId;
+  results.tasksPanelPreForm = _cronPreFormDetail;
+  results.tasksPanelDuplicate = _cronIsDuplicate;
   process.stdout.write(JSON.stringify(results));
 }})().catch((err) => {{
   console.error(err);
@@ -366,9 +429,17 @@ async function loadWorkspacesPanel() {{ workspaceLoads += 1; }}
     assert result["chatPanelToggle"] is False
     assert result["chatPanelCount"] == 0
     assert result["chatPanelTaskLoads"] == 0
+    assert result["chatPanelClears"] == 1
+    assert result["chatPanelEditing"] is None
+    assert result["chatPanelPreForm"] is None
+    assert result["chatPanelDuplicate"] is False
     assert result["tasksPanelToggle"] is False
     assert result["tasksPanelCount"] == 0
     assert result["tasksPanelTaskLoads"] == 1
+    assert result["tasksPanelClears"] == 2
+    assert result["tasksPanelEditing"] is None
+    assert result["tasksPanelPreForm"] is None
+    assert result["tasksPanelDuplicate"] is False
 
 
 def test_panels_js_uses_composite_cron_row_identity():
