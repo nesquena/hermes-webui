@@ -6348,7 +6348,7 @@ def _run_agent_streaming(
                 put('metering', stats)
 
             def _compact_for_echo_compare(value: str) -> str:
-                return re.sub(r'\s+', ' ', str(value or '')).strip()
+                return re.sub(r'\s+', '', str(value or ''))
 
             def _is_visible_output_echo(text: str) -> bool:
                 candidate = _compact_for_echo_compare(text)

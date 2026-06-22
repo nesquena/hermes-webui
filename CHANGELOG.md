@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Live process updates no longer duplicate when token output and interim progress differ only by whitespace.** The streaming echo guard now compares visible progress text after removing whitespace, so an interim assistant update is marked as already streamed instead of being appended again when only paragraph or line-break formatting changed.
+
 ## [v0.51.584] — 2026-06-22 — Release UQ (freeze /api/sessions cache during streaming)
 
 ### Fixed
