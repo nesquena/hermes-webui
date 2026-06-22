@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Mobile Enter now reliably inserts a newline instead of sending on iOS and Android.** The touch-primary Enter=newline default was additionally gated on a `visualViewport` height-delta probe (`_isVirtualKeyboardLikelyOpen`, >120px shrink = software keyboard open), but that heuristic is unreliable on iOS Safari and several Android browsers where the on-screen keyboard does not consistently shrink the visual viewport — so the composer fell through to the desktop Enter=send path and phones sent half-typed messages. The override now keys solely off the pointer media-query pair (`matchMedia('(pointer:coarse)')` with no co-existing `any-pointer:fine`), which is a sufficient and stable signal for "software keyboard only." Tablets with an attached hardware keyboard still get desktop Enter=send via the existing `_hasFinePointerCoexisting` check, and the now-dead viewport heuristic was removed.
+
 ## [v0.51.579] — 2026-06-22 — Release UL (deflake TLS end-to-end tests)
 
 ### Fixed
