@@ -3,6 +3,13 @@
 
 ## [Unreleased]
 
+## [v0.51.569] — 2026-06-22 — Release UB (mobile drawer fixes)
+
+### Fixed
+
+- **The mobile sidebar drawer now closes after you tap a panel.** Previously, tapping a rail icon (Tasks, Logs, Insights, etc.) on phone switched the panel but left the drawer open, so you had to dismiss it manually. The drawer now closes automatically after a rail-click panel switch on mobile (desktop is unaffected). Thanks @franksong2702. (#4644)
+- **Smoother mobile sidebar drawer animation.** The drawer open/close now animates with a GPU-accelerated `transform` instead of a `left` offset, for a smoother slide on phones. Thanks @franksong2702. (#4645)
+
 ## [v0.51.568] — 2026-06-22 — Release UA (toggle installed extensions)
 
 ### Added

@@ -277,10 +277,21 @@ async function switchPanel(name, opts = {}) {
   // Update main content view. Each entry in MAIN_VIEW_PANELS gets a matching
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
+  const _mainViewPanels = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
+    _mainViewPanels.forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
+  }
+  // #4644: close the mobile sidebar drawer after a rail-click panel switch — but
+  // ONLY for panels that have a main-content view (or chat). Sidebar-only panels
+  // like Todos render INSIDE the drawer, so closing it would hide the very panel
+  // the user just opened. Keep the drawer open for those.
+  const _panelHasMainView = nextPanel === 'chat' || _mainViewPanels.indexOf(nextPanel) !== -1;
+  if (_panelHasMainView && opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
+    if (typeof closeMobileSidebar === 'function') {
+      closeMobileSidebar();
+    }
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
@@ -297,12 +308,6 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'settings') {
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
-  }
-  if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
-    const sidebar = document.querySelector('.sidebar');
-    const overlay = document.getElementById('mobileOverlay');
-    if (sidebar) sidebar.classList.add('mobile-open');
-    if (overlay) overlay.classList.add('visible');
   }
   _resyncChatSidebarAfterPanelSwitch();
   if (nextPanel === 'chat' && typeof syncTopbar === 'function') syncTopbar();

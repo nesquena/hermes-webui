@@ -2369,9 +2369,9 @@
     /* Viewport-phone rules handle app chrome and touch sizing; they intentionally
        overlap the container compact rules for actual phones. */
     /* ── Sidebar: slide-in overlay instead of hidden ── */
-    .sidebar{position:fixed;left:-320px;top:0;bottom:0;width:min(320px, 100vw);z-index:200;
-      transition:left .25s ease;}
-    .sidebar.mobile-open{left:0;}
+    .sidebar{position:fixed;left:0;top:0;bottom:0;width:min(320px, 100vw);z-index:200;
+      transform:translateX(-100%);transition:transform .25s ease;will-change:transform;}
+    .sidebar.mobile-open{transform:translateX(0);}
     .sidebar .resize-handle{display:none;}
     /* Hamburger button (in app titlebar on mobile) */
     .app-titlebar{justify-content:space-between;}
