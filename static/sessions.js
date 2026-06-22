@@ -899,7 +899,7 @@ async function newSession(flash, options={}){
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
       const _explicitModelProvider=newModelState.model_provider;
-      // Fill model_provider for bare slugs to skip cold catalog rebuilds, but leave cross-provider model names on the server slow path.
+      // #2518 follow-up: fill model_provider for bare slugs to skip cold catalog rebuilds, but leave cross-provider model names on the server slow path.
       const _bareModel=!/[/]/.test(newModelState.model)&&!newModelState.model.startsWith('@');
       // Second guard (#3410-followup): even a bare model can carry a known
       // family prefix (gpt→openai, claude→anthropic, gemini→google). If that
