@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.579] — 2026-06-22 — Release UL (deflake TLS end-to-end tests)
+
+### Fixed
+
+- **Test reliability: the TLS end-to-end tests no longer flake.** The `test_tls_support.py` end-to-end tests picked a free port, released it, then started the server — leaving a TOCTOU window where the OS could reassign that port (common under the parallel test suite), so the server failed to bind and the test timed out intermittently. The harness now retries server bring-up on a freshly chosen port, detects a died subprocess immediately instead of polling to the deadline, and surfaces server output on failure. Test-only; no product change.
+
 ## [v0.51.578] — 2026-06-22 — Release UK (preserve reader scroll position across re-render)
 
 ### Fixed

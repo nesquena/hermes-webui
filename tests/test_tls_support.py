@@ -43,8 +43,15 @@ def _find_free_port() -> int:
 
 
 def _wait_for_server(host: str, port: int, use_ssl: bool = False,
-                     timeout: float = 8.0) -> bool:
-    """Poll until the server accepts a connection or times out."""
+                     timeout: float = 30.0, proc: "subprocess.Popen | None" = None) -> bool:
+    """Poll until the server accepts a connection or times out.
+
+    Bumped to 30s because the server subprocess imports the whole app, which can
+    exceed a tight budget under the parallel (9-shard) suite + concurrent agents.
+    If ``proc`` is supplied, bail out early the moment the subprocess has exited
+    (e.g. failed to bind the port) instead of polling a dead process to the
+    deadline — that turns a slow flake into a fast, deterministic retry signal.
+    """
     ctx = None
     if use_ssl:
         ctx = ssl.create_default_context()
@@ -52,6 +59,8 @@ def _wait_for_server(host: str, port: int, use_ssl: bool = False,
         ctx.verify_mode = ssl.CERT_NONE
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False  # subprocess died (e.g. port already taken) — don't wait it out
         try:
             if use_ssl:
                 c = http.client.HTTPSConnection(host, port, timeout=2, context=ctx)
@@ -63,7 +72,7 @@ def _wait_for_server(host: str, port: int, use_ssl: bool = False,
             c.close()
             return True
         except Exception:
-            time.sleep(0.5)
+            time.sleep(0.25)
     return False
 
 
@@ -86,6 +95,45 @@ def _start_server(port: int, cert: str = None, key: str = None) -> subprocess.Po
         **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
     )
     return proc
+
+
+def _terminate(proc: "subprocess.Popen | None") -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    with suppress(Exception):
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def _start_and_wait(use_ssl: bool, cert: str = None, key: str = None,
+                    attempts: int = 4) -> subprocess.Popen:
+    """Start the server and wait until it is reachable, retrying on a fresh port.
+
+    Defeats the _find_free_port() TOCTOU race (the OS can hand the just-released
+    port to another process before server.py binds it, especially under the
+    parallel suite). On a failed bring-up we tear the subprocess down and retry
+    with a NEWLY chosen port. Returns the live Popen, or raises AssertionError
+    with the captured server output after exhausting attempts.
+    """
+    last_output = ""
+    for _ in range(attempts):
+        port = _find_free_port()
+        proc = _start_server(port, cert=cert, key=key)
+        if _wait_for_server("127.0.0.1", port, use_ssl=use_ssl, proc=proc):
+            proc._test_port = port  # type: ignore[attr-defined]
+            return proc
+        # Capture diagnostics before retrying with a fresh port.
+        with suppress(Exception):
+            os.set_blocking(proc.stdout.fileno(), False)
+            last_output = (proc.stdout.read(4000) or "")[:4000]
+        _terminate(proc)
+    raise AssertionError(
+        f"server did not become reachable after {attempts} attempts "
+        f"(use_ssl={use_ssl}); last server output:\n{last_output}"
+    )
 
 
 # ── Test class ──────────────────────────────────────────────────────────────
@@ -162,12 +210,8 @@ class TestTLSEndToEnd(unittest.TestCase):
                 self._proc.kill()
 
     def test_https_server_responds_to_health(self):
-        port = _find_free_port()
-        self._proc = _start_server(port, cert=self._cert, key=self._key)
-        self.assertTrue(
-            _wait_for_server("127.0.0.1", port, use_ssl=True),
-            "TLS server did not start in time",
-        )
+        self._proc = _start_and_wait(use_ssl=True, cert=self._cert, key=self._key)
+        port = self._proc._test_port
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -180,11 +224,8 @@ class TestTLSEndToEnd(unittest.TestCase):
         conn.close()
 
     def test_http_without_tls_still_works(self):
-        port = _find_free_port()
-        self._proc = _start_server(port)
-        self.assertTrue(
-            _wait_for_server("127.0.0.1", port, use_ssl=False),
-        )
+        self._proc = _start_and_wait(use_ssl=False)
+        port = self._proc._test_port
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         conn.request("GET", "/health")
         resp = conn.getresponse()
@@ -196,14 +237,9 @@ class TestTLSEndToEnd(unittest.TestCase):
     @requires_fcntl
     def test_tls_startup_failure_fallback_to_http(self):
         """Bad cert paths should print a warning and start HTTP anyway."""
-        port = _find_free_port()
-        self._proc = _start_server(
-            port, cert="/nonexistent/cert.pem", key="/nonexistent/key.pem",
-        )
-        # Server should be reachable over plain HTTP even though TLS setup failed
-        self.assertTrue(
-            _wait_for_server("127.0.0.1", port, use_ssl=False),
-            "HTTP fallback server did not start after TLS failure",
+        # Server should be reachable over plain HTTP even though TLS setup failed.
+        self._proc = _start_and_wait(
+            use_ssl=False, cert="/nonexistent/cert.pem", key="/nonexistent/key.pem",
         )
         # Confirm TLS warning was printed
         import fcntl
