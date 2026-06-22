@@ -72,6 +72,23 @@ def _declarations(rule_body):
     return declarations
 
 
+def _js_function_body(source, function_name):
+    """Return a JavaScript function body using balanced braces."""
+    match = re.search(rf'function\s+{re.escape(function_name)}\s*\([^)]*\)\s*\{{', source)
+    if not match:
+        raise AssertionError(f"Missing JavaScript function {function_name}()")
+    open_brace = match.end() - 1
+    depth = 0
+    for idx in range(open_brace, len(source)):
+        if source[idx] == "{":
+            depth += 1
+        elif source[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[open_brace + 1:idx]
+    raise AssertionError(f"Could not parse JavaScript function {function_name}()")
+
+
 def _optional_declarations(css, selector):
     try:
         return _declarations(_rule_body(css, selector))
@@ -467,28 +484,52 @@ def test_mobile_keeps_hamburger_drawer_with_vertical_44px_panel_targets():
     )
 
 
-def test_mobile_rail_click_opens_sidebar_for_all_panels():
-    """Rail clicks on phone must reveal the selected sidebar panel."""
+def test_mobile_rail_click_closes_sidebar_for_all_panels():
+    """Rail clicks on phone should switch panels and then close the mobile drawer."""
     panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
     assert "opts.fromRailClick" in panels_js, (
         "switchPanel() should distinguish rail clicks from programmatic switches"
     )
     assert "!_isDesktopWidth()" in panels_js, (
-        "Rail-click sidebar opening must be limited to mobile widths"
+        "Mobile rail-click sidebar handling must be limited to mobile widths"
     )
-    mobile_click_block = re.search(
-        r'if\s*\(\s*opts\.fromRailClick[^{}]*!\s*_isDesktopWidth\(\)[\s\S]*?\n\s*\}',
-        panels_js,
+    switch_panel = _js_function_body(panels_js, "switchPanel")
+    mobile_click_match = re.search(
+        r"if\s*\(\s*opts\.fromRailClick\s*&&\s*typeof\s+_isDesktopWidth\s*===\s*'function'\s*&&\s*!\s*_isDesktopWidth\(\)\s*\)\s*\{(?P<body>.*?)\n\s*\}",
+        switch_panel,
+        re.DOTALL,
     )
-    assert mobile_click_block, "Missing mobile rail-click sidebar handler"
-    assert "sidebar.classList.add('mobile-open')" in panels_js, (
-        "Phone rail clicks should open the sidebar panel"
+    assert mobile_click_match, "Missing mobile rail-click sidebar handler"
+    mobile_click_block = mobile_click_match.group("body")
+    assert "typeof closeMobileSidebar === 'function'" in mobile_click_block, (
+        "Phone rail clicks should guard closeMobileSidebar with a typeof check"
     )
-    assert "overlay.classList.add('visible')" in panels_js, (
-        "Phone rail clicks should show the overlay behind the opened sidebar"
+    assert "closeMobileSidebar();" in mobile_click_block, (
+        "Phone rail clicks should close the mobile sidebar after panel switch"
     )
-    assert "nextPanel === 'chat'" not in mobile_click_block.group(0), (
-        "Chat rail clicks must open the session list on phone, not close the sidebar"
+    assert "sidebar.classList.add('mobile-open')" not in mobile_click_block, (
+        "Phone rail-click path in switchPanel should no longer add mobile-open"
+    )
+    assert "overlay.classList.add('visible')" not in mobile_click_block, (
+        "Phone rail-click path in switchPanel should no longer add mobile overlay"
+    )
+
+
+def test_mobile_switch_panel_non_chat_opens_sidebar():
+    """mobileSwitchPanel() non-chat path should still open the sidebar overlay."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    fn_body = _js_function_body(boot_js, "mobileSwitchPanel")
+    assert "if(name==='chat')" in fn_body, (
+        "mobileSwitchPanel must close sidebar only on chat target"
+    )
+    assert "closeMobileSidebar();" in fn_body, (
+        "mobileSwitchPanel should still close sidebar on chat"
+    )
+    assert "sidebar.classList.add('mobile-open')" in fn_body, (
+        "mobileSwitchPanel non-chat branch should keep adding mobile-open"
+    )
+    assert "overlay.classList.add('visible')" in fn_body, (
+        "mobileSwitchPanel non-chat branch should keep showing mobile overlay"
     )
 
 
