@@ -11579,6 +11579,23 @@ def handle_post(handler, parsed) -> bool:
             from api.helpers import build_profile_cookie
             if name != 'default':
                 _validate_profile_name(name)
+
+            # Multi-user guard: non-admin users can only switch to their
+            # assigned profile (enforced by get_session_username).
+            from api.users import is_multi_user_enabled, get_user_profile
+            if is_multi_user_enabled():
+                from api.auth import parse_cookie, get_session_username
+                session_cookie = parse_cookie(handler)
+                username = get_session_username(session_cookie) if session_cookie else None
+                if username:  # non-admin user with a username in the session
+                    assigned = get_user_profile(username)
+                    if assigned and name != assigned:
+                        return bad(
+                            handler,
+                            f"Access denied: profile '{name}' is not assigned to user '{username}'",
+                            403,
+                        )
+
             # process_wide=False: don't mutate the process-global _active_profile.
             # Per-client profile is managed via cookie + thread-local (#798).
             result = switch_profile(name, process_wide=False)
@@ -12405,7 +12422,7 @@ def handle_post(handler, parsed) -> bool:
             if username != "admin":
                 profile = get_user_profile(username)
                 if profile:
-                    from api.auth import sign_profile_cookie_value
+                    from api.auth import sign_profile_cookie_value, _is_secure_context, _resolve_session_ttl
                     from api.helpers import get_profile_cookie_name
                     import http.cookies as _hc
                     profile_cookie_val = sign_profile_cookie_value(profile, cookie_val)
@@ -12414,6 +12431,9 @@ def handle_post(handler, parsed) -> bool:
                     pc[get_profile_cookie_name()]['path'] = '/'
                     pc[get_profile_cookie_name()]['httponly'] = True
                     pc[get_profile_cookie_name()]['samesite'] = 'Lax'
+                    pc[get_profile_cookie_name()]['max-age'] = str(_resolve_session_ttl())
+                    if _is_secure_context(handler):
+                        pc[get_profile_cookie_name()]['secure'] = True
                     handler.send_header("Set-Cookie", pc[get_profile_cookie_name()].OutputString())
                     logger.info("User %s logged in, profile cookie set to %s", username, profile)
 
@@ -12426,8 +12446,7 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Invalid password", 401)
 
         _clear_login_attempts(client_ip)
-        username_val = username if multi_user else ""
-        cookie_val = create_session(username=username_val)
+        cookie_val = create_session(username="")
         response_body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
@@ -12435,21 +12454,6 @@ def handle_post(handler, parsed) -> bool:
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         set_auth_cookie(handler, cookie_val)
-        # In multi-user mode, set the hermes_profile cookie to the user's profile
-        if multi_user and username_val:
-            profile = get_user_profile(username)
-            if profile:
-                from api.auth import sign_profile_cookie_value
-                from api.helpers import get_profile_cookie_name
-                import http.cookies as _hc
-                profile_cookie_val = sign_profile_cookie_value(profile, cookie_val)
-                pc = _hc.SimpleCookie()
-                pc[get_profile_cookie_name()] = profile_cookie_val
-                pc[get_profile_cookie_name()]['path'] = '/'
-                pc[get_profile_cookie_name()]['httponly'] = True
-                pc[get_profile_cookie_name()]['samesite'] = 'Lax'
-                handler.send_header("Set-Cookie", pc[get_profile_cookie_name()].OutputString())
-                logger.info("User %s logged in, profile cookie set to %s", username, profile)
         handler.end_headers()
         handler.wfile.write(response_body)
         return True

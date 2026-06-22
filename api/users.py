@@ -69,10 +69,12 @@ def _save_users(users: dict) -> None:
 
 
 def _ensure_loaded():
-    """Load users on first access."""
-    global _loaded
-    if not _loaded:
-        _load_users()
+    """Load users on first access (double-checked locking, thread-safe)."""
+    if _loaded:
+        return
+    with _USERS_LOCK:
+        if not _loaded:
+            _load_users()
 
 
 # ── Public API ─────────────────────────────────────────────────────────────
@@ -81,7 +83,8 @@ def _ensure_loaded():
 def is_multi_user_enabled() -> bool:
     """Return True if at least one user is defined in users.json."""
     _ensure_loaded()
-    return len(_users) > 0
+    with _USERS_LOCK:
+        return len(_users) > 0
 
 
 def verify_user(username: str, password: str) -> bool:
@@ -113,7 +116,8 @@ def add_user(username: str, password: str, profile: str = None) -> bool:
     """Add a new user.
 
     Args:
-        username: Unique username.
+        username: Unique username. Raises ValueError if username is 'admin'
+            (reserved for legacy HERMES_WEBUI_PASSWORD auth).
         password: Plaintext password (will be hashed via PBKDF2-SHA256).
         profile: Hermes profile name. Defaults to the username.
 
@@ -123,6 +127,11 @@ def add_user(username: str, password: str, profile: str = None) -> bool:
     _ensure_loaded()
     from api.auth import _hash_password
     with _USERS_LOCK:
+        if username == "admin":
+            raise ValueError(
+                "'admin' is a reserved username; use the HERMES_WEBUI_PASSWORD "
+                "env var or settings password to set the admin password"
+            )
         if username in _users:
             return False
         _users[username] = {

@@ -2,20 +2,37 @@
 """CLI utility for managing WebUI users.
 
 Usage:
-    python cli_users.py add <username> <password> [--profile PROFILE]
+    python cli_users.py add <username> [password] [--profile PROFILE]
     python cli_users.py remove <username>
-    python cli_users.py passwd <username> <new-password>
+    python cli_users.py passwd <username> [new-password]
     python cli_users.py set-profile <username> <profile>
     python cli_users.py list
+
+When password is omitted for `add` or `passwd`, the tool prompts interactively
+(using getpass) so the credential is never exposed in the process table or
+shell history.
 
 Runs against the WebUI's STATE_DIR (configurable via --state-dir or
 $HERMES_WEBUI_STATE_DIR; defaults to ~/.hermes/webui).
 """
 
 import argparse
+import getpass
 import os
 import sys
 from pathlib import Path
+
+
+def _prompt_password(prompt="Password: ", confirm=False) -> str:
+    """Prompt for a password via getpass (hides input, avoids shell history)."""
+    pw = getpass.getpass(prompt)
+    if confirm:
+        pw2 = getpass.getpass("Confirm password: ")
+        if pw != pw2:
+            print("Error: passwords do not match.", file=sys.stderr)
+            sys.exit(1)
+    return pw
+
 
 # Ensure we can import from the api package.
 _HERE = Path(__file__).resolve().parent
@@ -32,10 +49,28 @@ def _resolve_state_dir(args) -> Path:
     return Path.home() / ".hermes" / "webui"
 
 
+def _resolve_password(args, prompt="Password: ", confirm=False) -> str:
+    """Resolve password from --password-file, positional arg, or interactive prompt."""
+    if args.password_file:
+        try:
+            return Path(args.password_file).read_text(encoding="utf-8").strip()
+        except OSError as e:
+            print(f"Error: cannot read password file: {e}", file=sys.stderr)
+            sys.exit(1)
+    if args.password:
+        return args.password
+    return _prompt_password(prompt, confirm=confirm)
+
+
 def cmd_add(args):
     from api.users import add_user
+    password = _resolve_password(args, "Password: ", confirm=True)
     profile = args.profile or args.username
-    ok = add_user(args.username, args.password, profile)
+    try:
+        ok = add_user(args.username, password, profile)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     if ok:
         print(f"User '{args.username}' created (profile: {profile}).")
     else:
@@ -55,7 +90,8 @@ def cmd_remove(args):
 
 def cmd_passwd(args):
     from api.users import change_password
-    ok = change_password(args.username, args.password)
+    new_password = _resolve_password(args, "New password: ", confirm=True)
+    ok = change_password(args.username, new_password)
     if ok:
         print(f"Password changed for '{args.username}'.")
     else:
@@ -94,15 +130,17 @@ def main():
 
     p_add = sub.add_parser("add", help="Create a new user")
     p_add.add_argument("username")
-    p_add.add_argument("password")
+    p_add.add_argument("password", nargs="?", help="Plaintext password (omit for interactive prompt)")
     p_add.add_argument("--profile", "-p", help="Hermes profile name (default: username)")
+    p_add.add_argument("--password-file", help="Read password from file instead of CLI arg")
 
     p_rm = sub.add_parser("remove", help="Delete a user")
     p_rm.add_argument("username")
 
     p_pw = sub.add_parser("passwd", help="Change a user's password")
     p_pw.add_argument("username")
-    p_pw.add_argument("password")
+    p_pw.add_argument("password", nargs="?", help="New password (omit for interactive prompt)")
+    p_pw.add_argument("--password-file", help="Read password from file instead of CLI arg")
 
     p_sp = sub.add_parser("set-profile", help="Set a user's Hermes profile")
     p_sp.add_argument("username")
