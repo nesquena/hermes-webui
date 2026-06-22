@@ -88,11 +88,15 @@ def _resolve_cookie_name() -> str:
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
 
 
-def _load_sessions() -> dict[str, float]:
+def _load_sessions() -> dict[str, dict]:
     """Load persisted sessions from STATE_DIR, pruning expired entries.
 
     Returns an empty dict on any read or parse error so startup is never
     blocked by a corrupt or missing sessions file.
+
+    Supports both legacy format (token -> float expiry) and new format
+    (token -> {"exp": float, "username": str | None}), transparently
+    upgrading legacy entries on load.
     """
     try:
         if _SESSIONS_FILE.exists():
@@ -100,14 +104,27 @@ def _load_sessions() -> dict[str, float]:
             if not isinstance(data, dict):
                 raise ValueError('malformed sessions file — expected dict')
             now = time.time()
-            return {t: exp for t, exp in data.items()
-                    if isinstance(t, str) and isinstance(exp, (int, float)) and exp > now}
+            result = {}
+            for token, raw in data.items():
+                if not isinstance(token, str):
+                    continue
+                if isinstance(raw, dict):
+                    exp = raw.get("exp")
+                    if isinstance(exp, (int, float)) and exp > now:
+                        result[token] = {
+                            "exp": exp,
+                            "username": raw.get("username", ""),
+                        }
+                elif isinstance(raw, (int, float)) and raw > now:
+                    # Legacy format: upgrade on load
+                    result[token] = {"exp": raw, "username": ""}
+            return result
     except Exception as e:
         logger.debug("Failed to load sessions file, starting fresh: %s", e)
     return {}
 
 
-def _save_sessions(sessions: dict[str, float]) -> None:
+def _save_sessions(sessions: dict[str, dict]) -> None:
     """Atomically persist sessions to STATE_DIR/.sessions.json (0600).
 
     Uses a temp file + os.replace() so a crash mid-write never leaves a
@@ -131,7 +148,7 @@ def _save_sessions(sessions: dict[str, float]) -> None:
         logger.debug("Failed to persist sessions: %s", e)
 
 
-# Active sessions: token -> expiry timestamp (persisted across restarts via STATE_DIR)
+# Active sessions: token -> {"exp": float, "username": str}
 _sessions = _load_sessions()
 _SESSIONS_LOCK = threading.Lock()
 
@@ -414,11 +431,18 @@ def verify_password(plain: str) -> bool:
     return False
 
 
-def create_session() -> str:
-    """Create a new auth session. Returns signed cookie value."""
+def create_session(username: str = "") -> str:
+    """Create a new auth session. Returns signed cookie value.
+    
+    Args:
+        username: Optional username to associate with this session.
+    """
     token = secrets.token_hex(32)
     with _SESSIONS_LOCK:
-        _sessions[token] = time.time() + _resolve_session_ttl()
+        _sessions[token] = {
+            "exp": time.time() + _resolve_session_ttl(),
+            "username": username,
+        }
         _save_sessions(_sessions)
     sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()
     return f"{token}.{sig}"
@@ -428,7 +452,7 @@ def _prune_expired_sessions():
     """Remove all expired session entries to prevent unbounded memory growth."""
     now = time.time()
     with _SESSIONS_LOCK:
-        expired = [t for t, exp in _sessions.items() if now > exp]
+        expired = [t for t, data in _sessions.items() if now > data["exp"]]
         if expired:
             for token in expired:
                 _sessions.pop(token, None)
@@ -451,8 +475,8 @@ def verify_session(cookie_value: str) -> bool:
     if not valid:
         return False
     with _SESSIONS_LOCK:
-        expiry = _sessions.get(token)
-        if not expiry or time.time() > expiry:
+        session = _sessions.get(token)
+        if not session or time.time() > session["exp"]:
             _sessions.pop(token, None)
             _save_sessions(_sessions)
             return False
@@ -545,6 +569,23 @@ def invalidate_session(cookie_value) -> None:
             if token in _sessions:
                 _sessions.pop(token, None)
                 _save_sessions(_sessions)
+
+
+def get_session_username(cookie_value: str) -> str | None:
+    """Return the username associated with a session, or None.
+
+    Returns empty string for legacy (pre-multi-user) sessions.
+    """
+    if not cookie_value or '.' not in cookie_value:
+        return None
+    if not verify_session(cookie_value):
+        return None
+    token = cookie_value.rsplit('.', 1)[0]
+    with _SESSIONS_LOCK:
+        session = _sessions.get(token)
+        if session:
+            return session.get("username") or ""
+    return None
 
 
 def parse_cookie(handler) -> str | None:
