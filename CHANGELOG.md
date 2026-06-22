@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.583] — 2026-06-22 — Release UP (no legacy interim toggle in anchor Worklog)
+
+### Fixed
+
+- **The legacy "Show N earlier updates" link no longer appears above the live Worklog.** When the anchor-scene took ownership of a live turn, the older `interim_assistant` collapse toggle could still be left behind or recreated as an orphan control above the Compact Worklog. The live anchor render now clears that legacy toggle, and the `interim_assistant` handler skips recreating it while the anchor scene owns the live turn — so you see the anchor-backed `Processed…` Worklog surface, not a stray legacy collapse affordance. Thanks @franksong2702. (#4681)
+
 ## [v0.51.582] — 2026-06-22 — Release UO (mobile Enter reliably inserts newline)
 
 ### Fixed

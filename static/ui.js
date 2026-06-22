@@ -9578,7 +9578,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     ? _captureWorklogDetailDisclosureState(blocks)
     : null;
   blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
-  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"]').forEach(el=>el.remove());
+  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>el.remove());
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
     el.classList.add('assistant-segment-worklog-source');
     el.setAttribute('aria-hidden','true');
