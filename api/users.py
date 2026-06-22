@@ -16,6 +16,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import tempfile
 import threading
 import time
@@ -91,18 +92,23 @@ def verify_user(username: str, password: str) -> bool:
     """Verify a username/password combination against users.json.
 
     Returns True if the password matches the stored hash for this user.
+    Always runs PBKDF2 (constant-time from the caller's perspective) to
+    prevent timing-based username enumeration (#4703).
     Thread-safe: reads under lock.
     """
     _ensure_loaded()
+    from api.auth import _hash_password
     with _USERS_LOCK:
         user = _users.get(username)
-        if not user:
-            return False
-        expected = user.get('password_hash', '')
-        if not expected:
-            return False
-    from api.auth import _hash_password
-    return hmac.compare_digest(_hash_password(password), expected)
+        stored_hash = user.get('password_hash', '') if user else ''
+        stored_salt_hex = user.get('password_salt', '') if user else ''
+    # Always run PBKDF2 — even for absent usernames — so response latency
+    # does not leak whether the username exists (#4703).
+    if stored_salt_hex:
+        computed = _hash_password(password, salt=bytes.fromhex(stored_salt_hex))
+    else:
+        computed = _hash_password(password)
+    return bool(user) and hmac.compare_digest(computed, stored_hash)
 
 
 def user_exists(username: str) -> bool:
@@ -134,8 +140,10 @@ def add_user(username: str, password: str, profile: str = None) -> bool:
             )
         if username in _users:
             return False
+        salt = secrets.token_bytes(32)
         _users[username] = {
-            'password_hash': _hash_password(password),
+            'password_hash': _hash_password(password, salt=salt),
+            'password_salt': salt.hex(),
             'profile': profile or username,
             'created_at': time.time(),
         }
@@ -161,7 +169,9 @@ def change_password(username: str, new_password: str) -> bool:
     with _USERS_LOCK:
         if username not in _users:
             return False
-        _users[username]['password_hash'] = _hash_password(new_password)
+        salt = secrets.token_bytes(32)
+        _users[username]['password_hash'] = _hash_password(new_password, salt=salt)
+        _users[username]['password_salt'] = salt.hex()
         _save_users(_users)
         return True
 
