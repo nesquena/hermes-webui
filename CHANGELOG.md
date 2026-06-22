@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/api/sessions` no longer crawls (and token output no longer drops to ~2 tok/s) during an active chat turn.** The sidebar session-list cache keyed its freshness on a content fingerprint of `state.db`, but an in-flight turn writes message rows continuously — so the fingerprint changed on essentially every poll, popping the cache and forcing a full `all_sessions()` rebuild mid-stream. Each forced rebuild then contended for the global session lock the streaming worker holds while writing, producing multi-second (occasionally ~15s) `/api/sessions` latencies and starving token rendering. The cache now applies a streaming hold-down: while any session is actively streaming, the volatile `state.db`-derived stamp components collapse to a marker keyed only on the set of active streams, so per-token writes stop busting the cache. Rebuilds are bounded to the existing TTL cadence instead of one-per-poll, the streaming path also stops opening a per-poll SQLite connection to the contended `state.db`, the 2.5s TTL still refreshes a streaming session's own title/count, live streaming indicators are unaffected (overlaid post-cache), and structural changes (new/deleted/renamed/imported sessions) still invalidate immediately via the explicit listener. Thanks @batkuip. (#4672)
+
 ## [v0.51.580] — 2026-06-22 — Release UM (wrap markdown source previews)
 
 ### Fixed
@@ -33,7 +37,6 @@
 
 - **The transcript no longer yanks you back to the bottom while you're reading mid-stream.** Scroll re-pinning now requires a deliberate move toward the bottom (and ignores tiny scroll jitter), so reading earlier messages during an active stream stays put instead of getting hijacked back to the latest token. Thanks @rodboev. (#4584, fixes #4295)
 - **No more accidental horizontal panning of the mobile transcript.** Wide content (long code lines, URLs) could let the message area pan sideways on phones; the transcript now clips horizontal overflow and wraps long words. Thanks @rodboev. (#4583, fixes #4553)
->>>>>>> baa5869e4 (stage #4577 (dso2ng): keep failed steer from cancelling active runs)
 
 ## [v0.51.575] — 2026-06-22 — Release UH (session-list perf for long histories)
 

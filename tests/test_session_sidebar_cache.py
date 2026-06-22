@@ -406,3 +406,112 @@ def test_session_list_payload_to_response_overlays_live_stream_runtime(monkeypat
     assert by_id["stale-session"]["active_stream_id"] is None
     assert by_id["stale-session"]["is_streaming"] is False
     assert by_id["stale-session"]["has_pending_user_message"] is False
+
+
+def _build_stamp_env(tmp_path, monkeypatch):
+    """Wire a self-contained source-stamp environment and return its key."""
+    state_db = tmp_path / "state.db"
+    state_db.write_text("db", encoding="utf-8")
+    state_db_wal = tmp_path / "state.db-wal"
+    state_db_wal.write_text("wal-1", encoding="utf-8")
+    gateway = tmp_path / "gateway-sessions.json"
+    gateway.write_text("{}", encoding="utf-8")
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / "_index.json").write_text("{}", encoding="utf-8")
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: str(state_db))
+    monkeypatch.setattr(routes, "_gateway_session_metadata_path", lambda: gateway)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SETTINGS_FILE", settings_file)
+    # Make the content fingerprint deterministic and unaffected by the dummy
+    # text-file state.db (a real sqlite connect would just return None here).
+    fingerprint = {"value": (1, 1)}
+    monkeypatch.setattr(
+        routes,
+        "_session_list_cache_state_db_fingerprint",
+        lambda _p: fingerprint["value"],
+    )
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    return key, state_db_wal, settings_file, fingerprint
+
+
+def test_source_stamp_freezes_during_streaming_message_writes(tmp_path, monkeypatch):
+    """#4672: per-token state.db churn must not bust the cache mid-stream.
+
+    With an active stream the volatile state.db-derived components are collapsed
+    to a stream-set marker, so advancing the WAL stat AND the content
+    fingerprint (the per-message-write signals) leaves the stamp unchanged.
+    Before the fix each of these advanced the stamp and forced a rebuild on
+    every poll.
+    """
+    key, state_db_wal, _settings_file, fingerprint = _build_stamp_env(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {"turn-1"})
+
+    before = routes._session_list_cache_source_stamp(key)
+    # Simulate the writes an active chat turn makes to state.db: WAL grows and
+    # the messages-table fingerprint advances.
+    state_db_wal.write_text("wal-2-grew-a-lot", encoding="utf-8")
+    fingerprint["value"] = (2, 99)
+    after = routes._session_list_cache_source_stamp(key)
+
+    assert after == before
+
+
+def test_source_stamp_changes_when_stream_set_transitions(tmp_path, monkeypatch):
+    """The hold-down marker tracks the active-stream SET, so a turn starting or
+    finishing re-validates the cache and the final title/count is picked up."""
+    key, _wal, _settings, _fp = _build_stamp_env(tmp_path, monkeypatch)
+
+    streams = {"value": set()}
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set(streams["value"]))
+
+    idle = routes._session_list_cache_source_stamp(key)
+    streams["value"] = {"turn-1"}
+    streaming = routes._session_list_cache_source_stamp(key)
+    streams["value"] = {"turn-1", "turn-2"}
+    two_streams = routes._session_list_cache_source_stamp(key)
+    streams["value"] = set()
+    idle_again = routes._session_list_cache_source_stamp(key)
+
+    assert idle != streaming
+    assert streaming != two_streams
+    # Returning to idle re-engages the live state.db stamp path.
+    assert idle_again != streaming
+
+
+def test_source_stamp_tracks_settings_even_while_streaming(tmp_path, monkeypatch):
+    """Settings-file / sidebar-toggle changes must still invalidate the cache
+    during streaming so user-initiated changes are never held stale."""
+    key, _wal, settings_file, _fp = _build_stamp_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {"turn-1"})
+
+    before = routes._session_list_cache_source_stamp(key)
+    settings_file.write_text('{"show_cli_sessions": true}', encoding="utf-8")
+    after = routes._session_list_cache_source_stamp(key)
+
+    assert after != before
+
+
+def test_source_stamp_still_tracks_wal_when_idle(tmp_path, monkeypatch):
+    """Regression guard: with NO active stream the stamp must still advance on a
+    state.db/WAL write (the original commit-reliable behavior is preserved)."""
+    key, state_db_wal, _settings, _fp = _build_stamp_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    before = routes._session_list_cache_source_stamp(key)
+    state_db_wal.write_text("wal-2-more", encoding="utf-8")
+    after = routes._session_list_cache_source_stamp(key)
+
+    assert after != before
