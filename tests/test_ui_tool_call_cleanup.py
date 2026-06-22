@@ -279,6 +279,30 @@ class TestToolCallGroupingStatic:
             "Restoring multi-tool groups must sync both CSS state and accessibility state."
         )
 
+    def test_render_rebuild_preserves_nested_worklog_detail_scroll_position(self):
+        capture_fn = _function_body(UI_JS, "_captureWorklogDetailDisclosureState")
+        restore_fn = _function_body(UI_JS, "_restoreWorklogDetailDisclosureState")
+        body_fn = _function_body(UI_JS, "_worklogDetailScrollableBody")
+
+        assert ".thinking-card-body,.tool-card-detail" in body_fn, (
+            "Nested scroll preservation must cover Thinking bodies and Tool details."
+        )
+        assert "_worklogDetailScrollableBody(el)" in capture_fn, (
+            "The rebuild-state capture must inspect each detail's nested scroll container."
+        )
+        assert "scrollTop:body?Math.max(0,Number(body.scrollTop)||0):0" in capture_fn, (
+            "The captured Worklog detail state must retain the nested scrollTop value."
+        )
+        assert "const saved=state.get(key)" in restore_fn, (
+            "Restoration should read the structured state object for each detail."
+        )
+        assert "const open=(saved&&typeof saved==='object'&&'open' in saved)?saved.open:saved" in restore_fn, (
+            "Restoration must remain backward-compatible with legacy boolean snapshots."
+        )
+        assert "body.scrollTop=Math.min(scrollTop, Math.max(0, body.scrollHeight-body.clientHeight))" in restore_fn, (
+            "Restoration must reapply nested scrollTop after the rebuilt detail is opened."
+        )
+
     def test_worklog_detail_keys_stay_stable_while_streaming_content_grows(self):
         key_fn = _function_body(UI_JS, "_worklogDetailBaseKey")
         append_thinking_fn = _function_body(UI_JS, "appendThinking")

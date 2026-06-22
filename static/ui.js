@@ -8224,6 +8224,10 @@ function _worklogDetailBaseKey(el){
 function _worklogDetailDisclosureIsOpen(el){
   return !!(el&&el.classList&&el.classList.contains('open'));
 }
+function _worklogDetailScrollableBody(el){
+  if(!el||!el.querySelector) return null;
+  return el.querySelector('.thinking-card-body,.tool-card-detail');
+}
 function _setWorklogDetailDisclosureOpen(el, open){
   if(!el||!el.classList) return;
   el.classList.toggle('open', !!open);
@@ -8252,7 +8256,12 @@ function _captureWorklogDetailDisclosureState(root){
   const counts=Object.create(null);
   root.querySelectorAll(_worklogDetailDisclosureSelector).forEach(el=>{
     const key=_worklogDetailDisclosureKeyForElement(el, counts);
-    if(key) state.set(key, _worklogDetailDisclosureIsOpen(el));
+    if(!key) return;
+    const body=_worklogDetailScrollableBody(el);
+    state.set(key,{
+      open:_worklogDetailDisclosureIsOpen(el),
+      scrollTop:body?Math.max(0,Number(body.scrollTop)||0):0,
+    });
   });
   return state;
 }
@@ -8264,7 +8273,14 @@ function _restoreWorklogDetailDisclosureState(root, state){
   root.querySelectorAll(_worklogDetailDisclosureSelector).forEach(el=>{
     const key=_worklogDetailDisclosureKeyForElement(el, counts);
     if(!key||!state.has(key)) return;
-    _setWorklogDetailDisclosureOpen(el, state.get(key));
+    const saved=state.get(key);
+    const open=(saved&&typeof saved==='object'&&'open' in saved)?saved.open:saved;
+    _setWorklogDetailDisclosureOpen(el, open);
+    const scrollTop=(saved&&typeof saved==='object')?Number(saved.scrollTop):0;
+    if(open&&Number.isFinite(scrollTop)&&scrollTop>0){
+      const body=_worklogDetailScrollableBody(el);
+      if(body) body.scrollTop=Math.min(scrollTop, Math.max(0, body.scrollHeight-body.clientHeight));
+    }
   });
 }
 function _thinkingCardHtml(text, open){
