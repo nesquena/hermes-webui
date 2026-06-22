@@ -209,6 +209,26 @@ def test_rightpanel_mobile_slide_over_css():
         "mobile workspace header should keep comfortable row spacing"
 
 
+def test_mobile_sidebar_drawer_uses_transform_instead_of_left():
+    """Mobile sidebar drawer open/close must animate with transform not left offsets."""
+    mobile_640 = "\n".join(_max_width_media_blocks(640))
+    assert mobile_640, "Missing @media(max-width:640px) block in style.css"
+
+    sidebar_rule = _declarations(_rule_body(mobile_640, ".sidebar"))
+    sidebar_open_rule = _declarations(_rule_body(mobile_640, ".sidebar.mobile-open"))
+
+    assert sidebar_rule.get("left") == "0", \
+        "Mobile .sidebar should keep left:0 in the drawer rules"
+    assert sidebar_rule.get("transform") == "translateX(-100%)", \
+        "Closed mobile .sidebar should use transform:translateX(-100%)"
+    assert sidebar_rule.get("transition") == "transform .25s ease", \
+        "Mobile .sidebar should transition transform for drawer animation"
+    assert "will-change" not in sidebar_rule, \
+        "Closed mobile .sidebar should not set permanent will-change"
+    assert sidebar_open_rule.get("transform") == "translateX(0)", \
+        "Open mobile .sidebar should use transform:translateX(0)"
+
+
 def test_workspace_panel_inline_width_is_desktop_only():
     """Persisted rightpanel width must only be restored above compact/mobile breakpoints."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
