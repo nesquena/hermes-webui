@@ -477,9 +477,10 @@ def test_mobile_sidebar_edge_guard_claims_body_edge_only():
         "edge guard should start below the PWA titlebar so it does not block hamburger"
     )
     assert guard.get("width") == "24px"
-    assert guard.get("touch-action") == "pan-y", (
-        "edge guard must allow native vertical panning (pan-y), not block all touch "
-        "(touch-action:none swallowed vertical scrolls/taps starting in the strip — #4660 review)"
+    assert guard.get("pointer-events") == "none", (
+        "edge guard must be pointer-events:none so taps/vertical scrolls starting in the "
+        "strip fall through to the .messages scroller; the edge-swipe gesture is handled by "
+        "window-level capture listeners, not by the guard intercepting hit-testing (#4660 review)"
     )
     assert guard.get("z-index") == "198", (
         "edge guard should sit below the full-screen sidebar but above the page body"

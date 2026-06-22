@@ -324,18 +324,6 @@ function _onPwaSidebarSwipeStart(e){
   _pwaSidebarSwipe={startX:point.clientX,startY:point.clientY,active:true,opened:false};
 }
 
-function _onPwaSidebarEdgeGuardStart(e){
-  if(_isDesktopWidth())return;
-  if(document.querySelector('.sidebar')?.classList.contains('mobile-open'))return;
-  // #4660 review: do NOT preventDefault here. Calling it unconditionally on
-  // touchstart in the left edge strip swallowed legitimate vertical scrolls and
-  // taps that merely STARTED in the strip. Just begin tracking; the move handler
-  // (_onPwaSidebarSwipeMove) calls preventDefault only once a horizontal swipe
-  // intent is established (dx>=_PWA_SIDEBAR_SWIPE_CLAIM and dx dominates dy), and
-  // the guard's CSS uses touch-action:pan-y so vertical panning stays native.
-  _onPwaSidebarSwipeStart(e);
-}
-
 function _onPwaSidebarSwipeMove(e){
   if(_isTouchPointerEvent(e))return;
   const swipe=_pwaSidebarSwipe;
@@ -359,8 +347,13 @@ function _onPwaSidebarSwipeEnd(e){if(_isTouchPointerEvent(e))return;_pwaSidebarS
 function _onPwaSidebarSwipeCancel(e){if(_isTouchPointerEvent(e))return;_pwaSidebarSwipe=null;}
 
 function _installPwaSidebarSwipeGesture(){
-  const guard=document.getElementById('pwaSidebarEdgeGuard');
-  if(guard)guard.addEventListener('touchstart', _onPwaSidebarEdgeGuardStart, {passive:false});
+  // #4660 review (Codex CORE): the #pwaSidebarEdgeGuard element is now
+  // pointer-events:none (CSS), so it can no longer intercept hit-testing for
+  // taps / vertical scrolls that merely start in the left edge strip — those
+  // pass through to the underlying .messages scroller. The edge-swipe-to-open
+  // gesture is handled entirely by the window-level CAPTURE touch/pointer
+  // listeners below (which see the event regardless of the guard), so no
+  // dedicated guard-element listener is needed.
   window.addEventListener('touchstart', _onPwaSidebarSwipeStart, {capture:true,passive:true});
   window.addEventListener('touchmove', _onPwaSidebarSwipeMove, {capture:true,passive:false});
   window.addEventListener('touchend', _onPwaSidebarSwipeEnd, {capture:true,passive:true});

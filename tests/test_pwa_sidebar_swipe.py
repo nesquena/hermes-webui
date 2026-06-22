@@ -8,7 +8,12 @@ STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 def test_pwa_edge_swipe_gesture_is_registered_for_mobile_sidebar():
     assert "function _installPwaSidebarSwipeGesture" in BOOT_JS
-    assert "guard.addEventListener('touchstart', _onPwaSidebarEdgeGuardStart, {passive:false})" in BOOT_JS
+    # #4660 review (Codex CORE): the guard element must NOT have its own touch
+    # listener — it's pointer-events:none and the window-level capture handlers
+    # below see the edge swipe regardless, so taps/scrolls starting in the strip
+    # pass through to the app instead of being intercepted.
+    assert "guard.addEventListener(" not in BOOT_JS
+    assert "_onPwaSidebarEdgeGuardStart" not in BOOT_JS
     assert "window.addEventListener('touchstart', _onPwaSidebarSwipeStart, {capture:true,passive:true})" in BOOT_JS
     assert "window.addEventListener('touchmove', _onPwaSidebarSwipeMove, {capture:true,passive:false})" in BOOT_JS
     assert "window.addEventListener('touchend', _onPwaSidebarSwipeEnd, {capture:true,passive:true})" in BOOT_JS
@@ -38,17 +43,20 @@ def test_pwa_sidebar_swipe_is_edge_gated_standalone_and_horizontal():
     assert ".messages" not in BOOT_JS[BOOT_JS.find("function _isInteractiveSwipeTarget"):BOOT_JS.find("function _openMobileSidebarFromGesture")]
 
 
-def test_pwa_sidebar_edge_guard_defers_preventdefault_until_horizontal_intent():
-    # #4660 review: the edge guard must NOT preventDefault on touchstart — doing so
-    # swallowed vertical scrolls/taps that merely started in the left edge strip.
-    # It only begins tracking; _onPwaSidebarSwipeMove calls preventDefault once a
-    # horizontal swipe intent is established. The guard CSS uses touch-action:pan-y.
-    assert "function _onPwaSidebarEdgeGuardStart" in BOOT_JS
-    body = BOOT_JS[BOOT_JS.find("function _onPwaSidebarEdgeGuardStart"):BOOT_JS.find("function _onPwaSidebarSwipeMove")]
-    assert "if(e.cancelable)e.preventDefault()" not in body, (
-        "edge guard must NOT preventDefault on touchstart (it swallows vertical scroll/taps)"
+def test_pwa_sidebar_edge_guard_is_non_interactive_and_swipe_uses_window_capture():
+    # #4660 review (Codex CORE): the left edge guard must not intercept hit-testing.
+    # It is pointer-events:none (CSS) with NO dedicated touch listener, so taps and
+    # vertical scrolls starting in the strip fall through to the .messages scroller.
+    # The edge-swipe-to-open gesture is handled by window-level CAPTURE listeners,
+    # and _onPwaSidebarSwipeMove only preventDefaults once horizontal intent is set.
+    assert "_onPwaSidebarEdgeGuardStart" not in BOOT_JS, (
+        "the interactive edge-guard handler must be gone (guard is pointer-events:none)"
     )
-    assert "_onPwaSidebarSwipeStart(e)" in body
+    assert "guard.addEventListener(" not in BOOT_JS
+    move = BOOT_JS[BOOT_JS.find("function _onPwaSidebarSwipeMove"):BOOT_JS.find("function _onPwaSidebarSwipeEnd")]
+    assert "_PWA_SIDEBAR_SWIPE_CLAIM" in move and "e.preventDefault()" in move, (
+        "horizontal-intent claim should preventDefault only inside the move handler"
+    )
 
 
 def test_pwa_sidebar_swipe_opens_existing_mobile_drawer_without_desktop_collapse():

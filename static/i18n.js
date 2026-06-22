@@ -925,6 +925,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'Dashboard is loopback-only on the server. Either browse from the server itself or restart it with --host 0.0.0.0 (insecure).',
     tab_logs: 'Logs',
     tab_settings: 'Settings',
+    close_menu: 'Close menu',
     new_conversation: 'New conversation',
     filter_conversations: 'Filter conversations...',
     markdown_table_filter: 'Filter table',
@@ -2497,6 +2498,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'La dashboard è solo loopback sul server. Naviga dal server stesso o riavvialo con --host 0.0.0.0 (non sicuro).',
     tab_logs: 'Log',
     tab_settings: 'Impostazioni',
+    close_menu: 'Close menu', // TODO: translate
     new_conversation: 'Nuova conversazione',
     filter_conversations: 'Filtra conversazioni...',
     markdown_table_filter: 'Filtra tabella',
@@ -4060,6 +4062,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'ダッシュボードはサーバー上のループバック専用です。サーバー上で閲覧するか、--host 0.0.0.0（安全ではありません）で再起動してください。',
     tab_logs: 'ログ',
     tab_settings: '設定',
+    close_menu: 'Close menu', // TODO: translate
     new_conversation: '新しい会話',
     filter_conversations: '会話を絞り込み...',
     markdown_table_filter: 'テーブルをフィルター',
@@ -5363,6 +5366,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'Панель доступна только через loopback на сервере. Откройте её с самого сервера или перезапустите с --host 0.0.0.0 (небезопасно).',
     tab_logs: 'Logs',
     tab_settings: 'Настройки',
+    close_menu: 'Close menu', // TODO: translate
 
     logs_title: 'Logs',  // TODO: translate
     logs_file: 'File',  // TODO: translate
@@ -6863,6 +6867,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'El panel solo usa loopback en el servidor. Navega desde el propio servidor o reinícialo con --host 0.0.0.0 (inseguro).',
     tab_logs: 'Logs',
     tab_settings: 'Ajustes',
+    close_menu: 'Close menu', // TODO: translate
 
     logs_title: 'Logs',  // TODO: translate
     logs_file: 'File',  // TODO: translate
@@ -8341,6 +8346,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'Das Dashboard ist auf dem Server nur per Loopback erreichbar. Öffne es direkt auf dem Server oder starte es mit --host 0.0.0.0 neu (unsicher).',
     tab_logs: 'Logs',
     tab_settings: 'Einstellungen',
+    close_menu: 'Close menu', // TODO: translate
 
     logs_title: 'Logs',  // TODO: translate
     logs_file: 'File',  // TODO: translate
@@ -9876,6 +9882,7 @@ const LOCALES = {
     tab_profiles: '配置',
     tab_logs: '日志',
     tab_settings: '设置',
+    close_menu: 'Close menu', // TODO: translate
 
     logs_title: '日志',
     logs_file: '文件',
@@ -11626,6 +11633,7 @@ const LOCALES = {
     dashboard_loopback_warning: '儀表板在伺服器上僅限 loopback 存取。請從伺服器本機瀏覽，或使用 --host 0.0.0.0 重新啟動（不安全）。',
     tab_logs: '記錄',
     tab_settings: '設定',
+    close_menu: '關閉選單',
     new_conversation: '新增對話',
     filter_conversations: '篩選對話……',
     markdown_table_filter: '篩選表格',
@@ -13076,6 +13084,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'O painel é somente loopback no servidor. Navegue pelo próprio servidor ou reinicie com --host 0.0.0.0 (inseguro).',
     tab_logs: 'Logs',
     tab_settings: 'Configurações',
+    close_menu: 'Close menu', // TODO: translate
 
     logs_title: 'Logs',  // TODO: translate
     logs_file: 'File',  // TODO: translate
@@ -14540,6 +14549,7 @@ const LOCALES = {
     dashboard_loopback_warning: '대시보드는 서버에서 loopback 전용입니다. 서버 자체에서 접속하거나 --host 0.0.0.0(안전하지 않음)으로 다시 시작하세요.',
     tab_logs: 'Logs',
     tab_settings: '설정',
+    close_menu: 'Close menu', // TODO: translate
 
     logs_title: 'Logs',  // TODO: translate
     logs_file: 'File',  // TODO: translate
@@ -16009,6 +16019,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'Le tableau de bord est en boucle uniquement sur le serveur. Naviguez depuis le serveur lui-même ou redémarrez-le avec --host 0.0.0.0 (non sécurisé).',
     tab_logs: 'Journaux',
     tab_settings: 'Paramètres',
+    close_menu: 'Close menu', // TODO: translate
     new_conversation: 'Nouvelle conversation',
     filter_conversations: 'Filtrer les conversations...',
     markdown_table_filter: 'Filtrer le tableau',
@@ -17607,6 +17618,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'Kontrol Paneli sunucuda yalnızca geri döngüye sahiptir. Ya sunucunun kendisinden göz atın ya da --host 0.0.0.0 (güvenli değil) ile yeniden başlatın.',
     tab_logs: 'Günlükler',
     tab_settings: 'Ayarlar',
+    close_menu: 'Close menu', // TODO: translate
 
     logs_title: 'Günlükler',
     logs_file: 'Dosya',
@@ -19185,6 +19197,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'Pulpit nawigacyjny na serwerze jest dostępny wyłącznie lokalnie (loopback). Przeglądaj bezpośrednio z serwera lub uruchom go ponownie z flagą --host 0.0.0.0 (niebezpieczne).',
     tab_logs: 'Logi',
     tab_settings: 'Ustawienia',
+    close_menu: 'Close menu', // TODO: translate
     new_conversation: 'Nowa konwersacja',
     filter_conversations: 'Filtruj konwersacje...',
     markdown_table_filter: 'Filtruj tabelę',
