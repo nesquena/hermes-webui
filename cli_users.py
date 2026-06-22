@@ -146,7 +146,7 @@ def main():
     p_sp.add_argument("username")
     p_sp.add_argument("profile")
 
-    p_ls = sub.add_parser("list", help="List all users")
+    sub.add_parser("list", help="List all users")
 
     args = parser.parse_args()
     if not args.command:
