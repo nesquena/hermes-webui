@@ -1586,7 +1586,12 @@ class TestFrontendModelProviderState:
         )
         idx = src.find("function syncTopbar")
         assert idx != -1, "syncTopbar must exist"
-        block = src[idx:idx + 5200]
+        # Anchor the block to the END of syncTopbar (start of the next top-level
+        # function) rather than a fixed byte window, so unrelated additions inside
+        # syncTopbar (e.g. #3177's titlebar profile-label sync) can't push the
+        # asserted lines out of a too-small window and cause a false failure.
+        nxt = src.find("\nfunction ", idx + len("function syncTopbar"))
+        block = src[idx:nxt if nxt != -1 else idx + 6000]
         assert "missingModelIsRoutable=_providerDefersMissingModelFallback" in block
         assert "liveStillPending||missingModelIsRoutable" in block, (
             "syncTopbar must preserve routable custom:* selections instead of forcing fallback persistence"

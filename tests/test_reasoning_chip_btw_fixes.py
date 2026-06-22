@@ -61,11 +61,15 @@ class TestReasoningDropdownEscapesComposerLeft:
         assert 'id="composerReasoningDropdown"' in INDEX
 
     def test_dropdown_is_sibling_of_other_composer_dropdowns(self):
-        # The four composer-level dropdowns must appear contiguously — if one
+        # The composer-level dropdowns must appear contiguously — if one
         # of them is nested inside an overflow-hidden container, this would
         # typically split the group.
+        # NOTE (#3177): #profileDropdown was intentionally relocated to document
+        # root so it can be positioned from BOTH the composer chip and the
+        # optional titlebar profile button. It is therefore no longer part of the
+        # composer-footer contiguity group; the check below covers the three
+        # dropdowns that must still sit together in the composer footer.
         positions = [
-            ("profileDropdown", INDEX.find('id="profileDropdown"')),
             ("composerWsDropdown", INDEX.find('id="composerWsDropdown"')),
             ("composerReasoningDropdown", INDEX.find('id="composerReasoningDropdown"')),
             ("composerModelDropdown", INDEX.find('id="composerModelDropdown"')),

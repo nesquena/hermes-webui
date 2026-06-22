@@ -7146,6 +7146,7 @@ _SETTINGS_DEFAULTS = {
     "hide_composer_attach": False,  # hide attach button in composer footer
     "hide_composer_saved_prompts": False,  # hide saved prompts button in composer footer
     "hide_composer_mic": False,  # hide dictation mic button in composer footer
+    "show_titlebar_profile": False,  # show profile switcher in app titlebar (opt-in)
     "hide_composer_voice_mode": False,  # hide hands-free voice-mode button in composer footer
     "hide_composer_yolo": False,  # hide YOLO chip in composer footer
     "hide_composer_profile": False,  # hide profile chip in composer footer
@@ -7388,6 +7389,7 @@ _SETTINGS_BOOL_KEYS = {
     "hide_composer_attach",
     "hide_composer_saved_prompts",
     "hide_composer_mic",
+    "show_titlebar_profile",
     "hide_composer_voice_mode",
     "hide_composer_yolo",
     "hide_composer_profile",

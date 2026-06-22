@@ -595,6 +595,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Auto-follow new content',
     settings_desc_auto_scroll_follow: 'When enabled, the view scrolls to the bottom as new tokens stream in. When disabled, you control the scroll position manually.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar',
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
@@ -2165,6 +2167,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Segui automaticamente i nuovi contenuti',
     settings_desc_auto_scroll_follow: 'Se abilitato, la vista scorre verso il basso man mano che arrivano nuovi token. Se disabilitato, controlli tu la posizione di scorrimento.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
@@ -3726,6 +3730,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: '新しい内容を自動で追従',
     settings_desc_auto_scroll_follow: '有効にすると、ストリーミング中に画面が自動で一番下までスクロールします。無効にすると、スクロール位置を自分で操作できます。',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Worklog の詳細を自動的に開く',
     settings_desc_worklog_details_expanded_default: '有効にすると、新しい Worklog の詳細が展開された状態で始まり、ツール、Thinking、進捗カードをクリックなしで確認できます。無効の場合、Worklog の詳細はデフォルトで折りたたまれます。ターンごとの手動折りたたみ/展開は優先されます。',
@@ -5987,6 +5993,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Автопрокрутка к новому содержимому',
     settings_desc_auto_scroll_follow: 'Если включено, область прокручивается вниз по мере поступления новых токенов. Если выключено, вы сами управляете прокруткой.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
@@ -7473,6 +7481,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Seguir automáticamente el contenido nuevo',
     settings_desc_auto_scroll_follow: 'Si está activado, la vista se desplaza hacia abajo a medida que llegan nuevos tokens. Si está desactivado, controlas tú la posición de desplazamiento.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
@@ -8640,6 +8650,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Neuen Inhalten automatisch folgen',
     settings_desc_auto_scroll_follow: 'Wenn aktiviert, scrollt die Ansicht nach unten, während neue Tokens eintreffen. Wenn deaktiviert, steuerst du die Scrollposition selbst.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
@@ -10480,6 +10492,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: '自动跟随新内容',
     settings_desc_auto_scroll_follow: '启用后，流式输出时页面会自动滚动到底部。禁用后，你可以自由控制滚动位置，阅读答案不会被拽到底部。',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
@@ -11280,6 +11294,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: '自動跟隨新內容',
     settings_desc_auto_scroll_follow: '啟用後，串流輸出時畫面會自動捲動到底部。停用後，你可以自由控制捲動位置。',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: '在標題列顯示設定檔切換器',
+    settings_desc_show_titlebar_profile: '啟用後，左上角的應用程式標題列會出現設定檔切換按鈕，讓你在任何分頁都能切換設定檔。預設關閉；無論此設定為何，輸入列底部一律保留設定檔切換器。',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
@@ -12737,6 +12753,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Acompanhar automaticamente o novo conteúdo',
     settings_desc_auto_scroll_follow: 'Quando ativado, a visualização rola para baixo conforme novos tokens chegam. Quando desativado, você controla a posição de rolagem.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
@@ -14200,6 +14218,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: '새 내용 자동 따라가기',
     settings_desc_auto_scroll_follow: '활성화하면 토큰이 스트리밍되는 동안 화면이 자동으로 맨 아래로 스크롤됩니다. 비활성화하면 스크롤 위치를 직접 제어합니다.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
@@ -15685,6 +15705,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Suivre automatiquement le nouveau contenu',
     settings_desc_auto_scroll_follow: 'Lorsque cette option est activée, la vue défile vers le bas à mesure que de nouveaux jetons arrivent. Lorsqu\'elle est désactivée, vous contrôlez la position de défilement.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
@@ -17264,6 +17286,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Yeni içeriği otomatik takip et',
     settings_desc_auto_scroll_follow: 'Etkinleştirildiğinde, yeni belirteçler akarken görünüm en alta kaydırılır. Devre dışı bırakıldığında kaydırma konumunu kendiniz kontrol edersiniz.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Open Worklog details automatically',
     settings_desc_worklog_details_expanded_default: 'When enabled, new Worklog details start expanded so tool, thinking, and progress cards are visible without an extra click. When off, Worklog details stay folded by default; per-turn manual collapse/expand choices still win.',
@@ -18839,6 +18863,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Automatycznie podążaj za nową treścią',
     settings_desc_auto_scroll_follow: 'Gdy włączone, widok przewija się na dół w miarę napływania nowych tokenów. Gdy wyłączone, sam kontrolujesz pozycję przewijania.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
+    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
+    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_worklog_details_expanded_default: 'Otwieraj szczegóły Worklog automatycznie',
     settings_desc_worklog_details_expanded_default: 'Gdy ta opcja jest włączona, nowe szczegóły Worklog zaczynają rozwinięte, dzięki czemu karty narzędzi, Thinking i postępu są widoczne bez dodatkowego kliknięcia. Gdy jest wyłączona, szczegóły Worklog pozostają domyślnie zwinięte. Ręczne decyzje o zwinięciu/rozwinięciu w danej turze mają pierwszeństwo.',
