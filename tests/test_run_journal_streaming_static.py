@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from api.streaming import _compact_for_echo_compare
+
 
 def test_streaming_initializes_one_run_journal_writer_per_stream():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
@@ -24,12 +26,7 @@ def test_streaming_journals_sse_events_before_queue_delivery():
 
 
 def test_visible_process_echo_compare_ignores_all_whitespace():
-    src = Path("api/streaming.py").read_text(encoding="utf-8")
-    helper_idx = src.index("def _compact_for_echo_compare(value: str) -> str:")
-    helper = src[helper_idx:src.index("def _is_visible_output_echo", helper_idx)]
+    token_text = "先把 issue 4249 拉下来\n\n先看正文和评论"
+    interim_text = "先把 issue 4249 拉下来先看正文和评论"
 
-    assert "re.sub(r'\\s+', '', str(value or ''))" in helper, (
-        "Visible process-prose echo detection must ignore paragraph and line-break "
-        "formatting so interim_assistant does not duplicate token prose that only "
-        "differs by whitespace."
-    )
+    assert _compact_for_echo_compare(token_text) == _compact_for_echo_compare(interim_text)
