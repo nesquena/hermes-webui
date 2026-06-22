@@ -430,6 +430,164 @@ def test_prefer_context_reconcile_keeps_state_delta_when_no_mirrored_prefix():
     assert reconciled == sidecar_context + state_messages
 
 
+def test_prefer_context_reconcile_uses_compression_anchor_boundary_for_compacted_context():
+    sidecar_context = [
+        {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] compacted"},
+        {"role": "user", "content": "fresh kept question"},
+        {"role": "assistant", "content": "fresh kept answer"},
+    ]
+    state_messages = [
+        {"role": "user", "content": "old question", "timestamp": 1.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 2.0},
+        {"role": "user", "content": "fresh kept question", "timestamp": 3.0},
+        {"role": "assistant", "content": "fresh kept answer", "timestamp": 4.0},
+        {"role": "user", "content": "new after compress", "timestamp": 5.0},
+    ]
+    session = SimpleNamespace(
+        session_id="anchor-boundary",
+        context_messages=sidecar_context,
+        messages=[],
+        compression_anchor_message_key={
+            "role": "assistant",
+            "text": "fresh kept answer",
+            "ts": 4.0,
+            "attachments": 0,
+        },
+    )
+
+    reconciled = reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state_messages
+    )
+
+    assert reconciled == sidecar_context + [
+        {"role": "user", "content": "new after compress", "timestamp": 5.0},
+    ]
+
+
+def test_prefer_context_reconcile_fails_closed_when_compression_anchor_missing():
+    sidecar_context = [
+        {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] compacted"},
+        {"role": "user", "content": "fresh kept question"},
+        {"role": "assistant", "content": "fresh kept answer"},
+    ]
+    state_messages = [
+        {"role": "user", "content": "old question", "timestamp": 1.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 2.0},
+        {"role": "user", "content": "fresh kept question", "timestamp": 3.0},
+        {"role": "assistant", "content": "fresh kept answer", "timestamp": 4.0},
+        {"role": "user", "content": "new after compress", "timestamp": 5.0},
+    ]
+    session = SimpleNamespace(
+        session_id="anchor-missing",
+        context_messages=sidecar_context,
+        messages=[],
+        compression_anchor_message_key={
+            "role": "assistant",
+            "text": "missing boundary",
+            "ts": 999.0,
+            "attachments": 0,
+        },
+    )
+
+    reconciled = reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state_messages
+    )
+
+    assert reconciled == sidecar_context
+
+
+def test_prefer_context_reconcile_fails_closed_when_compressed_context_has_no_anchor_key():
+    sidecar_context = [
+        {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] compacted"},
+        {"role": "user", "content": "new question"},
+    ]
+    state_messages = [
+        {"role": "user", "content": "old question", "timestamp": 1.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 2.0},
+        {"role": "user", "content": "new question", "timestamp": 3.0},
+    ]
+    session = SimpleNamespace(
+        session_id="compressed-anchor-none",
+        context_messages=sidecar_context,
+        messages=[],
+        compression_anchor_message_key=None,
+    )
+
+    reconciled = reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state_messages
+    )
+
+    assert reconciled == sidecar_context
+
+
+def test_prefer_context_reconcile_accepts_iso_compression_anchor_timestamp():
+    sidecar_context = [
+        {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] compacted"},
+        {"role": "user", "content": "fresh kept question"},
+        {"role": "assistant", "content": "fresh kept answer"},
+    ]
+    state_messages = [
+        {"role": "user", "content": "old question", "timestamp": "2026-06-22T09:00:00Z"},
+        {"role": "assistant", "content": "old answer", "timestamp": "2026-06-22T09:01:00Z"},
+        {"role": "user", "content": "fresh kept question", "timestamp": "2026-06-22T09:02:00Z"},
+        {"role": "assistant", "content": "fresh kept answer", "timestamp": "2026-06-22T09:03:00Z"},
+        {"role": "user", "content": "new after compress", "timestamp": "2026-06-22T09:04:00Z"},
+    ]
+    session = SimpleNamespace(
+        session_id="iso-anchor-boundary",
+        context_messages=sidecar_context,
+        messages=[],
+        compression_anchor_message_key={
+            "role": "assistant",
+            "text": "fresh kept answer",
+            "ts": "2026-06-22T09:03:00Z",
+            "attachments": 0,
+        },
+    )
+
+    reconciled = reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state_messages
+    )
+
+    assert reconciled == sidecar_context + [
+        {"role": "user", "content": "new after compress", "timestamp": "2026-06-22T09:04:00Z"},
+    ]
+
+
+def test_prefer_context_reconcile_fails_closed_when_compression_anchor_ts_is_missing():
+    sidecar_context = [
+        {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] compacted"},
+        {"role": "user", "content": "latest kept question"},
+        {"role": "assistant", "content": "latest kept answer"},
+    ]
+    state_messages = [
+        {"role": "user", "content": "original long prompt"},
+        {"role": "assistant", "content": "old answer", "timestamp": 1.0},
+        {"role": "user", "content": "old tool-heavy follow-up", "timestamp": 2.0},
+        {"role": "assistant", "content": "old tool-heavy answer", "timestamp": 3.0},
+        {"role": "user", "content": "latest kept question", "timestamp": 4.0},
+        {"role": "assistant", "content": "latest kept answer", "timestamp": 5.0},
+        {"role": "user", "content": "new after compression", "timestamp": 6.0},
+    ]
+    session = SimpleNamespace(
+        session_id="anchor-ts-missing",
+        context_messages=sidecar_context,
+        messages=[],
+        compression_anchor_message_key={
+            "role": "user",
+            "text": "original long prompt",
+            "ts": None,
+            "attachments": 0,
+        },
+    )
+
+    reconciled = reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state_messages
+    )
+
+    assert reconciled == sidecar_context
+
+
 def test_prefer_context_reconcile_strips_small_mirrored_context_prefix():
     sidecar_context = [
         {"role": "user", "content": "[Session Arc Summary] compacted"},

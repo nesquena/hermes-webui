@@ -14,6 +14,7 @@ from contextlib import closing
 from pathlib import Path
 
 import api.config as _cfg
+from api.compression_anchor import is_context_compression_marker
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
@@ -4898,6 +4899,93 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     return state_messages[best_len:]
 
 
+def _normalized_compression_anchor_text(value) -> str:
+    return " ".join(str(value or "").split()).strip()[:160]
+
+
+def _compression_anchor_timestamp_as_float(value) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.datetime.fromisoformat(str(value).strip().replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def _context_messages_include_compression_marker(messages: list) -> bool:
+    for message in messages or []:
+        if not is_context_compression_marker(message):
+            continue
+        text = _message_content_text(message).lower().lstrip()
+        # Only prompt compaction summaries require fail-closed state.db replay.
+        # Other compression-adjacent summaries, such as Session Arc Summary,
+        # keep the existing prefix-delta behavior so fresh follow-ups survive.
+        if text.startswith("[context compaction") or text.startswith("context compaction"):
+            return True
+    return False
+
+
+def _state_db_anchor_index(state_messages: list, anchor_key) -> int | None:
+    if not isinstance(anchor_key, dict):
+        return None
+
+    anchor_role = str(anchor_key.get("role") or "").strip().lower()
+    anchor_text = _normalized_compression_anchor_text(anchor_key.get("text"))
+    anchor_attachments = anchor_key.get("attachments")
+    anchor_ts = _compression_anchor_timestamp_as_float(anchor_key.get("ts"))
+
+    if not anchor_role:
+        return None
+
+    # Do not attempt text-only fallback when timestamp is unavailable. Text-based
+    # fallback can match stale legacy rows if the anchor timestamp was lost,
+    # which can re-introduce old state.db rows after compaction.
+    if anchor_ts is None:
+        return None
+
+    if anchor_attachments in (None, ""):
+        expected_attachments = 0
+    else:
+        try:
+            expected_attachments = int(anchor_attachments)
+        except (TypeError, ValueError):
+            expected_attachments = 0
+
+    exact_timestamp_matches = []
+    for idx, message in enumerate(state_messages or []):
+        if _message_role(message) != anchor_role:
+            continue
+
+        attachments = message.get("attachments") if isinstance(message, dict) else None
+        attach_count = len(attachments) if isinstance(attachments, list) else 0
+        if attach_count != expected_attachments:
+            continue
+
+        # Attachment-only or timestamp-only anchors have no stable text payload.
+        # In that shape the timestamp + role + attachment count is the boundary;
+        # apply text comparison only when the anchor actually captured text.
+        message_text = _normalized_compression_anchor_text(_message_content_text(message))
+        if anchor_text and message_text != anchor_text:
+            continue
+
+        message_ts = _compression_anchor_timestamp_as_float(
+            message.get("timestamp") if isinstance(message, dict) else None
+        )
+        if message_ts is None:
+            continue
+        if abs(message_ts - anchor_ts) <= 1e-6:
+            exact_timestamp_matches.append(idx)
+            continue
+
+    if exact_timestamp_matches:
+        return exact_timestamp_matches[-1]
+    return None
+
+
 def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
     """Insert a state.db-only row before newer sidecar rows when safe.
 
@@ -5199,15 +5287,35 @@ def reconciled_state_db_messages_for_session(
     if session is None:
         return []
     local_messages = []
+    using_context_messages = False
     if prefer_context:
         context_messages = getattr(session, 'context_messages', None)
         if isinstance(context_messages, list) and context_messages:
             local_messages = context_messages
+            using_context_messages = True
     if not local_messages:
         local_messages = getattr(session, 'messages', None) or []
     if state_messages is None:
         state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
     if prefer_context and local_messages:
+        if using_context_messages:
+            compressed_context = _context_messages_include_compression_marker(local_messages)
+            anchor_key = getattr(session, "compression_anchor_message_key", None)
+            if compressed_context:
+                if not anchor_key:
+                    logger.debug(
+                        "Compressed context for session %s has no compression anchor; using context_messages only",
+                        getattr(session, "session_id", None),
+                    )
+                    return list(local_messages)
+                anchor_index = _state_db_anchor_index(state_messages, anchor_key)
+                if anchor_index is None:
+                    logger.debug(
+                        "Compressed context for session %s has an unverifiable compression anchor; using context_messages only",
+                        getattr(session, "session_id", None),
+                    )
+                    return list(local_messages)
+                state_messages = list(state_messages or [])[anchor_index + 1 :]
         state_messages = state_db_delta_after_context(local_messages, state_messages)
     return merge_session_messages_append_only(
         local_messages,
