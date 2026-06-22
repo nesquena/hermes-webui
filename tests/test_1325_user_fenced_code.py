@@ -126,7 +126,7 @@ class TestUserFencedBlocks:
     def test_four_backtick_outer_fence_preserves_inner_triple_fence(self):
         """User-message code fences should follow CommonMark fence-length matching too."""
         out = _run_user_render("````md\n```inner\nfoo\n```\n````")
-        assert out.count("<pre>") == 1
+        assert out.count("<pre class=\"md-source-block\">") == 1
         assert out.count("</pre>") == 1
         assert '<div class="pre-header">md</div>' in out
         assert "```inner" in out

@@ -349,6 +349,7 @@ function _renderUserFencedBlocks(text){
     if(code.endsWith('\n')) code=code.slice(0,-1);
     const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';
     const langAttr=lang?` class="language-${esc(lang)}"`:'';
+    const preClass=/^(md|markdown|mdx)$/.test(lang)?' class="md-source-block"':'';
     if(lang==='diff'||lang==='patch'){
       const colored=esc(code).split('\n').map(line=>{
         if(line.startsWith('@@')) return `<span class="diff-line diff-hunk">${line}</span>`;
@@ -358,7 +359,7 @@ function _renderUserFencedBlocks(text){
       }).join('\n');
       stash.push(`${h}<pre class="diff-block"><code${langAttr}>${colored}</code></pre>`);
     } else {
-      stash.push(`${h}<pre><code${langAttr}>${esc(code)}</code></pre>`);
+      stash.push(`${h}<pre${preClass}><code${langAttr}>${esc(code)}</code></pre>`);
     }
     return lead+'\x00UF'+(stash.length-1)+'\x00';
   });
@@ -4856,6 +4857,7 @@ function renderMd(raw){
     } else {
       const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';
       const langAttr=lang?` class="language-${esc(lang)}"`:'';
+      const preClass=/^(md|markdown|mdx)$/.test(lang)?' class="md-source-block"':'';
       // For diff/patch blocks, wrap each line in a colored span
       if(lang==='diff'||lang==='patch'){
         const colored=esc(code.replace(/\n$/,'')).split('\n').map(line=>{
@@ -4881,10 +4883,10 @@ function renderMd(raw){
           const body=rows.slice(1).map(r=>'<tr>'+r.split(',').map(c=>`<td>${esc(c.trim())}</td>`).join('')+'</tr>').join('');
           _preBlock_stash.push(`${h}<div class="csv-table-wrap"><table class="csv-table"><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>`);
         } else {
-          _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+          _preBlock_stash.push(`${h}<pre${preClass}><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
         }
       } else {
-        _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+        _preBlock_stash.push(`${h}<pre${preClass}><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
       }
     }
     return lead+'\x00P'+(_preBlock_stash.length-1)+'\x00';
