@@ -223,8 +223,8 @@ def test_mobile_sidebar_drawer_uses_transform_instead_of_left():
         "Closed mobile .sidebar should use transform:translateX(-100%)"
     assert sidebar_rule.get("transition") == "transform .25s ease", \
         "Mobile .sidebar should transition transform for drawer animation"
-    assert "will-change" not in sidebar_rule, \
-        "Closed mobile .sidebar should not set permanent will-change"
+    assert sidebar_rule.get("will-change") == "transform", \
+        "Mobile .sidebar should promote the transform layer before drawer animation"
     assert sidebar_open_rule.get("transform") == "translateX(0)", \
         "Open mobile .sidebar should use transform:translateX(0)"
 
