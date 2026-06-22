@@ -1084,16 +1084,15 @@ async function send(){
       if(busyMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
-        // _trySteer falls back to queue+cancel internally if the agent
-        // isn't running / cached / steer-capable.
+        // _trySteer restores the draft and leaves the active stream running if
+        // the agent isn't running / cached / steer-capable.
         $('msg').value='';autoResize();
-        // Do NOT clear pendingFiles yet — _trySteer may fall back to
-        // interrupt+queue and needs the files for queueSessionMessage.
-        // _trySteer clears pendingFiles itself in the fallback path, and
-        // the server returns accepted:true (no files sent) on success.
-        await _trySteer(text, /*explicitSteer=*/false);
-        // After _trySteer: clear any remaining files (success path).
-        S.pendingFiles=[];renderTray();
+        // Do NOT clear pendingFiles yet — a failed steer restores the draft and
+        // must keep staged files available for the user's next explicit action.
+        const _steerDelivered=await _trySteer(text, /*explicitSteer=*/false);
+        // After a delivered steer, clear any staged files because the text-only
+        // steer payload has been handled. On failure, keep files staged.
+        if(_steerDelivered){S.pendingFiles=[];renderTray();}
       } else if(busyMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();

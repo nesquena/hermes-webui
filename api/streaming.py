@@ -8932,9 +8932,10 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     interrupted.
 
     If no agent is cached, the agent is too old to support steer, or no
-    stream is active, return {"accepted": False, "fallback": "<reason>"}
-    so the frontend can fall back to interrupt or queue mode. The
-    fallback path is the existing behaviour from PR #1062.
+    stream is active, return {"accepted": False, "fallback": "<reason>"}.
+    The frontend must surface that failure without cancelling the active run;
+    Steer is active-run guidance, not implicit permission to Queue, Interrupt,
+    or Stop-and-send.
 
     Returns 200 with {"accepted": bool, "fallback": str|None,
     "stream_id": str|None}.
@@ -8968,7 +8969,8 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         except Exception:
             logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
     if not cached:
-        # No active agent for this session — caller falls back to interrupt
+        # No active agent for this session — caller surfaces a steer failure
+        # without cancelling the active run.
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
                            "stream_id": None})
     agent = cached[0]
