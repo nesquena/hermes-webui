@@ -1444,11 +1444,20 @@ def _build_profile_rows_fast() -> list | None:
         }
 
     rows: list = []
+
+    # Determine which profile is the "default" (startup) profile by reading
+    # the active_profile file.  When a user runs `hermes profile use <name>`,
+    # that profile should report is_default=True so that clients (desktop app,
+    # mobile app) treat it as the startup profile.  Previously is_default was
+    # hardcoded to True only for the root profile, making it impossible for a
+    # named profile to ever be the default — even after `hermes profile use`.
+    active_profile_name = _read_active_profile_file()
+
     default_home = _get_default_hermes_home()
     if default_home.is_dir():
         # Upstream hardcodes the base home's display name to "default" even when
         # the directory is literally ".hermes" — match that exactly.
-        rows.append(_row(default_home, 'default', True))
+        rows.append(_row(default_home, 'default', _is_root_profile(active_profile_name)))
 
     profiles_root = _get_profiles_root()
     if profiles_root.is_dir():
@@ -1457,7 +1466,7 @@ def _build_profile_rows_fast() -> list | None:
                 continue
             if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
                 continue
-            rows.append(_row(entry, entry.name, False))
+            rows.append(_row(entry, entry.name, entry.name == active_profile_name))
 
     return rows
 
