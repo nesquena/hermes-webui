@@ -225,10 +225,9 @@ def test_crons_route_ignores_all_profiles_toggle_in_isolated_mode(monkeypatch):
     current_home = {"value": None}
     jobs_by_home = {
         "alpha-home": [{"id": "alpha-job", "name": "Alpha", "profile": None}],
-        "default-home": [],
-        "beta-home": [{"id": "beta-job", "name": "Beta", "profile": None}],
     }
     _install_cron_jobs(monkeypatch, jobs_by_home, current_home)
+    lookups = []
 
     class _Ctx:
         def __init__(self, home):
@@ -246,14 +245,11 @@ def test_crons_route_ignores_all_profiles_toggle_in_isolated_mode(monkeypatch):
 
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "alpha")
     monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: True)
-    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [
-        {"name": "alpha", "visible": True},
-        {"name": "beta", "visible": True},
-    ])
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [{"name": "alpha", "visible": True}])
     monkeypatch.setattr(
         profiles,
         "get_hermes_home_for_profile",
-        lambda name: Path({"alpha": "alpha-home", "default": "default-home", "beta": "beta-home"}[name]),
+        lambda name: lookups.append(name) or Path("alpha-home"),
     )
     monkeypatch.setattr(profiles, "cron_profile_context_for_home", _Ctx)
 
@@ -263,8 +259,9 @@ def test_crons_route_ignores_all_profiles_toggle_in_isolated_mode(monkeypatch):
 
     assert handler.status == 200
     assert body["all_profiles"] is False
-    assert body["other_profile_count"] == 1
+    assert body["other_profile_count"] == 0
     assert [job["owner_profile"] for job in body["jobs"]] == ["alpha"]
+    assert lookups == ["alpha", "default"]
 
 
 def test_panels_toggle_button_flips_state_and_refetches():
@@ -377,10 +374,14 @@ async function loadWorkspacesPanel() {{ workspaceLoads += 1; }}
 def test_panels_js_uses_composite_cron_row_identity():
     assert "function _cronJobKey(job)" in PANELS_JS
     assert "_currentCronDetailKey" in PANELS_JS
+    assert "function _cronDetailMatches(jobId, detailKey)" in PANELS_JS
     assert "openCronDetail(job, item)" in PANELS_JS
 
 
 def test_panels_read_only_rows_hide_actions_and_skip_unread_side_effects():
+    profile_name = _extract_function(PANELS_JS, "_cronProfileName")
+    owner_name = _extract_function(PANELS_JS, "_cronOwnerProfileName")
+    job_key = _extract_function(PANELS_JS, "_cronJobKey")
     set_buttons = _extract_function(PANELS_JS, "_setCronHeaderButtons")
     open_detail = _extract_function(PANELS_JS, "openCronDetail")
     script = f"""
@@ -410,6 +411,9 @@ const activeEl = {{
 const document = {{
   querySelectorAll() {{ return [activeEl]; }},
 }};
+{profile_name}
+{owner_name}
+{job_key}
 {set_buttons}
 {open_detail}
 _setCronHeaderButtons('read', {{ read_only: true }});
@@ -441,5 +445,92 @@ process.stdout.write(JSON.stringify(results));
     assert result["stopCalls"] == 1
     assert result["dotRemoved"] is False
     assert result["renderedReadOnly"] is True
-    assert "if (!isReadOnly) _loadCronDetailRuns(job.id);" in PANELS_JS
+    assert "if (!isReadOnly) _loadCronDetailRuns(job.id, _currentCronDetailKey);" in PANELS_JS
     assert "Read-only from another profile" in PANELS_JS
+
+
+def test_history_race_ignores_stale_active_response_after_foreign_row_switch():
+    profile_name = _extract_function(PANELS_JS, "_cronProfileName")
+    owner_name = _extract_function(PANELS_JS, "_cronOwnerProfileName")
+    job_key = _extract_function(PANELS_JS, "_cronJobKey")
+    detail_matches = _extract_function(PANELS_JS, "_cronDetailMatches")
+    load_runs = _extract_function(PANELS_JS, "_loadCronDetailRuns").replace(
+        "function _loadCronDetailRuns",
+        "async function _loadCronDetailRuns",
+        1,
+    )
+    script = f"""
+const results = {{}};
+let resolveHistory;
+let _currentCronDetail = {{ id: 'job-shared', owner_profile: 'alpha', read_only: false }};
+let _currentCronDetailKey = 'alpha\\u0000job-shared';
+const card = {{ innerHTML: 'read-only placeholder' }};
+function $(id) {{ return id === 'cronDetailRuns' ? card : null; }}
+function api() {{
+  return new Promise((resolve) => {{ resolveHistory = resolve; }});
+}}
+function _cronOutputTitle() {{ return 'Output'; }}
+function _isCronScriptJob() {{ return false; }}
+function t(key) {{ return key; }}
+function esc(value) {{ return String(value); }}
+{profile_name}
+{owner_name}
+{job_key}
+{detail_matches}
+{load_runs}
+(async () => {{
+  const pending = _loadCronDetailRuns('job-shared', _currentCronDetailKey);
+  _currentCronDetail = {{ id: 'job-shared', owner_profile: 'beta', read_only: true }};
+  _currentCronDetailKey = 'beta\\u0000job-shared';
+  resolveHistory({{ runs: [], total: 0 }});
+  await pending;
+  results.cardHtml = card.innerHTML;
+  process.stdout.write(JSON.stringify(results));
+}})().catch((err) => {{
+  console.error(err);
+  process.exit(1);
+}});
+"""
+    result = _run_node(script)
+
+    assert result["cardHtml"] == "read-only placeholder"
+
+
+def test_status_probe_race_does_not_start_watch_for_foreign_row_with_same_job_id():
+    profile_name = _extract_function(PANELS_JS, "_cronProfileName")
+    owner_name = _extract_function(PANELS_JS, "_cronOwnerProfileName")
+    job_key = _extract_function(PANELS_JS, "_cronJobKey")
+    detail_matches = _extract_function(PANELS_JS, "_cronDetailMatches")
+    check_watch = _extract_function(PANELS_JS, "_checkCronWatchOnDetail")
+    script = f"""
+const results = {{}};
+let resolveStatus;
+let _currentCronDetail = {{ id: 'job-shared', owner_profile: 'alpha', read_only: false }};
+let _currentCronDetailKey = 'alpha\\u0000job-shared';
+let watchStarts = 0;
+function api() {{
+  return new Promise((resolve) => {{ resolveStatus = resolve; }});
+}}
+function _startCronWatch() {{ watchStarts += 1; }}
+{profile_name}
+{owner_name}
+{job_key}
+{detail_matches}
+{check_watch}
+(async () => {{
+  _checkCronWatchOnDetail('job-shared', _currentCronDetailKey);
+  _currentCronDetail = {{ id: 'job-shared', owner_profile: 'beta', read_only: true }};
+  _currentCronDetailKey = 'beta\\u0000job-shared';
+  resolveStatus({{ running: true }});
+  await Promise.resolve();
+  await Promise.resolve();
+  results.watchStarts = watchStarts;
+  process.stdout.write(JSON.stringify(results));
+}})().catch((err) => {{
+  console.error(err);
+  process.exit(1);
+}});
+"""
+    result = _run_node(script)
+
+    assert result["watchStarts"] == 0
