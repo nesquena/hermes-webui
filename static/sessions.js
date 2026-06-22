@@ -3843,6 +3843,10 @@ let _sessionListRefreshPendingReason = '';
 function startStreamingPoll(){
   if(_streamingPollTimer) return;
   _streamingPollTimer = setInterval(() => {
+    // SSE already pushes real-time session updates; skip redundant poll while
+    // a stream is in progress or the tab is hidden (#perf).
+    if(typeof S!=='undefined' && (S.busy || S.activeStreamId)) return;
+    if(typeof document!=='undefined' && document.hidden) return;
     void renderSessionList({deferWhileInteracting:true});
   }, _streamingPollMs);
 }
@@ -4101,7 +4105,13 @@ if(typeof window!=='undefined') window.refreshSessionList = refreshSessionList;
 function startGatewayPollFallback(ms){
   const intervalMs = Math.max(5000, Number(ms) || _gatewayFallbackPollMs);
   if(_gatewayPollTimer) clearInterval(_gatewayPollTimer);
-  _gatewayPollTimer = setInterval(() => { renderSessionList({deferWhileInteracting:true}); }, intervalMs);
+  _gatewayPollTimer = setInterval(() => {
+    // Skip poll while the tab is hidden; visibilitychange re-triggers on return.
+    if(typeof document!=='undefined' && document.hidden) return;
+    // SSE is the authoritative source during a live stream.
+    if(typeof S!=='undefined' && (S.busy || S.activeStreamId)) return;
+    renderSessionList({deferWhileInteracting:true});
+  }, intervalMs);
 }
 
 function stopGatewayPollFallback(){

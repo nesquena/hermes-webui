@@ -3350,6 +3350,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const displayText=segmentStart===0
       ? _parseStreamState().displayText
       : _stripXmlToolCalls(assistantText.slice(segmentStart));
+    // Prefer incremental smd parser over full innerHTML=renderMd() re-parse.
+    // The smd parser appends parsed Markdown to existing DOM; the innerHTML
+    // fallback re-parses the entire growing message body on every flush —
+    // O(n^2) DOM churn for long responses (#perf).
+    if(!_smdParser && window.smd){
+      if(_smdReconnect){assistantBody.innerHTML='';_smdReconnect=false;}
+      _smdNewParser(assistantBody,true);
+    }
     if(_smdParser){
       _smdWrite(displayText);
     } else if(renderMd){
