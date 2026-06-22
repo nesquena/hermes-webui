@@ -513,6 +513,11 @@ def test_mobile_rail_click_closes_sidebar_for_all_panels():
     assert "overlay.classList.add('visible')" not in mobile_click_block, (
         "Phone rail-click path in switchPanel should no longer add mobile overlay"
     )
+    close_idx = switch_panel.index("closeMobileSidebar();")
+    lazy_load_idx = switch_panel.index("if (nextPanel === 'tasks') await loadCrons();")
+    assert close_idx < lazy_load_idx, (
+        "Phone rail clicks should close the drawer before async panel lazy-loads"
+    )
 
 
 def test_mobile_switch_panel_non_chat_opens_sidebar():
