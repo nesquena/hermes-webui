@@ -16,6 +16,7 @@ the cached result.
 """
 import importlib
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -56,6 +57,10 @@ class TestPasswordHashCache(unittest.TestCase):
         # Clear the env var before each test so a dirty environment
         # doesn't cascade across test boundaries
         os.environ.pop('HERMES_WEBUI_PASSWORD', None)
+
+    def tearDown(self):
+        os.environ.pop('HERMES_WEBUI_PASSWORD', None)
+        auth._invalidate_password_hash_cache()
 
     def _set_env_pw(self, pw: str) -> None:
         os.environ['HERMES_WEBUI_PASSWORD'] = pw
@@ -166,6 +171,10 @@ class TestPasswordHashCacheConcurrency(unittest.TestCase):
         auth._AUTH_HASH_CACHE = None
         os.environ.pop('HERMES_WEBUI_PASSWORD', None)
 
+    def tearDown(self):
+        os.environ.pop('HERMES_WEBUI_PASSWORD', None)
+        auth._invalidate_password_hash_cache()
+
     def _set_env_pw(self, pw: str) -> None:
         os.environ['HERMES_WEBUI_PASSWORD'] = pw
 
@@ -251,18 +260,18 @@ class TestPasswordCacheInvalidation(unittest.TestCase):
         auth._AUTH_HASH_COMPUTED = False
         auth._AUTH_HASH_CACHE = None
         os.environ.pop('HERMES_WEBUI_PASSWORD', None)
-        # Start with a clean settings.json so write tests are isolated
-        self._sf = config.SETTINGS_FILE
-        self._backup = None
-        if self._sf.exists():
-            self._backup = self._sf.read_text(encoding='utf-8')
-            self._sf.unlink()
+        # Start with a clean temporary settings.json so write tests are isolated.
+        # The full pytest shard may already have the test server subprocess
+        # running. Mutating the shared TEST_STATE_DIR/settings.json here can make
+        # that server observe/cache a password and then return 401 to unrelated
+        # later HTTP tests. Keep this class fully in-process instead.
+        self._orig_settings_file = config.SETTINGS_FILE
+        self._tmpdir = Path(tempfile.mkdtemp())
+        config.SETTINGS_FILE = self._tmpdir / 'settings.json'
 
     def tearDown(self):
-        if self._backup is not None:
-            self._sf.write_text(self._backup, encoding='utf-8')
-        elif self._sf.exists():
-            self._sf.unlink()
+        config.SETTINGS_FILE = self._orig_settings_file
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
         auth._invalidate_password_hash_cache()
         os.environ.pop('HERMES_WEBUI_PASSWORD', None)
 

@@ -46,9 +46,12 @@ def test_save_models_cache_to_disk_preserves_response_metadata(tmp_path, monkeyp
     if "api.updates" in sys.modules:
         assert on_disk.get("_webui_version") == sys.modules["api.updates"].WEBUI_VERSION
 
-    # Load returns ONLY the response-shape fields (stamps stripped).
+    # Load returns the response-shape fields (stamps stripped) plus `aliases`,
+    # which the loader reconstructs from current config because the save path
+    # does not persist aliases on disk (keeps /model <alias> resolution working
+    # on a disk-cache hit). No config aliases here, so it reconstructs to {}.
     loaded = config._load_models_cache_from_disk()
-    assert loaded == payload
+    assert loaded == {**payload, "aliases": {}}
 
 
 def test_load_models_cache_from_disk_rejects_legacy_groups_only_cache(tmp_path, monkeypatch):

@@ -522,6 +522,37 @@ def test_non_openrouter_slash_model_provider_context_stays_unqualified():
     assert runtime_model == "anthropic/claude-sonnet-4.6"
 
 
+def test_configured_provider_slash_model_keeps_provider_context():
+    """Configured OpenAI-compatible providers need explicit context for slash IDs."""
+    import api.config as config
+
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "openai-codex",
+        "default": "gpt-5.5",
+    }
+    config.cfg["providers"] = {
+        "local-llama": {
+            "base_url": "http://127.0.0.1:8088/v1",
+            "api_key": "test-key",
+        },
+    }
+    try:
+        runtime_model = config.model_with_provider_context(
+            "unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL",
+            "local-llama",
+        )
+        model, provider, base_url = config.resolve_model_provider(runtime_model)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert runtime_model == "@local-llama:unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL"
+    assert model == "unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL"
+    assert provider == "local-llama"
+    assert base_url == "http://127.0.0.1:8088/v1"
+
+
 def test_cursor_acp_slash_model_always_gets_provider_hint():
     """ACP subprocess models with '/' must not fall through to config default."""
     import api.config as config
@@ -1555,7 +1586,12 @@ class TestFrontendModelProviderState:
         )
         idx = src.find("function syncTopbar")
         assert idx != -1, "syncTopbar must exist"
-        block = src[idx:idx + 5200]
+        # Anchor the block to the END of syncTopbar (start of the next top-level
+        # function) rather than a fixed byte window, so unrelated additions inside
+        # syncTopbar (e.g. #3177's titlebar profile-label sync) can't push the
+        # asserted lines out of a too-small window and cause a false failure.
+        nxt = src.find("\nfunction ", idx + len("function syncTopbar"))
+        block = src[idx:nxt if nxt != -1 else idx + 6000]
         assert "missingModelIsRoutable=_providerDefersMissingModelFallback" in block
         assert "liveStillPending||missingModelIsRoutable" in block, (
             "syncTopbar must preserve routable custom:* selections instead of forcing fallback persistence"

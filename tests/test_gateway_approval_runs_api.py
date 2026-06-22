@@ -132,10 +132,23 @@ def test_gateway_runs_api_submission():
         STREAMS[stream_id] = q
 
     runs_called = {"called": False}
+    captured = {}
     original_text = "hello from runs"
 
-    def fake_runs_streaming(*args, **kwargs):
+    def fake_runs_streaming(
+        session_id,
+        msg_text,
+        model,
+        workspace,
+        stream_id,
+        base_url,
+        api_key,
+        prefill_messages,
+        body_extras,
+        **kwargs,
+    ):
         runs_called["called"] = True
+        captured["body_extras"] = body_extras
         return (original_text, {"input_tokens": 10, "output_tokens": 5})
 
     mock_session = MagicMock()
@@ -154,6 +167,7 @@ def test_gateway_runs_api_submission():
         with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"}):
             with patch("api.gateway_chat.gateway_supports_approval", lambda *_args, **_kwargs: True), \
                  patch("api.gateway_chat._run_gateway_runs_api_streaming", fake_runs_streaming), \
+                 patch("api.gateway_chat._gateway_reasoning_effort_for_request", return_value="high"), \
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
@@ -169,6 +183,7 @@ def test_gateway_runs_api_submission():
             STREAMS.pop(stream_id, None)
 
     assert runs_called["called"], "The runs-API streaming path should have been invoked"
+    assert captured["body_extras"]["reasoning_effort"] == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +315,7 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
     assert run_body["instructions"] == "system prompt"
     assert run_body["conversation_history"] == [{"role": "assistant", "content": "earlier reply"}]
     assert run_body["provider"] == "anthropic"
+    assert run_body["session_id"] == "sess1"
     assert "messages" not in run_body
 
     assert final_text == "Hello"

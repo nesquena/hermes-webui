@@ -95,7 +95,7 @@ def test_issue1855_target_routes_are_wired_to_diagnostics():
     src = Path("api/routes.py").read_text(encoding="utf-8")
 
     assert 'RequestDiagnostics.maybe_start("GET", parsed.path' in src
-    assert "all_sessions(diag=diag)" in src
+    assert "all_sessions(diag=diag, include_lineage_metadata=False)" in src
     assert 'RequestDiagnostics.maybe_start("POST", parsed.path' in src
     assert "_handle_chat_start(handler, body, diag=diag)" in src
     for stage in (

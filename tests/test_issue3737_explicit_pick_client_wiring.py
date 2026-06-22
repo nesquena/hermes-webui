@@ -61,9 +61,11 @@ def test_send_consumes_pending_pick_after_reading_it():
     assert "_clearPendingSessionModel(activeSid)" in region, (
         "send() must consume (clear) the pending explicit-pick marker after reading it"
     )
-    # The clear must be gated on _explicitPick (only consume a genuine, matching pick).
-    assert re.search(r"_explicitPick\s*&&[^\n]*_clearPendingSessionModel", region), (
-        "the consume-clear must be gated on _explicitPick"
+    # The clear must be gated on a genuine, matching pending pick (not on the
+    # broadened _explicitPick which may also be true from a cross-provider
+    # inference without a pending marker to consume).
+    assert re.search(r"_pendingPickMatch\s*&&[^\\n]*_clearPendingSessionModel", region), (
+        "the consume-clear must be gated on _pendingPickMatch (a genuine, matching pending pick)"
     )
 
 

@@ -61,9 +61,21 @@ def unregister_gateway_notify(session_key: str) -> None:
 
 
 def clear_pending(session_key: str) -> int:
-    """Clear any pending clarify prompts for the session without removing the callback."""
+    """Clear any pending clarify prompts for the session without removing the callback.
+
+    Emits an SSE notify (``pending=None, total=0``) so any browser subscribed to
+    the clarify stream takes down its visible card and unlocks the composer.
+    Without this notify, the silent-timeout path in
+    ``streaming.py::_clarify_callback_impl`` cleared server state but left the
+    browser with a stuck card and a locked composer that 409'd on any submit
+    (#4504).
+    """
     with _lock:
         entries = _clear_queue_locked(session_key)
+        # Notify from inside _lock for ordering consistency with submit_pending
+        # and resolve_clarify*, which also publish under the same lock.
+        if entries:
+            _clarify_sse_notify(session_key, None, 0)
     if entries:
         publish_session_list_changed("attention_cleared")
     for entry in entries:

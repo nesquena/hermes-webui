@@ -297,8 +297,36 @@ function _stripWorkspaceDisplayPrefix(text){
 }
 function _renderUserFencedBlocks(text){
   const stash=[];
+  const contextStash=[];
   const mathStash=[];
   const stashMath=(type,src)=>{mathStash.push({type,src});return '\x00UM'+(mathStash.length-1)+'\x00';};
+  const sentContextHtml=(label,quoteText)=>{
+    const safeLabel=String(label||'').trim()||'Context';
+    const safeQuote=String(quoteText||'').replace(/\s+$/,'');
+    return `<figure class="sent-selection-context" data-selected-context="1"><figcaption class="sent-selection-context-label">${esc(safeLabel)}</figcaption><blockquote class="sent-selection-context-quote">${esc(safeQuote)}</blockquote></figure>`;
+  };
+  const stashContext=(label,quote)=>{contextStash.push(sentContextHtml(label,quote));return '\x00UC'+(contextStash.length-1)+'\x00';};
+  const stashSelectedContextBlocks=(value)=>{
+    const lines=String(value||'').split('\n');
+    const marker='<!-- hermes-selected-context -->';
+    const out=[];
+    for(let i=0;i<lines.length;i++){
+      const labelMatch=lines[i].match(/^\*\*([^\n]{1,200}):\*\*\s*$/);
+      if(!labelMatch){out.push(lines[i]);continue;}
+      const quoteLines=[];
+      let j=i+1;
+      if(lines[j]!==marker){out.push(lines[i]);continue;}
+      j++;
+      while(j<lines.length&&/^>/.test(lines[j])){
+        quoteLines.push(lines[j].replace(/^>[ \t]?/,''));
+        j++;
+      }
+      if(!quoteLines.length){out.push(lines[i]);continue;}
+      out.push(stashContext(labelMatch[1], quoteLines.join('\n')));
+      i=j-1;
+    }
+    return out.join('\n');
+  };
   const restoreMath=html=>String(html||'').replace(/\x00UM(\d+)\x00/g,(_,i)=>{
     const item=mathStash[+i];
     if(!item) return '';
@@ -341,10 +369,15 @@ function _renderUserFencedBlocks(text){
   s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>stashMath('display',m));
   s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>stashMath('inline',m));
   s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>stashMath('inline',m));
+  // Render selected-context payloads produced by Reply with selection as calm
+  // quote cards in the sent user bubble. Keep ordinary user Markdown escaped;
+  // only blocks carrying the internal marker get custom treatment.
+  s=stashSelectedContextBlocks(s);
   // Escape remaining plain text and convert newlines to <br>
   s=esc(s).replace(/\n/g,'<br>');
-  // Restore stashed code blocks, then math placeholders as KaTeX targets.
+  // Restore stashed code/context blocks, then math placeholders as KaTeX targets.
   s=s.replace(/\x00UF(\d+)\x00/g,(_,i)=>stash[+i]);
+  s=s.replace(/\x00UC(\d+)\x00/g,(_,i)=>contextStash[+i]||'');
   s=restoreMath(s);
   return s;
 }
@@ -747,6 +780,34 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   requestAnimationFrame(()=>{ _programmaticScroll=false; });
   return true;
 }
+let _messageViewportAnchorRemounting=false;
+function _remountMessageViewportAnchor(anchor){
+  const container=$('messages');
+  if(!container||!anchor||_messageViewportAnchorRemounting) return false;
+  const targetIdx=Number(anchor.rawIdx);
+  if(!Number.isFinite(targetIdx)) return false;
+  if(container.querySelector(`[data-msg-idx="${targetIdx}"]`)) return true;
+  if(typeof _getVisibleMessagesWithIdx!=='function'||
+     typeof _messageVisibleIndexForRawIdx!=='function'||
+     typeof _messageVirtualScrollTopForVisibleIdx!=='function'||
+     typeof renderMessages!=='function') return false;
+  const visWithIdx=_getVisibleMessagesWithIdx();
+  const visIdx=_messageVisibleIndexForRawIdx(targetIdx,visWithIdx);
+  if(visIdx<0) return false;
+  // A virtualized anchor may be outside the current DOM. Scroll to its virtual
+  // row and render once so the semantic restore below has a real target.
+  _programmaticScroll=true;
+  container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx,visIdx,container);
+  _messageVirtualWindowKey='';
+  _messageViewportAnchorRemounting=true;
+  try{
+    renderMessages({preserveScroll:true});
+  }finally{
+    _messageViewportAnchorRemounting=false;
+    requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
+  }
+  return !!container.querySelector(`[data-msg-idx="${targetIdx}"]`);
+}
 function _compensateScrollForMeasurementDelta(renderFn){
   const container=$('messages');
   if(!container) return renderFn();
@@ -857,7 +918,9 @@ const _renderCache = new Map();
 const _renderCacheMax = 300;
 function _clearRenderCache(){ _renderCache.clear(); }
 function _renderCacheKey(text, isUser){
-  const p = isUser ? 'u' : 'a';
+  // Fold render_user_markdown state into user-message keys so toggling the
+  // setting invalidates cached plain-text renders (#3870).
+  const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
   // Short content: use the full string as key (cheap Map lookup).
   // Long content: length + prefix + suffix is good enough — collisions on
   // 20-char prefix+suffix are vanishingly rare for chat messages.
@@ -869,7 +932,7 @@ function _getCachedRender(text, isUser){
   const hit = _renderCache.get(key);
   if(hit !== undefined) return hit;
   const rendered = isUser
-    ? _renderUserFencedBlocks(text)
+    ? (window._renderUserMarkdown ? renderMd(text) : _renderUserFencedBlocks(text))
     : renderMd(_stripXmlToolCallsDisplay(String(text)));
   if(_renderCache.size > _renderCacheMax) _renderCache.clear();
   _renderCache.set(key, rendered);
@@ -960,7 +1023,7 @@ function _questionJumpButtonHtml(questionRawIdx, assistantRawIdx){
   const label=t('jump_to_question')||'Response';
   const title=t('jump_to_question_label')||'Jump to the start of this response';
   const aIdx=(typeof assistantRawIdx==='number'&&assistantRawIdx>=0)?assistantRawIdx:-1;
-  return `<button class="msg-question-jump-btn" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx},${aIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
+  return `<button class="msg-question-jump-btn session-jump-btn session-jump-btn--inline" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx},${aIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
 }
 
 function _highlightQuestionRow(row){
@@ -1812,14 +1875,23 @@ function _refreshOpenModelDropdown(){
     if(typeof _positionModelDropdown==='function') _positionModelDropdown();
   }
 }
-function _applyModelToDropdown(modelId, sel, preferredProviderId){
+function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
   if(!modelId||!sel) return null;
+  const currentState=(sel.id==='modelSelect'&&typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel, sel.value)
+    : null;
   const resolved=_findModelInDropdown(modelId,sel,preferredProviderId);
   if(resolved){
     sel.value=resolved;
     if(sel.id==='modelSelect'){
+      const resolvedState=typeof _modelStateForSelect==='function'
+        ? _modelStateForSelect(sel, resolved)
+        : {model:resolved,model_provider:preferredProviderId||null};
+      const pickerChanged= !!(opts&&opts.forceRefresh) || !currentState
+        || String(currentState.model||'')!==String(resolvedState.model||'')
+        || String(currentState.model_provider||'')!==String(resolvedState.model_provider||'');
       if(typeof syncModelChip==='function') syncModelChip();
-      _refreshOpenModelDropdown();
+      if(pickerChanged) _refreshOpenModelDropdown();
     }
     return resolved;
   }
@@ -2052,14 +2124,21 @@ function _addLiveModelsToSelect(provider, models, sel){
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
   }
-  const currentProvider=(S.session&&S.session.model_provider)||null;
-  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel, currentProvider);
+  const currentState=(currentVal&&typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel, currentVal)
+    : {model:currentVal||'', model_provider:(S.session&&S.session.model_provider)||null};
+  const currentProvider=currentState&&currentState.model_provider||null;
+  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel, currentProvider, {forceRefresh:true});
   // After live models are added, re-apply the session's model in case it was
   // absent from the static list and syncTopbar() fired before the live fetch
   // completed (#1169). This ensures the session model wins over any premature
   // fallback that may have set sel.value to the first available option.
   if(S.session && S.session.model && sel.id==='modelSelect'){
-    const reapplied=_applyModelToDropdown(S.session.model, sel, S.session.model_provider||null);
+    const sessionProvider=S.session.model_provider||null;
+    const sessionAlreadyRefreshed=added>0 && currentVal
+      && String((currentState&&currentState.model)||'')===String(S.session.model||'')
+      && String((currentState&&currentState.model_provider)||'')===String(sessionProvider||'');
+    const reapplied=_applyModelToDropdown(S.session.model, sel, sessionProvider, {forceRefresh:added>0&&!sessionAlreadyRefreshed});
     if(reapplied && typeof syncModelChip==='function') syncModelChip();
   }
   return added;
@@ -2991,13 +3070,61 @@ function _applyReasoningChip(eff){
   _highlightReasoningOption(effort);
 }
 
+// Tracks the model/provider identity of the last reasoning fetch so routine
+// topbar syncs can serve the cached chip state instead of re-hitting the
+// network. null = never fetched.
+let _lastReasoningFetchKey=null;
+// Monotonic dispatch counter. Each fetchReasoningChip() increments it and the
+// async handlers capture their own value; a response (success OR failure) only
+// applies if it is still the most recent dispatch. This defeats out-of-order
+// resolution even when two fetches share the same model/provider key (e.g. a
+// profile switch that resets the cache and refetches the same default model but
+// a different agent.reasoning_effort) — #4650 review.
+let _reasoningFetchSeq=0;
+
 function fetchReasoningChip(){
-  api('/api/reasoning'+_reasoningEffortQuery()).then(function(st){
+  // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
+  // while this GET is in flight short-circuit instead of re-dispatching (that
+  // in-flight window is exactly where the #4650 storm lived).
+  const key=_reasoningEffortQuery();
+  const seq=++_reasoningFetchSeq;
+  _lastReasoningFetchKey=key;
+  api('/api/reasoning'+key).then(function(st){
+    // Ignore a stale/superseded response: only the most recent dispatch may
+    // apply, so an older in-flight GET can't poison the current chip (#4650).
+    if(seq!==_reasoningFetchSeq) return;
     _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
-  }).catch(function(){_applyReasoningChip('', {supported_efforts:[]});});
+  }).catch(function(){
+    // Same staleness guard on failure: a stale error must neither hide the chip
+    // nor clear a newer fetch's key. Only the latest dispatch clears the key so
+    // routine syncs retry after a genuine transient failure.
+    if(seq!==_reasoningFetchSeq) return;
+    _lastReasoningFetchKey=null;
+    _applyReasoningChip('', {supported_efforts:[]});
+  });
 }
 
 function syncReasoningChip(){
+  // #4650: syncTopbar() calls this on every routine UI refresh, and during
+  // streaming those fire at high frequency. Before a9ce2889 this served the
+  // cached _currentReasoningEffort after the first load; that commit made it
+  // refetch unconditionally to refresh supported-efforts after a model switch,
+  // which turned ordinary syncs into a GET /api/reasoning storm (one per token).
+  // Restore the cache short-circuit but keep a9ce2889's intent: only hit the
+  // network when nothing is cached yet OR the model/provider identity changed
+  // since the last fetch (the only inputs that change /api/reasoning's answer).
+  // The user-pick and model-switch paths still update the cache directly.
+  const key=_reasoningEffortQuery();
+  // Short-circuit on the KEY alone: if a fetch for this exact model/provider has
+  // already been dispatched (in-flight) or completed, do not dispatch another —
+  // this is what stops the #4650 storm, including the COLD-cache window where
+  // _currentReasoningEffort is still null between the first dispatch and its
+  // response (10 syncs before the first GET resolves must produce ONE request,
+  // not ten). Apply the cached chip only once we actually have an effort value.
+  if(_lastReasoningFetchKey===key){
+    if(_currentReasoningEffort!==null) _applyReasoningChip(_currentReasoningEffort);
+    return;
+  }
   fetchReasoningChip();
 }
 
@@ -3506,9 +3633,9 @@ function _recordNonMessageScrollIntent(e){
   const target=e&&e.target;
   if(!el||!target) return;
   if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
-  else if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY<0)){
+  else if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)){
     _cancelBottomSettle();
-    if(typeof e.deltaY==='number'&&e.deltaY<0){
+    if(typeof e.deltaY==='number'&&e.deltaY< -30){
       _messageUserUnpinned=true;
       _nearBottomCount=0;
       _scrollPinned=false;
@@ -3682,7 +3809,8 @@ if(typeof window!=='undefined'){
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
       const top=el.scrollTop;
-      const nearBottom=el.scrollHeight-top-el.clientHeight<250;
+      const bottomDistance=el.scrollHeight-top-el.clientHeight;
+      const nearBottom=bottomDistance<250;
       const movedUp=_lastScrollTop!==null&&top<_lastScrollTop-2;
       const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
       _lastScrollTop=top;
@@ -3694,13 +3822,16 @@ if(typeof window!=='undefined'){
       }else if(movedDown&&nearBottom){
         _nearBottomCount=_nearBottomCount+1;
         if(_nearBottomCount>=2){
-          _scrollPinned=true;
-          _messageUserUnpinned=false;
+          if(!_messageUserUnpinned||bottomDistance<=80){
+            _messageUserUnpinned=false;
+            _scrollPinned=true;
+          }
+          _nearBottomCount=0;
         }
       }else if(!_messageUserUnpinned){
         if(nearBottom){
           _nearBottomCount=_nearBottomCount+1;
-          if(_nearBottomCount>=2) _scrollPinned=true;
+          if(_nearBottomCount>=2){_scrollPinned=true;_nearBottomCount=0;}
         }else{
           _nearBottomCount=0;
           _scrollPinned=false;
@@ -3748,6 +3879,10 @@ function _formatActiveElapsedTimer(seconds){
   const m=Math.floor(total/60);
   const s=total%60;
   return`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+function _processedElapsedLabel(seconds){
+  const text=_formatTurnDuration(seconds);
+  return text?t('processed_elapsed',text):'';
 }
 const _COMPRESSION_ELAPSED_MAX_SECONDS=5*60;
 let _compressionElapsedTimer=null;
@@ -3798,6 +3933,20 @@ function _activityElapsedLabel(group){
   const started=_activityElapsedStartedAt(group);
   if(!started)return'';
   return _formatActiveElapsedTimer(_activityNowSeconds()-started);
+}
+function _activityProcessedElapsedLabel(group){
+  const started=_activityElapsedStartedAt(group);
+  if(!started)return'';
+  return _processedElapsedLabel(_activityNowSeconds()-started);
+}
+function _activitySettledProcessedLabel(group){
+  let durationText=_formatTurnDuration(group&&group.dataset&&group.dataset.turnDuration);
+  if(!durationText&&group){
+    const durationEl=group.querySelector&&group.querySelector('.tool-call-group-duration');
+    const legacy=String(durationEl&&durationEl.textContent||'').replace(/^\s*Done in\s+/i,'').trim();
+    if(legacy) durationText=legacy;
+  }
+  return durationText?t('processed_elapsed',durationText):'';
 }
 function _activityMarkObserved(group, ts){
   if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
@@ -3857,21 +4006,27 @@ function _updateActiveActivityElapsedTimer(){
   }
   const durationEl=group.querySelector('.tool-call-group-duration');
   const label=_activityElapsedLabel(group);
+  const processedLabel=_activityProcessedElapsedLabel(group);
   if(label){
     group.setAttribute('data-active-turn-elapsed',label);
   }else{
     group.removeAttribute('data-active-turn-elapsed');
   }
+  const labelEl=group.querySelector('.tool-worklog-label') || group.querySelector('.tool-call-group-label');
+  if(labelEl&&processedLabel){
+    labelEl.textContent=processedLabel;
+    labelEl.setAttribute('data-sweep-label', processedLabel);
+  }
   if(durationEl){
-    const activeText=label?`Working for ${label}`:'';
-    const progressText=_activityLiveProgressLabel(group);
-    durationEl.textContent=[progressText, activeText].filter(Boolean).join(' · ');
-    durationEl.style.display=durationEl.textContent?'':'none';
+    durationEl.textContent='';
+    durationEl.style.display='none';
   }
 }
 function _startActivityElapsedTimer(group){
   if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
   _setActivityElapsedStartedAt(group);
+  // Last-resort fallback for recovered live renders that arrive before session metadata.
+  if(!group.getAttribute('data-turn-started-at')) group.setAttribute('data-turn-started-at',String(_activityNowSeconds()));
   if(_activityElapsedTimerGroup&&_activityElapsedTimerGroup!==group)_clearActivityElapsedTimer();
   _activityElapsedTimerGroup=group;
   _updateActiveActivityElapsedTimer();
@@ -4008,6 +4163,12 @@ function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
   const el=$('ctxIndicator');
   if(!el)return;
+  const ctxHidden=!!(window._composerControlVisibility&&window._composerControlVisibility.hide_composer_context);
+  if(ctxHidden){
+    if(wrap) wrap.style.display='none';
+    _syncMobileCtxDisplay({visible:false});
+    return;
+  }
   // #1436: Use last_prompt_tokens only — NEVER fall back to cumulative
   // input_tokens for the "context window % used" calculation.  input_tokens
   // is summed across all turns, so dividing it by the context window gives a
@@ -4028,7 +4189,12 @@ function _syncCtxIndicator(usage){
     _syncMobileCtxDisplay({visible:false});
     return;
   }
-  if(wrap) wrap.style.display='';
+  if(wrap){
+    // Defensive reset: keep dynamic context display from being stuck hidden.
+    wrap.classList.remove('composer-control-hidden');
+    wrap.removeAttribute('aria-hidden');
+    wrap.style.display='';
+  }
   const hasPromptTok=!!promptTok;
   const rawPct=hasPromptTok?Math.round((promptTok/ctxWindow)*100):0;
   const pct=Math.min(100,rawPct);
@@ -5183,11 +5349,20 @@ function setStatus(t){
 function setComposerStatus(t){
   const el=$('composerStatus');
   if(!el)return;
+  const statusHidden=!!(window._composerControlVisibility&&window._composerControlVisibility.hide_composer_status);
+  if(statusHidden){
+    el.style.display='none';
+    el.textContent='';
+    return;
+  }
   if(!t){
     el.style.display='none';
     el.textContent='';
     return;
   }
+  // Defensive reset: a stale hidden class should never block live status text.
+  el.classList.remove('composer-control-hidden');
+  el.removeAttribute('aria-hidden');
   el.textContent=t;
   el.style.display='';
 }
@@ -5233,7 +5408,7 @@ function unlockComposerForClarify(){
 
 function _composerHasContent(){
   const msg=$('msg');
-  return !!((msg&&msg.value.trim().length>0)||S.pendingFiles.length>0);
+  return !!((msg&&msg.value.trim().length>0)||S.pendingFiles.length>0||(typeof window._hasPendingSelections==='function'&&window._hasPendingSelections()));
 }
 
 function _getExplicitBusyCommandAction(text){
@@ -5400,6 +5575,29 @@ function setBusy(v){
 // normal user bubble in the chat — the chip is removed at drain time.
 const _queueRenderKeys={};  // per-session fingerprint to avoid redundant rebuilds
 const _queueCollapsed={};   // per-session: true when user explicitly collapsed the card
+let _queueRenderEpoch=0;
+function _clearQueueCardDisplay(sid){
+  const card=document.getElementById('queueCard');
+  const chips=document.getElementById('queueChips');
+  if(sid) delete _queueRenderKeys[sid];
+  if(card) card.classList.remove('visible');
+  if(chips){
+    const _chips=chips;
+    const _card=card;
+    const _sid=String(sid||'');
+    const _epoch=_chips.getAttribute('data-queue-render-epoch')||'';
+    setTimeout(()=>{
+      if((_card&&!_card.classList.contains('visible'))||!_card){
+        if((_chips.getAttribute('data-queue-render-sid')||'')===_sid&&(_chips.getAttribute('data-queue-render-epoch')||'')===_epoch){
+          _chips.innerHTML='';
+        }
+      }
+    },360);
+  }
+  const _msgsEl=document.getElementById('messages');
+  if(_msgsEl) _msgsEl.classList.remove('queue-open');
+  _updateQueuePill(sid,0);
+}
 
 function _renderQueueChips(sid){
   const card=document.getElementById('queueCard');
@@ -5411,6 +5609,8 @@ function _renderQueueChips(sid){
   // Skip re-render if user is actively editing inside the queue panel
   if(inner.contains(document.activeElement)&&document.activeElement!==inner) return;
   _queueRenderKeys[sid]=key;
+  inner.setAttribute('data-queue-render-sid',sid);
+  inner.setAttribute('data-queue-render-epoch',String(++_queueRenderEpoch));
   inner.innerHTML='';
   if(!q.length){
     card.classList.remove('visible');
@@ -5649,14 +5849,7 @@ function updateQueueBadge(sessionId){
     // Only wipe global DOM if this is the currently active session
     const isActive=S.session&&sid===S.session.session_id;
     if(isActive){
-      const card=document.getElementById('queueCard');
-      const chips=document.getElementById('queueChips');
-      if(card) card.classList.remove('visible');
-      // Defer clear until after slide-out transition so content doesn't vanish mid-animation
-      if(chips){const _chips=chips;const _card=card;setTimeout(()=>{if(!_card||!_card.classList.contains('visible'))_chips.innerHTML='';},360);}
-      const _msgsEl=document.getElementById('messages');
-      if(_msgsEl) _msgsEl.classList.remove('queue-open');
-      _updateQueuePill(sid,0);
+      _clearQueueCardDisplay(sid);
     }
   }
 }
@@ -5799,7 +5992,10 @@ function showConfirmDialog(opts={}){
   if(title) title.textContent=opts.title||t('dialog_confirm_title');
   if(desc) desc.textContent=opts.message||'';
   if(input){input.style.display='none';input.value='';}
-  if(cancelBtn) cancelBtn.textContent=opts.cancelLabel||t('cancel');
+  if(cancelBtn){
+    if(opts.hideCancel){cancelBtn.style.display='none';}
+    else{cancelBtn.style.display='';cancelBtn.textContent=opts.cancelLabel||t('cancel');}
+  }
   if(confirmBtn){
     confirmBtn.textContent=opts.confirmLabel||t('dialog_confirm_btn');
     confirmBtn.classList.toggle('danger',!!opts.danger);
@@ -5829,9 +6025,18 @@ function showPromptDialog(opts={}){
     input.value=prefill;input.placeholder=opts.placeholder||'';
     input.autocomplete='off';input.spellcheck=false;
   }
-  if(cancelBtn) cancelBtn.textContent=opts.cancelLabel||t('cancel');
-  if(confirmBtn){confirmBtn.textContent=opts.confirmLabel||t('create');confirmBtn.classList.remove('danger');}
-  if(dialog) dialog.setAttribute('role','dialog');
+  if(cancelBtn){
+    // A prior showConfirmDialog({hideCancel:true}) (e.g. the outside-symlink info
+    // dialog, #4581) may have hidden the shared Cancel button; always restore it
+    // so a subsequent prompt keeps its Cancel affordance.
+    cancelBtn.style.display='';
+    cancelBtn.textContent=opts.cancelLabel||t('cancel');
+  }
+  if(confirmBtn){
+    confirmBtn.textContent=opts.confirmLabel||t('create');
+    confirmBtn.classList.toggle('danger',!!opts.danger);
+  }
+  if(dialog) dialog.setAttribute('role',opts.danger?'alertdialog':'dialog');
   if(overlay){overlay.style.display='flex';overlay.setAttribute('aria-hidden','false');}
   return new Promise(resolve=>{
     APP_DIALOG.resolve=resolve;
@@ -6006,6 +6211,8 @@ function _buildBrowserUtterance(text, btn){
 }
 
 function _playEdgeTtsChunked(text, btn){
+  _ttsSpeaking=true;
+  if(btn) btn.dataset.speaking='1';
   const chunks=_splitForTTS(text);
   const _playOne=function(idx){
     if(idx>=chunks.length){
@@ -6585,6 +6792,7 @@ function restoreLiveTurnHtmlForSession(sid){
   // session-switch/reconnect restore. (Codex trifecta finding C1.)
   if(typeof _rehydrateTransparentStreamDom==='function') _rehydrateTransparentStreamDom(restored);
   if(typeof normalizeLiveActivityGroupPlacement==='function') normalizeLiveActivityGroupPlacement(restored);
+  if(typeof _dedupeLiveProcessedWorklogAnchors==='function') _dedupeLiveProcessedWorklogAnchors(restored);
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
@@ -6715,6 +6923,7 @@ const AGENT_HEALTH_INTERVAL_MS=30000;
 const AGENT_HEALTH_DISMISSED_KEY='agent-health-dismissed';
 let _agentHealthTimer=null;
 let _agentHealthLastState='unknown';
+let _lastGatewayRestartTime=0;
 function _agentHealthDismissed(){
   try{return localStorage.getItem(AGENT_HEALTH_DISMISSED_KEY)==='1';}
   catch(_){return false;}
@@ -6745,8 +6954,35 @@ function dismissAgentHealthAlert(){
   _setAgentHealthDismissed(true);
   _hideAgentHealthAlert();
 }
+async function restartGatewayService(){
+  const btn = $('btnRestartGateway');
+  const dismissBtn = $('agentHealthDismiss');
+  if(!btn) return;
+  btn.disabled = true;
+  if(dismissBtn) dismissBtn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Restarting...';
+  try {
+    const res = await api('/api/health/restart', {method: 'POST'});
+    if(res && res.ok){
+      showToast('Gateway service restarted successfully');
+      _hideAgentHealthAlert();
+      _lastGatewayRestartTime = Date.now();
+      setTimeout(pollAgentHealth, 15000);
+    } else {
+      showToast(res && res.error || 'Failed to restart gateway service');
+    }
+  } catch(e) {
+    showToast('Failed to restart gateway service: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    if(dismissBtn) dismissBtn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
 async function pollAgentHealth(){
   if(document.visibilityState !== 'visible') return;
+  if(Date.now() - _lastGatewayRestartTime < 15000) return;
   try{
     const payload=await api('/api/health/agent',{timeoutToast:false});
     if(payload.alive === true){
@@ -7425,6 +7661,8 @@ function syncTopbar(){
     // Update profile chip even when no session is active (e.g. right after profile switch)
     const _profileLabel=$('profileChipLabel');
     if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
+    const _titleLabel=$('titlebarProfileLabel');
+    if(_titleLabel) _titleLabel.textContent=S.activeProfile||'default';
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -7550,6 +7788,8 @@ function syncTopbar(){
   // unaffected by this line.
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  const titleLabel=$('titlebarProfileLabel');
+  if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
 }
 
 function msgContent(m){
@@ -7576,9 +7816,17 @@ function _isRecoveryControlMessage(m){
   // interrupted" card carries 'Interruption details' and must stay visible.
   return _isRecoveryControlMessageText(msgContent(m)||String(m.content||''));
 }
+function _assistantAnchorSceneFinalAnswerText(m){
+  const scene=m&&m._anchor_activity_scene&&typeof m._anchor_activity_scene==='object'
+    ? m._anchor_activity_scene
+    : null;
+  const text=scene&&typeof scene.final_answer==='string'?scene.final_answer:'';
+  return String(text||'').trim()?text:'';
+}
 function _assistantMessageHasVisibleContent(m){
   if(!m||m.role!=='assistant') return false;
   if(_isRecoveryControlMessage(m)) return false;
+  if(_assistantAnchorSceneFinalAnswerText(m)) return true;
   const content=m.content;
   if(typeof content==='string') return !_isAssistantEmptyPlaceholderContent(m, content)&&!!content.trim();
   if(!Array.isArray(content)) return false;
@@ -7664,10 +7912,12 @@ function _assistantTurnBlocks(turn){
 }
 function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, visibleContent, opts){
   if(!m||m.role!=='assistant') return false;
+  if(m._error) return false;
   const isTurnFinalAssistant=!!(opts&&opts.isTurnFinalAssistant);
   const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
   const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
   if(m._live) return true;
+  if(hasVisibleText&&m._anchor_activity_scene) return false;
   if(hasVisibleText&&isTurnFinalAssistant) return false;
   if(m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined) return true;
   const hasToolMetadata=!!(
@@ -7724,6 +7974,8 @@ function _stripLeadingAssistantThinkingMarkup(content){
 }
 function _assistantVisibleContentForReasoningCompare(m){
   if(!m||m.role!=='assistant') return '';
+  const anchorFinal=_assistantAnchorSceneFinalAnswerText(m);
+  if(anchorFinal) return anchorFinal;
   let content=m.content||'';
   if(Array.isArray(content)){
     content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
@@ -7800,9 +8052,6 @@ function _applyWorklogDetailsExpandedDefault(root){
   scope.querySelectorAll('.thinking-card').forEach(card=>{
     card.classList.toggle('open', open);
   });
-  scope.querySelectorAll('.tool-card').forEach(card=>{
-    if(card.querySelector('.tool-card-detail')) card.classList.toggle('open', open);
-  });
   scope.querySelectorAll('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group').forEach(group=>{
     group.classList.toggle('open', open);
     group.classList.toggle('tool-worklog-tool-group-collapsed', !open);
@@ -7827,6 +8076,7 @@ function _worklogDetailBaseKey(el){
   if(!el||!el.classList) return '';
   const activity=el.closest&&el.closest('.agent-activity-group,.tool-worklog-group[data-tool-worklog-group="1"],.tool-call-group[data-tool-call-group="1"],.live-worklog[data-live-worklog-shell="1"]');
   const scope=activity?[
+    activity.getAttribute('data-anchor-stream-id')?`stream:${activity.getAttribute('data-anchor-stream-id')}`:'',
     activity.getAttribute('data-activity-disclosure-key')||'',
     activity.getAttribute('data-tool-worklog-key')||'',
     activity.getAttribute('data-live-segment-seq')||'',
@@ -7971,6 +8221,31 @@ function _transparentToolStatus(tc, settled){
   if(tc&&tc.is_error) return 'Failed';
   if(tc&&tc.done===false) return settled?'Interrupted':'Running';
   return 'Completed';
+}
+// Quiet one-line summary for a collapsed transparent tool row (#4658).
+// The transparent view overrides the row name to the bare tool name
+// (_toolShortName, e.g. "read_file"/"terminal"), so — unlike the worklog view —
+// it has no action-label carrying the target, and buildToolCard's collapsed
+// preview is blanked for the common arg/shell case (the #4411 suppression that
+// assumes the name carries the target). That left transparent rows showing only
+// the bare tool name with no hint of what each call did. Rebuild a summary from
+// the call's TARGET (path/command/query/skill/...) — NOT the raw result JSON —
+// so it stays consistent with the "keep collapsed previews quiet" intent
+// (test_tool_card_preview_summary.py) while restoring "understand the call
+// without expanding it".
+function _transparentToolSummary(tc){
+  if(!tc||typeof tc!=='object') return '';
+  // Explicit progress text (e.g. subagent_progress) wins while still running.
+  const explicit=String(tc.preview||'').trim();
+  if(tc.done===false&&explicit) return _shortToolLabel(explicit,160);
+  // Target-based summary only (path/command/query/skill). Deliberately NO generic
+  // arg-preview fallback: a call with args but no real target (e.g. `terminal`
+  // with only {workdir} or an unknown tool with {mode:"dry-run"}) must yield an
+  // EMPTY collapsed preview rather than dumping a raw arg snippet — that keeps the
+  // collapsed row quiet and consistent with the no-args case (#4658 review).
+  const target=typeof _toolVisibleTargetLabel==='function'?_toolVisibleTargetLabel(tc,{limit:160}):'';
+  if(target) return target;
+  return '';
 }
 function _copyEventToClipboard(row){
   if(!row) return;
@@ -8233,6 +8508,22 @@ function _decorateTransparentEventRow(row, opts){
       // also prefix the name with "Running:" — that's the same redundancy class
       // V6 removed from the detail body. (Trifecta r2 #4.)
       if(nameEl) nameEl.textContent=_toolShortName(name);
+      // #4658: restore the collapsed-row inline summary. buildToolCard emits a
+      // `.tool-card-preview` span but blanks its text for the common case, and
+      // the bare _toolShortName above drops the target the worklog view carries
+      // in its action-label name. Populate the preview from a quiet,
+      // target-based summary so each collapsed row says what it did without
+      // expanding. Idempotent across re-decoration (status updates re-run this).
+      const previewEl=header.querySelector('.tool-card-preview');
+      if(previewEl){
+        const summary=_transparentToolSummary(tc);
+        if(summary){
+          previewEl.textContent=summary;
+          previewEl.removeAttribute('hidden');
+        }else{
+          previewEl.textContent='';
+        }
+      }
       let statusEl=header.querySelector('.transparent-event-status');
       if(!statusEl){
         statusEl=document.createElement('span');
@@ -8543,6 +8834,9 @@ function _onLiveActivityToggle(group){
 function _toggleActivityGroup(summary){
   const group=summary&&summary.closest?summary.closest('.agent-activity-group,.tool-call-group'):null;
   if(!group) return;
+  if(group.getAttribute('data-live-tool-call-group')==='1'&&group.getAttribute('data-live-activity-current')==='1'){
+    return;
+  }
   const collapsed=group.classList.toggle('tool-call-group-collapsed');
   group.classList.toggle('open',!collapsed);
   summary.setAttribute('aria-expanded',String(!collapsed));
@@ -8558,6 +8852,28 @@ function _toggleToolWorklogGroup(summary){
     return;
   }
   return _toggleActivityGroup(summary);
+}
+function _finalizeLiveActivityDisclosureGroup(group){
+  if(!group) return;
+  const keepOpen=!!(
+    group.querySelector&&group.querySelector('.tool-card.open,.thinking-card.open,.tool-group.open,.tool-worklog-tool-group.open')
+  );
+  const disclosureKey=group.getAttribute('data-activity-disclosure-key')||group.getAttribute('data-tool-worklog-key')||'';
+  group.removeAttribute('data-live-activity-current');
+  group.removeAttribute('data-live-tool-call-group');
+  group.removeAttribute('data-live-tool-worklog-group');
+  group.removeAttribute('data-live-anchor-scene-owner');
+  group.classList.toggle('tool-call-group-collapsed', !keepOpen);
+  group.classList.toggle('open', keepOpen);
+  if(keepOpen&&disclosureKey) _writeActivityDisclosureState(disclosureKey, true);
+  const summary=group.querySelector&&group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
+  if(summary){
+    summary.removeAttribute('data-live-summary-static');
+    summary.removeAttribute('aria-disabled');
+    summary.disabled=false;
+    summary.setAttribute('aria-expanded',keepOpen?'true':'false');
+  }
+  if(typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
 }
 function _worklogReasonHtmlFromAnchor(anchor, textOverride){
   if(!anchor||!anchor.matches||!anchor.matches('.assistant-segment')) return '';
@@ -8742,6 +9058,46 @@ function _filterNewWorklogTools(cards, seenTools){
   }
   return out;
 }
+function _anchorSceneToolRowLogicalKey(row){
+  if(!row||row.role!=='tool') return '';
+  const tool=(row.tool&&typeof row.tool==='object')?row.tool:{};
+  const payload=(row.payload&&typeof row.payload==='object')?row.payload:{};
+  const id=row.tool_call_id||tool.id||tool.tid||tool.tool_call_id||tool.tool_use_id||tool.call_id||
+    payload.tid||payload.id||payload.tool_call_id||payload.tool_use_id||payload.call_id||'';
+  return id?`call:${id}`:'';
+}
+function _anchorSceneMergeToolRows(prev, row){
+  if(!prev) return row;
+  const prevTool=(prev.tool&&typeof prev.tool==='object')?prev.tool:{};
+  const nextTool=(row&&row.tool&&typeof row.tool==='object')?row.tool:{};
+  const prevPayload=(prev.payload&&typeof prev.payload==='object')?prev.payload:{};
+  const nextPayload=(row&&row.payload&&typeof row.payload==='object')?row.payload:{};
+  const prevArgs=(prevTool.args&&typeof prevTool.args==='object')?prevTool.args:
+    ((prevPayload.args&&typeof prevPayload.args==='object')?prevPayload.args:{});
+  const nextArgs=(nextTool.args&&typeof nextTool.args==='object')?nextTool.args:
+    ((nextPayload.args&&typeof nextPayload.args==='object')?nextPayload.args:{});
+  const mergedPayload=Object.assign({},prevPayload,nextPayload);
+  const mergedTool=Object.assign({},prevTool,nextTool);
+  if(!Object.keys(nextArgs).length&&Object.keys(prevArgs).length) mergedTool.args=prevArgs;
+  const prevPreview=String(prevTool.preview||prevPayload.preview||'').trim();
+  const nextText=String(row&&row.text||'').trim();
+  const nextSnippet=String(nextTool.snippet||nextPayload.snippet||nextPayload.result||nextPayload.output||'').trim();
+  const nextStatus=String(row&&row.status||'').toLowerCase();
+  const nextLooksLikeResult=!!nextSnippet||(
+    !!nextText&&nextStatus&&nextStatus!=='running'&&nextStatus!=='pending'
+  );
+  if(prevPreview&&nextLooksLikeResult){
+    mergedTool.preview=prevTool.preview||prevPayload.preview||prevPreview;
+    if(!mergedPayload.preview) mergedPayload.preview=prevPayload.preview||prevPreview;
+  }
+  if(nextSnippet) mergedTool.snippet=nextTool.snippet||nextPayload.snippet||nextPayload.result||nextPayload.output||nextSnippet;
+  return Object.assign({},prev,row,{
+    row_id:prev.row_id||row.row_id,
+    order_index:prev.order_index??row.order_index,
+    payload:mergedPayload,
+    tool:mergedTool,
+  });
+}
 function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
   const list=_toolWorklogListEl(group);
   if(!group||!list) return;
@@ -8785,7 +9141,463 @@ function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
     _syncToolRowsContainer(tools, !!(opts&&opts.live));
   }
 }
+function _anchorSceneRowsForRendering(scene, opts){
+  const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+  const settled=!!(opts&&opts.settled);
+  const out=[];
+  const byKey=new Map();
+  const keyFor=(row)=>{
+    if(!row) return '';
+    if(row.role==='tool') return `tool:${_anchorSceneToolRowLogicalKey(row)||row.row_id||row.event_id||row.local_id||out.length}`;
+    if(row.role==='prose') return `prose:${row.local_id||row.row_id||out.length}`;
+    if(row.role==='thinking') return `thinking:${row.local_id||row.row_id||out.length}`;
+    if(row.role==='lifecycle'){
+      const source=String(row.source_event_type||'');
+      if(source==='compressing'||source==='compressed') return 'lifecycle:compression';
+      return `lifecycle:${source||row.local_id||row.row_id||out.length}`;
+    }
+    return `row:${row.row_id||out.length}`;
+  };
+  for(const row of rows){
+    if(!row||typeof row!=='object') continue;
+    if(row.role==='terminal'&&row.source_event_type==='done') continue;
+    if(_anchorSceneIsSettledSuccessfulCompression(row,settled)) continue;
+    const text=String(row.text||'').trim();
+    if((row.role==='prose'||row.role==='thinking')&&!text) continue;
+    const key=keyFor(row);
+    if(byKey.has(key)){
+      const index=byKey.get(key);
+      out[index]=row.role==='tool'?_anchorSceneMergeToolRows(out[index],row):row;
+    }else{
+      byKey.set(key,out.length);
+      out.push(row);
+    }
+  }
+  return out;
+}
+function _anchorSceneIsSettledSuccessfulCompression(row, settled){
+  if(!settled||!row||row.role!=='lifecycle') return false;
+  const source=String(row.source_event_type||'');
+  if(source!=='compressing'&&source!=='compressed') return false;
+  const status=String(row.status||'').toLowerCase();
+  return !['error','failed','failure','compression_exhausted','degraded','interrupted','connection_lost'].includes(status);
+}
+function _anchorSceneToolCallFromRow(row, opts){
+  const tool=(row&&row.tool&&typeof row.tool==='object')?row.tool:{};
+  const payload=(row&&row.payload&&typeof row.payload==='object')?row.payload:{};
+  const id=tool.id||row.tool_call_id||payload.tid||payload.id||payload.tool_call_id||payload.tool_use_id||payload.call_id||'';
+  const settled=!!(opts&&opts.settled);
+  return {
+    name:tool.name||payload.name||'tool',
+    args:(tool.args&&typeof tool.args==='object')?tool.args:((payload.args&&typeof payload.args==='object')?payload.args:{}),
+    command:tool.command||payload.command||payload.cmd||'',
+    raw_command:tool.raw_command||payload.raw_command||'',
+    preview:tool.preview||payload.preview||'',
+    snippet:tool.snippet||payload.snippet||payload.result||payload.output||(
+      row&&row.status!=='running'&&row.status!=='pending'?row.text:''
+    )||'',
+    done:settled?true:(tool.done!==null&&tool.done!==undefined?tool.done:(row.status!=='running'&&row.status!=='pending')),
+    is_error:!!(tool.is_error||payload.is_error||row.status==='error'||row.status==='failed'),
+    duration:tool.duration||payload.duration||payload.duration_seconds,
+    started_at:tool.started_at||payload.started_at,
+    tid:id,
+    id,
+  };
+}
+function _anchorSceneNodeForRow(row, opts){
+  const settled=!!(opts&&opts.settled);
+  if(!row) return null;
+  let node=null;
+  if(row.role==='prose'){
+    const text=String(row.text||'').trim();
+    if(!text) return null;
+    node=document.createElement('div');
+    node.className='assistant-segment';
+    node.setAttribute('data-anchor-scene-prose','1');
+    node.dataset.rawText=text;
+    node.innerHTML=`<div class="msg-body">${renderMd?renderMd(text):esc(text)}</div>`;
+  }else if(row.role==='thinking'){
+    if(window._showThinking===false) return null;
+    const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
+    if(!text) return null;
+    node=_thinkingActivityNode(text, false, row.row_id||row.local_id||'anchor-thinking');
+  }else if(row.role==='tool'){
+    node=buildToolCard(_anchorSceneToolCallFromRow(row,opts));
+  }else if(row.role==='lifecycle'){
+    if(row.source_event_type==='compressing'||row.source_event_type==='compressed'){
+      node=_autoCompressionWorklogNode({
+        phase:settled||row.source_event_type==='compressed'?'done':'running',
+        automatic:true,
+        message:row.text||'Compressing context',
+      });
+    }else{
+      node=_activityStatusNode({
+        kind:settled?'done':'waiting',
+        label:row.text||row.status||'Working',
+        status:!settled&&row.status==='running'?'running':'done',
+        id:row.row_id||row.local_id||'',
+      });
+    }
+  }else if(row.role==='control'){
+    node=_activityStatusNode({
+      kind:settled?'done':'waiting',
+      label:row.text||row.source_event_type||'Waiting',
+      status:settled?'done':'running',
+      id:row.row_id||row.local_id||'',
+    });
+  }else if(row.role==='terminal'){
+    const status=String(row.status||row.source_event_type||'').trim();
+    const isError=['error','failed','connection_lost','interrupted','compression_exhausted','tool_limit_reached','no_response'].includes(status);
+    node=_activityStatusNode({
+      kind:isError?'warning':'done',
+      label:row.text||status||'Turn ended',
+      status:settled?'done':(isError?'error':'done'),
+      id:row.row_id||row.local_id||'',
+    });
+  }
+  if(!node) return null;
+  node.setAttribute('data-anchor-scene-row','1');
+  node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
+  node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
+  node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
+  return node;
+}
+function _anchorSceneTransparentNodeForRow(row, opts){
+  const settled=!!(opts&&opts.settled);
+  if(!row) return null;
+  let node=null;
+  const meta={
+    segmentSeq:row.segment_seq||row.segmentSeq||'',
+    burstId:row.activity_burst_id||row.burst_id||row.burstId||'',
+  };
+  if(row.role==='prose'){
+    // The settled assistant segment already owns the FINAL answer prose, so a
+    // prose row whose text matches the final answer must be suppressed here to
+    // avoid duplicating the answer. But INTERMEDIATE progress prose (the
+    // between-tool narration from earlier rounds) is NOT the final answer and
+    // belongs in the chronological transparent history — dropping it loses the
+    // interleaving the user saw live (#4568: tools were restored but mid-turn
+    // prose still vanished on reload). Render intermediate prose as an inline
+    // assistant-segment (same shape _anchorSceneNodeForRow builds), skip only
+    // the final-answer duplicate.
+    const text=String(row.text||'').trim();
+    if(!text) return null;
+    const finalAnswer=String((opts&&opts.finalAnswer)||'').trim();
+    if(finalAnswer&&_anchorSceneProseMatchesFinalAnswer(text,finalAnswer)) return null;
+    node=_anchorSceneNodeForRow(row,{settled});
+    if(!node) return null;
+    node=_decorateTransparentEventRow(node,{type:'prose',text,preview:text,...meta});
+  }else if(row.role==='thinking'){
+    if(window._showThinking===false) return null;
+    const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
+    if(!text) return null;
+    node=_decorateTransparentEventRow(_thinkingActivityNode(text,false,row.row_id||row.local_id||'anchor-thinking'),{
+      type:'thinking',
+      text,
+      preview:text,
+      ...meta,
+    });
+  }else if(row.role==='tool'){
+    const toolCall=_anchorSceneToolCallFromRow(row,{settled});
+    node=_decorateTransparentEventRow(buildToolCard(toolCall),{
+      type:'tool',
+      name:toolCall&&toolCall.name,
+      status:_transparentToolStatus(toolCall,true),
+      toolCall,
+      ...meta,
+    });
+  }else{
+    node=_anchorSceneNodeForRow(row,{settled});
+    node=_decorateTransparentEventRow(node,{
+      type:String(row.role||'activity'),
+      ...meta,
+    });
+  }
+  if(!node) return null;
+  node.setAttribute('data-anchor-scene-row','1');
+  node.setAttribute('data-anchor-settled-scene-row','1');
+  node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
+  node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
+  node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
+  return node;
+}
+// Whitespace-insensitive compare so a scene prose row that IS the final answer
+// (possibly re-wrapped) is recognized and not duplicated against the segment.
+// Codex #4568: the prefix tolerance must NOT be able to suppress a DISTINCT
+// intermediate progress row that merely happens to be a prefix of the final
+// answer (e.g. "I found the issue and I'm applying the fix now." when the final
+// answer starts with that sentence). So require exact normalized equality, with
+// a prefix tolerance allowed ONLY when the two strings are near-equal length
+// (>=0.9 ratio, shorter >=80 chars) — i.e. genuine re-wrap/truncation of the
+// SAME text, never a short intermediate sentence that prefixes a long answer.
+function _anchorSceneProseMatchesFinalAnswer(proseText, finalAnswer){
+  const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim();
+  const a=norm(proseText), b=norm(finalAnswer);
+  if(!a||!b) return false;
+  if(a===b) return true;
+  if(!(a.startsWith(b)||b.startsWith(a))) return false;
+  const shorter=Math.min(a.length,b.length), longer=Math.max(a.length,b.length);
+  return shorter>=80 && (shorter/longer)>=0.9;
+}
+function _anchorSceneWorklogGroup(blocks, opts){
+  if(!blocks) return null;
+  const live=!!(opts&&opts.live);
+  const activityKey=(opts&&opts.activityKey)||'anchor-scene';
+  let group=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+  if(!group){
+    group=ensureActivityGroup(blocks,{
+      collapsed:!live,
+      live,
+      activityKey,
+      beforeAnchor:!!(opts&&opts.beforeAnchor),
+      anchor:(opts&&opts.anchor)||null,
+      turnDuration:opts&&opts.turnDuration,
+      turnStartedAt:opts&&opts.turnStartedAt,
+      syncAnchorReason:false,
+    });
+  }
+  if(!group) return null;
+  group.setAttribute('data-anchor-scene-owner','1');
+  if(live) group.setAttribute('data-live-anchor-scene-owner','1');
+  group.setAttribute('data-tool-worklog-key',activityKey);
+  if(opts&&opts.streamId) group.setAttribute('data-anchor-stream-id',String(opts.streamId));
+  if(opts&&opts.turnDuration!==undefined&&opts.turnDuration!==null) group.setAttribute('data-turn-duration',String(opts.turnDuration));
+  if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
+  return group;
+}
+function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
+  const list=_toolWorklogListEl(group);
+  if(!group||!list) return false;
+  list.innerHTML='';
+  let wrote=false;
+  let currentTools=null;
+  for(const row of rows){
+    const node=_anchorSceneNodeForRow(row,opts);
+    if(!node) continue;
+    if(row.role==='tool'){
+      if(!currentTools){
+        currentTools=document.createElement('div');
+        currentTools.className='wl-step-tools tool-worklog-tools';
+        currentTools.setAttribute('data-worklog-tools','1');
+        list.appendChild(currentTools);
+      }
+      currentTools.appendChild(node);
+    }else{
+      currentTools=null;
+      list.appendChild(node);
+    }
+    wrote=true;
+  }
+  if(wrote){
+    _syncToolCallGroupSummary(group);
+  }
+  return wrote;
+}
+function _liveProcessedWorklogAnchorScore(group, index){
+  if(!group) return -1;
+  const hasRows=!!group.querySelector('.tool-card-row,.wl-reason,.agent-activity-thinking,[data-anchor-scene-row="1"]');
+  const label=group.querySelector('.tool-worklog-label,.tool-call-group-label');
+  const text=String(label&&label.textContent||'').trim();
+  const hasElapsed=!!(group.getAttribute('data-active-turn-elapsed')||/\d/.test(text));
+  let score=index;
+  if(hasElapsed) score+=400;
+  if(hasRows) score+=200;
+  if(group.getAttribute('data-live-activity-current')==='1') score+=80;
+  if(group.getAttribute('data-anchor-scene-owner')==='1') score+=40;
+  if(group.getAttribute('data-live-tool-call-group')==='1') score+=20;
+  return score;
+}
+function _dedupeLiveProcessedWorklogAnchors(turn){
+  const blocks=_assistantTurnBlocks(turn||$('liveAssistantTurn'));
+  if(!blocks) return null;
+  const groups=Array.from(blocks.querySelectorAll(
+    '.tool-worklog-group[data-tool-worklog-group="1"],'+
+    '.tool-call-group[data-tool-worklog-group="1"],'+
+    '.live-worklog[data-live-worklog-shell="1"]'
+  )).filter(group=>group&&group.isConnected!==false);
+  if(groups.length<=1) return groups[0]||null;
+  let keep=groups[0];
+  let keepScore=_liveProcessedWorklogAnchorScore(keep,0);
+  groups.forEach((group,index)=>{
+    const score=_liveProcessedWorklogAnchorScore(group,index);
+    if(score>=keepScore){
+      keep=group;
+      keepScore=score;
+    }
+  });
+  groups.forEach(group=>{
+    if(group!==keep) group.remove();
+  });
+  if(keep&&typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(keep);
+  return keep;
+}
+function isLiveAnchorActivitySceneOwner(streamId){
+  const turn=$('liveAssistantTurn');
+  if(!turn) return false;
+  const owner=turn.getAttribute('data-anchor-scene-live-owner')==='1'||
+    !!turn.querySelector('[data-live-anchor-scene-owner="1"],[data-anchor-scene-row="1"]');
+  if(!owner) return false;
+  const current=turn.getAttribute('data-anchor-stream-id')||'';
+  return !streamId||!current||String(streamId)===current;
+}
+function _projectLiveAnchorActivitySceneForStream(streamId, mode){
+  const api=(typeof window!=='undefined')?window.HermesAssistantTurnAnchors:null;
+  const map=(typeof window!=='undefined')?window._liveAnchorRegistries:null;
+  const registry=map&&streamId?map.get(streamId):null;
+  if(!api||!registry||typeof api.projectAssistantTurnAnchorActivityScene!=='function') return null;
+  try{
+    return api.projectAssistantTurnAnchorActivityScene(registry,{mode:mode||'compact_worklog'});
+  }catch(err){
+    if(typeof console!=='undefined'&&console.warn) console.warn('assistant turn anchor scene projection failed',err);
+    return null;
+  }
+}
+function renderLiveAnchorActivityScene(streamId, scene, opts){
+  opts=opts||{};
+  if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;
+  if(!S.session||!S.activeStreamId) return false;
+  if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
+  if(streamId&&S.activeStreamId!==streamId) return false;
+  const rows=_anchorSceneRowsForRendering(scene,{settled:false});
+  $('emptyState').style.display='none';
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    if(S.session) turn.dataset.sessionId=S.session.session_id;
+    $('msgInner').appendChild(turn);
+  }
+  turn.setAttribute('data-anchor-scene-live-owner','1');
+  turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  if(S.session) turn.dataset.sessionId=S.session.session_id;
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return false;
+  const liveDisclosureState=typeof _captureWorklogDetailDisclosureState==='function'
+    ? _captureWorklogDetailDisclosureState(blocks)
+    : null;
+  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"]').forEach(el=>el.remove());
+  blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
+    el.classList.add('assistant-segment-worklog-source');
+    el.setAttribute('aria-hidden','true');
+  });
+  const group=_anchorSceneWorklogGroup(blocks,{
+    live:true,
+    collapsed:false,
+    activityKey:`live:${streamId||S.activeStreamId||'anchor'}`,
+    streamId:streamId||S.activeStreamId||'',
+    turnStartedAt:S.session&&S.session.pending_started_at,
+  });
+  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{live:true,settled:false});
+  if(!ok){
+    const list=_toolWorklogListEl(group);
+    if(list) list.innerHTML='';
+    _syncToolCallGroupSummary(group);
+  }
+  if(typeof _restoreWorklogDetailDisclosureState==='function') _restoreWorklogDetailDisclosureState(blocks, liveDisclosureState);
+  if(typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(group);
+  _dedupeLiveProcessedWorklogAnchors(turn);
+  if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
+  return true;
+}
+function _renderLiveAnchorActivitySceneForStream(streamId, sessionId, opts){
+  const scene=_projectLiveAnchorActivitySceneForStream(streamId,(opts&&opts.mode)||'compact_worklog');
+  if(!scene) return false;
+  return renderLiveAnchorActivityScene(streamId,scene,{...(opts||{}),sessionId});
+}
+function _renderLiveAnchorActivitySceneSnapshotForStream(streamId, scene, sessionId, opts){
+  if(!scene||scene.version!=='activity_scene_v1') return false;
+  return renderLiveAnchorActivityScene(streamId,scene,{...(opts||{}),sessionId});
+}
+if(typeof window!=='undefined'){
+  // Direct assignment, NOT a same-name wrapper: these are top-level `function`
+  // declarations, which in a classic script are already window properties.
+  // Re-exporting via `window.X = function(){ return X() }` reassigns that same
+  // global property to the wrapper, so the inner call resolves to the wrapper
+  // itself → infinite recursion (RangeError: Maximum call stack size exceeded)
+  // on every live render / reattach / snapshot-restore path (#2715/#2771 class).
+  window._renderLiveAnchorActivitySceneForStream=_renderLiveAnchorActivitySceneForStream;
+  window._renderLiveAnchorActivitySceneSnapshotForStream=_renderLiveAnchorActivitySceneSnapshotForStream;
+  window._projectLiveAnchorActivitySceneForStream=_projectLiveAnchorActivitySceneForStream;
+  window.isLiveAnchorActivitySceneOwner=isLiveAnchorActivitySceneOwner;
+}
+function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
+  if(!message||!message._anchor_activity_scene||!segment) return false;
+  const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
+  if(!blocks) return false;
+  const scene=message._anchor_activity_scene;
+  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  if(!rows.length) return false;
+  // The assistant segment owns the final answer; pass it so intermediate prose
+  // rows render but the final-answer-duplicate prose row is suppressed.
+  const finalAnswer=String(
+    (scene&&typeof scene.final_answer==='string'&&scene.final_answer)
+    || _assistantAnchorSceneFinalAnswerText(message)
+    || (typeof msgContent==='function'?msgContent(message):'')
+    || ''
+  );
+  blocks.querySelectorAll('[data-anchor-settled-scene-row="1"],.transparent-event-row[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+  blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
+    const idx=Number(node.getAttribute('data-msg-idx'));
+    if(Number.isFinite(idx)&&idx<rawIdx){
+      node.classList.add('assistant-segment-worklog-source');
+      node.setAttribute('aria-hidden','true');
+    }
+  });
+  let wrote=false;
+  for(const row of rows){
+    const node=_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer});
+    if(!node) continue;
+    if(segment.parentElement===blocks) blocks.insertBefore(node,segment);
+    else blocks.appendChild(node);
+    wrote=true;
+  }
+  if(wrote){
+    const turn=segment.closest('.assistant-turn');
+    if(turn) _syncTransparentEventControls(turn);
+  }
+  return wrote;
+}
+function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
+  if(!message||!message._anchor_activity_scene||!segment) return false;
+  if(typeof isTransparentStream==='function'&&isTransparentStream()){
+    return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
+  }
+  if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;
+  const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
+  if(!blocks) return false;
+  const scene=message._anchor_activity_scene;
+  const rows=_anchorSceneRowsForRendering(scene,{settled:true});
+  if(!rows.length) return false;
+  blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
+    const idx=Number(node.getAttribute('data-msg-idx'));
+    if(Number.isFinite(idx)&&idx<rawIdx){
+      node.classList.add('assistant-segment-worklog-source');
+      node.setAttribute('aria-hidden','true');
+    }
+  });
+  blocks.querySelectorAll('.tool-worklog-group:not([data-anchor-scene-owner="1"]),.tool-call-group:not([data-anchor-scene-owner="1"]),.agent-activity-thinking:not([data-anchor-scene-row="1"]),.wl-reason').forEach(el=>el.remove());
+  const streamId=String(message._anchor_stream_id||scene.stream_id||scene.identity&&scene.identity.stream_id||'');
+  const activityKey=`anchor-scene:${rawIdx}`;
+  if(streamId&&!_readActivityDisclosureState(activityKey)){
+    _copyActivityDisclosureState(`live:${streamId}`, activityKey);
+  }
+  const group=_anchorSceneWorklogGroup(blocks,{
+    live:false,
+    collapsed:true,
+    beforeAnchor:true,
+    anchor:segment,
+    activityKey,
+    streamId,
+    turnDuration:message._turnDuration!==undefined&&message._turnDuration!==null?message._turnDuration:scene.turn_duration,
+  });
+  if(!group) return false;
+  group.setAttribute('data-anchor-settled-scene-owner','1');
+  return _renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
+}
 function _syncLiveWorklogReasonsForAnchor(anchor, displayTextOverride){
+  if(S.activeStreamId&&isLiveAnchorActivitySceneOwner(S.activeStreamId)) return;
   // Worklog reason-mirroring (folding intermediate prose into a top Worklog rail
   // and hiding the inline `assistant-segment` via `assistant-segment-worklog-source`
   // → display:none) is the Compact Worklog presentation (#3401). In Transparent
@@ -8910,6 +9722,18 @@ function ensureActivityGroup(inner, opts){
   if(!group.getAttribute('data-tool-worklog-key')&&activityKey) group.setAttribute('data-tool-worklog-key',activityKey);
   if(opts.turnDuration!==undefined&&opts.turnDuration!==null) group.setAttribute('data-turn-duration',String(opts.turnDuration));
   if(opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
+  const summary=group.querySelector('.tool-worklog-summary,.tool-call-group-summary');
+  if(summary){
+    if(live){
+      summary.setAttribute('data-live-summary-static','1');
+      summary.setAttribute('aria-disabled','true');
+      summary.disabled=true;
+    }else{
+      summary.removeAttribute('data-live-summary-static');
+      summary.removeAttribute('aria-disabled');
+      summary.disabled=false;
+    }
+  }
   const anchor=opts.anchor||null;
   if(anchor&&anchor.parentElement===inner&&group.parentElement===inner){
     if(opts.beforeAnchor){
@@ -9026,6 +9850,13 @@ function placeLiveRunStatusHost(){
   return _moveLiveRunStatusToTurnEnd(el);
 }
 function showLiveRunStatus(sid,opts){
+  if(typeof isCompactWorklogMode==='function'&&isCompactWorklogMode()){
+    _liveRunStatusSessionId=sid;
+    _liveRunStatusTokens=opts&&opts.tokens||null;
+    const el=$('liveRunStatus');
+    if(el){el.hidden=true;el.innerHTML='';}
+    return;
+  }
   const el=placeLiveRunStatusHost();
   if(!el)return;
   _liveRunStatusSessionId=sid;
@@ -9044,6 +9875,7 @@ function _renderLiveRunStatusContent(el,startedAt){
   el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>`;
 }
 function updateLiveRunStatus(opts){
+  if(opts&&opts.sessionId&&_liveRunStatusSessionId&&opts.sessionId!==_liveRunStatusSessionId) return;
   if(opts&&opts.tokens!==undefined)_liveRunStatusTokens=opts.tokens;
   const el=$('liveRunStatus');
   if(el&&!el.hidden){
@@ -9058,6 +9890,11 @@ function _syncLiveRunStatusAfterRender(){
   if(!sid||!S.activeStreamId||!S.busy) return;
   const timer=_liveRunStatusTimers[sid];
   const startedAt=(timer&&timer.startedAt)||((S.session&&S.session.pending_started_at)||Date.now()/1000);
+  if(typeof isCompactWorklogMode==='function'&&isCompactWorklogMode()){
+    const el=$('liveRunStatus');
+    if(el){el.hidden=true;el.innerHTML='';}
+    return;
+  }
   const el=$('liveRunStatus');
   if(el&&el.isConnected&&!el.hidden){
     _moveLiveRunStatusToTurnEnd(el);
@@ -9067,6 +9904,7 @@ function _syncLiveRunStatusAfterRender(){
   showLiveRunStatus(sid,{startedAt,tokens:_liveRunStatusTokens});
 }
 function hideLiveRunStatus(sid){
+  if(sid&&_liveRunStatusSessionId&&sid!==_liveRunStatusSessionId) return;
   const el=$('liveRunStatus');
   if(el){el.hidden=true;el.innerHTML='';}
   _clearLiveRunStatusTimer(sid||_liveRunStatusSessionId);
@@ -9096,6 +9934,7 @@ function closeCurrentLiveActivityGroup(){
   if(!turn) return;
   turn.querySelectorAll('.tool-worklog-group[data-live-tool-call-group="1"][data-live-activity-current="1"],.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
     group.removeAttribute('data-live-activity-current');
+    _finalizeLiveActivityDisclosureGroup(group);
   });
 }
 function _compressionStateForCurrentSession(){
@@ -9236,25 +10075,21 @@ function _autoCompressionCardsHtml(state){
   const preview=_autoCompressionPreviewText(state);
   const done=state&&state.phase==='done';
   return `
-    <div class="tool-card-row compression-card-row auto-compression-divider-row" data-compression-card="1">
-      <div class="auto-compression-divider${done?' auto-compression-divider-done':''}" aria-label="${esc(preview)}">
-        <span class="auto-compression-divider-line"></span>
-        <span class="auto-compression-divider-label">${done?li('file-text',13):''}${esc(preview)}</span>
-        <span class="auto-compression-divider-line"></span>
+    <div class="tool-card-row compression-card-row auto-compression-divider-row auto-compression-inline-row" data-compression-card="1">
+      <div class="auto-compression-divider auto-compression-inline${done?' auto-compression-divider-done':''}" aria-label="${esc(preview)}">
+        <span class="auto-compression-divider-label">${done?li('file-text',13):li('loader',13)}${esc(preview)}</span>
       </div>
     </div>`;
 }
 function _autoCompressionWorklogNode(state){
   const row=document.createElement('div');
-  row.className='tool-card-row compression-card-row auto-compression-divider-row';
+  row.className='tool-card-row compression-card-row auto-compression-divider-row auto-compression-inline-row';
   row.setAttribute('data-compression-card','1');
   const label=_autoCompressionPreviewText(state);
   const done=state&&state.phase==='done';
   row.innerHTML=`
-    <div class="auto-compression-divider${done?' auto-compression-divider-done':''}" aria-label="${esc(label)}">
-      <span class="auto-compression-divider-line"></span>
-      <span class="auto-compression-divider-label">${done?li('file-text',13):''}${esc(label)}</span>
-      <span class="auto-compression-divider-line"></span>
+    <div class="auto-compression-divider auto-compression-inline${done?' auto-compression-divider-done':''}" aria-label="${esc(label)}">
+      <span class="auto-compression-divider-label">${done?li('file-text',13):li('loader',13)}${esc(label)}</span>
     </div>`;
   return row;
 }
@@ -9266,6 +10101,9 @@ function _compressionCardsNode(state){
 }
 function appendLiveCompressionCard(state){
   if(!S.session||!S.activeStreamId||!state) return false;
+  if(isLiveAnchorActivitySceneOwner(S.activeStreamId)){
+    return _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id, {mode:'compact_worklog'});
+  }
   const scrollSnapshot=_captureMessageScrollSnapshot();
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -9683,6 +10521,7 @@ function renderCompressionUi(){
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
 function clearMessageRenderCache(){
+  _clearRenderCache();
   _sessionHtmlCache.clear();
   _sessionHtmlCacheSid=null;
   clearVisibleMessageRowCache();
@@ -9892,24 +10731,39 @@ function _restoreMessageScrollSnapshot(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
-  const restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
+  let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
     : false;
+  if(!restoredViaAnchor&&typeof _remountMessageViewportAnchor==='function'&&_remountMessageViewportAnchor(snapshot.anchor)){
+    restoredViaAnchor=(typeof _restoreMessageViewportAnchor==='function')
+      ? _restoreMessageViewportAnchor(snapshot.anchor,0)
+      : false;
+  }
   if(!restoredViaAnchor){
     _programmaticScroll=true;
     el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
   }
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
-  const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
-  if(bottomDistance>250){
+  if(snapshot.userUnpinned===true){
     _messageUserUnpinned=true;
     _scrollPinned=false;
     _nearBottomCount=0;
-  }else if(bottomDistance<=120){
+  }else if(snapshot.pinned===true){
     _messageUserUnpinned=false;
     _scrollPinned=true;
     _nearBottomCount=2;
+  }else{
+    const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
+    if(bottomDistance>250){
+      _messageUserUnpinned=true;
+      _scrollPinned=false;
+      _nearBottomCount=0;
+    }else if(bottomDistance<=120){
+      _messageUserUnpinned=false;
+      _scrollPinned=true;
+      _nearBottomCount=2;
+    }
   }
   if(!restoredViaAnchor){
     requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
@@ -9921,22 +10775,10 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
     : false;
-  if(!restoredViaAnchor&&snapshot.anchor&&snapshot.anchor.rawIdx!=null&&
-     !el.querySelector(`[data-msg-idx="${snapshot.anchor.rawIdx}"]`)&&
-     typeof _getVisibleMessagesWithIdx==='function'&&
-     typeof _messageVisibleIndexForRawIdx==='function'&&
-     typeof _messageVirtualScrollTopForVisibleIdx==='function'){
-    const visWithIdx=_getVisibleMessagesWithIdx();
-    const visIdx=_messageVisibleIndexForRawIdx(snapshot.anchor.rawIdx,visWithIdx);
-    if(visIdx>=0){
-      _programmaticScroll=true;
-      el.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx,visIdx,el);
-      _messageVirtualWindowKey='';
-      renderMessages({preserveScroll:true});
-      restoredViaAnchor=(typeof _restoreMessageViewportAnchor==='function')
-        ? _restoreMessageViewportAnchor(snapshot.anchor,0)
-        : false;
-    }
+  if(!restoredViaAnchor&&typeof _remountMessageViewportAnchor==='function'&&_remountMessageViewportAnchor(snapshot.anchor)){
+    restoredViaAnchor=(typeof _restoreMessageViewportAnchor==='function')
+      ? _restoreMessageViewportAnchor(snapshot.anchor,0)
+      : false;
   }
   if(!restoredViaAnchor){
     const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
@@ -9968,16 +10810,18 @@ function _renderMessagesWithScrollSnapshot(options){
 }
 let _assistantTurnAnchorSettledFinalAnswerWarned=false;
 function _assistantTurnAnchorSettledFinalAnswer(message, content, context){
+  const sceneFinal=_assistantAnchorSceneFinalAnswerText(message);
+  const effectiveContent=String(content||'').trim()?content:sceneFinal;
   try{
     const api=(typeof window!=='undefined')?window.HermesAssistantTurnAnchors:null;
-    if(!api||typeof api.projectAssistantTurnAnchorSettledMessageFinalAnswer!=='function') return null;
+    if(!api||typeof api.projectAssistantTurnAnchorSettledMessageFinalAnswer!=='function') return String(sceneFinal||'').trim()?sceneFinal:null;
     const result=api.projectAssistantTurnAnchorSettledMessageFinalAnswer(message,{
       session_id:context&&context.session_id,
       raw_idx:context&&context.raw_idx,
-      content,
+      content:effectiveContent,
     });
     const finalAnswer=result&&typeof result.final_answer==='string'?result.final_answer:'';
-    return finalAnswer?finalAnswer:null;
+    return finalAnswer?finalAnswer:(String(sceneFinal||'').trim()?sceneFinal:null);
   }catch(err){
     if(!_assistantTurnAnchorSettledFinalAnswerWarned&&typeof console!=='undefined'&&console.warn){
       _assistantTurnAnchorSettledFinalAnswerWarned=true;
@@ -10573,6 +11417,17 @@ function renderMessages(options){
     _insertCompressionLikeNodeByRawIdx(_handoffCardsNode(entry.state), entry.rawIdx);
   }
   renderCompressionUi();
+  const anchorOwnedAssistantRawIdxs=new Set();
+  for(const [rawIdx,seg] of assistantSegments){
+    const msg=S.messages[rawIdx];
+    if(!msg||!msg._anchor_activity_scene||!seg) continue;
+    const turn=seg.closest('.assistant-turn');
+    if(!turn) continue;
+    turn.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
+      const idx=Number(node.getAttribute('data-msg-idx'));
+      if(Number.isFinite(idx)) anchorOwnedAssistantRawIdxs.add(idx);
+    });
+  }
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
   // tool SSE handler and never mixed into the message list until done fires.
@@ -10582,7 +11437,7 @@ function renderMessages(options){
   // a display list from per-message tool_calls (OpenAI format) stored in each
   // assistant message. This covers the reload case described in issue #140.
   const hasMessageToolMetadata=!S.busy&&Array.isArray(S.messages)&&S.messages.some(m=>
-    m&&m.role==='assistant'&&(
+    m&&m.role==='assistant'&&!anchorOwnedAssistantRawIdxs.has(S.messages.indexOf(m))&&(
       (Array.isArray(m.tool_calls)&&m.tool_calls.length>0)||
       (Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0)||
       (Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use'))
@@ -10615,6 +11470,7 @@ function renderMessages(options){
         });
       }
       if(m.role==='assistant'){
+        if(anchorOwnedAssistantRawIdxs.has(rawIdx)) return;
         const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
         const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
         const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
@@ -10754,7 +11610,7 @@ function renderMessages(options){
     // regression vs master; same content-loss-on-switch class as #3668). The
     // `:not([data-live-thinking="1"])` / live-card guards below keep the active
     // turn's own live nodes from being double-built.
-    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
+    inner.querySelectorAll('.tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]):not([data-event-type="tool"]),.agent-activity-thinking:not([data-live-thinking="1"]):not([data-event-type="thinking"]),.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
     const byActivity = new Map();
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const _assistantAnchorForActivity=(aIdx,segmentSeq,burstId)=>{
@@ -10805,18 +11661,23 @@ function renderMessages(options){
       const hasValue=value!==undefined&&value!==null&&String(value)!==''&&String(value)!=='0';
       return hasValue?String(value):'';
     };
+    const knownBurstIds=new Set();
+    for(const s of assistantSegments.values()) if(s){const b=s.getAttribute('data-activity-burst-id');if(b)knownBurstIds.add(b);}
     for(const tc of (S.toolCalls||[])){
       if(!tc) continue;
       const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
+      if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
       if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const segmentSeq=normalizeToken(tc.activitySegmentSeq);
       const burstId=normalizeToken(tc.activityBurstId);
-      const key=segmentSeq?`segment:${segmentSeq}`:(burstId?`burst:${burstId}`:`assistant:${aIdx}`);
+      const burstResolvable=burstId&&knownBurstIds.has(burstId);
+      const key=segmentSeq?`segment:${segmentSeq}`:(burstResolvable?`burst:${burstId}`:`assistant:${aIdx}`);
       const entry=ensureActivityBucket(key,aIdx,segmentSeq,burstId);
       entry.cards.push(tc);
       entry.includeAnchorReason=true;
     }
     for(const aIdx of assistantThinking.keys()){
+      if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
       if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const seg=assistantSegments.get(aIdx);
       const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
@@ -10826,6 +11687,7 @@ function renderMessages(options){
       if(entry.thinkingIdx===null) entry.thinkingIdx=aIdx;
     }
     for(const [aIdx,seg] of assistantSegments){
+      if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;
       if(!seg||!seg.classList||!seg.classList.contains('assistant-segment-worklog-source')) continue;
       if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       if(!_worklogReasonHtmlFromAnchor(seg)) continue;
@@ -10964,6 +11826,12 @@ function renderMessages(options){
         }
         _syncTransparentEventControls(turn);
       }
+    }
+  }
+  for(const [rawIdx,seg] of assistantSegments){
+    const msg=S.messages[rawIdx];
+    if(msg&&msg._anchor_activity_scene){
+      _renderSettledAnchorSceneForMessage(msg, seg, rawIdx);
     }
   }
   _restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);
@@ -11286,6 +12154,8 @@ function _toolDisplayName(tc){
   const name=(tc&&tc.name)||'tool';
   if(name==='subagent_progress') return 'Subagent';
   if(name==='delegate_task') return 'Delegate task';
+  if(name==='skill_view') return 'Skill';
+  if(name==='skill_manage') return 'Skill';
   return name;
 }
 
@@ -11333,10 +12203,27 @@ function _shortToolLabel(value, limit){
   const tail=Math.max(12, max-head-3);
   return text.slice(0,head).trimEnd()+'...'+text.slice(-tail).trimStart();
 }
+function _toolI18n(key, fallback){
+  const args=Array.prototype.slice.call(arguments,2);
+  if(typeof t==='function'){
+    const value=t.apply(null,[key].concat(args));
+    if(value&&value!==key) return value;
+  }
+  return typeof fallback==='function'?fallback.apply(null,args):String(fallback||'');
+}
+function _toolPathBasename(value){
+  const text=String(value||'').trim();
+  if(!text) return '';
+  const normalized=text.replace(/[\\/]+$/,'');
+  const parts=normalized.split(/[\\/]+/);
+  return parts.pop()||normalized;
+}
 function _toolActionKind(tc){
   const n=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
   if(!n) return 'unknown';
   if(n==='subagent_progress'||n==='delegate_task') return 'delegate';
+  if(n.includes('skill')) return 'skill';
+  if(n.includes('memory')) return 'memory';
   if(n.includes('terminal')||n.includes('shell')||n.includes('command')||n.includes('process')||n==='execute_code') return 'shell';
   if(n.includes('read')||n.includes('view')||n.includes('open')||n==='vision_analyze') return 'read';
   if(n.includes('list')||n==='todo') return 'list';
@@ -11345,15 +12232,44 @@ function _toolActionKind(tc){
   if(n.includes('write')||n.includes('patch')||n.includes('edit')) return 'write';
   return 'unknown';
 }
+function _toolKindIcon(kind){
+  const icons={
+    shell:'terminal',
+    read:'file-text',
+    list:'list',
+    search:'search',
+    web:'globe',
+    write:'file-pen',
+    skill:'book-open',
+    memory:'brain',
+    delegate:'bot',
+    unknown:'wrench',
+  };
+  return li(icons[kind]||icons.unknown,14);
+}
 function _toolTargetLabel(tc){
   const a=tc&&tc.args||{};
-  const raw=a.cmd||a.command||a.path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||tc.preview||'';
+  const kind=_toolActionKind(tc);
+  let raw='';
+  if(kind==='shell') raw=a.cmd||a.command||tc.command||tc.raw_command||tc.original_command||tc.display_command||'';
+  else if(kind==='skill') raw=a.name||a.skill||'';
+  else if(kind==='memory') raw=a.target||a.name||a.action||'';
+  else if(kind==='read'||kind==='write') raw=a.path||a.file_path||a.file||a.target||a.name||'';
+  else if(kind==='search'||kind==='web') raw=a.query||a.pattern||a.url||a.uri||'';
+  else raw=a.cmd||a.command||a.path||a.file_path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||a.name||'';
   return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
 }
 function _toolVisibleTargetLabel(tc, opts){
   opts=opts||{};
   const target=_toolTargetLabel(tc);
   if(!target) return '';
+  const kind=_toolActionKind(tc);
+  if(kind==='read'||kind==='write') return _shortToolLabel(_toolPathBasename(target)||target, opts.limit||112);
+  if(kind==='skill'){
+    const suffix=_toolI18n('tool_target_skill_suffix', 'skill');
+    const text=target.toLowerCase().endsWith(String(suffix).toLowerCase())?target:`${target} ${suffix}`;
+    return _shortToolLabel(text, opts.limit||112);
+  }
   return _shortToolLabel(target, opts.limit||112);
 }
 function _toolCommandTitle(command){
@@ -11378,40 +12294,58 @@ function _toolActionLabelText(tc, opts){
   const kind=_toolActionKind(tc);
   const done=tc&&tc.done!==false;
   const isErr=tc&&tc.is_error;
+  const state=done?'done':'running';
   let target=opts.generic?'':_toolVisibleTargetLabel(tc, opts);
-  if(kind==='shell'&&target) target=_toolCommandTitle(target);
-  else if((kind==='search'||kind==='web')&&target) target=_toolQueryTitle(target);
-  const verbs={
-    shell:   {ing:'Running',   ed:'Ran'},
-    read:    {ing:'Reading',   ed:'Read'},
-    list:    {ing:'Listing',   ed:'Listed'},
-    search:  {ing:'Searching for',ed:'Searched for'},
-    web:     {ing:'Checking',  ed:'Checked'},
-    write:   {ing:'Updating',  ed:'Updated'},
-    delegate:{ing:'Delegating',ed:'Delegated'},
-    unknown: {ing:'Running',   ed:'Ran'},
-  };
-  const v=verbs[kind]||verbs.unknown;
+  if((kind==='search'||kind==='web')&&target) target=_toolQueryTitle(target);
   const display=_toolDisplayName(tc);
-  if(isErr){
-    return target?`Failed ${v.ing.toLowerCase()} ${target}`:`Failed ${v.ing.toLowerCase()} ${display}`;
-  }
-  if(done) return target?`${v.ed} ${target}`:`${v.ed} ${display}`;
-  return target?`${v.ing} ${target}`:`${v.ing} ${display}`;
+  return _toolI18n('tool_action_label',(k,s,tgt,disp,err)=>{
+    const verbs={
+      shell:{running:'Running',done:'Ran',fallback:'a command'},
+      read:{running:'Reading',done:'Read',fallback:'a file'},
+      list:{running:'Listing',done:'Listed',fallback:'files'},
+      search:{running:'Searching for',done:'Searched for',fallback:'workspace'},
+      web:{running:'Checking',done:'Checked',fallback:'web data'},
+      write:{running:'Updating',done:'Updated',fallback:'a file'},
+      skill:{running:'Loading',done:'Loaded',fallback:'a skill'},
+      memory:{running:'Saving',done:'Saved',fallback:'memory'},
+      delegate:{running:'Delegating',done:'Delegated',fallback:'a task'},
+      unknown:{running:'Running',done:'Ran',fallback:disp||'a tool'},
+    };
+    const v=verbs[k]||verbs.unknown;
+    const verb=v[s]||v.running;
+    const object=tgt||v.fallback||disp||'tool';
+    if(err) return `Failed ${String(v.running||verb).toLowerCase()} ${object}`;
+    return `${verb} ${object}`;
+  },kind,state,target,display,isErr);
 }
 function _toolActionLabel(tc){
   return esc(_toolActionLabelText(tc,{limit:112}));
 }
-const _toolWorklogSummaries={
-  shell:{running:'Running a command',runningMany:'Running {n} commands',done:'Ran a command',doneMany:'Ran {n} commands'},
-  read:{running:'Reading a file',runningMany:'Read {n} files',done:'Read a file',doneMany:'Read {n} files'},
-  list:{running:'Listing files',runningMany:'Listed {n} items',done:'Listed files',doneMany:'Listed {n} files'},
-  search:{running:'Searching workspace',runningMany:'Searching workspace {n} times',done:'Searched workspace',doneMany:'Searched workspace {n} times'},
-  web:{running:'Checking web',runningMany:'Checked web {n} times',done:'Checked the web',doneMany:'Checked the web {n} times'},
-  write:{running:'Updating a file',runningMany:'Updated {n} files',done:'Wrote a file',doneMany:'Wrote {n} files'},
-  delegate:{running:'Delegating a task',runningMany:'Delegated {n} tasks',done:'Delegated a task',doneMany:'Delegated {n} tasks'},
-  unknown:{running:'Running a tool',runningMany:'Running {n} tools',done:'Ran a tool',doneMany:'Ran {n} tools'},
-};
+const _toolWorklogSummaries={shell:{},read:{},list:{},search:{},web:{},write:{},skill:{},memory:{},delegate:{},unknown:{}};
+function _toolWorklogSummaryLine(kind, state, count){
+  const n=Math.max(1,Number(count)||1);
+  return _toolI18n('tool_worklog_summary',(k,s,c)=>{
+    const forms={
+      shell:{running:['Running a command','Running {n} commands'],done:['Ran a command','Ran {n} commands']},
+      read:{running:['Reading a file','Reading {n} files'],done:['Read a file','Read {n} files']},
+      list:{running:['Listing files','Listing {n} items'],done:['Listed files','Listed {n} files']},
+      search:{running:['Searching workspace','Searching workspace {n} times'],done:['Searched workspace','Searched workspace {n} times']},
+      web:{running:['Checking web','Checking web {n} times'],done:['Checked the web','Checked the web {n} times']},
+      write:{running:['Updating a file','Updating {n} files'],done:['Updated a file','Updated {n} files']},
+      skill:{running:['Loading a skill','Loading {n} skills'],done:['Loaded a skill','Loaded {n} skills']},
+      memory:{running:['Saving memory','Saving {n} memory updates'],done:['Saved memory','Saved {n} memory updates']},
+      delegate:{running:['Delegating a task','Delegating {n} tasks'],done:['Delegated a task','Delegated {n} tasks']},
+      unknown:{running:['Running a tool','Running {n} tools'],done:['Ran a tool','Ran {n} tools']},
+    };
+    const pair=((forms[k]||forms.unknown)[s]||forms.unknown.running);
+    return (c===1?pair[0]:pair[1]).replace('{n}',String(c));
+  },kind,state,n);
+}
+function _toolWorklogJoin(lines){
+  const parts=Array.from(lines||[]).filter(Boolean);
+  if(parts.length<=1) return parts[0]||'';
+  return _toolI18n('tool_summary_join',(items)=>items.join(', '),parts);
+}
 function _toolWorklogActionParts(tc){
   if(tc&&tc.nodeType===1){
     const row=tc.classList&&tc.classList.contains('tool-card-row')?tc:tc.closest&&tc.closest('.tool-card-row');
@@ -11420,7 +12354,7 @@ function _toolWorklogActionParts(tc){
     const kind=(row&&row.dataset.toolKind)||'unknown';
     const isDone=!((row&&row.dataset.toolDone)==='false'||(card&&card.classList.contains('tool-card-running')));
     const isErr=(row&&row.dataset.toolError)==='true'||(card&&card.classList.contains('tool-card-error'));
-    return {kind,isDone,isErr,target:'',summary:_toolWorklogSummaries[kind]||_toolWorklogSummaries.unknown,actionLabel};
+    return {kind,isDone,isErr,target:'',actionLabel};
   }
   const kind=_toolActionKind(tc);
   return {
@@ -11428,7 +12362,6 @@ function _toolWorklogActionParts(tc){
     isDone:tc&&tc.done!==false,
     isErr:tc&&tc.is_error,
     target:_toolTargetLabel(tc),
-    summary:_toolWorklogSummaries[kind]||_toolWorklogSummaries.unknown,
     actionLabel:_toolActionLabelText(tc),
   };
 }
@@ -11437,11 +12370,10 @@ function _toolWorklogSummary(toolCalls, opts){
   if(!cards.length) return (opts&&opts.live)?'Running':'Worklog';
   if(cards.length===1){
     const part=_toolWorklogActionParts(cards[0]);
-    const fmt=part.summary||_toolWorklogSummaries.unknown;
-    const line=part.isDone?fmt.done:fmt.running;
+    const line=_toolWorklogSummaryLine(part.kind,part.isDone?'done':'running',1);
     return part.isErr?`${line}, 1 failed`:line;
   }
-  const order=['shell','read','write','search','web','list','delegate','unknown'];
+  const order=['shell','read','search','write','skill','memory','web','list','delegate','unknown'];
   const runningCounts={}, doneCounts={};
   let failed=0;
   for(const tc of cards){
@@ -11455,15 +12387,13 @@ function _toolWorklogSummary(toolCalls, opts){
     for(const kind of order){
       const n=counts[kind]||0;
       if(!n) continue;
-      const fmt=_toolWorklogSummaries[kind]||_toolWorklogSummaries.unknown;
-      if(n===1) out.push(state==='done'?fmt.done:fmt.running);
-      else out.push((state==='done'?fmt.doneMany:fmt.runningMany).replace('{n}',String(n)));
+      out.push(_toolWorklogSummaryLine(kind,state,n));
     }
     return out;
   };
   const lines=[...emit(runningCounts,'running'),...emit(doneCounts,'done')];
   if(failed) lines.push(`${failed} failed`);
-  return lines.length?lines.map((line,idx)=>idx===0?line:line.charAt(0).toLowerCase()+line.slice(1)).join(', '):_toolActionLabel(cards[0]);
+  return lines.length?_toolWorklogJoin(lines):_toolActionLabel(cards[0]);
 }
 function _toolWorklogListEl(group){
   if(!group) return null;
@@ -11505,8 +12435,25 @@ function _unwrapNestedToolGroups(tools){
   if(!tools) return;
   tools.querySelectorAll(':scope > .tool-worklog-tool-group,:scope > .tool-group').forEach(el=>el.remove());
 }
+function _toolGroupPrimaryKind(rows){
+  const counts=Object.create(null);
+  Array.from(rows||[]).forEach(row=>{
+    const kind=row&&row.dataset&&row.dataset.toolKind?row.dataset.toolKind:'unknown';
+    counts[kind]=(counts[kind]||0)+1;
+  });
+  const order=['search','shell','read','write','skill','memory','web','list','delegate','unknown'];
+  for(const kind of order){
+    if(counts[kind]) return kind;
+  }
+  return 'unknown';
+}
+function _toolGroupIcon(rows){
+  return _toolKindIcon(_toolGroupPrimaryKind(rows));
+}
 function _syncToolRowsContainer(tools, isLiveWorklog){
   if(!tools) return;
+  const existingGroup=tools.querySelector(':scope > .tool-worklog-tool-group,:scope > .tool-group[data-tool-worklog-tool-group="1"]');
+  const wasOpen=!!(existingGroup&&existingGroup.classList&&existingGroup.classList.contains('open'));
   const rows=_directWorklogToolRows(tools);
   _unwrapNestedToolGroups(tools);
   rows.forEach(row=>{ if(row.parentElement) row.remove(); });
@@ -11516,8 +12463,7 @@ function _syncToolRowsContainer(tools, isLiveWorklog){
     rows.forEach(row=>tools.appendChild(row));
     return;
   }
-  const hasRunning=rows.some(row=>row&&row.dataset&&row.dataset.toolDone==='false');
-  const shouldOpen=_worklogDetailsExpandedDefault();
+  const shouldOpen=wasOpen||_worklogDetailsExpandedDefault();
   const group=document.createElement('div');
   group.className='tool-group'+(shouldOpen?' open':' tool-worklog-tool-group-collapsed');
   group.setAttribute('data-tool-worklog-tool-group','1');
@@ -11528,8 +12474,8 @@ function _syncToolRowsContainer(tools, isLiveWorklog){
     if(stepIdx>=0) groupKey=`step:${stepIdx}`;
   }
   group.setAttribute('data-tool-group-disclosure-key',groupKey);
-  const summary=hasRunning?'Running':_toolWorklogSummary(rows,{live:isLiveWorklog, toolCount:rows.length});
-  group.innerHTML=`<button type="button" class="tool-group-head tool-worklog-tool-group-head" aria-expanded="${shouldOpen?'true':'false'}" onclick="_toggleToolWorklogGroup(this)"><span class="tg-sum tool-worklog-tool-group-label">${esc(summary)}</span><span class="tool-call-group-chevron tg-caret">${li('chevron-right',12)}</span></button><div class="tool-group-body tool-worklog-tool-group-body"><div class="tg-rows tool-worklog-tool-group-rows"></div></div>`;
+  const summary=_toolWorklogSummary(rows,{live:isLiveWorklog, toolCount:rows.length});
+  group.innerHTML=`<button type="button" class="tool-group-head tool-worklog-tool-group-head" aria-expanded="${shouldOpen?'true':'false'}" onclick="_toggleToolWorklogGroup(this)"><span class="tool-worklog-tool-group-icon tg-icon">${_toolGroupIcon(rows)}</span><span class="tg-sum tool-worklog-tool-group-label">${esc(summary)}</span><span class="tool-call-group-chevron tg-caret">${li('chevron-right',12)}</span></button><div class="tool-group-body tool-worklog-tool-group-body"><div class="tg-rows tool-worklog-tool-group-rows"></div></div>`;
   const body=group.querySelector('.tg-rows');
   rows.forEach(row=>body.appendChild(row));
   tools.appendChild(group);
@@ -11563,6 +12509,7 @@ function toolIcon(name){
     execute_code:    li('play'),
     patch:           li('wrench'),
     memory:          li('brain'),
+    skill_view:      li('book-open'),
     skill_manage:    li('book-open'),
     todo:            li('list-todo'),
     cronjob:         li('clock'),
@@ -11625,27 +12572,46 @@ function _formatToolArgPreview(args){
   return out.length>180?`${out.slice(0,177)}…`:out;
 }
 function _toolCardPreviewText(tc, displaySnippet){
-  const explicit=String(tc&&tc.preview||'').trim();
-  if(explicit) return explicit;
+  const explicitPreview=String(tc&&tc.preview||'').trim();
+  if(tc&&tc.done===false&&explicitPreview) return explicitPreview;
   const argPreview=_formatToolArgPreview(tc&&tc.args);
   if(argPreview) return argPreview;
   if(tc&&tc.done===false) return 'Running';
   if(tc&&tc.is_error) return 'Failed';
   return 'Completed';
 }
+function _toolCardAllowsDetail(kind, tc){
+  const infoKinds={read:1,search:1,list:1,web:1};
+  if(infoKinds[kind]&&!(tc&&tc.is_error)) return false;
+  return true;
+}
+function _toolDetailLeadLabel(kind){
+  if(kind==='shell') return 'Shell';
+  if(kind==='write') return 'Target';
+  return 'Input';
+}
+function _toolDetailLeadText(kind, tc){
+  const target=_toolTargetLabel(tc);
+  if(!target) return '';
+  if(kind==='shell') return `$ ${target}`;
+  return target;
+}
 function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='tool-card-row';
   if(!row.dataset) row.dataset={};
   row.dataset.toolName=String(tc&&tc.name||'tool');
-  row.dataset.toolKind=typeof _toolActionKind==='function'?_toolActionKind(tc):'unknown';
+  const toolKind=typeof _toolActionKind==='function'?_toolActionKind(tc):'unknown';
+  row.dataset.toolKind=toolKind;
   row.dataset.toolDone=String(tc&&tc.done!==false);
   row.dataset.toolError=String(!!(tc&&tc.is_error));
   row.dataset.toolActionLabel=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc):_toolDisplayName(tc);
   const disclosureKey=typeof _toolDisclosureIdentity==='function'?_toolDisclosureIdentity(tc):'';
   if(disclosureKey) row.setAttribute('data-tool-disclosure-key', disclosureKey);
   const icon=toolIcon(tc.name);
-  const hasDetail=(tc.snippet&&tc.snippet!==tc.preview)||(tc.args&&Object.keys(tc.args).length>0);
+  const hasRawDetail=!!(tc.snippet)||(tc.args&&Object.keys(tc.args).length>0);
+  const allowsDetail=typeof _toolCardAllowsDetail==='function'?_toolCardAllowsDetail(toolKind,tc):true;
+  const hasDetail=hasRawDetail&&allowsDetail;
   let displaySnippet='';
   if(tc.snippet){
     const s=tc.snippet;
@@ -11662,24 +12628,34 @@ function buildToolCard(tc){
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
-  const openClass=hasDetail&&_worklogDetailsExpandedDefault()?' open':'';
-  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'')+openClass;
+  const openClass='';
+  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'')+(hasDetail?'':' tool-card-no-detail')+openClass;
+  const headerClick=hasDetail?' onclick="this.closest(\'.tool-card\').classList.toggle(\'open\')"':'';
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
-  let displayName=_toolDisplayName(tc);
+  let displayName=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc,{limit:112}):_toolDisplayName(tc);
+  let genericName=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc,{generic:true,limit:112}):_toolDisplayName(tc);
   let previewText=_toolCardPreviewText(tc, displaySnippet);
+  const argPreview=_formatToolArgPreview(tc&&tc.args);
+  if(toolKind==='shell'||previewText===argPreview||previewText==='Completed'||previewText==='Running'||previewText==='Failed') previewText='';
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
+  const detailLeadText=hasDetail&&typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
+  const detailLeadLabel=typeof _toolDetailLeadLabel==='function'?_toolDetailLeadLabel(toolKind):(toolKind==='shell'?'Shell':'Input');
+  const detailLead=detailLeadText?`<div class="tool-card-detail-lead"><div class="tool-card-detail-lead-label">${esc(detailLeadLabel)}</div><pre>${esc(detailLeadText)}</pre></div>`:'';
+  const argsEntries=tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
+  const visibleArgs=(detailLeadText&&toolKind==='shell')?[]:argsEntries;
   row.innerHTML=`
     <div class="${cardClass}">
-      <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
+      <div class="tool-card-header"${headerClick}>
         ${runIndicator}
         <span class="tool-card-icon">${icon}</span>
-        <span class="tool-card-name">${esc(displayName)}</span>
+        <span class="tool-card-name"><span class="tool-card-name-label">${esc(displayName)}</span><span class="tool-card-name-generic">${esc(genericName)}</span></span>
         <span class="tool-card-preview">${esc(previewText)}</span>
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       </div>
       ${hasDetail?`<div class="tool-card-detail">
-        ${tc.args&&Object.keys(tc.args).length?`<div class="tool-card-args">${
-          Object.entries(tc.args).map(([k,v])=>`<div class="tool-arg-pair"><span class="tool-arg-key">${esc(k)}</span><span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
+        ${detailLead}
+        ${visibleArgs.length?`<div class="tool-card-args">${
+          visibleArgs.map(([k,v])=>`<div class="tool-arg-pair"><span class="tool-arg-key">${esc(k)}</span><span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
           <pre>${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?`<code class="diff-block" data-highlighted="1">${_colorDiffLines(displaySnippet)}</code>`:esc(displaySnippet)}</pre>
@@ -11756,8 +12732,10 @@ function _syncToolCallGroupSummary(group){
     if(group.getAttribute('data-run-activity-group')==='1'){
       label.textContent=toolCount?_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount}):'Running';
     }else if(isWorklogGroup){
-      label.textContent=_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount, labelOnly:!toolCount&&isLiveWorklog});
-      if(!label.textContent) label.textContent=isLiveWorklog?'Running':'Worklog';
+      const processedLabel=isLiveWorklog
+        ? _activityProcessedElapsedLabel(group)
+        : _activitySettledProcessedLabel(group);
+      label.textContent=processedLabel||t('processed_elapsed','');
     }else{
       const rows=Array.from(group.querySelectorAll('.tool-card-row'));
       // Prefer the live _tcData classification; fall back to the durable data-*
@@ -11789,11 +12767,13 @@ function _syncToolCallGroupSummary(group){
       durationEl.style.display=durationEl.textContent?'':'none';
     }else if(group.getAttribute('data-live-tool-call-group')==='1'){
       const activeText=_activityElapsedLabel(group);
-      const progressText=_activityLiveProgressLabel(group);
       if(activeText) group.setAttribute('data-active-turn-elapsed',activeText);
       else group.removeAttribute('data-active-turn-elapsed');
-      durationEl.textContent=[progressText, activeText].filter(Boolean).join(' · ');
-      durationEl.style.display=durationEl.textContent?'':'none';
+      durationEl.textContent='';
+      durationEl.style.display='none';
+    }else if(isWorklogGroup){
+      durationEl.textContent='';
+      durationEl.style.display='none';
     }else{
       const durationText=_formatTurnDuration(group.dataset.turnDuration);
       durationEl.textContent=durationText?` Done in ${durationText}`:'';
@@ -11814,11 +12794,23 @@ function _activityProgressLabelForToolName(name){
   return 'Working';
 }
 
+function _toolCardVisibleNameText(nameEl){
+  if(!nameEl) return '';
+  const specific=nameEl.querySelector&&nameEl.querySelector('.tool-card-name-label');
+  const generic=nameEl.querySelector&&nameEl.querySelector('.tool-card-name-generic');
+  if(specific&&generic){
+    const card=nameEl.closest&&nameEl.closest('.tool-card');
+    const preferred=(card&&card.classList&&card.classList.contains('open'))?generic:specific;
+    return String(preferred.textContent||'').trim();
+  }
+  return String(nameEl.textContent||'').trim();
+}
+
 function _activityLatestToolName(group){
   if(!group) return '';
   const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
   const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
-  return latest?String(latest.textContent||'').trim():'';
+  return _toolCardVisibleNameText(latest);
 }
 
 function _activityWaitingDetail(group,label=''){
@@ -11837,7 +12829,7 @@ function _activityLiveProgressLabel(group){
   const idleAge=_activityLastObservedAge(group);
   if(idleAge!==null&&idleAge>=90) return `No recent activity for ${_formatActiveElapsedTimer(idleAge)}`;
   const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
-  const latest=running?String(running.textContent||'').trim():_activityLatestToolName(group);
+  const latest=running?_toolCardVisibleNameText(running):_activityLatestToolName(group);
   const waiting=group.querySelector('.agent-activity-status-waiting .agent-activity-status-label');
   if(latest) return _activityProgressLabelForToolName(latest);
   if(waiting&&waiting.textContent&&String(waiting.textContent).toLowerCase().includes('model')) return 'Reviewing prompt and context';
@@ -11859,6 +12851,10 @@ function appendLiveToolCard(tc){
   const opts=arguments[1]||{};
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return;
   if(opts.streamId&&S.activeStreamId!==opts.streamId) return;
+  if(isLiveAnchorActivitySceneOwner(opts.streamId||S.activeStreamId)){
+    _renderLiveAnchorActivitySceneForStream(opts.streamId||S.activeStreamId, opts.sessionId||S.session.session_id, {mode:'compact_worklog'});
+    return;
+  }
   let turn=$('liveAssistantTurn');
   if(!turn){
     turn=_createAssistantTurn();
@@ -12017,7 +13013,7 @@ function _findLiveAssistantAnchorForSegment(inner, segmentSeq){
 function clearLiveToolCards(){
   if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
   const inner=_assistantTurnBlocks($('liveAssistantTurn'));
-  if(inner) inner.querySelectorAll('.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]:not(.transparent-event-row)').forEach(el=>el.remove());
+  if(inner) inner.querySelectorAll('.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]:not(.transparent-event-row),[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   // Reset the per-turn user expand intent so the next turn starts at the
   // default collapsed state (#1298).
   if(typeof _clearLiveActivityUserIntent==='function') _clearLiveActivityUserIntent();
@@ -12032,10 +13028,38 @@ function _removeEmptyLiveWorklogShells(inner){
     if(!group.querySelector('.tool-card-row,.wl-reason,.agent-activity-thinking')) group.remove();
   });
 }
+function _setLiveWorklogThinkingPlaceholder(group){
+  if(!group) return;
+  group.setAttribute('data-prestart-thinking','1');
+  const label=group.querySelector&&(
+    group.querySelector('.tool-worklog-label') || group.querySelector('.tool-call-group-label')
+  );
+  if(label){
+    const text=typeof t==='function'?t('worklog_thinking'):'Thinking';
+    label.textContent=text;
+    label.setAttribute('data-sweep-label', text);
+  }
+  const durationEl=group.querySelector&&group.querySelector('.tool-call-group-duration');
+  if(durationEl){
+    durationEl.textContent='';
+    durationEl.style.display='none';
+  }
+}
 function ensureLiveWorklogShell(){
-  if(!S.session||!S.activeStreamId) return null;
+  if(!S.session) return null;
+  const activeStreamId=S.activeStreamId||'';
+  if(activeStreamId&&typeof _renderLiveAnchorActivitySceneForStream==='function'&&_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id, {mode:'compact_worklog'})){
+    _dedupeLiveProcessedWorklogAnchors($('liveAssistantTurn'));
+    return $('liveAssistantTurn');
+  }
+  if(activeStreamId&&isLiveAnchorActivitySceneOwner(activeStreamId)){
+    _renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id, {mode:'compact_worklog'});
+    _dedupeLiveProcessedWorklogAnchors($('liveAssistantTurn'));
+    return $('liveAssistantTurn');
+  }
   $('emptyState').style.display='none';
-  if(!isSimplifiedToolCalling()){
+  const compactWorklog=typeof isCompactWorklogMode==='function'&&isCompactWorklogMode();
+  if(!compactWorklog&&!isSimplifiedToolCalling()){
     appendThinking();
     return $('thinkingRow');
   }
@@ -12053,11 +13077,21 @@ function ensureLiveWorklogShell(){
     scrollIfPinned();
     return blocks;
   }
-  const group=ensureLiveWorklogContainer(blocks,{
+  const group=ensureActivityGroup(blocks,{
+    live:true,
+    collapsed:false,
     activityKey:_activityKeyForLiveTurn(),
+    turnStartedAt:S.session&&S.session.pending_started_at,
   });
   if(!group) return null;
+  if(activeStreamId){
+    group.removeAttribute('data-prestart-thinking');
+    if(typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(group);
+  }else{
+    _setLiveWorklogThinkingPlaceholder(group);
+  }
   _moveLiveRunStatusToTurnEnd();
+  _dedupeLiveProcessedWorklogAnchors(turn);
   scrollIfPinned();
   return group;
 }
@@ -12869,6 +13903,10 @@ function appendThinking(text='', options){
   options=options||{};
   const allowPendingPlaceholder=!!(options&&options.pending===true);
   if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
+  if(!allowPendingPlaceholder&&isLiveAnchorActivitySceneOwner(S.activeStreamId)){
+    _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id, {mode:'compact_worklog'});
+    return;
+  }
   const empty=$('emptyState');
   if(empty) empty.style.display='none';
   if(!isSimplifiedToolCalling()){
@@ -12992,9 +14030,9 @@ function removeThinking(){
   }
   const turn=$('liveAssistantTurn');
   const blocks=_assistantTurnBlocks(turn);
-  if(blocks) blocks.querySelectorAll('.agent-activity-thinking').forEach(el=>el.remove());
+  if(blocks) blocks.querySelectorAll('.agent-activity-thinking:not([data-anchor-scene-row="1"])').forEach(el=>el.remove());
   if(blocks) blocks.querySelectorAll('.wl-reason[data-worklog-anchor-reason="1"],.wl-reason[data-worklog-reason-source="reasoning"]').forEach(el=>el.remove());
-  if(blocks) blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
+  if(blocks) blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"]:not([data-anchor-scene-owner="1"]),.tool-call-group[data-live-tool-call-group="1"]:not([data-anchor-scene-owner="1"]),.tool-call-group[data-agent-activity-group="1"]:not([data-anchor-scene-owner="1"])').forEach(group=>{
     _syncToolCallGroupSummary(group);
     if(!group.querySelector('.tool-card-row,.agent-activity-thinking,.wl-reason')){
       if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
@@ -13473,9 +14511,13 @@ function _renderTreeItems(container, entries, depth){
     el.ondragend=()=>{el.classList.remove('dragging');_clearWorkspaceMoveDragOver();};
 
     const isLk = item.type === 'symlink';
-    const isDirLike = item.type === 'dir' || (isLk && item.is_dir);
-    const isFileLike = !isDirLike;
+    const isExternalLink = isLk && item.target_outside_workspace;
+    // External symlinks are display-only: not expandable, not openable.
+    // The read gate (safe_resolve_ws) still blocks navigation through them.
+    const isDirLike = !isExternalLink && (item.type === 'dir' || (isLk && item.is_dir));
+    const isFileLike = !isExternalLink && !isDirLike;
     el.dataset.wsIsDir = String(isDirLike);
+    if(isExternalLink){el.removeAttribute('draggable');el.ondragstart=null;}
 
     if(isDirLike){
       // Toggle arrow for directories
@@ -13496,9 +14538,11 @@ function _renderTreeItems(container, entries, depth){
     // Icon
     const iconEl=document.createElement('span');
     iconEl.className='file-icon';
-    iconEl.innerHTML = isDirLike
-      ? (isLk ? li('link', 14) : li('folder', 14))
-      : (isLk ? li('link', 14) : fileIcon(item.name, item.type));
+    iconEl.innerHTML = isExternalLink
+      ? li('external-link', 14)
+      : isDirLike
+        ? (isLk ? li('link', 14) : li('folder', 14))
+        : (isLk ? li('link', 14) : fileIcon(item.name, item.type));
     el.appendChild(iconEl);
 
     // Name
@@ -13530,6 +14574,8 @@ function _renderTreeItems(container, entries, depth){
       if(_nameClickTimer){clearTimeout(_nameClickTimer);_nameClickTimer=null;}
       // For directories, double-click navigates (breadcrumb view)
       if(isDirLike){loadDir(item.path);return;}
+      // External symlinks: show informational dialog, not rename
+      if(isExternalLink){if(typeof el.onclick==='function')el.onclick(e);return;}
       const inp=document.createElement('input');
       inp.className='file-rename-input';inp.value=item.name;
       inp.onclick=(e2)=>e2.stopPropagation();
@@ -13617,6 +14663,21 @@ function _renderTreeItems(container, entries, depth){
           }
           renderFileTree();
         }
+      };
+    }else if(isExternalLink){
+      // Display-only: the link points outside the workspace. We do NOT disclose
+      // the resolved outside path (#4581 hardening) and do NOT call openFile —
+      // the read gate (safe_resolve_ws) blocks navigation through the link.
+      el.onclick=async(e)=>{
+        e.stopPropagation();
+        await showConfirmDialog({
+          title:item.name,
+          message:t('external_link_open_confirm'),
+          confirmLabel:t('dialog_confirm_btn'),
+          danger:false,
+          hideCancel:true,
+          focusCancel:false,
+        });
       };
     }else{
       el.onclick=async()=>openFile(item.path);

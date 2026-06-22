@@ -220,11 +220,12 @@ def test_auto_compression_running_card_defaults_collapsed():
     assert "open: running" not in helper
 
 
-def test_auto_compression_uses_centered_noninteractive_divider():
+def test_auto_compression_uses_inline_noninteractive_status():
     src = _read("static/style.css")
 
     assert ".auto-compression-divider" in src
-    assert "grid-template-columns:minmax(32px,1fr) auto minmax(32px,1fr)" in src
+    assert "grid-template-columns:minmax(32px,1fr) auto minmax(32px,1fr)" not in src
+    assert ".auto-compression-inline" in src
     assert "pointer-events:none" in src
     override = src.split(".auto-compression-divider{", 1)[1].split("}", 1)[0]
     assert "color:var(--muted)" in override
@@ -246,7 +247,8 @@ def test_auto_compression_worklog_row_does_not_use_tool_card_affordances():
     assert "tabindex" not in helper
     assert "tl-caret" not in helper
     assert "auto-compression-divider" in helper
-    assert "auto-compression-divider-line" in helper
+    assert "auto-compression-inline-row" in helper
+    assert "auto-compression-divider-line" not in helper
     assert "_autoCompressionPreviewText(state)" in helper
 
 
@@ -379,6 +381,10 @@ def test_auto_compression_running_card_completes_on_followup_live_events():
     helper = src.split("function _completeAutomaticCompressionOnLiveProgress", 1)[1].split("source.addEventListener('token'", 1)[0]
     assert "data-live-compression-card=\"1\"][data-compression-started-at]" in helper
     assert "window._compressionUi&&window._compressionUi.automatic&&window._compressionUi.phase==='running'" in helper
+    assert "function _ensureAnchorCompressionCompletedOnLiveProgress" in src
+    assert "_ensureAnchorCompressionCompletedOnLiveProgress(sid);" in helper
+    assert "const eventId=`synthetic:${localId}`;" in src
+    assert "_findAnchorActivityEventByLocalId(localId,'compressed')" in src
     assert "phase:'done'" in helper
     assert "message:'Context auto-compressed'" in helper
     assert "appendLiveCompressionCard({" in helper
@@ -518,7 +524,8 @@ def test_auto_compression_card_reuses_compression_card_renderer():
 
     assert "if(state.automatic) return _autoCompressionCardsHtml(state);" in src
     assert "tool-card-row compression-card-row auto-compression-divider-row" in helper
-    assert "auto-compression-divider-line" in helper
+    assert "auto-compression-inline-row" in helper
+    assert "auto-compression-divider-line" not in helper
     assert "variantClass: 'tool-card-compress-auto'" not in helper
     assert "statusLabel: preview" not in helper
 

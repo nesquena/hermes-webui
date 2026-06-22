@@ -534,6 +534,59 @@ def test_session_scoped_message_queue_frontend_wiring(cleanup_test_sessions):
     assert "updateQueueBadge(sid);" in sessions_src
 
 
+def test_queue_card_cross_session_clear_called_before_draft_save(cleanup_test_sessions):
+    """R15c: switching away from one session to another should clear the old
+    session's queue card before the async draft-save await, so stale DOM cannot
+    survive into the destination session.
+    """
+    src = (REPO_ROOT / "static/sessions.js").read_text()
+    block_pattern = re.compile(
+        r"if \(currentSid && currentSid !== sid\) \{\s*"
+        r"if\(typeof window\._clearPendingSelections==='function'\) window\._clearPendingSelections\(\);\s*"
+        r"if\(typeof _clearQueueCardDisplay==='function'\) _clearQueueCardDisplay\(currentSid\);\s*"
+        r"await _saveComposerDraftNow\(currentSid",
+        re.S,
+    )
+    assert block_pattern.search(src), (
+        "cross-session loadSession path must clear queue card display via"
+        " _clearQueueCardDisplay(currentSid) before awaiting _saveComposerDraftNow"
+    )
+
+
+def test_queue_card_cross_session_helper_used_only_for_session_change(cleanup_test_sessions):
+    """R15c: _clearQueueCardDisplay(sid) must only fire on cross-session switches,
+    not on same-session navigation/force-reload code paths.
+    """
+    src = (REPO_ROOT / "static/sessions.js").read_text()
+    load_start = src.find("async function loadSession(sid){")
+    assert load_start >= 0
+    load_end = src.find("  // Sync context usage indicator from session data", load_start)
+    load_body = src[load_start:load_end]
+    cross_start = load_body.find("if (currentSid && currentSid !== sid) {")
+    cross_end = load_body.find("if (currentSid !== sid || forceReload) {", cross_start)
+    assert cross_start >= 0 and cross_end >= 0
+    assert "_clearQueueCardDisplay(currentSid);" in load_body[cross_start:cross_end], (
+        "queue-card clear helper must be inside the cross-session branch"
+    )
+    same_session_idx = load_body.find("if(currentSid===sid && !forceReload && !_loadingSessionId) return;")
+    assert same_session_idx >= 0
+    assert same_session_idx < cross_start
+
+
+def test_queue_card_clear_helper_tracks_render_epoch(cleanup_test_sessions):
+    """R15d: the delayed queue clear must only wipe the chips from the render it
+    was asked to dismiss, not a later render for the same shared queue DOM.
+    """
+    src = (REPO_ROOT / "static/ui.js").read_text()
+    assert "let _queueRenderEpoch=0;" in src
+    assert "if(sid) delete _queueRenderKeys[sid];" in src
+    assert "inner.setAttribute('data-queue-render-sid',sid);" in src
+    assert "inner.setAttribute('data-queue-render-epoch',String(++_queueRenderEpoch));" in src
+    assert "const _epoch=_chips.getAttribute('data-queue-render-epoch')||'';" in src
+    assert "(_chips.getAttribute('data-queue-render-sid')||'')===_sid" in src
+    assert "(_chips.getAttribute('data-queue-render-epoch')||'')===_epoch" in src
+
+
 def test_chat_start_persists_pending_turn_metadata_for_reload_recovery(cleanup_test_sessions):
     """R15c: chat/start must expose enough pending-turn metadata for a reload to
     rebuild the in-flight conversation instead of showing a blank session.

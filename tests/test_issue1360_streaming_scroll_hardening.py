@@ -30,7 +30,7 @@ def test_messages_scroller_disables_browser_scroll_anchoring():
 
 
 def test_scroll_repin_dead_zone_is_wider_for_mac_app_windows():
-    assert "clientHeight<250" in UI_JS, (
+    assert "clientHeight<250" in UI_JS or "bottomDistance<250" in UI_JS, (
         "The near-bottom re-pin threshold should be at least 250px so small "
         "macOS app windows and trackpad momentum do not re-pin too eagerly."
     )

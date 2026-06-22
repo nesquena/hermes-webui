@@ -43,8 +43,8 @@ def test_sessions_and_projects_load_independently_so_projects_failure_cannot_bla
     block = src[block_start:block_end]
 
     assert "Promise.all" not in block
-    assert "api('/api/sessions' + allProfilesQS" in block
-    assert "try{\n      projData = await api('/api/projects'" in block
+    assert "api('/api/sessions' + sessionListQS" in block
+    assert "try{\n      const projectQS = _showAllProfiles ? '?all_profiles=1' : '';\n      projData = await api('/api/projects' + projectQS" in block
     assert "console.warn('renderProjectsList'," in block
     assert "_applySessionListPayload(sessData,projData)" in block
 

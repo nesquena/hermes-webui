@@ -24,6 +24,7 @@ from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
     is_cli_session_row,
+    normalize_agent_session_source,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
@@ -391,10 +392,13 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     context_messages = getattr(session, 'context_messages', None)
     if not isinstance(context_messages, list) or not context_messages:
         return
+    role = str(recovered.get('role') or '')
     recovered_text = " ".join(str(recovered.get('content') or '').split())
+    if not recovered_text and not recovered.get('tool_call_id') and not recovered.get('tool_calls'):
+        return
     if recovered_text:
         for existing in reversed(context_messages[-8:]):
-            if not isinstance(existing, dict) or existing.get('role') != 'user':
+            if not isinstance(existing, dict) or existing.get('role') != role:
                 continue
             existing_text = " ".join(str(existing.get('content') or '').split())
             if existing_text == recovered_text:
@@ -644,11 +648,12 @@ class Session:
                 parent_session_id: str=None,
                 worktree_path=None,
                 worktree_branch=None,
-                worktree_repo_root=None,
-                worktree_created_at=None,
-                enabled_toolsets=None,
-                composer_draft=None,
-                **kwargs):
+                 worktree_repo_root=None,
+                 worktree_created_at=None,
+                 enabled_toolsets=None,
+                 composer_draft=None,
+                 anchor_activity_scenes=None,
+                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
@@ -704,6 +709,7 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
         if raw_message_count is not None:
@@ -759,7 +765,7 @@ class Session:
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
-            'enabled_toolsets', 'composer_draft',
+            'enabled_toolsets', 'composer_draft', 'anchor_activity_scenes',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['message_count'] = len(self.messages or [])
@@ -1418,15 +1424,19 @@ def _append_journaled_partial_output(
             if existing_idx is not None:
                 current_assistant_idx = existing_idx
                 assistant_started_at = None
+                if 0 <= existing_idx < len(session.messages):
+                    _append_recovered_turn_to_context(session, session.messages[existing_idx])
                 return existing_idx
         timestamp = int(assistant_started_at or time.time())
-        session.messages.append({
+        recovered_assistant = {
             'role': 'assistant',
             'content': content,
             'timestamp': timestamp,
             '_recovered_from_run_journal': True,
             '_recovered_stream_id': stream_id,
-        })
+        }
+        session.messages.append(recovered_assistant)
+        _append_recovered_turn_to_context(session, recovered_assistant)
         current_assistant_idx = len(session.messages) - 1
         assistant_started_at = None
         appended_any = True
@@ -2283,12 +2293,39 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
         return False
     cached_messages = getattr(cached, 'messages', None) or []
     disk_messages = getattr(disk_session, 'messages', None) or []
-    if len(cached_messages) <= len(disk_messages):
-        return False
     if _last_non_tool_role(cached_messages) != 'user':
         return False
     if _last_non_tool_role(disk_messages) != 'assistant':
         return False
+    if len(cached_messages) < len(disk_messages):
+        return True
+    if len(cached_messages) == len(disk_messages):
+        # Same-length divergence is still stale: a completed assistant turn can
+        # be persisted through a sibling Session object while this inactive LRU
+        # entry still ends on the optimistic/recovered user row.
+        #
+        # Keep this narrow: only evict when the shared prefix is the same and
+        # the cached user tail is not newer than the persisted assistant.  A
+        # genuine just-submitted user message can exist briefly before the
+        # stream id is attached, and that must not be replaced by older disk
+        # state.
+        cached_tail = _last_non_tool_message(cached_messages)
+        disk_tail = _last_non_tool_message(disk_messages)
+        cached_prefix = [
+            (_message_role(message), _message_content_text(message))
+            for message in cached_messages[:-1]
+        ]
+        disk_prefix = [
+            (_message_role(message), _message_content_text(message))
+            for message in disk_messages[:-1]
+        ]
+        if cached_prefix != disk_prefix:
+            return False
+        cached_tail_ts = _message_timestamp(cached_tail)
+        disk_tail_ts = _message_timestamp(disk_tail)
+        if cached_tail_ts is not None and disk_tail_ts is not None and cached_tail_ts > disk_tail_ts:
+            return False
+        return True
 
     cached_tail = _last_non_tool_message(cached_messages)
     previous_disk_user = None
@@ -2303,6 +2340,30 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
     # A genuinely new concurrent user edit must stay in memory so stale-session
     # guards can report and preserve it.
     return _message_content_text(cached_tail) == _message_content_text(previous_disk_user)
+
+
+def _anchor_scene_record_keys(session) -> set[str]:
+    records = getattr(session, 'anchor_activity_scenes', None)
+    if not isinstance(records, dict):
+        return set()
+    return {str(key) for key, value in records.items() if key and isinstance(value, dict)}
+
+
+def _anchor_scene_records_updated_at(session) -> float:
+    records = getattr(session, 'anchor_activity_scenes', None)
+    if not isinstance(records, dict):
+        return 0.0
+    latest = 0.0
+    for record in records.values():
+        if not isinstance(record, dict):
+            continue
+        try:
+            updated_at = float(record.get('updated_at') or 0)
+        except (TypeError, ValueError):
+            updated_at = 0.0
+        if updated_at > latest:
+            latest = updated_at
+    return latest
 
 
 def _cached_session_lags_disk(cached) -> bool:
@@ -2329,7 +2390,19 @@ def _cached_session_lags_disk(cached) -> bool:
     disk_count = _parse_nonnegative_int(getattr(disk_meta, '_metadata_message_count', None))
     if disk_count is None:
         disk_count = _lookup_index_message_count(sid)
-    return bool(disk_count is not None and disk_count > cached_count)
+    if disk_count is not None and disk_count > cached_count:
+        return True
+    if not getattr(cached, 'active_stream_id', None) and not getattr(cached, 'pending_user_message', None):
+        cached_scene_keys = _anchor_scene_record_keys(cached)
+        disk_scene_keys = _anchor_scene_record_keys(disk_meta)
+        if disk_scene_keys and not disk_scene_keys.issubset(cached_scene_keys):
+            return True
+        if (
+            disk_scene_keys
+            and _anchor_scene_records_updated_at(disk_meta) > _anchor_scene_records_updated_at(cached)
+        ):
+            return True
+    return False
 
 
 def get_session(sid, metadata_only=False):
@@ -3127,40 +3200,149 @@ def _sidebar_title_is_generic_webui(title: str | None) -> bool:
     return text.startswith(prefix) and text[len(prefix):].isdigit()
 
 
-def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
-    """Attach state.db compression lineage metadata used by sidebar collapse."""
+def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> dict[str, dict]:
+    """Return cheap state.db source/title overrides for sidebar rows.
+
+    This intentionally does not chase lineage parents/children. It is used on
+    the /api/sessions hot path before CLI filtering so state.db can correct
+    stale JSON source flags without paying the full lineage-enrichment cost.
+    """
+    wanted = {str(sid) for sid in (session_ids or set()) if sid}
+    if not wanted or not db_path.exists():
+        return {}
     try:
-        metadata = read_session_lineage_metadata(
+        import sqlite3
+    except ImportError:
+        return {}
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {row[1] for row in cur.fetchall()}
+            if 'id' not in session_cols:
+                return {}
+            source_expr = 's.source' if 'source' in session_cols else 'NULL AS source'
+            session_source_expr = 's.session_source' if 'session_source' in session_cols else 'NULL AS session_source'
+            title_expr = 's.title' if 'title' in session_cols else 'NULL AS title'
+            overrides: dict[str, dict] = {}
+            ids = list(wanted)
+            chunk_size = 500
+            for i in range(0, len(ids), chunk_size):
+                chunk = ids[i:i + chunk_size]
+                placeholders = ','.join('?' * len(chunk))
+                cur.execute(
+                    f"""
+                    SELECT s.id, {source_expr}, {session_source_expr}, {title_expr}
+                    FROM sessions s
+                    WHERE s.id IN ({placeholders})
+                    """,
+                    chunk,
+                )
+                for row in cur.fetchall():
+                    sid = str(row['id'])
+                    entry: dict[str, object] = {}
+                    state_title = str(row['title'] or '').strip()
+                    if state_title:
+                        entry['_state_db_title'] = state_title
+                    state_source = str(row['source'] or '').strip().lower()
+                    if state_source:
+                        entry['_state_db_source'] = state_source
+                        source_meta = normalize_agent_session_source(state_source)
+                        entry['_state_db_source_tag'] = state_source
+                        entry['_state_db_raw_source'] = source_meta.get('raw_source')
+                        entry['_state_db_session_source'] = source_meta.get('session_source')
+                        entry['_state_db_source_label'] = source_meta.get('source_label')
+                    if entry:
+                        overrides[sid] = entry
+            return overrides
+    except Exception:
+        return {}
+
+
+def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
+    """Apply state.db source/title overrides without full lineage enrichment."""
+    try:
+        metadata = _read_state_db_sidebar_overrides(
             _active_state_db_path(),
             {str(s.get('session_id')) for s in sessions if s.get('session_id')},
         )
     except Exception:
         return
+    _apply_sidebar_state_db_override_metadata(sessions, metadata)
+
+
+def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: dict[str, dict]) -> None:
+    for session in sessions:
+        sid = session.get('session_id')
+        if sid not in metadata:
+            continue
+        entry = dict(metadata[sid])
+        state_db_title = entry.pop('_state_db_title', None)
+        state_db_source = entry.pop('_state_db_source', None)
+        state_db_source_tag = entry.pop('_state_db_source_tag', None)
+        state_db_raw_source = entry.pop('_state_db_raw_source', None)
+        state_db_session_source = entry.pop('_state_db_session_source', None)
+        state_db_source_label = entry.pop('_state_db_source_label', None)
+        if state_db_source == 'webui':
+            session['source_tag'] = state_db_source_tag
+            session['raw_source'] = state_db_raw_source
+            session['session_source'] = state_db_session_source
+            session['source_label'] = state_db_source_label
+            session['is_cli_session'] = False
+        title = session.get('title')
+        if (
+            state_db_title
+            and state_db_title != title
+            and _sidebar_title_is_generic_webui(title)
+        ):
+            session['_state_db_title'] = state_db_title
+            session['display_title'] = state_db_title
+
+
+def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
+    """Attach state.db compression lineage metadata used by sidebar collapse.
+
+    Cap the DB lookup to the top-N most recent sessions to bound wall-clock
+    on power users with thousands of sessions. The sidebar paints chronologically
+    newest first; older sessions almost never have visible lineage to collapse
+    (parents are themselves stale and rarely surface in the same render).
+    Lineage enrichment for those is loaded lazily when the user opens the
+    history panel. Issue #38914 / 2026-06-21 triage: /api/sessions was spending
+    4.9s on lineage_metadata across 2400+ rows.
+    """
+    # 2026-06-21: configurable via env to ease A/B and rollback without a redeploy.
+    import os as _os
+    try:
+        _cap = int(_os.environ.get("HERMES_WEBUI_LINEAGE_TOP_N", "300"))
+    except (TypeError, ValueError):
+        _cap = 300
+    if _cap > 0 and len(sessions) > _cap:
+        candidates = sessions[:_cap]
+    else:
+        candidates = sessions
+    try:
+        metadata = read_session_lineage_metadata(
+            _active_state_db_path(),
+            {str(s.get('session_id')) for s in candidates if s.get('session_id')},
+        )
+    except Exception:
+        return
+    _apply_sidebar_state_db_override_metadata(sessions, metadata)
     for session in sessions:
         sid = session.get('session_id')
         if sid in metadata:
             entry = dict(metadata[sid])
-            state_db_title = entry.pop('_state_db_title', None)
-            state_db_source = entry.pop('_state_db_source', None)
-            state_db_source_tag = entry.pop('_state_db_source_tag', None)
-            state_db_raw_source = entry.pop('_state_db_raw_source', None)
-            state_db_session_source = entry.pop('_state_db_session_source', None)
-            state_db_source_label = entry.pop('_state_db_source_label', None)
-            session.update(entry)
-            if state_db_source == 'webui':
-                session['source_tag'] = state_db_source_tag
-                session['raw_source'] = state_db_raw_source
-                session['session_source'] = state_db_session_source
-                session['source_label'] = state_db_source_label
-                session['is_cli_session'] = False
-            title = session.get('title')
-            if (
-                state_db_title
-                and state_db_title != title
-                and _sidebar_title_is_generic_webui(title)
+            for key in (
+                '_state_db_title',
+                '_state_db_source',
+                '_state_db_source_tag',
+                '_state_db_raw_source',
+                '_state_db_session_source',
+                '_state_db_source_label',
             ):
-                session['_state_db_title'] = state_db_title
-                session['display_title'] = state_db_title
+                entry.pop(key, None)
+            session.update(entry)
 
 
 def _diag_stage(diag, name: str) -> None:
@@ -3171,7 +3353,7 @@ def _diag_stage(diag, name: str) -> None:
             pass
 
 
-def all_sessions(diag=None):
+def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
@@ -3265,8 +3447,13 @@ def all_sessions(diag=None):
                 and not s.get('has_pending_user_message')
                 and not s.get('worktree_path')
             )]
-            _diag_stage(diag, "all_sessions.lineage_metadata")
-            _enrich_sidebar_lineage_metadata(result)
+            if include_lineage_metadata:
+                _diag_stage(diag, "all_sessions.lineage_metadata")
+                _enrich_sidebar_lineage_metadata(result)
+            else:
+                _diag_stage(diag, "all_sessions.state_db_overrides")
+                _apply_sidebar_state_db_overrides(result)
+                _diag_stage(diag, "all_sessions.lineage_metadata_skipped")
             result = _prefer_fuller_snapshots_for_sidebar(result)
             sidebar_candidates = result
             visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
@@ -3306,8 +3493,13 @@ def all_sessions(diag=None):
         and not s.pending_user_message
         and not getattr(s, 'worktree_path', None)
     )]
-    _diag_stage(diag, "all_sessions.lineage_metadata")
-    _enrich_sidebar_lineage_metadata(result)
+    if include_lineage_metadata:
+        _diag_stage(diag, "all_sessions.lineage_metadata")
+        _enrich_sidebar_lineage_metadata(result)
+    else:
+        _diag_stage(diag, "all_sessions.state_db_overrides")
+        _apply_sidebar_state_db_overrides(result)
+        _diag_stage(diag, "all_sessions.lineage_metadata_skipped")
     result = _prefer_fuller_snapshots_for_sidebar(result)
     sidebar_candidates = result
     visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
@@ -4610,6 +4802,41 @@ def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool
     return _matching_visible_duplicate(visible_key, visible_keys) is not None
 
 
+def _sidecar_has_terminal_partial_error(sidecar_messages: list) -> bool:
+    """Return True when WebUI already owns an interrupted live partial turn.
+
+    After a cancelled/error terminal event, the WebUI sidecar contains the
+    user prompt, the streamed partial assistant prose/tool snapshot, and the
+    explicit terminal carrier. state.db may still contain the same run's raw
+    assistant/tool replay rows; appending those rows makes Compact Worklog show
+    duplicated process prose after cancel. In that shape, the sidecar is the
+    display owner.
+    """
+    messages = [msg for msg in (sidecar_messages or []) if isinstance(msg, dict)]
+    latest_error_idx = None
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        if str(msg.get("role") or "").lower() != "assistant":
+            continue
+        if msg.get("_error"):
+            latest_error_idx = idx
+    if latest_error_idx is None:
+        return False
+    for msg in messages[latest_error_idx + 1 :]:
+        if str(msg.get("role") or "").lower() in ("user", "assistant"):
+            return False
+    segment_start = 0
+    for idx in range(latest_error_idx - 1, -1, -1):
+        if str(messages[idx].get("role") or "").lower() == "user":
+            segment_start = idx + 1
+            break
+    for msg in messages[segment_start:latest_error_idx]:
+        if str(msg.get("role") or "").lower() == "assistant" and msg.get("_partial"):
+            return True
+    return False
+
+
 def state_db_delta_after_context(sidecar_context: list, state_messages: list) -> list:
     """Return only state.db rows that are newer than model-facing context.
 
@@ -4816,6 +5043,8 @@ def merge_session_messages_append_only(
         sidecar_visible_counts[visible_key] = sidecar_visible_counts.get(visible_key, 0) + 1
         sidecar_visible_sequence.append(visible_key)
         merged_messages.append(msg)
+    if _sidecar_has_terminal_partial_error(sidecar_messages):
+        return merged_messages
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
     state_replay_idx = 0
     skipped_state_visible_counts = {}

@@ -277,10 +277,21 @@ async function switchPanel(name, opts = {}) {
   // Update main content view. Each entry in MAIN_VIEW_PANELS gets a matching
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
+  const _mainViewPanels = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
+    _mainViewPanels.forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
+  }
+  // #4644: close the mobile sidebar drawer after a rail-click panel switch — but
+  // ONLY for panels that have a main-content view (or chat). Sidebar-only panels
+  // like Todos render INSIDE the drawer, so closing it would hide the very panel
+  // the user just opened. Keep the drawer open for those.
+  const _panelHasMainView = nextPanel === 'chat' || _mainViewPanels.indexOf(nextPanel) !== -1;
+  if (_panelHasMainView && opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
+    if (typeof closeMobileSidebar === 'function') {
+      closeMobileSidebar();
+    }
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
@@ -297,12 +308,6 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'settings') {
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
-  }
-  if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
-    const sidebar = document.querySelector('.sidebar');
-    const overlay = document.getElementById('mobileOverlay');
-    if (sidebar) sidebar.classList.add('mobile-open');
-    if (overlay) overlay.classList.add('visible');
   }
   _resyncChatSidebarAfterPanelSwitch();
   if (nextPanel === 'chat' && typeof syncTopbar === 'function') syncTopbar();
@@ -711,7 +716,7 @@ function _renderCronDetail(job){
     job.provider && job.model ? `${esc(job.provider)}/${esc(job.model)}` :
     job.model ? esc(job.model) :
     job.provider ? esc(job.provider) :
-    isNoAgent ? '' : 'default';
+    isNoAgent ? '' : esc(t('cron_model_use_default') || 'Use profile default');
   const profileLabel = _cronProfileLabel(job.profile);
   const profileTitle = _cronProfileTitle(job.profile);
   const lastError = job.last_error ? `<div class="detail-row"><div class="detail-row-label">${esc(t('error_prefix').replace(/:\s*$/,''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>` : '';
@@ -1091,11 +1096,11 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           <div class="detail-form-hint">${esc(t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time')}</div>
         </div>
         <div class="detail-form-row">
-          <label for="cronFormModel">${esc(t('cron_model_label') || 'Model Override')}</label>
+          <label for="cronFormModel">${esc(t('cron_model_label') || 'Model')}</label>
           <select id="cronFormModel"${isNoAgent ? ' disabled' : ''}>
             <option value="">loading...</option>
           </select>
-          <div class="detail-form-hint">${esc(t('cron_model_hint') || 'Override the default model for this job.')}</div>
+          <div class="detail-form-hint">${esc(isNoAgent ? (t('cron_model_no_agent_hint') || 'No-agent jobs run the configured script directly; model is unused.') : (t('cron_model_hint') || 'Use the profile default model at run time, or pin this job to a specific provider/model.'))}</div>
         </div>
         <div class="detail-form-row">
           <label for="cronFormToastNotifications">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</label>
@@ -4914,15 +4919,27 @@ function _positionComposerWsDropdown(){
 
 function _positionProfileDropdown(){
   const dd=$('profileDropdown');
-  const chip=$('profileChip');
-  const footer=document.querySelector('.composer-footer');
-  if(!dd||!chip||!footer)return;
-  const chipRect=chip.getBoundingClientRect();
-  const footerRect=footer.getBoundingClientRect();
-  let left=chipRect.left-footerRect.left;
-  const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
-  left=Math.max(0, Math.min(left, maxLeft));
-  dd.style.left=`${left}px`;
+  const trigger=_profileDropdownTrigger||$('profileChip');
+  if(!dd||!trigger)return;
+  const rect=trigger.getBoundingClientRect();
+  const gap=4;
+  const ddW=dd.offsetWidth||260;
+  // Decide direction: below for titlebar, above for composer
+  const openBelow=trigger===document.getElementById('titlebarProfileBtn');
+  // Horizontal: center on trigger, clamp to viewport
+  let left=rect.left+(rect.width/2)-(ddW/2);
+  left=Math.max(8, Math.min(left, window.innerWidth-ddW-8));
+  dd.style.left=left+'px';
+  // Vertical
+  if(openBelow){
+    dd.style.bottom=''; // clear any stale bottom from a prior composer-chip open
+    dd.style.top=(rect.bottom+gap)+'px';
+    dd.classList.add('open-below');
+  }else{
+    dd.style.top=''; dd.style.bottom=''; // clear fixed top/bottom
+    dd.style.bottom=(window.innerHeight-rect.top+gap)+'px';
+    dd.classList.remove('open-below');
+  }
 }
 
 function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
@@ -5523,6 +5540,7 @@ async function switchToWorkspace(path,name){
 // ── Profile panel + dropdown ──
 let _profilesCache = null;
 let _profileSwitchGeneration = 0;
+let _profileDropdownTrigger = null;  // tracks which element triggered the dropdown
 
 async function _profileSwitchPanelLoad(){
   if (_currentPanel === 'skills') await loadSkills();
@@ -5556,6 +5574,12 @@ function _refreshProfileSwitchBackground(gen){
     if (typeof _setTabOrder === 'function') _setTabOrder(order);
     if (typeof _applyTabOrder === 'function') _applyTabOrder(order);
     if (typeof _applyTabVisibility === 'function') _applyTabVisibility(hidden);
+    _ensureComposerControlVisibilityState(s||{});
+    _renderComposerControlChips();
+    _renderComposerSituationalControlChips();
+    if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
+    window._showTitlebarProfile=!!(s&&s.show_titlebar_profile);
+    if(typeof _applyTitlebarProfileVisibility==='function') _applyTitlebarProfileVisibility();
   }).catch(function(){});
 }
 
@@ -5566,17 +5590,28 @@ async function loadProfilesPanel() {
     const data = await api('/api/profiles');
     _profilesCache = data;
     panel.innerHTML = '';
-    const explainer = document.createElement('div');
-    explainer.className = 'profile-card profile-help-card';
-    explainer.innerHTML = `
-      <div class="profile-card-header">
-        <div style="min-width:0;flex:1">
-          <div class="profile-card-name">Profiles vs workspaces</div>
-          <div class="profile-card-meta">Use profiles for how the agent works; use workspaces for what files it works on.</div>
-        </div>
-      </div>`;
-    explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
-    panel.appendChild(explainer);
+
+    // Hide "New profile" button in single profile mode
+    const newProfileBtn = document.querySelector('[onclick="openProfileCreate()"]');
+    if (newProfileBtn) {
+      newProfileBtn.style.display = data.single_profile_mode ? 'none' : '';
+    }
+
+    // In single profile mode, don't show the explanatory card
+    if (!data.single_profile_mode) {
+      const explainer = document.createElement('div');
+      explainer.className = 'profile-card profile-help-card';
+      explainer.innerHTML = `
+        <div class="profile-card-header">
+          <div style="min-width:0;flex:1">
+            <div class="profile-card-name">Profiles vs workspaces</div>
+            <div class="profile-card-meta">Use profiles for how the agent works; use workspaces for what files it works on.</div>
+          </div>
+        </div>`;
+      explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
+      panel.appendChild(explainer);
+    }
+
     if (!data.profiles || !data.profiles.length) {
       const emptyMsg = document.createElement('div');
       emptyMsg.style.cssText = 'padding:16px;color:var(--muted);font-size:12px';
@@ -5695,8 +5730,9 @@ function _setProfileHeaderButtons(mode, p, activeName){
   if (mode === 'read') {
     const isActive = p && p.name === activeName;
     const isDefault = !!(p && p.is_default);
-    if (isActive) hide(actBtn); else show(actBtn);
-    if (isDefault) hide(delBtn); else show(delBtn);
+    const singleProfileMode = !!(_profilesCache && _profilesCache.single_profile_mode);
+    if (isActive || singleProfileMode) hide(actBtn); else show(actBtn);
+    if (isDefault || singleProfileMode) hide(delBtn); else show(delBtn);
     hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create') {
     hide(actBtn); hide(delBtn); show(cancelBtn); show(saveBtn);
@@ -5774,26 +5810,41 @@ function renderProfileDropdown(data) {
     };
     dd.appendChild(opt);
   }
-  // Divider + Manage link
-  const div = document.createElement('div'); div.className = 'ws-divider'; dd.appendChild(div);
-  const mgmt = document.createElement('div'); mgmt.className = 'profile-opt ws-manage';
-  mgmt.innerHTML = `${li('settings',12)} ${esc(t('manage_profiles'))}`;
-  mgmt.onclick = () => { closeProfileDropdown(); mobileSwitchPanel('profiles'); };
-  dd.appendChild(mgmt);
+  // Divider + Manage link (hidden in single profile mode)
+  if (!data.single_profile_mode) {
+    const div = document.createElement('div'); div.className = 'ws-divider'; dd.appendChild(div);
+    const mgmt = document.createElement('div'); mgmt.className = 'profile-opt ws-manage';
+    mgmt.innerHTML = `${li('settings',12)} ${esc(t('manage_profiles'))}`;
+    mgmt.onclick = () => { closeProfileDropdown(); mobileSwitchPanel('profiles'); };
+    dd.appendChild(mgmt);
+  }
+  // Sync titlebar label to the resolved active profile
+  const tbl = $('titlebarProfileLabel');
+  if (tbl) tbl.textContent = active;
 }
 
-function toggleProfileDropdown() {
+function toggleProfileDropdown(e) {
   const dd = $('profileDropdown');
   if (!dd) return;
   if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
+  // Track which element triggered the dropdown for positioning
+  _profileDropdownTrigger = (e && e.currentTarget) || $('profileChip');
   api('/api/profiles').then(data => {
+    // In single profile mode, don't show profile dropdown at all
+    if (data.single_profile_mode) {
+      closeProfileDropdown();
+      return;
+    }
     renderProfileDropdown(data);
     dd.classList.add('open');
     _positionProfileDropdown();
+    // Mark the triggering button as active
     const chip=$('profileChip');
-    if(chip) chip.classList.add('active');
+    if(chip && _profileDropdownTrigger===chip) chip.classList.add('active');
+    const tbtn=$('titlebarProfileBtn');
+    if(tbtn && _profileDropdownTrigger===tbtn) tbtn.classList.add('active');
   }).catch(e => { showToast(t('profiles_load_failed')); });
 }
 
@@ -5802,9 +5853,11 @@ function closeProfileDropdown() {
   if (dd) dd.classList.remove('open');
   const chip=$('profileChip');
   if(chip) chip.classList.remove('active');
+  const tbtn=$('titlebarProfileBtn');
+  if(tbtn) tbtn.classList.remove('active');
 }
 document.addEventListener('click', e => {
-  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
+  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#titlebarProfileBtn') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('profileDropdown');
@@ -5822,11 +5875,15 @@ async function switchToProfile(name) {
   // feedback while the async switch is in progress.
   const _chip = $('profileChip');
   const _chipLabel = $('profileChipLabel');
+  const _titlebarBtn = $('titlebarProfileBtn');
+  const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
+  if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
+  if (_titlebarLabel) _titlebarLabel.textContent = name;
 
   // Determine whether the current session has any messages.
   // A session with messages is "in progress" and belongs to the current profile —
@@ -5842,6 +5899,12 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // #4650 review: a profile switch can change agent.reasoning_effort (and other
+    // reasoning inputs like base_url) WITHOUT changing the default model/provider,
+    // which is all the reasoning-chip cache key tracks. Force exactly one reasoning
+    // refetch for the new profile so the chip reflects the new profile's effort
+    // (the syncTopbar() calls below route through syncReasoningChip()).
+    if (typeof _lastReasoningFetchKey !== 'undefined') _lastReasoningFetchKey = null;
 
     // Reconnect the gateway SSE to the NEW profile's watcher. The backend watcher
     // registry is now profile-keyed (#3629), but this tab's existing EventSource is
@@ -5965,10 +6028,12 @@ async function switchToProfile(name) {
   } catch (e) {
     // Revert the optimistic name update on error
     if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
+    if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
     if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
   } finally {
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
+    if (_switchGen === _profileSwitchGeneration && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
   }
 }
 
@@ -6203,6 +6268,8 @@ let _currentSettingsSection = 'conversation';
 let _settingsIndex = null;
 let _settingsIndexPromise = null;
 let _settingsSearchSeq = 0;
+let _extensionsStatusData = null;
+let _extensionsSidecarMonitorSeq = 0;
 let _settingsSearchDismissListenerRegistered = false;
 let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
@@ -6392,6 +6459,82 @@ function _toggleTabVisibilityChip(panel){
   _scheduleAppearanceAutosave();
 }
 
+function _ensureComposerControlVisibilityState(settings){
+  const fromSettings=(typeof _composerControlVisibilityFromSettings==='function')
+    ? _composerControlVisibilityFromSettings(settings||{})
+    : {};
+  if(!window._composerControlVisibility) window._composerControlVisibility={};
+  Object.assign(window._composerControlVisibility, fromSettings);
+}
+
+function _composerControlVisibilityPayload(){
+  const payload={};
+  const baseDefs=Array.isArray(window._COMPOSER_CONTROL_TOGGLE_DEFS)?window._COMPOSER_CONTROL_TOGGLE_DEFS:[];
+  const situationalDefs=Array.isArray(window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS)?window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS:[];
+  const defs=baseDefs.concat(situationalDefs);
+  const state=window._composerControlVisibility||{};
+  defs.forEach(function(def){payload[def.key]=!!state[def.key];});
+  return payload;
+}
+
+function _toggleComposerControlChip(key){
+  if(!window._composerControlVisibility) window._composerControlVisibility={};
+  window._composerControlVisibility[key]=!window._composerControlVisibility[key];
+  if(typeof _renderComposerControlChips==='function') _renderComposerControlChips();
+  if(typeof _renderComposerSituationalControlChips==='function') _renderComposerSituationalControlChips();
+  if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
+  _scheduleAppearanceAutosave();
+}
+
+function _composerControlChipLabel(def){
+  if(!def) return '';
+  if(def.labelKey&&typeof t==='function'){
+    const localized=t(def.labelKey);
+    if(typeof localized==='string'&&localized&&localized!==def.labelKey) return localized;
+  }
+  return def.label||'';
+}
+
+function _renderComposerControlChips(){
+  const container=$('composerControlsChips');
+  if(!container) return;
+  const defs=Array.isArray(window._COMPOSER_CONTROL_TOGGLE_DEFS)?window._COMPOSER_CONTROL_TOGGLE_DEFS:[];
+  const state=window._composerControlVisibility||{};
+  container.innerHTML='';
+  defs.forEach(function(def){
+    const chip=document.createElement('button');
+    chip.type='button';
+    chip.className='tab-visibility-chip';
+    const hidden=!!state[def.key];
+    if(hidden) chip.classList.add('chip-off');
+    chip.textContent=_composerControlChipLabel(def);
+    chip.setAttribute('role','switch');
+    chip.setAttribute('aria-checked',hidden?'false':'true');
+    chip.onclick=function(){_toggleComposerControlChip(def.key);};
+    container.appendChild(chip);
+  });
+}
+
+function _renderComposerSituationalControlChips(){
+  const container=$('composerSituationalControlsChips');
+  if(!container) return;
+  const defs=Array.isArray(window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS)?window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS:[];
+  const state=window._composerControlVisibility||{};
+  container.innerHTML='';
+  defs.forEach(function(def){
+    const chip=document.createElement('button');
+    chip.type='button';
+    chip.className='tab-visibility-chip';
+    const hidden=!!state[def.key];
+    if(hidden) chip.classList.add('chip-off');
+    chip.textContent=_composerControlChipLabel(def);
+    chip.setAttribute('role','switch');
+    chip.setAttribute('aria-checked',hidden?'false':'true');
+    chip.onclick=function(){_toggleComposerControlChip(def.key);};
+    container.appendChild(chip);
+  });
+}
+
 function switchSettingsSection(name,opts){
   // If the main content is not showing settings, just remember the section
   // without force-switching the panel. The section will be applied when the
@@ -6401,7 +6544,7 @@ function switchSettingsSection(name,opts){
     _settingsSection = name;
     return;
   }
-  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system'||name==='help')?name:'conversation';
+  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='extensions'||name==='system'||name==='help')?name:'conversation';
   // Deep-linking to the Plugins pane when the tab is hidden (no plugins
   // installed, #3457) falls back to Conversation. Resolve this BEFORE toggling
   // panes/sidebar/dropdown below so every downstream selection uses the
@@ -6413,13 +6556,13 @@ function switchSettingsSection(name,opts){
   }
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System',help:'Help'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',extensions:'Extensions',system:'System',help:'Help'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','system','help'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','plugins','extensions','system','help'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -6432,6 +6575,7 @@ function switchSettingsSection(name,opts){
   if(!(opts&&opts.skipLazyLoad)){
     if(section==='providers') loadProvidersPanel();
     if(section==='plugins') loadPluginsPanel();
+    if(section==='extensions') loadExtensionsPanel();
   }
 }
 
@@ -6442,7 +6586,7 @@ async function _buildSettingsIndex() {
   if (_settingsIndexPromise) return _settingsIndexPromise;
   const promise = (async () => {
     // Ensure lazy-loaded panes are populated before reading the DOM
-    await Promise.all([loadProvidersPanel(), loadPluginsPanel()]);
+    await Promise.all([loadProvidersPanel(), loadPluginsPanel(), loadExtensionsPanel()]);
     const index = [];
     const sectionMap = {
       settingsPaneConversation: 'conversation',
@@ -6450,6 +6594,7 @@ async function _buildSettingsIndex() {
       settingsPanePreferences: 'preferences',
       settingsPaneProviders: 'providers',
       settingsPanePlugins: 'plugins',
+      settingsPaneExtensions: 'extensions',
       settingsPaneSystem: 'system',
       settingsPaneHelp: 'help',
     };
@@ -6510,6 +6655,7 @@ async function filterSettings(query) {
     preferences: t('settings_tab_preferences') || 'Preferences',
     providers: t('providers_tab_title') || 'Providers',
     plugins: t('settings_tab_plugins') || 'Plugins',
+    extensions: t('settings_tab_extensions') || 'Extensions',
     system: t('settings_tab_system') || 'System',
     help: t('settings_tab_help') || 'Help',
   };
@@ -6563,6 +6709,7 @@ function _resolveSettingsField(entry) {
     preferences: 'settingsPanePreferences',
     providers: 'settingsPaneProviders',
     plugins: 'settingsPanePlugins',
+    extensions: 'settingsPaneExtensions',
     system: 'settingsPaneSystem',
     help: 'settingsPaneHelp',
   };
@@ -6711,8 +6858,11 @@ function _appearancePayloadFromUi(){
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
+    render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
+    show_titlebar_profile: !!($('settingsShowTitlebarProfile')||{}).checked,
     worklog_details_expanded_default: worklogDetailsExpanded,
     activity_feed_expanded_default: worklogDetailsExpanded,
+    ..._composerControlVisibilityPayload(),
     hidden_tabs: _getHiddenTabs(),
     tab_order: _getTabOrder(),
   };
@@ -6806,6 +6956,12 @@ async function _autosaveAppearanceSettings(payload){
           ? saved.worklog_details_expanded_default
           : saved.activity_feed_expanded_default
       );
+    }
+    if(saved){
+      _ensureComposerControlVisibilityState(saved);
+      _renderComposerControlChips();
+      _renderComposerSituationalControlChips();
+      if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
     }
     _setAppearanceAutosaveStatus('saved');
   }catch(e){
@@ -7084,6 +7240,30 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
+    const renderUserMarkdownCb=$('settingsRenderUserMarkdown');
+    if(renderUserMarkdownCb){
+      renderUserMarkdownCb.checked=!!settings.render_user_markdown;
+      window._renderUserMarkdown=renderUserMarkdownCb.checked;
+      renderUserMarkdownCb.onchange=function(){
+        window._renderUserMarkdown=this.checked;
+        if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+        if(typeof renderMessages==='function') renderMessages();
+        _scheduleAppearanceAutosave();
+      };
+    }
+    const showTitlebarProfileCb=$('settingsShowTitlebarProfile');
+    if(showTitlebarProfileCb){
+      showTitlebarProfileCb.checked=!!settings.show_titlebar_profile;
+      showTitlebarProfileCb.onchange=function(){
+        window._showTitlebarProfile=this.checked;
+        if(typeof _applyTitlebarProfileVisibility==='function') _applyTitlebarProfileVisibility();
+        _scheduleAppearanceAutosave();
+      };
+    }
+    _ensureComposerControlVisibilityState(settings);
+    _renderComposerControlChips();
+    _renderComposerSituationalControlChips();
+    if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
     // Tab visibility/order chips (dynamically populated from DOM)
     var hiddenTabs=[];
     if(Array.isArray(settings.hidden_tabs)){
@@ -7336,6 +7516,7 @@ async function loadSettingsPanel(){
           {value:'zh-CN-YunyangNeural',label:'Yunyang (Chinese, Male)'},
           {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
           {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
+          {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
         ];
         ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
         edgeVoices.forEach(v=>{
@@ -7436,8 +7617,13 @@ async function loadSettingsPanel(){
     // Show auth buttons only when auth is active
     try{
       const authStatus=await api('/api/auth/status');
+      _settingsPasswordAuthEnabled=!!authStatus.password_auth_enabled;
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
       _syncPasswordlessButton(authStatus);
+      _renderSettingsAuthStatus(authStatus);
+      _updateCurrentPasswordVisibility();
+      _updateAuthWarningBadge(authStatus);
+      _updateAuthDisabledWarning(authStatus);
     }catch(e){}
     loadPasskeys();
     // #1560: env-var-locked password also disables the Disable Auth button —
@@ -7452,9 +7638,318 @@ async function loadSettingsPanel(){
     if(typeof loadDashboardSettings==='function') loadDashboardSettings();
     loadProvidersPanel(); // load provider cards in background
     loadPluginsPanel(); // load plugin/hook visibility in background
+    loadExtensionsPanel(); // load extension diagnostics in background
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
+  }
+}
+
+
+// ── Extensions panel (browser-origin diagnostics + local enable controls) ──
+
+function _extensionStatusLabel(value){
+  return value ? 'Enabled' : 'Disabled';
+}
+
+function _extensionBooleanBadge(value){
+  const cls=value?'extension-status-badge-on':'extension-status-badge-off';
+  return `<span class="extension-status-badge ${cls}">${value?'true':'false'}</span>`;
+}
+
+function _extensionAssetList(urls){
+  if(!Array.isArray(urls)||urls.length===0){
+    return '<div class="extension-url-empty">None</div>';
+  }
+  return '<ul class="extension-url-list">'+urls.map(url=>`<li><code>${esc(url)}</code></li>`).join('')+'</ul>';
+}
+
+function _extensionWarningList(warnings){
+  if(!Array.isArray(warnings)||warnings.length===0){
+    return '<div class="extension-url-empty">No warnings.</div>';
+  }
+  return '<ul class="extension-warning-list">'+warnings.map(item=>{
+    const rawCode=(item&&item.code)||'unknown_warning';
+    const code=esc(rawCode);
+    const source=esc((item&&item.source)||'unknown');
+    const hint=rawCode==='extension_state_unknown_ids'
+      ? '<span>Some saved disabled-extension overrides no longer match the current manifest; re-added extensions with the same id may stay disabled.</span>'
+      : '';
+    return `<li><code>${code}</code><span>${source}</span>${hint}</li>`;
+  }).join('')+'</ul>';
+}
+
+function _extensionCountValue(counts,key,urls){
+  if(counts&&Number.isFinite(Number(counts[key]))) return Number(counts[key]);
+  return Array.isArray(urls)?urls.length:0;
+}
+
+function _extensionEntryStatusLabel(entry){
+  const status=(entry&&entry.status)||'';
+  if(status==='manifest_disabled') return 'Disabled in manifest';
+  if(status==='user_disabled') return 'Disabled';
+  if(status==='enabled') return 'Enabled';
+  return 'Unknown';
+}
+
+function _extensionEntryBadge(entry){
+  const enabled=!!(entry&&entry.effective_enabled);
+  const cls=enabled?'extension-status-badge-on':'extension-status-badge-off';
+  return `<span class="extension-status-badge ${cls}">${esc(_extensionEntryStatusLabel(entry))}</span>`;
+}
+
+function _extensionInstalledList(extensions,extensionDirConfigured){
+  const list=Array.isArray(extensions)?extensions:[];
+  if(!list.length){
+    if(!extensionDirConfigured) return '<div class="extension-url-empty">No extension directory is configured.</div>';
+    return '<div class="extension-url-empty">No manifest extensions are installed in the configured bundle.</div>';
+  }
+  return `<div class="extension-installed-list">${list.map(entry=>{
+    const id=(entry&&entry.id)||'';
+    const name=(entry&&entry.name)||id||'Unnamed extension';
+    const canToggle=!!(entry&&entry.can_toggle);
+    const userEnabled=!!(entry&&entry.user_enabled);
+    const disabledAttr=canToggle?'':' disabled aria-disabled="true"';
+    const buttonText=userEnabled?'Disable':'Enable';
+    const nextEnabled=userEnabled?'false':'true';
+    const note=canToggle
+      ? 'Toggles the WebUI-managed override for the next app load.'
+      : 'Manifest-disabled entries cannot be enabled from WebUI.';
+    return `<div class="extension-installed-row" data-extension-id="${esc(id)}">
+      <div class="extension-installed-main">
+        <div class="extension-installed-title-row">
+          <div class="extension-installed-title">${esc(name)}</div>
+          ${_extensionEntryBadge(entry)}
+        </div>
+        <div class="extension-installed-meta"><code>${esc(id)}</code><span>${esc(note)}</span></div>
+      </div>
+      <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function _extensionSidecarHealthBadge(status,label){
+  const safeStatus=['checking','healthy','unhealthy','blocked'].includes(status)?status:'checking';
+  return `<span class="extension-sidecar-status-badge extension-sidecar-status-${safeStatus}">${esc(label||safeStatus)}</span>`;
+}
+
+function _extensionSidecarCard(sidecars){
+  const list=Array.isArray(sidecars)?sidecars:[];
+  const body=list.length?`<div class="extension-sidecar-list">${list.map((sidecar,index)=>{
+    const id=(sidecar&&sidecar.id)||'';
+    const name=(sidecar&&sidecar.name)||'';
+    const title=name||id||'Unnamed extension';
+    const meta=(name&&id)?id:(sidecar&&sidecar.type)||'loopback';
+    const origin=(sidecar&&sidecar.origin)||'';
+    const healthPath=(sidecar&&sidecar.health_path)||'';
+    const healthUrl=(sidecar&&sidecar.health_url)||'';
+    return `<div class="extension-sidecar-row" data-sidecar-index="${index}">
+      <div class="extension-sidecar-row-head">
+        <div class="extension-sidecar-title">${esc(title)}</div>
+        <span id="extensionSidecarHealth${index}" data-sidecar-health-index="${index}">${_extensionSidecarHealthBadge('checking','checking')}</span>
+      </div>
+      <div class="extension-sidecar-meta">${esc(meta)}</div>
+      <div class="extension-sidecar-fields">
+        <div><span>Origin</span><code>${esc(origin)}</code></div>
+        <div><span>Health path</span><code>${esc(healthPath)}</code></div>
+        <div><span>Health URL</span><code>${esc(healthUrl)}</code></div>
+      </div>
+    </div>`;
+  }).join('')}</div>`:'<div class="extension-url-empty">No loopback sidecars declared.</div>';
+  return `
+    <div class="provider-card extension-sidecars-card">
+      <div class="provider-card-header plugin-card-header">
+        <div class="provider-card-info">
+          <div class="provider-card-name">Loopback sidecars</div>
+          <div class="provider-card-meta">Declared local companions; health is checked directly from this browser with WebUI credentials omitted.</div>
+        </div>
+      </div>
+      <div class="provider-card-body extension-card-body">
+        ${body}
+      </div>
+    </div>`;
+}
+
+function _setExtensionSidecarHealth(index,status,label){
+  const el=document.querySelector(`[data-sidecar-health-index="${index}"]`);
+  if(el) el.innerHTML=_extensionSidecarHealthBadge(status,label);
+}
+
+async function _checkExtensionSidecarHealth(sidecar,index,seq){
+  const healthUrl=sidecar&&sidecar.health_url;
+  if(!healthUrl){
+    _setExtensionSidecarHealth(index,'blocked','unreachable / blocked');
+    return;
+  }
+  let controller=null;
+  let timeoutId=null;
+  try{
+    if(typeof AbortController!=='undefined'){
+      controller=new AbortController();
+      timeoutId=setTimeout(()=>controller.abort(),2500);
+    }
+    const res=await fetch(healthUrl,{credentials:'omit',cache:'no-store',signal:controller?controller.signal:undefined});
+    if(seq!==_extensionsSidecarMonitorSeq) return;
+    if(res.ok) _setExtensionSidecarHealth(index,'healthy','healthy');
+    else _setExtensionSidecarHealth(index,'unhealthy','unhealthy');
+  }catch(_e){
+    if(seq!==_extensionsSidecarMonitorSeq) return;
+    _setExtensionSidecarHealth(index,'blocked','unreachable / blocked');
+  }finally{
+    if(timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+function _monitorExtensionSidecars(sidecars,seq){
+  if(!Array.isArray(sidecars)||sidecars.length===0) return;
+  sidecars.forEach((sidecar,index)=>_checkExtensionSidecarHealth(sidecar,index,seq));
+}
+
+function _renderExtensionsPanel(data,seq){
+  const target=$('extensionsDiagnostics');
+  const copyBtn=$('extensionsCopyDiagnosticsBtn');
+  if(!target) return;
+  _extensionsStatusData=data||null;
+  if(copyBtn) copyBtn.disabled=!data;
+  const manifest=(data&&data.manifest)||{};
+  const counts=(data&&data.counts)||{};
+  const scripts=Array.isArray(data&&data.script_urls)?data.script_urls:[];
+  const styles=Array.isArray(data&&data.stylesheet_urls)?data.stylesheet_urls:[];
+  const sidecars=Array.isArray(data&&data.sidecars)?data.sidecars:[];
+  const extensions=Array.isArray(data&&data.extensions)?data.extensions:[];
+  const statusClass=(data&&data.enabled)?'extension-card-enabled':'extension-card-disabled';
+  const scriptCount=_extensionCountValue(counts,'script_urls',scripts);
+  const styleCount=_extensionCountValue(counts,'stylesheet_urls',styles);
+  const sidecarCount=_extensionCountValue(counts,'sidecars',sidecars);
+  const manifestExtensionCount=_extensionCountValue(counts,'manifest_extensions',extensions);
+  const userDisabledCount=_extensionCountValue(counts,'user_disabled',[]);
+  target.innerHTML=`
+    <div class="provider-card extension-status-card ${statusClass}">
+      <div class="provider-card-header plugin-card-header">
+        <div class="provider-card-info">
+          <div class="provider-card-name">Extension runtime</div>
+          <div class="provider-card-meta">Status from /api/extensions/status; toggles persist a local override for installed manifest entries.</div>
+        </div>
+        <span class="provider-card-badge ${data&&data.enabled?'':'plugin-card-badge-disabled'}">${_extensionStatusLabel(!!(data&&data.enabled))}</span>
+      </div>
+      <div class="provider-card-body extension-card-body">
+        <div class="extension-summary-grid">
+          <div><span>Extension dir configured</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_configured))}</div>
+          <div><span>Extension dir valid</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_valid))}</div>
+          <div><span>Manifest configured</span>${_extensionBooleanBadge(!!manifest.configured)}</div>
+          <div><span>Manifest loaded</span>${_extensionBooleanBadge(!!manifest.loaded)}</div>
+          <div><span>Manifest status</span><code>${esc(manifest.status||'unknown')}</code></div>
+          <div><span>Manifest entries inspected</span><code>${Number(manifest.entry_count)||0}</code></div>
+          <div><span>Manifest script count</span><code>${Number(manifest.script_count)||0}</code></div>
+          <div><span>Manifest stylesheet count</span><code>${Number(manifest.stylesheet_count)||0}</code></div>
+          <div><span>Manifest sidecar count</span><code>${Number(manifest.sidecar_count)||0}</code></div>
+          <div><span>Final script count</span><code>${scriptCount}</code></div>
+          <div><span>Final stylesheet count</span><code>${styleCount}</code></div>
+          <div><span>Loopback sidecar count</span><code>${sidecarCount}</code></div>
+          <div><span>Installed manifest extensions</span><code>${manifestExtensionCount}</code></div>
+          <div><span>User-disabled extensions</span><code>${userDisabledCount}</code></div>
+        </div>
+      </div>
+    </div>
+    <div class="provider-card extension-installed-card">
+      <div class="provider-card-header plugin-card-header">
+        <div class="provider-card-info">
+          <div class="provider-card-name">Installed manifest extensions</div>
+          <div class="provider-card-meta">Enable or disable already-present local extensions. Reload WebUI to apply injected asset changes to this browser tab.</div>
+        </div>
+      </div>
+      <div class="provider-card-body extension-card-body">
+        ${_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured))}
+      </div>
+    </div>
+    <div class="provider-card extension-assets-card">
+      <div class="provider-card-header plugin-card-header">
+        <div class="provider-card-info">
+          <div class="provider-card-name">Final public asset URLs</div>
+          <div class="provider-card-meta">Same-origin URLs that may be injected into the app shell.</div>
+        </div>
+      </div>
+      <div class="provider-card-body extension-card-body">
+        <div class="provider-card-label">Scripts</div>
+        ${_extensionAssetList(scripts)}
+        <div class="provider-card-label extension-section-label">Stylesheets</div>
+        ${_extensionAssetList(styles)}
+      </div>
+    </div>
+    ${_extensionSidecarCard(sidecars)}
+    <div class="provider-card extension-warnings-card">
+      <div class="provider-card-header plugin-card-header">
+        <div class="provider-card-info">
+          <div class="provider-card-name">Sanitized warnings</div>
+          <div class="provider-card-meta">Codes and coarse sources only; paths and rejected values are not shown.</div>
+        </div>
+      </div>
+      <div class="provider-card-body extension-card-body">
+        ${_extensionWarningList(data&&data.warnings)}
+      </div>
+    </div>
+  `;
+  _bindExtensionToggleButtons(target);
+  _monitorExtensionSidecars(sidecars,seq);
+}
+
+function _bindExtensionToggleButtons(root){
+  if(!root) return;
+  root.querySelectorAll('[data-extension-toggle-id]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionToggle(btn));
+  });
+}
+
+async function handleExtensionToggle(btn){
+  if(!btn||btn.disabled) return;
+  const id=btn.dataset.extensionToggleId||'';
+  const enabled=btn.dataset.extensionNextEnabled==='true';
+  if(!id) return;
+  const previousText=btn.textContent;
+  btn.disabled=true;
+  btn.textContent=enabled?'Enabling…':'Disabling…';
+  try{
+    const data=await api('/api/extensions/toggle',{method:'POST',body:JSON.stringify({id,enabled})});
+    showToast(enabled?'Extension enabled. Reload WebUI to apply changes.':'Extension disabled. Reload WebUI to apply changes.');
+    _renderExtensionsPanel(data,++_extensionsSidecarMonitorSeq);
+  }catch(e){
+    btn.disabled=false;
+    btn.textContent=previousText;
+    showToast('Failed to update extension: '+(e&&e.message?e.message:String(e)));
+  }
+}
+
+async function loadExtensionsPanel(){
+  const target=$('extensionsDiagnostics');
+  const copyBtn=$('extensionsCopyDiagnosticsBtn');
+  if(!target) return;
+  if(copyBtn) copyBtn.disabled=true;
+  const seq=++_extensionsSidecarMonitorSeq;
+  target.innerHTML='<div class="extensions-loading">Loading extension diagnostics…</div>';
+  try{
+    const data=await api('/api/extensions/status');
+    if(seq!==_extensionsSidecarMonitorSeq) return;
+    _renderExtensionsPanel(data,seq);
+  }catch(e){
+    _extensionsStatusData=null;
+    if(copyBtn) copyBtn.disabled=true;
+    target.innerHTML='<div class="extensions-error">Failed to load extension diagnostics: '+esc(e.message||String(e))+'</div>';
+  }
+}
+
+async function copyExtensionsDiagnostics(){
+  if(!_extensionsStatusData) return;
+  const text=JSON.stringify(_extensionsStatusData,null,2);
+  const success=()=>showToast(t('copied')||'Copied!');
+  const fail=()=>showToast(t('copy_failed')||'Copy failed');
+  if(typeof _copyText==='function'){
+    _copyText(text).then(success).catch(fail);
+    return;
+  }
+  if(typeof navigator!=='undefined'&&navigator&&navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(success).catch(fail);
+  }else{
+    fail();
   }
 }
 
@@ -7546,9 +8041,12 @@ const enabled=plugin&&plugin.enabled!==false;
          </label>
        </div>`
     : '');
+  const isProviderActive = plugin&&typeof plugin.is_active_provider==='boolean'
+    ? plugin.is_active_provider
+    : isProvider;
   let badgeText;
   let badgeClass;
-  if(isProvider){
+  if(isProviderActive){
     badgeText=t('plugins_active_provider');
     badgeClass='plugin-card-badge-provider';
   }else if(activation==='enabled'){
@@ -8259,6 +8757,7 @@ async function _refreshProviderModels(providerId, btn){
 }
 
 let _settingsPasswordEnvLocked=false;
+let _settingsPasswordAuthEnabled=false;
 function _setSettingsAuthButtonsVisible(active){
   const signOutBtn=$('btnSignOut');
   if(signOutBtn) signOutBtn.style.display=active?'':'none';
@@ -8273,6 +8772,63 @@ function _syncPasswordlessButton(authStatus){
   const can=!!(authStatus&&authStatus.auth_enabled&&authStatus.password_auth_enabled&&authStatus.passkeys_count>0&&!_settingsPasswordEnvLocked);
   btn.style.display=can?'':'none';
   btn.disabled=!can;
+}
+
+function _renderSettingsAuthStatus(authStatus){
+  const el=$('settingsAuthStatus');
+  if(!el) return;
+  if(!authStatus) { el.style.display='none'; return; }
+  el.style.display='block';
+  let label='',cls='detail-badge ok';
+  if(authStatus.auth_enabled && authStatus.password_auth_enabled){
+    label=t('auth_status_password'); cls='detail-badge ok';
+  }else if(authStatus.auth_enabled && !authStatus.password_auth_enabled){
+    label=t('auth_status_passkey_only'); cls='detail-badge warn';
+  }else{
+    label=t('auth_status_unauthenticated'); cls='detail-badge err';
+  }
+  el.innerHTML='<span class="'+cls+'" style="font-size:11px">'+label+'</span>';
+}
+
+function _updateCurrentPasswordVisibility(){
+  const block=$('settingsCurrentPasswordBlock');
+  if(!block) return;
+  block.style.display=_settingsPasswordAuthEnabled?'block':'none';
+}
+
+function _updateAuthWarningBadge(authStatus){
+  const badges=['authWarningBadgeDesktop','authWarningBadgeMobile'];
+  const authDisabled=!authStatus||!authStatus.auth_enabled;
+  const acknowledged=!!(authStatus&&authStatus.auth_disabled_acknowledged);
+  badges.forEach(function(id){
+    const el=$(id);
+    if(!el) return;
+    if(!authDisabled){ el.style.display='none'; return; }
+    el.style.display='block';
+    el.style.background=acknowledged?'#e8a030':'#e05';
+  });
+}
+
+function _updateAuthDisabledWarning(authStatus){
+  const el=$('settingsAuthDisabledWarning');
+  if(!el) return;
+  const authDisabled=!authStatus||!authStatus.auth_enabled;
+  if(!authDisabled){ el.style.display='none'; return; }
+  el.style.display='block';
+  const cb=$('settingsAuthDisabledAck');
+  if(cb) cb.checked=!!(authStatus&&authStatus.auth_disabled_acknowledged);
+}
+
+async function _setAuthDisabledAck(checked){
+  try{
+    await api('/api/settings',{method:'POST',body:JSON.stringify({_auth_disabled_acknowledged:!!checked})});
+    try{
+      const authStatus=await api('/api/auth/status');
+      _updateAuthWarningBadge(authStatus);
+    }catch(e){}
+  }catch(e){
+    showToast(t('auth_ack_save_failed')+e.message);
+  }
 }
 
 function _b64uToBytes(s){
@@ -8676,6 +9232,14 @@ function _openAuxAdvancedOptions(taskKey,cfg){
     if(typeof showToast==='function') showToast(isMain?(t('settings_main_advanced_saved')||'Main model options saved'):(t('settings_aux_advanced_saved')||'Auxiliary options saved'));
     overlay.style.display='none';
     _loadAuxiliaryModels();
+    // #4650 review: a main-model advanced save can change base_url, which
+    // /api/reasoning's answer depends on for some providers (e.g. LM Studio),
+    // WITHOUT changing the model/provider cache key. Invalidate the reasoning
+    // cache and refresh so the chip reflects the new config (one refetch).
+    if(isMain){
+      if(typeof _lastReasoningFetchKey!=='undefined') _lastReasoningFetchKey=null;
+      if(typeof fetchReasoningChip==='function') fetchReasoningChip();
+    }
    }catch(e){
     if(typeof showToast==='function') showToast(isMain?(t('settings_main_advanced_save_failed')||'Failed to save main model options'):(t('settings_aux_advanced_save_failed')||'Failed to save auxiliary options'));
    }
@@ -8892,6 +9456,7 @@ async function saveSettings(andClose){
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
   body.chat_activity_display_mode=(($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')?'transparent_stream':'compact_worklog';
   body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
+  body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
   body.language=language;
   body.show_token_usage=showTokenUsage;
   body.show_quota_chip=showQuotaChip===true;
@@ -8922,8 +9487,17 @@ async function saveSettings(andClose){
   body.bot_name=botName||'Hermes';
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
+    const currentPwField=$('settingsCurrentPassword');
+    const currentPw=(currentPwField||{}).value||'';
+    if(_settingsPasswordAuthEnabled && !currentPw.trim()){
+      if(currentPwField) currentPwField.focus();
+      showToast(t('current_password_required'));
+      return;
+    }
+    const payload={...body,_set_password:pw.trim()};
+    if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
-      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({...body,_set_password:pw.trim()})});
+      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
       if(modelChanged && model){
         try{
           await api('/api/default-model',{method:'POST',body:JSON.stringify({model})});
@@ -8934,6 +9508,16 @@ async function saveSettings(andClose){
       }
       _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
+      const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
+      const pwField=$('settingsPassword'); if(pwField) pwField.value='';
+      _settingsPasswordAuthEnabled=!!saved.password_auth_enabled;
+      _updateCurrentPasswordVisibility();
+      try{
+        const authStatus=await api('/api/auth/status');
+        _renderSettingsAuthStatus(authStatus);
+        _updateAuthWarningBadge(authStatus);
+        _updateAuthDisabledWarning(authStatus);
+      }catch(e){}
       _settingsDirty=false;
       _resetSettingsPanelState();
       if(!andClose) _pendingSettingsTargetPanel = null;
@@ -8974,28 +9558,57 @@ async function signOut(){
 async function goPasswordless(){
   const ok=await showConfirmDialog({title:'Go passwordless?',message:'This removes the password and keeps passkey sign-in enabled. Keep at least one passkey registered or you could lose access.',confirmLabel:'Go passwordless',danger:false,focusCancel:true});
   if(!ok) return;
+  const currentPw=($('settingsCurrentPassword')||{}).value;
+  const payload={_passwordless:true};
+  if(_settingsPasswordAuthEnabled && currentPw) payload._current_password=currentPw;
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({_passwordless:true})});
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
     showToast('Password removed. Passkey sign-in remains enabled.');
     _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
     _syncPasswordlessButton({auth_enabled:saved.auth_enabled,password_auth_enabled:false,passkeys_count:1});
     const pwField=$('settingsPassword'); if(pwField) pwField.value='';
+    const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
+    _settingsPasswordAuthEnabled=false;
+    _updateCurrentPasswordVisibility();
+    try{
+      const authStatus=await api('/api/auth/status');
+      _renderSettingsAuthStatus(authStatus);
+      _updateAuthWarningBadge(authStatus);
+    }catch(e){}
   }catch(e){showToast('Failed to go passwordless: '+e.message);}
 }
 
 async function disableAuth(){
-  const _disAuth=await showConfirmDialog({title:t('disable_auth_confirm_title'),message:t('disable_auth_confirm_message'),confirmLabel:t('disable'),danger:true,focusCancel:true});
-  if(!_disAuth) return;
+  const currentPwField=$('settingsCurrentPassword');
+  const currentPw=(currentPwField||{}).value||'';
+  if(_settingsPasswordAuthEnabled && !currentPw.trim()){
+    if(currentPwField) currentPwField.focus();
+    showToast(t('current_password_required'));
+    return;
+  }
+  const confirmText='DISABLE AUTH';
+  const userInput=await showPromptDialog({title:t('disable_auth_confirm_title'),message:t('disable_auth_confirm_message')+' '+t('disable_auth_typed_confirm'),placeholder:confirmText,confirmLabel:t('disable_auth'),danger:true});
+  if(!userInput || userInput.trim()!==confirmText) return;
+  const payload={_clear_password:true};
+  if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
   try{
-    await api('/api/settings',{method:'POST',body:JSON.stringify({_clear_password:true})});
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
     showToast(t('auth_disabled'));
-    // Hide auth controls since auth is now off
     const disableBtn=$('btnDisableAuth');
     if(disableBtn) disableBtn.style.display='none';
     const signOutBtn=$('btnSignOut');
     if(signOutBtn) signOutBtn.style.display='none';
     _syncPasswordlessButton({auth_enabled:false,password_auth_enabled:false,passkeys_count:0});
+    _settingsPasswordAuthEnabled=false;
+    _updateCurrentPasswordVisibility();
+    const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
     loadPasskeys();
+    try{
+      const authStatus=await api('/api/auth/status');
+      _renderSettingsAuthStatus(authStatus);
+      _updateAuthWarningBadge(authStatus);
+      _updateAuthDisabledWarning(authStatus);
+    }catch(e){}
   }catch(e){
     showToast(t('disable_auth_failed')+e.message);
   }

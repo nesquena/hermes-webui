@@ -49,7 +49,8 @@ def test_partition_helper_applies_message_source_project_and_archive_gates():
     assert "const showCliOnly=_sessionSourceFilter==='cli';" in block
     assert "if(!_showArchived&&s.archived) continue;" in block
     assert "if(s.archived){" in block
-    assert "archivedCount: showCliOnly ? cliArchivedCount : webuiArchivedCount," in block
+    assert "const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;" in block
+    assert "archivedCount: Math.max(showCliOnly ? cliArchivedCount : webuiArchivedCount, Number(serverArchivedCount||0))," in block
     assert "return {" in block
     assert "profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered," in block
     assert "sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw," in block

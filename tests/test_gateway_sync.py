@@ -1331,7 +1331,13 @@ def test_sessions_response_backfills_imported_messaging_source_metadata(cleanup_
     sid = 'gw_legacy_import_weixin_001'
     cleanup_test_sessions.append(sid)
     try:
-        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+        _insert_gateway_session(
+            conn,
+            session_id=sid,
+            source='weixin',
+            title='Weixin Session',
+            session_key='agent:test:weixin:legacy-import-backfill',
+        )
         s = Session(
             session_id=sid,
             title='Legacy Imported Weixin',
@@ -1487,6 +1493,159 @@ def test_sessions_response_distinguishes_same_user_different_chat_identity_from_
             conn.close()
         except Exception:
             pass
+
+
+def test_messaging_projection_keeps_no_identity_continuation_when_gateway_source_active(monkeypatch, cleanup_test_sessions):
+    """A WebUI/mobile recovery continuation must not disappear behind source-wide Gateway hiding.
+
+    Long WebUI turns can rotate to a child session during compression. If the
+    browser is backgrounded before the final SSE handoff, recovery depends on
+    the continuation still being visible in the sidebar. This is source-generic:
+    Telegram, Discord, Slack, and Weixin all use the same messaging projection.
+    """
+    from api import routes
+    from api.models import Session
+
+    parent_sid = "webui_pre_compression_snapshot"
+    cleanup_test_sessions.append(parent_sid)
+    Session(
+        session_id=parent_sid,
+        title="Archived pre-compression snapshot",
+        model="openai/gpt-5",
+        messages=[{"role": "user", "content": "before compression", "timestamp": time.time() - 10}],
+        pre_compression_snapshot=True,
+    ).save(touch_updated_at=False)
+
+    for source in ("telegram", "discord", "slack", "weixin"):
+        active_sid = f"{source}_active_sid"
+        continuation_sid = f"webui_{source}_continuation_no_identity"
+        cleanup_test_sessions.append(continuation_sid)
+        monkeypatch.setattr(
+            routes,
+            "_load_gateway_session_identity_map",
+            lambda source=source, active_sid=active_sid: {
+                active_sid: {
+                    "session_key": f"agent:main:{source}:dm:user_1",
+                    "raw_source": source,
+                    "platform": source,
+                    "chat_type": "dm",
+                    "chat_id": "user_1",
+                    "user_id": "user_1",
+                },
+            },
+        )
+        sessions = [
+            {
+                "session_id": active_sid,
+                "raw_source": source,
+                "session_source": "messaging",
+                "title": f"Current {source} DM",
+                "updated_at": 100,
+                "message_count": 3,
+            },
+            {
+                "session_id": continuation_sid,
+                "raw_source": source,
+                "session_source": "messaging",
+                "chat_id": "webui_recovery_chat",
+                "chat_type": "dm",
+                "title": f"Recovered {source} WebUI continuation",
+                "parent_session_id": parent_sid,
+                "updated_at": 200,
+                "message_count": 1003,
+            },
+        ]
+
+        kept = routes._keep_latest_messaging_session_per_source(sessions)
+        ids = {session.get("session_id") for session in kept}
+
+        assert ids == {active_sid, continuation_sid}
+
+
+def test_session_load_exposes_continuation_for_pre_compression_snapshot(cleanup_test_sessions):
+    """Reloading an old hidden compression snapshot should give the browser a recovery target."""
+    from api.models import Session
+
+    parent_sid = "webui_mobile_snapshot_parent"
+    child_sid = "webui_mobile_snapshot_child"
+    now = time.time()
+    cleanup_test_sessions.extend([parent_sid, child_sid])
+
+    parent = Session(
+        session_id=parent_sid,
+        title="Mobile reload parent",
+        model="openai/gpt-5",
+        messages=[{"role": "user", "content": "before compression", "timestamp": now - 10}],
+        created_at=now - 20,
+        updated_at=now - 10,
+        pre_compression_snapshot=True,
+    )
+    child = Session(
+        session_id=child_sid,
+        title="Mobile reload child",
+        model="openai/gpt-5",
+        parent_session_id=parent_sid,
+        messages=[{"role": "assistant", "content": "finished after reload", "timestamp": now}],
+        created_at=now - 5,
+        updated_at=now,
+    )
+    parent.save(touch_updated_at=False)
+    child.save(touch_updated_at=False)
+
+    data, status = get(f"/api/session?session_id={parent_sid}&messages=0&resolve_model=0")
+
+    assert status == 200
+    assert data["session"].get("session_id") == parent_sid
+    assert data["session"].get("continuation_session_id") == child_sid
+
+
+def test_session_load_exposes_multihop_continuation_for_repeated_compression(cleanup_test_sessions):
+    """A stale older snapshot should recover to the newest visible descendant."""
+    from api.models import Session
+
+    root_sid = "webui_mobile_snapshot_root"
+    middle_sid = "webui_mobile_snapshot_middle"
+    child_sid = "webui_mobile_snapshot_grandchild"
+    now = time.time()
+    cleanup_test_sessions.extend([root_sid, middle_sid, child_sid])
+
+    root = Session(
+        session_id=root_sid,
+        title="Mobile reload root snapshot",
+        model="openai/gpt-5",
+        messages=[{"role": "user", "content": "before first compression", "timestamp": now - 30}],
+        created_at=now - 40,
+        updated_at=now - 30,
+        pre_compression_snapshot=True,
+    )
+    middle = Session(
+        session_id=middle_sid,
+        title="Mobile reload middle snapshot",
+        model="openai/gpt-5",
+        parent_session_id=root_sid,
+        messages=[{"role": "assistant", "content": "before second compression", "timestamp": now - 20}],
+        created_at=now - 25,
+        updated_at=now - 20,
+        pre_compression_snapshot=True,
+    )
+    child = Session(
+        session_id=child_sid,
+        title="Mobile reload final child",
+        model="openai/gpt-5",
+        parent_session_id=middle_sid,
+        messages=[{"role": "assistant", "content": "finished after repeated compression", "timestamp": now}],
+        created_at=now - 5,
+        updated_at=now,
+    )
+    root.save(touch_updated_at=False)
+    middle.save(touch_updated_at=False)
+    child.save(touch_updated_at=False)
+
+    data, status = get(f"/api/session?session_id={root_sid}&messages=0&resolve_model=0")
+
+    assert status == 200
+    assert data["session"].get("session_id") == root_sid
+    assert data["session"].get("continuation_session_id") == child_sid
 
 
 def test_messaging_projection_hides_stale_gateway_internal_segments(monkeypatch):

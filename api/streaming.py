@@ -4,6 +4,7 @@ Includes Sprint 10 cancel support via CANCEL_FLAGS.
 """
 import base64
 import contextlib
+import contextvars
 import json
 import logging
 import mimetypes
@@ -84,6 +85,78 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
 _ENV_LOCK = threading.Lock()
 
 _KEYLESS_CUSTOM_API_KEY = "dummy-key"
+
+_STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "webui_streaming_cron_profile_home",
+    default=None,
+)
+_STREAMING_CRONJOB_WRAPPER_INSTALLED = False
+
+
+def _install_streaming_cronjob_profile_wrapper() -> None:
+    """Wrap the agent cronjob tool so calls run under the streaming profile.
+
+    The in-chat agent run already binds per-turn contextvars for other
+    session-scoped state. Cron jobs are special because ``cron.jobs`` snapshots
+    path constants at import time, so the model-facing ``cronjob`` tool must
+    enter the existing WebUI cron profile context at the tool-call boundary.
+    That context uses the cron-specific lock and restores the module caches as
+    soon as the single cron tool call returns, avoiding long-lived global path
+    mutation for the whole agent turn.
+    """
+    global _STREAMING_CRONJOB_WRAPPER_INSTALLED
+    if _STREAMING_CRONJOB_WRAPPER_INSTALLED:
+        return
+    try:
+        from tools.registry import registry
+    except Exception:
+        logger.debug("streaming cronjob wrapper: tools registry unavailable", exc_info=True)
+        return
+
+    entry = registry.get_entry("cronjob")
+    if entry is None:
+        try:
+            import tools.cronjob_tools  # noqa: F401
+        except Exception:
+            logger.debug("streaming cronjob wrapper: cronjob tool import failed", exc_info=True)
+        entry = registry.get_entry("cronjob")
+    if entry is None:
+        logger.debug("streaming cronjob wrapper: cronjob tool not registered")
+        return
+    original_handler = entry.handler
+    if getattr(original_handler, "_webui_streaming_profile_wrapper", False):
+        _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+        return
+
+    # This relies on the agent tool executor's ``propagate_context_to_thread``
+    # using an unfiltered ``contextvars.copy_context()`` so this WebUI-owned
+    # contextvar reaches the sync cronjob handler even when the tool call runs
+    # on the agent's ThreadPoolExecutor worker.
+    def _profile_scoped_cronjob_handler(args, **kwargs):
+        profile_home = _STREAMING_CRON_PROFILE_HOME.get()
+        if not profile_home:
+            return original_handler(args, **kwargs)
+        from api.profiles import cron_profile_context_for_home
+        with cron_profile_context_for_home(Path(profile_home)):
+            return original_handler(args, **kwargs)
+
+    _profile_scoped_cronjob_handler.__dict__["_webui_streaming_profile_wrapper"] = True
+    _profile_scoped_cronjob_handler.__dict__["_webui_original_handler"] = original_handler
+    registry.register(
+        name=entry.name,
+        toolset=entry.toolset,
+        schema=entry.schema,
+        handler=_profile_scoped_cronjob_handler,
+        check_fn=entry.check_fn,
+        requires_env=entry.requires_env,
+        is_async=entry.is_async,
+        description=entry.description,
+        emoji=entry.emoji,
+        max_result_size_chars=entry.max_result_size_chars,
+        dynamic_schema_overrides=entry.dynamic_schema_overrides,
+    )
+    _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+
 
 _PERSISTENT_MEMORY_FILES = (
     ("memory", ("memories", "MEMORY.md")),
@@ -5721,50 +5794,126 @@ def _run_agent_streaming(
                 _cc = getattr(_agent, 'context_compressor', None)
                 if _cc:
                     _cc_cl_u = getattr(_cc, 'context_length', 0) or 0
-                    # Default-only guard (#3256): the agent-side compressor is
-                    # built in agent_init with the global model.context_length
-                    # applied unconditionally — for non-default models that
-                    # value is the stale global cap (e.g. 232K). Drop it here
-                    # so the live usage payload doesn't surface the wrong cap.
-                    # PERF: resolve the real per-model cap at most once per
-                    # stream (cached in _real_ctx_cache). This snapshot runs on
-                    # every metering tick; doing the config read + metadata
-                    # lookup per tick froze non-default-model streams.
+                    # Stale-compressor self-heal (#3256, broadened): the
+                    # agent-side compressor caches a context_length from the
+                    # model it was *built/last-updated* with. After an in-place
+                    # model switch (or when agent_init seeded it with the global
+                    # model.context_length cap), that cached value can be the
+                    # WRONG model's window — e.g. a session on claude-opus-4.8
+                    # (1M / 936k prompt on Copilot) whose compressor still holds
+                    # claude-opus-4.5's 168k. The original guard only corrected
+                    # the narrow case where the cached value equalled the config
+                    # cap exactly; a leftover *other-model* value (168k) slipped
+                    # straight through to the live usage payload. Broaden it:
+                    # ALWAYS resolve the real per-model window for the agent's
+                    # CURRENT model and, when that differs from the cached value,
+                    # surface the real one. Frontend hydration (GET /api/session)
+                    # already does this; this aligns the streaming path with it
+                    # so "refresh shows 1M, send-a-message drops to 168k" can't
+                    # happen.
+                    # PERF: resolve at most once per stream (cached in
+                    # _real_ctx_cache). This snapshot runs on every metering
+                    # tick; doing the config read + metadata lookup per tick
+                    # froze non-default-model streams.
                     if _real_ctx_cache[0] is None:
-                        _resolved_real = 0  # 0 = guard not applicable / failed
+                        _resolved_real = 0  # 0 = no correction / lookup failed
                         try:
-                            from api.config import get_config as _gc_u
-                            _cfg_u = _gc_u()
-                            _mcfg_u = _cfg_u.get('model', {}) if isinstance(_cfg_u, dict) else {}
-                            if isinstance(_mcfg_u, dict):
-                                _def_u = str(_mcfg_u.get('default') or '').strip()
-                                _raw_u = _mcfg_u.get('context_length')
+                            _sm_u = str(getattr(_agent, 'model', '') or '').strip()
+                            _prov_u = str(getattr(_agent, 'provider', '') or '').strip()
+                            _base_u = str(getattr(_agent, 'base_url', '') or '').strip()
+                            _key_u = getattr(_agent, 'api_key', '') or ''
+                            if _sm_u:
+                                # Resolve the real window through the SAME helper
+                                # hydration uses (routes._context_length_lookup_inputs_for_model
+                                # + get_model_context_length). This honors the
+                                # nested per-model config override
+                                # (model.<provider>.models.<model>.context_length,
+                                # e.g. claude-opus-4.8 -> 1,000,000) and custom-
+                                # provider keys, so the streaming/SSE path and the
+                                # GET /api/session path land on the IDENTICAL value.
+                                # Reusing the helper (instead of hand-reading the
+                                # flat top-level model.context_length, which is
+                                # None here) is what prevents a new mismatch like
+                                # "refresh shows 1M, send-a-message shows 936k".
                                 try:
-                                    _cl_u = int(_raw_u) if _raw_u is not None else 0
-                                except (TypeError, ValueError):
-                                    _cl_u = 0
-                                _sm_u = str(getattr(_agent, 'model', '') or '').strip()
-                                from api.routes import _model_matches_configured_default as _mmcd_u
-                                if (
-                                    _cl_u > 0
-                                    and _cc_cl_u == _cl_u
-                                    and _def_u
-                                    and _sm_u
-                                    and not _mmcd_u(_sm_u, _def_u, getattr(_agent, 'provider', '') or '')
-                                ):
-                                    # Recompute from real per-model metadata.
+                                    from api.routes import (
+                                        _context_length_lookup_inputs_for_model as _cli_u,
+                                        _should_accept_session_context_length_refresh as _accept_u,
+                                    )
+                                    from agent.model_metadata import get_model_context_length as _g_u
+                                    # Resolve the SESSION's own profile config, not
+                                    # the ambient one. This worker is a detached
+                                    # thread that does NOT inherit the per-request
+                                    # thread-local profile context, so a bare
+                                    # get_config() resolves the process-global
+                                    # (default) profile (#3294) — for a non-default
+                                    # profile that pins a different per-model
+                                    # context_length, that would surface the WRONG
+                                    # profile's window in the live payload. Read the
+                                    # session's profile home explicitly, mirroring
+                                    # the worker's own _cfg resolution below.
                                     try:
-                                        from agent.model_metadata import get_model_context_length as _g_u
-                                        _real_u = _g_u(
-                                            _sm_u,
-                                            getattr(_agent, 'base_url', '') or '',
-                                            config_context_length=None,
-                                            provider=getattr(_agent, 'provider', '') or '',
-                                        ) or 0
-                                        if _real_u:
+                                        from api.config import get_config_for_profile_home as _gch_u
+                                        from api.profiles import get_hermes_home_for_profile as _ghp_u
+                                        _ph_u = _ghp_u(getattr(_session_obj, 'profile', None))
+                                        _cfg_u = _gch_u(_ph_u)
+                                    except Exception:
+                                        from api.config import get_config as _gc_u
+                                        _cfg_u = _gc_u()
+                                    _lk_u = _cli_u(
+                                        _sm_u,
+                                        _prov_u,
+                                        base_url=_base_u,
+                                        api_key=_key_u,
+                                        cfg=_cfg_u if isinstance(_cfg_u, dict) else {},
+                                    )
+                                    _real_u = _g_u(
+                                        _sm_u,
+                                        _lk_u.base_url,
+                                        api_key=_lk_u.api_key,
+                                        config_context_length=_lk_u.config_context_length,
+                                        provider=_lk_u.provider or _prov_u or '',
+                                        custom_providers=_lk_u.custom_providers,
+                                    ) or 0
+                                    # Only treat it as a correction when the real
+                                    # window is valid AND disagrees with the
+                                    # compressor's cached value. Equal => nothing
+                                    # to fix, leave the fast path untouched.
+                                    # #4248: never let a low-confidence 256k metadata
+                                    # fallback clobber a LARGER cached window — that
+                                    # would reintroduce the very "drops to a smaller
+                                    # window mid-stream" regression this guard fixes.
+                                    # Reuse the exact acceptance gate hydration uses.
+                                    # NOTE: we deliberately omit model_changed (=False
+                                    # default) here, unlike hydration. The streaming
+                                    # path can't cheaply know if the model changed
+                                    # since the compressor was seeded, so we err
+                                    # toward the LARGER window (auto-compress fires
+                                    # late, not early — the safe direction), and the
+                                    # next GET /api/session hydration self-heals any
+                                    # genuine downward 256k case via model_changed.
+                                    if (
+                                        _real_u and _real_u != _cc_cl_u
+                                        and _accept_u(_cc_cl_u, _real_u)
+                                    ):
+                                        _resolved_real = _real_u
+                                except TypeError:
+                                    # Older hermes-agent: legacy 2-arg form.
+                                    try:
+                                        from api.routes import (
+                                            _should_accept_session_context_length_refresh as _accept2_u,
+                                        )
+                                        from agent.model_metadata import get_model_context_length as _g2_u
+                                        _real_u = _g2_u(_sm_u, _base_u) or 0
+                                        if (
+                                            _real_u and _real_u != _cc_cl_u
+                                            and _accept2_u(_cc_cl_u, _real_u)
+                                        ):
                                             _resolved_real = _real_u
                                     except Exception:
                                         pass
+                                except Exception:
+                                    pass
                         except Exception:
                             _resolved_real = 0
                         _real_ctx_cache[0] = _resolved_real
@@ -5905,6 +6054,7 @@ def _run_agent_streaming(
     # Placed ABOVE the _checkpoint_stop cluster so that cluster stays adjacent
     # to the `try:` (preserves the Issue #765 static-locator invariant).
     _turn_session_identity_tokens = None
+    _streaming_cron_profile_home_token = None
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -5951,6 +6101,7 @@ def _run_agent_streaming(
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
+            _streaming_cron_profile_home_token = _STREAMING_CRON_PROFILE_HOME.set(_profile_home)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
             _safe_profile_runtime_env = filter_runtime_env_for_gateway_parity(_profile_runtime_env)
         except ImportError:
@@ -6008,6 +6159,7 @@ def _run_agent_streaming(
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
+        _install_streaming_cronjob_profile_wrapper()
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
@@ -6032,9 +6184,12 @@ def _run_agent_streaming(
             os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
-                # Patch module-level caches to match the active profile.
+                # Patch skill module caches to match the active profile.
                 # _set_hermes_home() does this for process-wide switches
-                # but per-request switches skip it (#1700).
+                # but per-request switches skip it (#1700). The in-chat
+                # cronjob tool is wrapped separately at its tool-call boundary
+                # with cron_profile_context_for_home (#4580) so cron.jobs path
+                # caches are not mutated for the entire agent turn.
                 # Modules were prewarmed by _prewarm_skill_tool_modules()
                 # above, so we only do lightweight sys.modules lookups and
                 # attribute assignments here — no first-time import under
@@ -7910,25 +8065,48 @@ def _run_agent_streaming(
                     # cap (e.g. 232K) that would clobber the real 1M metadata
                     # on every stream end. In that case skip the compressor
                     # value and let the fallback resolver below recompute.
+                    # #4618: broaden the stale-compressor guard the same way the
+                    # live-usage snapshot does. The OLD test only skipped the
+                    # compressor value when it equalled the config cap EXACTLY
+                    # (a non-default model carrying the global cap). But a
+                    # compressor can hold a DIFFERENT model's window after an
+                    # in-place model switch (e.g. opus-4.5's 168k lingering on an
+                    # opus-4.8 1M session) — that value != the config cap, so the
+                    # old guard let it persist to s.context_length and the SSE
+                    # payload, snapping the indicator back to 168k at turn-end.
+                    # Resolve the real per-model window via the SAME helper the
+                    # live path + hydration use and skip the compressor value
+                    # whenever the real window differs, honoring the #4248
+                    # acceptance gate (never let a low-confidence 256k fallback
+                    # clobber a larger cached window).
                     _skip_cc_cl = False
                     try:
-                        _model_cfg_cc = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
-                        if isinstance(_model_cfg_cc, dict):
-                            _cfg_default_cc = str(_model_cfg_cc.get('default') or '').strip()
-                            _raw_cfg_cl_cc = _model_cfg_cc.get('context_length')
+                        from api.routes import (
+                            _context_length_lookup_inputs_for_model as _cli_cc,
+                            _should_accept_session_context_length_refresh as _accept_cc,
+                        )
+                        from agent.model_metadata import get_model_context_length as _g_cc
+                        _sess_model_cc = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                        if _sess_model_cc and _cc_cl > 0:
+                            _lk_cc = _cli_cc(
+                                _sess_model_cc,
+                                resolved_provider or '',
+                                base_url=getattr(agent, 'base_url', '') or resolved_base_url or '',
+                                api_key=getattr(agent, 'api_key', '') or resolved_api_key or '',
+                                cfg=_cfg if isinstance(_cfg, dict) else {},
+                            )
                             try:
-                                _cfg_cl_cc = int(_raw_cfg_cl_cc) if _raw_cfg_cl_cc is not None else 0
-                            except (TypeError, ValueError):
-                                _cfg_cl_cc = 0
-                            _sess_model_cc = str(getattr(agent, 'model', resolved_model or '') or '').strip()
-                            from api.routes import _model_matches_configured_default as _mmcd_cc
-                            if (
-                                _cfg_cl_cc > 0
-                                and _cc_cl == _cfg_cl_cc
-                                and _cfg_default_cc
-                                and _sess_model_cc
-                                and not _mmcd_cc(_sess_model_cc, _cfg_default_cc, resolved_provider or '')
-                            ):
+                                _real_cc = _g_cc(
+                                    _sess_model_cc,
+                                    _lk_cc.base_url,
+                                    api_key=_lk_cc.api_key,
+                                    config_context_length=_lk_cc.config_context_length,
+                                    provider=_lk_cc.provider or resolved_provider or '',
+                                    custom_providers=_lk_cc.custom_providers,
+                                ) or 0
+                            except TypeError:
+                                _real_cc = _g_cc(_sess_model_cc, _lk_cc.base_url) or 0
+                            if _real_cc and _real_cc != _cc_cl and _accept_cc(_cc_cl, _real_cc):
                                 _skip_cc_cl = True
                     except Exception:
                         pass
@@ -8176,31 +8354,46 @@ def _run_agent_streaming(
                 _orig_cc_cl_sse = _cc_cl_sse
                 _orig_cc_thresh_sse = getattr(_cc, 'threshold_tokens', 0) or 0
                 _dropped_stale_cap_sse = False
-                # Default-only guard (#3256): the agent-side context_compressor
-                # is constructed in agent_init with the global model.context_length
-                # applied unconditionally, so for non-default models its
-                # context_length is the stale global cap (e.g. 232K) — surfacing
-                # it via SSE makes the indicator show the wrong window even
-                # after the session was correctly resized. Drop the compressor
-                # value in that case and let the fallback resolver below recompute.
+                # Default-only guard (#3256), broadened (#4618): the agent-side
+                # context_compressor caches a context_length from the model it
+                # was built/last-updated with. For a non-default model it may be
+                # the stale global cap (e.g. 232K); after an in-place model switch
+                # it may be a DIFFERENT model's window (e.g. opus-4.5's 168k on an
+                # opus-4.8 1M session). Either way, surfacing it via the terminal
+                # `done` SSE makes the indicator REVERT to the wrong window on
+                # stream end (messages.js overwrites S.lastUsage with this payload)
+                # — the exact "send a message reverts to 168k" symptom. Resolve
+                # the real per-model window via the SAME helper the live path +
+                # hydration use; drop the compressor value whenever the real
+                # window differs, honoring the #4248 acceptance gate (never let a
+                # low-confidence 256k fallback clobber a larger cached window).
                 try:
-                    _model_cfg_sse = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
-                    if isinstance(_model_cfg_sse, dict):
-                        _cfg_default_sse = str(_model_cfg_sse.get('default') or '').strip()
-                        _raw_cfg_cl_sse = _model_cfg_sse.get('context_length')
+                    from api.routes import (
+                        _context_length_lookup_inputs_for_model as _cli_sse,
+                        _should_accept_session_context_length_refresh as _accept_sse,
+                    )
+                    from agent.model_metadata import get_model_context_length as _g_sse
+                    _sess_model_sse = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                    if _sess_model_sse and _cc_cl_sse > 0:
+                        _lk_sse = _cli_sse(
+                            _sess_model_sse,
+                            resolved_provider or '',
+                            base_url=getattr(agent, 'base_url', '') or resolved_base_url or '',
+                            api_key=getattr(agent, 'api_key', '') or resolved_api_key or '',
+                            cfg=_cfg if isinstance(_cfg, dict) else {},
+                        )
                         try:
-                            _cfg_cl_sse = int(_raw_cfg_cl_sse) if _raw_cfg_cl_sse is not None else 0
-                        except (TypeError, ValueError):
-                            _cfg_cl_sse = 0
-                        _sess_model_sse = str(getattr(agent, 'model', resolved_model or '') or '').strip()
-                        from api.routes import _model_matches_configured_default as _mmcd_sse
-                        if (
-                            _cfg_cl_sse > 0
-                            and _cc_cl_sse == _cfg_cl_sse
-                            and _cfg_default_sse
-                            and _sess_model_sse
-                            and not _mmcd_sse(_sess_model_sse, _cfg_default_sse, resolved_provider or '')
-                        ):
+                            _real_sse = _g_sse(
+                                _sess_model_sse,
+                                _lk_sse.base_url,
+                                api_key=_lk_sse.api_key,
+                                config_context_length=_lk_sse.config_context_length,
+                                provider=_lk_sse.provider or resolved_provider or '',
+                                custom_providers=_lk_sse.custom_providers,
+                            ) or 0
+                        except TypeError:
+                            _real_sse = _g_sse(_sess_model_sse, _lk_sse.base_url) or 0
+                        if _real_sse and _real_sse != _cc_cl_sse and _accept_sse(_cc_cl_sse, _real_sse):
                             _cc_cl_sse = 0
                             _dropped_stale_cap_sse = True
                 except Exception:
@@ -8656,6 +8849,8 @@ def _run_agent_streaming(
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
+        if _streaming_cron_profile_home_token is not None:
+            _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on
         # every exit path so a reused thread-pool worker leaks no identity and
@@ -8737,9 +8932,10 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     interrupted.
 
     If no agent is cached, the agent is too old to support steer, or no
-    stream is active, return {"accepted": False, "fallback": "<reason>"}
-    so the frontend can fall back to interrupt or queue mode. The
-    fallback path is the existing behaviour from PR #1062.
+    stream is active, return {"accepted": False, "fallback": "<reason>"}.
+    The frontend must surface that failure without cancelling the active run;
+    Steer is active-run guidance, not implicit permission to Queue, Interrupt,
+    or Stop-and-send.
 
     Returns 200 with {"accepted": bool, "fallback": str|None,
     "stream_id": str|None}.
@@ -8773,7 +8969,8 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         except Exception:
             logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
     if not cached:
-        # No active agent for this session — caller falls back to interrupt
+        # No active agent for this session — caller surfaces a steer failure
+        # without cancelling the active run.
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
                            "stream_id": None})
     agent = cached[0]

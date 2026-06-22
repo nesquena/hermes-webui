@@ -9,7 +9,8 @@ recursion.  Covers:
 - Self-referencing symlink (ln -s . ~/workspace/loop)
 - Ancestor symlink (ln -s .. ~/workspace/up)
 - Internal symlink entries carry correct type / is_dir / target fields
-- External symlink directories are hidden from listings and cannot be traversed
+- External symlink directories are emitted as display-only rows (target_outside_workspace=True)
+  and cannot be traversed
 """
 import json
 import os
@@ -57,8 +58,8 @@ def make_session(created_list, ws=None):
 class TestSymlinkCycleDetection:
     """Symlink cycle detection in list_dir / safe_resolve_ws."""
 
-    def test_external_symlink_filtered_from_listing(self, cleanup_test_sessions, tmp_path_factory):
-        """External symlink dirs should be hidden from workspace listings."""
+    def test_external_symlink_emitted_as_display_only(self, cleanup_test_sessions, tmp_path_factory):
+        """External symlink dirs are emitted with target_outside_workspace=True (display-only)."""
         ws = tmp_path_factory.mktemp("ws")
         target = tmp_path_factory.mktemp("target")
         (target / "file.txt").write_text("hello")
@@ -67,8 +68,14 @@ class TestSymlinkCycleDetection:
 
         sid, _ = make_session(cleanup_test_sessions, ws)
         listing = get(f"/api/list?session_id={sid}&path=.")
-        names = [e["name"] for e in listing["entries"]]
-        assert "ext" not in names
+        entries = {e["name"]: e for e in listing["entries"]}
+        assert "ext" in entries
+        assert entries["ext"]["type"] == "symlink"
+        assert entries["ext"]["target_outside_workspace"] is True
+        # #4581 hardening: display-only escape rows don't disclose target-derived
+        # metadata (is_dir/target), so an external dir symlink reports is_dir=False.
+        assert entries["ext"]["is_dir"] is False
+        assert "target" not in entries["ext"]
 
     def test_internal_symlink_listed_as_symlink(self, cleanup_test_sessions, tmp_path_factory):
         """Internal symlink dirs should appear with type='symlink', is_dir=True."""
@@ -149,10 +156,11 @@ class TestSymlinkCycleDetection:
         (ws / "ext").symlink_to(target)
 
         sid, _ = make_session(cleanup_test_sessions, ws)
-        # List root — should hide the external symlink and not recurse.
+        # List root — external symlink is emitted as display-only, not traversed.
         listing = get(f"/api/list?session_id={sid}&path=.")
-        names = [e["name"] for e in listing["entries"]]
-        assert "ext" not in names
+        entries = {e["name"]: e for e in listing["entries"]}
+        assert "ext" in entries
+        assert entries["ext"]["target_outside_workspace"] is True
 
         # Traversing into ext/subdir crosses the workspace boundary and is blocked.
         try:
@@ -177,8 +185,8 @@ class TestSymlinkCycleDetection:
         assert link[0]["is_dir"] is False
         assert link[0]["size"] == 11  # len("hello world")
 
-    def test_external_symlink_file_filtered_from_listing(self, cleanup_test_sessions, tmp_path_factory):
-        """External symlink files should be hidden from workspace listings."""
+    def test_external_symlink_file_emitted_as_display_only(self, cleanup_test_sessions, tmp_path_factory):
+        """External symlink files are emitted with target_outside_workspace=True (display-only)."""
         ws = tmp_path_factory.mktemp("ws")
         real = tmp_path_factory.mktemp("real")
         (real / "data.txt").write_text("hello world")
@@ -186,8 +194,11 @@ class TestSymlinkCycleDetection:
 
         sid, _ = make_session(cleanup_test_sessions, ws)
         listing = get(f"/api/list?session_id={sid}&path=.")
-        names = [e["name"] for e in listing["entries"]]
-        assert "link.txt" not in names
+        entries = {e["name"]: e for e in listing["entries"]}
+        assert "link.txt" in entries
+        assert entries["link.txt"]["type"] == "symlink"
+        assert entries["link.txt"]["target_outside_workspace"] is True
+        assert entries["link.txt"]["is_dir"] is False
 
     def test_path_traversal_still_blocked(self, cleanup_test_sessions, tmp_path_factory):
         """Raw .. traversal must still be blocked even with symlink support."""

@@ -31,6 +31,22 @@ def _event_listener_body(src: str, event_name: str) -> str:
     return src[start:end]
 
 
+def _function_body(src: str, name: str) -> str:
+    start = src.find(f"function {name}")
+    assert start != -1, f"{name} not found"
+    brace = src.find("{", start)
+    assert brace != -1, f"{name} body not found"
+    depth = 0
+    for idx in range(brace, len(src)):
+        if src[idx] == "{":
+            depth += 1
+        elif src[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[brace + 1 : idx]
+    raise AssertionError(f"{name} body did not close")
+
+
 def _registry_snapshot() -> dict:
     assert NODE, "node is required for assistant_turn_anchors.js registry tests"
     script = f"""
@@ -1236,25 +1252,26 @@ def test_registry_instances_do_not_share_owner_state():
     assert isolated["stats"]["applied"] == 0
     assert isolated["anchor"]["activity_events"] == []
 
-def test_slice5_scene_projection_does_not_wire_activity_scene_into_rendering_hot_paths():
+def test_live_visible_order_handoff_wires_scene_projection_without_ui_registry_ownership():
     scene_helper = "projectAssistantTurnAnchorActivityScene"
     for helper in [
         "applyAssistantTurnAnchorNormalizedEvent",
         "applyAssistantTurnAnchorSourceEvents",
         "createAssistantTurnAnchorShadowSnapshot",
-        scene_helper,
         "reconcileAssistantTurnAnchorActivityScene",
     ]:
         assert helper not in _read(UI_JS)
         assert helper not in _read(SESSIONS_JS)
-        assert helper not in _read(MESSAGES_JS)
     assert "projectAssistantTurnAnchorSettledMessageFinalAnswer" in _read(UI_JS)
-    assert scene_helper not in _read(UI_JS)
+    assert scene_helper in _read(UI_JS)
     assert scene_helper not in _read(SESSIONS_JS)
-    assert scene_helper not in _read(MESSAGES_JS)
+    assert scene_helper in _read(MESSAGES_JS)
+    assert "function _renderLiveAnchorActivitySceneForStream" in _read(UI_JS)
+    assert "window._renderLiveAnchorActivitySceneForStream" in _read(SESSIONS_JS)
+    assert "window._renderLiveAnchorActivitySceneForStream" in _read(MESSAGES_JS)
 
 
-def test_slice6_live_shadow_feed_wires_non_token_events_without_renderer_scene_consumption():
+def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
     src = _read(MESSAGES_JS)
     helper_body = src.split("function _applyToAnchor", 1)[1].split(
         "function _mergeSettledToolCallsWithLiveMetadata", 1
@@ -1284,21 +1301,27 @@ def test_slice6_live_shadow_feed_wires_non_token_events_without_renderer_scene_c
         assert f"_applyToAnchor('{event_name}'" in _event_listener_body(src, event_name)
 
     token_body = _event_listener_body(src, "token")
-    assert "_applyToAnchor" not in token_body
+    assert "_scheduleRender();" in token_body
+    assert "function _upsertAnchorProcessProse" in src
+    assert "_upsertAnchorProcessProse(displayText" in src
     reasoning_body = _event_listener_body(src, "reasoning")
     assert "_applyToAnchor" not in reasoning_body
+    assert "_upsertAnchorReasoning(_liveThinkingText())" in reasoning_body
     assert "function _flushReasoningToAnchor()" in src
-    assert "_applyToAnchor('reasoning',{" in src
-    assert "local_id:'live-reasoning'" in src
+    assert "_upsertAnchorReasoning(reasoningText" in src
+    assert "`live-reasoning:${streamId}:final`" in src
     error_body = _event_listener_body(src, "error")
     assert "_applyToAnchor('error'" not in error_body
     assert "_flushReasoningToAnchor();" in error_body
     assert "_scheduleAnchorRegistryCleanup(120000);" in error_body
     assert "_handleStreamError(source)" in error_body
-    assert "projectAssistantTurnAnchorActivityScene" not in src
+    assert "projectAssistantTurnAnchorActivityScene" in src
 
     tool_body = _event_listener_body(src, "tool")
     assert tool_body.index("upsertLiveToolCall(d,'start')") < tool_body.index(
+        "_applyToAnchor('tool'"
+    )
+    assert tool_body.index("_upsertAnchorProcessProse(pendingDisplayTextBeforeTool") < tool_body.index(
         "_applyToAnchor('tool'"
     )
     done_body = _event_listener_body(src, "done")
@@ -1308,6 +1331,10 @@ def test_slice6_live_shadow_feed_wires_non_token_events_without_renderer_scene_c
     assert "_applyToAnchor('done',{...d" not in done_body
     assert "_flushReasoningToAnchor();" in done_body
     assert "_scheduleAnchorRegistryCleanup();" in done_body
-    assert "lastAsst._anchor_stream_id=streamId" in done_body
+    assert "_attachProjectedAnchorSceneToLastAssistant(S.messages);" in done_body
+    attach_body = _function_body(src, "_attachProjectedAnchorSceneToLastAssistant")
+    assert "lastAsst._anchor_stream_id=streamId" in attach_body
+    assert "lastAsst._anchor_activity_scene=scene" in attach_body
     assert "'_anchor_stream_id'" in src
+    assert "'_anchor_activity_scene'" in src
     assert src.index("'_anchor_stream_id'") < src.index("function _carryForwardEphemeralTurnFields")

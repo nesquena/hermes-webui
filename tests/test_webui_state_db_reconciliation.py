@@ -100,6 +100,58 @@ def _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages):
     return session
 
 
+def test_tail_cancelled_partial_blocks_state_db_replay():
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [
+        {"role": "user", "content": "cancelled turn", "timestamp": 1000.0},
+        {"role": "assistant", "content": "partial answer", "_partial": True, "timestamp": 1001.0},
+        {"role": "assistant", "content": "Task cancelled: stopped", "_error": True, "timestamp": 1002.0},
+    ]
+    state = [
+        {"role": "user", "content": "cancelled turn", "timestamp": 1000.0},
+        {"role": "assistant", "content": "partial answer", "timestamp": 1001.0},
+        {"role": "assistant", "content": "Task cancelled: stopped", "timestamp": 1002.0},
+        {"role": "assistant", "content": "raw replay after cancel", "timestamp": 1003.0},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    assert [msg["content"] for msg in merged] == [
+        "cancelled turn",
+        "partial answer",
+        "Task cancelled: stopped",
+    ]
+
+
+def test_historical_cancelled_partial_does_not_disable_later_state_db_merge():
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [
+        {"role": "user", "content": "cancelled turn", "timestamp": 1000.0},
+        {"role": "assistant", "content": "partial answer", "_partial": True, "timestamp": 1001.0},
+        {"role": "assistant", "content": "Task cancelled: stopped", "_error": True, "timestamp": 1002.0},
+        {"role": "user", "content": "later user", "timestamp": 1003.0},
+        {"role": "assistant", "content": "later answer", "timestamp": 1004.0},
+    ]
+    state = [
+        {"role": "user", "content": "cancelled turn", "timestamp": 1000.0},
+        {"role": "assistant", "content": "partial answer", "timestamp": 1001.0},
+        {"role": "assistant", "content": "Task cancelled: stopped", "timestamp": 1002.0},
+        {"role": "user", "content": "later user", "timestamp": 1003.0},
+        {"role": "assistant", "content": "later answer", "timestamp": 1004.0},
+        {"role": "user", "content": "state db only user", "timestamp": 1005.0},
+        {"role": "assistant", "content": "state db only answer", "timestamp": 1006.0},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    assert [msg["content"] for msg in merged][-2:] == [
+        "state db only user",
+        "state db only answer",
+    ]
+
+
 def test_api_session_includes_state_db_messages_newer_than_webui_sidecar(monkeypatch, tmp_path):
     import api.routes as routes
 
@@ -451,6 +503,67 @@ def test_state_db_reconciliation_preserves_repeated_sidecar_rows(monkeypatch, tm
     assert handler.response_json["session"]["message_count"] == 3
 
 
+def test_cancelled_partial_sidecar_owns_display_over_state_db_replay(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_cancel_partial_display_owner"
+    partial_text = (
+        "I am reading the RFC and current implementation.\n\n"
+        "Baseline confirmed: the assistant turn must preserve visible process rows."
+    )
+    replay_fragment = "Baseline confirmed: the assistant turn must preserve visible process rows."
+    sidecar_messages = [
+        {"role": "user", "content": "review the current anchor slice", "timestamp": 1000.0},
+        {
+            "role": "assistant",
+            "content": partial_text,
+            "timestamp": 1001.0,
+            "_partial": True,
+            "_partial_tool_calls": [
+                {"tid": "call_1", "name": "terminal", "done": True, "snippet": "pytest output"}
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": "**Task cancelled:** Task cancelled.",
+            "timestamp": 1002.0,
+            "_error": True,
+            "provider_details_label": "Cancellation details",
+        },
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {"role": "user", "content": "review the current anchor slice", "timestamp": 1000.0},
+            {
+                "role": "assistant",
+                "content": partial_text,
+                "timestamp": 1001.1,
+                "tool_calls": json.dumps([{"id": "call_1", "function": {"name": "terminal"}}]),
+            },
+            {"role": "tool", "content": "pytest output", "timestamp": 1001.2, "tool_call_id": "call_1"},
+            {
+                "role": "assistant",
+                "content": replay_fragment,
+                "timestamp": 1001.3,
+                "tool_calls": json.dumps([{"id": "call_2", "function": {"name": "terminal"}}]),
+            },
+        ],
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    messages = session["messages"]
+    assert [m["content"] for m in messages] == [m["content"] for m in sidecar_messages]
+    assert session["message_count"] == 3
+    assert sum(1 for m in messages if replay_fragment in (m.get("content") or "")) == 1
+
+
 def test_metadata_fast_path_reports_reconciled_state_db_count(monkeypatch, tmp_path):
     import api.routes as routes
 
@@ -565,6 +678,136 @@ def test_api_session_reload_drops_stale_cached_user_tail_after_saved_assistant(m
     assert messages[-1]["role"] == "assistant"
     assert messages[-1]["content"] == "final audit complete"
     assert handler.response_json["session"]["message_count"] == 2
+
+
+def test_get_session_reloads_equal_count_cached_user_tail_after_saved_assistant(monkeypatch, tmp_path):
+    import api.models as models
+
+    sid = "webui_reconcile_equal_count_user_tail"
+    disk = _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        [
+            {"role": "user", "content": "review anchor scene", "timestamp": 1000.0},
+            {"role": "assistant", "content": "review complete", "timestamp": 1001.0},
+        ],
+    )
+    disk.anchor_activity_scenes = {
+        "assistant-final": {
+            "version": "anchor_activity_scene_record_v1",
+            "message_index": 1,
+            "message_ref": "assistant-final",
+            "stream_id": "stream-equal-count",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "activity_rows": [{"row_id": "tool-1", "role": "tool"}],
+                "final_answer": "review complete",
+            },
+            "updated_at": 1002.0,
+        }
+    }
+    disk.save(touch_updated_at=False)
+
+    cached = models.Session(
+        session_id=sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=[
+            {"role": "user", "content": "review anchor scene", "timestamp": 1000.0},
+            {"role": "user", "content": "You've reached the maximum number of tool-calling iterations.", "timestamp": 1001.0},
+        ],
+        created_at=1000.0,
+        updated_at=1001.0,
+    )
+    models.SESSIONS[sid] = cached
+
+    loaded = models.get_session(sid)
+
+    assert loaded.messages[-1]["role"] == "assistant"
+    assert loaded.messages[-1]["content"] == "review complete"
+    assert "assistant-final" in loaded.anchor_activity_scenes
+    assert models.SESSIONS[sid] is loaded
+
+
+def test_get_session_keeps_equal_count_newer_cached_user_tail(monkeypatch, tmp_path):
+    import api.models as models
+
+    sid = "webui_reconcile_equal_count_newer_user_tail"
+    _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        [
+            {"role": "user", "content": "old prompt", "timestamp": 1000.0},
+            {"role": "assistant", "content": "old answer", "timestamp": 1001.0},
+        ],
+    )
+
+    cached = models.Session(
+        session_id=sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=[
+            {"role": "user", "content": "old prompt", "timestamp": 1000.0},
+            {"role": "user", "content": "new prompt before stream id", "timestamp": 1002.0},
+        ],
+        created_at=1000.0,
+        updated_at=1002.0,
+    )
+    models.SESSIONS[sid] = cached
+
+    loaded = models.get_session(sid)
+
+    assert loaded is cached
+    assert loaded.messages[-1]["role"] == "user"
+    assert loaded.messages[-1]["content"] == "new prompt before stream id"
+    assert models.SESSIONS[sid] is cached
+
+
+def test_get_session_reloads_when_disk_adds_anchor_scene_without_new_messages(monkeypatch, tmp_path):
+    import api.models as models
+
+    sid = "webui_reconcile_anchor_scene_delta"
+    _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        [
+            {"role": "user", "content": "question", "timestamp": 1000.0},
+            {"role": "assistant", "content": "final answer", "timestamp": 1001.0},
+        ],
+    )
+    cached = models.Session.load(sid)
+    assert cached is not None
+    models.SESSIONS[sid] = cached
+
+    disk = models.Session.load(sid)
+    disk.anchor_activity_scenes = {
+        "assistant-final": {
+            "version": "anchor_activity_scene_record_v1",
+            "message_index": 1,
+            "message_ref": "assistant-final",
+            "stream_id": "stream-scene-delta",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "activity_rows": [{"row_id": "tool-1", "role": "tool"}],
+                "final_answer": "final answer",
+            },
+            "updated_at": 1002.0,
+        }
+    }
+    disk.save(touch_updated_at=False)
+
+    loaded = models.get_session(sid)
+
+    assert loaded.messages[-1]["role"] == "assistant"
+    assert "assistant-final" in loaded.anchor_activity_scenes
+    assert models.SESSIONS[sid] is loaded
 
 
 def test_get_session_reloads_when_cached_session_lags_disk(monkeypatch, tmp_path):

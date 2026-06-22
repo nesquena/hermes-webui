@@ -102,7 +102,7 @@ def test_pre_start_optimistic_ui_helpers_cannot_block_chat_start():
     body = _function_body(MESSAGES_JS, "send")
     helper_body = _function_body(MESSAGES_JS, "_runOptionalPreStartUiStep")
 
-    optimistic_idx = body.index("S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);")
+    optimistic_idx = body.index("S.messages.push(userMsg);renderMessages();setBusy(true);")
     chat_start_idx = body.index("api('/api/chat/start'")
     pre_start = body[optimistic_idx:chat_start_idx]
 
@@ -116,13 +116,16 @@ def test_pre_start_optimistic_ui_helpers_cannot_block_chat_start():
     assert "_runOptionalPreStartUiStep" in pre_start, (
         "send() should wrap optimistic sidebar/title/polling helpers before /api/chat/start"
     )
+    assert "ensureLiveWorklogShell" in pre_start or "appendThinking('',{pending:true})" in pre_start, (
+        "send() should render an assistant-side pending shell before /api/chat/start"
+    )
     assert "upsertActiveSessionForLocalTurn" in pre_start and "applySessionTitleUpdate" in pre_start
 
 
 def test_pre_start_optimistic_block_cannot_prevent_chat_start():
     """Any pre-start UI/storage exception must still fall through to /api/chat/start."""
     body = _function_body(MESSAGES_JS, "send")
-    optimistic_idx = body.index("S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);")
+    optimistic_idx = body.index("S.messages.push(userMsg);renderMessages();setBusy(true);")
     chat_start_idx = body.index("api('/api/chat/start'")
     pre_start = body[optimistic_idx:chat_start_idx]
 

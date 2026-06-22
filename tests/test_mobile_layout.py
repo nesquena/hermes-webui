@@ -72,6 +72,23 @@ def _declarations(rule_body):
     return declarations
 
 
+def _js_function_body(source, function_name):
+    """Return a JavaScript function body using balanced braces."""
+    match = re.search(rf'function\s+{re.escape(function_name)}\s*\([^)]*\)\s*\{{', source)
+    if not match:
+        raise AssertionError(f"Missing JavaScript function {function_name}()")
+    open_brace = match.end() - 1
+    depth = 0
+    for idx in range(open_brace, len(source)):
+        if source[idx] == "{":
+            depth += 1
+        elif source[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[open_brace + 1:idx]
+    raise AssertionError(f"Could not parse JavaScript function {function_name}()")
+
+
 def _optional_declarations(css, selector):
     try:
         return _declarations(_rule_body(css, selector))
@@ -207,6 +224,26 @@ def test_rightpanel_mobile_slide_over_css():
         "open mobile rightpanel should keep the edge shadow"
     assert re.search(r'\.rightpanel\s+\.panel-header\{[^}]*row-gap:\s*8px', rightpanel_block), \
         "mobile workspace header should keep comfortable row spacing"
+
+
+def test_mobile_sidebar_drawer_uses_transform_instead_of_left():
+    """Mobile sidebar drawer open/close must animate with transform not left offsets."""
+    mobile_640 = "\n".join(_max_width_media_blocks(640))
+    assert mobile_640, "Missing @media(max-width:640px) block in style.css"
+
+    sidebar_rule = _declarations(_rule_body(mobile_640, ".sidebar"))
+    sidebar_open_rule = _declarations(_rule_body(mobile_640, ".sidebar.mobile-open"))
+
+    assert sidebar_rule.get("left") == "0", \
+        "Mobile .sidebar should keep left:0 in the drawer rules"
+    assert sidebar_rule.get("transform") == "translateX(-100%)", \
+        "Closed mobile .sidebar should use transform:translateX(-100%)"
+    assert sidebar_rule.get("transition") == "transform .25s ease", \
+        "Mobile .sidebar should transition transform for drawer animation"
+    assert sidebar_rule.get("will-change") == "transform", \
+        "Mobile .sidebar should promote the transform layer before drawer animation"
+    assert sidebar_open_rule.get("transform") == "translateX(0)", \
+        "Open mobile .sidebar should use transform:translateX(0)"
 
 
 def test_workspace_panel_inline_width_is_desktop_only():
@@ -467,28 +504,74 @@ def test_mobile_keeps_hamburger_drawer_with_vertical_44px_panel_targets():
     )
 
 
-def test_mobile_rail_click_opens_sidebar_for_all_panels():
-    """Rail clicks on phone must reveal the selected sidebar panel."""
+def test_mobile_rail_click_closes_sidebar_for_main_view_panels():
+    """Rail clicks on phone should switch panels and then close the mobile drawer —
+    but ONLY for panels that have a main-content view (or chat). Sidebar-only panels
+    like Todos render inside the drawer, so the drawer must stay open for them (#4644)."""
     panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
     assert "opts.fromRailClick" in panels_js, (
         "switchPanel() should distinguish rail clicks from programmatic switches"
     )
     assert "!_isDesktopWidth()" in panels_js, (
-        "Rail-click sidebar opening must be limited to mobile widths"
+        "Mobile rail-click sidebar handling must be limited to mobile widths"
     )
-    mobile_click_block = re.search(
-        r'if\s*\(\s*opts\.fromRailClick[^{}]*!\s*_isDesktopWidth\(\)[\s\S]*?\n\s*\}',
-        panels_js,
+    switch_panel = _js_function_body(panels_js, "switchPanel")
+    mobile_click_match = re.search(
+        r"if\s*\(\s*_panelHasMainView\s*&&\s*opts\.fromRailClick\s*&&\s*typeof\s+_isDesktopWidth\s*===\s*'function'\s*&&\s*!\s*_isDesktopWidth\(\)\s*\)\s*\{(?P<body>.*?)\n\s*\}",
+        switch_panel,
+        re.DOTALL,
     )
-    assert mobile_click_block, "Missing mobile rail-click sidebar handler"
-    assert "sidebar.classList.add('mobile-open')" in panels_js, (
-        "Phone rail clicks should open the sidebar panel"
+    assert mobile_click_match, "Missing mobile rail-click sidebar handler (gated on _panelHasMainView)"
+    mobile_click_block = mobile_click_match.group("body")
+    assert "typeof closeMobileSidebar === 'function'" in mobile_click_block, (
+        "Phone rail clicks should guard closeMobileSidebar with a typeof check"
     )
-    assert "overlay.classList.add('visible')" in panels_js, (
-        "Phone rail clicks should show the overlay behind the opened sidebar"
+    assert "closeMobileSidebar();" in mobile_click_block, (
+        "Phone rail clicks should close the mobile sidebar after panel switch"
     )
-    assert "nextPanel === 'chat'" not in mobile_click_block.group(0), (
-        "Chat rail clicks must open the session list on phone, not close the sidebar"
+    # The close must be gated so sidebar-only panels (e.g. Todos, which has no
+    # main-content view) keep the drawer open instead of hiding themselves.
+    assert "_panelHasMainView" in switch_panel, (
+        "Mobile drawer close must be gated on _panelHasMainView so sidebar-only "
+        "panels like Todos are not hidden by the close (#4644 Todos regression)"
+    )
+    main_view_decl = re.search(r"_panelHasMainView\s*=\s*([^;]+);", switch_panel)
+    assert main_view_decl, "_panelHasMainView guard must be defined"
+    guard_expr = main_view_decl.group(1)
+    assert "nextPanel === 'chat'" in guard_expr, (
+        "chat (default main view) must be treated as having a main view"
+    )
+    assert "_mainViewPanels" in guard_expr, (
+        "the guard must derive from the main-view panel list, not a hardcoded subset"
+    )
+    assert "sidebar.classList.add('mobile-open')" not in mobile_click_block, (
+        "Phone rail-click path in switchPanel should no longer add mobile-open"
+    )
+    assert "overlay.classList.add('visible')" not in mobile_click_block, (
+        "Phone rail-click path in switchPanel should no longer add mobile overlay"
+    )
+    close_idx = switch_panel.index("closeMobileSidebar();")
+    lazy_load_idx = switch_panel.index("if (nextPanel === 'tasks') await loadCrons();")
+    assert close_idx < lazy_load_idx, (
+        "Phone rail clicks should close the drawer before async panel lazy-loads"
+    )
+
+
+def test_mobile_switch_panel_non_chat_opens_sidebar():
+    """mobileSwitchPanel() non-chat path should still open the sidebar overlay."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    fn_body = _js_function_body(boot_js, "mobileSwitchPanel")
+    assert "if(name==='chat')" in fn_body, (
+        "mobileSwitchPanel must close sidebar only on chat target"
+    )
+    assert "closeMobileSidebar();" in fn_body, (
+        "mobileSwitchPanel should still close sidebar on chat"
+    )
+    assert "sidebar.classList.add('mobile-open')" in fn_body, (
+        "mobileSwitchPanel non-chat branch should keep adding mobile-open"
+    )
+    assert "overlay.classList.add('visible')" in fn_body, (
+        "mobileSwitchPanel non-chat branch should keep showing mobile overlay"
     )
 
 

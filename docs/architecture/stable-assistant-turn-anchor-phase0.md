@@ -41,6 +41,15 @@ streaming or rendering yet.
   Transparent Stream row hooks and feed them through the reconciler to produce a
   concrete matched / mismatched answer. The adapter remains opt-in and is not
   invoked by `renderMessages()` or the live SSE hot path.
+- The first visible-order handoff switches live Compact Worklog rendering from
+  legacy DOM mirroring to the per-stream anchor `activity_scene_v1` projection
+  for same-browser active streams. Visible process prose, reasoning rows, and
+  tool start/complete boundaries are represented as ordered scene rows. The
+  existing Compact Worklog writers remain as fallback paths only when no anchor
+  scene is available, and settled assistant messages may carry an in-memory
+  `_anchor_activity_scene` snapshot so the folded activity summary can appear
+  above the final answer. This handoff does not claim Transparent Stream wiring
+  or durable hard-reload scene persistence.
 
 ## State Layers
 
@@ -249,6 +258,32 @@ bounded way to ask whether the current renderer output is equivalent to the
 anchor-owned activity scene. A `matched: false` result is expected while current
 renderers intentionally collapse or omit events, such as representing a tool
 start + tool completion as one visible row or omitting terminal status rows.
+
+## Compact Worklog Visible-Order Handoff
+
+The first renderer handoff deliberately targets the live Compact Worklog path
+only. `attachLiveStream()` keeps the existing streaming markdown parser as a hot
+write buffer, but every visible process-prose segment is upserted into the
+per-stream anchor registry as a single `process_prose` row. Reasoning and tool
+events enter the same registry before their legacy renderer callbacks run, so
+the projected `activity_scene_v1` owns the visible row order.
+
+`renderLiveAnchorActivityScene()` consumes only that projected scene for the
+active live turn. Once the live turn is anchor-owned, legacy live
+`appendLiveToolCard()`, `appendThinking()`, auto-compression, and Worklog
+reason-mirroring paths re-render or exit instead of creating a second activity
+rail. On same-browser session switch, `loadSession()` tries the live anchor
+scene before falling back to saved live DOM snapshots or persisted `INFLIGHT`
+tool replay.
+
+At settle time, the active final assistant message may receive the current
+in-memory `_anchor_activity_scene`. `renderMessages()` uses that snapshot to
+build a folded activity summary above the final answer and leaves the final
+answer as ordinary assistant prose. Successful auto-compression rows remain
+live-only in settled history unless they explain a visible error or recovery
+state. This is not a Transparent Stream handoff and not a durable reload
+guarantee: hard reload scene persistence still requires a later persisted scene
+or journal hydration slice.
 
 ## Source Event Classification
 

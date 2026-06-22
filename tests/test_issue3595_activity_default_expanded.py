@@ -100,12 +100,12 @@ def test_setting_controls_worklog_item_details_not_only_outer_group():
         "The deprecated compact-tool toggle should not keep dead branches in Thinking markup"
 
     tool_fn = _function_body(src, "buildToolCard")
-    assert "_worklogDetailsExpandedDefault()" in tool_fn and "openClass" in tool_fn, \
-        "Tool cards should respect the Worklog details default when they have detail content"
+    assert "const openClass='';" in tool_fn and "hasDetail&&_worklogDetailsExpandedDefault()" not in tool_fn, \
+        "Tool cards must stay one-line by default; details should open only after the user expands that card"
 
     grouped_tools_fn = _function_body(src, "_syncToolRowsContainer")
-    assert "const shouldOpen=_worklogDetailsExpandedDefault()" in grouped_tools_fn, \
-        "Multi-tool Worklog groups should respect the Worklog details default"
+    assert "const shouldOpen=wasOpen||_worklogDetailsExpandedDefault()" in grouped_tools_fn, \
+        "Multi-tool Worklog groups should respect the default without closing a group the user already opened"
 
 
 def test_setting_toggle_applies_to_existing_worklog_details():
@@ -113,8 +113,8 @@ def test_setting_toggle_applies_to_existing_worklog_details():
     helper = _function_body(ui_src, "_applyWorklogDetailsExpandedDefault")
     assert "scope.querySelectorAll('.thinking-card')" in helper, \
         "Toggling the setting should update existing Thinking cards"
-    assert "scope.querySelectorAll('.tool-card')" in helper and ".tool-card-detail" in helper, \
-        "Toggling the setting should update existing Tool cards that have details"
+    assert "scope.querySelectorAll('.tool-card')" not in helper, \
+        "Toggling the setting must not expand every Tool card into multi-line rows"
     assert "data-tool-worklog-tool-group" in helper and "aria-expanded" in helper, \
         "Toggling the setting should update existing multi-tool Worklog groups"
 

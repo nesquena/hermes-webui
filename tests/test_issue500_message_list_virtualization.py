@@ -455,6 +455,7 @@ let _lastScrollTop = 0;
 let _messageUserUnpinned = true;
 let _scrollPinned = false;
 let _nearBottomCount = 0;
+let _messageViewportAnchorRemounting = false;
 let _messageVirtualHeightCache = Array.from({length: TOTAL}, () => ROW_HEIGHT);
 let _messageVirtualHeightCacheEntries = [];
 let _messageVirtualHeightCacheLen = TOTAL;
@@ -497,9 +498,11 @@ function _restoreMessageViewportAnchor(anchor, delta){
   _programmaticScroll = true;
   return true;
 }
+function requestAnimationFrame(fn){ fn(); }
 
 eval(extractFunc('_messageVisibleIndexForRawIdx'));
 eval(extractFunc('_messageVirtualScrollTopForVisibleIdx'));
+eval(extractFunc('_remountMessageViewportAnchor'));
 eval(extractFunc('_restoreMessageScrollSnapshotSameFrame'));
 
 const snapshot = {
