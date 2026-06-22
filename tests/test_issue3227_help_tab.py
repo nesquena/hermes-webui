@@ -11,7 +11,7 @@ LOCALE_COUNT = 13  # en, it, ja, ru, es, de, zh, zh-TW, pt, ko, fr, tr, pl
 
 def test_help_nav_button_present():
     assert 'data-settings-section="help"' in INDEX_HTML
-    assert "switchSettingsSection('help')" in INDEX_HTML
+    assert "switchSettingsSection('help',{fromSidebarItem:true})" in INDEX_HTML
     assert 'data-i18n="settings_tab_help"' in INDEX_HTML
 
 

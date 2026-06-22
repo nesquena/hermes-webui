@@ -41,6 +41,8 @@ const APP_TITLEBAR_KEYS = {
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
 };
+const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
+const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
 /**
  * Update the top app titlebar to reflect the current page or selected conversation.
@@ -235,6 +237,34 @@ function _resyncChatSidebarAfterPanelSwitch() {
   else run();
 }
 
+function _closeMobileSidebarAfterPanelSelection(){
+  if(typeof closeMobileSidebar!=='function')return;
+  if(typeof _isDesktopWidth==='function'&&_isDesktopWidth())return;
+  closeMobileSidebar();
+}
+
+function _panelFromCurrentMainView(){
+  const mainEl=document.querySelector('main.main');
+  if(!mainEl)return _currentPanel||'chat';
+  for(const panel of MAIN_VIEW_PANELS){
+    if(mainEl.classList.contains('showing-'+panel))return MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS[panel]||panel;
+  }
+  if(_currentPanel&&$('panel'+_currentPanel.charAt(0).toUpperCase()+_currentPanel.slice(1)))return _currentPanel;
+  return 'chat';
+}
+
+function _syncMobileSidebarPanelFromMainView(){
+  const panel=_panelFromCurrentMainView();
+  if(!panel)return _currentPanel||'chat';
+  const panelEl=$('panel'+panel.charAt(0).toUpperCase()+panel.slice(1));
+  if(!panelEl)return _currentPanel||'chat';
+  _currentPanel=panel;
+  document.querySelectorAll('[data-panel]').forEach(t=>t.classList.toggle('active',t.dataset.panel===panel));
+  document.querySelectorAll('.panel-view').forEach(p=>p.classList.remove('active'));
+  panelEl.classList.add('active');
+  return panel;
+}
+
 async function switchPanel(name, opts = {}) {
   const nextPanel = name || 'chat';
   const prevPanel = _currentPanel;
@@ -277,21 +307,10 @@ async function switchPanel(name, opts = {}) {
   // Update main content view. Each entry in MAIN_VIEW_PANELS gets a matching
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
-  const _mainViewPanels = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
   if (mainEl) {
-    _mainViewPanels.forEach(p => {
+    MAIN_VIEW_PANELS.forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
-  }
-  // #4644: close the mobile sidebar drawer after a rail-click panel switch — but
-  // ONLY for panels that have a main-content view (or chat). Sidebar-only panels
-  // like Todos render INSIDE the drawer, so closing it would hide the very panel
-  // the user just opened. Keep the drawer open for those.
-  const _panelHasMainView = nextPanel === 'chat' || _mainViewPanels.indexOf(nextPanel) !== -1;
-  if (_panelHasMainView && opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
-    if (typeof closeMobileSidebar === 'function') {
-      closeMobileSidebar();
-    }
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
@@ -308,6 +327,13 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'settings') {
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
+  }
+  if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
+    const sidebar = document.querySelector('.sidebar');
+    if (sidebar) {
+      sidebar.classList.remove('mobile-session-page');
+      sidebar.classList.add('mobile-panel-drawer', 'mobile-open');
+    }
   }
   _resyncChatSidebarAfterPanelSwitch();
   if (nextPanel === 'chat' && typeof syncTopbar === 'function') syncTopbar();
@@ -910,6 +936,7 @@ function openCronDetail(id, el){
   _stopCronWatch();
   _renderCronDetail(job);
   _checkCronWatchOnDetail(id);
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function _clearCronDetail(){
@@ -3011,6 +3038,7 @@ async function loadKanbanTask(taskId){
       preview.style.display = '';
       preview.innerHTML = _kanbanRenderTaskDetail(data);
     }
+    _closeMobileSidebarAfterPanelSelection();
     showToast(`${t('kanban_task')}: ${title}`);
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
@@ -4263,6 +4291,7 @@ async function openSkill(name, el) {
     }
     _currentSkillDetail = { name, content: data.content || '', linked_files: data.linked_files || {} };
     _renderSkillDetail(name, data.content || '', data.linked_files || {});
+    _closeMobileSidebarAfterPanelSelection();
   } catch(e) { setStatus(t('skill_load_failed') + e.message); }
 }
 
@@ -4712,6 +4741,7 @@ async function openMemorySection(section, el) {
     await loadNotesSources(false);
   }
   _renderMemoryDetail(section);
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function editCurrentMemory() {
@@ -5258,6 +5288,7 @@ function openWorkspaceDetail(path, el){
   if (target) target.classList.add('active');
   _workspacePreFormDetail = null;
   _renderWorkspaceDetail(ws);
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function _clearWorkspaceDetail(){
@@ -5750,6 +5781,7 @@ function openProfileDetail(name, el){
   if (target) target.classList.add('active');
   _profilePreFormDetail = null;
   _renderProfileDetail(p, _profilesCache.active);
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function _clearProfileDetail(){
@@ -6577,6 +6609,7 @@ function switchSettingsSection(name,opts){
     if(section==='plugins') loadPluginsPanel();
     if(section==='extensions') loadExtensionsPanel();
   }
+  if(opts&&opts.fromSidebarItem)_closeMobileSidebarAfterPanelSelection();
 }
 
 async function _buildSettingsIndex() {
@@ -8108,7 +8141,7 @@ async function switchPluginPage(event, path, label) {
   _currentPanel = 'plugin';
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
+    MAIN_VIEW_PANELS.forEach(p => {
       mainEl.classList.toggle('showing-' + p, p === 'plugin');
     });
   }
