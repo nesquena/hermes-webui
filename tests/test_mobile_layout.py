@@ -1514,22 +1514,24 @@ def test_mobile_enter_newline_uses_match_media():
         "boot.js must use matchMedia('(pointer:coarse)') for mobile detection"
 
 
-def test_mobile_enter_newline_checks_virtual_keyboard_viewport():
-    """Touch devices should only force newline while the software keyboard is likely open."""
+def test_mobile_enter_newline_does_not_depend_on_viewport_heuristic():
+    """The viewport-shrink heuristic was unreliable on iOS/Android and must be gone."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    assert "function _isVirtualKeyboardLikelyOpen()" in boot_js, \
-        "boot.js must isolate the software-keyboard viewport heuristic"
-    assert "window.visualViewport" in boot_js and "window.innerHeight-vv.height>120" in boot_js, \
-        "software-keyboard detection must compare visualViewport height against window.innerHeight"
-    assert "&&_isVirtualKeyboardLikelyOpen()" in boot_js, \
-        "mobile Enter newline override must not apply when a hardware keyboard leaves the viewport unshrunk"
+    assert "function _isVirtualKeyboardLikelyOpen()" not in boot_js, \
+        "the unreliable visualViewport keyboard heuristic function must be removed"
+    assert "&&_isVirtualKeyboardLikelyOpen()" not in boot_js, \
+        "the mobile Enter override must no longer call the viewport heuristic"
+    assert "window.innerHeight-vv.height>120" not in boot_js, \
+        "the viewport height-delta probe must no longer gate the mobile Enter override"
 
 
-def test_mobile_enter_newline_preserves_legacy_fallback_without_visual_viewport():
-    """Browsers without visualViewport should keep the previous touch Enter=newline behavior."""
+def test_mobile_enter_newline_respects_hardware_keyboard_on_touch_devices():
+    """Touch devices with a co-existing fine pointer (hardware keyboard) keep desktop Enter=send."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    assert "if(!vv||!window.innerHeight)return true;" in boot_js, \
-        "missing visualViewport support must preserve the legacy touch-primary newline fallback"
+    assert "any-pointer:fine" in boot_js, \
+        "boot.js must use any-pointer:fine to detect a co-existing hardware keyboard/trackpad"
+    assert "!_hasFinePointerCoexisting()" in boot_js, \
+        "mobile Enter newline override must skip touch devices that also expose a fine pointer"
 
 
 def test_mobile_enter_newline_only_overrides_enter_default():

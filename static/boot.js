@@ -1512,11 +1512,6 @@ let _imeComposing=false;
 })();
 function _isImeEnter(e){return e.isComposing||e.keyCode===229||_imeComposing;}
 window._isImeEnter=_isImeEnter;
-function _isVirtualKeyboardLikelyOpen(){
-  const vv=window.visualViewport;
-  if(!vv||!window.innerHeight)return true;
-  return window.innerHeight-vv.height>120;
-}
 // #3076: a touch-primary device (`pointer:coarse`) can still have a
 // physical keyboard attached (Android tablet + Bluetooth keyboard,
 // detachable Surface in tablet mode, iPad + Magic Keyboard). When that
@@ -1549,9 +1544,13 @@ $('msg').addEventListener('keydown',e=>{
     }
   }
   // Send key: respect user preference.
-  // On touch-primary devices with the software keyboard open, default to
-  // Enter = newline since there's no physical Shift key. Hardware keyboards on
-  // tablets keep desktop behavior when the viewport is not keyboard-shrunk.
+  // On touch-primary devices (coarse pointer, no fine pointer co-existing),
+  // default to Enter = newline regardless of whether the visual viewport has
+  // shrunk. The viewport-shrink heuristic (_isVirtualKeyboardLikelyOpen) was
+  // unreliable on iOS Safari and some Android browsers where the keyboard
+  // doesn't consistently reduce vv.height by >120px. The pointer media query
+  // pair is a sufficient and more reliable signal for "software keyboard only".
+  // Hardware keyboards on tablets are covered by _hasFinePointerCoexisting.
   // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
@@ -1559,8 +1558,7 @@ $('msg').addEventListener('keydown',e=>{
     const isNumpadEnter=_isNumpadEnter(e);
     const _mobileDefault=matchMedia('(pointer:coarse)').matches
       &&!_hasFinePointerCoexisting()
-      &&window._sendKey==='enter'
-      &&_isVirtualKeyboardLikelyOpen();
+      &&window._sendKey==='enter';
     if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(isNumpadEnter||e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
