@@ -1575,6 +1575,19 @@ _SESSIONS_CACHE_TTL_SECONDS = 2.5
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
+# Cold-miss join wait (#4718): when NO payload exists yet (the cold profile-switch
+# case) and a rebuild is genuinely in-flight — e.g. the post-switch pre-warm is
+# already building — a second caller (the client's sidebar GET) should JOIN that
+# build rather than give up after 0.25s and redundantly build it again. The real
+# cold build is ~0.8s, so a sub-second wait guarantees double work; this ceiling
+# lets the waiter ride the in-flight build to completion. Only used on a true cold
+# miss with a live in-flight owner (a stale payload is still served immediately).
+_SESSIONS_CACHE_COLD_JOIN_WAIT_SECONDS = 2.0
+# Total deadline for riding a slow in-flight build on a cold miss (#4718). If the owner's
+# build runs longer than one join wait, a cold caller re-joins (rather than double-building)
+# up to this bound, then falls through to its own build only if the owner is gone or this
+# deadline passes — so a wedged/dead owner can never hang the request indefinitely.
+_SESSIONS_CACHE_COLD_JOIN_MAX_WAIT_SECONDS = 6.0
 _SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple, dict]] = OrderedDict()
 _SESSIONS_CACHE_LOCK = threading.RLock()
 _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
@@ -2281,10 +2294,43 @@ def _get_cached_session_list_payload(
             pass
 
     if stale is not None:
-        timeout = _SESSIONS_CACHE_STALE_WAIT_SECONDS
+        # A stale payload exists: wait only briefly, then serve stale immediately.
+        event.wait(_SESSIONS_CACHE_STALE_WAIT_SECONDS)
     else:
-        timeout = _SESSIONS_CACHE_WAIT_SECONDS
-    event.wait(timeout)
+        # True cold miss (no payload at all). If a rebuild is genuinely in-flight (an
+        # owner is building — e.g. the post-switch pre-warm), JOIN it rather than giving
+        # up after 0.25s and redundantly rebuilding the same payload ourselves (the
+        # post-switch double-build, #4718). The build can exceed a single wait on a large
+        # profile, so re-join under ONE total deadline that starts NOW (before the first
+        # wait) and caps every wait by the remaining time — so the whole cold in-flight
+        # join is bounded by _SESSIONS_CACHE_COLD_JOIN_MAX_WAIT_SECONDS, never that plus an
+        # initial wait. Only build ourselves once the owner is gone (died) or the deadline
+        # passes. If no owner is in flight at all, fall through to our own build promptly.
+        cold_join_deadline = time.monotonic() + _SESSIONS_CACHE_COLD_JOIN_MAX_WAIT_SECONDS
+        while True:
+            with _SESSIONS_CACHE_LOCK:
+                current_owner = _SESSIONS_CACHE_INFLIGHT.get(key)
+            if current_owner is None:
+                break  # no in-flight owner — re-check cache, then build ourselves if needed
+            if current_owner is not event:
+                event = current_owner  # a new owner took over; ride the new build
+            remaining = cold_join_deadline - time.monotonic()
+            if remaining <= 0:
+                break  # rode the build to the total deadline; fall through to own build
+            if diag is not None:
+                try:
+                    diag.stage("session_list_cache_cold_rejoin_wait")
+                except Exception:
+                    pass
+            current_owner.wait(min(_SESSIONS_CACHE_COLD_JOIN_WAIT_SECONDS, remaining))
+            latest, is_fresh = _session_list_cache_get(key, allow_stale=False)
+            if latest is not None:
+                if diag is not None:
+                    try:
+                        diag.stage("session_list_cache_cold_rejoin_hit")
+                    except Exception:
+                        pass
+                return latest
 
     latest, is_fresh = _session_list_cache_get(key, allow_stale=False)
     if latest is not None:
@@ -2303,7 +2349,8 @@ def _get_cached_session_list_payload(
                 pass
         return stale
 
-    # Safety path if the owner died before storing anything.
+    # Safety path: build it ourselves — the owner died before storing anything, the
+    # cold-join deadline elapsed with no payload, or there was never an in-flight owner.
     if diag is not None:
         try:
             diag.stage("session_list_cache_fallback_rebuild")
@@ -2314,6 +2361,105 @@ def _get_cached_session_list_payload(
     if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
         _session_list_cache_set(key, payload)
     return payload
+
+
+# Pre-warm coordination (#4718): dedup concurrent/rapid warms of the same profile so a
+# burst of switches (or a switch racing the client's own GET) can't fan out duplicate
+# builds. The actual rebuild single-flight + invalidation-stamp guard already live in
+# _get_cached_session_list_payload; this set just avoids spawning redundant warm threads.
+_SESSION_LIST_WARM_INFLIGHT: set = set()
+_SESSION_LIST_WARM_LOCK = threading.Lock()
+
+
+def warm_session_list_cache(profile_name: str | None = None) -> bool:
+    """Best-effort pre-warm of the /api/sessions sidebar payload for the active profile.
+
+    Mirrors the GET /api/sessions handler's cache key + builder exactly (same settings
+    reads, same sidebar_source='webui' / exclude_hidden / visible_only contract) so the
+    client's sidebar GET that immediately follows a profile switch hits a WARM payload
+    instead of paying the ~780ms cold build (#4718, measured by @rodboev on v0.51.610).
+
+    This warms the SAME cache layer the sidebar reads (_session_list_cache via
+    _get_cached_session_list_payload) — not the lower get_cli_sessions() cache, which
+    #4769's sidebar_source=webui path no longer touches for sidebar loads.
+
+    MUST run with the target profile's request-profile TLS established (the caller, e.g.
+    the post-switch detached worker, uses set_request_profile/clear_request_profile) so
+    active_profile resolves to the target, not the process default. Deliberately bind ONLY
+    the TLS here — NOT profile_scope_for_detached_worker — since this path resolves the
+    profile entirely via get_active_profile_name()/get_active_hermes_home() (both TLS) and
+    reads process-global settings; its os.environ['HERMES_HOME'] mutation would open a
+    cross-profile bleed window on this multithreaded server for the full build (#4718 Opus gate).
+
+    Returns True if a warm build ran, False if it was deduped or skipped. Never raises.
+    """
+    try:
+        from api.profiles import get_active_profile_name
+
+        active_profile = get_active_profile_name()
+        dedup_key = profile_name or active_profile or "__default__"
+        with _SESSION_LIST_WARM_LOCK:
+            if dedup_key in _SESSION_LIST_WARM_INFLIGHT:
+                return False
+            _SESSION_LIST_WARM_INFLIGHT.add(dedup_key)
+        try:
+            settings = load_settings()
+            show_cli_sessions = bool(settings.get("show_cli_sessions"))
+            show_previous_messaging_sessions = bool(
+                settings.get("show_previous_messaging_sessions")
+            )
+            show_cron_sessions = bool(settings.get("show_cron_sessions"))
+            agent_session_source_filter = settings.get("agent_session_source_filter")
+            # The sidebar's default request: visible WebUI rows, hidden excluded.
+            # (Matches static/sessions.js which fetches with sidebar_source=webui
+            # and exclude_hidden=1 for the standard sidebar load.)
+            # NOTE: this warms ONLY the default sidebar view. Non-default states
+            # (all-profiles, archived, show-hidden, or a CLI-source tab) use a
+            # different cache key and still pay the cold build on switch — acceptable
+            # as a best-effort warm of the common case, not full coverage.
+            all_profiles = False
+            include_archived = False
+            exclude_hidden = True
+            sidebar_source = "webui"
+            key = _session_list_cache_key(
+                active_profile=active_profile,
+                all_profiles=all_profiles,
+                show_cli_sessions=show_cli_sessions,
+                show_previous_messaging_sessions=show_previous_messaging_sessions,
+                show_cron_sessions=show_cron_sessions,
+                include_archived=include_archived,
+                exclude_hidden=exclude_hidden,
+                visible_only=True,
+                source_filter=agent_session_source_filter,
+                sidebar_source=sidebar_source,
+            )
+            # If a fresh entry already exists (e.g. the client beat us), do nothing.
+            cached, is_fresh = _session_list_cache_get(key, allow_stale=False)
+            if cached is not None and is_fresh:
+                return False
+            _get_cached_session_list_payload(
+                key=key,
+                builder=lambda: _build_session_list_cache_payload(
+                    active_profile=active_profile,
+                    all_profiles=all_profiles,
+                    show_cli_sessions=show_cli_sessions,
+                    show_previous_messaging_sessions=show_previous_messaging_sessions,
+                    show_cron_sessions=show_cron_sessions,
+                    include_archived=include_archived,
+                    exclude_hidden=exclude_hidden,
+                    visible_only=True,
+                    source_filter=agent_session_source_filter,
+                    sidebar_source=sidebar_source,
+                ),
+            )
+            return True
+        finally:
+            with _SESSION_LIST_WARM_LOCK:
+                _SESSION_LIST_WARM_INFLIGHT.discard(dedup_key)
+    except Exception as exc:  # pragma: no cover - defensive; warming must never break
+        logger.debug("warm_session_list_cache() skipped: %s", exc)
+        return False
+
 
 from api.config import (
     STATE_DIR,
@@ -11793,6 +11939,43 @@ def handle_post(handler, parsed) -> bool:
                 restart_watcher_for_profile(name)
             except Exception as exc:
                 logger.warning("Failed to restart gateway watcher for profile %s: %s", name, exc)
+            # Pre-warm the target profile's sidebar payload on a detached thread (#4718):
+            # the switch POST returns in ~200ms but the client's /api/sessions GET then
+            # pays the ~780ms cold build (measured by @rodboev). Warming the SAME cache
+            # the sidebar reads lets that GET join/hit a warm payload, dropping the
+            # perceived switch from ~1s to ~200ms. Best-effort + fully detached: never
+            # blocks/fails the switch response.
+            #
+            # Profile scoping: the sidebar build resolves its profile via
+            # get_active_profile_name() (thread-local, #798) for the WebUI-session filter
+            # AND via get_active_hermes_home() (also TLS-derived) for any CLI-session read
+            # — neither reads process os.environ. So binding ONLY the request-profile TLS
+            # on this worker thread is sufficient and correct; we deliberately do NOT use
+            # profile_scope_for_detached_worker here because its process-global os.environ
+            # mutation would open a cross-profile env-bleed window for the full ~780ms
+            # build on this multithreaded server (Opus gate). set/clear TLS is leak-free.
+            try:
+                import threading as _threading
+                from api.profiles import set_request_profile, clear_request_profile
+
+                def _warm_target_profile_sidebar(profile_name: str):
+                    try:
+                        set_request_profile(profile_name)
+                        try:
+                            warm_session_list_cache(profile_name)
+                        finally:
+                            clear_request_profile()
+                    except Exception as warm_exc:  # pragma: no cover - defensive
+                        logger.debug("post-switch sidebar pre-warm skipped: %s", warm_exc)
+
+                _threading.Thread(
+                    target=_warm_target_profile_sidebar,
+                    args=(name,),
+                    name="profile-switch-prewarm",
+                    daemon=True,
+                ).start()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Failed to launch post-switch sidebar pre-warm: %s", exc)
             return j(handler, result, extra_headers={
                 'Set-Cookie': build_profile_cookie(name, handler),
             })
