@@ -4527,8 +4527,7 @@ def _advance_truncation_watermark_after_commit(session) -> None:
             if isinstance(ts, (int, float)) and ts > 0:
                 session.truncation_watermark = float(ts)
                 return
-    import time as _time
-    session.truncation_watermark = _time.time()
+    session.truncation_watermark = time.time()
 
 
 def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text, source: str = "webui"):
