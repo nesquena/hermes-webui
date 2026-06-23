@@ -308,6 +308,15 @@ async function send(){
   _sendInProgress = true;
   try{
   const text=$('msg').value.trim();
+  // Capture and clear the textarea immediately so the value is atomically
+  // frozen before any async work. This prevents stalled-text race conditions
+  // when send() is re-entered (interrupt queue drain, _sendInProgress guard)
+  // while the textarea hasn't been cleared yet — the second read would
+  // otherwise pick up old + new text mixed together.
+  // The captured `text` variable is the sole authority from here down;
+  // no code path below re-reads $('msg').value unless it intentionally
+  // restores the field.
+  $('msg').value='';autoResize();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
@@ -461,7 +470,6 @@ async function send(){
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
-  $('msg').value='';autoResize();
   // Clear persisted composer draft since message was sent.
   if (activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);
   const displayText=text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
