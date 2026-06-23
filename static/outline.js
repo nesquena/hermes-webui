@@ -61,18 +61,12 @@ function _expandOutlineRenderWindow() {
 }
 
 function _ensureOutlineMessagesLoaded(sid) {
-  if (!sid || S.busy || S.activeStreamId) return Promise.resolve(false);
-  if (typeof _messagesTruncated === 'undefined' || !_messagesTruncated) {
-    return Promise.resolve(false);
-  }
-  if (typeof _ensureAllMessagesLoaded !== 'function') return Promise.resolve(false);
-  return _ensureAllMessagesLoaded().then(function() {
-    if (!S.session || S.session.session_id !== sid) return false;
-    _expandOutlineRenderWindow();
-    return true;
-  }).catch(function() {
-    return false;
-  });
+  if (!sid || !S.session || S.session.session_id !== sid) return Promise.resolve(false);
+  // Keep the outline bounded to the messages already loaded in the transcript.
+  // Large sessions must not trigger a hidden full-history fetch just because the
+  // outline opened; users can scroll/load older messages to add more entries.
+  _expandOutlineRenderWindow();
+  return Promise.resolve(false);
 }
 
 // Extracts the first 60 visible characters from a message content value.
@@ -103,24 +97,15 @@ function _jumpToMessage(rawIdx) {
     return;
   }
 
-  // Row is outside the render window — reload the full session and retry.
-  if (typeof api !== 'function') return;
-  if (S.busy || S.activeStreamId) return;
-  api('/api/session?session_id=' + encodeURIComponent(sid) +
-      '&messages=1&resolve_model=0&msg_limit=9999')
-    .then(function(data) {
-      if (!data || !data.session) return;
-      if (!S.session || S.session.session_id !== sid) return;  // session switched
-      S.messages = data.session.messages || [];                // populate S
-      _expandOutlineRenderWindow();
-      if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true });
-      window.setTimeout(function() {
-        if (!S.session || S.session.session_id !== sid) return;
-        const r = document.getElementById('msg-user-' + rawIdx);
-        if (r) { r.scrollIntoView({ block: 'center', behavior: 'smooth' }); _flashRow(r); }
-      }, 120);
-    })
-    .catch(function() {});
+  // Row is loaded but currently outside the render window. Expand locally and
+  // retry; do not fetch the whole transcript from the server.
+  _expandOutlineRenderWindow();
+  if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true });
+  window.setTimeout(function() {
+    if (!S.session || S.session.session_id !== sid) return;
+    const r = document.getElementById('msg-user-' + rawIdx);
+    if (r) { r.scrollIntoView({ block: 'center', behavior: 'smooth' }); _flashRow(r); }
+  }, 120);
 }
 
 // Brief highlight flash on a message row after jumping.

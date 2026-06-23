@@ -2450,15 +2450,10 @@ async function _loadOlderMessages() {
   // rebuilt transcript (#1937).
   const startGeneration = _messagesGeneration;
   try {
-    // Ask the server for a larger authoritative tail window instead of a
-    // separate msg_before page. The same /api/session contract handles both —
-    // post-#2716 the backend always runs the full append-only merge, so a
-    // larger msg_limit on the same call produces the same merged transcript
-    // we'd get by stitching pages, but without client-side index bookkeeping.
-    // Cumulative growth: each "load more" asks for currentLoaded + 30, and the
-    // newly exposed head is what we expose to the user.
-    const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`);
+    // Ask the server for the next older bounded page. Do not request an
+    // ever-growing cumulative tail: large transcripts must stay page-based so
+    // both API payload size and frontend render work remain bounded.
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) { _loadingOlder = false; return; }
     //  - response shape sane
@@ -2476,46 +2471,11 @@ async function _loadOlderMessages() {
     // counter and abort cleanly. _oldestIdx and _messagesTruncated were
     // already reset by the wholesale-replace path, so no rollback needed.
     if (_messagesGeneration !== startGeneration) return;
-    let responseSession = data.session;
-    let expandedMsgs = (responseSession.messages || []).filter(m => m && m.role);
-    const currentMsgs = (S.messages || []).filter(m => m && m.role);
-    const currentLen = currentMsgs.length;
-    // Suffix-continuity check: the cumulative tail is only safe to wholesale-
-    // replace when our currently-displayed messages are still its suffix. If
-    // the server appended new messages (or merge filtered something) while we
-    // were awaiting, the suffix won't line up — fall back to the legacy
-    // msg_before page so we never drop visible older messages on the floor.
-    let tailMatches = expandedMsgs.length >= currentLen;
-    if (tailMatches && currentLen > 0) {
-      const start = expandedMsgs.length - currentLen;
-      for (let i = 0; i < currentLen; i++) {
-        if (!_sameTranscriptMessage(expandedMsgs[start + i], currentMsgs[i])) {
-          tailMatches = false;
-          break;
-        }
-      }
-    }
-    let olderCount = Math.max(0, expandedMsgs.length - currentLen);
-    let olderMsgs = expandedMsgs.slice(0, olderCount);
-    let nextMessages = expandedMsgs;
-    if (!tailMatches) {
-      // Race fallback: keep the legacy index-page request as the
-      // correctness-preserving alternative. Same guards reapplied because
-      // we just awaited again.
-      const fallback = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
-      if (!fallback || !fallback.session) { _loadingOlder = false; return; }
-      if (!S.session || S.session.session_id !== sid) return;
-      if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-      if (_messagesGeneration !== startGeneration) return;
-      responseSession = fallback.session;
-      olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
-      nextMessages = [...olderMsgs, ...S.messages];
-    }
+    const responseSession = data.session;
+    const olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
+    let nextMessages = [...olderMsgs, ...S.messages];
     if (!olderMsgs.length) { _messagesTruncated = !!responseSession._messages_truncated; return; }
-    // Replace with the larger tail window and preserve scroll as if older
-    // messages were prepended. When the suffix check fails, nextMessages
-    // already encodes the legacy prepend fallback so the visible behavior
-    // matches the old msg_before page path exactly.
+    // Replace by prepending the older page and preserve scroll position.
     // Use $('messages') — the scrollable container (#msgInner is not scrollable).
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
@@ -2582,8 +2542,9 @@ async function _loadOlderMessages() {
   }
 }
 
-// Ensure the full message history is loaded (for undo, export, etc).
-// If the session was loaded with msg_limit, this fetches all messages.
+// Ensure the full message history is loaded (for jump-to-start/export-style UI affordances).
+// If the session was loaded with msg_limit, this walks older pages in bounded
+// chunks instead of issuing one monolithic /api/session request.
 //
 // Race-safety (#1937): with the endless-scroll opt-in, _loadOlderMessages
 // may be in flight when this runs (e.g. user scrolled near the top, then
@@ -2614,14 +2575,30 @@ async function _ensureAllMessagesLoaded() {
   _loadingOlder = true;
   try {
     const sid = S.session.session_id;
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
-    // Guard: api() may have redirected (401) and returned undefined.
-    if (!data || !data.session) return;
-    // Session may have been switched while we awaited. Bail rather than
-    // overwrite the new session's messages.
-    if (!S.session || S.session.session_id !== sid) return;
-    if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-    const msgs = (data.session.messages || []).filter(m => m && m.role);
+    let combined = (S.messages || []).filter(m => m && m.role);
+    let oldest = Number(_oldestIdx || 0);
+    let responseSession = S.session;
+    let safety = 0;
+    while (oldest > 0 && safety < 200) {
+      safety += 1;
+      const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${oldest}&msg_limit=300`, {timeoutMs:120000});
+      // Guard: api() may have redirected (401) and returned undefined.
+      if (!data || !data.session) return;
+      // Session may have been switched while we awaited. Bail rather than
+      // overwrite the new session's messages.
+      if (!S.session || S.session.session_id !== sid) return;
+      if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+      responseSession = data.session;
+      const page = (responseSession.messages || []).filter(m => m && m.role);
+      if (!page.length) break;
+      combined = [...page, ...combined];
+      const nextOldest = Number(responseSession._messages_offset || 0);
+      if (!responseSession._messages_truncated || nextOldest <= 0 || nextOldest >= oldest) {
+        oldest = 0;
+        break;
+      }
+      oldest = nextOldest;
+    }
     // Bump the generation BEFORE the wholesale replace so any racing
     // prefetch (whose snapshot was taken before this call's mutex
     // acquisition) sees the new value and aborts.
@@ -2630,16 +2607,16 @@ async function _ensureAllMessagesLoaded() {
     // Loading older messages also does a wholesale replace of S.messages
     // and would otherwise drop _turnUsage/_turnDuration/_turnTps/
     // _gatewayRouting/_statusCard/_anchor_stream_id on the existing turns.
-    let _msgsToAssign = msgs;
+    let _msgsToAssign = combined;
     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
-      _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
+      _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], combined);
     }
     S.messages = _msgsToAssign;
     _messagesTruncated = false;
     _oldestIdx = 0;
-    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
+    _syncToolCallsForLoadedMessages(combined, responseSession.tool_calls);
     if (S.session && S.session.session_id === sid) {
-      S.session.message_count = Number(data.session.message_count || msgs.length);
+      S.session.message_count = Number(responseSession.message_count || combined.length);
     }
   } finally {
     _loadingOlder = false;

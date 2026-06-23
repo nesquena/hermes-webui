@@ -4718,9 +4718,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // "*Task cancelled.*" message gets lost when done event overwrites S.messages
       (async()=>{
         try{
-          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=100`);
           if(data&&data.session&&S.session&&S.session.session_id===activeSid){
             S.session=data.session;
+            if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!data.session._messages_truncated;
+            if(typeof _oldestIdx!=='undefined') _oldestIdx=data.session._messages_offset||0;
             const _nextMsgs3018=(data.session.messages||[]).filter(m=>m&&m.role);
             _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
@@ -4799,7 +4801,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return returnStatus?'stale':false;
     }
     try{
-      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=100`);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -4828,6 +4830,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
         S.session=session;
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);

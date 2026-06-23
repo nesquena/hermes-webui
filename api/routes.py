@@ -5837,6 +5837,8 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
     return window, start_idx
 
 
+_DEFAULT_SESSION_MSG_LIMIT = 100
+_MAX_SESSION_MSG_LIMIT = 300
 _LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
 _LIMITED_TOOL_CONTENT_NOTICE = (
     "\n\n[Tool output truncated in paginated session response; "
@@ -5883,27 +5885,58 @@ def _messages_for_limited_payload(messages) -> list:
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     """Return the display sidecar plus only necessary state.db rows for msg_limit.
 
-    Paginated session loads are latency-sensitive and should not stitch every
-    lineage segment before slicing the tail. Keep the lightweight
-    pre-compression snapshot stitch so continuation sessions can still reveal
-    archived history, then merge only newer state.db rows that have not reached
-    the sidecar yet.
+    Paginated session loads are latency-sensitive.  The full append-only merge
+    has intentionally broad fuzzy duplicate handling for recovery/import cases,
+    but that fuzzy pass is too expensive for ordinary large WebUI sidecars: a
+    6k-message transcript with only old state.db mirror rows can spend tens of
+    seconds comparing historical visible text before the response is sliced to a
+    100-message window.  For the limited display path, keep the sidecar as the
+    coordinate space and only merge state.db rows that are strictly newer than
+    the sidecar tail; older reconciliation remains available through the
+    deliberate full/heavy path.
     """
-    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    sidecar_messages = list(getattr(session, "messages", []) or [])
+    if not sidecar_messages:
+        sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
         return sidecar_messages
-    # NOTE: do not short-circuit to the sidecar when state.db has no strictly
-    # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
-    # newest (recovery / edited-in-place / missing-timestamp cases) is still
-    # absent from the sidecar and must be reconciled — dropping it would render
-    # a tail that differs from the full merge path (silent wrong-transcript on
-    # the paginated load). The append-only merge is O(n) over already-bounded
-    # in-memory lists; the real latency win here is skipping the lineage-parent
-    # DISK load above, which we still skip. (#4070 ship-review)
+    if not sidecar_messages:
+        return merge_session_messages_append_only(
+            sidecar_messages,
+            state_db_messages,
+            truncation_watermark=getattr(session, "truncation_watermark", None),
+        )
+
+    max_sidecar_timestamp = None
+    for msg in sidecar_messages:
+        timestamp = _message_timestamp_as_float(msg)
+        if timestamp is not None:
+            max_sidecar_timestamp = (
+                timestamp
+                if max_sidecar_timestamp is None
+                else max(max_sidecar_timestamp, timestamp)
+            )
+    if max_sidecar_timestamp is None:
+        # Without timestamps we cannot safely identify a tiny state.db delta, so
+        # fall back to the precise merge. This shape is uncommon for modern
+        # WebUI sessions and preserves old recovery semantics.
+        return merge_session_messages_append_only(
+            sidecar_messages,
+            state_db_messages,
+            truncation_watermark=getattr(session, "truncation_watermark", None),
+        )
+
+    newer_state_rows = []
+    for msg in state_db_messages:
+        timestamp = _message_timestamp_as_float(msg)
+        if timestamp is not None and timestamp > max_sidecar_timestamp:
+            newer_state_rows.append(msg)
+    if not newer_state_rows:
+        return sidecar_messages
     return merge_session_messages_append_only(
         sidecar_messages,
-        state_db_messages,
+        newer_state_rows,
         truncation_watermark=getattr(session, "truncation_watermark", None),
     )
 
@@ -6483,6 +6516,7 @@ from api.models import (
     _active_stream_ids,
     _session_message_merge_key,
     _session_message_visible_key,
+    _message_timestamp_as_float,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
@@ -9258,12 +9292,27 @@ def handle_get(handler, parsed) -> bool:
         # ?msg_limit=N returns a tail window containing the last N visible
         # transcript rows. Hidden tool-result rows do not consume the budget;
         # they are included only when they sit inside the selected window and
-        # are bounded before serialization. Older rows load on-demand.
+        # are bounded before serialization. Older rows load on-demand. Ordinary
+        # UI paths default to a bounded recent window; full transcript loading is
+        # deliberately opt-in through include_heavy=1.
+        include_heavy = str(query.get("include_heavy", [""])[0]).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         _msg_limit = query.get("msg_limit", [None])[0]
         try:
-            msg_limit = max(1, int(_msg_limit)) if _msg_limit else None
+            parsed_msg_limit = max(1, int(_msg_limit)) if _msg_limit else None
         except (ValueError, TypeError):
-            msg_limit = None
+            parsed_msg_limit = None
+        if load_messages and not include_heavy:
+            if parsed_msg_limit is None:
+                msg_limit = _DEFAULT_SESSION_MSG_LIMIT
+            else:
+                msg_limit = min(parsed_msg_limit, _MAX_SESSION_MSG_LIMIT)
+        else:
+            msg_limit = parsed_msg_limit
         # ?msg_before=N — 0-based index into the full message array.
         # Returns messages before this index (for scroll-to-top lazy loading).
         # Combined with msg_limit for paging.
