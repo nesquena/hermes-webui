@@ -1583,6 +1583,11 @@ _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
 # lets the waiter ride the in-flight build to completion. Only used on a true cold
 # miss with a live in-flight owner (a stale payload is still served immediately).
 _SESSIONS_CACHE_COLD_JOIN_WAIT_SECONDS = 2.0
+# Total deadline for riding a slow in-flight build on a cold miss (#4718). If the owner's
+# build runs longer than one join wait, a cold caller re-joins (rather than double-building)
+# up to this bound, then falls through to its own build only if the owner is gone or this
+# deadline passes — so a wedged/dead owner can never hang the request indefinitely.
+_SESSIONS_CACHE_COLD_JOIN_MAX_WAIT_SECONDS = 6.0
 _SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple, dict]] = OrderedDict()
 _SESSIONS_CACHE_LOCK = threading.RLock()
 _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
@@ -2323,7 +2328,39 @@ def _get_cached_session_list_payload(
                 pass
         return stale
 
-    # Safety path if the owner died before storing anything.
+    # Cold-miss re-join (#4718): if the wait elapsed but the SAME owner is still building
+    # (a genuinely slow build, e.g. a very large profile that exceeds the join ceiling),
+    # re-join it rather than falling through to our own redundant build. Falling through
+    # here would reintroduce the double-build AND stack our build's latency on top of the
+    # wait we already paid — worst exactly on the large profiles this path targets. Bound
+    # the total time we'll ride a slow owner so a wedged owner can't hang us forever; only
+    # build ourselves once the owner is gone (died) or the deadline passes.
+    if stale is None:
+        rejoin_deadline = time.monotonic() + _SESSIONS_CACHE_COLD_JOIN_MAX_WAIT_SECONDS
+        while time.monotonic() < rejoin_deadline:
+            with _SESSIONS_CACHE_LOCK:
+                current_owner = _SESSIONS_CACHE_INFLIGHT.get(key)
+            if current_owner is None:
+                break  # owner finished or died — re-check cache, then build if needed
+            if current_owner is not event:
+                event = current_owner  # a new owner took over; ride the new build
+            if diag is not None:
+                try:
+                    diag.stage("session_list_cache_cold_rejoin_wait")
+                except Exception:
+                    pass
+            current_owner.wait(_SESSIONS_CACHE_COLD_JOIN_WAIT_SECONDS)
+            latest, is_fresh = _session_list_cache_get(key, allow_stale=False)
+            if latest is not None:
+                if diag is not None:
+                    try:
+                        diag.stage("session_list_cache_cold_rejoin_hit")
+                    except Exception:
+                        pass
+                return latest
+
+    # Safety path if the owner died before storing anything (or the re-join deadline
+    # elapsed with no payload — build it ourselves rather than hang).
     if diag is not None:
         try:
             diag.stage("session_list_cache_fallback_rebuild")
@@ -2382,6 +2419,10 @@ def warm_session_list_cache(profile_name: str | None = None) -> bool:
             # The sidebar's default request: visible WebUI rows, hidden excluded.
             # (Matches static/sessions.js which fetches with sidebar_source=webui
             # and exclude_hidden=1 for the standard sidebar load.)
+            # NOTE: this warms ONLY the default sidebar view. Non-default states
+            # (all-profiles, archived, show-hidden, or a CLI-source tab) use a
+            # different cache key and still pay the cold build on switch — acceptable
+            # as a best-effort warm of the common case, not full coverage.
             all_profiles = False
             include_archived = False
             exclude_hidden = True

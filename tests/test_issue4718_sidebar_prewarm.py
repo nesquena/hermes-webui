@@ -205,3 +205,65 @@ def test_cold_miss_follower_joins_inflight_build_no_double_build():
     assert results[0] == results[1] == {"sessions": [{"session_id": "joined"}], "active_profile": "work"}
     assert calls["n"] == 1, "exactly one build should have run for the cold-join case"
 
+
+def test_cold_miss_follower_rejoins_build_slower_than_one_wait():
+    """Re-join hardening (#4718, Opus gate): if the owner's build runs LONGER than a
+    single cold-join wait, the follower must re-join and ride it to completion — NOT
+    fall through to its own redundant build (which would double-build AND stack latency
+    on the largest profiles this path targets). Pins single-build even for a slow owner.
+
+    Driven by shrinking the per-iteration wait so the test's ~0.6s build exceeds one
+    wait but stays well under the total deadline.
+    """
+    routes._session_list_cache_clear()
+    orig_wait = routes._SESSIONS_CACHE_COLD_JOIN_WAIT_SECONDS
+    orig_max = routes._SESSIONS_CACHE_COLD_JOIN_MAX_WAIT_SECONDS
+    routes._SESSIONS_CACHE_COLD_JOIN_WAIT_SECONDS = 0.15  # < build time, forces re-join
+    routes._SESSIONS_CACHE_COLD_JOIN_MAX_WAIT_SECONDS = 5.0
+    try:
+        started = threading.Event()
+        release = threading.Event()
+        calls = {"n": 0}
+        lock = threading.Lock()
+
+        def builder():
+            with lock:
+                calls["n"] += 1
+            started.set()
+            release.wait(timeout=5)
+            return {"sessions": [{"session_id": "slow"}], "active_profile": "work"}
+
+        key = routes._session_list_cache_key(
+            active_profile="work",
+            all_profiles=False,
+            show_cli_sessions=False,
+            show_previous_messaging_sessions=False,
+            show_cron_sessions=False,
+            exclude_hidden=True,
+            visible_only=True,
+            sidebar_source="webui",
+        )
+        results = []
+
+        def reader():
+            results.append(routes._get_cached_session_list_payload(key=key, builder=builder))
+
+        owner = threading.Thread(target=reader)
+        owner.start()
+        assert started.wait(2.0)
+        follower = threading.Thread(target=reader)
+        follower.start()
+        # Let the follower pass SEVERAL join-wait iterations (0.15s each) while the build
+        # is still held — it must keep re-joining, not fall through and build.
+        time.sleep(0.6)
+        with lock:
+            assert calls["n"] == 1, "follower fell through to its own build instead of re-joining"
+        release.set()
+        owner.join(3)
+        follower.join(3)
+        assert len(results) == 2
+        assert calls["n"] == 1, "exactly one build for a slow owner with a re-joining follower"
+    finally:
+        routes._SESSIONS_CACHE_COLD_JOIN_WAIT_SECONDS = orig_wait
+        routes._SESSIONS_CACHE_COLD_JOIN_MAX_WAIT_SECONDS = orig_max
+
