@@ -331,6 +331,19 @@ def test_active_request_readonly_scope_blocks_pool_env_seed(monkeypatch, tmp_pat
     work_home = base / "profiles" / "work"
     work_home.mkdir(parents=True)
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    # Point HERMES_HOME at this test's own tmp base too (#4740). The readonly scope
+    # blocks the process-env credential fallback correctly, but the credential pool's
+    # global-root fallback (read_credential_pool -> _load_global_auth_store) resolves
+    # the root via get_default_hermes_root(), which reads os.environ["HERMES_HOME"]
+    # DIRECTLY — not the thread-local/scoped home. Under full-suite ordering that env
+    # var points at the shared persistent test state dir, where an EARLIER test
+    # persisted an openrouter credential_pool entry (source: env:OPENROUTER_API_KEY)
+    # into auth.json. read_credential_pool then falls back to that global store, finds
+    # the leaked openrouter entry, and _has_explicit_pool_credentials returns True —
+    # an order-dependent false failure that doesn't reproduce in isolation. Pinning
+    # HERMES_HOME to this test's empty tmp base makes the global-root fallback resolve
+    # to a clean dir with no leaked auth.json.
+    monkeypatch.setenv("HERMES_HOME", str(base))
     monkeypatch.setenv("OPENROUTER_API_KEY", "from-process-env")
 
     profiles.set_request_profile("work")
