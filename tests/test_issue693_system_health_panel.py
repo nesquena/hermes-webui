@@ -131,6 +131,31 @@ def test_system_health_falls_back_to_psutil_when_procfs_is_unavailable(monkeypat
     }
 
 
+def test_system_health_missing_optional_psutil_is_safe_unavailable(monkeypatch):
+    from api import system_health
+
+    class _MissingProcPath:
+        def open(self, *args, **kwargs):
+            raise FileNotFoundError("/private/proc/path")
+
+    def missing_psutil(name):
+        if name == "psutil":
+            raise ModuleNotFoundError("No module named 'psutil'")
+        raise AssertionError(f"unexpected import: {name}")
+
+    monkeypatch.setattr(system_health, "_PROC_STAT", _MissingProcPath())
+    monkeypatch.setattr(system_health, "_PROC_MEMINFO", _MissingProcPath())
+    monkeypatch.setattr(system_health, "import_module", missing_psutil)
+
+    for collect in (system_health._cpu_percent, system_health._memory_usage):
+        try:
+            collect()
+        except RuntimeError as exc:
+            assert str(exc) == "psutil_unavailable"
+        else:  # pragma: no cover - defensive regression clarity
+            raise AssertionError("missing optional psutil should surface a safe unavailable error")
+
+
 def test_system_health_procfs_parse_errors_remain_visible(monkeypatch):
     from api import system_health
 

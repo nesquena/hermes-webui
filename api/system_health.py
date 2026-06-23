@@ -22,6 +22,13 @@ _PROC_MEMINFO = Path("/proc/meminfo")
 _CPU_SAMPLE_SECONDS = 0.05
 
 
+def _load_optional_psutil():
+    try:
+        return import_module("psutil")
+    except ImportError:
+        raise RuntimeError("psutil_unavailable") from None
+
+
 def _checked_at() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -74,13 +81,13 @@ def _cpu_percent() -> float:
     try:
         start = _read_proc_stat_cpu()
     except OSError:
-        psutil = import_module("psutil")
+        psutil = _load_optional_psutil()
         return _clamp_percent(psutil.cpu_percent(interval=_CPU_SAMPLE_SECONDS))
     time.sleep(_CPU_SAMPLE_SECONDS)
     try:
         end = _read_proc_stat_cpu()
     except OSError:
-        psutil = import_module("psutil")
+        psutil = _load_optional_psutil()
         return _clamp_percent(psutil.cpu_percent(interval=0.0))
     return _cpu_delta_percent(start, end)
 
@@ -106,7 +113,7 @@ def _memory_usage() -> dict[str, int | float]:
     try:
         meminfo = _read_meminfo_kib()
     except OSError:
-        vm = import_module("psutil").virtual_memory()
+        vm = _load_optional_psutil().virtual_memory()
         total = int(getattr(vm, "total", 0) or 0)
         if total <= 0:
             raise RuntimeError("memory_unavailable") from None
