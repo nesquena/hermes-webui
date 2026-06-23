@@ -5174,8 +5174,14 @@ def merge_session_messages_append_only(
         # advanced), allow state rows newer than the sidecar tail to merge.
         sidecar_advanced_past_watermark = (
             watermark_timestamp is not None
-            and max_sidecar_timestamp is not None
-            and max_sidecar_timestamp > watermark_timestamp
+            and (
+                (max_sidecar_timestamp is not None
+                 and max_sidecar_timestamp > watermark_timestamp)
+                # If the sidecar is empty but watermark > 0, the session has
+                # advanced (a new user turn was committed).  Treat this as
+                # advanced so post-edit state.db rows are not dropped.
+                or (not sidecar_messages and watermark_timestamp > 0)
+            )
         )
         if (
             watermark_timestamp is not None
@@ -5198,6 +5204,18 @@ def merge_session_messages_append_only(
             watermark_timestamp is not None
             and timestamp is not None
             and timestamp < watermark_timestamp
+            and key not in seen_message_keys
+            and _session_message_content_key(msg) not in seen_content_keys
+        ):
+            continue
+        # Same-second edit: if timestamp equals the watermark and the message
+        # content is not in the sidecar, it's a replaced message edited at the
+        # same second — skip it.  The edited version (same timestamp, different
+        # content) is in the sidecar and survives this check.
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp == watermark_timestamp
             and key not in seen_message_keys
             and _session_message_content_key(msg) not in seen_content_keys
         ):
