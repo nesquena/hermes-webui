@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **EvoLink is available as an OpenAI-compatible provider in onboarding, Settings, and model discovery.** The WebUI now recognizes `EVOLINK_API_KEY`, uses `https://direct.evolink.ai/v1` as the default Base URL, and shows curated GPT-5.5 fallback models for EvoLink.
+
 ## [v0.51.601] — 2026-06-23 — Release VH (sidebar lineage rows keep running/unread state when continuation is hidden)
 
 ### Fixed
