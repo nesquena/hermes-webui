@@ -131,9 +131,9 @@ class TestWorkspaceSwitcherBlankPage:
 
     def test_switch_to_workspace_keeps_busy_guard_after_blank_page_create(self):
         src = read('static/panels.js')
-        start = src.find('async function switchToWorkspace(')
-        assert start != -1, "switchToWorkspace not found"
-        fn = src[start:src.find('async function toggleWorktreePanel', start)]
+        m = re.search(r'async function switchToWorkspace\(path,name\)\{.*?\n\}', src, re.DOTALL)
+        assert m, "switchToWorkspace not found"
+        fn = m.group(0)
         assert "t('workspace_busy_switch')" in fn, (
             "switchToWorkspace must keep the busy-session workspace switch toast"
         )
