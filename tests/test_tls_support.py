@@ -23,6 +23,38 @@ from conftest import requires_fcntl
 ROOT = Path(__file__).parent.parent
 
 
+def _run_config_probe(code: str, env=None, *, attempts: int = 3, timeout: int = 60):
+    """Run a short `python -c` probe that imports api.config, with retries.
+
+    Importing api.config in a fresh subprocess is heavyweight, and under a fully
+    parallel test suite the box can be saturated enough that a 10s timeout trips
+    and the runner SIGKILLs the child (returncode -9) — a pure resource-contention
+    flake, not a logic failure. Use a generous timeout and retry the spawn on
+    TimeoutExpired / SIGKILL so the full-suite run is deterministic (#4740 sweep:
+    zero tolerance for load-dependent flakes). A genuine non-zero exit with output
+    is returned immediately (no retry) so real failures still surface fast.
+    """
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            r = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True, text=True, timeout=timeout,
+                cwd=str(ROOT), env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_exc = exc
+            continue  # contention — respawn
+        # returncode -9 == SIGKILL (OOM/oversubscription under load): retry.
+        if r.returncode == -9 and attempt < attempts - 1:
+            continue
+        return r
+    raise AssertionError(
+        f"config probe subprocess did not complete after {attempts} attempts "
+        f"(timeout={timeout}s each); last error: {last_exc!r}"
+    )
+
+
 def _gen_test_cert(tmpdir: Path) -> tuple[str, str]:
     """Generate a self-signed cert and key pair for testing."""
     cert = str(tmpdir / "test_cert.pem")
@@ -149,11 +181,7 @@ class TestTLSConfigFlag(unittest.TestCase):
             from api.config import TLS_ENABLED
             print(TLS_ENABLED)
         """)
-        r = subprocess.run(
-            [os.sys.executable, "-c", code],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(ROOT),
-        )
+        r = _run_config_probe(code)
         self.assertEqual(r.stdout.strip(), "True")
 
     def test_tls_enabled_false_when_env_absent(self):
@@ -166,11 +194,7 @@ class TestTLSConfigFlag(unittest.TestCase):
             from api.config import TLS_ENABLED
             print(TLS_ENABLED)
         """)
-        r = subprocess.run(
-            [os.sys.executable, "-c", code],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(ROOT), env=env,
-        )
+        r = _run_config_probe(code, env=env)
         self.assertEqual(r.stdout.strip(), "False")
 
     def test_tls_enabled_false_when_only_cert_set(self):
@@ -181,11 +205,7 @@ class TestTLSConfigFlag(unittest.TestCase):
             from api.config import TLS_ENABLED
             print(TLS_ENABLED)
         """)
-        r = subprocess.run(
-            [os.sys.executable, "-c", code],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(ROOT), env=env,
-        )
+        r = _run_config_probe(code, env=env)
         self.assertEqual(r.stdout.strip(), "False")
 
 
