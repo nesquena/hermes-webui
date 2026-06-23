@@ -3001,7 +3001,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdWrittenLen=0;
     _smdWrittenText='';
     if(!window.smd){_smdParser=null;return;}
-    const baseRenderer=fade ? _streamFadeRenderer(el) : window.smd.default_renderer(el);
+    const baseRenderer=fade ? _streamFadeRenderer(el) : _safeSmdRenderer(el);
     const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
     _smdParser=window.smd.parser(renderer);
   }
@@ -3072,9 +3072,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     try{window.smd.parser_write(_smdParser,delta);}catch(_){}
     _smdWrittenLen=displayText.length;
     _smdWrittenText=displayText;
-    // streaming-markdown does NOT sanitize URL schemes. The default live path
-    // scans after writes; fade mode blocks unsafe href/src in its renderer.set_attr.
-    if(assistantBody&&!fade){_sanitizeSmdLinks(assistantBody);}
+    // URL scheme safety is handled by the renderer's set_attr hook
+    // (_safeSmdRenderer or _streamFadeRenderer), applied inline as smd
+    // creates each DOM node — no post-hoc full-DOM scan needed.
     _scheduleStreamingKatex();
   }
   // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
@@ -3224,6 +3224,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(last<value.length) frag.appendChild(document.createTextNode(value.slice(last)));
       parent.appendChild(frag);
     };
+    renderer.set_attr=(data,attr,value)=>{
+      const isHref=window.smd&&attr===window.smd.HREF;
+      const isSrc=window.smd&&attr===window.smd.SRC;
+      const safeUrl=isSrc?_SMD_SAFE_IMG_URL_RE:_SMD_SAFE_URL_RE;
+      if(isHref&&/^(file|workspace|session):\/\//i.test(String(value||''))){
+        baseSetAttr(data,attr,_smdLinkHref(value));
+        if(/^session:\/\//i.test(String(value||''))){
+          const node=data&&data.nodes&&data.nodes[data.index];
+          if(node&&node.classList) node.classList.add('session-link');
+        }
+        return;
+      }
+      if((isHref||isSrc)&&!safeUrl.test(String(value||''))){
+        const node=data&&data.nodes&&data.nodes[data.index];
+        if(node&&node.setAttribute) node.setAttribute('data-blocked-scheme','1');
+        return;
+      }
+      baseSetAttr(data,attr,value);
+    };
+    return renderer;
+  }
+  // Safe renderer: wraps default_renderer with a set_attr hook that validates
+  // href/src URL schemes inline — no post-hoc DOM-wide querySelectorAll needed.
+  // Unlike _streamFadeRenderer, this does NOT wrap add_text, so smd adds new
+  // DOM nodes as plain text nodes (no animation spans). Used on the non-fade
+  // streaming path to eliminate _sanitizeSmdLinks(assistantBody) O(DOM) scans
+  // on every token event (#WebUI-perf).
+  function _safeSmdRenderer(el){
+    const renderer=window.smd.default_renderer(el);
+    const baseSetAttr=renderer.set_attr;
     renderer.set_attr=(data,attr,value)=>{
       const isHref=window.smd&&attr===window.smd.HREF;
       const isSrc=window.smd&&attr===window.smd.SRC;
@@ -3714,7 +3744,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   let _lastRenderMs=0;
-  function _scheduleRender(){
+  // Parse-result cache: _scheduleRender can accept a pre-computed _parseStreamState()
+  // from the token event handler, avoiding a duplicate O(n) scan inside _doRender
+  // when the rAF fires before the next token arrives.
+  let _cachedParsed=null;
+  let _cachedParsedText='';
+  let _cachedParsedReasoning='';
+  function _scheduleRender(parsed){
+    // If caller provides a pre-computed parse result, cache it for _doRender.
+    if(parsed){
+      _cachedParsed=parsed;
+      _cachedParsedText=assistantText;
+      _cachedParsedReasoning=liveReasoningText;
+    }
     if(_renderPending) return;
     if(_streamFinalized) return; // Bug A: don't schedule new rAF after stream finalized
     _renderPending=true;
@@ -3733,7 +3775,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Guard: a pending setTimeout+rAF can outlive stream finalization.
       if(_streamFinalized) return;
       _lastRenderMs=performance.now();
-      const parsed=_parseStreamState();
+      const parsed=_cachedParsed&&_cachedParsedText===assistantText&&_cachedParsedReasoning===liveReasoningText ? _cachedParsed : _parseStreamState();
+      _cachedParsed=null;
       _renderLiveThinking(parsed);
       if(assistantBody){
         const displayText = segmentStart===0
@@ -3828,7 +3871,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const parsed=_parseStreamState();
       if(_freshSegment) appendThinking('', _liveThinkingPlacement());
       if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
-      _scheduleRender();
+      _scheduleRender(parsed);
     });
 
     source.addEventListener('interim_assistant',e=>{
