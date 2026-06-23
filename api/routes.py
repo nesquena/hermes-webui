@@ -2294,22 +2294,43 @@ def _get_cached_session_list_payload(
             pass
 
     if stale is not None:
-        timeout = _SESSIONS_CACHE_STALE_WAIT_SECONDS
+        # A stale payload exists: wait only briefly, then serve stale immediately.
+        event.wait(_SESSIONS_CACHE_STALE_WAIT_SECONDS)
     else:
-        # True cold miss. If a rebuild is genuinely in-flight (an owner is building —
-        # e.g. the post-switch pre-warm), JOIN it: wait long enough to ride that build
-        # to completion instead of giving up at 0.25s and redundantly rebuilding the
-        # same payload ourselves (the post-switch double-build, #4718). If no owner is
-        # in flight, keep the short wait — there's nothing to join, and the fast
-        # fall-through to our own build below is correct.
-        with _SESSIONS_CACHE_LOCK:
-            rebuild_in_flight = _SESSIONS_CACHE_INFLIGHT.get(key) is not None
-        timeout = (
-            _SESSIONS_CACHE_COLD_JOIN_WAIT_SECONDS
-            if rebuild_in_flight
-            else _SESSIONS_CACHE_WAIT_SECONDS
-        )
-    event.wait(timeout)
+        # True cold miss (no payload at all). If a rebuild is genuinely in-flight (an
+        # owner is building — e.g. the post-switch pre-warm), JOIN it rather than giving
+        # up after 0.25s and redundantly rebuilding the same payload ourselves (the
+        # post-switch double-build, #4718). The build can exceed a single wait on a large
+        # profile, so re-join under ONE total deadline that starts NOW (before the first
+        # wait) and caps every wait by the remaining time — so the whole cold in-flight
+        # join is bounded by _SESSIONS_CACHE_COLD_JOIN_MAX_WAIT_SECONDS, never that plus an
+        # initial wait. Only build ourselves once the owner is gone (died) or the deadline
+        # passes. If no owner is in flight at all, fall through to our own build promptly.
+        cold_join_deadline = time.monotonic() + _SESSIONS_CACHE_COLD_JOIN_MAX_WAIT_SECONDS
+        while True:
+            with _SESSIONS_CACHE_LOCK:
+                current_owner = _SESSIONS_CACHE_INFLIGHT.get(key)
+            if current_owner is None:
+                break  # no in-flight owner — re-check cache, then build ourselves if needed
+            if current_owner is not event:
+                event = current_owner  # a new owner took over; ride the new build
+            remaining = cold_join_deadline - time.monotonic()
+            if remaining <= 0:
+                break  # rode the build to the total deadline; fall through to own build
+            if diag is not None:
+                try:
+                    diag.stage("session_list_cache_cold_rejoin_wait")
+                except Exception:
+                    pass
+            current_owner.wait(min(_SESSIONS_CACHE_COLD_JOIN_WAIT_SECONDS, remaining))
+            latest, is_fresh = _session_list_cache_get(key, allow_stale=False)
+            if latest is not None:
+                if diag is not None:
+                    try:
+                        diag.stage("session_list_cache_cold_rejoin_hit")
+                    except Exception:
+                        pass
+                return latest
 
     latest, is_fresh = _session_list_cache_get(key, allow_stale=False)
     if latest is not None:
@@ -2328,39 +2349,8 @@ def _get_cached_session_list_payload(
                 pass
         return stale
 
-    # Cold-miss re-join (#4718): if the wait elapsed but the SAME owner is still building
-    # (a genuinely slow build, e.g. a very large profile that exceeds the join ceiling),
-    # re-join it rather than falling through to our own redundant build. Falling through
-    # here would reintroduce the double-build AND stack our build's latency on top of the
-    # wait we already paid — worst exactly on the large profiles this path targets. Bound
-    # the total time we'll ride a slow owner so a wedged owner can't hang us forever; only
-    # build ourselves once the owner is gone (died) or the deadline passes.
-    if stale is None:
-        rejoin_deadline = time.monotonic() + _SESSIONS_CACHE_COLD_JOIN_MAX_WAIT_SECONDS
-        while time.monotonic() < rejoin_deadline:
-            with _SESSIONS_CACHE_LOCK:
-                current_owner = _SESSIONS_CACHE_INFLIGHT.get(key)
-            if current_owner is None:
-                break  # owner finished or died — re-check cache, then build if needed
-            if current_owner is not event:
-                event = current_owner  # a new owner took over; ride the new build
-            if diag is not None:
-                try:
-                    diag.stage("session_list_cache_cold_rejoin_wait")
-                except Exception:
-                    pass
-            current_owner.wait(_SESSIONS_CACHE_COLD_JOIN_WAIT_SECONDS)
-            latest, is_fresh = _session_list_cache_get(key, allow_stale=False)
-            if latest is not None:
-                if diag is not None:
-                    try:
-                        diag.stage("session_list_cache_cold_rejoin_hit")
-                    except Exception:
-                        pass
-                return latest
-
-    # Safety path if the owner died before storing anything (or the re-join deadline
-    # elapsed with no payload — build it ourselves rather than hang).
+    # Safety path: build it ourselves — the owner died before storing anything, the
+    # cold-join deadline elapsed with no payload, or there was never an in-flight owner.
     if diag is not None:
         try:
             diag.stage("session_list_cache_fallback_rebuild")
