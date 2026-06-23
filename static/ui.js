@@ -10985,7 +10985,13 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // lands at the bottom as expected. (Codex #4006 follow-up.)
   // renderMessages() captures the pre-wipe snapshot for this case too (see its
   // scrollSnapshot init), so restoring here lands the reader where they were.
-  if(_messageUserUnpinned){
+  //
+  // Guard: only honor unpin when preserveScroll is true (same-session refresh
+  // where we're deliberately keeping the user's position). For fresh session
+  // loads (preserveScroll=false), the unpin flag may be stale from a mobile
+  // touch event during the loading transition — forcing scrollToBottom() is the
+  // correct behavior for a user-initiated navigation to a different session.
+  if(_messageUserUnpinned && preserveScroll){
     _restoreMessageScrollSnapshot(scrollSnapshot);
     _maybeShowNewMessageScrollCue(scrollSnapshot);
     return;
