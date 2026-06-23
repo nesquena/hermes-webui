@@ -1659,7 +1659,61 @@ def _format_process_notification(evt: dict) -> str:
     """Format a completed background process notification for agent input."""
     if not isinstance(evt, dict):
         return ''
-    if evt.get('type') != 'completion':
+    evt_type = evt.get('type', 'completion')
+
+    # Async delegation completions carry the full task source + result
+    if evt_type == 'async_delegation':
+        deleg_id = evt.get('delegation_id', 'unknown')
+        goal = evt.get('goal', '') or ''
+        status = evt.get('status') or 'completed'
+        duration = evt.get('duration_seconds') or evt.get('total_duration_seconds', '?')
+        api_calls = evt.get('api_calls', 0)
+        error = evt.get('error') or ''
+
+        # Batch events carry a 'results' list (one entry per subagent)
+        batch_results = evt.get('results')
+        if evt.get('is_batch') or isinstance(batch_results, list):
+            results = batch_results or []
+            goals = evt.get('goals') or []
+            n = len(results) if results else len(goals)
+            lines = [
+                f"[ASYNC DELEGATION BATCH COMPLETE — {deleg_id}]",
+                f"A background fan-out of {n} subagent(s) has finished.",
+                f"Goal: {goal}",
+                f"Duration: {duration}s",
+            ]
+            for i, r in enumerate(results):
+                task_goal = goals[i] if i < len(goals) else f"Task {i+1}"
+                task_status = r.get('status', 'unknown')
+                task_summary = r.get('summary') or ''
+                task_error = r.get('error') or ''
+                lines.append(f"--- TASK {i+1}/{n}: {task_goal} (status={task_status}) ---")
+                if task_summary:
+                    lines.append(task_summary)
+                elif task_error:
+                    lines.append(f"Error: {task_error}")
+                else:
+                    lines.append(f"(no output — status={task_status})")
+            return "\n".join(lines)
+
+        # Single-task event
+        summary = evt.get('summary') or ''
+        if status in ('completed', 'success') and summary:
+            result = summary
+        elif error:
+            result = f"Error ({status}): {error}"
+            if summary:
+                result += f"\nPartial output:\n{summary}"
+        else:
+            result = f"Status: {status}"
+        return (
+            f"[ASYNC DELEGATION COMPLETE — {deleg_id}]\n"
+            f"Goal: {goal}\n"
+            f"Duration: {duration}s   API calls: {api_calls}\n"
+            f"--- RESULT ---\n{result}]"
+        )
+
+    if evt_type != 'completion':
         return ''
     _sid = evt.get('session_id', '')
     _cmd = evt.get('command', '')
@@ -1717,6 +1771,22 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
             break
 
         evt_sid = str(evt.get('session_id') or '') if isinstance(evt, dict) else ''
+        # Async delegation events don't carry session_id — match by session_key
+        if not evt_sid and isinstance(evt, dict) and evt.get('type') == 'async_delegation':
+            evt_session_key = str(evt.get('session_key') or '')
+            if evt_session_key == session_id:
+                notification = _format_process_notification(evt)
+                if notification:
+                    notifications.append(notification)
+                    try:
+                        from tools.async_delegation import mark_async_delegation_consumed
+                        mark_async_delegation_consumed(evt.get('delegation_id', ''))
+                    except Exception:
+                        pass
+                continue
+            # session_key doesn't match this session — requeue
+            skipped_events.append(evt)
+            continue
         if not evt_sid:
             skipped_events.append(evt)
             continue

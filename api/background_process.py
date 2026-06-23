@@ -753,9 +753,75 @@ def _resolve_wakeup_target(
     return owner
 
 
+def _process_async_delegation(evt: dict, _cfg) -> None:
+    """Route an async_delegation completion event to its WebUI session.
+
+    Async delegation events carry session_key (which equals the WebUI
+    session_id) and a full result summary. Unlike terminal completion
+    events, they have no process_id, so we route directly by session_key
+    → PROCESS_SESSION_INDEX → session_id, then format and emit + wake.
+    """
+    session_key = str(evt.get('session_key') or '')
+    if not session_key:
+        logger.debug("async_delegation drop: no session_key on event %s",
+                     evt.get('delegation_id', ''))
+        return
+
+    with _cfg.PROCESS_SESSION_INDEX_LOCK:
+        session_id = _cfg.PROCESS_SESSION_INDEX.get(session_key)
+
+    if not session_id:
+        # session_key might BE the session_id directly (WebUI sets them equal)
+        session_id = session_key
+
+    # Format the notification using the streaming module's formatter
+    from api.streaming import _format_process_notification
+    notification = _format_process_notification(evt)
+    if not notification:
+        logger.debug("async_delegation drop: empty notification for %s",
+                     evt.get('delegation_id', ''))
+        return
+
+    logger.info("async_delegation: delivering result for delegation_id=%s to session_id=%s",
+                evt.get('delegation_id', ''), session_id)
+
+    # Emit the bg_task_complete SSE event to the persistent session channel
+    _emit_to_session_streams(session_id, 'bg_task_complete', {
+        'session_id': session_id,
+        'notification': notification,
+        'delegation_id': evt.get('delegation_id', ''),
+    })
+
+    # Mark consumed so the hermes-agent recovery sweep won't re-inject
+    try:
+        from tools.async_delegation import mark_async_delegation_consumed
+        mark_async_delegation_consumed(evt.get('delegation_id', ''))
+    except Exception:
+        logger.debug("async_delegation: mark_consumed failed for %s",
+                      evt.get('delegation_id', ''), exc_info=True)
+
+    # Start a server-side wakeup turn so the agent processes the result
+    try:
+        _start_server_side_wakeup_turn(session_id, notification)
+    except Exception:
+        logger.debug("async_delegation: wakeup turn start failed for session %s",
+                      session_id, exc_info=True)
+
+
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
+
+    # ── Async delegation completions ──────────────────────────────────
+    # These events carry session_key (the WebUI session_id) and a full
+    # result summary. They don't have a process_id, so the terminal
+    # process-registry lookup below doesn't apply. Route directly by
+    # session_key → session_id via PROCESS_SESSION_INDEX, format the
+    # notification, and emit + wake the agent.
+    evt_type = evt.get('type', 'completion')
+    if evt_type == 'async_delegation':
+        _process_async_delegation(evt, _cfg)
+        return
 
     # Hoist the process-registry import once per event: it was imported in
     # three separate blocks below (session_key recovery, env-immune owner
