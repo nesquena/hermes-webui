@@ -16146,15 +16146,15 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     if attachments:
         user_msg["attachments"] = list(attachments)
     s.messages.append(user_msg)
-    # The new user turn is now committed to messages (#3831): a positive
-    # truncation watermark from a prior retry/undo/edit has been superseded and
-    # must retire, else it freezes at the old edit boundary and later drops these
-    # post-edit turns on an empty-sidecar reconcile. Safe here (not at chat-start)
-    # because the row is durably in messages, so the merge's max-sidecar guard now
-    # suppresses the replaced tail without the watermark. Cleared to None — never
-    # 0.0, which is the truncate-to-empty sentinel (#2914).
+    # The new user turn is now committed to messages (#3831): advance the
+    # truncation watermark to the new message's timestamp so that
+    # merge_session_messages_append_only() still filters out replaced
+    # pre-edit rows from state.db whose timestamps fall below the boundary.
+    # The merge's sidecar_advanced_past_watermark guard (models.py:5172)
+    # allows state.db rows newer than the watermark, so post-edit turns
+    # are not dropped. Never 0.0 (the truncate-to-empty sentinel, #2914).
     if getattr(s, "truncation_watermark", None):
-        s.truncation_watermark = None
+        s.truncation_watermark = user_msg.get("timestamp") or time.time()
 
 
 def _is_default_or_empty_session_title(title) -> bool:

@@ -428,12 +428,15 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)
     _append_recovered_turn_to_context(session, recovered)
-    # The new user turn is now committed to messages (#3831): retire a positive
-    # truncation watermark from a prior retry/undo/edit so it can't freeze at the
-    # old edit boundary and drop these post-edit turns on a later empty-sidecar
-    # reconcile. None, never 0.0 (the truncate-to-empty sentinel, #2914).
+    # The new user turn is now committed to messages (#3831): advance the
+    # truncation watermark to the new message's timestamp so that
+    # merge_session_messages_append_only() still filters out replaced
+    # pre-edit rows from state.db whose timestamps fall below the boundary.
+    # The merge's sidecar_advanced_past_watermark guard allows state.db rows
+    # newer than the watermark, so post-edit turns are not dropped.
+    # Never 0.0 (the truncate-to-empty sentinel, #2914).
     if getattr(session, 'truncation_watermark', None):
-        session.truncation_watermark = None
+        session.truncation_watermark = recovered_ts
     return recovered
 
 
