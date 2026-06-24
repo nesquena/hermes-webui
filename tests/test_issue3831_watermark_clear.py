@@ -136,19 +136,21 @@ def test_advanced_watermark_keeps_post_edit_state_rows():
 # --- The guardrails: the fix must NOT regress #2914/#3102 ---------------------
 
 def test_active_watermark_still_filters_replaced_tail_empty_sidecar():
-    """A still-active (positive) watermark with an empty sidecar still suppresses
-    rows above the boundary — the replaced/edited tail (#2914). The fix only
-    changes WHEN the watermark is advanced, never the merge semantics."""
+    """A positive watermark (advanced to the new user-turn timestamp) with an
+    empty sidecar must suppress the replaced pre-edit tail while keeping
+    post-edit rows (#4767 / CORE finding #2)."""
     state = _rows(
         ("user", "q1", 50),
         ("assistant", "a1", 100),
-        ("user", "replaced-q2", 200),   # above watermark -> filtered
-        ("assistant", "replaced-a2", 300),
+        ("user", "replaced-q2", 150),   # replaced by the edit -> filtered
+        ("assistant", "replaced-a2", 160),  # replaced by the edit -> filtered
+        ("user", "edited-q2", 200),     # new user turn (watermark advanced here)
+        ("assistant", "a2-new", 300),   # post-edit reply -> kept
     )
     merged = models.merge_session_messages_append_only(
-        [], state, truncation_watermark=100.0
+        [], state, truncation_watermark=200.0
     )
-    assert [m["content"] for m in merged] == ["q1", "a1"]
+    assert [m["content"] for m in merged] == ["q1", "a1", "edited-q2", "a2-new"]
 
 
 def test_zero_watermark_still_blocks_all_replay_empty_sidecar():

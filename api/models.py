@@ -5085,23 +5085,45 @@ def merge_session_messages_append_only(
     if not state_messages:
         return sidecar_messages
     if not sidecar_messages:
-        if watermark_timestamp is not None:
-            filtered = [
-                msg for msg in state_messages
-                if (
-                    (timestamp := _message_timestamp_as_float(msg)) is not None
-                    and timestamp <= watermark_timestamp
-                )
-            ]
-        else:
+        if watermark_timestamp is None:
+            # No watermark — keep everything, just dedup.
             filtered = state_messages
+        elif watermark_timestamp == 0:
+            # Truncate-to-empty sentinel (#2914) — block all replay.
+            return []
+        else:
+            # Positive watermark advanced after edit/retry/undo (#4767).
+            # Without a sidecar there's no seen_content_keys to check against,
+            # so we reconstruct the correct transcript from state.db alone:
+            #   1. Keep all messages at/after the watermark (the new turn +
+            #      post-edit assistant reply — these are always legitimate).
+            #   2. For pre-watermark messages, drop the last complete turn
+            #      (user + assistant pair) which is the replaced tail.
+            #      Everything before that is legitimate history.
+            at_or_after = []
+            pre_watermark = []
+            for msg in state_messages:
+                ts = _message_timestamp_as_float(msg)
+                if ts is not None and ts >= watermark_timestamp:
+                    at_or_after.append(msg)
+                else:
+                    pre_watermark.append(msg)
+            # Scan pre_watermark from the end: skip assistant messages until
+            # we hit a user message (the replaced prompt), then stop.
+            i = len(pre_watermark) - 1
+            while i >= 0:
+                role = str(pre_watermark[i].get("role", "")).lower()
+                if role == "assistant":
+                    i -= 1
+                elif role == "user":
+                    i -= 1  # skip this user message too (the replaced prompt)
+                    break
+                else:
+                    i -= 1  # tool messages etc. — skip
+            filtered = pre_watermark[:i + 1] + at_or_after
+
         # Deduplicate true duplicates (same role, content, exact timestamp)
         # without collapsing legitimately-repeated identical turns (#3346).
-        # Note: rows whose timestamps were mutated by compaction/recovery to
-        # microsecond-different values will not be folded — only byte-identical
-        # timestamps are treated as the same message.  This is intentional;
-        # collapsing same-second distinct turns would be worse than retaining
-        # a compaction-restamped duplicate.
         seen = set()
         deduped = []
         for msg in filtered:

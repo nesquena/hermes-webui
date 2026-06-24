@@ -346,3 +346,32 @@ def test_zero_watermark_preserved_through_new_turn(monkeypatch, tmp_path):
     assert reloaded.truncation_watermark == 0.0, (
         "0.0 truncate-to-empty sentinel was advanced — #2914 regression!"
     )
+
+
+def test_empty_sidecar_advanced_watermark_no_ghost_no_data_loss():
+    """Empty sidecar + advanced watermark must keep post-edit rows without
+    resurrecting stale pre-edit ghosts (#4767).
+
+    Reproduction: cold reload / crash recovery before sidecar persists.
+    state.db has the full lineage including replaced pre-edit rows."""
+    state = [
+        {"role": "user", "content": "first msg", "timestamp": 50},
+        {"role": "assistant", "content": "first reply", "timestamp": 51},
+        {"role": "user", "content": "original pre-edit", "timestamp": 100},
+        {"role": "assistant", "content": "original reply", "timestamp": 101},
+        {"role": "user", "content": "edited/new turn", "timestamp": 200},
+        {"role": "assistant", "content": "post-edit reply", "timestamp": 201},
+    ]
+    merged = models.merge_session_messages_append_only(
+        [], state, truncation_watermark=200.0
+    )
+    contents = [m["content"] for m in merged]
+    wanted = ["first msg", "first reply", "edited/new turn", "post-edit reply"]
+    assert contents == wanted, (
+        f"empty-sidecar + advanced watermark broken: got {contents}, wanted {wanted}"
+    )
+    # Ghost must NOT appear
+    assert "original pre-edit" not in contents
+    assert "original reply" not in contents
+    # Post-edit reply must NOT be dropped
+    assert "post-edit reply" in contents
