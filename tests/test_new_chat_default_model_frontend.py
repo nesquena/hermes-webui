@@ -162,6 +162,7 @@ def test_save_settings_syncs_default_model_provider_with_saved_model():
     autosave_block = panels_js[panels_js.index("const pwField=$('settingsPassword');"):panels_js.index("if(!pwDirty&&!modelDirty){", panels_js.index("const pwField=$('settingsPassword');")) + 24]
 
     assert "_captureModelDropdownSelection($('settingsModel'))" in save_block
+    assert "JSON.stringify({model,provider:modelState.model_provider||null})" in save_block
     assert "body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;" in save_block
     assert "const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'')||((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null));" in save_block
     assert "if(Object.prototype.hasOwnProperty.call(body,'default_model_provider')) window._activeProvider=body.default_model_provider||null;" in apply_saved_block

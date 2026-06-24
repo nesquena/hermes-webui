@@ -10886,7 +10886,8 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/default-model":
         try:
             advanced = body.get("advanced") if isinstance(body, dict) else None
-            return j(handler, set_hermes_default_model(body.get("model"), advanced=advanced))
+            provider = body.get("provider") if isinstance(body, dict) else None
+            return j(handler, set_hermes_default_model(body.get("model"), provider=provider, advanced=advanced))
         except ValueError as e:
             return bad(handler, str(e))
         except RuntimeError as e:
@@ -10907,7 +10908,7 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, str(exc), status=400)
         if scope == "main":
             try:
-                return j(handler, set_hermes_default_model(model, advanced=advanced))
+                return j(handler, set_hermes_default_model(model, provider=provider, advanced=advanced))
             except ValueError as exc:
                 return bad(handler, str(exc), status=400)
         return bad(handler, f"unknown scope: {scope}", status=400)

@@ -474,6 +474,23 @@ class TestAuxiliaryModelsBackend:
         assert "reasoning_effort: none" in text
         assert "DUMMY_KEY_DO_NOT_PRINT" in text
 
+    def test_set_hermes_default_model_persists_explicit_provider_override(self, monkeypatch, tmp_path):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("model:\n  provider: openai\n  default: gpt-5.5\n", encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(config, "resolve_model_provider", lambda model: (model, "", None))
+
+        result = config.set_hermes_default_model("gpt-5.5", provider="anthropic")
+
+        assert result["ok"] is True
+        assert result["provider"] == "anthropic"
+        text = config_path.read_text(encoding="utf-8")
+        assert "provider: anthropic" in text
+
     def test_set_auxiliary_model_persists_advanced_options(self, monkeypatch, tmp_path):
         """Gear-modal payload should persist supported per-slot options."""
         from api import config

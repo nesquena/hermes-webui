@@ -9795,7 +9795,7 @@ async function saveSettings(andClose){
       const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
       if(modelChanged && model){
         try{
-          await api('/api/default-model',{method:'POST',body:JSON.stringify({model})});
+          await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
           body.default_model=model;
           body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
         }catch(_modelErr){
@@ -9825,7 +9825,7 @@ async function saveSettings(andClose){
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
     if(modelChanged && model){
       try{
-        await api('/api/default-model',{method:'POST',body:JSON.stringify({model})});
+        await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
         body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
       }catch(_modelErr){
