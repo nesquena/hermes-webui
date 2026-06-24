@@ -10941,9 +10941,9 @@ def handle_post(handler, parsed) -> bool:
         raw_models = body.get("models")
         if raw_models is None:
             return bad(handler, "models is required")
-        if raw_models is not None and not isinstance(raw_models, list):
+        if not isinstance(raw_models, list):
             return bad(handler, "models must be a JSON array of model name strings")
-        models = [str(m).strip() for m in raw_models if str(m).strip()] if isinstance(raw_models, list) else []
+        models = [str(m).strip() for m in raw_models if str(m).strip()]
         from api.providers import set_custom_provider_models
         result = set_custom_provider_models(provider_id, models)
         if not result.get("ok"):

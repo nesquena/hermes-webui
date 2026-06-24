@@ -8957,6 +8957,47 @@ function _buildProviderCard(p){
     addRow.appendChild(addInput);
     mgmtWrap.appendChild(addRow);
 
+    // --- Refresh button for custom provider (inside scope of _availModelList) ---
+    const custRefreshRow=document.createElement('div');
+    custRefreshRow.className='provider-card-row';
+    custRefreshRow.style.marginTop='6px';
+    const custRefreshBtn=document.createElement('button');
+    custRefreshBtn.type='button';
+    custRefreshBtn.className='provider-card-btn provider-card-btn-ghost';
+    custRefreshBtn.style.display='flex';
+    custRefreshBtn.style.alignItems='center';
+    custRefreshBtn.style.gap='5px';
+    custRefreshBtn.innerHTML=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg> Refresh Models`;
+    custRefreshBtn.onclick = async () => {
+      await _refreshProviderModels(p.id, custRefreshBtn);
+      try{
+        const data = await api('/api/models');
+        const groups = Array.isArray(data && data.groups) ? data.groups : [];
+        const slug = p.id;
+        const found = [];
+        for(const g of groups){
+          const gid = g.provider_id || '';
+          if(gid === slug || gid === p.display_name){
+            for(const m of [...(g.models||[]), ...(g.extra_models||[])]){
+              if(m.id) found.push(m.id);
+            }
+          }
+        }
+        if(found.length){
+          const prefix = '@'+slug+':';
+          const clean = found.map(id => id.startsWith(prefix) ? id.slice(prefix.length) : id);
+          _availModelList = [...new Set(clean)];
+          _renderAvailTags(_availModelList);
+        }else{
+          showToast('No custom models found. Try adding manually.');
+        }
+      }catch(e){
+        console.warn('Failed to fetch models for refresh:', e);
+      }
+    };
+    custRefreshRow.appendChild(custRefreshBtn);
+    mgmtWrap.appendChild(custRefreshRow);
+
     // --- Save button ---
     const saveRow = document.createElement('div');
     saveRow.className = 'provider-card-row';
@@ -8990,47 +9031,6 @@ function _buildProviderCard(p){
     saveRow.appendChild(saveBtn2);
     mgmtWrap.appendChild(saveRow);
     body.appendChild(mgmtWrap);
-
-    // --- Refresh button for custom provider (inside scope of _availModelList) ---
-    const custRefreshRow=document.createElement('div');
-    custRefreshRow.className='provider-card-row';
-    custRefreshRow.style.marginTop='6px';
-    const custRefreshBtn=document.createElement('button');
-    custRefreshBtn.type='button';
-    custRefreshBtn.className='provider-card-btn provider-card-btn-ghost';
-    custRefreshBtn.style.display='flex';
-    custRefreshBtn.style.alignItems='center';
-    custRefreshBtn.style.gap='5px';
-    custRefreshBtn.innerHTML=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg> ${t('providers_refresh_models')||'Refresh Models'}`;
-    custRefreshBtn.onclick = async () => {
-      await _refreshProviderModels(p.id, custRefreshBtn);
-      try{
-        const data = await api('/api/models');
-        const groups = Array.isArray(data && data.groups) ? data.groups : [];
-        const slug = p.id;
-        const found = [];
-        for(const g of groups){
-          const gid = g.provider_id || '';
-          if(gid === slug || gid === p.display_name){
-            for(const m of [...(g.models||[]), ...(g.extra_models||[])]){
-              if(m.id) found.push(m.id);
-            }
-          }
-        }
-        if(found.length){
-          const prefix = '@'+slug+':';
-          const clean = found.map(id => id.startsWith(prefix) ? id.slice(prefix.length) : id);
-          _availModelList = [...new Set(clean)];
-          _renderAvailTags(_availModelList);
-        }else{
-          showToast('No custom models found. Try adding manually.');
-        }
-      }catch(e){
-        console.warn('Failed to fetch models for refresh:', e);
-      }
-    };
-    custRefreshRow.appendChild(custRefreshBtn);
-    body.appendChild(custRefreshRow);
   }else{
     const hint=document.createElement('div');
     hint.className='provider-card-hint';
