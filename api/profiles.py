@@ -1581,29 +1581,37 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     }
 
 
-_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, float]] = {}
-_SKILLS_STATS_CACHE_TTL = 8.0  # seconds
+_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float]] = {}
+_SKILLS_STATS_CACHE_TTL = 300.0  # seconds — long because .clear() handles programmatic changes
 
 
-def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
-    """Calculate (enabled_count, compatible_count) for a profile directory."""
-    import time
-    profile_dir = Path(profile_dir).resolve()
-    now = time.time()
-    # Read via .get() (not membership-check + index) so a concurrent
-    # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
-    # between the `in` test and the lookup.
-    cached = _SKILLS_STATS_CACHE.get(profile_dir)
-    if cached is not None:
-        enabled, compat, expiry = cached
-        if now < expiry:
-            return enabled, compat
+def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
+    """Return the max st_mtime_ns across SKILL.md files and config.yaml (stat-only, no reads)."""
+    max_ns = 0
+    try:
+        if config_path.exists():
+            max_ns = max(max_ns, config_path.stat().st_mtime_ns)
+    except OSError:
+        pass
+    if not skills_dir.is_dir():
+        return max_ns
+    try:
+        from agent.skill_utils import iter_skill_index_files
+        for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+            try:
+                max_ns = max(max_ns, skill_md.stat().st_mtime_ns)
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return max_ns
 
+
+def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
+    """Compute (enabled_count, compatible_count) by reading and parsing all SKILL.md files."""
     skills_dir = profile_dir / "skills"
     if not skills_dir.is_dir():
-        res = (0, 0)
-        _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
-        return res
+        return (0, 0)
 
     disabled = set()
     config_path = profile_dir / "config.yaml"
@@ -1620,7 +1628,7 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
                         disabled_val = platform_disabled
                     else:
                         disabled_val = skills_cfg.get("disabled")
-                    
+
                     if disabled_val is not None:
                         if isinstance(disabled_val, str):
                             disabled_val = [disabled_val]
@@ -1629,11 +1637,11 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
             pass
 
     from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
-    
+
     seen_names = set()
     enabled_count = 0
     compatible_count = 0
-    
+
     for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
         try:
             content = skill_md.read_text(encoding="utf-8")[:4000]
@@ -1644,15 +1652,45 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
             if name in seen_names:
                 continue
             seen_names.add(name)
-            
+
             compatible_count += 1
             if name not in disabled:
                 enabled_count += 1
         except Exception:
             pass
-            
-    res = (enabled_count, compatible_count)
-    _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
+
+    return (enabled_count, compatible_count)
+
+
+def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
+    """Calculate (enabled_count, compatible_count) with two-tier mtime cache."""
+    import time
+    profile_dir = Path(profile_dir).resolve()
+    now = time.time()
+
+    # Read via .get() (not membership-check + index) so a concurrent
+    # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
+    # between the `in` test and the lookup.
+    cached = _SKILLS_STATS_CACHE.get(profile_dir)
+    if cached is not None:
+        enabled, compat, cached_mtime_ns, expiry = cached
+        if now < expiry:
+            return enabled, compat  # fast path: within TTL, zero I/O
+        # TTL expired — stat-only probe to check whether files actually changed
+        skills_dir = profile_dir / "skills"
+        config_path = profile_dir / "config.yaml"
+        current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+        if current_mtime_ns == cached_mtime_ns:
+            # Files unchanged — refresh TTL without re-reading
+            _SKILLS_STATS_CACHE[profile_dir] = (enabled, compat, cached_mtime_ns, now + _SKILLS_STATS_CACHE_TTL)
+            return enabled, compat
+
+    # Cache miss or mtime changed — full recompute
+    res = _compute_profile_skills_stats(profile_dir)
+    skills_dir = profile_dir / "skills"
+    config_path = profile_dir / "config.yaml"
+    new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], new_mtime_ns, now + _SKILLS_STATS_CACHE_TTL)
     return res
 
 
