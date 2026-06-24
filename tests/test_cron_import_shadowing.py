@@ -44,7 +44,10 @@ def test_agent_cron_import_path_prefers_agent_cron_over_plugin_shadow(monkeypatc
         shadowed_cron = importlib.import_module("cron")
         assert Path(shadowed_cron.__file__).resolve() == shadow_cron / "__init__.py"
 
+        sys_path_before_fix = list(sys.path)
         routes._ensure_agent_cron_import_path()
+        assert sys.path == sys_path_before_fix
+
         cron_jobs = importlib.import_module("cron.jobs")
 
         assert Path(cron_jobs.__file__).resolve() == agent_cron / "jobs.py"

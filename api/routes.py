@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import uuid
+import importlib.util
 from collections import defaultdict, OrderedDict
 from pathlib import Path
 from contextlib import closing
@@ -1258,36 +1259,39 @@ def _ensure_agent_cron_import_path() -> None:
     agent_dir = getattr(api_config, "_AGENT_DIR", None)
     if not agent_dir:
         return
-    agent_path = str(Path(agent_dir).expanduser().resolve())
-    agent_cron_path = str(Path(agent_path) / "cron")
+    agent_cron_dir = Path(agent_dir).expanduser().resolve() / "cron"
+    agent_cron_init = agent_cron_dir / "__init__.py"
+    if not agent_cron_init.exists():
+        return
+    agent_cron_path = str(agent_cron_dir)
 
     global _AGENT_CRON_IMPORT_PATH_READY
     with _AGENT_CRON_IMPORT_PATH_LOCK:
         cron_mod = sys.modules.get("cron")
         cron_file = str(getattr(cron_mod, "__file__", "") or "") if cron_mod else ""
         cron_is_agent = bool(cron_mod is not None and cron_file.startswith(agent_cron_path + os.sep))
-        if _AGENT_CRON_IMPORT_PATH_READY == agent_path and (cron_mod is None or cron_is_agent):
+        if _AGENT_CRON_IMPORT_PATH_READY == agent_cron_path and cron_is_agent:
             return
-
-        while agent_path in sys.path:
-            sys.path.remove(agent_path)
-        shadow_indexes = [
-            idx
-            for idx, path_entry in enumerate(sys.path)
-            if path_entry
-            and Path(path_entry).resolve() != Path(agent_path)
-            and (Path(path_entry) / "cron" / "__init__.py").exists()
-        ]
-        if shadow_indexes:
-            sys.path.insert(min(shadow_indexes), agent_path)
-        else:
-            sys.path.append(agent_path)
-        _AGENT_CRON_IMPORT_PATH_READY = agent_path
 
         if cron_mod is not None and not cron_is_agent:
             for name in list(sys.modules):
                 if name == "cron" or name.startswith("cron."):
                     sys.modules.pop(name, None)
+        if cron_is_agent:
+            _AGENT_CRON_IMPORT_PATH_READY = agent_cron_path
+            return
+
+        spec = importlib.util.spec_from_file_location(
+            "cron",
+            str(agent_cron_init),
+            submodule_search_locations=[agent_cron_path],
+        )
+        if spec is None or spec.loader is None:
+            return
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["cron"] = module
+        spec.loader.exec_module(module)
+        _AGENT_CRON_IMPORT_PATH_READY = agent_cron_path
 
 
 def _available_cron_profile_names() -> set[str]:
