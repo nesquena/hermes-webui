@@ -413,7 +413,10 @@ async function switchPanel(name, opts = {}) {
     });
   }
   if (nextPanel === 'terminal' && typeof toggleComposerTerminal === 'function') {
-    await toggleComposerTerminal(true, { mode: 'page' });
+    const terminalOpened = await toggleComposerTerminal(true, { mode: 'page' });
+    if (terminalOpened === false) {
+      return switchPanel(prevPanel || 'chat', { ...opts, fromRailClick: false, refresh: true });
+    }
   } else if (prevPanel === 'terminal' && nextPanel !== 'terminal' && typeof toggleComposerTerminal === 'function' && typeof TERMINAL_UI !== 'undefined' && TERMINAL_UI.open) {
     await toggleComposerTerminal(true, { mode: 'dock' });
   }
