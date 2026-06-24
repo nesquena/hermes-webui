@@ -2864,8 +2864,13 @@ def set_custom_provider_models(provider_id: str, models: list[str]) -> dict[str,
                     existing_models = cp.get("models")
                     if isinstance(existing_models, dict):
                         if models:
-                            # Rebuild dict with empty metadata for each model
-                            cp["models"] = {m: {} for m in models}
+                            # Preserve any per-model metadata from the original
+                            # dict (context_length, label, etc.) for models that
+                            # are still in the list; new models get empty dict.
+                            cp["models"] = {
+                                m: dict(existing_models.get(m, {}))
+                                for m in models
+                            }
                         else:
                             cp.pop("models", None)
                     else:
