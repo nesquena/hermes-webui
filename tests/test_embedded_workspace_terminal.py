@@ -174,9 +174,19 @@ def test_terminal_page_nav_uses_shared_runtime_without_changing_slash_command_pa
     assert "await toggleComposerTerminal(true, { mode: 'dock' });" in panels_js
     assert "toggleComposerTerminal(true)" in commands_js
     assert "const desiredMode=opts.mode==='page'?'page':'dock';" in terminal_js
+    assert "function _canStartComposerTerminal()" in terminal_js
+    assert "if (nextPanel === 'terminal' && typeof _canStartComposerTerminal === 'function' && !_canStartComposerTerminal()) return;" in panels_js
     assert "_terminalSetPresentationMode(desiredMode)" in terminal_js
     assert terminal_js.count("new window.Terminal(") == 1
     assert terminal_js.count("new EventSource(") == 1
+
+
+def test_terminal_page_mode_clears_collapsed_state_before_refit():
+    terminal_js = _read("static/terminal.js")
+    toggle_block = terminal_js.split("async function toggleComposerTerminal", 1)[1].split("function collapseComposerTerminal", 1)[0]
+
+    assert "if(desiredMode==='page')TERMINAL_UI.collapsed=false;" in toggle_block
+    assert toggle_block.index("if(desiredMode==='page')TERMINAL_UI.collapsed=false;") < toggle_block.index("_setTerminalChromeState(desiredMode==='dock'?'expanded':'page');")
 
 
 def test_terminal_slash_command_preflights_remote_backend_before_session_create():
@@ -272,13 +282,15 @@ def test_terminal_button_and_start_path_respect_remote_backend_guard():
     terminal_js = _read("static/terminal.js")
 
     sync_block = terminal_js.split("function syncTerminalButton", 1)[1].split("function focusComposerTerminalInput", 1)[0]
+    guard_block = terminal_js.split("function _canStartComposerTerminal", 1)[1].split("async function _startComposerTerminal", 1)[0]
     start_block = terminal_js.split("async function _startComposerTerminal", 1)[1].split("async function toggleComposerTerminal", 1)[0]
     assert "function syncTerminalBackendState" in terminal_js
     assert "function _terminalRemoteBackendUnsupportedMessage" in terminal_js
     assert "toggle.disabled=!hasWorkspace||remoteBackend;" in sync_block
     assert "_terminalRemoteBackendUnsupportedMessage()" in sync_block
-    assert "if(S.terminalRemoteBackend)" in start_block
-    assert "showToast(_terminalRemoteBackendUnsupportedMessage(),3200,'warning');" in start_block
+    assert "if(S.terminalRemoteBackend)" in guard_block
+    assert "showToast(_terminalRemoteBackendUnsupportedMessage(),3200,'warning');" in guard_block
+    assert "if(!_canStartComposerTerminal())return false;" in start_block
     assert "payload&&payload.error==='remote_terminal_backend_unsupported'" in terminal_js
 
 

@@ -82,6 +82,21 @@ function _terminalSessionId(){
   return S.session&&S.session.session_id;
 }
 
+function _canStartComposerTerminal(){
+  const sid=_terminalSessionId();
+  if(!sid||!(S.session&&S.session.workspace)){
+    showToast(t('terminal_no_workspace_title'),2600,'warning');
+    syncTerminalButton();
+    return false;
+  }
+  if(S.terminalRemoteBackend){
+    showToast(_terminalRemoteBackendUnsupportedMessage(),3200,'warning');
+    syncTerminalButton();
+    return false;
+  }
+  return true;
+}
+
 function _terminalWorkspaceName(){
   const ws=S.session&&S.session.workspace;
   if(!ws)return '';
@@ -514,19 +529,10 @@ function _connectTerminalOutput(){
 }
 
 async function _startComposerTerminal(restart=false){
+  if(!_canStartComposerTerminal())return false;
   const sid=_terminalSessionId();
-  if(!sid||!(S.session&&S.session.workspace)){
-    showToast(t('terminal_no_workspace_title'),2600,'warning');
-    syncTerminalButton();
-    return;
-  }
-  if(S.terminalRemoteBackend){
-    showToast(_terminalRemoteBackendUnsupportedMessage(),3200,'warning');
-    syncTerminalButton();
-    return;
-  }
   const term=_ensureXterm();
-  if(!term)return;
+  if(!term)return false;
   _fitTerminal();
   const dims=_terminalDimensions();
   try{
@@ -545,6 +551,7 @@ async function _startComposerTerminal(restart=false){
   TERMINAL_UI.typedLine='';
   _connectTerminalOutput();
   _resizeComposerTerminal();
+  return true;
 }
 
 async function toggleComposerTerminal(force,opts){
@@ -557,6 +564,7 @@ async function toggleComposerTerminal(force,opts){
         _terminalSetPresentationMode(desiredMode);
         const {panel,inner}= _terminalEls();
         if(desiredMode==='page'){
+          TERMINAL_UI.collapsed=false;
           _setTerminalChromeState('page');
           _syncTerminalTranscriptSpace(false);
           requestAnimationFrame(()=>_fitTerminal());
@@ -594,6 +602,7 @@ async function toggleComposerTerminal(force,opts){
     _terminalSetPresentationMode(desiredMode);
     if(desiredMode==='dock'&&messages)messages.classList.add('terminal-expanding-from-dock');
     if(desiredMode==='dock')_resetTerminalHeightForViewport();
+    if(desiredMode==='page')TERMINAL_UI.collapsed=false;
     _setTerminalChromeState(desiredMode==='dock'?'expanded':'page');
     TERMINAL_UI.open=true;
     if(desiredMode==='dock')TERMINAL_UI.collapsed=false;
@@ -618,11 +627,24 @@ async function toggleComposerTerminal(force,opts){
       TERMINAL_UI.resizeObserver.observe(inner||panel);
     }
     try{
-      await _startComposerTerminal(false);
+      const started=await _startComposerTerminal(false);
+      if(!started){
+        TERMINAL_UI.open=false;
+        TERMINAL_UI.collapsed=false;
+        _terminalSetPresentationMode('dock');
+        _setTerminalChromeState('closed');
+        return false;
+      }
       if(opts.focus!==false)focusComposerTerminalInput();
     }catch(e){
+      TERMINAL_UI.open=false;
+      TERMINAL_UI.collapsed=false;
+      _terminalSetPresentationMode('dock');
+      _setTerminalChromeState('closed');
       showToast(t('terminal_start_failed')+e.message,3200,'error');
+      return false;
     }
+    return true;
   }else{
     await closeComposerTerminal();
   }
