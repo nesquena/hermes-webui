@@ -10993,7 +10993,8 @@ function _restoreMessageScrollSnapshot(snapshot){
  * browser preserves scroll position across the innerHTML='' + DOM rebuild gap.
  * Safari/Chrome on iOS/Android can paint a frame with scrollTop=0 between
  * innerHTML='' and snapshot restore, scroll-janking the user to the top.
- * Also acts as a generic anchor-stabilizer during streaming DOM updates.
+ * Called from renderMessages() before the DOM wipe — not from streaming ticks,
+ * since CSS already gives overflow-anchor:auto on mobile via media query.
  */
 window._fixMobileScrollJank=function _fixMobileScrollJank(){
   const el=document.getElementById('messages');
@@ -11245,7 +11246,7 @@ function renderMessages(options){
   // preserves scroll position across the DOM wipe-and-rebuild gap.
   // Safari/Chrome on iOS/Android can paint a frame with scrollTop=0 between
   // innerHTML='' and snapshot restore, scroll-janking the user to the top.
-  const _scrollAnchorRestore=window._fixMobileScrollJank&&window._fixMobileScrollJank();
+  if(window._fixMobileScrollJank) window._fixMobileScrollJank();
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
