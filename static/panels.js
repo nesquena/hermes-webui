@@ -8257,6 +8257,10 @@ function _pluginActivationState(plugin){
   const activation=(plugin&&typeof plugin.activation==='string')
     ? plugin.activation
     : (plugin&&plugin.enabled===false ? 'disabled' : 'enabled');
+  // Mirror _buildPluginCard's isProviderActive precedence: an explicit
+  // is_active_provider===true overrides the activation string so the sort
+  // bucket always matches the badge.
+  if(plugin&&plugin.is_active_provider===true) return 'provider';
   if(activation==='exclusive'||activation==='provider'){
     if(plugin&&plugin.is_active_provider===false) return 'disabled';
     return 'provider';
