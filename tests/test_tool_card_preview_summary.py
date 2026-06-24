@@ -38,6 +38,7 @@ function extractFunc(name) {
 eval(extractFunc('_toolArgPreviewValue'));
 eval(extractFunc('_toolArgPreviewKeyIsHidden'));
 eval(extractFunc('_formatToolArgPreview'));
+eval(extractFunc('_toolResultOneLiner'));
 eval(extractFunc('_toolCardPreviewText'));
 let buf = '';
 process.stdin.on('data', c => { buf += c; });

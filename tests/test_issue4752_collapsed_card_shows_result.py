@@ -197,6 +197,11 @@ class TestToolCardPreviewText:
         tc = {"done": True, "preview": "", "snippet": "Found 3 matches", "args": {"path": "src/"}}
         assert _preview_text(tc) == "Found 3 matches"
 
+    def test_error_with_text_snippet_shows_message(self):
+        """Error tool with a plain-text snippet shows the error message, not 'Failed'."""
+        tc = {"done": True, "is_error": True, "preview": "", "snippet": "Permission denied", "args": {}}
+        assert _preview_text(tc) == "Permission denied"
+
     def test_snippet_json_suppressed(self):
         """Cold-loaded tool with JSON in snippet falls through to args."""
         tc = {"done": True, "preview": "", "snippet": '{"key":"val"}', "args": {"path": "src/"}}

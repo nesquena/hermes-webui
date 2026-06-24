@@ -119,7 +119,7 @@ var _FN_NAMES=[
  '_decodeToolLabelEntities','_redactToolTargetLabel','_shortToolLabel','_toolI18n',
  '_toolTargetLabel','_toolVisibleTargetLabel','_toolCommandTitle','_toolQueryTitle',
  '_toolActionLabelText','_toolArgPreviewValue','_toolArgPreviewKeyIsHidden',
- '_formatToolArgPreview','_toolCardPreviewText','_toolCardAllowsDetail',
+ '_formatToolArgPreview','_toolResultOneLiner','_toolCardPreviewText','_toolCardAllowsDetail',
  '_toolDetailLeadLabel','_toolDetailLeadText','_toolShortName','_transparentEventPreview',
  '_transparentToolStatus','_transparentToolSummary',
  '_isMemorySave','_isSkillUpdate','_tcAction',
