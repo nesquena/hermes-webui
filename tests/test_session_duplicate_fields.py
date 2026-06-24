@@ -357,8 +357,12 @@ def test_branch_copies_context_messages():
     ctor = _find_session_ctor(block, 'branch')
     assert _has_field(ctor, 'context_messages'), \
         "Branch must copy context_messages"
-    assert _has_deepcopy_for(ctor, 'context_messages'), \
-        "context_messages must be deepcopied in branch"
+    assert 'copy.deepcopy(source.context_messages)' in ctor, \
+        "Full branch must deep-copy the source context_messages snapshot"
+    assert 'copy.deepcopy(forked_messages)' in ctor, \
+        "Truncated branch must deep-copy the visible fork prefix"
+    assert 'if keep_count is None' in ctor, \
+        "Branch context copy must distinguish full forks from truncated forks"
 
 
 def test_branch_copies_gateway_routing():

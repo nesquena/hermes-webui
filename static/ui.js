@@ -13431,47 +13431,69 @@ function autoResizeTextarea(ta) {
   ta.style.height = Math.min(ta.scrollHeight, 300) + 'px';
 }
 
+async function _branchFromMessageForResend(localIdx, titleSuffix, textToSend) {
+  if(!S.session || S.busy) return;
+  const initialSid = S.session.session_id;
+  // Capture the absolute keep_count before any async work that may reset
+  // _oldestIdx.  _oldestIdx is 0 when the full transcript is already loaded,
+  // so short sessions send localIdx unchanged.
+  const absoluteKeepCount = _oldestIdx + localIdx;
+  // Ensure the full transcript is loaded so the forked session renders
+  // correctly and subsequent operations see the complete history.
+  if(typeof _ensureAllMessagesLoaded === 'function'){
+    await _ensureAllMessagesLoaded();
+  }
+  // Abort if the user switched sessions while we were awaiting.
+  if(!S.session || S.session.session_id !== initialSid) return;
+  try {
+    const sourceTitle = S.session.title || 'Untitled';
+    const data = await api('/api/session/branch', {
+      method: 'POST',
+      body: JSON.stringify({
+        session_id: initialSid,
+        keep_count: absoluteKeepCount,
+        title: `${sourceTitle} (${titleSuffix})`,
+      }),
+    });
+    if(data && data.error){ throw new Error(data.error); }
+    if(data && data.session_id){
+      const targetSid = data.session_id;
+      if(!S.session || S.session.session_id !== initialSid) return;
+      await loadSession(targetSid);
+      if(typeof _ensureAllMessagesLoaded === 'function') await _ensureAllMessagesLoaded();
+      if(typeof renderSessionList === 'function') await renderSessionList();
+      if(!S.session || S.session.session_id !== targetSid) return;
+      const composer = $('msg');
+      if(composer){
+        composer.value = textToSend;
+        if(typeof autoResize === 'function') autoResize();
+      }
+      await send();
+    }
+  } catch(e) { setStatus(t('branch_failed') + e.message); }
+}
+
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
-  // Truncate session at msgIdx (keep messages before the edited one)
-  // then re-send the edited text
-  try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: S.session.session_id,
-      keep_count: msgIdx  // keep messages[0..msgIdx-1], discard from msgIdx onward
-    })});
-    S.messages = S.messages.slice(0, msgIdx);
-    renderMessages();
-    // Now send the edited message as a new chat
-    $('msg').value = newText;
-    await send();
-  } catch(e) { setStatus(t('edit_failed') + e.message); }
+  // Preserve the source session by branching from before the edited message,
+  // then send the edited text in the new branch.
+  await _branchFromMessageForResend(msgIdx, 'edit', newText);
 }
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
-  // Find the last user message and re-run it
-  // Remove the last assistant message first (truncate to before it)
+  // Find the preceding user message and re-run it in a new branch that
+  // preserves the source session.
   const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
-  // Find the last user message text (one before this assistant message)
   let lastUserText = '';
   for(let i = assistantIdx - 1; i >= 0; i--) {
     const m = S.messages[i];
     if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
   }
   if(!lastUserText) return;
-  try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: S.session.session_id,
-      keep_count: assistantIdx  // remove the assistant message
-    })});
-    S.messages = S.messages.slice(0, assistantIdx);
-    renderMessages();
-    $('msg').value = lastUserText;
-    await send();
-  } catch(e) { setStatus(t('regen_failed') + e.message); }
+  await _branchFromMessageForResend(assistantIdx, 'regenerate', lastUserText);
 }
 
 function postProcessRenderedMessages(container) {

@@ -11436,7 +11436,6 @@ def handle_post(handler, parsed) -> bool:
             forked_messages = source_messages[:keep_count]
         else:
             forked_messages = list(source_messages)
-
         # Derive title
         if custom_title:
             branch_title = custom_title
@@ -11457,8 +11456,16 @@ def handle_post(handler, parsed) -> bool:
             enabled_toolsets=getattr(source, "enabled_toolsets", None),
             context_length=getattr(source, "context_length", None),
             threshold_tokens=getattr(source, "threshold_tokens", None),
-            # context_messages — deep copy so the branch has independent context
-            context_messages=copy.deepcopy(getattr(source, "context_messages", None) or []),
+            # Full-fork branches (no keep_count) should preserve the source
+            # session's curated context snapshot when available (eg. from
+            # compression), while truncated forks must keep the visible branch
+            # prefix only to avoid rehydrating discarded tail rows.
+            context_messages=(
+                copy.deepcopy(source.context_messages)
+                if keep_count is None
+                and isinstance(getattr(source, "context_messages", None), list)
+                else copy.deepcopy(forked_messages)
+            ),
             # Gateway routing — inherit from source
             gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
             # Context engine — inherit state so branch's context engine starts correctly
@@ -20208,6 +20215,18 @@ def _handle_session_import(handler, body):
         tool_calls=body.get("tool_calls", []),
         profile=get_active_profile_name(),
     )
+    active_stream_id = body.get("active_stream_id")
+    if isinstance(active_stream_id, str) and active_stream_id:
+        s.active_stream_id = active_stream_id
+    pending_user_message = body.get("pending_user_message")
+    if isinstance(pending_user_message, str) and pending_user_message:
+        s.pending_user_message = pending_user_message
+    pending_attachments = body.get("pending_attachments")
+    if isinstance(pending_attachments, list):
+        s.pending_attachments = pending_attachments
+    pending_started_at = body.get("pending_started_at")
+    if isinstance(pending_started_at, (int, float)):
+        s.pending_started_at = pending_started_at
     s.pinned = body.get("pinned", False)
     with LOCK:
         SESSIONS[s.session_id] = s
