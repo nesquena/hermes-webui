@@ -8902,9 +8902,10 @@ function _buildProviderCard(p){
 
     function _renderAvailTags(models){
       availWrap.innerHTML = '';
-      availHint.style.display = models.length ? 'none' : '';
+      let visibleCount = 0;
       for(const m of models){
-        if(_usedModelList.includes(m)) continue;  // already active
+        if(_usedModelList.includes(m)) continue;
+        visibleCount++;
         const tag = document.createElement('span');
         tag.className = 'provider-card-model-tag provider-card-model-tag-avail';
         tag.textContent = m;
@@ -8926,6 +8927,7 @@ function _buildProviderCard(p){
         tag.appendChild(add);
         availWrap.appendChild(tag);
       }
+      availHint.style.display = availWrap.children.length ? 'none' : '';
     }
     let _availModelList = [];
     _renderAvailTags(_availModelList);
