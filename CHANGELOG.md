@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **WebUI-created sessions stay in sync after the official Hermes Desktop App continues the same Hermes Agent session.** The conversation sidebar now refreshes WebUI-origin rows from settled `state.db` message counts/timestamps even when external/CLI sessions are hidden, recovers persisted sidecar rows that are readable by `/api/session` but missing from `_index.json`, full session loads avoid duplicating the sidecar prefix when merging `state.db`, and the next WebUI turn saves a single reconciled transcript instead of re-writing duplicated history.
+
 ## [v0.51.636] — 2026-06-25 — Release WQ (Android Chromium no longer jumps the transcript to the top)
 
 ### Fixed
