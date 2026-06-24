@@ -3226,6 +3226,18 @@ def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> di
             source_expr = 's.source' if 'source' in session_cols else 'NULL AS source'
             session_source_expr = 's.session_source' if 'session_source' in session_cols else 'NULL AS session_source'
             title_expr = 's.title' if 'title' in session_cols else 'NULL AS title'
+            message_count_expr = 's.message_count' if 'message_count' in session_cols else 'NULL AS message_count'
+
+            cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
+            has_messages_table = cur.fetchone() is not None
+            messages_has_session_id = False
+            messages_has_timestamp = False
+            if has_messages_table:
+                cur.execute("PRAGMA table_info(messages)")
+                message_cols = {str(row[1]) for row in cur.fetchall()}
+                messages_has_session_id = 'session_id' in message_cols
+                messages_has_timestamp = 'timestamp' in message_cols
+
             overrides: dict[str, dict] = {}
             ids = list(wanted)
             chunk_size = 500
@@ -3234,7 +3246,7 @@ def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> di
                 placeholders = ','.join('?' * len(chunk))
                 cur.execute(
                     f"""
-                    SELECT s.id, {source_expr}, {session_source_expr}, {title_expr}
+                    SELECT s.id, {source_expr}, {session_source_expr}, {title_expr}, {message_count_expr}
                     FROM sessions s
                     WHERE s.id IN ({placeholders})
                     """,
@@ -3254,8 +3266,39 @@ def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> di
                         entry['_state_db_raw_source'] = source_meta.get('raw_source')
                         entry['_state_db_session_source'] = source_meta.get('session_source')
                         entry['_state_db_source_label'] = source_meta.get('source_label')
+                    if row['message_count'] is not None:
+                        try:
+                            entry['_state_db_message_count'] = max(0, int(row['message_count'] or 0))
+                        except (TypeError, ValueError):
+                            pass
                     if entry:
                         overrides[sid] = entry
+                if has_messages_table and messages_has_session_id:
+                    last_at_expr = "MAX(timestamp) AS last_message_at" if messages_has_timestamp else "NULL AS last_message_at"
+                    cur.execute(
+                        f"""
+                        SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
+                        FROM messages
+                        WHERE session_id IN ({placeholders})
+                        GROUP BY session_id
+                        """,
+                        chunk,
+                    )
+                    for row in cur.fetchall():
+                        sid = str(row['session_id'])
+                        entry = overrides.setdefault(sid, {})
+                        try:
+                            entry['_state_db_message_count'] = max(
+                                int(entry.get('_state_db_message_count') or 0),
+                                int(row['actual_message_count'] or 0),
+                            )
+                        except (TypeError, ValueError):
+                            pass
+                        if row['last_message_at'] is not None:
+                            try:
+                                entry['_state_db_last_message_at'] = float(row['last_message_at'] or 0)
+                            except (TypeError, ValueError):
+                                pass
             return overrides
     except Exception:
         return {}
@@ -3285,12 +3328,40 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         state_db_raw_source = entry.pop('_state_db_raw_source', None)
         state_db_session_source = entry.pop('_state_db_session_source', None)
         state_db_source_label = entry.pop('_state_db_source_label', None)
+        state_db_message_count = entry.pop('_state_db_message_count', None)
+        state_db_last_message_at = entry.pop('_state_db_last_message_at', None)
         if state_db_source == 'webui':
             session['source_tag'] = state_db_source_tag
             session['raw_source'] = state_db_raw_source
             session['session_source'] = state_db_session_source
             session['source_label'] = state_db_source_label
             session['is_cli_session'] = False
+            try:
+                current_count = max(0, int(session.get('message_count') or 0))
+                state_count = max(0, int(state_db_message_count or 0))
+            except (TypeError, ValueError):
+                current_count = 0
+                state_count = 0
+            try:
+                current_last = max(
+                    float(session.get('last_message_at') or 0),
+                    float(session.get('updated_at') or 0),
+                )
+            except (TypeError, ValueError):
+                current_last = 0.0
+            try:
+                state_last = float(state_db_last_message_at or 0)
+            except (TypeError, ValueError):
+                state_last = 0.0
+            if state_count > current_count and (state_last <= 0 or state_last > current_last):
+                session['message_count'] = state_count
+                session['actual_message_count'] = max(
+                    state_count,
+                    int(session.get('actual_message_count') or 0) if str(session.get('actual_message_count') or '').isdigit() else 0,
+                )
+                if state_last > 0:
+                    session['last_message_at'] = max(float(session.get('last_message_at') or 0), state_last)
+                    session['updated_at'] = max(float(session.get('updated_at') or 0), state_last)
         title = session.get('title')
         if (
             state_db_title
