@@ -12903,9 +12903,19 @@ function _formatToolArgPreview(args){
   const out=parts.join(' · ');
   return out.length>180?`${out.slice(0,177)}…`:out;
 }
+function _toolResultOneLiner(preview){
+  if(!preview) return '';
+  const first=preview.split('\n').find(l=>l.trim())||'';
+  const trimmed=first.trim();
+  if(!trimmed) return '';
+  if(trimmed[0]==='{'||trimmed[0]==='[') return '';
+  return trimmed.length>180?trimmed.slice(0,177)+'…':trimmed;
+}
 function _toolCardPreviewText(tc, displaySnippet){
   const explicitPreview=String(tc&&tc.preview||'').trim();
   if(tc&&tc.done===false&&explicitPreview) return explicitPreview;
+  const resultLine=_toolResultOneLiner(explicitPreview);
+  if(tc&&tc.done!==false&&resultLine) return resultLine;
   const argPreview=_formatToolArgPreview(tc&&tc.args);
   if(argPreview) return argPreview;
   if(tc&&tc.done===false) return 'Running';
