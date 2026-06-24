@@ -4858,8 +4858,9 @@ main.main > #mainKanban,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
+main.main > #mainTerminal,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-terminal):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
@@ -4868,10 +4869,20 @@ main.main.showing-kanban > #mainKanban{display:flex;overflow-y:auto;}
 main.main.showing-workspaces > #mainWorkspaces{display:flex;}
 main.main.showing-profiles > #mainProfiles{display:flex;}
 main.main.showing-logs > #mainLogs{display:flex;}
+main.main.showing-terminal{overflow:hidden;}
+main.main.showing-terminal > #mainTerminal{display:flex;overflow:hidden;}
 main.main.showing-plugin > #mainPlugin{display:flex;}
 main.main > #mainPlugin{display:none;}
 #mainPlugin .main-view-body{flex:1;display:flex;flex-direction:column;overflow:hidden;}
 #pluginPageContainer{flex:1;display:flex;flex-direction:column;min-height:0;}
+#mainTerminal .main-view-body.terminal-main-body{flex:1;display:flex;flex-direction:column;min-height:0;padding:0;}
+#panelTerminal{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden;background:var(--bg);}
+#panelTerminal .composer-terminal-panel.is-page-mode{position:relative;top:auto;right:auto;bottom:auto;left:auto;transform:none;width:100%;max-width:none;height:100%;margin:0;display:flex;flex-direction:column;border-radius:0;border:0;box-shadow:none;background:var(--bg);}
+#panelTerminal .composer-terminal-panel.is-page-mode .composer-terminal-inner{flex:1;min-height:0;height:100%;max-height:none;display:flex;flex-direction:column;border-radius:0;border:0;}
+#panelTerminal .composer-terminal-panel.is-page-mode .composer-terminal-resize-handle,
+#panelTerminal .composer-terminal-panel.is-page-mode .composer-terminal-dock{display:none;}
+#panelTerminal .composer-terminal-panel.is-page-mode .composer-terminal-viewport{flex:1;min-height:0;height:auto;}
+#panelTerminal .composer-terminal-panel.is-page-mode .composer-terminal-surface{height:100%;}
 #mainSettings{overflow-y:auto;}
 
 /* Sidebar menu (lives in the left sidebar under the cog panel) */

@@ -42,9 +42,9 @@ let _logsSeverityFilter = 'all';
 const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
-  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
+  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', terminal: 'tab_terminal', logs: 'tab_logs', settings: 'tab_settings',
 };
-const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
+const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','terminal','logs','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
 /**
@@ -410,6 +410,11 @@ async function switchPanel(name, opts = {}) {
     MAIN_VIEW_PANELS.forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
+  }
+  if (nextPanel === 'terminal' && typeof toggleComposerTerminal === 'function') {
+    await toggleComposerTerminal(true, { mode: 'page' });
+  } else if (prevPanel === 'terminal' && nextPanel !== 'terminal' && typeof toggleComposerTerminal === 'function' && typeof TERMINAL_UI !== 'undefined' && TERMINAL_UI.open) {
+    await toggleComposerTerminal(true, { mode: 'dock' });
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();

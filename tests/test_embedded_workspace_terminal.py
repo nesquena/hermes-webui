@@ -133,7 +133,7 @@ def test_terminal_collapsed_state_preserves_pty_and_output_surface():
     assert "api('/api/terminal/close'" not in collapse_block
     assert "_disposeXterm" not in collapse_block
     assert "_setTerminalChromeState('collapsed')" in collapse_block
-    assert "composerWrap.classList.toggle('terminal-dock-visible',collapsed)" in terminal_js
+    assert "composerWrap.classList.toggle('terminal-dock-visible',collapsed&&!page)" in terminal_js
     expand_block = terminal_js.split("function expandComposerTerminal", 1)[1].split("function _disposeXterm", 1)[0]
     assert "_setTerminalChromeState('expanded')" in expand_block
     assert "panel.classList.add('is-expanding-from-dock')" in expand_block
@@ -160,6 +160,23 @@ def test_terminal_slash_command_expands_existing_collapsed_terminal():
     assert "if(TERMINAL_UI.open)" in toggle_block
     assert "if(TERMINAL_UI.collapsed)expandComposerTerminal();" in toggle_block
     assert "else focusComposerTerminalInput();" in toggle_block
+
+
+def test_terminal_page_nav_uses_shared_runtime_without_changing_slash_command_path():
+    html = _read("static/index.html")
+    panels_js = _read("static/panels.js")
+    commands_js = _read("static/commands.js")
+    terminal_js = _read("static/terminal.js")
+
+    assert 'data-panel="terminal"' in html
+    assert "switchPanel('terminal',{fromRailClick:true})" in html
+    assert "await toggleComposerTerminal(true, { mode: 'page' });" in panels_js
+    assert "await toggleComposerTerminal(true, { mode: 'dock' });" in panels_js
+    assert "toggleComposerTerminal(true)" in commands_js
+    assert "const desiredMode=opts.mode==='page'?'page':'dock';" in terminal_js
+    assert "_terminalSetPresentationMode(desiredMode)" in terminal_js
+    assert terminal_js.count("new window.Terminal(") == 1
+    assert terminal_js.count("new EventSource(") == 1
 
 
 def test_terminal_slash_command_preflights_remote_backend_before_session_create():
