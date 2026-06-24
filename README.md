@@ -339,7 +339,7 @@ Full list of environment variables:
 | `HERMES_WEBUI_PORT` | `8787` | Port |
 | `HERMES_WEBUI_STATE_DIR` | `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) | Where sessions and state are stored. **Note (upgrade):** the default now follows `HERMES_HOME` — if you previously relocated `HERMES_HOME` to a non-default base **without** setting `HERMES_WEBUI_STATE_DIR`, your WebUI state now resolves to `$HERMES_HOME/webui` instead of the old platform-default `~/.hermes/webui`. To keep using the old location, set `HERMES_WEBUI_STATE_DIR` to it (or move the directory). Installs with `HERMES_HOME` unset or at the default base are unaffected. |
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
-| `HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS` | *(unset)* | `os.pathsep`-separated absolute paths to trust as workspace roots even if they sit under a normally-blocked system prefix (e.g. REANA mounts user workspaces under `/var/reana/...`). Only the listed roots are carved out; other system paths stay blocked |
+| `HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS` | *(unset)* | **Internal deployment bridge** — prefer the `config.yaml` key `workspace.extra_trusted_roots` (below) for normal configuration. `os.pathsep`-separated absolute paths to trust as workspace roots even if they sit under a normally-blocked system prefix. Merged with the config key (config entries take precedence); kept as an env var only so a deployment can inject a root at boot from a dynamic mount path |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
 | `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the report-only CSP `connect-src` directive for reverse-proxy or tunnel deployments |
@@ -352,6 +352,31 @@ Full list of environment variables:
 | `HERMES_WEBUI_SERVER_CWD` | *(unset)* | Working directory for the server process. Defaults to the agent dir; point it at a writable workspace when the agent dir is read-only so fallback relative writes land somewhere writable |
 | `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
 | `HERMES_WEBUI_SESSIONS_MAX` | `100` | Max compact `Session` objects held in the in-memory LRU. Lighter than the agent cache; lower it on installs with hundreds of sessions |
+
+#### Extra trusted workspace roots (`config.yaml`)
+
+Some deployments mount legitimate user workspaces under a path that the WebUI
+normally blocks as a system prefix — for example REANA mounts each user's
+persistent workspace under `/var/reana/users/<uid>/workflows/<id>/`. Without a
+carve-out the WebUI rejects such a path and session creation fails with a 400.
+
+Because this is non-secret *behavioral* configuration (a trusted-roots
+allowlist, and a security boundary), it lives in `config.yaml` rather than an
+env var:
+
+```yaml
+workspace:
+  extra_trusted_roots:
+    - /var/reana          # only paths strictly below a blocked system root are accepted
+```
+
+Only the listed roots are carved out; every other system path stays blocked.
+Each entry must be an **absolute** path that sits **strictly below** a blocked
+system root — entries that are non-absolute, contain `..`, resolve to a
+filesystem root, or equal/parent a blocked root are ignored with a logged
+warning (so a misconfiguration surfaces rather than silently widening the
+boundary). The `HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS` env var remains as an
+internal deployment bridge (merged with this key, config entries first).
 
 ---
 

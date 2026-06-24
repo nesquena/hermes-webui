@@ -1,11 +1,13 @@
-"""HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS carve-out (api/workspace.py).
+"""Extra-trusted-workspace-roots carve-out (api/workspace.py).
 
 A deployment may mount legitimate user workspaces under a normally-blocked
-system prefix (e.g. REANA mounts them under /var/reana/...). The env var opts
-specific roots back in. This must hold across all three gating functions the
-add/validate/resolve paths use — in particular the POSIX probe that
-_is_blocked_workspace_path consults first — be default-off, and never over-reach
-to sibling or parent paths.
+system prefix (e.g. REANA mounts them under /var/reana/...). The user-facing
+surface is the ``config.yaml`` key ``workspace.extra_trusted_roots`` (a list of
+absolute paths); the ``HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS`` env var is retained
+as an internal deployment bridge. Either opts specific roots back in. This must
+hold across all three gating functions the add/validate/resolve paths use — in
+particular the POSIX probe that _is_blocked_workspace_path consults first — be
+default-off, and never over-reach to sibling or parent paths.
 """
 
 import os
@@ -130,6 +132,84 @@ def test_strict_subdir_of_blocked_root_still_allowed(monkeypatch):
     """The bounding check must not regress the legitimate case: a root that sits
     strictly below a blocked system root (the whole point of the feature)."""
     _parse_extra_workspace_roots.cache_clear()
+    monkeypatch.setenv(ENV, "/var/reana")
+    assert any(p.as_posix() == "/var/reana" for p in _extra_workspace_prefixes())
+    assert _is_blocked_workspace_path(Path(WS), WS) is False
+
+
+# --- config.yaml surface (workspace.extra_trusted_roots) -----------------------
+#
+# The user-facing surface is config.yaml, not the env var. _config_extra_workspace
+# _root_entries() reads workspace.extra_trusted_roots via api.config.get_config(),
+# resolved lazily, so these tests stub that call. The env var stays valid as an
+# internal bridge; the two sources merge (config first) and dedup.
+
+
+def _set_config(monkeypatch, cfg):
+    """Stub api.config.get_config() (resolved lazily inside workspace.py)."""
+    _parse_extra_workspace_roots.cache_clear()
+    monkeypatch.setattr("api.config.get_config", lambda: cfg)
+
+
+def test_config_yaml_list_carves_out_on_every_gate(monkeypatch):
+    monkeypatch.delenv(ENV, raising=False)
+    _set_config(monkeypatch, {"workspace": {"extra_trusted_roots": ["/var/reana"]}})
+    # Same carve-out as the env var, sourced purely from config.yaml.
+    assert any(p.as_posix() == "/var/reana" for p in _extra_workspace_prefixes())
+    assert _is_blocked_posix_workspace_path(WS) is False
+    assert _is_blocked_workspace_path(Path(WS), WS) is False
+    assert _is_blocked_system_path(Path(WS)) is False
+
+
+def test_config_yaml_accepts_scalar_pathsep_string(monkeypatch):
+    monkeypatch.delenv(ENV, raising=False)
+    _set_config(
+        monkeypatch,
+        {"workspace": {"extra_trusted_roots": os.pathsep.join(["/var/reana", "/srv/data"])}},
+    )
+    prefixes = {p.as_posix() for p in _extra_workspace_prefixes()}
+    assert "/var/reana" in prefixes
+    assert "/srv/data" in prefixes
+
+
+def test_config_default_off_when_key_absent(monkeypatch):
+    monkeypatch.delenv(ENV, raising=False)
+    _set_config(monkeypatch, {})  # no workspace key at all
+    assert _extra_workspace_prefixes() == ()
+    assert _is_blocked_posix_workspace_path(WS) is True
+
+
+def test_config_and_env_merge_and_dedup(monkeypatch):
+    # config supplies /var/reana; env adds the same root plus another. The shared
+    # entry must not be duplicated, and both distinct roots must carve out.
+    _set_config(monkeypatch, {"workspace": {"extra_trusted_roots": ["/var/reana"]}})
+    monkeypatch.setenv(ENV, os.pathsep.join(["/var/reana", "/srv/extra"]))
+    resolved = [p.as_posix() for p in _extra_workspace_prefixes()]
+    assert resolved.count("/var/reana") == 1, resolved
+    assert "/srv/extra" in resolved
+    assert _is_blocked_workspace_path(Path(WS), WS) is False
+
+
+def test_config_invalid_type_is_ignored_with_warning(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.delenv(ENV, raising=False)
+    _set_config(monkeypatch, {"workspace": {"extra_trusted_roots": 1234}})
+    with caplog.at_level(logging.WARNING):
+        prefixes = _extra_workspace_prefixes()
+    assert prefixes == ()
+    assert _is_blocked_posix_workspace_path(WS) is True
+    assert any("extra_trusted_roots" in r.getMessage() for r in caplog.records)
+
+
+def test_config_unloadable_falls_back_to_env(monkeypatch):
+    # get_config() raising must not break the env-var bridge.
+    _parse_extra_workspace_roots.cache_clear()
+
+    def _boom():
+        raise RuntimeError("config not ready")
+
+    monkeypatch.setattr("api.config.get_config", _boom)
     monkeypatch.setenv(ENV, "/var/reana")
     assert any(p.as_posix() == "/var/reana" for p in _extra_workspace_prefixes())
     assert _is_blocked_workspace_path(Path(WS), WS) is False

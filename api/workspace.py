@@ -439,8 +439,12 @@ _USER_TMP_PREFIXES: tuple[Path, ...] = (
 
 @functools.lru_cache(maxsize=8)
 def _parse_extra_workspace_roots(raw: str) -> tuple[tuple[Path, Path], ...]:
-    """Parse the env value into ``(expanded, resolved)`` root pairs; cached so
-    warnings fire once.
+    """Parse an ``os.pathsep``-joined raw value into ``(expanded, resolved)``
+    root pairs; cached so warnings fire once.
+
+    Callers combine entries from ``config.yaml`` (``workspace.extra_trusted_roots``,
+    the user-facing surface) and the ``HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS`` env
+    var (an internal deployment bridge) into the single string passed here.
 
     ``expanded`` is the literal entry after ``~`` expansion; ``resolved`` is its
     symlink-resolved canonical form. Both are kept because the POSIX probe matches
@@ -473,7 +477,7 @@ def _parse_extra_workspace_roots(raw: str) -> tuple[tuple[Path, Path], ...]:
         expanded = os.path.expanduser(part)
         if not os.path.isabs(expanded):
             logger.warning(
-                "Ignoring non-absolute HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS entry %r "
+                "Ignoring non-absolute extra trusted workspace root %r "
                 "(workspace roots must be absolute paths)",
                 part,
             )
@@ -483,7 +487,7 @@ def _parse_extra_workspace_roots(raw: str) -> tuple[tuple[Path, Path], ...]:
         # below-a-blocked-root check by resolving to a broader prefix.
         if ".." in Path(expanded).parts:
             logger.warning(
-                "Ignoring HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS entry %r: '..' path "
+                "Ignoring extra trusted workspace root %r: '..' path "
                 "components are not allowed (give a fully-resolved absolute path)",
                 part,
             )
@@ -492,14 +496,14 @@ def _parse_extra_workspace_roots(raw: str) -> tuple[tuple[Path, Path], ...]:
             resolved = Path(expanded).resolve()
         except Exception as exc:  # pragma: no cover - resolve() edge cases
             logger.warning(
-                "Ignoring unresolvable HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS entry %r: %s",
+                "Ignoring unresolvable extra trusted workspace root %r: %s",
                 part,
                 exc,
             )
             continue
         if resolved == Path(resolved.anchor):
             logger.warning(
-                "Ignoring HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS entry %r: a filesystem "
+                "Ignoring extra trusted workspace root %r: a filesystem "
                 "root is too broad to be a trusted workspace root",
                 part,
             )
@@ -513,7 +517,7 @@ def _parse_extra_workspace_roots(raw: str) -> tuple[tuple[Path, Path], ...]:
             for blocked in _workspace_blocked_roots()
         ):
             logger.warning(
-                "Ignoring HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS entry %r (resolves to "
+                "Ignoring extra trusted workspace root %r (resolves to "
                 "%s): equal to or a parent of a blocked system root; a workspace "
                 "root must sit strictly below one",
                 part,
@@ -524,12 +528,63 @@ def _parse_extra_workspace_roots(raw: str) -> tuple[tuple[Path, Path], ...]:
     return tuple(out)
 
 
-def _extra_workspace_root_pairs() -> tuple[tuple[Path, Path], ...]:
-    """``(expanded, resolved)`` pairs for the configured extra workspace roots."""
-    raw = os.environ.get("HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS", "").strip()
-    if not raw:
+def _config_extra_workspace_root_entries() -> tuple[str, ...]:
+    """Raw extra-trusted-root entry strings from ``config.yaml``.
+
+    The user-facing surface for this setting is the ``config.yaml`` key
+    ``workspace.extra_trusted_roots`` -- a list of absolute paths. It is a
+    non-secret *behavioral* setting (a trusted-workspace-roots allowlist), so per
+    the project convention it lives in ``config.yaml`` rather than an env var.
+    Values are returned as raw strings for ``_parse_extra_workspace_roots`` to
+    validate; a scalar string is also accepted (``os.pathsep``-separated).
+    """
+    try:
+        from api.config import get_config
+        cfg = get_config()
+    except Exception:  # pragma: no cover - config not loadable yet
         return ()
-    return _parse_extra_workspace_roots(raw)
+    ws = cfg.get("workspace") if isinstance(cfg, dict) else None
+    raw = ws.get("extra_trusted_roots") if isinstance(ws, dict) else None
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        items: list = raw.split(os.pathsep)
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        logger.warning(
+            "Ignoring config workspace.extra_trusted_roots: expected a list of "
+            "absolute paths (or an os.pathsep-separated string), got %s",
+            type(raw).__name__,
+        )
+        return ()
+    return tuple(str(item).strip() for item in items if str(item).strip())
+
+
+def _extra_workspace_root_pairs() -> tuple[tuple[Path, Path], ...]:
+    """``(expanded, resolved)`` pairs for the configured extra workspace roots.
+
+    Roots come from two sources, deduped with config taking precedence (listed
+    first): the ``config.yaml`` ``workspace.extra_trusted_roots`` list -- the
+    user-facing surface -- and the ``HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS`` env var,
+    retained as an internal deployment bridge so a deployment can still inject a
+    root at boot from a dynamic mount path (e.g. REANA's per-user workspace).
+    Both feed the same ``_parse_extra_workspace_roots`` validation.
+    """
+    entries: list[str] = list(_config_extra_workspace_root_entries())
+    env_raw = os.environ.get("HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS", "").strip()
+    if env_raw:
+        entries += [p.strip() for p in env_raw.split(os.pathsep) if p.strip()]
+    # Dedup preserving order (config entries appear first, so they win).
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for entry in entries:
+        if entry and entry not in seen:
+            seen.add(entry)
+            deduped.append(entry)
+    if not deduped:
+        return ()
+    return _parse_extra_workspace_roots(os.pathsep.join(deduped))
 
 
 def _extra_workspace_posix_carveouts() -> tuple[PurePosixPath, ...]:
@@ -555,11 +610,13 @@ def _extra_workspace_posix_carveouts() -> tuple[PurePosixPath, ...]:
 def _extra_workspace_prefixes() -> tuple[Path, ...]:
     """Deployment-provided workspace-root carve-outs.
 
-    ``HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS`` (os.pathsep-separated absolute paths)
-    whitelists legitimate workspace roots that nominally sit under a blocked
-    system prefix. REANA, for example, mounts each user's persistent workspace
-    under ``/var/reana/users/<uid>/workflows/<id>/`` — without this carve-out it
-    is rejected as a ``/var`` system path and session creation 400s. Entries are
+    The ``config.yaml`` key ``workspace.extra_trusted_roots`` (a list of absolute
+    paths; the user-facing surface) — plus the ``HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS``
+    env var as an internal deployment bridge — whitelists legitimate workspace
+    roots that nominally sit under a blocked system prefix. REANA, for example,
+    mounts each user's persistent workspace under
+    ``/var/reana/users/<uid>/workflows/<id>/`` — without this carve-out it is
+    rejected as a ``/var`` system path and session creation 400s. Entries are
     validated and parsed by ``_parse_extra_workspace_roots``.
 
     Returns the symlink-resolved form of each root (used by the ``Path``-based
@@ -629,8 +686,9 @@ def _is_blocked_posix_workspace_path(raw_path: str | Path | None) -> bool:
         PurePosixPath('/var/tmp'),
         PurePosixPath('/private/var/tmp'),
     ]
-    # Deployment-provided workspace roots (HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS) are
-    # carved out here too — this POSIX probe runs first in _is_blocked_workspace_path,
+    # Deployment-provided workspace roots (config.yaml workspace.extra_trusted_roots
+    # + the HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS bridge) are carved out here too —
+    # this POSIX probe runs first in _is_blocked_workspace_path,
     # so without it a legitimate workspace under an otherwise-blocked system prefix
     # (e.g. REANA's /var/reana/...) is rejected on the validate/resolve path even
     # though _is_blocked_system_path honors the carve-out. Both the literal and the
