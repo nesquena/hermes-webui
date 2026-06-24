@@ -20719,6 +20719,8 @@ const LOCALES = {
     kanban_no_matching_tasks: 'Không có tác vụ phù hợp',
     kanban_no_data: 'Không có dữ liệu Kanban',
     kanban_work_queue_hint: 'Đây là hàng đợi công việc của Hermes Agent. Tạo hoặc phân loại tác vụ, gán người xử lý, chuyển sang Ready rồi để dispatcher nhận.',
+    kanban_tasks_hidden_by_filters: 'Tasks hidden by filters',
+    kanban_clear_filters: 'Clear filters',
     kanban_unavailable: 'Kanban không khả dụng',
     kanban_read_only: 'Chế độ chỉ đọc',
     kanban_empty: 'Trống',
