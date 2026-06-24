@@ -3,9 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.626] — 2026-06-24 — Release WG (keep the sidebar in sync after the Desktop app continues a session)
+
 ### Fixed
 
-- **WebUI-created sessions stay in sync after the official Hermes Desktop App continues the same Hermes Agent session.** The conversation sidebar now refreshes WebUI-origin rows from settled `state.db` message counts/timestamps even when external/CLI sessions are hidden, full session loads avoid duplicating the sidecar prefix when merging `state.db`, and the next WebUI turn saves a single reconciled transcript instead of re-writing duplicated history.
+- **The conversation sidebar stays in sync after the official Hermes Desktop App continues a session that was started in the WebUI.** When the Desktop app appends settled rows to the same Hermes Agent `state.db` session, the WebUI sidebar now refreshes the WebUI-origin row's message count and timestamp from `state.db` even while external/CLI sessions are hidden (previously it could show a stale count). The existing no-duplicate-prefix merge and single-reconciled-transcript-on-next-turn behaviors are now covered by regression tests against this Desktop-continuation scenario. The change is read-only and content-free — it adjusts the sidebar's count/timestamp/source overlay only, never message content. Thanks @franksong2702. (#4834)
 
 ## [v0.51.625] — 2026-06-24 — Release WF (cron job model override no longer keeps the @provider: display prefix)
 
