@@ -137,8 +137,9 @@ def test_new_chat_prefers_explicit_empty_composer_override_before_configured_def
     assert "explicitModelOverride" in fn
     assert "hasLoadedSession" in fn
     assert "consumedExplicitModelOverride" in fn
+    assert "usingConfiguredDefault" in fn
     assert "_clearEmptyComposerModelOverride" in fn
-    assert "hasLoadedSession&&window._defaultModel" in fn
+    assert "newModelState={model:window._defaultModel,model_provider:window._activeProvider||null};" in fn
     assert fn.index("explicitModelOverride") < fn.index("hasLoadedSession&&window._defaultModel") < fn.index("_modelStateForSelect"), (
         "newSession() must prefer the empty-composer override first, then the configured default for loaded-session flows, then legacy picker state"
     )
@@ -151,6 +152,7 @@ def test_new_session_keeps_provider_fallback_guards_after_model_precedence():
     assert "_fallbackProvider" in provider_assignment
     assert "_familyMismatch" in provider_assignment
     assert "_fallbackIsNamedCustom" in provider_assignment
+    assert "usingConfiguredDefault?window._activeProvider" in fn
 
 
 def test_changelog_mentions_new_chat_default_model_provider_sync():

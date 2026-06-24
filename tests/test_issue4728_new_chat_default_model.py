@@ -31,7 +31,15 @@ function extractNewSession(src) {
 
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const args = JSON.parse(process.argv[3]);
-const modelSelect = { value: args.currentModel || '', options: [] };
+const modelSelect = {
+  value: args.currentModel || '',
+  options: [],
+  selectedOptions: [{
+    dataset: {
+      provider: args.selectedOptionProvider || '',
+    },
+  }],
+};
 const store = new Map();
 const captured = [];
 
@@ -93,15 +101,14 @@ globalThis._readEmptyComposerModelOverride = () => globalThis._emptyComposerMode
 globalThis._clearEmptyComposerModelOverride = () => {
   globalThis._emptyComposerModelOverride = null;
 };
-globalThis._modelStateForSelect = (_sel, modelId) => {
-  if (args.modelStates && Object.prototype.hasOwnProperty.call(args.modelStates, modelId)) {
-    const state = args.modelStates[modelId];
-    return {
-      model: state.model || modelId,
-      model_provider: state.model_provider || null,
-    };
-  }
-  return { model: modelId, model_provider: null };
+globalThis._modelStateForSelect = (sel, modelId) => {
+  const value = String(modelId || '').trim();
+  if (!value) return { model: '', model_provider: null };
+  const provider = String(((sel && sel.selectedOptions && sel.selectedOptions[0] && sel.selectedOptions[0].dataset) || {}).provider || '').trim();
+  return {
+    model: value,
+    model_provider: provider && provider !== 'default' ? provider : null,
+  };
 };
 globalThis._applyModelToDropdown = (modelId, sel, provider) => {
   sel.value = modelId;
@@ -196,12 +203,9 @@ def test_loaded_session_picker_value_posts_configured_default_model(driver_path)
             "model_provider": "session-provider",
         },
         "currentModel": "GPT-5.4",
+        "selectedOptionProvider": "session-provider",
         "defaultModel": "deepseek-v4-flash",
         "activeProvider": "deepseek",
-        "modelStates": {
-            "GPT-5.4": {"model": "GPT-5.4", "model_provider": "session-provider"},
-            "deepseek-v4-flash": {"model": "deepseek-v4-flash", "model_provider": "deepseek"},
-        },
     })
 
     assert data["reqBody"]["model"] == "deepseek-v4-flash"
@@ -220,11 +224,6 @@ def test_explicit_empty_composer_override_wins_over_configured_default(driver_pa
             "model_provider": "cursor",
             "saved_at": 123,
         },
-        "modelStates": {
-            "GPT-5.4": {"model": "GPT-5.4", "model_provider": "session-provider"},
-            "cursor/composer-2.5": {"model": "cursor/composer-2.5", "model_provider": "cursor"},
-            "deepseek-v4-flash": {"model": "deepseek-v4-flash", "model_provider": "deepseek"},
-        },
     })
 
     assert data["reqBody"]["model"] == "cursor/composer-2.5"
@@ -242,9 +241,6 @@ def test_matching_fallback_provider_still_routes_bare_models(driver_path):
         },
         "currentModel": "gpt-4o",
         "activeProvider": "openai",
-        "modelStates": {
-            "gpt-4o": {"model": "gpt-4o"},
-        },
     })
 
     assert data["reqBody"]["model"] == "gpt-4o"
@@ -261,9 +257,6 @@ def test_family_mismatched_fallback_provider_stays_null(driver_path):
         },
         "currentModel": "gpt-4o",
         "activeProvider": "anthropic",
-        "modelStates": {
-            "gpt-4o": {"model": "gpt-4o"},
-        },
     })
 
     assert data["reqBody"]["model"] == "gpt-4o"

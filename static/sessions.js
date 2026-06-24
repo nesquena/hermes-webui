@@ -882,13 +882,13 @@ async function newSession(flash, options={}){
     const hasLoadedSession=!!(S.session&&S.session.session_id);
     let newModelState=null;
     let consumedExplicitModelOverride=false;
+    let usingConfiguredDefault=false;
     if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
       newModelState=explicitModelOverride;
       consumedExplicitModelOverride=true;
     }else if(hasLoadedSession&&window._defaultModel){
-      newModelState=(typeof _modelStateForSelect==='function'&&modelSelForNew)
-        ? _modelStateForSelect(modelSelForNew,window._defaultModel)
-        : {model:window._defaultModel,model_provider:window._activeProvider||null};
+      newModelState={model:window._defaultModel,model_provider:window._activeProvider||null};
+      usingConfiguredDefault=true;
     }else if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
       newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
     }else if(typeof _readPersistedModelState==='function'){
@@ -924,7 +924,9 @@ async function newSession(flash, options={}){
       // server fast path passes the pair through verbatim (no validation) and
       // silently routes to the wrong backend — so leave model_provider=null and
       // let the slow-path family repair run (mirrors routes.py _normalize_provider_id).
-      const _fallbackProvider=_bareModel?(window._activeProvider||(S.session&&S.session.model_provider)||''):'';
+      const _fallbackProvider=_bareModel
+        ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
+        : '';
       const _familyProvider=(m=>{const s=String(m||'').toLowerCase();
         if(s.startsWith('gpt'))return 'openai';if(s.startsWith('claude'))return 'anthropic';
         if(s.startsWith('gemini'))return 'google';return '';})(newModelState.model);
