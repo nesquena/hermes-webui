@@ -119,32 +119,34 @@ def test_eager_checkpointed_user_is_removed_from_model_context():
     assert [m["content"] for m in context] == ["older", "prior"]
 
 
-def test_submitted_turn_journal_does_not_duplicate_current_model_context(tmp_path):
-    from api.turn_journal import append_turn_journal_event
+def test_active_pending_current_user_is_removed_from_model_context():
+    """Current pending user text must not appear in conversation_history twice.
 
+    The provider receives the active turn as `user_message`; if an eager
+    checkpoint/recovery path has already put the same current user text at the
+    end of `context_messages`, `_context_messages_for_new_turn` must strip it
+    before building the model-facing history.  Turn-journal `submitted` records
+    are intentionally not a context source for this helper.
+    """
     session = Session(
         session_id="journal_context_current_turn",
         title="journal context",
-        messages=[{"role": "user", "content": "older"}],
-        context_messages=[{"role": "user", "content": "older"}],
+        messages=[
+            {"role": "user", "content": "older"},
+            {"role": "assistant", "content": "prior"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "older"},
+            {"role": "assistant", "content": "prior"},
+            {"role": "user", "content": "[Workspace::v1: /tmp/hermes]\ncurrent prompt"},
+        ],
         active_stream_id="stream-current",
         pending_user_message="current prompt",
-    )
-    append_turn_journal_event(
-        session.session_id,
-        {
-            "event": "submitted",
-            "stream_id": "stream-current",
-            "role": "user",
-            "content": "current prompt",
-            "created_at": 123.0,
-        },
-        session_dir=tmp_path,
     )
 
     context = streaming._context_messages_for_new_turn(session, "current prompt")
 
-    assert [m["content"] for m in context] == ["older"]
+    assert [m["content"] for m in context] == ["older", "prior"]
 
 
 def test_eager_checkpointed_user_is_not_duplicated_after_agent_result():

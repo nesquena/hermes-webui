@@ -2332,7 +2332,11 @@ function _stripForcedSkillEnvelope(text){
 }
 
 function _normalizeUserTranscriptText(text){
-  let value=_stripAttachedFilesMarker(_stripForcedSkillEnvelope(text));
+  const value=_stripAttachedFilesMarker(_stripForcedSkillEnvelope(text));
+  // ui.js is loaded before sessions.js in index.html and owns the canonical
+  // workspace-sentinel parser used by rendering.  Keep a small fallback for
+  // static/helper tests and defensive partial loads, but prefer the renderer's
+  // parser whenever it is available.
   if(typeof _stripWorkspaceDisplayPrefix==='function'){
     return _stripWorkspaceDisplayPrefix(value);
   }

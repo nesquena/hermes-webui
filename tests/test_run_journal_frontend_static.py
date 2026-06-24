@@ -1,9 +1,12 @@
+import json
+import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text()
 SESSIONS_SRC = (ROOT / "static" / "sessions.js").read_text()
+UI_SRC = (ROOT / "static" / "ui.js").read_text()
 
 
 def _function_body(src: str, signature: str) -> str:
@@ -19,6 +22,53 @@ def _function_body(src: str, signature: str) -> str:
             if depth == 0:
                 return src[start : idx + 1]
     raise AssertionError(f"could not extract function body for {signature!r}")
+
+
+def _run_session_identity_probe() -> dict:
+    prompt = "same submitted prompt\nwith a second line"
+    workspace_prompt = f"[Workspace::v1: /tmp/hermes-webui]\n{prompt}"
+    legacy_workspace_prompt = f"[Workspace: /tmp/hermes-webui]\n{prompt}"
+    attached_prompt = f"{prompt}\n\n[Attached files: /tmp/a.txt]"
+    forced_prompt = (
+        "[USER OVERRIDE] You MUST follow the skill 'hermes-webui-coordinator' "
+        "content provided below before responding to the next message.\n\n"
+        "[FORCED SKILL CONTEXT: hermes-webui-coordinator]\n"
+        "skill body that should not make a second user bubble\n"
+        "[/FORCED SKILL CONTEXT]\n\n"
+        f"{prompt}"
+    )
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _stripWorkspaceDisplayPrefix"),
+            _function_body(SESSIONS_SRC, "function _messageComparableText"),
+            _function_body(SESSIONS_SRC, "function _stripAttachedFilesMarker"),
+            _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
+            _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
+            _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(SESSIONS_SRC, "function _inflightHasVisibleLiveState"),
+        ]
+    )
+    script = f"""
+{helpers}
+const plain = {{role:'user', content:{json.dumps(prompt)}}};
+const workspace = {{role:'user', content:{json.dumps(workspace_prompt)}}};
+const legacyWorkspace = {{role:'user', content:{json.dumps(legacy_workspace_prompt)}}};
+const attached = {{role:'user', content:{json.dumps(attached_prompt)}}};
+const forced = {{role:'user', content:{json.dumps(forced_prompt)}}};
+const different = {{role:'user', content:'a different submitted prompt'}};
+process.stdout.write(JSON.stringify({{
+  workspaceDedupe: _sameTranscriptMessage(plain, workspace),
+  legacyWorkspaceDedupe: _sameTranscriptMessage(plain, legacyWorkspace),
+  attachedDedupe: _sameTranscriptMessage(plain, attached),
+  forcedSkillDedupe: _sameTranscriptMessage(plain, forced),
+  differentUserNotDedupe: !_sameTranscriptMessage(plain, different),
+  roleMismatchNotDedupe: !_sameTranscriptMessage(plain, {{role:'assistant', content:{json.dumps(prompt)}}}),
+  userOnlyInflightVisible: _inflightHasVisibleLiveState({{messages:[plain]}}),
+  emptyUserOnlyInflightNotVisible: !_inflightHasVisibleLiveState({{messages:[{{role:'user', content:'   '}}]}}),
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
 
 
 def test_reattach_path_uses_replay_when_status_reports_journal():
@@ -150,31 +200,26 @@ def test_active_reload_keeps_user_only_inflight_visible_until_pending_dedupe():
     The browser must not discard the user-only optimistic INFLIGHT entry as a
     cursor-only snapshot before pending/live replay reconciliation runs.
     """
-    helper = _function_body(SESSIONS_SRC, "function _inflightHasVisibleLiveState")
+    result = _run_session_identity_probe()
 
-    assert "msg.role === 'user'" in helper or "msg.role==='user'" in helper
-    assert "_messageComparableText(msg)" in helper or "msg.content" in helper
+    assert result["userOnlyInflightVisible"] is True
+    assert result["emptyUserOnlyInflightNotVisible"] is True
 
 
-def test_pending_user_merge_dedupes_workspace_prefixed_replay_rows():
+def test_pending_user_merge_dedupes_user_turn_variants_by_behavior():
     """Pending user rows and replayed/checkpointed user rows share one turn.
 
-    The model-facing current user message may carry the WebUI workspace sentinel,
-    while pending_user_message stores only the human prompt.  Frontend transcript
-    equality must normalize the same way the renderer and backend context
-    identity do, otherwise active reload/reconnect can show two user bubbles for
-    one submitted turn.
+    Execute the same JavaScript helpers the browser uses so the regression test
+    catches regex/order/trim mistakes, not just identifier wiring.
     """
-    same = _function_body(SESSIONS_SRC, "function _sameTranscriptMessage")
-    normalizer = _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText")
-    forced = _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope")
+    result = _run_session_identity_probe()
 
-    assert "_normalizeUserTranscriptText" in same
-    assert "_stripWorkspaceDisplayPrefix" in normalizer
-    assert "_stripAttachedFilesMarker" in normalizer
-    assert "Workspace::v1" in normalizer
-    assert "FORCED SKILL CONTEXT" in forced
-    assert "USER OVERRIDE" in forced
+    assert result["workspaceDedupe"] is True
+    assert result["legacyWorkspaceDedupe"] is True
+    assert result["attachedDedupe"] is True
+    assert result["forcedSkillDedupe"] is True
+    assert result["differentUserNotDedupe"] is True
+    assert result["roleMismatchNotDedupe"] is True
 
 
 def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():
