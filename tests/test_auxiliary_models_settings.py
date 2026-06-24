@@ -5,6 +5,7 @@ that the JS loading/saving logic is wired up, and that all locales have the
 required i18n keys.
 """
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).parent.parent
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
@@ -305,8 +306,8 @@ class TestAuxiliaryModelsI18n:
         """Count of each key should equal the number of locales (12 with Turkish)."""
         for key in self.REQUIRED_KEYS:
             count = I18N_JS.count(f"{key}:")
-            assert count == 13, (
-                f"i18n key '{key}' found {count} times — expected 12 (one per locale)"
+            assert count == 14, (
+                f"i18n key '{key}' found {count} times — expected 14 (one per locale)"
             )
 
 
@@ -327,6 +328,55 @@ class TestAuxiliaryModelsBackend:
         assert '"/api/model/set"' in self.ROUTES_PY, (
             "Missing /api/model/set route in routes.py"
         )
+
+    def test_default_model_routes_drop_auxiliary_auto_provider_sentinel(self, monkeypatch):
+        from api import routes
+
+        seen = []
+
+        monkeypatch.setattr(routes, "_csrf_exempt_path", lambda _path: True)
+        monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
+
+        def fake_set_default_model(model, provider=None, advanced=None):
+            seen.append({
+                "model": model,
+                "provider": provider,
+                "advanced": advanced,
+            })
+            return {"ok": True, "model": model, "provider": provider}
+
+        monkeypatch.setattr(routes, "set_hermes_default_model", fake_set_default_model)
+
+        bodies = {
+            "/api/default-model": {
+                "model": "gpt-5.5",
+                "provider": "auto",
+                "advanced": {"base_url": "https://example.invalid/v1"},
+            },
+            "/api/model/set": {
+                "scope": "main",
+                "model": "gpt-5.5",
+                "provider": "auto",
+                "advanced": {"base_url": "https://example.invalid/v1"},
+            },
+        }
+
+        for path, body in bodies.items():
+            monkeypatch.setattr(routes, "read_body", lambda _handler, payload=body: payload)
+            routes.handle_post(object(), SimpleNamespace(path=path, query=""))
+
+        assert seen == [
+            {
+                "model": "gpt-5.5",
+                "provider": None,
+                "advanced": {"base_url": "https://example.invalid/v1"},
+            },
+            {
+                "model": "gpt-5.5",
+                "provider": None,
+                "advanced": {"base_url": "https://example.invalid/v1"},
+            },
+        ]
 
     def test_get_auxiliary_models_function_exists(self):
         """get_auxiliary_models() must exist in api/config.py."""
@@ -473,6 +523,41 @@ class TestAuxiliaryModelsBackend:
         assert "max_concurrency: 2" in text
         assert "reasoning_effort: none" in text
         assert "DUMMY_KEY_DO_NOT_PRINT" in text
+
+    def test_set_hermes_default_model_persists_explicit_provider_override(self, monkeypatch, tmp_path):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("model:\n  provider: openai\n  default: gpt-5.5\n", encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(config, "resolve_model_provider", lambda model: (model, "", None))
+
+        result = config.set_hermes_default_model("gpt-5.5", provider="anthropic")
+
+        assert result["ok"] is True
+        assert result["provider"] == "anthropic"
+        text = config_path.read_text(encoding="utf-8")
+        assert "provider: anthropic" in text
+
+    def test_set_hermes_default_model_provider_override_replaces_stale_custom_base_url(self, monkeypatch, tmp_path):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("model:\n  provider: custom\n  default: gpt-5.5\n  base_url: http://old.local/v1\n", encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(config, "resolve_model_provider", lambda model: (model, "custom", "http://old.local/v1"))
+
+        result = config.set_hermes_default_model("gpt-5.5", provider="openai")
+
+        assert result["ok"] is True
+        saved = config_path.read_text(encoding="utf-8")
+        assert "provider: openai" in saved
+        assert "base_url: https://api.openai.com/v1" in saved
+        assert "http://old.local/v1" not in saved
 
     def test_set_auxiliary_model_persists_advanced_options(self, monkeypatch, tmp_path):
         """Gear-modal payload should persist supported per-slot options."""

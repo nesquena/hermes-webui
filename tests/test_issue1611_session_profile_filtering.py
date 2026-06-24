@@ -158,13 +158,16 @@ def test_static_sessions_js_uses_all_profiles_query_when_toggle_on():
     repo_root = Path(__file__).parent.parent
     src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
 
-    assert "_showAllProfiles ? '?all_profiles=1' : ''" in src, (
-        "Expected fetch path to flip on the toggle state"
+    assert "if(_showAllProfiles) qs.set('all_profiles','1');" in src, (
+        "Expected session-list fetch query to flip on the all-profiles toggle state"
     )
-    assert "api('/api/sessions' + allProfilesQS" in src, (
+    assert "const projectQS = _showAllProfiles ? '?all_profiles=1' : '';" in src, (
+        "Expected project fetch path to flip on the all-profiles toggle state"
+    )
+    assert "api('/api/sessions' + sessionListQS" in src, (
         "Expected /api/sessions fetch to use the variant query"
     )
-    assert "api('/api/projects' + allProfilesQS" in src, (
+    assert "api('/api/projects' + projectQS" in src, (
         "Expected /api/projects fetch to use the variant query"
     )
 

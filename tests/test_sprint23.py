@@ -30,6 +30,24 @@ def make_session(created_list):
     return sid, d["session"]
 
 
+def _make_session_visible(sid):
+    from api.models import Session
+    from tests.conftest import TEST_WORKSPACE
+
+    session = Session(
+        session_id=sid,
+        title="Compact Usage",
+        workspace=str(TEST_WORKSPACE),
+        model="test",
+        created_at=1.0,
+        updated_at=1.0,
+        profile="default",
+        messages=[{"role": "user", "content": "visible row", "timestamp": 1.0}],
+        tool_calls=[],
+    )
+    session.save(touch_updated_at=False)
+
+
 # ── Session usage fields ─────────────────────────────────────────────────
 
 def test_new_session_has_usage_fields():
@@ -56,6 +74,8 @@ def test_session_compact_has_usage_fields():
     created = []
     try:
         sid, _ = make_session(created)
+        post("/api/session/rename", {"session_id": sid, "title": "Compact Usage"})
+        _make_session_visible(sid)
         post("/api/session/rename", {"session_id": sid, "title": "Compact Usage"})
         d, status = get("/api/sessions")
         assert status == 200

@@ -141,7 +141,9 @@ def test_disk_models_cache_still_loads_when_auth_and_config_sources_are_unchange
 
     result = config.get_available_models()
 
-    assert result == fresh_opencode
+    # The disk-cache hit reconstructs `aliases` from current config (the save
+    # path doesn't persist aliases); no config aliases here, so it's {}.
+    assert result == {**fresh_opencode, "aliases": {}}
 
 
 def test_memory_models_cache_invalidates_when_static_catalog_changes(tmp_path, monkeypatch):

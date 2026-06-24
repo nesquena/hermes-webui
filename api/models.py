@@ -14,6 +14,7 @@ from contextlib import closing
 from pathlib import Path
 
 import api.config as _cfg
+from api.compression_anchor import is_context_compression_marker
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
@@ -24,6 +25,7 @@ from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
     is_cli_session_row,
+    normalize_agent_session_source,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
@@ -391,10 +393,13 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     context_messages = getattr(session, 'context_messages', None)
     if not isinstance(context_messages, list) or not context_messages:
         return
+    role = str(recovered.get('role') or '')
     recovered_text = " ".join(str(recovered.get('content') or '').split())
+    if not recovered_text and not recovered.get('tool_call_id') and not recovered.get('tool_calls'):
+        return
     if recovered_text:
         for existing in reversed(context_messages[-8:]):
-            if not isinstance(existing, dict) or existing.get('role') != 'user':
+            if not isinstance(existing, dict) or existing.get('role') != role:
                 continue
             existing_text = " ".join(str(existing.get('content') or '').split())
             if existing_text == recovered_text:
@@ -423,12 +428,15 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)
     _append_recovered_turn_to_context(session, recovered)
-    # The new user turn is now committed to messages (#3831): retire a positive
-    # truncation watermark from a prior retry/undo/edit so it can't freeze at the
-    # old edit boundary and drop these post-edit turns on a later empty-sidecar
-    # reconcile. None, never 0.0 (the truncate-to-empty sentinel, #2914).
+    # The new user turn is now committed to messages (#3831): advance the
+    # truncation watermark to the new message's timestamp so that
+    # merge_session_messages_append_only() still filters out replaced
+    # pre-edit rows from state.db whose timestamps fall below the boundary.
+    # The merge's sidecar_advanced_past_watermark guard allows state.db rows
+    # newer than the watermark, so post-edit turns are not dropped.
+    # Never 0.0 (the truncate-to-empty sentinel, #2914).
     if getattr(session, 'truncation_watermark', None):
-        session.truncation_watermark = None
+        session.truncation_watermark = recovered_ts
     return recovered
 
 
@@ -638,17 +646,19 @@ class Session:
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
                  truncation_watermark=None,
+                 truncation_boundary=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
                 parent_session_id: str=None,
                 worktree_path=None,
                 worktree_branch=None,
-                worktree_repo_root=None,
-                worktree_created_at=None,
-                enabled_toolsets=None,
-                composer_draft=None,
-                **kwargs):
+                 worktree_repo_root=None,
+                 worktree_created_at=None,
+                 enabled_toolsets=None,
+                 composer_draft=None,
+                 anchor_activity_scenes=None,
+                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
@@ -687,6 +697,7 @@ class Session:
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
         self.truncation_watermark = truncation_watermark
+        self.truncation_boundary = truncation_boundary
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -704,6 +715,7 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
         if raw_message_count is not None:
@@ -755,11 +767,12 @@ class Session:
             'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'truncation_watermark',
+            'truncation_boundary',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
-            'enabled_toolsets', 'composer_draft',
+            'enabled_toolsets', 'composer_draft', 'anchor_activity_scenes',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['message_count'] = len(self.messages or [])
@@ -1418,15 +1431,19 @@ def _append_journaled_partial_output(
             if existing_idx is not None:
                 current_assistant_idx = existing_idx
                 assistant_started_at = None
+                if 0 <= existing_idx < len(session.messages):
+                    _append_recovered_turn_to_context(session, session.messages[existing_idx])
                 return existing_idx
         timestamp = int(assistant_started_at or time.time())
-        session.messages.append({
+        recovered_assistant = {
             'role': 'assistant',
             'content': content,
             'timestamp': timestamp,
             '_recovered_from_run_journal': True,
             '_recovered_stream_id': stream_id,
-        })
+        }
+        session.messages.append(recovered_assistant)
+        _append_recovered_turn_to_context(session, recovered_assistant)
         current_assistant_idx = len(session.messages) - 1
         assistant_started_at = None
         appended_any = True
@@ -2283,12 +2300,39 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
         return False
     cached_messages = getattr(cached, 'messages', None) or []
     disk_messages = getattr(disk_session, 'messages', None) or []
-    if len(cached_messages) <= len(disk_messages):
-        return False
     if _last_non_tool_role(cached_messages) != 'user':
         return False
     if _last_non_tool_role(disk_messages) != 'assistant':
         return False
+    if len(cached_messages) < len(disk_messages):
+        return True
+    if len(cached_messages) == len(disk_messages):
+        # Same-length divergence is still stale: a completed assistant turn can
+        # be persisted through a sibling Session object while this inactive LRU
+        # entry still ends on the optimistic/recovered user row.
+        #
+        # Keep this narrow: only evict when the shared prefix is the same and
+        # the cached user tail is not newer than the persisted assistant.  A
+        # genuine just-submitted user message can exist briefly before the
+        # stream id is attached, and that must not be replaced by older disk
+        # state.
+        cached_tail = _last_non_tool_message(cached_messages)
+        disk_tail = _last_non_tool_message(disk_messages)
+        cached_prefix = [
+            (_message_role(message), _message_content_text(message))
+            for message in cached_messages[:-1]
+        ]
+        disk_prefix = [
+            (_message_role(message), _message_content_text(message))
+            for message in disk_messages[:-1]
+        ]
+        if cached_prefix != disk_prefix:
+            return False
+        cached_tail_ts = _message_timestamp(cached_tail)
+        disk_tail_ts = _message_timestamp(disk_tail)
+        if cached_tail_ts is not None and disk_tail_ts is not None and cached_tail_ts > disk_tail_ts:
+            return False
+        return True
 
     cached_tail = _last_non_tool_message(cached_messages)
     previous_disk_user = None
@@ -2303,6 +2347,30 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
     # A genuinely new concurrent user edit must stay in memory so stale-session
     # guards can report and preserve it.
     return _message_content_text(cached_tail) == _message_content_text(previous_disk_user)
+
+
+def _anchor_scene_record_keys(session) -> set[str]:
+    records = getattr(session, 'anchor_activity_scenes', None)
+    if not isinstance(records, dict):
+        return set()
+    return {str(key) for key, value in records.items() if key and isinstance(value, dict)}
+
+
+def _anchor_scene_records_updated_at(session) -> float:
+    records = getattr(session, 'anchor_activity_scenes', None)
+    if not isinstance(records, dict):
+        return 0.0
+    latest = 0.0
+    for record in records.values():
+        if not isinstance(record, dict):
+            continue
+        try:
+            updated_at = float(record.get('updated_at') or 0)
+        except (TypeError, ValueError):
+            updated_at = 0.0
+        if updated_at > latest:
+            latest = updated_at
+    return latest
 
 
 def _cached_session_lags_disk(cached) -> bool:
@@ -2329,7 +2397,19 @@ def _cached_session_lags_disk(cached) -> bool:
     disk_count = _parse_nonnegative_int(getattr(disk_meta, '_metadata_message_count', None))
     if disk_count is None:
         disk_count = _lookup_index_message_count(sid)
-    return bool(disk_count is not None and disk_count > cached_count)
+    if disk_count is not None and disk_count > cached_count:
+        return True
+    if not getattr(cached, 'active_stream_id', None) and not getattr(cached, 'pending_user_message', None):
+        cached_scene_keys = _anchor_scene_record_keys(cached)
+        disk_scene_keys = _anchor_scene_record_keys(disk_meta)
+        if disk_scene_keys and not disk_scene_keys.issubset(cached_scene_keys):
+            return True
+        if (
+            disk_scene_keys
+            and _anchor_scene_records_updated_at(disk_meta) > _anchor_scene_records_updated_at(cached)
+        ):
+            return True
+    return False
 
 
 def get_session(sid, metadata_only=False):
@@ -3127,40 +3207,149 @@ def _sidebar_title_is_generic_webui(title: str | None) -> bool:
     return text.startswith(prefix) and text[len(prefix):].isdigit()
 
 
-def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
-    """Attach state.db compression lineage metadata used by sidebar collapse."""
+def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> dict[str, dict]:
+    """Return cheap state.db source/title overrides for sidebar rows.
+
+    This intentionally does not chase lineage parents/children. It is used on
+    the /api/sessions hot path before CLI filtering so state.db can correct
+    stale JSON source flags without paying the full lineage-enrichment cost.
+    """
+    wanted = {str(sid) for sid in (session_ids or set()) if sid}
+    if not wanted or not db_path.exists():
+        return {}
     try:
-        metadata = read_session_lineage_metadata(
+        import sqlite3
+    except ImportError:
+        return {}
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {row[1] for row in cur.fetchall()}
+            if 'id' not in session_cols:
+                return {}
+            source_expr = 's.source' if 'source' in session_cols else 'NULL AS source'
+            session_source_expr = 's.session_source' if 'session_source' in session_cols else 'NULL AS session_source'
+            title_expr = 's.title' if 'title' in session_cols else 'NULL AS title'
+            overrides: dict[str, dict] = {}
+            ids = list(wanted)
+            chunk_size = 500
+            for i in range(0, len(ids), chunk_size):
+                chunk = ids[i:i + chunk_size]
+                placeholders = ','.join('?' * len(chunk))
+                cur.execute(
+                    f"""
+                    SELECT s.id, {source_expr}, {session_source_expr}, {title_expr}
+                    FROM sessions s
+                    WHERE s.id IN ({placeholders})
+                    """,
+                    chunk,
+                )
+                for row in cur.fetchall():
+                    sid = str(row['id'])
+                    entry: dict[str, object] = {}
+                    state_title = str(row['title'] or '').strip()
+                    if state_title:
+                        entry['_state_db_title'] = state_title
+                    state_source = str(row['source'] or '').strip().lower()
+                    if state_source:
+                        entry['_state_db_source'] = state_source
+                        source_meta = normalize_agent_session_source(state_source)
+                        entry['_state_db_source_tag'] = state_source
+                        entry['_state_db_raw_source'] = source_meta.get('raw_source')
+                        entry['_state_db_session_source'] = source_meta.get('session_source')
+                        entry['_state_db_source_label'] = source_meta.get('source_label')
+                    if entry:
+                        overrides[sid] = entry
+            return overrides
+    except Exception:
+        return {}
+
+
+def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
+    """Apply state.db source/title overrides without full lineage enrichment."""
+    try:
+        metadata = _read_state_db_sidebar_overrides(
             _active_state_db_path(),
             {str(s.get('session_id')) for s in sessions if s.get('session_id')},
         )
     except Exception:
         return
+    _apply_sidebar_state_db_override_metadata(sessions, metadata)
+
+
+def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: dict[str, dict]) -> None:
+    for session in sessions:
+        sid = session.get('session_id')
+        if sid not in metadata:
+            continue
+        entry = dict(metadata[sid])
+        state_db_title = entry.pop('_state_db_title', None)
+        state_db_source = entry.pop('_state_db_source', None)
+        state_db_source_tag = entry.pop('_state_db_source_tag', None)
+        state_db_raw_source = entry.pop('_state_db_raw_source', None)
+        state_db_session_source = entry.pop('_state_db_session_source', None)
+        state_db_source_label = entry.pop('_state_db_source_label', None)
+        if state_db_source == 'webui':
+            session['source_tag'] = state_db_source_tag
+            session['raw_source'] = state_db_raw_source
+            session['session_source'] = state_db_session_source
+            session['source_label'] = state_db_source_label
+            session['is_cli_session'] = False
+        title = session.get('title')
+        if (
+            state_db_title
+            and state_db_title != title
+            and _sidebar_title_is_generic_webui(title)
+        ):
+            session['_state_db_title'] = state_db_title
+            session['display_title'] = state_db_title
+
+
+def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
+    """Attach state.db compression lineage metadata used by sidebar collapse.
+
+    Cap the DB lookup to the top-N most recent sessions to bound wall-clock
+    on power users with thousands of sessions. The sidebar paints chronologically
+    newest first; older sessions almost never have visible lineage to collapse
+    (parents are themselves stale and rarely surface in the same render).
+    Lineage enrichment for those is loaded lazily when the user opens the
+    history panel. Issue #38914 / 2026-06-21 triage: /api/sessions was spending
+    4.9s on lineage_metadata across 2400+ rows.
+    """
+    # 2026-06-21: configurable via env to ease A/B and rollback without a redeploy.
+    import os as _os
+    try:
+        _cap = int(_os.environ.get("HERMES_WEBUI_LINEAGE_TOP_N", "300"))
+    except (TypeError, ValueError):
+        _cap = 300
+    if _cap > 0 and len(sessions) > _cap:
+        candidates = sessions[:_cap]
+    else:
+        candidates = sessions
+    try:
+        metadata = read_session_lineage_metadata(
+            _active_state_db_path(),
+            {str(s.get('session_id')) for s in candidates if s.get('session_id')},
+        )
+    except Exception:
+        return
+    _apply_sidebar_state_db_override_metadata(sessions, metadata)
     for session in sessions:
         sid = session.get('session_id')
         if sid in metadata:
             entry = dict(metadata[sid])
-            state_db_title = entry.pop('_state_db_title', None)
-            state_db_source = entry.pop('_state_db_source', None)
-            state_db_source_tag = entry.pop('_state_db_source_tag', None)
-            state_db_raw_source = entry.pop('_state_db_raw_source', None)
-            state_db_session_source = entry.pop('_state_db_session_source', None)
-            state_db_source_label = entry.pop('_state_db_source_label', None)
-            session.update(entry)
-            if state_db_source == 'webui':
-                session['source_tag'] = state_db_source_tag
-                session['raw_source'] = state_db_raw_source
-                session['session_source'] = state_db_session_source
-                session['source_label'] = state_db_source_label
-                session['is_cli_session'] = False
-            title = session.get('title')
-            if (
-                state_db_title
-                and state_db_title != title
-                and _sidebar_title_is_generic_webui(title)
+            for key in (
+                '_state_db_title',
+                '_state_db_source',
+                '_state_db_source_tag',
+                '_state_db_raw_source',
+                '_state_db_session_source',
+                '_state_db_source_label',
             ):
-                session['_state_db_title'] = state_db_title
-                session['display_title'] = state_db_title
+                entry.pop(key, None)
+            session.update(entry)
 
 
 def _diag_stage(diag, name: str) -> None:
@@ -3171,7 +3360,7 @@ def _diag_stage(diag, name: str) -> None:
             pass
 
 
-def all_sessions(diag=None):
+def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
@@ -3265,8 +3454,13 @@ def all_sessions(diag=None):
                 and not s.get('has_pending_user_message')
                 and not s.get('worktree_path')
             )]
-            _diag_stage(diag, "all_sessions.lineage_metadata")
-            _enrich_sidebar_lineage_metadata(result)
+            if include_lineage_metadata:
+                _diag_stage(diag, "all_sessions.lineage_metadata")
+                _enrich_sidebar_lineage_metadata(result)
+            else:
+                _diag_stage(diag, "all_sessions.state_db_overrides")
+                _apply_sidebar_state_db_overrides(result)
+                _diag_stage(diag, "all_sessions.lineage_metadata_skipped")
             result = _prefer_fuller_snapshots_for_sidebar(result)
             sidebar_candidates = result
             visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
@@ -3306,8 +3500,13 @@ def all_sessions(diag=None):
         and not s.pending_user_message
         and not getattr(s, 'worktree_path', None)
     )]
-    _diag_stage(diag, "all_sessions.lineage_metadata")
-    _enrich_sidebar_lineage_metadata(result)
+    if include_lineage_metadata:
+        _diag_stage(diag, "all_sessions.lineage_metadata")
+        _enrich_sidebar_lineage_metadata(result)
+    else:
+        _diag_stage(diag, "all_sessions.state_db_overrides")
+        _apply_sidebar_state_db_overrides(result)
+        _diag_stage(diag, "all_sessions.lineage_metadata_skipped")
     result = _prefer_fuller_snapshots_for_sidebar(result)
     sidebar_candidates = result
     visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar(s)]
@@ -4484,6 +4683,38 @@ def _session_message_merge_key(msg: dict):
     )
 
 
+_SESSION_MESSAGE_DISPLAY_METADATA_KEYS = (
+    "_turnDuration",
+    "_turnTps",
+    "_turnUsage",
+    "_firstTokenMs",
+    "_gatewayRouting",
+    "_statusCard",
+    "_anchor_stream_id",
+    "_anchor_activity_scene",
+)
+
+
+def _message_display_metadata_value_present(value) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, (dict, list, tuple, set)) and not value:
+        return False
+    return True
+
+
+def _merge_session_display_metadata(target: dict | None, source: dict | None) -> None:
+    """Preserve display-only turn metadata when duplicate transcript rows merge."""
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    for key in _SESSION_MESSAGE_DISPLAY_METADATA_KEYS:
+        if _message_display_metadata_value_present(target.get(key)):
+            continue
+        value = source.get(key)
+        if _message_display_metadata_value_present(value):
+            target[key] = copy.deepcopy(value)
+
+
 def _session_message_dedup_key(msg: dict):
     """Like _session_message_merge_key but preserves full-precision timestamp.
 
@@ -4610,6 +4841,41 @@ def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool
     return _matching_visible_duplicate(visible_key, visible_keys) is not None
 
 
+def _sidecar_has_terminal_partial_error(sidecar_messages: list) -> bool:
+    """Return True when WebUI already owns an interrupted live partial turn.
+
+    After a cancelled/error terminal event, the WebUI sidecar contains the
+    user prompt, the streamed partial assistant prose/tool snapshot, and the
+    explicit terminal carrier. state.db may still contain the same run's raw
+    assistant/tool replay rows; appending those rows makes Compact Worklog show
+    duplicated process prose after cancel. In that shape, the sidecar is the
+    display owner.
+    """
+    messages = [msg for msg in (sidecar_messages or []) if isinstance(msg, dict)]
+    latest_error_idx = None
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        if str(msg.get("role") or "").lower() != "assistant":
+            continue
+        if msg.get("_error"):
+            latest_error_idx = idx
+    if latest_error_idx is None:
+        return False
+    for msg in messages[latest_error_idx + 1 :]:
+        if str(msg.get("role") or "").lower() in ("user", "assistant"):
+            return False
+    segment_start = 0
+    for idx in range(latest_error_idx - 1, -1, -1):
+        if str(messages[idx].get("role") or "").lower() == "user":
+            segment_start = idx + 1
+            break
+    for msg in messages[segment_start:latest_error_idx]:
+        if str(msg.get("role") or "").lower() == "assistant" and msg.get("_partial"):
+            return True
+    return False
+
+
 def state_db_delta_after_context(sidecar_context: list, state_messages: list) -> list:
     """Return only state.db rows that are newer than model-facing context.
 
@@ -4669,6 +4935,93 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     if sidecar_index == len(sidecar_keys):
         return state_messages[state_index:]
     return state_messages[best_len:]
+
+
+def _normalized_compression_anchor_text(value) -> str:
+    return " ".join(str(value or "").split()).strip()[:160]
+
+
+def _compression_anchor_timestamp_as_float(value) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.datetime.fromisoformat(str(value).strip().replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def _context_messages_include_compression_marker(messages: list) -> bool:
+    for message in messages or []:
+        if not is_context_compression_marker(message):
+            continue
+        text = _message_content_text(message).lower().lstrip()
+        # Only prompt compaction summaries require fail-closed state.db replay.
+        # Other compression-adjacent summaries, such as Session Arc Summary,
+        # keep the existing prefix-delta behavior so fresh follow-ups survive.
+        if text.startswith("[context compaction") or text.startswith("context compaction"):
+            return True
+    return False
+
+
+def _state_db_anchor_index(state_messages: list, anchor_key) -> int | None:
+    if not isinstance(anchor_key, dict):
+        return None
+
+    anchor_role = str(anchor_key.get("role") or "").strip().lower()
+    anchor_text = _normalized_compression_anchor_text(anchor_key.get("text"))
+    anchor_attachments = anchor_key.get("attachments")
+    anchor_ts = _compression_anchor_timestamp_as_float(anchor_key.get("ts"))
+
+    if not anchor_role:
+        return None
+
+    # Do not attempt text-only fallback when timestamp is unavailable. Text-based
+    # fallback can match stale legacy rows if the anchor timestamp was lost,
+    # which can re-introduce old state.db rows after compaction.
+    if anchor_ts is None:
+        return None
+
+    if anchor_attachments in (None, ""):
+        expected_attachments = 0
+    else:
+        try:
+            expected_attachments = int(anchor_attachments)
+        except (TypeError, ValueError):
+            expected_attachments = 0
+
+    exact_timestamp_matches = []
+    for idx, message in enumerate(state_messages or []):
+        if _message_role(message) != anchor_role:
+            continue
+
+        attachments = message.get("attachments") if isinstance(message, dict) else None
+        attach_count = len(attachments) if isinstance(attachments, list) else 0
+        if attach_count != expected_attachments:
+            continue
+
+        # Attachment-only or timestamp-only anchors have no stable text payload.
+        # In that shape the timestamp + role + attachment count is the boundary;
+        # apply text comparison only when the anchor actually captured text.
+        message_text = _normalized_compression_anchor_text(_message_content_text(message))
+        if anchor_text and message_text != anchor_text:
+            continue
+
+        message_ts = _compression_anchor_timestamp_as_float(
+            message.get("timestamp") if isinstance(message, dict) else None
+        )
+        if message_ts is None:
+            continue
+        if abs(message_ts - anchor_ts) <= 1e-6:
+            exact_timestamp_matches.append(idx)
+            continue
+
+    if exact_timestamp_matches:
+        return exact_timestamp_matches[-1]
+    return None
 
 
 def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
@@ -4759,38 +5112,85 @@ def merge_session_messages_append_only(
     state_messages: list,
     *,
     truncation_watermark=None,
+    truncation_boundary=None,
 ) -> list:
-    """Merge sidecar/context and state.db messages without deleting local rows."""
+    """Merge sidecar/context and state.db messages without deleting local rows.
+
+    ``truncation_boundary``: the original truncate cutoff — the
+    timestamp of the last message kept by the truncate operation.  When the
+    watermark is later advanced (new turn committed), this boundary is preserved
+    so the empty-sidecar recovery can distinguish a legitimate prefix from a
+    deleted suffix instead of guessing by dropping one turn pair.
+    """
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
     watermark_timestamp = _message_timestamp_as_float({"timestamp": truncation_watermark})
     if not state_messages:
         return sidecar_messages
     if not sidecar_messages:
-        if watermark_timestamp is not None:
-            filtered = [
-                msg for msg in state_messages
-                if (
-                    (timestamp := _message_timestamp_as_float(msg)) is not None
-                    and timestamp <= watermark_timestamp
-                )
-            ]
-        else:
+        if watermark_timestamp is None:
+            # No watermark — keep everything, just dedup.
             filtered = state_messages
+        elif watermark_timestamp == 0:
+            # Truncate-to-empty sentinel (#2914) — block all replay.
+            return []
+        else:
+            # Positive watermark after edit/retry/undo (#4767).  Without a
+            # sidecar there's no seen_content_keys to check against, so we
+            # reconstruct the correct transcript from state.db alone.
+            #
+            # `at_or_after` (ts >= watermark) is legitimate POST-EDIT content
+            # ONLY when the watermark was ADVANCED strictly past the original
+            # truncate cutoff — i.e. a new turn was committed after the edit, so
+            # truncation_boundary (the original cutoff) is strictly below the
+            # advanced watermark.  In that state we keep the legitimate prefix
+            # (ts <= boundary) plus the post-edit tail (ts >= watermark) and drop
+            # the deleted (boundary, watermark) suffix.
+            #
+            # In every OTHER state the content above the watermark is the deleted
+            # suffix, NOT post-edit content, so keeping it would resurrect deleted
+            # turns (the exact data-loss this fix exists to kill):
+            #   * boundary == watermark — just truncated, no new turn committed
+            #     yet (e.g. crash/cold-load with metadata-vs-sidecar divergence);
+            #   * boundary is None — legacy session saved before this field
+            #     existed.  In the pre-#4767 model committing a turn CLEARED the
+            #     watermark to None, so a persisted positive watermark always
+            #     meant "frozen at cutoff, not advanced".
+            # For all of those, fall back to the conservative pre-#4767 filter
+            # `ts <= watermark`, which never resurrects a deleted suffix.
+            boundary_ts = _message_timestamp_as_float({"timestamp": truncation_boundary})
+            if boundary_ts is not None and boundary_ts < watermark_timestamp:
+                pre_legitimate = [
+                    m for m in state_messages
+                    if (ts := _message_timestamp_as_float(m)) is not None
+                    and ts <= boundary_ts
+                ]
+                at_or_after = [
+                    m for m in state_messages
+                    if (ts := _message_timestamp_as_float(m)) is not None
+                    and ts >= watermark_timestamp
+                ]
+                filtered = pre_legitimate + at_or_after
+            else:
+                filtered = [
+                    m for m in state_messages
+                    if (ts := _message_timestamp_as_float(m)) is not None
+                    and ts <= watermark_timestamp
+                ]
+
         # Deduplicate true duplicates (same role, content, exact timestamp)
         # without collapsing legitimately-repeated identical turns (#3346).
-        # Note: rows whose timestamps were mutated by compaction/recovery to
-        # microsecond-different values will not be folded — only byte-identical
-        # timestamps are treated as the same message.  This is intentional;
-        # collapsing same-second distinct turns would be worse than retaining
-        # a compaction-restamped duplicate.
         seen = set()
+        seen_messages = {}
         deduped = []
         for msg in filtered:
             key = _session_message_dedup_key(msg)
             if key not in seen:
                 seen.add(key)
+                seen_messages[key] = msg
                 deduped.append(msg)
+            else:
+                _merge_session_display_metadata(seen_messages.get(key), msg)
         return deduped
 
     merged_messages = []
@@ -4799,9 +5199,21 @@ def merge_session_messages_append_only(
     seen_content_keys = set()
     seen_visible_keys = set()
     sidecar_visible_sequence = []
+    sidecar_visible_messages = []
     sidecar_visible_keys = set()
     sidecar_visible_counts = {}
+    merged_by_message_key = {}
+    merged_by_dedup_key = {}
+    merged_by_visible_key = {}
     max_sidecar_timestamp = None
+
+    def _remember_merged_message(message):
+        if not isinstance(message, dict):
+            return
+        merged_by_message_key.setdefault(_session_message_merge_key(message), message)
+        merged_by_dedup_key.setdefault(_session_message_dedup_key(message), message)
+        merged_by_visible_key.setdefault(_session_message_visible_key(message), message)
+
     for msg in sidecar_messages:
         timestamp = _message_timestamp_as_float(msg)
         if timestamp is not None:
@@ -4815,23 +5227,42 @@ def merge_session_messages_append_only(
         sidecar_visible_keys.add(visible_key)
         sidecar_visible_counts[visible_key] = sidecar_visible_counts.get(visible_key, 0) + 1
         sidecar_visible_sequence.append(visible_key)
+        sidecar_visible_messages.append(msg)
         merged_messages.append(msg)
+        _remember_merged_message(msg)
+    if _sidecar_has_terminal_partial_error(sidecar_messages):
+        return merged_messages
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
     state_replay_idx = 0
     skipped_state_visible_counts = {}
+    # Loop-invariant: a session whose original truncate cutoff (truncation_boundary)
+    # is strictly below the watermark is genuinely ADVANCED (a new turn was
+    # committed after the edit). In that state post-watermark state.db rows are
+    # legitimate post-edit content, even when the sidecar's newest row only
+    # EQUALS the watermark (the post-edit user is checkpointed but its assistant
+    # reply exists only in state.db). Conservative for boundary None / == watermark.
+    boundary_ts = _message_timestamp_as_float({"timestamp": truncation_boundary})
+    watermark_advanced_by_boundary = (
+        watermark_timestamp is not None
+        and boundary_ts is not None
+        and boundary_ts < watermark_timestamp
+    )
     for msg in state_messages:
         timestamp = _message_timestamp_as_float(msg)
         key = _session_message_merge_key(msg)
         visible_key = _session_message_visible_key(msg)
         replays_sidecar_prefix = False
+        replay_target = None
         if state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
             if visible_key == expected_visible_key or _has_visible_duplicate(
                 visible_key, {expected_visible_key}
             ):
                 replays_sidecar_prefix = True
+                replay_target = sidecar_visible_messages[state_replay_idx]
                 state_replay_idx += 1
         if replays_sidecar_prefix:
+            _merge_session_display_metadata(replay_target, msg)
             matched_visible_key = _matching_visible_duplicate(
                 visible_key,
                 sidecar_visible_keys,
@@ -4852,10 +5283,33 @@ def merge_session_messages_append_only(
         # rows once the session moves forward past the edit boundary. Once the
         # sidecar's own max timestamp is beyond the watermark (the session has
         # advanced), allow state rows newer than the sidecar tail to merge.
+        #
+        # The sidecar's max timestamp can also EQUAL the watermark when the new
+        # post-edit USER turn has been checkpointed into the sidecar (its
+        # timestamp == the advanced watermark) but its ASSISTANT reply exists
+        # only in state.db (recovery before the sidecar tail advances). In that
+        # state truncation_boundary < watermark proves the session is genuinely
+        # advanced, so the post-watermark state-only reply is legitimate
+        # post-edit content and must merge through (not be dropped as a replaced
+        # tail). The conservative skip still applies for boundary is None and
+        # boundary == watermark (not-advanced / legacy).
+        #
+        # CRITICAL: the boundary-advanced signal may only bypass the skip AFTER
+        # state replay has consumed the sidecar's visible checkpoint
+        # (state_replay_idx >= len(sidecar_visible_sequence)). A deleted suffix
+        # row with ts > watermark that appears in state.db BEFORE the edited
+        # checkpoint must still be skipped — otherwise the advanced signal would
+        # resurrect it. The sidecar-max-timestamp signal needs no such gate (a
+        # sidecar tail beyond the watermark is itself proof the checkpoint has
+        # advanced).
+        checkpoint_consumed = state_replay_idx >= len(sidecar_visible_sequence)
         sidecar_advanced_past_watermark = (
             watermark_timestamp is not None
-            and max_sidecar_timestamp is not None
-            and max_sidecar_timestamp > watermark_timestamp
+            and (
+                (max_sidecar_timestamp is not None
+                 and max_sidecar_timestamp > watermark_timestamp)
+                or (watermark_advanced_by_boundary and checkpoint_consumed)
+            )
         )
         if (
             watermark_timestamp is not None
@@ -4882,6 +5336,25 @@ def merge_session_messages_append_only(
             and _session_message_content_key(msg) not in seen_content_keys
         ):
             continue
+        # Same-second edit: if timestamp equals the watermark and the message
+        # content is not in the sidecar, it's a replaced message edited at the
+        # same second — skip it.  The edited version (same timestamp, different
+        # content) is in the sidecar and survives this check.
+        #
+        # Only apply the same-second guard to user messages.  An assistant reply
+        # (or tool message) at the same second as the watermark is a legitimate
+        # post-edit recovery row — the sidecar holds only the edited user
+        # checkpoint, so the assistant reply's content won't be in it and would
+        # be silently dropped without this role guard.
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp == watermark_timestamp
+            and key not in seen_message_keys
+            and _session_message_content_key(msg) not in seen_content_keys
+            and str(msg.get("role", "")).lower() == "user"
+        ):
+            continue
         # Check for true duplicates using full-precision timestamp (#3346).
         # Must run before the merge-key guards so that legitimately distinct
         # sub-second messages with the same second-level merge key are not
@@ -4889,6 +5362,7 @@ def merge_session_messages_append_only(
         # not.
         dedup_key = _session_message_dedup_key(msg)
         if dedup_key in seen_dedup_keys:
+            _merge_session_display_metadata(merged_by_dedup_key.get(dedup_key), msg)
             continue
         if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
             # For message_id keys the merge key is authoritative — skip if
@@ -4896,6 +5370,7 @@ def merge_session_messages_append_only(
             # handled true duplicates; same-second distinct messages must
             # fall through.
             if key in seen_message_keys and key[0] == "message_id":
+                _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                 continue
             if not (isinstance(key, tuple) and key[:1] == ("message_id",)):
                 # Legacy key within sidecar timestamp range — only skip if
@@ -4904,8 +5379,10 @@ def merge_session_messages_append_only(
                 # identical content/timestamp, so an unchecked continue here
                 # would drop legitimately distinct turns.  (#3346 / PR #3665)
                 if key in seen_message_keys:
+                    _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                     continue
         if key in seen_message_keys and key[0] == "message_id":
+            _merge_session_display_metadata(merged_by_message_key.get(key), msg)
             continue
         matched_visible_key = _matching_visible_duplicate(
             visible_key,
@@ -4917,6 +5394,7 @@ def merge_session_messages_append_only(
             sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)
             if skipped_count < sidecar_count:
                 skipped_state_visible_counts[matched_visible_key] = skipped_count + 1
+                _merge_session_display_metadata(merged_by_visible_key.get(matched_visible_key), msg)
                 continue
         # State rows at or before the newest sidecar timestamp are normally
         # assumed to have already been observed by the sidecar. The <= gate
@@ -4934,32 +5412,56 @@ def merge_session_messages_append_only(
             and timestamp is not None
             and timestamp <= max_sidecar_timestamp
         ):
-            # Legacy key within sidecar timestamp range.  Normally skip — the
-            # sidecar already has this message.  Exception: if the state.db
-            # message has tool_calls that DIFFER from the sidecar version
-            # (same content_key but different dedup_key because tool_calls
-            # differ), preserve it — distinct tool_calls must not be collapsed.
-            _tc = msg.get("tool_calls")
-            if _tc:
-                _ck = _session_message_content_key(msg)
-                if _ck in seen_content_keys and dedup_key not in seen_dedup_keys:
-                    pass  # different tool_calls from sidecar — preserve
-                else:
-                    continue
+            # When a truncation watermark is active and the sidecar holds only
+            # the edited user checkpoint, state.db may contain an assistant/tool
+            # reply at the same timestamp that is NOT in the sidecar.  This
+            # block would normally skip it ("sidecar already has this message"),
+            # but the sidecar doesn't — it's a genuine state-only recovery row.
+            # Let it through (CORE-B, #4767).
+            #
+            # Only AFTER the sidecar's visible checkpoint has been consumed
+            # (checkpoint_consumed) — a same-second row appearing in state.db
+            # BEFORE the edited user replay is a deleted/replaced row, not the
+            # post-edit reply, and must stay skipped.
+            if (
+                watermark_timestamp is not None
+                and timestamp == watermark_timestamp
+                and checkpoint_consumed
+                and str(msg.get("role", "")).lower() != "user"
+                and _session_message_content_key(msg) not in seen_content_keys
+            ):
+                pass  # fall through to append below
             else:
-                if msg.get("role") == "user" and _session_message_content_key(msg) not in seen_content_keys:
-                    if _insert_state_message_chronologically(merged_messages, msg):
-                        seen_message_keys.add(key)
-                        seen_dedup_keys.add(dedup_key)
-                        seen_content_keys.add(_session_message_content_key(msg))
-                        seen_visible_keys.add(visible_key)
+                # Legacy key within sidecar timestamp range.  Normally skip — the
+                # sidecar already has this message.  Exception: if the state.db
+                # message has tool_calls that DIFFER from the sidecar version
+                # (same content_key but different dedup_key because tool_calls
+                # differ), preserve it — distinct tool_calls must not be collapsed.
+                _tc = msg.get("tool_calls")
+                if _tc:
+                    _ck = _session_message_content_key(msg)
+                    if _ck in seen_content_keys and dedup_key not in seen_dedup_keys:
+                        pass  # different tool_calls from sidecar — preserve
+                    else:
+                        _merge_session_display_metadata(merged_by_message_key.get(key), msg)
+                        continue
+                else:
+                    if msg.get("role") == "user" and _session_message_content_key(msg) not in seen_content_keys:
+                        if _insert_state_message_chronologically(merged_messages, msg):
+                            seen_message_keys.add(key)
+                            seen_dedup_keys.add(dedup_key)
+                            seen_content_keys.add(_session_message_content_key(msg))
+                            seen_visible_keys.add(visible_key)
+                            _remember_merged_message(msg)
+                        continue
+                    _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                     continue
-                continue
         seen_message_keys.add(key)
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(_session_message_content_key(msg))
         seen_visible_keys.add(visible_key)
         merged_messages.append(msg)
+        _remember_merged_message(msg)
     return merged_messages
 
 
@@ -4970,20 +5472,41 @@ def reconciled_state_db_messages_for_session(
     if session is None:
         return []
     local_messages = []
+    using_context_messages = False
     if prefer_context:
         context_messages = getattr(session, 'context_messages', None)
         if isinstance(context_messages, list) and context_messages:
             local_messages = context_messages
+            using_context_messages = True
     if not local_messages:
         local_messages = getattr(session, 'messages', None) or []
     if state_messages is None:
         state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
     if prefer_context and local_messages:
+        if using_context_messages:
+            compressed_context = _context_messages_include_compression_marker(local_messages)
+            anchor_key = getattr(session, "compression_anchor_message_key", None)
+            if compressed_context:
+                if not anchor_key:
+                    logger.debug(
+                        "Compressed context for session %s has no compression anchor; using context_messages only",
+                        getattr(session, "session_id", None),
+                    )
+                    return list(local_messages)
+                anchor_index = _state_db_anchor_index(state_messages, anchor_key)
+                if anchor_index is None:
+                    logger.debug(
+                        "Compressed context for session %s has an unverifiable compression anchor; using context_messages only",
+                        getattr(session, "session_id", None),
+                    )
+                    return list(local_messages)
+                state_messages = list(state_messages or [])[anchor_index + 1 :]
         state_messages = state_db_delta_after_context(local_messages, state_messages)
     return merge_session_messages_append_only(
         local_messages,
         state_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
+        truncation_boundary=getattr(session, "truncation_boundary", None),
     )
 
 

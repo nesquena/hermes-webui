@@ -22,8 +22,14 @@ def test_stream_completion_syncs_rotated_session_id_to_tab_state():
     assert completion_pos != -1
     assert settled_pos != -1
 
-    completion_block = MESSAGES_JS[completion_pos : completion_pos + 800]
-    settled_block = MESSAGES_JS[settled_pos : settled_pos + 800]
+    # Proximity window scoping "the completion/settled handler block near the
+    # session assignment". #4720 added a documented `_oldestIdx` reset statement
+    # into the completion block (between the marker and the localStorage sync),
+    # growing it past the original 800; widen to 1000 — still well within the
+    # single done/settled handler, so the guard's intent (the rotated session id
+    # is synced to tab state right after the session assignment) is preserved.
+    completion_block = MESSAGES_JS[completion_pos : completion_pos + 1000]
+    settled_block = MESSAGES_JS[settled_pos : settled_pos + 1000]
 
     for block in (completion_block, settled_block):
         assert "localStorage.setItem('hermes-webui-session',S.session.session_id);" in block

@@ -6,12 +6,12 @@ PANELS_JS  = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 I18N_JS    = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 STYLE_CSS  = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
-LOCALE_COUNT = 13  # en, it, ja, ru, es, de, zh, zh-TW, pt, ko, fr, tr, pl
+LOCALE_COUNT = 14  # en, it, ja, ru, es, de, zh, zh-TW, pt, ko, fr, tr, pl
 
 
 def test_help_nav_button_present():
     assert 'data-settings-section="help"' in INDEX_HTML
-    assert "switchSettingsSection('help')" in INDEX_HTML
+    assert "switchSettingsSection('help',{fromSidebarItem:true})" in INDEX_HTML
     assert 'data-i18n="settings_tab_help"' in INDEX_HTML
 
 

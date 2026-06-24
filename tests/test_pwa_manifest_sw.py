@@ -344,13 +344,24 @@ class TestIndexHtmlIntegration:
 
     def test_index_route_url_encodes_asset_version(self):
         src = ROUTES.read_text(encoding="utf-8")
-        idx = src.find('parsed.path in ("/", "/index.html")')
-        if idx == -1:
-            idx = src.find('parsed.path.startswith("/session/")')
-        assert idx != -1, "routes.py must handle /, /index.html, and /session/<id>"
-        block = src[idx:idx + 800]
+        # #4774 moved the app-shell render (incl. the version-token substitution)
+        # out of the route handler and into the cached `_render_index_shell_base()`
+        # helper. The security property — the cache-busting version token is
+        # URL-encoded before it's injected into script src / SW registration — must
+        # still hold, so assert it in whichever location renders the shell. Check the
+        # shell-render helper first (its current home), then fall back to the route
+        # handler block for older layouts.
+        helper_idx = src.find("def _render_index_shell_base")
+        if helper_idx != -1:
+            block = src[helper_idx:helper_idx + 1200]
+        else:
+            idx = src.find('parsed.path in ("/", "/index.html")')
+            if idx == -1:
+                idx = src.find('parsed.path.startswith("/session/")')
+            assert idx != -1, "routes.py must handle /, /index.html, and /session/<id>"
+            block = src[idx:idx + 800]
         assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
-            "index route must URL-encode the cache-busting version token before "
+            "the app-shell render must URL-encode the cache-busting version token before "
             "injecting it into script src attributes and service worker registration"
         )
 

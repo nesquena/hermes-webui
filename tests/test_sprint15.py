@@ -1,7 +1,7 @@
 """
 Sprint 15 Tests: session projects (CRUD, move, backward compat).
 """
-import json, urllib.error, urllib.request
+import json, urllib.error, urllib.parse, urllib.request
 
 from tests._pytest_port import BASE
 
@@ -27,6 +27,16 @@ def make_session(created_list):
     sid = d["session"]["session_id"]
     created_list.append(sid)
     return sid, d["session"]
+
+
+def _make_session_visible(sid):
+    d, status = post("/api/chat/start", {
+        "session_id": sid,
+        "message": "visible row",
+        "model": "openai/gpt-5.4-mini",
+    })
+    assert status == 200, f"chat/start failed with {status}: {d}"
+    get(f"/api/chat/cancel?stream_id={urllib.parse.quote(d['stream_id'])}")
 
 
 def make_project(created_list, name="Test Project", color=None):
@@ -196,8 +206,9 @@ def test_session_project_in_list():
     try:
         pid, _ = make_project(pids, "Listed")
         sid, _ = make_session(sids)
-        # Give it a title so it shows in list (non-empty Untitled sessions are hidden)
+        # Give it one real message so the default sidebar route keeps it visible.
         post("/api/session/rename", {"session_id": sid, "title": "Project Test Session"})
+        _make_session_visible(sid)
         post("/api/session/move", {"session_id": sid, "project_id": pid})
         dl, _ = get("/api/sessions")
         match = [s for s in dl["sessions"] if s["session_id"] == sid]
@@ -216,7 +227,8 @@ def test_compact_includes_project_id():
     sids = []
     try:
         sid, sess = make_session(sids)
-        # Give it a title so it appears in the list
+        # Give it a real message so the default sidebar route keeps it visible.
+        _make_session_visible(sid)
         post("/api/session/rename", {"session_id": sid, "title": "Compat Test"})
         dl, _ = get("/api/sessions")
         match = [s for s in dl["sessions"] if s["session_id"] == sid]

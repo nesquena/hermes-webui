@@ -73,6 +73,16 @@ def test_duplicate_copies_truncation_watermark():
         "Duplicate must copy truncation_watermark"
 
 
+def test_duplicate_copies_truncation_boundary():
+    """truncation_boundary must be copied alongside truncation_watermark so
+    empty-sidecar recovery in the duplicate can distinguish legitimate prefix
+    from deleted suffix."""
+    block, _ = _extract_duplicate_block()
+    ctor = _find_session_ctor(block)
+    assert _has_field(ctor, 'truncation_boundary'), \
+        "Duplicate must copy truncation_boundary"
+
+
 def test_duplicate_copies_context_messages():
     """context_messages is the authoritative model-facing prefix. Without it,
     the duplicate's agent context diverges from what the user sees."""
@@ -417,6 +427,16 @@ def test_branch_does_not_copy_truncation_watermark():
     ctor = _find_session_ctor(block, 'branch')
     assert not _has_field(ctor, 'truncation_watermark'), \
         "truncation_watermark should NOT be copied in branch"
+
+
+def test_branch_does_not_copy_truncation_boundary():
+    """truncation_boundary must NOT be copied in branch — same reasoning as
+    truncation_watermark: the branch is a fresh message slice with no truncate
+    history of its own."""
+    block, _ = _extract_branch_block()
+    ctor = _find_session_ctor(block, 'branch')
+    assert not _has_field(ctor, 'truncation_boundary'), \
+        "truncation_boundary should NOT be copied in branch"
 
 
 def test_branch_does_not_copy_usage_counters():

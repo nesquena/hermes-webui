@@ -52,9 +52,13 @@ def test_delete_action_repaints_sidebar_before_loading_remaining_sessions():
 
     api_call = "const deleteRequest=api('/api/session/delete'"
     optimistic = "_optimisticallyRemoveSessionFromList(sid);"
-    remaining_fetch = "const remaining=await api('/api/sessions');"
+    remaining_fetch = "const remaining=await api('/api/sessions'+_sessionListQueryString());"
     full_refresh = "await renderSessionList();"
 
     assert optimistic in body
     assert body.index(api_call) < body.index(optimistic) < body.index(full_refresh)
     assert body.index(optimistic) < body.index(remaining_fetch)
+
+def test_batch_delete_remaining_session_fetch_uses_sidebar_query_string():
+    """Batch delete must reload the default sidebar through the same query builder."""
+    assert SESSIONS_JS.count("const remaining=await api('/api/sessions'+_sessionListQueryString());") >= 2

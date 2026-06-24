@@ -47,4 +47,5 @@ def test_user_render_uses_stripped_display_content_without_preempting_context_ca
     # already-stripped displayContent, so the invariant holds either way.
     assert ("_renderUserFencedBlocks(displayContent)" in render_prefix or
             "_getCachedRender(displayContent, isUser)" in render_prefix)
-    assert "row.dataset.rawText=String(displayContent).trim();" in render_prefix
+    assert "const newRawText=String(displayContent).trim();" in render_prefix
+    assert "row.dataset.rawText=newRawText;" in render_prefix

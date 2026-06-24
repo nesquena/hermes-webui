@@ -10,6 +10,18 @@ PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 CHANGELOG = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
+DESKTOP_BACKGROUND_NOTIFICATION_NAMES = (
+    "_desktopBackgroundedForNotifications",
+    "__hermesSetBackgrounded",
+    "_isBackgroundedForBrowserNotification",
+)
+
+
+def _source_between(start_marker: str, end_marker: str) -> str:
+    start = MESSAGES_JS.index(start_marker)
+    end = MESSAGES_JS.index(end_marker, start)
+    return MESSAGES_JS[start:end]
+
 
 def test_browser_notifications_use_service_worker_when_available():
     assert "function _showPwaNotification" in MESSAGES_JS
@@ -25,7 +37,7 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "_sessionUrlForSid(sid)" in MESSAGES_JS
     assert "data:{url}" in MESSAGES_JS
     assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
-    assert "sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverHidden,sid:activeSid})" in MESSAGES_JS
+    assert "sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid})" in MESSAGES_JS
     assert "sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid})" in MESSAGES_JS
     assert "sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid})" in MESSAGES_JS
 
@@ -42,16 +54,38 @@ def test_completion_notification_fires_when_tab_was_hidden_during_stream():
     assert "function _bindStreamHiddenTracker" in MESSAGES_JS
     # Entries are stream-owned ({streamId, wasHidden}) so a stale entry from a
     # non-`done` terminal path can't be mis-attributed to a later same-sid stream.
-    assert "const _wasEverHidden=!!(_hiddenEntry&&_hiddenEntry.wasHidden);" in MESSAGES_JS
+    assert "function _shouldForceCompletionNotification(sid, streamId){" in MESSAGES_JS
+    assert "return wasHidden||wasBackgrounded;" in MESSAGES_JS
     assert "function _clearStreamHidden" in MESSAGES_JS
-    # Cleared on the non-done terminal paths too (belt-and-suspenders alongside
-    # the streamId-ownership guard).
-    assert MESSAGES_JS.count("_clearStreamHidden(activeSid, streamId)") >= 4
+    assert "function _clearStreamNotificationBackground" in MESSAGES_JS
+    # Done-path cleanup lives inside _shouldForceCompletionNotification(); the
+    # activeSid call sites are the non-done terminal paths.
+    assert "_clearStreamHidden(sid, streamId);" in MESSAGES_JS
+    assert "_clearStreamNotificationBackground(sid, streamId);" in MESSAGES_JS
+    assert MESSAGES_JS.count("_clearStreamHidden(activeSid, streamId)") >= 3
+    assert MESSAGES_JS.count("_clearStreamNotificationBackground(activeSid, streamId)") >= 3
     # sendBrowserNotification honors forceHidden but still respects the
     # notifications-enabled setting (forceHidden is NOT the test-button force).
     assert "const forceHidden=!!(options&&options.forceHidden);" in MESSAGES_JS
     assert "if(!force&&!window._notificationsEnabled) return;" in MESSAGES_JS
-    assert "if(!force&&!forceHidden&&!document.hidden) return;" in MESSAGES_JS
+    assert "function _isBackgroundedForBrowserNotification(){" in MESSAGES_JS
+    assert "window.__hermesSetBackgrounded=(value)=>{" in MESSAGES_JS
+    assert "if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return;" in MESSAGES_JS
+
+
+def test_desktop_background_notification_signal_stays_out_of_stream_visibility():
+    stream_tracker = _source_between(
+        "const LIVE_STREAMS={};",
+        "function closeLiveStream(sessionId, streamId, source){",
+    )
+    deferred_recovery = _source_between(
+        "function _reattachOrRestoreAfterDeferredStreamError(source){",
+        "  // Bug A fix (#631):",
+    )
+
+    for name in DESKTOP_BACKGROUND_NOTIFICATION_NAMES:
+        assert name not in stream_tracker
+        assert name not in deferred_recovery
 
 
 def test_service_worker_handles_notification_clicks_without_hijacking_other_sessions():

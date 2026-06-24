@@ -1,9 +1,16 @@
 """
 Tests for issue #2698: HERMES_HOME isolated profile mode.
 
-When HERMES_HOME points at a specific profile directory like ~/.hermes/profiles/user1,
-the WebUI should pin to that single profile: list only it, reject create/switch/delete
-of other profiles, and hide multi-profile UI affordances.
+When HERMES_HOME points at a specific profile directory like ~/.hermes/profiles/user1
+AND isolated mode is explicitly opted into via HERMES_WEBUI_ISOLATED_PROFILE=1, the WebUI
+should pin to that single profile: list only it, reject create/switch/delete of other
+profiles, and hide multi-profile UI affordances.
+
+Note (#4586): isolated mode now requires the explicit HERMES_WEBUI_ISOLATED_PROFILE opt-in
+in addition to the profile-shaped HERMES_HOME — the shape alone is NOT sufficient, because a
+normal single-user named profile produces the same shape. The autouse fixture below enables
+the flag for this whole module (it tests the isolated-mode deployment posture); the
+shape-without-flag regression is covered separately in test_issue4586_*.
 """
 
 import os
@@ -32,8 +39,16 @@ from api.profiles import (
 
 
 @pytest.fixture(autouse=True)
-def _clear_profile_cache():
-    """Clear the profile list cache before and after each test to prevent cross-test leakage."""
+def _clear_profile_cache(monkeypatch):
+    """Clear the profile list cache + enable the isolated-mode opt-in for every test.
+
+    #4586: isolated mode is gated on the explicit HERMES_WEBUI_ISOLATED_PROFILE flag, so
+    this whole module — which exercises isolated-mode behavior — enables it. Normal-mode
+    assertions in this file still hold because they point HERMES_HOME at the base home, which
+    fails the secondary shape requirement regardless of the flag.
+    """
+    monkeypatch.setenv("HERMES_WEBUI_ISOLATED_PROFILE", "1")
+    monkeypatch.setattr(_profiles_mod, "_INITIAL_ISOLATED_PROFILE_OPT_IN", "1")
     _profiles_mod._LIST_PROFILES_CACHE = None
     yield
     _profiles_mod._LIST_PROFILES_CACHE = None

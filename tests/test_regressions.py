@@ -42,6 +42,24 @@ def make_session(created_list):
     return sid
 
 
+def _make_session_visible(sid):
+    from api.models import Session
+    from tests.conftest import TEST_WORKSPACE
+
+    session = Session(
+        session_id=sid,
+        title="regression-test-delete-R8",
+        workspace=str(TEST_WORKSPACE),
+        model="test",
+        created_at=time.time(),
+        updated_at=time.time(),
+        profile="default",
+        messages=[{"role": "user", "content": "visible row", "timestamp": time.time()}],
+        tool_calls=[],
+    )
+    session.save(touch_updated_at=False)
+
+
 def _make_auth_json_with_credential_pool(
     provider_id: str, pool_entries: list[dict], tmp_dir: pathlib.Path
 ) -> pathlib.Path:
@@ -295,6 +313,8 @@ def test_deleted_session_does_not_appear_in_list(cleanup_test_sessions):
     # Create a session with a title so it shows in the list
     d, _ = post("/api/session/new", {})
     sid = d["session"]["session_id"]
+    post("/api/session/rename", {"session_id": sid, "title": "regression-test-delete-R8"})
+    _make_session_visible(sid)
     post("/api/session/rename", {"session_id": sid, "title": "regression-test-delete-R8"})
 
     # Verify it appears

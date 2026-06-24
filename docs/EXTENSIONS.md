@@ -23,13 +23,17 @@ Extensions can:
 - serve files from one configured local directory at `/extensions/...`
 - inject configured same-origin stylesheets into `<head>`
 - inject configured same-origin scripts before `</body>`
+- read a local JSON manifest that lists bundled scripts/styles to inject
 - call the normal WebUI APIs available to the browser session
+- call trusted local loopback sidecars directly from extension JavaScript when
+  the browser Content Security Policy allows that origin
 
 Extensions cannot, by themselves:
 
 - bypass WebUI authentication
 - serve files outside the configured extension directory
 - load third-party scripts/styles through the built-in injection config
+- register new WebUI backend routes or proxy arbitrary sidecar/backend traffic
 - change Hermes Agent permissions, models, memory, or tools unless they call
   existing authenticated APIs that already allow those changes
 
@@ -53,14 +57,77 @@ export HERMES_WEBUI_EXTENSION_SCRIPT_URLS=/extensions/runtime.js,/extensions/app
 export HERMES_WEBUI_EXTENSION_STYLESHEET_URLS=/extensions/base.css,/extensions/theme.css
 ```
 
+For bundled or multi-extension installs, you may list assets in a manifest file
+inside `HERMES_WEBUI_EXTENSION_DIR` instead of maintaining long comma-separated
+environment variables:
+
+```bash
+cat > ~/.hermes/webui-extension-bundle/extensions.json <<'JSON'
+{
+  "extensions": [
+    {
+      "id": "templates",
+      "scripts": ["templates/templates.js"],
+      "stylesheets": ["templates/templates.css"]
+    },
+    {
+      "id": "sidebar-tools",
+      "scripts": ["sidebar-tools/sidebar-tools.js"],
+      "stylesheets": ["sidebar-tools/sidebar-tools.css"]
+    }
+  ]
+}
+JSON
+
+HERMES_WEBUI_EXTENSION_DIR=~/.hermes/webui-extension-bundle \
+HERMES_WEBUI_EXTENSION_MANIFEST=extensions.json \
+./start.sh
+```
+
+Manifest entries use the same URL safety rules as the environment variables.
+Bare relative entries such as `templates/templates.js` resolve to
+`/extensions/templates/templates.js`; absolute same-origin entries such as
+`/extensions/shared.js` or `/static/theme.css` are also accepted. A manifest may
+be an object with top-level `scripts` / `stylesheets`, an object with an
+`extensions` array, or a top-level array of extension objects. Disabled entries
+may be kept in the manifest with the JSON boolean `"enabled": false`. Explicit
+`HERMES_WEBUI_EXTENSION_SCRIPT_URLS` and
+`HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` still work and are appended after
+manifest assets, with duplicates ignored.
+
+Extension entries may also declare a read-only loopback sidecar for diagnostics:
+
+```json
+{
+  "extensions": [
+    {
+      "id": "desktop-companion",
+      "name": "Desktop Companion",
+      "scripts": ["companion-adapter.js"],
+      "stylesheets": ["companion-adapter.css"],
+      "sidecar": {
+        "type": "loopback",
+        "origin": "http://127.0.0.1:17787",
+        "health_path": "/health"
+      }
+    }
+  ]
+}
+```
+
+Loopback sidecars do **not** change asset injection behavior. They are only
+reported by diagnostics so an operator can see that a local companion service was
+declared and optionally check its health from the browser.
+
 ## URL rules
 
 Injected asset URLs are deliberately restricted:
 
 - must be same-origin paths
-- must start with `/extensions/` or `/static/`
+- must start with `/extensions/` or `/static/` after manifest normalization
 - must not include a URL scheme, host, fragment, quote, angle bracket, newline,
   NUL byte, or backslash
+- must not contain dot-segments or dotfiles after percent-decoding
 
 Allowed examples:
 
@@ -85,6 +152,59 @@ These restrictions keep the existing Content Security Policy intact and avoid
 turning the extension hook into a third-party script loader. Invalid configured
 URLs are ignored rather than injected.
 
+## Trusted local sidecars
+
+Manifest-bundled extensions may integrate with a trusted local sidecar process,
+such as a desktop companion listening on `http://127.0.0.1:17787`. The injected
+extension JavaScript talks to that sidecar directly from the browser; Hermes
+WebUI does not proxy those requests and does not create extension-owned backend
+routes.
+
+Loopback sidecar origins are already included in WebUI's enforced CSP
+`connect-src` directive:
+
+```text
+http://127.0.0.1:*
+http://localhost:*
+http://ipc.localhost
+ws://127.0.0.1:*
+ws://localhost:*
+```
+
+The wildcard ports above cover any loopback port, including
+`http://127.0.0.1:17787`. For a trusted non-loopback origin that you explicitly
+control, append the exact origin with `HERMES_WEBUI_CSP_CONNECT_EXTRA` before
+starting WebUI:
+
+```bash
+HERMES_WEBUI_CSP_CONNECT_EXTRA=https://companion.example.internal HERMES_WEBUI_EXTENSION_DIR=/path/to/my-extension/static HERMES_WEBUI_EXTENSION_MANIFEST=extensions.json ./start.sh
+```
+
+`HERMES_WEBUI_CSP_CONNECT_EXTRA` accepts space-separated `http(s)://` or
+`ws(s)://` origins only. It rejects paths, directive injection, and invalid port
+numbers. Avoid wildcard or remote origins unless you fully control the target;
+extension JavaScript runs with the logged-in WebUI session's authority.
+
+## Loopback sidecar declarations
+
+Sidecar declarations are sanitized before they appear in diagnostics:
+
+- only `"type": "loopback"` is supported
+- `origin` must be an `http` or `https` origin on `127.0.0.1`, `localhost`, or
+  `[::1]`
+- `origin` must not include a username, password, path, query string, or fragment
+- `health_path` is optional and defaults to `/health`
+- when present, `health_path` must start with `/` and must not contain a scheme,
+  host, query string, fragment, quotes, control characters, backslashes, empty
+  segments, whitespace, or path traversal
+
+Invalid sidecars are skipped with a stable warning code such as
+`sidecar_origin_rejected`, `sidecar_type_unsupported`,
+`sidecar_health_path_rejected`, or `sidecar_invalid`. Raw rejected origins and
+paths are never returned by the status endpoint. If `health_path` is omitted,
+diagnostics use `/health`; if `health_path` is present but invalid, the sidecar is
+skipped rather than probed.
+
 ## Static file serving
 
 When `HERMES_WEBUI_EXTENSION_DIR` points at an existing directory, files under
@@ -101,6 +221,8 @@ The static handler is sandboxed:
 - dotfiles and dot-directories are not served
 - symlinks that resolve outside the extension directory are rejected
 - missing or invalid extension directories behave as disabled
+- manifest paths must be relative files inside the configured extension directory
+- malformed, missing, or oversized manifests are ignored without enabling unsafe URLs
 - failures return a generic 404 without exposing local filesystem paths
 
 ## Security notes
@@ -210,3 +332,47 @@ HERMES_WEBUI_EXTENSION_SCRIPT_URLS=/extensions/app.js \
 ```
 
 Open the WebUI and confirm the badge appears.
+
+## Diagnostics
+
+Authenticated administrators can inspect sanitized extension configuration at:
+
+```text
+GET /api/extensions/status
+```
+
+The status endpoint is read-only and follows the normal WebUI authentication
+rules. The same sanitized diagnostics are also shown in **Settings → Extensions**
+for operators who prefer to inspect extension state from the browser. Installed
+manifest entries can be enabled or disabled from that panel through the
+authenticated `POST /api/extensions/toggle` endpoint. The toggle writes only a
+WebUI-managed override in the WebUI state directory; it does not edit extension
+manifests, fetch new extension assets, uninstall files, proxy sidecars, or add
+extension-owned backend routes. Manifest entries with `"enabled": false` remain
+manifest-disabled and cannot be re-enabled from WebUI.
+
+The diagnostics return the same public asset URLs that can already be injected
+into the HTML, plus coarse manifest status, per-extension effective state, asset
+counts, sanitized declared loopback sidecars, and warning codes for rejected or
+unavailable configuration. `manifest.script_count` and
+`manifest.stylesheet_count` count accepted assets from the effectively enabled
+manifest entries only; `manifest.sidecar_count` counts accepted enabled loopback
+sidecars from the manifest. `counts.script_urls` and `counts.stylesheet_urls`
+count the final post-env-merge URLs, while `counts.sidecars` counts the sanitized
+sidecar list returned in `sidecars`. `counts.manifest_extensions` counts
+sanitized manifest extension entries with valid IDs, and `counts.user_disabled`
+counts installed manifest entries currently suppressed by the WebUI-managed
+override. `manifest.entry_count` counts the loaded top-level manifest object and
+effectively enabled extension entries that were inspected for injection, not
+every extension object in the file. The endpoint and Settings panel do **not**
+return `HERMES_WEBUI_EXTENSION_DIR`, resolved manifest paths, raw environment
+values, rejected URL strings, rejected sidecar origins, rejected health paths, or
+the override state-file path.
+
+When sanitized loopback sidecars are present, **Settings → Extensions** renders a
+read-only sidecar monitor card. The browser checks each declared `health_url`
+directly with `fetch(..., { credentials: 'omit', cache: 'no-store' })` and a
+short timeout. WebUI does **not** proxy sidecar requests and does not send WebUI
+cookies to sidecars. A successful HTTP response is shown as healthy, a non-OK
+HTTP response as unhealthy, and CORS/network/timeouts as unreachable or blocked;
+health response bodies are never rendered.

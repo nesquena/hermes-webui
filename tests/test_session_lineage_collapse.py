@@ -730,7 +730,7 @@ console.log(JSON.stringify(rows));
     assert "_child_sessions" not in rows[0]
 
 
-def test_nested_fork_keeps_parent_timestamp_for_sorting():
+def test_nested_fork_bubbles_latest_child_timestamp_for_sorting():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
 const src = {js!r};
@@ -755,11 +755,313 @@ eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const parent = {{session_id:'parent', title:'Parent', updated_at:10, last_message_at:10}};
 const fork = {{session_id:'fork1', title:'Fork', session_source:'fork', parent_session_id:'parent', updated_at:20, last_message_at:20}};
 const rows = _attachChildSessionsToSidebarRows([parent, fork], [parent, fork]);
+console.log(JSON.stringify({{row: rows[0], timestampMs: _sessionTimestampMs(rows[0])}}));
+"""
+    result = json.loads(_run_node(source))
+    row = result["row"]
+    assert row["session_id"] == "parent"
+    # Keep the parent row's persisted timestamp intact, but use newest attached
+    # child/subagent activity for sidebar sorting/date grouping.
+    assert row["last_message_at"] == 10
+    assert row["_child_session_latest_at"] == 20
+    assert row["_sidebar_activity_at"] == 20
+    assert result["timestampMs"] == 20_000
+
+
+def test_hidden_archived_lineage_child_bubbles_running_state_and_activity_to_visible_parent():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isSessionEffectivelyStreaming(session) {{
+  return !!(session && (session.is_streaming || session.active_stream_id));
+}}
+function _hasUnreadForSession(session) {{
+  return !!(session && session.has_unread);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const visibleTip = {{
+  session_id:'visible-tip',
+  title:'Visible lineage row',
+  parent_session_id:'parent-root',
+  session_source:'webui',
+  _lineage_root_id:'parent-root',
+  updated_at:10,
+  last_message_at:10,
+}};
+const archivedTip = {{
+  session_id:'archived-tip',
+  title:'Archived running tip',
+  parent_session_id:'parent-root',
+  session_source:'webui',
+  archived:true,
+  _lineage_root_id:'parent-root',
+  is_streaming:true,
+  active_stream_id:'stream-1',
+  updated_at:30,
+  last_message_at:30,
+}};
+const rows = _attachChildSessionsToSidebarRows([visibleTip], [visibleTip], [visibleTip, archivedTip]);
+console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _sessionTimestampMs(rows[0])}}));
+"""
+    result = json.loads(_run_node(source))
+    row = result["row"]
+    assert result["count"] == 1
+    assert row["session_id"] == "visible-tip"
+    assert "_child_sessions" not in row
+    assert row["_child_session_streaming"] is True
+    assert row["_child_session_latest_at"] == 30
+    assert row["_sidebar_activity_at"] == 30
+    assert result["timestampMs"] == 30_000
+
+
+def test_archived_lineage_child_without_root_id_falls_back_to_parent_for_bubbling():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isSessionEffectivelyStreaming(session) {{
+  return !!(session && (session.is_streaming || session.active_stream_id));
+}}
+function _hasUnreadForSession(session) {{
+  return !!(session && session.has_unread);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const visibleTip = {{
+  session_id:'visible-tip',
+  title:'Visible lineage row',
+  parent_session_id:'parent-root',
+  session_source:'webui',
+  _lineage_root_id:'parent-root',
+  updated_at:10,
+  last_message_at:10,
+}};
+const archivedTip = {{
+  session_id:'archived-tip',
+  title:'Archived running tip',
+  parent_session_id:'parent-root',
+  session_source:'webui',
+  archived:true,
+  is_streaming:true,
+  active_stream_id:'stream-1',
+  updated_at:30,
+  last_message_at:30,
+}};
+const rows = _attachChildSessionsToSidebarRows([visibleTip], [visibleTip], [visibleTip, archivedTip]);
+console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _sessionTimestampMs(rows[0])}}));
+"""
+    result = json.loads(_run_node(source))
+    row = result["row"]
+    assert result["count"] == 1
+    assert row["session_id"] == "visible-tip"
+    assert "_child_sessions" not in row
+    assert row["_child_session_streaming"] is True
+    assert row["_child_session_latest_at"] == 30
+    assert row["_sidebar_activity_at"] == 30
+    assert result["timestampMs"] == 30_000
+
+
+def test_non_archived_reference_only_lineage_row_does_not_bubble_to_visible_parent():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isSessionEffectivelyStreaming(session) {{
+  return !!(session && (session.is_streaming || session.active_stream_id));
+}}
+function _hasUnreadForSession(session) {{
+  return !!(session && session.has_unread);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const visibleTip = {{
+  session_id:'visible-tip',
+  title:'Visible lineage row',
+  parent_session_id:'parent-root',
+  session_source:'webui',
+  _lineage_root_id:'parent-root',
+  updated_at:10,
+  last_message_at:10,
+}};
+const filteredReferenceOnly = {{
+  session_id:'filtered-tip',
+  title:'Filtered non-archived tip',
+  parent_session_id:'parent-root',
+  session_source:'webui',
+  _lineage_root_id:'parent-root',
+  archived:false,
+  is_streaming:true,
+  active_stream_id:'stream-1',
+  updated_at:30,
+  last_message_at:30,
+}};
+const rows = _attachChildSessionsToSidebarRows([visibleTip], [visibleTip], [visibleTip, filteredReferenceOnly]);
+console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _sessionTimestampMs(rows[0])}}));
+"""
+    result = json.loads(_run_node(source))
+    row = result["row"]
+    assert result["count"] == 1
+    assert row["session_id"] == "visible-tip"
+    assert "_child_sessions" not in row
+    assert "_child_session_streaming" not in row
+    assert "_child_session_latest_at" not in row
+    assert "_sidebar_activity_at" not in row
+    assert result["timestampMs"] == 10_000
+
+
+def test_stale_active_stream_id_on_hidden_archived_child_does_not_bubble_streaming_state():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isSessionEffectivelyStreaming(session) {{
+  return !!(session && (session.is_streaming || session.pending_user_message || session.has_pending_user_message));
+}}
+function _hasUnreadForSession(session) {{
+  return !!(session && session.has_unread);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const visibleTip = {{
+  session_id:'visible-tip',
+  title:'Visible lineage row',
+  parent_session_id:'parent-root',
+  session_source:'webui',
+  _lineage_root_id:'parent-root',
+  updated_at:10,
+  last_message_at:10,
+}};
+const archivedTip = {{
+  session_id:'archived-tip',
+  title:'Archived stale tip',
+  parent_session_id:'parent-root',
+  session_source:'webui',
+  archived:true,
+  _lineage_root_id:'parent-root',
+  is_streaming:false,
+  active_stream_id:'dead-stream',
+  updated_at:30,
+  last_message_at:30,
+}};
+const rows = _attachChildSessionsToSidebarRows([visibleTip], [visibleTip], [visibleTip, archivedTip]);
+console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _sessionTimestampMs(rows[0])}}));
+"""
+    result = json.loads(_run_node(source))
+    row = result["row"]
+    assert result["count"] == 1
+    assert row["session_id"] == "visible-tip"
+    assert "_child_sessions" not in row
+    assert "_child_session_streaming" not in row
+    assert row["_child_session_latest_at"] == 30
+    assert row["_sidebar_activity_at"] == 30
+    assert result["timestampMs"] == 30_000
+
+
+def test_collapsed_lineage_segments_do_not_render_as_child_sessions():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isSessionEffectivelyStreaming(session) {{
+  return !!(session && (session.is_streaming || session.active_stream_id));
+}}
+function _hasUnreadForSession(session) {{
+  return !!(session && session.has_unread);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_renderSidebarRowsFromRawSessions'));
+const root = {{session_id:'root', title:'Root', updated_at:10, last_message_at:10, _lineage_root_id:'root', _lineage_tip_id:'root'}};
+const mid = {{session_id:'mid', title:'Middle', parent_session_id:'root', updated_at:20, last_message_at:20, _lineage_root_id:'root', _lineage_tip_id:'mid'}};
+const tip = {{session_id:'tip', title:'Tip', parent_session_id:'root', updated_at:30, last_message_at:30, _lineage_root_id:'root', _lineage_tip_id:'tip'}};
+const rows = _renderSidebarRowsFromRawSessions([root, mid, tip], [root, mid, tip]);
 console.log(JSON.stringify(rows));
 """
     rows = json.loads(_run_node(source))
-    assert rows[0]["session_id"] == "parent"
-    assert rows[0]["last_message_at"] == 10
+    assert [row["session_id"] for row in rows] == ["tip"]
+    assert rows[0]["_lineage_collapsed_count"] == 3
+    assert [seg["session_id"] for seg in rows[0]["_lineage_segments"]] == ["tip", "mid", "root"]
+    assert "_child_sessions" not in rows[0]
+    assert "_child_session_count" not in rows[0]
 
 
 def test_nested_fork_bubbles_parent_attention_state():

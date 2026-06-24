@@ -30,6 +30,17 @@ jobs:
       - name: Ensure origin/master ref is available for the diff gate
         run: git fetch --no-tags --depth=1 origin master || true
 
+      # Whole-tree Python syntax gate. The Python analog of the JS `node --check`
+      # pass. The ruff E9 gate below is diff-scoped (new/changed lines only), so a
+      # SyntaxError/IndentationError whose parser-reported line sits on an UNTOUCHED
+      # line (e.g. a dedented `try:` above an unchanged import) can slip the diff
+      # filter and only surface as a confusing mass-failure of every test shard at
+      # the conftest server-boot fixture. compileall fails in ~2s with a clear
+      # file:line, before the matrix suite runs. Whole-tree + unconditional so it
+      # cannot be bypassed by the diff scope. (#4641)
+      - name: Python syntax gate (whole tree — fails fast on any unparseable .py)
+        run: python3 -m compileall -q api server.py bootstrap.py mcp_server.py tests scripts
+
       - name: Ruff forward gate (new/changed lines only)
         run: python3 scripts/ruff_lint.py --diff origin/master
 

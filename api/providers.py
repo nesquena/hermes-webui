@@ -37,9 +37,11 @@ from api.config import (
     _custom_provider_slug_from_name,
     _get_label_for_model,
     _models_from_live_provider_ids,
+    _pool_entry_payloads,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
+    _thread_local_env_value,
     get_config,
     invalidate_models_cache,
     reload_config,
@@ -741,6 +743,18 @@ _PROVIDER_ENV_VAR_ALIASES: dict[str, tuple[str, ...]] = {
     "opencode-go": ("OPENCODE_API_KEY",),
 }
 
+
+def _provider_credential_env_vars() -> tuple[str, ...]:
+    names = {name for name in _PROVIDER_ENV_VAR.values() if name}
+    for aliases in _PROVIDER_ENV_VAR_ALIASES.values():
+        for alias in aliases or ():
+            if alias:
+                names.add(alias)
+    return tuple(sorted(names))
+
+
+_PROVIDER_CREDENTIAL_ENV_VARS = _provider_credential_env_vars()
+
 # Providers that use OAuth or token flows — their credentials are managed
 # through the Hermes CLI, not via API keys.  The WebUI cannot set these.
 _OAUTH_PROVIDERS = frozenset({
@@ -853,11 +867,7 @@ def _local_pool_snapshot(provider):
     or None if the provider has no pool or no entries.
     """
     try:
-        from agent.credential_pool import load_pool
-        from api.config import _is_ambient_gh_cli_entry
-
-        pool = load_pool(provider)
-        entries = list(pool.entries()) if pool is not None and hasattr(pool, "entries") else []
+        entries = [SimpleNamespace(**payload) for payload in _pool_entry_payloads(provider)]
     except Exception:
         return None
     if not entries:
@@ -868,11 +878,6 @@ def _local_pool_snapshot(provider):
     exhausted_count = 0
     dead_count = 0
     for index, entry in enumerate(entries, start=1):
-        source = str(_entry_value(entry, "source") or "")
-        label_val = str(_entry_value(entry, "label", "source") or "")
-        key_source = str(_entry_value(entry, "key_source") or "")
-        if _is_ambient_gh_cli_entry(source, label_val, key_source):
-            continue
         label = _safe_entry_label(entry, index)
         entry_status = str(_entry_value(entry, "last_status") or "").strip().lower()
         if entry_status == "dead":
@@ -1032,10 +1037,10 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
         env_path = _get_hermes_home() / ".env"
         env_values = _load_env_file(env_path)
         values.append(env_values.get(env_var))
-        values.append(os.getenv(env_var))
+        values.append(_thread_local_env_value(env_var))
         for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
             values.append(env_values.get(alias))
-            values.append(os.getenv(alias))
+            values.append(_thread_local_env_value(alias))
 
     cfg = get_config()
     model_cfg = cfg.get("model", {})
@@ -1054,7 +1059,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
             if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp.get("name")):
                 cp_key = cp.get("api_key")
                 if isinstance(cp_key, str) and cp_key.startswith("${") and cp_key.endswith("}"):
-                    values.append(os.getenv(cp_key[2:-1]))
+                    values.append(_thread_local_env_value(cp_key[2:-1]))
                 else:
                     values.append(cp_key)
     return any(_looks_like_codex_oauth_token(str(value or "")) for value in values)
@@ -1175,7 +1180,7 @@ def _provider_has_key(provider_id: str) -> bool:
         env_file_value = env_values.get(env_var)
         if _provider_value_counts_as_api_key(provider_id, env_file_value):
             return True
-        env_value = os.getenv(env_var)
+        env_value = _thread_local_env_value(env_var)
         if _provider_value_counts_as_api_key(provider_id, env_value):
             return True
         # Fall back to legacy env-var aliases (e.g. lmstudio's pre-#1500
@@ -1184,7 +1189,7 @@ def _provider_has_key(provider_id: str) -> bool:
         for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
             if _provider_value_counts_as_api_key(provider_id, env_values.get(alias)):
                 return True
-            if _provider_value_counts_as_api_key(provider_id, os.getenv(alias)):
+            if _provider_value_counts_as_api_key(provider_id, _thread_local_env_value(alias)):
                 return True
     # Check credential pool — covers custom providers registered via
     # `hermes auth add` which store keys in auth.json (not config.yaml).
@@ -1238,14 +1243,14 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         env_file_value = env_values.get(env_var)
         if _provider_value_counts_as_api_key(provider_id, env_file_value):
             return str(env_file_value).strip() or None
-        env_value = os.getenv(env_var)
+        env_value = _thread_local_env_value(env_var)
         if _provider_value_counts_as_api_key(provider_id, env_value):
             return str(env_value).strip() or None
         for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
             alias_file_value = env_values.get(alias)
             if _provider_value_counts_as_api_key(provider_id, alias_file_value):
                 return str(alias_file_value).strip() or None
-            alias_value = os.getenv(alias)
+            alias_value = _thread_local_env_value(alias)
             if _provider_value_counts_as_api_key(provider_id, alias_value):
                 return str(alias_value).strip() or None
 
@@ -1273,26 +1278,26 @@ def _get_provider_api_key(provider_id: str) -> str | None:
             if _custom_provider_name_matches(provider_id, cp.get("name")):
                 cp_key = str(cp.get("api_key") or "").strip()
                 if cp_key.startswith("${") and cp_key.endswith("}"):
-                    return os.getenv(cp_key[2:-1], "").strip() or None
+                    return _thread_local_env_value(cp_key[2:-1]).strip() or None
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
     # Fallback: try credential pool (e.g. bothub key stored via auth.json)
-    try:
-        from api.config import _has_explicit_pool_credentials, _resolve_provider_alias
-        if _has_explicit_pool_credentials(provider_id):
-            from agent.credential_pool import load_pool
-            # Must resolve alias here too: _has_explicit_pool_credentials does it
-            # internally, but load_pool sees the original unresolved provider_id.
-            _resolved = _resolve_provider_alias(provider_id)
-            pool = load_pool(_resolved)
-            if pool:
-                entry = pool.select()
-                if entry:
-                    key = getattr(entry, "runtime_api_key", "") or getattr(entry, "access_token", "")
-                    if key:
-                        return key
-    except ImportError:
-        pass
+    for entry in _pool_entry_payloads(provider_id):
+        status = str(entry.get("last_status") or "").strip().lower()
+        if status == "dead":
+            continue
+        if status == "exhausted":
+            ns = SimpleNamespace(**entry)
+            if _entry_is_pool_exhausted(ns):
+                continue
+        key = str(
+            entry.get("runtime_api_key")
+            or entry.get("agent_key")
+            or entry.get("access_token")
+            or ""
+        ).strip()
+        if key:
+            return key
     return None
 
 
@@ -1394,6 +1399,24 @@ def _agent_fetch_account_usage(provider: str, *, base_url: str | None = None, ap
 
 def _account_usage_subprocess_env(home: Path, provider: str, api_key: str | None) -> dict[str, str]:
     env = dict(os.environ)
+    try:
+        from api.config import _thread_ctx
+    except Exception:
+        _thread_ctx = None
+    if bool(getattr(_thread_ctx, "block_process_env_fallback", False)):
+        # Rely on the centralized profile scrub set (api.profiles), which unions
+        # the WebUI provider env vars + the agent auth registry + the non-registry
+        # agent credential fallback (CUSTOM_API_KEY, AWS/Bedrock family). Falling
+        # back to the WebUI-only set keeps the probe fail-closed if that import
+        # fails. (#3961 — don't leave a partial local AWS set here.)
+        _strip = set(_PROVIDER_CREDENTIAL_ENV_VARS)
+        try:
+            from api.profiles import _profile_secret_env_names, get_active_hermes_home
+            _strip.update(_profile_secret_env_names(get_active_hermes_home()))
+        except Exception:
+            _strip.update({"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"})
+        for env_name in _strip:
+            env.pop(env_name, None)
     env["HERMES_HOME"] = str(Path(home))
 
     # Profile .env values should affect only the child quota probe, not the
@@ -2382,7 +2405,7 @@ def get_providers() -> dict[str, Any]:
                 env_values = _load_env_file(env_path)
                 if _provider_value_counts_as_api_key(pid, env_values.get(env_var)):
                     key_source = "env_file"
-                elif _provider_value_counts_as_api_key(pid, os.getenv(env_var)):
+                elif _provider_value_counts_as_api_key(pid, _thread_local_env_value(env_var)):
                     key_source = "env_var"
                 else:
                     # Canonical name not set; check legacy aliases (e.g. lmstudio's
@@ -2395,7 +2418,7 @@ def get_providers() -> dict[str, Any]:
                             key_source = "env_file"
                             aliased = True
                             break
-                        if _provider_value_counts_as_api_key(pid, os.getenv(alias)):
+                        if _provider_value_counts_as_api_key(pid, _thread_local_env_value(alias)):
                             key_source = "env_var"
                             aliased = True
                             break
@@ -2592,7 +2615,7 @@ def get_providers() -> dict[str, Any]:
             # Replace env var reference to check actual value
             if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
                 env_var = cp_api_key[2:-1]
-                cp_has_key = bool(os.getenv(env_var, "").strip())
+                cp_has_key = bool(_thread_local_env_value(env_var).strip())
             # Fallback: check credential pool (key added via hermes auth add)
             if not cp_has_key:
                 try:

@@ -19,6 +19,7 @@ from api.config import (
     STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT,
     _get_session_agent_lock,
+    coerce_reasoning_effort_for_model,
     gateway_supports_approval,
     register_active_run,
     unregister_active_run,
@@ -94,6 +95,23 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
         or ""
     ).strip().lower()
     return raw in ("1", "true", "yes", "on")
+
+
+def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None):
+    """Read and coerce user-configured reasoning effort for a gateway request."""
+    try:
+        cfg_data = cfg if isinstance(cfg, dict) else {}
+        effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
+        effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
+        coerced = coerce_reasoning_effort_for_model(
+            effort_raw,
+            model,
+            provider_id=model_provider,
+        )
+        # Preserve explicit "none" while still omitting absent or invalid effort.
+        return None if not coerced else str(coerced)
+    except Exception:
+        return None
 
 
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
@@ -313,6 +331,7 @@ def _run_gateway_runs_api_streaming(
         "model": model or "default",
         "input": run_input,
         **body_extras,
+        "session_id": session_id,
     }
     if instructions_parts:
         run_body["instructions"] = "\n\n".join(part for part in instructions_parts if part)
@@ -527,6 +546,11 @@ def _run_gateway_chat_streaming(
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
         cfg = get_config()
+        reasoning_effort = _gateway_reasoning_effort_for_request(
+            cfg,
+            model=model,
+            model_provider=model_provider,
+        )
         try:
             from api.streaming import (
                 _load_webui_prefill_context,
@@ -573,6 +597,8 @@ def _run_gateway_chat_streaming(
             body_extras = {}
             if model_provider:
                 body_extras["provider"] = model_provider
+            if reasoning_effort is not None:
+                body_extras["reasoning_effort"] = reasoning_effort
             try:
                 final_text, usage = _run_gateway_runs_api_streaming(
                     session_id, msg_text, model, workspace, stream_id,
@@ -633,6 +659,8 @@ def _run_gateway_chat_streaming(
             }
             if model_provider:
                 body["provider"] = model_provider
+            if reasoning_effort is not None:
+                body["reasoning_effort"] = reasoning_effort
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),
@@ -662,6 +690,28 @@ def _run_gateway_chat_streaming(
                     try:
                         payload = json.loads(data)
                     except json.JSONDecodeError:
+                        continue
+                    _payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip()
+                    if _payload_event in {"hermes.approval.request", "approval.request"}:
+                        approval_data = _gateway_runs_approval_event(payload)
+                        if approval_data:
+                            # Record the gateway run_id so /api/approval/respond
+                            # can relay the choice back and resume the parked run
+                            # (legacy path never creates a local run; without this
+                            # the card renders but approve/deny returns ok:false).
+                            # No-op when the payload omits run_id.
+                            _approval_run_id = str(approval_data.get("run_id") or "").strip()
+                            if _approval_run_id:
+                                _STREAM_RUN_IDS[stream_id] = _approval_run_id
+                            put_gateway_event("approval", approval_data)
+                            try:
+                                from api.route_approvals import submit_gateway_pending_mirror
+                                submit_gateway_pending_mirror(session_id, approval_data)
+                            except Exception:
+                                logger.debug("submit_gateway_pending_mirror failed", exc_info=True)
+                        else:
+                            logger.debug("Ignoring malformed gateway approval payload")
+                        sse_event = "message"
                         continue
                     if sse_event == "hermes.tool.progress":
                         translated = _gateway_tool_progress_event(payload)

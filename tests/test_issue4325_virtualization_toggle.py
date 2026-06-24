@@ -76,8 +76,8 @@ def test_panels_round_trip_and_hot_apply_virtualize_toggle():
 
 def test_virtualize_toggle_i18n_all_locales():
     js = I18N.read_text(encoding="utf-8")
-    assert js.count("settings_label_virtualize_transcript:") == 13
-    assert js.count("settings_desc_virtualize_transcript:") == 13
+    assert js.count("settings_label_virtualize_transcript:") == 14
+    assert js.count("settings_desc_virtualize_transcript:") == 14
 
 
 # ── #4343 force-off-for-everyone migration (load_settings behavior) ──────────

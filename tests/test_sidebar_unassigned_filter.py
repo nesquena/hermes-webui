@@ -94,8 +94,9 @@ def test_unassigned_chip_label_and_handler():
     assert "noneChip.textContent='Unassigned';" in js, (
         "The Unassigned chip must display the label 'Unassigned'"
     )
-    assert "_activeProject=NO_PROJECT_FILTER" in js, (
-        "Clicking the Unassigned chip must set _activeProject to the sentinel"
+    assert "_setActiveProjectFilter(NO_PROJECT_FILTER)" in js, (
+        "Clicking the Unassigned chip must route through the helper that sets "
+        "the sentinel and refreshes the payload"
     )
     # Active-state contract — the chip must reflect when it's the active filter.
     assert "_activeProject===NO_PROJECT_FILTER?' active':''" in js, (
@@ -142,8 +143,7 @@ def test_all_chip_clear_clears_unassigned_filter_too():
     js = _js()
     # Find the "All" chip handler. It must clear _activeProject to null and
     # NOT preserve any unassigned-flag state.
-    assert "allChip.onclick=()=>{_activeProject=null;renderSessionListFromCache();};" in js, (
-        "The All chip handler must reset _activeProject to null. If a parallel "
-        "_showNoneProject boolean is reintroduced, this test will catch it because "
-        "the handler will need additional state to reset."
+    assert "allChip.onclick=()=>{_setActiveProjectFilter(null);};" in js, (
+        "The All chip handler must route through the helper that clears "
+        "_activeProject and refreshes the filtered payload."
     )

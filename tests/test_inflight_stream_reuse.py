@@ -898,7 +898,7 @@ def test_restore_succeeded_reconnect_replays_tool_cards():
     body = _function_body(SESSIONS_JS, "loadSession")
     replay_fn = body.find("const replayPersistedLiveToolCards=(opts)=>{")
     reattach_pos = body.find("if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function')")
-    restore_pos = body.find("if(typeof restoreLiveTurnHtmlForSession==='function'){", reattach_pos if reattach_pos != -1 else 0)
+    restore_pos = body.find("restoreLiveTurnHtmlForSession", reattach_pos if reattach_pos != -1 else 0)
     fallback_pos = body.find("if(!restoredLiveTurn){", restore_pos)
     restore_replay_pos = body.find("if(restoredLiveTurn&&didReconnect){", restore_pos)
     restore_replay_block = body[restore_replay_pos:fallback_pos]

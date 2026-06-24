@@ -80,10 +80,10 @@ def test_panels_has_no_git_branch():
 
 
 def test_i18n_no_git_key_all_locales():
-    """settings_update_no_git key appears in all 13 locale blocks in static/i18n.js."""
+    """settings_update_no_git key appears in all 14 locale blocks in static/i18n.js."""
     i18n_path = Path(__file__).resolve().parent.parent / 'static' / 'i18n.js'
     content = i18n_path.read_text()
 
     # Count occurrences of the new key (should be exactly 13, one per locale)
     count = content.count("settings_update_no_git")
-    assert count == 13, f"Expected exactly 13 settings_update_no_git keys, found {count}"
+    assert count == 14, f"Expected exactly 14 settings_update_no_git keys, found {count}"

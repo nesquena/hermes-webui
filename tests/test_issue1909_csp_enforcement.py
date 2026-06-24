@@ -50,7 +50,7 @@ def test_security_helper_sends_enforcing_csp_with_hardening_directives(monkeypat
     assert "object-src 'none'" in policy
     assert "frame-ancestors 'none'" in policy
     assert "media-src 'self' data: blob:" in policy
-    assert "connect-src 'self' http://127.0.0.1:* http://localhost:* http://ipc.localhost ws://127.0.0.1:* ws://localhost:* https://cdn.jsdelivr.net" in policy
+    assert "connect-src 'self' http://127.0.0.1:* http://localhost:* http://ipc.localhost https://127.0.0.1:* https://localhost:* ws://127.0.0.1:* ws://localhost:* https://cdn.jsdelivr.net" in policy
 
 
 def test_enforcing_csp_honors_valid_extra_connect_origins(monkeypatch):
@@ -64,9 +64,24 @@ def test_enforcing_csp_honors_valid_extra_connect_origins(monkeypatch):
     policy = headers["Content-Security-Policy"]
     assert (
         "connect-src 'self' http://127.0.0.1:* http://localhost:* "
-        "http://ipc.localhost ws://127.0.0.1:* ws://localhost:* https://cdn.jsdelivr.net "
+        "http://ipc.localhost https://127.0.0.1:* https://localhost:* "
+        "ws://127.0.0.1:* ws://localhost:* https://cdn.jsdelivr.net "
         "https://metrics.example.com wss://events.example.com:443; "
     ) in policy
+
+
+def test_enforcing_csp_allows_trusted_loopback_sidecars_by_default(monkeypatch):
+    monkeypatch.delenv("HERMES_WEBUI_CSP_CONNECT_EXTRA", raising=False)
+
+    policy = _headers_from_security_helper()["Content-Security-Policy"]
+
+    assert "connect-src" in policy
+    assert "http://127.0.0.1:*" in policy
+    assert "http://localhost:*" in policy
+    assert "http://ipc.localhost" in policy
+    assert "ws://127.0.0.1:*" in policy
+    assert "ws://localhost:*" in policy
+    assert "http://127.0.0.1:17787" not in policy
 
 
 def test_enforcing_and_report_only_csp_share_validated_connect_extra(monkeypatch):

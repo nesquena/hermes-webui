@@ -342,16 +342,19 @@ Full list of environment variables:
 | `HERMES_WEBUI_EXTRA_WORKSPACE_ROOTS` | *(unset)* | **Internal deployment bridge** — prefer the `config.yaml` key `workspace.extra_trusted_roots` (below) for normal configuration. `os.pathsep`-separated absolute paths to trust as workspace roots even if they sit under a normally-blocked system prefix. Merged with the config key (config entries take precedence); kept as an env var only so a deployment can inject a root at boot from a dynamic mount path |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
-| `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the report-only CSP `connect-src` directive for reverse-proxy or tunnel deployments |
+| `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the enforced and report-only CSP `connect-src` directives for trusted reverse-proxy, tunnel, or extension sidecar deployments |
 | `HERMES_WEBUI_SSE_CHUNKED` | *(unset)* | Set truthy (`1`/`true`/`yes`/`on`) to send SSE with `Transfer-Encoding: chunked`. Needed behind buffering reverse proxies (e.g. `jupyter-server-proxy`) that otherwise buffer the whole stream; harmless but unnecessary for directly-served deployments |
 | `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
-| `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
-| `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` | *(unset)* | Optional comma-separated same-origin stylesheet URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
+| `HERMES_WEBUI_EXTENSION_MANIFEST` | *(unset)* | Optional relative JSON manifest inside `HERMES_WEBUI_EXTENSION_DIR` listing bundled scripts/styles to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
+| `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; appended after manifest scripts; see [WebUI Extensions](docs/EXTENSIONS.md) |
+| `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` | *(unset)* | Optional comma-separated same-origin stylesheet URLs to inject; appended after manifest stylesheets; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_HOME` | Windows: `%LOCALAPPDATA%\hermes`; POSIX: `~/.hermes` | Base directory for Hermes state (affects all paths) |
 | `HERMES_CONFIG_PATH` | `$HERMES_HOME/config.yaml` | Path to Hermes config file |
 | `HERMES_WEBUI_SERVER_CWD` | *(unset)* | Working directory for the server process. Defaults to the agent dir; point it at a writable workspace when the agent dir is read-only so fallback relative writes land somewhere writable |
 | `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
 | `HERMES_WEBUI_SESSIONS_MAX` | `100` | Max compact `Session` objects held in the in-memory LRU. Lighter than the agent cache; lower it on installs with hundreds of sessions |
+
+Extension deployments can inspect sanitized, authenticated diagnostics at `GET /api/extensions/status`; see [WebUI Extensions](docs/EXTENSIONS.md#diagnostics).
 
 #### Extra trusted workspace roots (`config.yaml`)
 
@@ -646,24 +649,24 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, absorbed into a batch release, or salvaged from a larger proposal — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
 <!-- BEGIN GENERATED CONTRIBUTORS -->
-Over **280 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
+Over **288 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
 
 ### Top contributors (by PR count, including absorbed/batch-released work)
 
 | # | Contributor | PRs | First → latest release |
 |---|---|---:|---|
-| 1 | [@franksong2702](https://github.com/franksong2702) | 244 | `v0.49.3` → `v0.51.492` |
-| 2 | [@rodboev](https://github.com/rodboev) | 189 | `v0.51.223` → `v0.51.511` |
+| 1 | [@franksong2702](https://github.com/franksong2702) | 264 | `v0.49.3` → `v0.51.587` |
+| 2 | [@rodboev](https://github.com/rodboev) | 204 | `v0.51.223` → `v0.51.586` |
 | 3 | [@Michaelyklam](https://github.com/Michaelyklam) | 157 | `v0.50.240` → `v0.51.198` |
-| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 115 | `v0.50.279` → `v0.51.482` |
-| 5 | [@bergeouss](https://github.com/bergeouss) | 77 | `v0.48.0` → `v0.51.505` |
+| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 116 | `v0.50.279` → `v0.51.519` |
+| 5 | [@bergeouss](https://github.com/bergeouss) | 80 | `v0.48.0` → `v0.51.527` |
 | 6 | [@AJV20](https://github.com/AJV20) | 57 | `v0.51.93` → `v0.51.346` |
-| 7 | [@dso2ng](https://github.com/dso2ng) | 41 | `v0.50.227` → `v0.51.488` |
-| 8 | [@Sanjays2402](https://github.com/Sanjays2402) | 26 | `v0.50.292` → `v0.51.484` |
-| 9 | [@starship-s](https://github.com/starship-s) | 23 | `v0.50.123` → `v0.51.473` |
-| 10 | [@Hinotoi-agent](https://github.com/Hinotoi-agent) | 21 | `v0.50.10` → `v0.51.497` |
+| 7 | [@dso2ng](https://github.com/dso2ng) | 43 | `v0.50.227` → `v0.51.578` |
+| 8 | [@Sanjays2402](https://github.com/Sanjays2402) | 27 | `v0.50.292` → `v0.51.484` |
+| 9 | [@starship-s](https://github.com/starship-s) | 25 | `v0.50.123` → `v0.51.547` |
+| 10 | [@Hinotoi-agent](https://github.com/Hinotoi-agent) | 23 | `v0.50.10` → `v0.51.522` |
 
-See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 280 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 288 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
 <!-- END GENERATED CONTRIBUTORS -->
 
 ### Notable contributions

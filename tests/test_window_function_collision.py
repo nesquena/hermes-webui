@@ -40,7 +40,7 @@ TOP_LEVEL_FN_RE = re.compile(r"^function\s+([A-Za-z_\$][A-Za-z_\$0-9]*)\s*\(", r
 # to see `function(` (8 chars) even after some whitespace; we use 32 chars to
 # be safe against newlines and odd indenting.
 WINDOW_ASSIGN_RE = re.compile(
-    r"window\.([A-Za-z_\$][A-Za-z_\$0-9]*)\s*=\s*([^=].{0,32})",
+    r"window\.([A-Za-z_\$][A-Za-z_\$0-9]*)\s*=\s*([^=].{0,80})",
     re.DOTALL,
 )
 
@@ -73,6 +73,12 @@ def _classify_rhs(rhs: str) -> str:
     # Bare identifier reference: looks like `_foo;` or `_foo,` or `_foo ` etc.
     # Allow ||, &&, ? chains too (e.g. `window.X = window.X || false;`).
     if re.match(r"[A-Za-z_\$][A-Za-z_\$0-9]*[\s;,)|&?.]", rhs):
+        return "identifier"
+    # Bare identifier that runs to the end of the (length-capped) capture window
+    # with no trailing terminator visible — e.g. a very long function name like
+    # `_renderLiveAnchorActivitySceneSnapshotForStream;` whose terminator falls
+    # outside the captured snippet. Still a benign function reference.
+    if re.fullmatch(r"[A-Za-z_\$][A-Za-z_\$0-9]*", rhs.rstrip()):
         return "identifier"
     return "other"
 

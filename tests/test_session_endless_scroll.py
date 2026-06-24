@@ -47,6 +47,14 @@ def test_scroll_listener_prefetches_older_messages_only_when_enabled():
     assert "el.scrollTop<80 && typeof _messagesTruncated" not in UI_JS
 
 
+def test_touch_momentum_defers_endless_scroll_prefetch():
+    assert "const MESSAGE_TOUCH_SCROLL_SUPPRESS_MS=1200" in UI_JS
+    assert "function _recentMessageTouchScrollIntent()" in UI_JS
+    assert "function _scheduleDeferredOlderMessagesLoad()" in UI_JS
+    assert "if(_recentMessageTouchScrollIntent()) _scheduleDeferredOlderMessagesLoad();" in UI_JS
+    assert "else _loadOlderMessages();" in UI_JS
+
+
 def test_endless_scroll_i18n_keys_exist_for_each_locale():
     assert I18N_JS.count("settings_label_session_endless_scroll") == I18N_JS.count("settings_label_workspace_panel_open")
     assert I18N_JS.count("settings_desc_session_endless_scroll") == I18N_JS.count("settings_desc_workspace_panel_open")

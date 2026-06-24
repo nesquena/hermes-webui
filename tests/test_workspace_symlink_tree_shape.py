@@ -27,14 +27,19 @@ class TestIsDirLikeLocals:
         assert "const isLk = item.type === 'symlink';" in block, \
             "isLk local must be declared inside the per-item loop"
 
+    def test_isExternalLink_local_declared(self):
+        block = _render_block()
+        assert "const isExternalLink = isLk && item.target_outside_workspace;" in block, \
+            "isExternalLink local must be declared for display-only external symlinks"
+
     def test_isDirLike_local_declared(self):
         block = _render_block()
-        assert "const isDirLike = item.type === 'dir' || (isLk && item.is_dir);" in block, \
+        assert "const isDirLike = !isExternalLink && (item.type === 'dir' || (isLk && item.is_dir));" in block, \
             "isDirLike local must be declared inside the per-item loop"
 
     def test_isFileLike_local_declared(self):
         block = _render_block()
-        assert "const isFileLike = !isDirLike;" in block, \
+        assert "const isFileLike = !isExternalLink && !isDirLike;" in block, \
             "isFileLike local must be declared for file-like symlink handling"
 
     def test_wsIsDir_dataset_set(self):
@@ -64,6 +69,15 @@ class TestLinkIcon:
         block = _render_block()
         assert "li('link', 14)" in block, \
             "icon dispatch must emit li('link', 14) for symlink rows"
+
+    def test_external_link_icon_path_exists(self):
+        assert "'external-link':" in ICONS_JS, \
+            "'external-link' key must be in LI_PATHS for display-only external symlinks"
+
+    def test_icon_dispatch_uses_li_external_link(self):
+        block = _render_block()
+        assert "li('external-link', 14)" in block, \
+            "icon dispatch must emit li('external-link', 14) for external symlink rows"
 
 
 class TestSymlinkTooltip:

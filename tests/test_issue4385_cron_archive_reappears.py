@@ -225,7 +225,7 @@ def test_webhook_state_projection_preserves_archived_sidecar(monkeypatch, tmp_pa
 
 
 def test_archived_webhook_projection_reaches_sidebar_payload(monkeypatch):
-    """The sidebar payload must preserve archived state for webhook projections."""
+    """Archived webhook projections are counted by default and fetched on demand."""
     import api.routes as routes
 
     sid = "webhook_archive_20260618"
@@ -249,12 +249,24 @@ def test_archived_webhook_projection_reaches_sidebar_payload(monkeypatch):
     monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [raw_webhook_row])
     monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _sessions: False)
 
+    default_payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    assert [row for row in default_payload["sessions"] if row["session_id"] == sid] == []
+    assert default_payload["archived_count"] == 1
+    assert default_payload["archived_webui_count"] == 1
+
     payload = routes._build_session_list_cache_payload(
         active_profile="default",
         all_profiles=False,
         show_cli_sessions=True,
         show_previous_messaging_sessions=False,
         show_cron_sessions=False,
+        include_archived=True,
     )
 
     rows = payload["sessions"]
@@ -266,7 +278,7 @@ def test_archived_webhook_projection_reaches_sidebar_payload(monkeypatch):
 
 
 def test_archived_cron_sidecar_suppresses_raw_unarchived_cron_row(monkeypatch):
-    """An archived cron sidecar should keep the raw state.db cron row hidden."""
+    """Archived cron sidecars stay out of the hot list but win on archive fetch."""
     import api.routes as routes
 
     sid = "cron_job123_20260618"
@@ -306,12 +318,25 @@ def test_archived_cron_sidecar_suppresses_raw_unarchived_cron_row(monkeypatch):
     monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [raw_cron_row])
     monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _sessions: False)
 
+    default_payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=True,
+    )
+    assert [row for row in default_payload["sessions"] if row["session_id"] == sid] == []
+    assert default_payload["archived_count"] == 1
+    assert default_payload["archived_webui_count"] == 1
+    assert default_payload["archived_cli_count"] == 0
+
     payload = routes._build_session_list_cache_payload(
         active_profile="default",
         all_profiles=False,
         show_cli_sessions=True,
         show_previous_messaging_sessions=False,
         show_cron_sessions=True,
+        include_archived=True,
     )
 
     rows = payload["sessions"]

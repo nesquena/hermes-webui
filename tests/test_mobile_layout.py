@@ -72,11 +72,48 @@ def _declarations(rule_body):
     return declarations
 
 
+def _js_function_body(source, function_name):
+    """Return a JavaScript function body using balanced braces."""
+    match = re.search(rf'function\s+{re.escape(function_name)}\s*\([^)]*\)\s*\{{', source)
+    if not match:
+        raise AssertionError(f"Missing JavaScript function {function_name}()")
+    open_brace = match.end() - 1
+    depth = 0
+    for idx in range(open_brace, len(source)):
+        if source[idx] == "{":
+            depth += 1
+        elif source[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[open_brace + 1:idx]
+    raise AssertionError(f"Could not parse JavaScript function {function_name}()")
+
+
 def _optional_declarations(css, selector):
     try:
         return _declarations(_rule_body(css, selector))
     except AssertionError:
         return {}
+
+
+def _js_function_body(src, name):
+    signature = f"function {name}("
+    start = src.find(signature)
+    if start == -1:
+        raise AssertionError(f"Missing JS function {name}()")
+    brace = src.find("{", start)
+    if brace == -1:
+        raise AssertionError(f"Missing function body for {name}()")
+    depth = 0
+    for idx in range(brace, len(src)):
+        char = src[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return src[brace + 1:idx]
+    raise AssertionError(f"Unterminated JS function {name}()")
 
 
 def _display_hidden(declarations):
@@ -207,6 +244,26 @@ def test_rightpanel_mobile_slide_over_css():
         "open mobile rightpanel should keep the edge shadow"
     assert re.search(r'\.rightpanel\s+\.panel-header\{[^}]*row-gap:\s*8px', rightpanel_block), \
         "mobile workspace header should keep comfortable row spacing"
+
+
+def test_mobile_sidebar_drawer_uses_transform_instead_of_left():
+    """Mobile sidebar drawer open/close must animate with transform not left offsets."""
+    mobile_640 = "\n".join(_max_width_media_blocks(640))
+    assert mobile_640, "Missing @media(max-width:640px) block in style.css"
+
+    sidebar_rule = _declarations(_rule_body(mobile_640, ".sidebar"))
+    sidebar_open_rule = _declarations(_rule_body(mobile_640, ".sidebar.mobile-open"))
+
+    assert sidebar_rule.get("left") == "0", \
+        "Mobile .sidebar should keep left:0 in the drawer rules"
+    assert sidebar_rule.get("transform") == "translateX(-100%)", \
+        "Closed mobile .sidebar should use transform:translateX(-100%)"
+    assert sidebar_rule.get("transition") == "transform .25s ease", \
+        "Mobile .sidebar should transition transform for drawer animation"
+    assert sidebar_rule.get("will-change") == "transform", \
+        "Mobile .sidebar should promote the transform layer before drawer animation"
+    assert sidebar_open_rule.get("transform") == "translateX(0)", \
+        "Open mobile .sidebar should use transform:translateX(0)"
 
 
 def test_workspace_panel_inline_width_is_desktop_only():
@@ -392,11 +449,42 @@ def test_composer_compact_switch_is_not_viewport_only():
         "Composer compact breakpoint should use container queries, not viewport media at 900px"
 
 def test_mobile_overlay_present():
-    """Mobile overlay element must exist for tap-to-close sidebar behavior."""
+    """Legacy mobile overlay stays hidden because the phone sidebar is full-screen."""
     assert 'id="mobileOverlay"' in HTML, \
         "#mobileOverlay element missing from index.html"
     assert "mobile-overlay" in CSS, \
         ".mobile-overlay CSS rule missing from style.css"
+    mobile_css = "\n".join(_max_width_media_blocks(640))
+    assert re.search(r'\.mobile-overlay\.visible\{[^}]*display:\s*none', mobile_css), (
+        "Full-screen mobile sidebar must not dim the PWA status/safe-area with a backdrop"
+    )
+
+
+def test_mobile_sidebar_edge_guard_claims_body_edge_only():
+    """A narrow body-only edge guard helps iOS hand left swipes to WebUI."""
+    assert 'id="pwaSidebarEdgeGuard"' in HTML, (
+        "mobile sidebar edge guard missing from index.html"
+    )
+    assert ".pwa-sidebar-edge-guard{display:none;}" in CSS.replace(" ", ""), (
+        "edge guard should be hidden outside the phone layout"
+    )
+    mobile_css = "\n".join(_max_width_media_blocks(640))
+    guard = _declarations(_rule_body(mobile_css, ".pwa-sidebar-edge-guard"))
+    assert guard.get("display") == "block"
+    assert guard.get("position") == "fixed"
+    assert guard.get("left") == "0"
+    assert guard.get("top") == "calc(38px + var(--app-titlebar-safe-top))", (
+        "edge guard should start below the PWA titlebar so it does not block hamburger"
+    )
+    assert guard.get("width") == "24px"
+    assert guard.get("pointer-events") == "none", (
+        "edge guard must be pointer-events:none so taps/vertical scrolls starting in the "
+        "strip fall through to the .messages scroller; the edge-swipe gesture is handled by "
+        "window-level capture listeners, not by the guard intercepting hit-testing (#4660 review)"
+    )
+    assert guard.get("z-index") == "198", (
+        "edge guard should sit below the full-screen sidebar but above the page body"
+    )
 
 
 def test_sidebar_nav_present():
@@ -415,13 +503,8 @@ def test_mobile_keeps_panel_navigation_available():
         "Phone panel navigation must remain available in the hamburger drawer"
 
 
-def test_mobile_keeps_hamburger_drawer_with_vertical_44px_panel_targets():
-    """Phone panel navigation should be vertical inside the hamburger drawer.
-
-    Phones need to preserve horizontal space for the conversation. The titlebar
-    hamburger opens the session/sidebar drawer; inside that drawer, panel icons
-    should use a vertical strip with 44px targets instead of a cramped top row.
-    """
+def test_mobile_sidebar_opens_as_full_screen_surface_with_panel_rail():
+    """Phone sidebar should open full-screen while keeping the panel rail visible."""
     mobile_css = "\n".join(_max_width_media_blocks(640))
     assert re.search(r'\.app-titlebar-hamburger,\s*\.app-titlebar-spacer\{[^}]*display:\s*flex', mobile_css), (
         "Phone titlebar hamburger must stay visible"
@@ -429,8 +512,31 @@ def test_mobile_keeps_hamburger_drawer_with_vertical_44px_panel_targets():
     assert not re.search(r'\.rail\{[^}]*display:\s*flex[^}]*position:\s*fixed', mobile_css), (
         "Phone must not use a persistent left rail that consumes chat width"
     )
-    assert not re.search(r'\.sidebar\s*>\s*\.sidebar-nav\{[^}]*display:\s*none', mobile_css), (
-        "Phone hamburger drawer must keep the sidebar panel tabs visible"
+    sidebar_rule = _declarations(_rule_body(mobile_css, ".sidebar"))
+    sidebar_open_rule = _declarations(_rule_body(mobile_css, ".sidebar.mobile-open"))
+    assert sidebar_rule.get("left") == "0", (
+        "Mobile sidebar should stay at left:0 and move with transform"
+    )
+    assert sidebar_rule.get("width") == "100vw", (
+        "Mobile sidebar should fill the viewport like a session page"
+    )
+    assert sidebar_rule.get("max-width") == "none", (
+        "Mobile sidebar must not retain desktop/drawer max width"
+    )
+    assert sidebar_rule.get("transform") == "translateX(-100%)", (
+        "Closed mobile sidebar should sit fully offscreen"
+    )
+    assert sidebar_rule.get("transition") == "transform .25s ease", (
+        "Mobile sidebar should animate with transform"
+    )
+    assert sidebar_rule.get("will-change") == "transform", (
+        "Mobile sidebar should promote the transform layer before opening"
+    )
+    assert sidebar_open_rule.get("transform") == "translateX(0)", (
+        "Open mobile sidebar should slide the full session page into view"
+    )
+    assert not re.search(r'\.sidebar\s+\.sidebar-nav\{[^}]*display:\s*none', mobile_css), (
+        "Full-screen mobile sidebar should keep the panel rail visible"
     )
     assert re.search(r'\.sidebar-nav\{[^}]*position:\s*absolute', mobile_css), (
         "Phone drawer panel tabs should be laid out as an internal side strip"
@@ -447,8 +553,11 @@ def test_mobile_keeps_hamburger_drawer_with_vertical_44px_panel_targets():
     assert re.search(r'\.sidebar-nav\s+\.nav-tab\{[^}]*min-height:\s*44px', mobile_css), (
         "Phone drawer panel tabs must be at least 44px tall"
     )
-    assert re.search(r'\.sidebar\s+\.panel-view\{[^}]*margin-left:\s*52px', mobile_css), (
-        "Phone drawer panel content should start beside the vertical icon strip"
+    assert re.search(r'\.sidebar\s+\.panel-view\{[^}]*height:\s*100%[^}]*margin-left:\s*52px', mobile_css), (
+        "Full-screen mobile sidebar content should start beside the vertical icon strip"
+    )
+    assert re.search(r'\.mobile-sidebar-close\{[^}]*display:\s*inline-flex\s*!important', mobile_css), (
+        "Full-screen mobile session page needs a visible close affordance"
     )
     assert re.search(r'\.sidebar\s+\.panel-icon-btn\{[^}]*min-width:\s*44px', mobile_css), (
         "Sidebar panel buttons must min-width:44px on phone"
@@ -467,28 +576,166 @@ def test_mobile_keeps_hamburger_drawer_with_vertical_44px_panel_targets():
     )
 
 
-def test_mobile_rail_click_opens_sidebar_for_all_panels():
-    """Rail clicks on phone must reveal the selected sidebar panel."""
+def test_mobile_rail_click_opens_full_screen_panel_drawer():
+    """Rail clicks on phone should keep the full-screen drawer open for panel switching."""
     panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
     assert "opts.fromRailClick" in panels_js, (
         "switchPanel() should distinguish rail clicks from programmatic switches"
     )
     assert "!_isDesktopWidth()" in panels_js, (
-        "Rail-click sidebar opening must be limited to mobile widths"
+        "Mobile rail-click sidebar handling must be limited to mobile widths"
     )
-    mobile_click_block = re.search(
-        r'if\s*\(\s*opts\.fromRailClick[^{}]*!\s*_isDesktopWidth\(\)[\s\S]*?\n\s*\}',
-        panels_js,
+    switch_panel = panels_js.split("async function switchPanel", 1)[1].split("\n}\n\n// ── Cron panel", 1)[0]
+    assert "if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth())" in switch_panel, (
+        "Missing mobile rail-click sidebar handler"
     )
-    assert mobile_click_block, "Missing mobile rail-click sidebar handler"
-    assert "sidebar.classList.add('mobile-open')" in panels_js, (
-        "Phone rail clicks should open the sidebar panel"
+    assert "sidebar.classList.remove('mobile-session-page')" in switch_panel, (
+        "Phone rail clicks should leave the full-screen session page mode"
     )
-    assert "overlay.classList.add('visible')" in panels_js, (
-        "Phone rail clicks should show the overlay behind the opened sidebar"
+    assert "sidebar.classList.add('mobile-panel-drawer', 'mobile-open')" in switch_panel, (
+        "Phone rail clicks should open the panel drawer mode"
     )
-    assert "nextPanel === 'chat'" not in mobile_click_block.group(0), (
-        "Chat rail clicks must open the session list on phone, not close the sidebar"
+    rail_handler_idx = switch_panel.index("if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth())")
+    close_sidebar_idx = switch_panel.find("closeMobileSidebar();", rail_handler_idx)
+    assert close_sidebar_idx == -1, "Phone rail clicks should keep the full-screen drawer open for panel switching"
+    assert "overlay.classList.add('visible')" not in switch_panel[rail_handler_idx:], (
+        "Full-screen phone rail clicks should not show a backdrop that dims the PWA status bar"
+    )
+
+
+def test_mobile_switch_panel_non_chat_opens_sidebar():
+    """mobileSwitchPanel() non-chat path should open the full-screen panel drawer."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    fn_body = _js_function_body(boot_js, "mobileSwitchPanel")
+    assert "if(name==='chat')" in fn_body, (
+        "mobileSwitchPanel must close sidebar only on chat target"
+    )
+    assert "closeMobileSidebar();" in fn_body, (
+        "mobileSwitchPanel should still close sidebar on chat"
+    )
+    assert "sidebar.classList.add('mobile-panel-drawer','mobile-open')" in fn_body, (
+        "mobileSwitchPanel non-chat branch should keep adding mobile-open"
+    )
+    assert "overlay.classList.add('visible')" not in fn_body, (
+        "mobileSwitchPanel non-chat branch should not show a backdrop over the PWA status bar"
+    )
+
+
+def test_pwa_edge_swipe_opens_current_mobile_panel():
+    """Left-edge swipe should open the current sidebar panel, matching hamburger."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    body = _js_function_body(boot_js, "_openMobileSidebarFromGesture")
+    assert "switchPanel('chat',{bypassSettingsGuard:true})" not in body, (
+        "Left-edge gesture should not force Chat; it should preserve the active panel"
+    )
+    assert "sidebar.classList.remove('mobile-session-page')" in body, (
+        "Left-edge gesture should leave the rail-hiding session page mode"
+    )
+    assert "sidebar.classList.add('mobile-panel-drawer')" in body, (
+        "Left-edge gesture should open the full-screen sidebar with panel rail"
+    )
+    assert "sidebar.classList.add('mobile-open')" in body
+    assert "overlay.classList.add('visible')" not in body
+    assert "_syncMobileSidebarPanelFromMainView()" in body, (
+        "Left-edge gesture should sync sidebar panel from the visible detail view before opening"
+    )
+
+
+def test_mobile_sidebar_open_syncs_panel_from_visible_detail_view():
+    """The mobile sidebar should not fall back to Chat when a module detail is visible."""
+    panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    assert "const MAIN_VIEW_PANELS =" in panels_js
+    main_view_panels = panels_js.split("const MAIN_VIEW_PANELS =", 1)[1].split("];", 1)[0]
+    assert "'todos'" not in main_view_panels, (
+        "Todos is a sidebar-only panel; adding showing-todos makes main-view sync ambiguous"
+    )
+    assert "const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' }" in panels_js
+    for panel_id in [
+        "panelSettings",
+        "panelSkills",
+        "panelMemory",
+        "panelTasks",
+        "panelKanban",
+        "panelWorkspaces",
+        "panelProfiles",
+        "panelTodos",
+        "panelInsights",
+        "panelLogs",
+    ]:
+        assert f'id="{panel_id}"' in HTML, f"{panel_id} should exist for mobile sidebar sync"
+    assert 'id="panelPlugin"' not in HTML, (
+        "Plugin pages are main-view only and should sync back to the Settings sidebar list"
+    )
+    assert "MAIN_VIEW_PANELS.forEach" in panels_js
+    panel_from_view = _js_function_body(panels_js, "_panelFromCurrentMainView")
+    assert "mainEl.classList.contains('showing-'+panel)" in panel_from_view
+    assert "MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS[panel]||panel" in panel_from_view
+    assert "$('panel'+_currentPanel.charAt(0).toUpperCase()+_currentPanel.slice(1))" in panel_from_view
+    assert "return 'chat'" in panel_from_view
+    sync_body = _js_function_body(panels_js, "_syncMobileSidebarPanelFromMainView")
+    assert "if(!panelEl)return _currentPanel||'chat'" in sync_body
+    assert "_currentPanel=panel" in sync_body
+    assert "document.querySelectorAll('[data-panel]')" in sync_body
+    assert "document.querySelectorAll('.panel-view')" in sync_body
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    toggle_body = _js_function_body(boot_js, "toggleMobileSidebar")
+    assert "_syncMobileSidebarPanelFromMainView()" in toggle_body, (
+        "Hamburger-opened mobile sidebar should also sync from the visible detail view"
+    )
+
+
+def test_mobile_skill_selection_closes_sidebar_after_detail_load():
+    """Selecting a skill on phone should reveal the newly-loaded detail view."""
+    panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    helper = _js_function_body(panels_js, "_closeMobileSidebarAfterPanelSelection")
+    assert "if(typeof closeMobileSidebar!=='function')return" in helper
+    assert "if(typeof _isDesktopWidth==='function'&&_isDesktopWidth())return" in helper
+    assert "closeMobileSidebar()" in helper
+    body = _js_function_body(panels_js, "openSkill")
+    assert "_renderSkillDetail(name, data.content || '', data.linked_files || {})" in body
+    assert "_closeMobileSidebarAfterPanelSelection()" in body
+
+
+def test_mobile_sidebar_detail_selections_share_close_helper():
+    """Sidebar list commits should consistently reveal their main detail on phone."""
+    panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    for name in [
+        "openCronDetail",
+        "loadKanbanTask",
+        "openMemorySection",
+        "openWorkspaceDetail",
+        "openProfileDetail",
+    ]:
+        body = _js_function_body(panels_js, name)
+        assert "_closeMobileSidebarAfterPanelSelection()" in body, (
+            f"{name} should close the full-screen mobile sidebar after opening detail"
+        )
+    settings_body = _js_function_body(panels_js, "switchSettingsSection")
+    assert "if(opts&&opts.fromSidebarItem)_closeMobileSidebarAfterPanelSelection()" in settings_body
+    assert "switchSettingsSection(_currentSettingsSection);" in panels_js
+    assert "mobile-panel-drawer', 'mobile-open'" in panels_js, (
+        "Opening Settings from the rail should keep the mobile drawer available"
+    )
+    for section in ["conversation", "appearance", "preferences", "providers", "plugins", "extensions", "system", "help"]:
+        assert f"switchSettingsSection('{section}',{{fromSidebarItem:true}})" in HTML, (
+            f"Settings sidebar item {section} should close after selecting its detail"
+        )
+
+
+def test_mobile_session_page_close_button_is_mobile_scoped():
+    """The full-screen session page close button should not appear on desktop."""
+    assert 'class="panel-head-btn mobile-sidebar-close' in HTML, (
+        "Sidebar needs a close button for the full-screen mobile session page"
+    )
+    assert 'onclick="closeMobileSidebar()"' in HTML, (
+        "Mobile session page close button should close the sidebar"
+    )
+    assert "mobile-sidebar-close{display:none" in CSS.replace(" ", ""), (
+        "Mobile sidebar close button should be hidden by default"
+    )
+    mobile_css = "\n".join(_max_width_media_blocks(640))
+    assert ".mobile-sidebar-close{display:inline-flex!important" in mobile_css.replace(" ", ""), (
+        "Mobile sidebar close button should be visible in phone layout"
     )
 
 
@@ -1267,22 +1514,24 @@ def test_mobile_enter_newline_uses_match_media():
         "boot.js must use matchMedia('(pointer:coarse)') for mobile detection"
 
 
-def test_mobile_enter_newline_checks_virtual_keyboard_viewport():
-    """Touch devices should only force newline while the software keyboard is likely open."""
+def test_mobile_enter_newline_does_not_depend_on_viewport_heuristic():
+    """The viewport-shrink heuristic was unreliable on iOS/Android and must be gone."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    assert "function _isVirtualKeyboardLikelyOpen()" in boot_js, \
-        "boot.js must isolate the software-keyboard viewport heuristic"
-    assert "window.visualViewport" in boot_js and "window.innerHeight-vv.height>120" in boot_js, \
-        "software-keyboard detection must compare visualViewport height against window.innerHeight"
-    assert "&&_isVirtualKeyboardLikelyOpen()" in boot_js, \
-        "mobile Enter newline override must not apply when a hardware keyboard leaves the viewport unshrunk"
+    assert "function _isVirtualKeyboardLikelyOpen()" not in boot_js, \
+        "the unreliable visualViewport keyboard heuristic function must be removed"
+    assert "&&_isVirtualKeyboardLikelyOpen()" not in boot_js, \
+        "the mobile Enter override must no longer call the viewport heuristic"
+    assert "window.innerHeight-vv.height>120" not in boot_js, \
+        "the viewport height-delta probe must no longer gate the mobile Enter override"
 
 
-def test_mobile_enter_newline_preserves_legacy_fallback_without_visual_viewport():
-    """Browsers without visualViewport should keep the previous touch Enter=newline behavior."""
+def test_mobile_enter_newline_respects_hardware_keyboard_on_touch_devices():
+    """Touch devices with a co-existing fine pointer (hardware keyboard) keep desktop Enter=send."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    assert "if(!vv||!window.innerHeight)return true;" in boot_js, \
-        "missing visualViewport support must preserve the legacy touch-primary newline fallback"
+    assert "any-pointer:fine" in boot_js, \
+        "boot.js must use any-pointer:fine to detect a co-existing hardware keyboard/trackpad"
+    assert "!_hasFinePointerCoexisting()" in boot_js, \
+        "mobile Enter newline override must skip touch devices that also expose a fine pointer"
 
 
 def test_mobile_enter_newline_only_overrides_enter_default():

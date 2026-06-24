@@ -31,6 +31,7 @@ let _allSessions = [
 ];
 let _sessionStreamingById = new Map([['old', true], ['new', true]]);
 let _sessionListSnapshotById = new Map([['old', {{message_count: 10}}]]);
+let _sessionListSourceById = new Map([['old', 'webui'], ['new', 'webui']]);
 function _forgetObservedStreamingSession(_sid) {{}}
 function renderSessionListFromCache() {{}}
 {fn_src}
@@ -40,7 +41,11 @@ _markSessionCompletedInList({{
   message_count: 3,
   parent_session_id: 'old',
 }}, 'old');
-console.log(JSON.stringify({{rows: _allSessions, oldStreaming: _sessionStreamingById.has('old')}}));
+console.log(JSON.stringify({{
+  rows: _allSessions,
+  oldStreaming: _sessionStreamingById.has('old'),
+  oldSourceTracked: _sessionListSourceById.has('old'),
+}}));
 """
     result = subprocess.run(["node", "-e", script], check=True, text=True, capture_output=True)
     payload = json.loads(result.stdout)
@@ -49,3 +54,4 @@ console.log(JSON.stringify({{rows: _allSessions, oldStreaming: _sessionStreaming
     assert payload["rows"][0]["title"] == "After done"
     assert payload["rows"][0]["message_count"] == 3
     assert payload["oldStreaming"] is False
+    assert payload["oldSourceTracked"] is False

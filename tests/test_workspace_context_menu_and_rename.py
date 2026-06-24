@@ -184,6 +184,20 @@ class ShowPromptDialogPrefillTests(unittest.TestCase):
                     break
         return self.src[start:end]
 
+    def test_show_prompt_dialog_restores_hidden_cancel_button(self):
+        """#4581: the outside-symlink info dialog calls showConfirmDialog with
+        hideCancel:true, which sets the shared #appDialogCancel button to
+        display:none. showPromptDialog reuses the same button, so it must restore
+        the display before showing — otherwise the next rename/new-file prompt
+        opens with no Cancel button after a user clicks an external symlink."""
+        body = self._slice_show_prompt_dialog()
+        self.assertIn(
+            "cancelBtn.style.display=''", body.replace(" ", ""),
+            "showPromptDialog must reset cancelBtn.style.display so a prior "
+            "showConfirmDialog({hideCancel:true}) can't leave the Cancel button "
+            "hidden on a subsequent prompt (#4581 regression).",
+        )
+
     def test_show_prompt_dialog_accepts_default_value_alias(self):
         body = self._slice_show_prompt_dialog()
         # Must reference `opts.defaultValue` somewhere — the alias was the

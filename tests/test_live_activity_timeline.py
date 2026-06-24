@@ -65,15 +65,17 @@ def test_tool_activity_uses_tool_cards_and_run_activity_owns_timer():
     assert "tool-worklog-summary" in UI_JS
     assert "tool-call-group-duration" in UI_JS
     assert "Activity · Running" not in UI_JS
-    assert "Working for ${label}" in UI_JS
+    assert "_processedElapsedLabel" in UI_JS
+    assert "t('processed_elapsed',text)" in UI_JS
     assert "_isActivityTimerGroup(group)" in UI_JS
     assert "opts.turnDuration" in UI_JS
     assert "data-turn-duration" in UI_JS
     assert "durationText?` Done in ${durationText}`" in UI_JS
     assert "return !!(group&&group.getAttribute('data-run-activity-group')==='1');" in UI_JS
     live_summary_fn = UI_JS.split("function _syncToolCallGroupSummary(group)", 1)[1].split("function _activityProgressLabelForToolName", 1)[0]
-    assert "_activityLiveProgressLabel(group)" in live_summary_fn
-    assert "[progressText, activeText].filter(Boolean).join(' · ')" in live_summary_fn
+    assert "_activityLiveProgressLabel(group)" not in live_summary_fn
+    assert "_activityProcessedElapsedLabel(group)" in live_summary_fn
+    assert "durationEl.textContent='';" in live_summary_fn
 
 
 def test_settled_activity_render_keeps_tools_bound_to_progress_bursts():
@@ -162,6 +164,7 @@ def test_message_tool_metadata_empty_assistant_tools_reuse_previous_visible_anch
     has_visible_fn = _function_source(UI_JS, "_assistantMessageHasVisibleContent")
     empty_placeholder_fn = _function_source(UI_JS, "_isAssistantEmptyPlaceholderContent")
     has_reasoning_fn = _function_source(UI_JS, "_messageHasReasoningPayload")
+    anchor_scene_final_fn = _function_source(UI_JS, "_assistantAnchorSceneFinalAnswerText")
     reasoning_fn = _function_source(UI_JS, "_assistantReasoningPayloadText")
     anchor_fn = _function_source(UI_JS, "_assistantToolAnchorIdxForMessage")
     script = f"""
@@ -175,6 +178,7 @@ function msgContent(m){{
 }}
 {has_reasoning_fn}
 {empty_placeholder_fn}
+{anchor_scene_final_fn}
 {has_visible_fn}
 {reasoning_fn}
 {anchor_fn}

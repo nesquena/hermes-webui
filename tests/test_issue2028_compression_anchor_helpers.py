@@ -14,7 +14,7 @@ def test_legacy_duplicate_anchor_helpers_are_removed():
 
     assert "def _visible_messages_for_anchor" not in routes_src
     assert "def _visible_messages_for_compression_anchor" not in streaming_src
-    assert "visible_messages_for_anchor(compressed, auto_compression=False)" in routes_src
+    assert "visible_messages_for_anchor(s.messages, auto_compression=False)" in routes_src
     assert "visible_messages_for_anchor(s.messages, auto_compression=True)" in streaming_src
 
 

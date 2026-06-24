@@ -253,20 +253,23 @@ function syncWorkspacePanelUI(){
 
 function toggleMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
-  const overlay=$('mobileOverlay');
   if(!sidebar)return;
   const isOpen=sidebar.classList.contains('mobile-open');
   if(isOpen){closeMobileSidebar();}
-  else{sidebar.classList.add('mobile-open');if(overlay)overlay.classList.add('visible');}
+  else{
+    try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
+    sidebar.classList.remove('mobile-session-page');sidebar.classList.add('mobile-panel-drawer','mobile-open');
+  }
 }
 function closeMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
-  if(sidebar)sidebar.classList.remove('mobile-open');
+  if(sidebar)sidebar.classList.remove('mobile-open','mobile-session-page','mobile-panel-drawer');
   if(overlay)overlay.classList.remove('visible');
 }
 
 const _PWA_SIDEBAR_SWIPE_EDGE=80;
+const _PWA_SIDEBAR_SWIPE_CLAIM=10;
 const _PWA_SIDEBAR_SWIPE_TRIGGER=64;
 const _PWA_SIDEBAR_SWIPE_MAX_VERTICAL=56;
 let _pwaSidebarSwipe=null;
@@ -284,35 +287,55 @@ function _isInteractiveSwipeTarget(target){
   catch(_){return false;}
 }
 
+function _pwaSidebarSwipePoint(e){
+  const touch=e&&e.touches&&e.touches[0]||e&&e.changedTouches&&e.changedTouches[0];
+  const src=touch||e;
+  if(!src)return null;
+  return {clientX:Number(src.clientX)||0,clientY:Number(src.clientY)||0};
+}
+
+function _isTouchPointerEvent(e){
+  return !!(e&&e.pointerType==='touch');
+}
+
 function _openMobileSidebarFromGesture(){
   if(_isDesktopWidth())return;
   const sidebar=document.querySelector('.sidebar');
-  const overlay=$('mobileOverlay');
   if(!sidebar)return;
+  try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
   const layout=document.querySelector('.layout');
   if(layout)layout.classList.remove('sidebar-collapsed');
   sidebar.classList.remove('sidebar-collapsed');
   try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
+  sidebar.classList.remove('mobile-session-page');
+  sidebar.classList.add('mobile-panel-drawer');
   sidebar.classList.add('mobile-open');
-  if(overlay)overlay.classList.add('visible');
 }
 
 function _onPwaSidebarSwipeStart(e){
   if(_isDesktopWidth())return;
+  if(_isTouchPointerEvent(e))return;
   if(e.pointerType==='mouse'||(e.pointerType&&e.pointerType!=='touch'&&e.pointerType!=='pen'))return;
   if(document.querySelector('.sidebar')?.classList.contains('mobile-open'))return;
-  const clientX=Number(e.clientX)||0;
-  if(clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
+  const point=_pwaSidebarSwipePoint(e);
+  if(!point)return;
+  if(point.clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
   if(_isInteractiveSwipeTarget(e.target))return;
-  _pwaSidebarSwipe={startX:clientX,startY:Number(e.clientY)||0,active:true,opened:false};
+  _pwaSidebarSwipe={startX:point.clientX,startY:point.clientY,active:true,opened:false};
 }
 
 function _onPwaSidebarSwipeMove(e){
+  if(_isTouchPointerEvent(e))return;
   const swipe=_pwaSidebarSwipe;
   if(!swipe||!swipe.active||swipe.opened)return;
-  const dx=(Number(e.clientX)||0)-swipe.startX;
-  const dy=(Number(e.clientY)||0)-swipe.startY;
+  const point=_pwaSidebarSwipePoint(e);
+  if(!point)return;
+  const dx=point.clientX-swipe.startX;
+  const dy=point.clientY-swipe.startY;
   if(dx<0||Math.abs(dy)>_PWA_SIDEBAR_SWIPE_MAX_VERTICAL*1.5){_pwaSidebarSwipe=null;return;}
+  if(dx>=_PWA_SIDEBAR_SWIPE_CLAIM&&dx>Math.abs(dy)*1.2){
+    if(e.cancelable)e.preventDefault();
+  }
   if(dx>=_PWA_SIDEBAR_SWIPE_TRIGGER&&Math.abs(dy)<=_PWA_SIDEBAR_SWIPE_MAX_VERTICAL&&dx>Math.abs(dy)*1.5){
     if(e.cancelable)e.preventDefault();
     swipe.opened=true;
@@ -320,10 +343,21 @@ function _onPwaSidebarSwipeMove(e){
   }
 }
 
-function _onPwaSidebarSwipeEnd(){_pwaSidebarSwipe=null;}
-function _onPwaSidebarSwipeCancel(){_pwaSidebarSwipe=null;}
+function _onPwaSidebarSwipeEnd(e){if(_isTouchPointerEvent(e))return;_pwaSidebarSwipe=null;}
+function _onPwaSidebarSwipeCancel(e){if(_isTouchPointerEvent(e))return;_pwaSidebarSwipe=null;}
 
 function _installPwaSidebarSwipeGesture(){
+  // #4660 review (Codex CORE): the #pwaSidebarEdgeGuard element is now
+  // pointer-events:none (CSS), so it can no longer intercept hit-testing for
+  // taps / vertical scrolls that merely start in the left edge strip — those
+  // pass through to the underlying .messages scroller. The edge-swipe-to-open
+  // gesture is handled entirely by the window-level CAPTURE touch/pointer
+  // listeners below (which see the event regardless of the guard), so no
+  // dedicated guard-element listener is needed.
+  window.addEventListener('touchstart', _onPwaSidebarSwipeStart, {capture:true,passive:true});
+  window.addEventListener('touchmove', _onPwaSidebarSwipeMove, {capture:true,passive:false});
+  window.addEventListener('touchend', _onPwaSidebarSwipeEnd, {capture:true,passive:true});
+  window.addEventListener('touchcancel', _onPwaSidebarSwipeCancel, {capture:true,passive:true});
   window.addEventListener('pointerdown', _onPwaSidebarSwipeStart, {passive:true});
   window.addEventListener('pointermove', _onPwaSidebarSwipeMove, {passive:false});
   window.addEventListener('pointerup', _onPwaSidebarSwipeEnd, {passive:true});
@@ -436,10 +470,9 @@ function mobileSwitchPanel(name){
     closeMobileSidebar();
   } else {
     const sidebar=document.querySelector('.sidebar');
-    const overlay=$('mobileOverlay');
     if(sidebar){
-      sidebar.classList.add('mobile-open');
-      if(overlay)overlay.classList.add('visible');
+      sidebar.classList.remove('mobile-session-page');
+      sidebar.classList.add('mobile-panel-drawer','mobile-open');
     }
   }
 }
@@ -463,6 +496,36 @@ $('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat
 $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
+function _micIsLocalhostOrLoopback(hostname){
+  const host=String(hostname||'').toLowerCase().replace(/^\[|\]$/g,'');
+  return host==='localhost'
+    || host.endsWith('.localhost')
+    || host==='::1'
+    || host==='0:0:0:0:0:0:0:1'
+    || /^127\./.test(host);
+}
+
+function _micOriginNeedsSecureContext(){
+  if(window.isSecureContext===true) return false;
+  const loc=window.location||{};
+  const protocol=loc.protocol||'';
+  return protocol==='http:'&&!_micIsLocalhostOrLoopback(loc.hostname);
+}
+
+function _micToastKeyForRecognitionError(error){
+  if((error==='not-allowed'||error==='service-not-allowed'||error==='audio-capture')
+      && _micOriginNeedsSecureContext()){
+    return 'mic_insecure_origin';
+  }
+  const msgs={
+    'not-allowed':'mic_denied',
+    'service-not-allowed':'mic_denied',
+    'no-speech':'mic_no_speech',
+    'network':'mic_network',
+  };
+  return msgs[error]||null;
+}
+
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
   const _canRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
@@ -677,12 +740,8 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
         _forceMediaRecorder=true;
         recognition=null;
       }
-      const msgs={
-        'not-allowed':t('mic_denied'),
-        'no-speech':t('mic_no_speech'),
-        'network':t('mic_network'),
-      };
-      showToast(msgs[event.error]||t('mic_error')+event.error);
+      const messageKey=_micToastKeyForRecognitionError(event.error);
+      showToast(messageKey?t(messageKey):t('mic_error')+event.error);
     };
 
     return sr;
@@ -739,6 +798,12 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     _isRecording=true;
     _finalText='';
     _prefix=ta.value;
+    if(_micOriginNeedsSecureContext()){
+      _isRecording=false;
+      window._micPendingSend=false;
+      showToast(t('mic_insecure_origin'));
+      return;
+    }
     if(recognition && !_forceMediaRecorder && !_rawAudioMode){
       _activeCaptureMode='speech';
       recognition.start();
@@ -788,7 +853,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
       _isRecording=false;
       window._micPendingSend=false;
       _stopTracks();
-      showToast(t('mic_denied'));
+      showToast(t(_micToastKeyForRecognitionError('not-allowed')||'mic_denied'));
     }
   };
 
@@ -907,6 +972,11 @@ window._micPendingSend=window._micPendingSend||false;
 
   function _startListening(){
     if(!_voiceModeActive) return;
+    if(_micOriginNeedsSecureContext()){
+      _deactivate();
+      showToast(t('mic_insecure_origin'));
+      return;
+    }
     _clearBrowserTtsRecovery();
     _setState('listening');
 
@@ -962,7 +1032,8 @@ window._micPendingSend=window._micPendingSend||false;
       }
       if(event.error==='not-allowed'||event.error==='service-not-allowed'||event.error==='audio-capture'){
         _deactivate();
-        showToast(t('mic_denied'));
+        const messageKey=_micToastKeyForRecognitionError(event.error);
+        showToast(messageKey?t(messageKey):t('mic_error')+event.error);
         return;
       }
       // Other errors — try to restart
@@ -1197,6 +1268,10 @@ window._micPendingSend=window._micPendingSend||false;
   };
 
   function _activate(){
+    if(_micOriginNeedsSecureContext()){
+      showToast(t('mic_insecure_origin'));
+      return;
+    }
     _voiceModeActive=true;
     modeBtn.classList.add('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
@@ -1351,6 +1426,7 @@ $('modelSelect').onchange=async()=>{
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
   if(!S.session){
+    if(typeof _rememberEmptyComposerModelOverride==='function') _rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider);
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncReasoningChip==='function') syncReasoningChip();
     return;
@@ -1437,11 +1513,6 @@ let _imeComposing=false;
 })();
 function _isImeEnter(e){return e.isComposing||e.keyCode===229||_imeComposing;}
 window._isImeEnter=_isImeEnter;
-function _isVirtualKeyboardLikelyOpen(){
-  const vv=window.visualViewport;
-  if(!vv||!window.innerHeight)return true;
-  return window.innerHeight-vv.height>120;
-}
 // #3076: a touch-primary device (`pointer:coarse`) can still have a
 // physical keyboard attached (Android tablet + Bluetooth keyboard,
 // detachable Surface in tablet mode, iPad + Magic Keyboard). When that
@@ -1474,9 +1545,13 @@ $('msg').addEventListener('keydown',e=>{
     }
   }
   // Send key: respect user preference.
-  // On touch-primary devices with the software keyboard open, default to
-  // Enter = newline since there's no physical Shift key. Hardware keyboards on
-  // tablets keep desktop behavior when the viewport is not keyboard-shrunk.
+  // On touch-primary devices (coarse pointer, no fine pointer co-existing),
+  // default to Enter = newline regardless of whether the visual viewport has
+  // shrunk. The viewport-shrink heuristic (_isVirtualKeyboardLikelyOpen) was
+  // unreliable on iOS Safari and some Android browsers where the keyboard
+  // doesn't consistently reduce vv.height by >120px. The pointer media query
+  // pair is a sufficient and more reliable signal for "software keyboard only".
+  // Hardware keyboards on tablets are covered by _hasFinePointerCoexisting.
   // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
@@ -1484,8 +1559,7 @@ $('msg').addEventListener('keydown',e=>{
     const isNumpadEnter=_isNumpadEnter(e);
     const _mobileDefault=matchMedia('(pointer:coarse)').matches
       &&!_hasFinePointerCoexisting()
-      &&window._sendKey==='enter'
-      &&_isVirtualKeyboardLikelyOpen();
+      &&window._sendKey==='enter';
     if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(isNumpadEnter||e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
@@ -1921,6 +1995,87 @@ function applyBotName(){
   if(msg) msg.placeholder='Message '+name+'\u2026';
 }
 
+const _COMPOSER_CONTROL_TOGGLE_DEFS=[
+  {key:'hide_composer_attach',label:'Attach',labelKey:'composer_control_attach',selectors:['#btnAttach']},
+  {key:'hide_composer_saved_prompts',label:'Saved prompts',labelKey:'composer_control_saved_prompts',selectors:['#btnSavedPrompts']},
+  {key:'hide_composer_mic',label:'Mic',labelKey:'composer_control_mic',selectors:['#btnMic']},
+  {key:'hide_composer_profile',label:'Profile',labelKey:'composer_control_profile',selectors:['#profileChipWrap']},
+  {key:'hide_composer_workspace',label:'Workspace',labelKey:'composer_control_workspace',selectors:['.composer-ws-wrap','#composerMobileWorkspaceAction']},
+  {key:'hide_composer_model',label:'Model',labelKey:'composer_control_model',selectors:['.composer-model-wrap','#composerMobileModelAction']},
+  {key:'hide_composer_reasoning',label:'Reasoning',labelKey:'composer_control_reasoning',selectors:['#composerReasoningWrap','#composerMobileReasoningAction']},
+  {key:'hide_composer_context',label:'Context',labelKey:'composer_control_context',selectors:['#ctxIndicatorWrap','#composerMobileContextAction']},
+];
+window._COMPOSER_CONTROL_TOGGLE_DEFS=_COMPOSER_CONTROL_TOGGLE_DEFS;
+
+const _COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=[
+  {key:'hide_composer_voice_mode',label:'Voice mode',labelKey:'composer_control_voice_mode',selectors:['#btnVoiceMode']},
+  {key:'hide_composer_yolo',label:'YOLO',labelKey:'composer_control_yolo',selectors:['#yoloPill']},
+  {key:'hide_composer_bg_badge',label:'Background badge',labelKey:'composer_control_bg_badge',selectors:['#bgBadge']},
+  {key:'hide_composer_mobile_config',label:'Mobile config',labelKey:'composer_control_mobile_config',selectors:['#composerMobileConfigBtn']},
+  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip']},
+  {key:'hide_composer_toolsets',label:'Toolsets',labelKey:'composer_control_toolsets',selectors:['#composerToolsetsWrap']},
+  {key:'hide_composer_status',label:'Status',labelKey:'composer_control_status',selectors:['#composerStatus']},
+];
+window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS;
+
+function _allComposerControlToggleDefs(){
+  return _COMPOSER_CONTROL_TOGGLE_DEFS.concat(_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS);
+}
+
+function _composerControlVisibilityFromSettings(settings){
+  const next={};
+  for(const def of _allComposerControlToggleDefs()){
+    next[def.key]=!!(settings&&settings[def.key]);
+  }
+  return next;
+}
+window._composerControlVisibilityFromSettings=_composerControlVisibilityFromSettings;
+
+function _setComposerControlHidden(el, hidden){
+  if(!el) return;
+  el.classList.toggle('composer-control-hidden', !!hidden);
+  if(hidden) el.setAttribute('aria-hidden','true');
+  else el.removeAttribute('aria-hidden');
+}
+
+function _applyComposerFooterVisibilitySettings(){
+  const hidden=window._composerControlVisibility||{};
+  for(const def of _allComposerControlToggleDefs()){
+    const isHidden=!!hidden[def.key];
+    for(const selector of def.selectors){
+      document.querySelectorAll(selector).forEach(el=>_setComposerControlHidden(el,isHidden));
+    }
+  }
+
+  const hideMic=!!hidden.hide_composer_mic;
+  if(hideMic&&window._micActive&&typeof window._stopMic==='function'){
+    try{window._stopMic();}catch(_){ }
+  }
+
+  const hideSavedPrompts=!!hidden.hide_composer_saved_prompts;
+  const savedBtn=$('btnSavedPrompts');
+  const savedPopup=$('savedPromptsPopup');
+  if(hideSavedPrompts&&savedPopup){
+    savedPopup.style.display='none';
+    if(savedBtn) savedBtn.setAttribute('aria-expanded','false');
+  }
+
+  if(hidden.hide_composer_workspace&&typeof closeWsDropdown==='function') closeWsDropdown();
+  if(hidden.hide_composer_profile&&typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(hidden.hide_composer_model&&typeof closeModelDropdown==='function') closeModelDropdown();
+  if(hidden.hide_composer_reasoning&&typeof closeReasoningDropdown==='function') closeReasoningDropdown();
+  if(hidden.hide_composer_toolsets&&typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(hidden.hide_composer_mobile_config&&typeof closeMobileComposerConfig==='function') closeMobileComposerConfig();
+}
+window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
+
+function _applyTitlebarProfileVisibility(){
+  const btn=$('titlebarProfileBtn');
+  if(!btn) return;
+  btn.style.display=window._showTitlebarProfile?'':'none';
+}
+window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
+
 (async()=>{
   // Load send key preference
   let _bootSettings={};
@@ -1973,6 +2128,9 @@ function applyBotName(){
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._autoScrollFollow=s.auto_scroll_follow!==false;
+    window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
+    window._showTitlebarProfile=!!s.show_titlebar_profile;
+    _applyTitlebarProfileVisibility();
     window._botName=s.bot_name||'Hermes';
     if(s.default_model_provider) window._activeProvider=s.default_model_provider;
     if(s.default_model){
@@ -2000,6 +2158,12 @@ function applyBotName(){
       }
     }
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
+    window._renderUserMarkdown=!!s.render_user_markdown;
+    // JSON/YAML structured code-block default view (#484): auto | on | off,
+    // plus the 'auto'-mode line threshold (sanitized int 1..1000, fallback 10).
+    window._structuredCodeDefaultView=['on','off','auto'].includes(s.structured_code_default_view)?s.structured_code_default_view:'auto';
+    const _sctLines=parseInt(s.structured_code_auto_tree_lines,10);
+    window._structuredCodeAutoTreeLines=(Number.isFinite(_sctLines)&&_sctLines>=1&&_sctLines<=1000)?_sctLines:10;
     // Reconcile appearance: prefer localStorage (what the user last saw) over
     // the server.  If they diverge (e.g. a previous autosave POST failed),
     // push the localStorage values back to the server so settings.json stays
@@ -2042,6 +2206,7 @@ function applyBotName(){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
+    _applyComposerFooterVisibilitySettings();
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
@@ -2068,11 +2233,14 @@ function applyBotName(){
     window._workspaceTodosTab=false;
     if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
     window._sessionJumpButtonsEnabled=false;
+    window._structuredCodeDefaultView='auto';
+    window._structuredCodeAutoTreeLines=10;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._autoScrollFollow=true;
+    window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
@@ -2082,6 +2250,7 @@ function applyBotName(){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
+    _applyComposerFooterVisibilitySettings();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
   // Non-blocking update check (fire-and-forget, once per tab session)
@@ -2097,6 +2266,8 @@ function applyBotName(){
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  const titleLabel=$('titlebarProfileLabel');
+  if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.

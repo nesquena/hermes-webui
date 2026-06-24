@@ -112,5 +112,5 @@ def test_rtl_in_config_defaults_and_writable_keys():
 def test_rtl_localized_in_all_locales():
     js = I18N.read_text(encoding="utf-8")
     # Count occurrences — should match the 11 locale blocks
-    assert js.count("settings_label_rtl:") == 13
-    assert js.count("settings_desc_rtl:") == 13
+    assert js.count("settings_label_rtl:") == 14
+    assert js.count("settings_desc_rtl:") == 14

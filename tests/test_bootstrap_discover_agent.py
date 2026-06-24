@@ -46,6 +46,30 @@ def _make_hermes_cli(tmp_path, shebang_target: str | None):
     return hermes
 
 
+def _make_hermes_bash_wrapper(tmp_path, exec_target: str):
+    """Write a `hermes` POSIX shell wrapper that ``exec``s the venv entrypoint.
+
+    This is the current installer shape: a bash wrapper whose shebang is
+    ``#!/usr/bin/env bash`` (so the shebang itself points at /usr/bin/env, not
+    the agent), and whose ``exec`` line carries the real venv path.
+    """
+    bin_dir = tmp_path / "user-bin"
+    bin_dir.mkdir(exist_ok=True)
+    hermes = bin_dir / "hermes"
+    hermes.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            unset PYTHONPATH
+            unset PYTHONHOME
+            exec "{exec_target}" "$@"
+            """
+        ),
+        encoding="utf-8",
+    )
+    return hermes
+
+
 def _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes_path):
     """Point `which("hermes")` at our fake CLI and clear all standard candidates."""
     monkeypatch.setattr(bootstrap.shutil, "which", lambda name: str(hermes_path) if name == "hermes" else None)
@@ -111,3 +135,57 @@ def test_explicit_candidate_takes_precedence_over_shebang(monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_WEBUI_AGENT_DIR", str(explicit_install))
 
     assert bootstrap.discover_agent_dir() == explicit_install.resolve()
+
+
+def test_discovers_agent_dir_from_hermes_bash_wrapper(monkeypatch, tmp_path):
+    """Current installer shape: a `#!/usr/bin/env bash` wrapper that execs the
+    venv entrypoint. The shebang is useless (/usr/bin/env), so discovery must
+    follow the quoted exec target up to run_agent.py. Regression for the
+    root-on-Linux report where bootstrap built a deps-only local venv and chat
+    failed with 'cannot import both WebUI dependencies and Hermes Agent'."""
+    install, _venv_python = _make_agent_install(tmp_path)
+    venv_hermes = install / "venv" / "bin" / "hermes"
+    venv_hermes.write_text("", encoding="utf-8")
+    hermes = _make_hermes_bash_wrapper(tmp_path, str(venv_hermes))
+    _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes)
+    monkeypatch.chdir(tmp_path)
+
+    assert bootstrap.discover_agent_dir() == install.resolve()
+
+
+def test_root_fhs_layout_is_in_candidate_list(monkeypatch, tmp_path):
+    """Root-on-Linux installs put agent code at /usr/local/lib/hermes-agent and
+    link the CLI into /usr/local/bin. HERMES_HOME stays at /root/.hermes, so the
+    `home / 'hermes-agent'` candidate never covers it. Verify the explicit FHS
+    path is probed by discover_agent_dir() — we can't create a real /usr/local
+    dir in tests, so capture the candidates the function actually checks by
+    stubbing Path.exists to record probed paths."""
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "root-dot-hermes"))
+    monkeypatch.delenv("HERMES_WEBUI_AGENT_DIR", raising=False)
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", tmp_path / "isolated-repo-root")
+    monkeypatch.setattr(bootstrap.Path, "home", classmethod(lambda cls: tmp_path / "isolated-home"))
+
+    probed: list[str] = []
+    real_exists = bootstrap.Path.exists
+
+    def recording_exists(self):
+        probed.append(str(self))
+        return real_exists(self)
+
+    monkeypatch.setattr(bootstrap.Path, "exists", recording_exists)
+
+    bootstrap.discover_agent_dir()
+
+    assert any(p == "/usr/local/lib/hermes-agent" for p in probed), (
+        f"/usr/local/lib/hermes-agent was not probed; checked: {probed}"
+    )
+
+
+def test_bash_wrapper_without_agent_target_returns_none(monkeypatch, tmp_path):
+    """A bash wrapper whose exec target is a system path (no run_agent.py in any
+    parent) must not false-positive."""
+    hermes = _make_hermes_bash_wrapper(tmp_path, "/usr/bin/python3")
+    _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes)
+
+    assert bootstrap.discover_agent_dir() is None
