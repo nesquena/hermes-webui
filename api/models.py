@@ -646,6 +646,7 @@ class Session:
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
                  truncation_watermark=None,
+                 truncation_boundary=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -696,6 +697,7 @@ class Session:
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
         self.truncation_watermark = truncation_watermark
+        self.truncation_boundary = truncation_boundary
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -765,6 +767,7 @@ class Session:
             'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'truncation_watermark',
+            'truncation_boundary',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -5077,8 +5080,16 @@ def merge_session_messages_append_only(
     state_messages: list,
     *,
     truncation_watermark=None,
+    truncation_boundary=None,
 ) -> list:
-    """Merge sidecar/context and state.db messages without deleting local rows."""
+    """Merge sidecar/context and state.db messages without deleting local rows.
+
+    ``truncation_boundary``: the original truncate cutoff — the
+    timestamp of the last message kept by the truncate operation.  When the
+    watermark is later advanced (new turn committed), this boundary is preserved
+    so the empty-sidecar recovery can distinguish a legitimate prefix from a
+    deleted suffix instead of guessing by dropping one turn pair.
+    """
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
     watermark_timestamp = _message_timestamp_as_float({"timestamp": truncation_watermark})
@@ -5094,12 +5105,13 @@ def merge_session_messages_append_only(
         else:
             # Positive watermark advanced after edit/retry/undo (#4767).
             # Without a sidecar there's no seen_content_keys to check against,
-            # so we reconstruct the correct transcript from state.db alone:
-            #   1. Keep all messages at/after the watermark (the new turn +
-            #      post-edit assistant reply — these are always legitimate).
-            #   2. For pre-watermark messages, drop the last complete turn
-            #      (user + assistant pair) which is the replaced tail.
-            #      Everything before that is legitimate history.
+            # so we reconstruct the correct transcript from state.db alone.
+            #
+            # Use truncation_boundary (the original truncate cutoff) to
+            # distinguish legitimate prefix from deleted suffix.  Without it,
+            # fall back to the backward-scan heuristic (drops last user+assistant
+            # pair) which works for the common single-turn case.
+            boundary_ts = _message_timestamp_as_float({"timestamp": truncation_boundary})
             at_or_after = []
             pre_watermark = []
             for msg in state_messages:
@@ -5108,19 +5120,28 @@ def merge_session_messages_append_only(
                     at_or_after.append(msg)
                 else:
                     pre_watermark.append(msg)
-            # Scan pre_watermark from the end: skip assistant messages until
-            # we hit a user message (the replaced prompt), then stop.
-            i = len(pre_watermark) - 1
-            while i >= 0:
-                role = str(pre_watermark[i].get("role", "")).lower()
-                if role == "assistant":
-                    i -= 1
-                elif role == "user":
-                    i -= 1  # skip this user message too (the replaced prompt)
-                    break
-                else:
-                    i -= 1  # tool messages etc. — skip
-            filtered = pre_watermark[:i + 1] + at_or_after
+            if boundary_ts is not None:
+                # Use the persisted boundary: keep only messages at or before it.
+                pre_legitimate = [
+                    m for m in pre_watermark
+                    if (ts := _message_timestamp_as_float(m)) is not None
+                    and ts <= boundary_ts
+                ]
+                filtered = pre_legitimate + at_or_after
+            else:
+                # Fallback: backward scan (works when exactly one turn was
+                # deleted — the common edit/retry/undo case).
+                i = len(pre_watermark) - 1
+                while i >= 0:
+                    role = str(pre_watermark[i].get("role", "")).lower()
+                    if role == "assistant":
+                        i -= 1
+                    elif role == "user":
+                        i -= 1  # skip this user message too (the replaced prompt)
+                        break
+                    else:
+                        i -= 1  # tool messages etc. — skip
+                filtered = pre_watermark[:i + 1] + at_or_after
 
         # Deduplicate true duplicates (same role, content, exact timestamp)
         # without collapsing legitimately-repeated identical turns (#3346).
@@ -5234,12 +5255,19 @@ def merge_session_messages_append_only(
         # content is not in the sidecar, it's a replaced message edited at the
         # same second — skip it.  The edited version (same timestamp, different
         # content) is in the sidecar and survives this check.
+        #
+        # Only apply the same-second guard to user messages.  An assistant reply
+        # (or tool message) at the same second as the watermark is a legitimate
+        # post-edit recovery row — the sidecar holds only the edited user
+        # checkpoint, so the assistant reply's content won't be in it and would
+        # be silently dropped without this role guard.
         if (
             watermark_timestamp is not None
             and timestamp is not None
             and timestamp == watermark_timestamp
             and key not in seen_message_keys
             and _session_message_content_key(msg) not in seen_content_keys
+            and str(msg.get("role", "")).lower() == "user"
         ):
             continue
         # Check for true duplicates using full-precision timestamp (#3346).
@@ -5294,27 +5322,41 @@ def merge_session_messages_append_only(
             and timestamp is not None
             and timestamp <= max_sidecar_timestamp
         ):
-            # Legacy key within sidecar timestamp range.  Normally skip — the
-            # sidecar already has this message.  Exception: if the state.db
-            # message has tool_calls that DIFFER from the sidecar version
-            # (same content_key but different dedup_key because tool_calls
-            # differ), preserve it — distinct tool_calls must not be collapsed.
-            _tc = msg.get("tool_calls")
-            if _tc:
-                _ck = _session_message_content_key(msg)
-                if _ck in seen_content_keys and dedup_key not in seen_dedup_keys:
-                    pass  # different tool_calls from sidecar — preserve
-                else:
-                    continue
+            # When a truncation watermark is active and the sidecar holds only
+            # the edited user checkpoint, state.db may contain an assistant/tool
+            # reply at the same timestamp that is NOT in the sidecar.  This
+            # block would normally skip it ("sidecar already has this message"),
+            # but the sidecar doesn't — it's a genuine state-only recovery row.
+            # Let it through.
+            if (
+                watermark_timestamp is not None
+                and timestamp == watermark_timestamp
+                and str(msg.get("role", "")).lower() != "user"
+                and _session_message_content_key(msg) not in seen_content_keys
+            ):
+                pass  # fall through to append below
             else:
-                if msg.get("role") == "user" and _session_message_content_key(msg) not in seen_content_keys:
-                    if _insert_state_message_chronologically(merged_messages, msg):
-                        seen_message_keys.add(key)
-                        seen_dedup_keys.add(dedup_key)
-                        seen_content_keys.add(_session_message_content_key(msg))
-                        seen_visible_keys.add(visible_key)
+                # Legacy key within sidecar timestamp range.  Normally skip — the
+                # sidecar already has this message.  Exception: if the state.db
+                # message has tool_calls that DIFFER from the sidecar version
+                # (same content_key but different dedup_key because tool_calls
+                # differ), preserve it — distinct tool_calls must not be collapsed.
+                _tc = msg.get("tool_calls")
+                if _tc:
+                    _ck = _session_message_content_key(msg)
+                    if _ck in seen_content_keys and dedup_key not in seen_dedup_keys:
+                        pass  # different tool_calls from sidecar — preserve
+                    else:
+                        continue
+                else:
+                    if msg.get("role") == "user" and _session_message_content_key(msg) not in seen_content_keys:
+                        if _insert_state_message_chronologically(merged_messages, msg):
+                            seen_message_keys.add(key)
+                            seen_dedup_keys.add(dedup_key)
+                            seen_content_keys.add(_session_message_content_key(msg))
+                            seen_visible_keys.add(visible_key)
+                        continue
                     continue
-                continue
         seen_message_keys.add(key)
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(_session_message_content_key(msg))
@@ -5364,6 +5406,7 @@ def reconciled_state_db_messages_for_session(
         local_messages,
         state_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
+        truncation_boundary=getattr(session, "truncation_boundary", None),
     )
 
 
