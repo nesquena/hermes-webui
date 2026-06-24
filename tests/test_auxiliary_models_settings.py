@@ -5,6 +5,7 @@ that the JS loading/saving logic is wired up, and that all locales have the
 required i18n keys.
 """
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).parent.parent
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
@@ -327,6 +328,55 @@ class TestAuxiliaryModelsBackend:
         assert '"/api/model/set"' in self.ROUTES_PY, (
             "Missing /api/model/set route in routes.py"
         )
+
+    def test_default_model_routes_drop_auxiliary_auto_provider_sentinel(self, monkeypatch):
+        from api import routes
+
+        seen = []
+
+        monkeypatch.setattr(routes, "_csrf_exempt_path", lambda _path: True)
+        monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
+
+        def fake_set_default_model(model, provider=None, advanced=None):
+            seen.append({
+                "model": model,
+                "provider": provider,
+                "advanced": advanced,
+            })
+            return {"ok": True, "model": model, "provider": provider}
+
+        monkeypatch.setattr(routes, "set_hermes_default_model", fake_set_default_model)
+
+        bodies = {
+            "/api/default-model": {
+                "model": "gpt-5.5",
+                "provider": "auto",
+                "advanced": {"base_url": "https://example.invalid/v1"},
+            },
+            "/api/model/set": {
+                "scope": "main",
+                "model": "gpt-5.5",
+                "provider": "auto",
+                "advanced": {"base_url": "https://example.invalid/v1"},
+            },
+        }
+
+        for path, body in bodies.items():
+            monkeypatch.setattr(routes, "read_body", lambda _handler, payload=body: payload)
+            routes.handle_post(object(), SimpleNamespace(path=path, query=""))
+
+        assert seen == [
+            {
+                "model": "gpt-5.5",
+                "provider": None,
+                "advanced": {"base_url": "https://example.invalid/v1"},
+            },
+            {
+                "model": "gpt-5.5",
+                "provider": None,
+                "advanced": {"base_url": "https://example.invalid/v1"},
+            },
+        ]
 
     def test_get_auxiliary_models_function_exists(self):
         """get_auxiliary_models() must exist in api/config.py."""
