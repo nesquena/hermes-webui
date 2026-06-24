@@ -1430,6 +1430,10 @@
   .approval-collapse:hover{color:var(--text);border-color:var(--accent-bg-strong);}
   .approval-collapse svg{width:14px;height:14px;display:block;}
   .approval-collapse:focus-visible{outline:2px solid var(--blue);outline-offset:2px;}
+  .approval-dismiss{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border:1px solid var(--border2);border-radius:999px;background:var(--surface);color:var(--muted);font:inherit;padding:0;cursor:pointer;}
+  .approval-dismiss:hover{color:var(--text);border-color:var(--accent-bg-strong);}
+  .approval-dismiss svg{width:14px;height:14px;display:block;}
+  .approval-dismiss:focus-visible{outline:2px solid var(--blue);outline-offset:2px;}
   .approval-card.collapsed{max-height:56px;bottom:8px;}
   .approval-card.collapsed .approval-inner{max-height:48px;overflow:hidden;padding:10px 14px;}
   .approval-card.collapsed .approval-header{margin-bottom:0;}

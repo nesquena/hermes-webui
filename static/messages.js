@@ -5252,6 +5252,33 @@ let _approvalSessionId = null;
 let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
 
+const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
+
+function _getDismissedApprovals() {
+  try { return JSON.parse(localStorage.getItem(_DISMISSED_APPROVALS_KEY) || '[]'); }
+  catch (_) { return []; }
+}
+
+function _isApprovalDismissed(approvalId) {
+  if (!approvalId) return false;
+  return _getDismissedApprovals().includes(approvalId);
+}
+
+function _markApprovalDismissed(approvalId) {
+  if (!approvalId) return;
+  const set = _getDismissedApprovals().filter(id => id !== approvalId);
+  set.push(approvalId);
+  try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set.slice(-100))); }
+  catch (_) {}
+}
+
+function _unmarkApprovalDismissed(approvalId) {
+  if (!approvalId) return;
+  const set = _getDismissedApprovals().filter(id => id !== approvalId);
+  try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set)); }
+  catch (_) {}
+}
+
 function _promptActiveSessionId() {
   return (S.session && S.session.session_id) || null;
 }
@@ -5309,6 +5336,7 @@ function showApprovalForSession(sid, pending, pendingCount) {
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
+  if (pending && pending.approval_id && _isApprovalDismissed(pending.approval_id)) return;
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
@@ -5350,6 +5378,11 @@ function showApprovalCard(pending, pendingCount) {
     setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
   }
   if (typeof syncTopbar === 'function') syncTopbar();
+}
+
+function dismissApprovalCard() {
+  if (_approvalCurrentId) _markApprovalDismissed(_approvalCurrentId);
+  hideApprovalCard(true);
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -5415,6 +5448,7 @@ async function respondApproval(choice) {
   const sid = _approvalSessionId || (S.session && S.session.session_id);
   if (!sid) return;
   const approvalId = _approvalCurrentId;
+  _unmarkApprovalDismissed(approvalId);
   // Disable all buttons immediately to prevent double-submit
   ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
     const b = $(id);
@@ -5469,6 +5503,7 @@ function _startApprovalFallbackPoll(sid) {
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
       else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
         _clearApprovalPendingForSession(sid);
+        if (_approvalCurrentId) _unmarkApprovalDismissed(_approvalCurrentId);
         _hideApprovalCardIfOwner(sid);
         if (!S.busy) {
           stopApprovalPollingForSession(sid);
