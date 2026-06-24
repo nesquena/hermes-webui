@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Profile switching and sidebar loads are no longer dominated by re-parsing Claude Code transcripts.** On an installation with a large `~/.claude/projects` history, every `/api/sessions` build (which a profile switch triggers) re-read and JSON-parsed every Claude Code transcript file from scratch — line by line — just to recover each session's title and message count. On a 200-file / ~130MB tree that single step measured 650–1000ms and dominated the cold sidebar latency; because the directory is global but the higher session cache is keyed per active profile, it repeated in full on every switch, on the 5s CLI-cache expiry, and on every sidebar poll. The transcript parse is now memoized per file by its `(path, mtime, size)` signature, so a warm build re-stats the files (~4ms for 200) instead of re-parsing them, while any genuine edit or append transparently invalidates just that one file's entry. The redundant per-row `get_last_workspace()` call (which stats config + probes the terminal cwd) was also hoisted out of the Claude Code row loop. Measured cold-rebuild `/api/sessions` latency on a 250-session profile dropped from ~670–880ms to ~100–200ms. Output is byte-identical to the previous behavior. Thanks @rodboev for the browser-level profiling that isolated the real bottleneck. (#4718, #4662)
+
 ## [v0.51.625] — 2026-06-24 — Release WF (cron job model override no longer keeps the @provider: display prefix)
 
 ### Fixed
