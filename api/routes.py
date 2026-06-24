@@ -1284,7 +1284,9 @@ def _ensure_agent_cron_import_path() -> None:
             sys.path.append(agent_path)
         _AGENT_CRON_IMPORT_PATH_READY = agent_path
 
-        if cron_mod is not None and not cron_is_agent:
+        # Keep in-memory test doubles or namespace stubs intact; only evict a
+        # real on-disk shadow package so the agent's cron package can import.
+        if cron_mod is not None and cron_file and not cron_is_agent:
             for name in list(sys.modules):
                 if name == "cron" or name.startswith("cron."):
                     sys.modules.pop(name, None)
