@@ -101,6 +101,34 @@ def test_dismiss_approval_card_hides_card():
     assert "hideApprovalCard(true)" in body
 
 
+def test_dismiss_approval_card_clears_pending_attention():
+    # dismissApprovalCard must call _clearApprovalPendingForSession so the tab
+    # indicator stops blinking after dismiss. Without this, _rememberApprovalPending
+    # reinsertes the pending entry on every poll tick and the indicator stays lit.
+    compact = _compact(MESSAGES_JS)
+    func_start = compact.find("functiondismissApprovalCard(")
+    assert func_start != -1
+    body_end = compact.find("}", func_start)
+    body = compact[func_start:body_end + 1]
+    assert "_clearApprovalPendingForSession(sid)" in body, (
+        "dismissApprovalCard must call _clearApprovalPendingForSession(sid)"
+    )
+
+
+def test_dismiss_approval_card_captures_sid_before_hide():
+    # The session ID must be captured before hideApprovalCard(true) nulls out
+    # _approvalSessionId so the clear call receives the correct ID.
+    compact = _compact(MESSAGES_JS)
+    func_start = compact.find("functiondismissApprovalCard(")
+    assert func_start != -1
+    body_end = compact.find("}", func_start)
+    body = compact[func_start:body_end + 1]
+    sid_pos = body.find("constsid=_approvalSessionId")
+    hide_pos = body.find("hideApprovalCard(true)")
+    assert sid_pos != -1, "sid must be captured via const sid=_approvalSessionId"
+    assert sid_pos < hide_pos, "sid must be captured before hideApprovalCard is called"
+
+
 # ---------------------------------------------------------------------------
 # respondApproval prunes dismissed set
 # ---------------------------------------------------------------------------

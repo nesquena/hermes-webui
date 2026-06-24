@@ -5382,7 +5382,9 @@ function showApprovalCard(pending, pendingCount) {
 
 function dismissApprovalCard() {
   if (_approvalCurrentId) _markApprovalDismissed(_approvalCurrentId);
+  const sid = _approvalSessionId;
   hideApprovalCard(true);
+  if (sid) _clearApprovalPendingForSession(sid);
 }
 
 function _syncApprovalCollapseButton(card) {
