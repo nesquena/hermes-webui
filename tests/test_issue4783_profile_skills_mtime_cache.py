@@ -8,7 +8,6 @@ Proof matrix:
   5. .clear() forces immediate recompute.
   6. Return signature is unchanged: tuple[int, int].
 """
-import importlib
 import sys
 import time
 import types
@@ -62,7 +61,7 @@ def _make_profiles_module():
     api_pkg = types.ModuleType("api")
     sys.modules["api"] = api_pkg
 
-    import importlib.util, os
+    import importlib.util
     spec_path = Path(__file__).parent.parent / "api" / "profiles.py"
     spec = importlib.util.spec_from_file_location(mod_name, spec_path)
     mod = importlib.util.module_from_spec(spec)
