@@ -1258,7 +1258,7 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
   retryBtn.textContent = t('steer_recovery_retry');
   retryBtn.addEventListener('click', () => {
     el.remove();
-    _trySteer(msg, explicitSteer);
+    void _trySteer(msg, explicitSteer).catch(console.error);
   });
   el.appendChild(retryBtn);
   const dismissBtn = document.createElement('button');
@@ -1280,7 +1280,8 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
  *
  * @param {string} msg - The steer text.
  * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
- *   (vs the busy-mode auto-fallback). Affects toast wording and draft restore.
+ *   (vs the busy-mode auto-fallback). Affects draft restore prefix only;
+ *   toast wording is determined by the failure reason code.
  * @returns {Promise<boolean>} true when the steer was delivered, false when the
  *   draft was restored and the active stream was left untouched.
  */
@@ -1313,9 +1314,9 @@ async function _trySteer(msg, explicitSteer){
     if(typeof autoResize==='function')autoResize();
   }
   if(typeof renderTray==='function')renderTray();
-  const failbackCode = result && result.fallback;
-  showToast(t(_steerFailureMessageKey(failbackCode)), 3500);
-  _showSteerRecovery(msg, explicitSteer, failbackCode);
+  const fallbackCode = result && result.fallback;
+  showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
+  _showSteerRecovery(msg, explicitSteer, fallbackCode);
   return false;
 }
 
