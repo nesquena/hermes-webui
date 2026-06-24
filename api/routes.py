@@ -1343,9 +1343,14 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
         if home_key in seen_homes:
             continue
         seen_homes.add(home_key)
-        with cron_profile_context_for_home(home):
-            jobs = _cron_jobs_for_api(list_jobs(include_disabled=True))
         is_active = _profiles_match(owner_profile, active_profile)
+        try:
+            with cron_profile_context_for_home(home):
+                jobs = _cron_jobs_for_api(list_jobs(include_disabled=True))
+        except Exception:
+            if not is_active:
+                continue
+            raise
         for job in jobs:
             row = dict(job)
             row["owner_profile"] = owner_profile
