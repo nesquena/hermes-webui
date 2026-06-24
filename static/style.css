@@ -1732,10 +1732,10 @@
   .steer-indicator .steer-body{white-space:pre-wrap;word-break:break-word;}
   .steer-badge{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--accent-text);background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:4px;padding:1px 6px;vertical-align:middle;line-height:1.6;font-style:normal;flex-shrink:0;}
   /* Steer recovery bar: dismissible after failure, same lifecycle as steer-indicator */
-  .steer-recovery{display:flex;align-items:center;gap:0.5rem;padding:0.5rem 0.75rem;margin:0.25rem 0;border-radius:var(--border-radius,0.5rem);background:var(--color-surface-secondary,#f5f5f5);font-size:0.85rem}
+  .steer-recovery{display:flex;align-items:center;gap:0.5rem;padding:0.5rem 0.75rem;margin:0.25rem 0;border-radius:var(--radius-md);background:var(--surface-subtle);font-size:0.85rem}
   .steer-recovery-label{flex:1;min-width:0}
-  .steer-recovery button{padding:0.25rem 0.75rem;border-radius:var(--border-radius,0.375rem);border:1px solid var(--color-border,#ddd);background:var(--color-surface,#fff);cursor:pointer;font-size:0.8rem}
-  .steer-recovery button:hover{background:var(--color-surface-hover,#eee)}
+  .steer-recovery button{padding:0.25rem 0.75rem;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--surface);cursor:pointer;font-size:0.8rem}
+  .steer-recovery button:hover{background:var(--hover-bg)}
   .msg-role{font-size:12px;font-weight:500;letter-spacing:.01em;margin-bottom:8px;display:flex;align-items:center;gap:8px;}
   .msg-role.user{color:var(--accent);}
   .msg-role.assistant{color:var(--accent-text);opacity:.6;}
