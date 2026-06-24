@@ -77,7 +77,8 @@ def _make_profiles_module():
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    """Clear the module-level cache before each test."""
+    """Clear the module-level cache and restore sys.modules after each test."""
+    saved = {k: v for k, v in sys.modules.items() if k == "api" or k.startswith("api.")}
     try:
         mod = sys.modules.get("api.profiles")
         if mod and hasattr(mod, "_SKILLS_STATS_CACHE"):
@@ -91,6 +92,11 @@ def _clear_cache():
             mod._SKILLS_STATS_CACHE.clear()
     except Exception:
         pass
+    for k in [k for k in sys.modules if k == "api" or k.startswith("api.")]:
+        if k in saved:
+            sys.modules[k] = saved[k]
+        else:
+            sys.modules.pop(k, None)
 
 
 # ---------------------------------------------------------------------------
