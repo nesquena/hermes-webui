@@ -367,7 +367,6 @@ function _syncMobileSidebarPanelFromMainView(){
 async function switchPanel(name, opts = {}) {
   const nextPanel = name || 'chat';
   const prevPanel = _currentPanel;
-  if (nextPanel === 'terminal' && typeof _canStartComposerTerminal === 'function' && !_canStartComposerTerminal()) return;
   // ── Desktop sidebar collapse toggle (rail-click only) ──
   // If the click came from a rail icon AND we're on desktop, the rail icon
   // does double duty: clicking the already-active panel collapses the sidebar;
@@ -418,7 +417,7 @@ async function switchPanel(name, opts = {}) {
       return switchPanel(prevPanel || 'chat', { ...opts, fromRailClick: false, refresh: true });
     }
   } else if (prevPanel === 'terminal' && nextPanel !== 'terminal' && typeof toggleComposerTerminal === 'function' && typeof TERMINAL_UI !== 'undefined' && TERMINAL_UI.open) {
-    await toggleComposerTerminal(true, { mode: 'dock' });
+    await toggleComposerTerminal(true, { mode: 'dock', focus: false });
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();

@@ -58,12 +58,13 @@ const args = JSON.parse(process.argv[3]);
 const toggleCalls = [];
 const storage = new Map();
 
+const currentPanel = args.currentPanel || 'chat';
 const navButtons = ['chat', 'terminal'].map(panel => ({
   dataset: { panel },
-  classList: createClassList(panel === 'chat' ? ['active'] : []),
+  classList: createClassList(panel === currentPanel ? ['active'] : []),
 }));
-const panelChat = { classList: createClassList(['panel-view', 'active']) };
-const panelTerminal = { classList: createClassList(['panel-view']) };
+const panelChat = { classList: createClassList(currentPanel === 'chat' ? ['panel-view', 'active'] : ['panel-view']) };
+const panelTerminal = { classList: createClassList(currentPanel === 'terminal' ? ['panel-view', 'active'] : ['panel-view']) };
 const mainEl = { classList: createClassList([]) };
 const sidebar = { classList: createClassList([]) };
 const byId = {
@@ -71,7 +72,7 @@ const byId = {
   panelTerminal,
 };
 
-globalThis._currentPanel = args.currentPanel || 'chat';
+globalThis._currentPanel = currentPanel;
 globalThis._currentSettingsSection = 'conversation';
 globalThis.MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','terminal','logs','plugin'];
 globalThis.$ = (id) => byId[id] || null;
@@ -116,7 +117,7 @@ globalThis.loadSettingsPanel = () => {};
 globalThis._resyncChatSidebarAfterPanelSwitch = () => {};
 globalThis.syncTopbar = () => {};
 globalThis.syncAppTitlebar = () => {};
-globalThis.TERMINAL_UI = { open: false };
+globalThis.TERMINAL_UI = { open: args.terminalOpen === true };
 globalThis.toggleComposerTerminal = async (_force, opts) => {
   toggleCalls.push(opts || {});
   return args.toggleResult;
@@ -125,7 +126,7 @@ globalThis.toggleComposerTerminal = async (_force, opts) => {
 eval(extractFunction(src, 'async function switchPanel'));
 
 (async () => {
-  const result = await switchPanel('terminal', { fromRailClick: false });
+  const result = await switchPanel(args.targetPanel || 'terminal', { fromRailClick: false });
   process.stdout.write(JSON.stringify({
     result,
     currentPanel: globalThis._currentPanel,
@@ -188,7 +189,8 @@ def test_terminal_page_mode_reuses_the_existing_runtime():
 
     assert "MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','terminal','logs','plugin'];" in panels_js
     assert "await toggleComposerTerminal(true, { mode: 'page' });" in panels_js
-    assert "await toggleComposerTerminal(true, { mode: 'dock' });" in panels_js
+    assert "await toggleComposerTerminal(true, { mode: 'dock', focus: false });" in panels_js
+    assert "typeof _canStartComposerTerminal === 'function' && !_canStartComposerTerminal()" not in panels_js
     assert "const desiredMode=opts.mode==='page'?'page':'dock';" in terminal_js
     assert "_terminalSetPresentationMode(desiredMode)" in terminal_js
     assert terminal_js.count("new window.Terminal(") == 1
@@ -224,6 +226,22 @@ def test_switch_panel_rolls_back_when_terminal_page_start_fails(switch_panel_dri
     assert data["toggleCalls"] == [{"mode": "page"}]
     assert "showing-terminal" not in data["mainClasses"]
     assert data["panelChatActive"] is True
+    assert data["chatNavActive"] is True
+
+
+@node_test
+def test_switch_panel_leaves_terminal_without_stealing_focus(switch_panel_driver):
+    data = _run_switch_panel_case(switch_panel_driver, {
+        "currentPanel": "terminal",
+        "targetPanel": "chat",
+        "terminalOpen": True,
+        "toggleResult": True,
+    })
+
+    assert data["result"] is True
+    assert data["currentPanel"] == "chat"
+    assert data["toggleCalls"] == [{"mode": "dock", "focus": False}]
+    assert "showing-terminal" not in data["mainClasses"]
     assert data["chatNavActive"] is True
 
 

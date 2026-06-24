@@ -171,11 +171,11 @@ def test_terminal_page_nav_uses_shared_runtime_without_changing_slash_command_pa
     assert 'data-panel="terminal"' in html
     assert "switchPanel('terminal',{fromRailClick:true})" in html
     assert "await toggleComposerTerminal(true, { mode: 'page' });" in panels_js
-    assert "await toggleComposerTerminal(true, { mode: 'dock' });" in panels_js
+    assert "await toggleComposerTerminal(true, { mode: 'dock', focus: false });" in panels_js
     assert "toggleComposerTerminal(true)" in commands_js
     assert "const desiredMode=opts.mode==='page'?'page':'dock';" in terminal_js
     assert "function _canStartComposerTerminal()" in terminal_js
-    assert "if (nextPanel === 'terminal' && typeof _canStartComposerTerminal === 'function' && !_canStartComposerTerminal()) return;" in panels_js
+    assert "if (nextPanel === 'terminal' && typeof _canStartComposerTerminal === 'function' && !_canStartComposerTerminal()) return;" not in panels_js
     assert "_terminalSetPresentationMode(desiredMode)" in terminal_js
     assert terminal_js.count("new window.Terminal(") == 1
     assert terminal_js.count("new EventSource(") == 1
