@@ -261,6 +261,37 @@ def test_redact_value_works_with_legacy_agent_redact_signature(monkeypatch):
         importlib.reload(helpers)
 
 
+def test_redaction_preserves_secret_key_literals_in_code_without_values():
+    import api.helpers as helpers
+
+    key = "DISCORD" + "_BOT" + "_TOKEN"
+    snippet = (
+        f'if line.startswith("{key}="):\n'
+        '    return line.split("=", 1)[1].strip()'
+    )
+
+    assert helpers._redact_value(snippet) == snippet
+
+
+def test_redaction_masks_authorization_bot_value_without_breaking_code_structure():
+    import ast
+    import api.helpers as helpers
+
+    token = "M" + ("T" * 40) + ".abc123"
+    snippet = (
+        'headers = ["-H", '
+        f'f"Authorization: Bot {token}", '
+        '"-H", "User-Agent: HermesBot/1.0"]'
+    )
+
+    redacted = helpers._redact_value(snippet)
+
+    assert token not in redacted
+    assert 'f"Authorization: Bot ' in redacted
+    assert '", "-H", "User-Agent: HermesBot/1.0"]' in redacted
+    ast.parse(redacted)
+
+
 def test_redact_session_data_messages():
     """redact_session_data masks credentials in messages[]."""
     from api.helpers import redact_session_data

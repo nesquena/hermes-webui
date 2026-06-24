@@ -263,11 +263,15 @@ def _build_redact_fn():
         r"|brv_[A-Za-z0-9]{10,}"          # ByteRover API key
         r")(?![A-Za-z0-9_-])"
     )
-    _AUTH_HDR_RE = _re.compile(r"(Authorization:\s*Bearer\s+)(\S+)", _re.IGNORECASE)
+    _AUTH_HDR_RE = _re.compile(
+        r"""(Authorization:\s*(?:Bearer|Bot)\s+)([^\s'",\]\)]+)""",
+        _re.IGNORECASE,
+    )
     _ENV_RE = _re.compile(
         r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50})"
-        r"\s*=\s*(['\"]?)(\S+)\2"
+        r"\s*=\s*(['\"]?)([^\s'\"\]\),;]+)\2"
     )
+
     _PRIVKEY_RE = _re.compile(
         r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
     )
@@ -275,14 +279,36 @@ def _build_redact_fn():
     def _mask(token: str) -> str:
         return f"{token[:6]}...{token[-4:]}" if len(token) >= 18 else "***"
 
+    def _env_replacement(match) -> str:
+        key, quote, value = match.group(1), match.group(2), match.group(3)
+        if not any(ch.isalnum() for ch in value):
+            return match.group(0)
+        return f"{key}={quote}{_mask(value)}{quote}"
+
+    _CODE_ENV_KEY_LITERAL_RE = _re.compile(
+        r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50}=)([\"'][)\]:,]+|[)\]:,]+)"
+    )
+
+    def _restore_code_env_key_literals(original: str, redacted: str) -> str:
+        if not isinstance(original, str) or not isinstance(redacted, str):
+            return redacted
+        restored = redacted
+        for match in _CODE_ENV_KEY_LITERAL_RE.finditer(original):
+            key_prefix = match.group(1)
+            literal_suffix = match.group(2)
+            restored = restored.replace(
+                f"{key_prefix}***",
+                f"{key_prefix}{literal_suffix}",
+                1,
+            )
+        return restored
+
     def _fallback_redact(text: str) -> str:
         if not isinstance(text, str) or not text:
             return text
         text = _CRED_RE.sub(lambda m: _mask(m.group(1)), text)
         text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
-        text = _ENV_RE.sub(
-            lambda m: f"{m.group(1)}={m.group(2)}{_mask(m.group(3))}{m.group(2)}", text
-        )
+        text = _ENV_RE.sub(_env_replacement, text)
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
         return text
 
@@ -304,6 +330,7 @@ def _build_redact_fn():
         except TypeError:
             # Older hermes-agent builds that predate the force kwarg.
             agent_redacted = redact_sensitive_text(text)
+        agent_redacted = _restore_code_env_key_literals(text, agent_redacted)
         return _fallback_redact(agent_redacted)
 
     return _combined_redact
@@ -357,6 +384,7 @@ _SENSITIVE_CASE_MARKERS = (
 )
 _SENSITIVE_LOWER_MARKERS = (
     "authorization: bearer ",
+    "authorization: bot ",
     "private key",
     "postgres://",
     "postgresql://",
