@@ -1216,20 +1216,6 @@ async function cmdSteer(args){
   await _trySteer(msg, /*explicitSteer=*/true);
 }
 
-/**
- * Shared implementation for /steer and the busy_input_mode='steer' path.
- *
- * Tries the real steer endpoint first. On any non-accept response (no cached
- * agent, agent lacks steer, stream dead, etc.) it restores the draft and keeps
- * the active stream running. Steer belongs to the active run; a failed Steer
- * must not be silently upgraded into Queue, Interrupt, or Stop-and-send.
- *
- * @param {string} msg - The steer text.
- * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
- *   (vs the busy-mode auto-fallback). Affects toast wording and draft restore.
- * @returns {Promise<boolean>} true when the steer was delivered, false when the
- *   draft was restored and the active stream was left untouched.
- */
 function _steerFailureMessageKey(fallback) {
   const key = 'steer_fail_' + (fallback || 'unknown');
   return (typeof LOCALES !== 'undefined' && LOCALES.en && LOCALES.en[key])
@@ -1284,6 +1270,20 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
   if (typeof scrollToBottom === 'function') scrollToBottom();
 }
 
+/**
+ * Shared implementation for /steer and the busy_input_mode='steer' path.
+ *
+ * Tries the real steer endpoint first. On any non-accept response (no cached
+ * agent, agent lacks steer, stream dead, etc.) it restores the draft and keeps
+ * the active stream running. Steer belongs to the active run; a failed Steer
+ * must not be silently upgraded into Queue, Interrupt, or Stop-and-send.
+ *
+ * @param {string} msg - The steer text.
+ * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
+ *   (vs the busy-mode auto-fallback). Affects toast wording and draft restore.
+ * @returns {Promise<boolean>} true when the steer was delivered, false when the
+ *   draft was restored and the active stream was left untouched.
+ */
 async function _trySteer(msg, explicitSteer){
   let result=null;
   try{
