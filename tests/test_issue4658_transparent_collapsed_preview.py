@@ -23,6 +23,7 @@ shims, and runs the same render path live streaming and persisted reload share
 (both go through _decorateTransparentEventRow(buildToolCard(tc))).
 """
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -35,11 +36,77 @@ UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
+_FN_NAMES = [
+    '_toolDisplayName', '_toolActionKind', '_toolKindIcon', '_toolPathBasename',
+    '_decodeToolLabelEntities', '_redactToolTargetLabel', '_shortToolLabel', '_toolI18n',
+    '_toolTargetLabel', '_toolVisibleTargetLabel', '_toolCommandTitle', '_toolQueryTitle',
+    '_toolActionLabelText', '_toolArgPreviewValue', '_toolArgPreviewKeyIsHidden',
+    '_formatToolArgPreview', '_toolResultOneLiner', '_toolCardPreviewText', '_toolCardAllowsDetail',
+    '_toolDetailLeadLabel', '_toolDetailLeadText', '_toolShortName', '_transparentEventPreview',
+    '_transparentToolStatus', '_transparentToolSummary',
+    '_isMemorySave', '_isSkillUpdate', '_tcAction',
+    'buildToolCard', '_decorateTransparentEventRow',
+]
 
-_DRIVER_SRC = r"""
-const fs = require('fs');
-const src = fs.readFileSync(process.argv[2], 'utf8');
 
+def _function_source(src: str, name: str) -> str:
+    match = re.search(rf"function\s+{re.escape(name)}\s*\(", src)
+    if not match:
+        return ""
+    brace = src.find("{", match.end())
+    assert brace != -1, f"{name}() has no body"
+    depth = 1
+    i = brace + 1
+    in_string = None
+    escaped = False
+    in_line_comment = False
+    in_block_comment = False
+    while i < len(src) and depth:
+        ch = src[i]
+        nxt = src[i + 1] if i + 1 < len(src) else ""
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+        if in_block_comment:
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == in_string:
+                in_string = None
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if ch in "'\"`":
+            in_string = ch
+            i += 1
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, f"{name}() body did not close"
+    return src[match.start():i]
+
+
+_DRIVER_TEMPLATE = r"""
 // ── Minimal DOM shims (enough for buildToolCard + _decorateTransparentEventRow)
 function makeEl(tag){
   const el = {
@@ -61,7 +128,6 @@ function makeEl(tag){
     get innerHTML(){return el._html;},
     set innerHTML(v){
       el._html=String(v);
-      // Parse just the spans we assert on out of the template buildToolCard emits.
       el.children=[];
       const mk=(cls,text)=>{const c=makeEl('span'); c._classes=new Set(cls.split(' ').filter(Boolean)); c.textContent=text; c.parentNode=el; el.children.push(c);};
       const grab=(cls)=>{const re=new RegExp('<span class="'+cls.replace(/[-]/g,'\\-')+'">([\\s\\S]*?)<\\/span>'); const m=el._html.match(re); return m?m[1]:null;};
@@ -70,7 +136,6 @@ function makeEl(tag){
       const preview=grab('tool-card-preview');
       if(preview!==null) mk('tool-card-preview', preview);
       const header=makeEl('div'); header._classes=new Set(['tool-card-header']);
-      // re-home the parsed spans under a header element so querySelector('.tool-card-header') works
       header.children=el.children.slice(); header.children.forEach(c=>c.parentNode=header);
       const card=makeEl('div'); card._classes=new Set(['tool-card']); card.appendChild(header);
       el.children=[card]; el.firstChild=card;
@@ -87,8 +152,8 @@ function makeEl(tag){
   return el;
 }
 
-global.document = { createElement: (t)=>makeEl(t), querySelectorAll:()=>[], querySelector:()=>null };
-global.window = {};
+global.document = { createElement: (t)=>makeEl(t), querySelectorAll:()=>[], querySelector:()=>null, addEventListener:()=>{}, removeEventListener:()=>{} };
+global.window = { addEventListener:()=>{}, removeEventListener:()=>{} };
 global.CSS = { escape: s=>s };
 global.t = undefined;
 global.li = () => '<svg></svg>';
@@ -100,36 +165,10 @@ global._attachCopyButton = () => {};
 global._attachProgressBar = () => {};
 global._wireTransparentHeaderToggle = () => {};
 global._transparentToolDetailHtml = () => '<div class="tool-card-detail"></div>';
-// _toolDisclosureIdentity pulls in worklog hashing helpers irrelevant to the
-// collapsed-preview assertion; stub it (only feeds a data- attribute).
 global._toolDisclosureIdentity = () => '';
 
-function extractFunc(name){
-  const re=new RegExp('function\\s+'+name+'\\s*\\(');
-  const start=src.search(re); if(start<0) throw new Error(name+' not found');
-  let i=src.indexOf('{',start); let depth=1; i++;
-  while(depth>0&&i<src.length){ if(src[i]==='{')depth++; else if(src[i]==='}')depth--; i++; }
-  return src.slice(start,i);
-}
-// helpers buildToolCard / decorate depend on — eval'd at TOP LEVEL (a function
-// declaration eval'd inside a callback would be scoped to that callback and
-// lost, so collect all sources and eval them once here).
-var _FN_NAMES=[
- '_toolDisplayName','_toolActionKind','_toolKindIcon','_toolPathBasename',
- '_decodeToolLabelEntities','_redactToolTargetLabel','_shortToolLabel','_toolI18n',
- '_toolTargetLabel','_toolVisibleTargetLabel','_toolCommandTitle','_toolQueryTitle',
- '_toolActionLabelText','_toolArgPreviewValue','_toolArgPreviewKeyIsHidden',
- '_formatToolArgPreview','_toolCardPreviewText','_toolCardAllowsDetail',
- '_toolDetailLeadLabel','_toolDetailLeadText','_toolShortName','_transparentEventPreview',
- '_transparentToolStatus','_transparentToolSummary',
- '_isMemorySave','_isSkillUpdate','_tcAction',
- 'buildToolCard','_decorateTransparentEventRow',
-];
-var _FN_SRC='';
-for(var _i=0;_i<_FN_NAMES.length;_i++){
-  try{ _FN_SRC+=extractFunc(_FN_NAMES[_i])+'\n'; }catch(e){ /* optional helper absent */ }
-}
-eval(_FN_SRC);
+// ── EXTRACTED_FUNCTIONS placeholder (replaced by Python) ──
+%%EXTRACTED_FUNCTIONS%%
 
 function previewFor(tc){
   const row=_decorateTransparentEventRow(buildToolCard(tc),{
@@ -142,7 +181,7 @@ function previewFor(tc){
   return { preview: preview?preview.textContent:null, name: name?name.textContent:null };
 }
 
-const cases = JSON.parse(process.argv[3]);
+const cases = JSON.parse(process.argv[2]);
 const out = {};
 for(const [key,tc] of Object.entries(cases)) out[key]=previewFor(tc);
 process.stdout.write(JSON.stringify(out));
@@ -162,10 +201,16 @@ CASES = {
 
 @pytest.fixture(scope="module")
 def results(tmp_path_factory):
+    ui_src = UI_JS_PATH.read_text(encoding="utf-8")
+    extracted = "\n".join(
+        _function_source(ui_src, name) for name in _FN_NAMES
+        if _function_source(ui_src, name)
+    )
+    driver_src = _DRIVER_TEMPLATE.replace("%%EXTRACTED_FUNCTIONS%%", extracted)
     driver = tmp_path_factory.mktemp("t4658") / "driver.js"
-    driver.write_text(_DRIVER_SRC, encoding="utf-8")
+    driver.write_text(driver_src, encoding="utf-8")
     proc = subprocess.run(
-        [NODE, str(driver), str(UI_JS_PATH), json.dumps(CASES)],
+        [NODE, str(driver), json.dumps(CASES)],
         capture_output=True, text=True, timeout=30,
     )
     if proc.returncode != 0:

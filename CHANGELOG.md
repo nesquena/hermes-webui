@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.633] — 2026-06-24 — Release WN (collapsed tool cards preview the result, not the call args)
+
+### Fixed
+
+- **A completed tool card's collapsed header now previews the tool's result instead of its call arguments.** For a finished tool, the one-line header showed the call args (e.g. `path=src/`) rather than what actually happened (e.g. `Found 3 matches`). Completed tools now surface a one-line result preview (from the tool's preview/snippet), suppressing JSON object/array blobs and capping length, while running tools and the args-preview fallback are unchanged. The preview is escaped on render (no XSS). Thanks @rodboev. (#4851, closes #4752)
+
 ## [v0.51.632] — 2026-06-24 — Release WM (new conversations use your configured default model)
 
 ### Fixed
