@@ -14763,8 +14763,30 @@ function renderFileTree(){
   _renderTreeItems(box, visibleEntries, 0);
 }
 
+let _wsActiveDragPath=null;
+let _wsActiveDragType=null;
+function _setWsDragData(e,item){
+  e.dataTransfer.setData('application/ws-path',item.path);
+  e.dataTransfer.setData('application/ws-type',item.type);
+  e.dataTransfer.setData('text/plain',item.path);
+  _wsActiveDragPath=item.path;
+  _wsActiveDragType=item.type;
+}
 function _isWorkspaceTreeMoveDrag(e){
-  return !!(e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('application/ws-path')&&!e.dataTransfer.types.includes('Files'));
+  if(e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('Files')) return false;
+  if(e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('application/ws-path')) return true;
+  return !!(_wsActiveDragPath&&e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('text/plain'));
+}
+function _wsDragSrcPath(e){
+  const custom=e.dataTransfer.getData('application/ws-path');
+  if(custom) return custom;
+  if(_wsActiveDragPath) return _wsActiveDragPath;
+  return e.dataTransfer.getData('text/plain')||'';
+}
+function _wsDragSrcType(e){
+  const custom=e.dataTransfer.getData('application/ws-type');
+  if(custom) return custom;
+  return _wsActiveDragType||'file';
 }
 
 function _workspaceParentDir(relPath){
@@ -14850,9 +14872,9 @@ function _bindWorkspaceMoveDropTarget(el,destDir){
     if(!_isWorkspaceTreeMoveDrag(e))return;
     e.preventDefault();e.stopPropagation();
     el.classList.remove('drag-over');
-    const srcPath=e.dataTransfer.getData('application/ws-path');
+    const srcPath=_wsDragSrcPath(e);
     if(!srcPath)return;
-    const srcType=e.dataTransfer.getData('application/ws-type');
+    const srcType=_wsDragSrcType(e);
     await _performWorkspaceMove(srcPath,destDir,srcType==='dir');
   };
 }
@@ -14875,8 +14897,8 @@ function _renderTreeItems(container, entries, depth){
       if(grant&&!isDirRow){e.preventDefault();e.stopPropagation();return;}
       e.preventDefault();e.stopPropagation();_showFileContextMenu(e,item);
     };
-    el.ondragstart=(e)=>{e.dataTransfer.setData('application/ws-path',item.path);e.dataTransfer.setData('application/ws-type',item.type);e.dataTransfer.effectAllowed='copy';el.classList.add('dragging');};
-    el.ondragend=()=>{el.classList.remove('dragging');_clearWorkspaceMoveDragOver();};
+    el.ondragstart=(e)=>{_setWsDragData(e,item);e.dataTransfer.effectAllowed='copy';el.classList.add('dragging');};
+    el.ondragend=()=>{el.classList.remove('dragging');_clearWorkspaceMoveDragOver();_wsActiveDragPath=null;_wsActiveDragType=null;};
 
     const isLk = item.type === 'symlink';
     const isExternalLink = isLk && item.target_outside_workspace;
