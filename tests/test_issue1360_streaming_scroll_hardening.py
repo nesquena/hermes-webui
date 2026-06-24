@@ -22,10 +22,24 @@ def _extract_function(src: str, name: str) -> str:
     raise AssertionError(f"Could not extract {name}")
 
 
-def test_messages_scroller_disables_browser_scroll_anchoring():
-    assert "overflow-anchor:none" in STYLE_CSS, (
-        "#messages must disable browser scroll anchoring so tool/card inserts "
-        "cannot yank the transcript while the user reads earlier content."
+def test_messages_scroller_disables_browser_scroll_anchoring_on_desktop():
+    # Desktop (mouse): overflow-anchor:none — tool/card inserts cannot yank
+    # the transcript while the user reads earlier content.
+    assert "@media (hover:hover) and (pointer:fine){.messages{overflow-anchor:none;}}" in STYLE_CSS, (
+        "On desktop (mouse-driven devices) #messages must disable browser scroll "
+        "anchoring so tool/card inserts cannot yank the transcript. "
+        "On mobile (touch devices) overflow-anchor:auto is used instead to prevent "
+        "scrollTop=0 jank during innerHTML rebuild (#MOBILESCROLL)."
+    )
+
+
+def test_messages_scroller_uses_overflow_anchor_auto_on_mobile():
+    # Mobile (touch): overflow-anchor:auto — prevents scrollTop=0 jank during
+    # innerHTML rebuild and streaming DOM updates (#MOBILESCROLL).
+    assert "overflow-anchor:auto;" in STYLE_CSS, (
+        "On mobile/touch devices #messages must default to overflow-anchor:auto "
+        "to prevent the browser painting a frame with scrollTop=0 between "
+        "innerHTML='' and snapshot restore."
     )
 
 
