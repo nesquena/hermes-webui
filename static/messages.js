@@ -2551,29 +2551,56 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!byIdx.has(idx)) byIdx.set(idx,[]);
       byIdx.get(idx).push(row);
     };
-    let order=0;
+    let encounter=0;
     for(let idx=turnStart+1;idx<lastAsstIndex;idx+=1){
       const message=messages[idx];
       if(!message||message.role!=='assistant') continue;
+      const pool=[];
       const text=_anchorSceneMessageText(message);
-      if(_anchorSceneCleanText(text)) add(idx,_anchorSceneProseRow(text,order++,idx));
+      if(_anchorSceneCleanText(text)){
+        pool.push({..._anchorSceneProseRow(text,0,idx),_phase:2,_encounter:encounter++});
+      }
       const reasoning=_anchorSceneMessageReasoningText(message);
       if(_anchorSceneCleanText(reasoning)&&_anchorSceneTextKey(reasoning)!==_anchorSceneTextKey(text)){
-        add(idx,_anchorSceneThinkingRow(reasoning,order++,idx));
+        pool.push({..._anchorSceneThinkingRow(reasoning,0,idx),_phase:0,_encounter:encounter++});
       }
       const messageTools=[];
       if(Array.isArray(message.tool_calls)) messageTools.push(...message.tool_calls);
       if(Array.isArray(message._partial_tool_calls)) messageTools.push(...message._partial_tool_calls);
+      const seenToolIds=new Set();
       for(const tool of messageTools){
-        add(idx,_anchorSceneToolRowFromCall(tool,order++,idx));
+        const row=_anchorSceneToolRowFromCall(tool,0,idx);
+        pool.push({...row,_phase:1,_encounter:encounter++});
+        const tid=row.tool_call_id||(row.tool&&row.tool.id);
+        if(tid) seenToolIds.add(tid);
       }
-    }
-    const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
-    for(const tool of toolCalls){
-      if(!tool||typeof tool!=='object') continue;
-      const idx=Number(tool.assistant_msg_idx);
-      if(!Number.isFinite(idx)||idx<=turnStart||idx>=lastAsstIndex) continue;
-      add(idx,_anchorSceneToolRowFromCall(tool,order++,idx));
+      // Merge S.toolCalls for this index, dedup by tool id
+      const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
+      for(const tool of toolCalls){
+        if(!tool||typeof tool!=='object') continue;
+        const toolIdx=Number(tool.assistant_msg_idx);
+        if(!Number.isFinite(toolIdx)||toolIdx!==idx) continue;
+        if(toolIdx<=turnStart||toolIdx>=lastAsstIndex) continue;
+        const row=_anchorSceneToolRowFromCall(tool,0,idx);
+        const tid=row.tool_call_id||(row.tool&&row.tool.id);
+        if(tid&&seenToolIds.has(tid)) continue;
+        if(tid) seenToolIds.add(tid);
+        pool.push({...row,_phase:1,_encounter:encounter++});
+      }
+      // Stable sort by (phase, started_at, encounter)
+      pool.sort((a,b)=>{
+        if(a._phase!==b._phase) return a._phase-b._phase;
+        const aTime=(a.tool&&a.tool.started_at!=null)?a.tool.started_at:Infinity;
+        const bTime=(b.tool&&b.tool.started_at!=null)?b.tool.started_at:Infinity;
+        if(aTime!==bTime) return aTime-bTime;
+        return a._encounter-b._encounter;
+      });
+      // Emit with sequential order_index values, strip temp props
+      for(const row of pool){
+        const {_phase,_encounter,...clean}=row;
+        clean.order_index=byIdx.has(idx)?byIdx.get(idx).length:0;
+        add(idx,clean);
+      }
     }
     return byIdx;
   }
