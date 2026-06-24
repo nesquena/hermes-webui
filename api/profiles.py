@@ -1596,6 +1596,10 @@ def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
     if not skills_dir.is_dir():
         return max_ns
     try:
+        max_ns = max(max_ns, skills_dir.stat().st_mtime_ns)
+    except OSError:
+        pass
+    try:
         from agent.skill_utils import iter_skill_index_files
         for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
             try:
