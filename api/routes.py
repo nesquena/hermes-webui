@@ -1761,9 +1761,7 @@ def _session_list_cache_streaming_freeze_marker():
 
 
 def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], object, int]:
-    _cache_profile, _cache_all_profiles, cache_show_cli_sessions, *_rest = key
-    if not cache_show_cli_sessions:
-        return ((0, 0), (0, 0), (0, 0), (0, 0), (0, 0), None, 0)
+    _cache_profile, _cache_all_profiles, _cache_show_cli_sessions, *_rest = key
     try:
         settings_file = SETTINGS_FILE
     except Exception:
@@ -1773,6 +1771,10 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
         swv = _SETTINGS_WRITE_VERSION
     except Exception:
         swv = 0
+    # WebUI-origin sessions can also receive settled rows in state.db when the
+    # official Hermes Desktop App continues the same agent session.  The sidebar
+    # therefore watches state.db even when the CLI/external-session tab is hidden.
+    #
     # Streaming hold-down (#4672): while a turn is in flight, collapse the
     # volatile state.db-derived components (db/WAL stat, gateway metadata, index
     # stat, content fingerprint) to a marker that only changes when a stream
