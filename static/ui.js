@@ -3857,6 +3857,14 @@ function _resetScrollDirectionTracker(){
   clearTimeout(_deferredOlderMessagesTimer);
   _deferredOlderMessagesTimer=0;
 }
+function _resetSessionSwitchScrollState(){
+  // Clear sticky manual-unpin and old scroll snapshot state before a fresh session
+  // lands in the renderer. This keeps the first meaningful paint on session switch
+  // pinned to the latest message unless same-session preserveScroll is explicitly
+  // requested.
+  _resetScrollDirectionTracker();
+  _resetStreamScrollFollow();
+}
 function _resetStreamScrollFollow(){
   _clearNewMessageScrollCue();
   _messageUserUnpinned=false;
@@ -3867,6 +3875,7 @@ function _resetStreamScrollFollow(){
 }
 if(typeof window!=='undefined'){
   window._resetScrollDirectionTracker=_resetScrollDirectionTracker;
+  window._resetSessionSwitchScrollState=_resetSessionSwitchScrollState;
   window._resetStreamScrollFollow=_resetStreamScrollFollow;
 }
 /* ── Pull-to-refresh for PWA standalone (Android) ── */
@@ -11141,7 +11150,11 @@ function _assistantTurnAnchorSettledFinalAnswer(message, content, context){
     return null;
   }
 }
-function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
+function _scrollAfterMessageRender(preserveScroll, scrollSnapshot, forceBottom){
+  if(forceBottom){
+    scrollToBottom();
+    return;
+  }
   // Terminal stream renders can happen after S.activeStreamId is cleared.
   // In that case, preserveScroll asks the normal pin-state helper to decide:
   // pinned users stay at bottom; users who manually scrolled up get their
@@ -11196,11 +11209,12 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
 
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
+  const forceBottom=!!(options&&options.freshSessionLoad);
   const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when the reader has
   // manually unpinned; both need to restore the reader's position after the DOM
   // rebuild rather than snap to the bottom. (Codex #4006 r3 follow-up.)
-  const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
+  const scrollSnapshot=(!forceBottom&&(preserveScroll||_messageUserUnpinned))?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const msgCount=S.messages.length;
@@ -11255,7 +11269,7 @@ function renderMessages(options){
       _rehydrateTransparentStreamDom(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
-      _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+      _scrollAfterMessageRender(preserveScroll, scrollSnapshot, forceBottom);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
       requestAnimationFrame(()=>postProcessRenderedMessages(inner));
@@ -12508,7 +12522,7 @@ function renderMessages(options){
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
-  _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+  _scrollAfterMessageRender(preserveScroll, scrollSnapshot, forceBottom);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>postProcessRenderedMessages(inner));

@@ -1075,6 +1075,7 @@ async function loadSession(sid){
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   const sameSessionForceReload = forceReload && currentSid===sid;
+  const freshSessionSwitch = currentSid !== sid;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
@@ -1092,9 +1093,24 @@ async function loadSession(sid){
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
   // from a prior session or a stray touch event during loading would place them.
-  if (currentSid !== sid && typeof _messageUserUnpinned !== 'undefined') {
-    _messageUserUnpinned = false;
-    _scrollPinned = true;
+  if (freshSessionSwitch) {
+    if (typeof window !== 'undefined' && typeof window._resetSessionSwitchScrollState === 'function') {
+      window._resetSessionSwitchScrollState();
+    } else if (
+      typeof _messageUserUnpinned !== 'undefined' &&
+      typeof _scrollPinned !== 'undefined'
+    ) {
+      if (typeof _clearNewMessageScrollCue === 'function') _clearNewMessageScrollCue();
+      _messageUserUnpinned = false;
+      _scrollPinned = true;
+      if (typeof _lastScrollTop !== 'undefined') _lastScrollTop = null;
+      if (typeof _lastMessageClientHeight !== 'undefined') _lastMessageClientHeight = null;
+      if (typeof _nearBottomCount !== 'undefined') _nearBottomCount = 0;
+      if (typeof _touchStartY !== 'undefined') _touchStartY = null;
+      if (typeof _messageTouchScrollActive !== 'undefined') _messageTouchScrollActive = false;
+      if (typeof _lastMessageTouchScrollIntentMs !== 'undefined') _lastMessageTouchScrollIntentMs = -Infinity;
+      if (typeof _cancelBottomSettle === 'function') _cancelBottomSettle();
+    }
   }
   stopApprovalPolling();hideApprovalCard(forceReload);
   if(typeof stopSessionStream==='function') stopSessionStream();
@@ -1106,7 +1122,7 @@ async function loadSession(sid){
   // Persist the current composer draft before switching away so it can be
   // restored when the user switches back (#1060). Save to server now so the
   // draft survives page refresh and syncs across clients.
-  if (currentSid && currentSid !== sid) {
+  if (currentSid && freshSessionSwitch) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
     await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
@@ -1135,7 +1151,7 @@ async function loadSession(sid){
       snapshotLiveTurnHtmlForSession(currentSid);
     }
   }
-  if (currentSid !== sid || forceReload) {
+  if (freshSessionSwitch || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
     // poll triggering a refresh), snapshot the existing messages BEFORE we
     // clear them. _ensureMessagesLoaded() runs the ephemeral-field
@@ -1310,9 +1326,6 @@ async function loadSession(sid){
   if (currentSid !== sid) {
     _clearDeferredActiveSessionExternalRefresh();
   }
-  if (currentSid !== sid && typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
-    try { window._resetScrollDirectionTracker(); } catch (_) {}
-  }
   if(typeof _applyPendingSessionModelForSession==='function') _applyPendingSessionModelForSession(sid);
   _resolveSessionModelForDisplaySoon(sid);
   // Sync workspace display immediately so the chip label reflects the new session's workspace
@@ -1452,7 +1465,7 @@ async function loadSession(sid){
       didReconnect=true;
       attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
     }
-    syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+    syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:(freshSessionSwitch?{freshSessionLoad:true}:undefined));
     const restoredAnchorScene=activeStreamId&&typeof window!=='undefined'
       ? ((typeof window._renderLiveAnchorActivitySceneForStream==='function'&&window._renderLiveAnchorActivitySceneForStream(activeStreamId, sid, {mode:'compact_worklog'}))||
         _renderRuntimeJournalAnchorActivityScene(activeStreamId, sid))
@@ -1563,7 +1576,7 @@ async function loadSession(sid){
       updateSendBtn();
       setStatus('');
       setComposerStatus('');
-      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:(freshSessionSwitch?{freshSessionLoad:true}:undefined));
       const restoredAnchorScene=activeStreamId&&typeof window!=='undefined'
         ? ((typeof window._renderLiveAnchorActivitySceneForStream==='function'&&window._renderLiveAnchorActivitySceneForStream(activeStreamId, sid, {mode:'compact_worklog'}))||
           _renderRuntimeJournalAnchorActivityScene(activeStreamId, sid))
@@ -1588,7 +1601,7 @@ async function loadSession(sid){
       setStatus('');
       setComposerStatus('');
       updateQueueBadge(sid);
-      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:(freshSessionSwitch?{freshSessionLoad:true}:undefined));
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       const _dirP=loadDir('.');
       // Workspace refresh is guarded by session id inside loadDir(); do not

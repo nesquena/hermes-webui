@@ -143,9 +143,9 @@ def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
     capture = _function_body(UI_JS, "function _captureMessageScrollSnapshot")
     restore = _function_body(UI_JS, "function _restoreMessageScrollSnapshot")
 
-    snapshot_idx = render.index("const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null")
+    snapshot_idx = render.index("const scrollSnapshot=(!forceBottom&&(preserveScroll||_messageUserUnpinned))?_captureMessageScrollSnapshot():null")
     inner_idx = render.index("const inner=$('msgInner')")
-    final_scroll_idx = render.rindex("_scrollAfterMessageRender(preserveScroll, scrollSnapshot)")
+    final_scroll_idx = render.rindex("_scrollAfterMessageRender(preserveScroll, scrollSnapshot, forceBottom)")
 
     assert snapshot_idx < inner_idx < final_scroll_idx, (
         "renderMessages({preserveScroll:true}) must capture #messages.scrollTop before "
