@@ -2858,11 +2858,21 @@ def set_custom_provider_models(provider_id: str, models: list[str]) -> dict[str,
                 if not isinstance(cp, dict):
                     continue
                 if _custom_provider_name_matches(provider_id, cp.get("name")):
-                    if models:
-                        cp["models"] = list(models)
+                    # Preserve the original format: if models was a dict, save
+                    # as dict keys so per-model metadata (context_length, etc.)
+                    # is not lost. If models was a list (or absent), save as list.
+                    existing_models = cp.get("models")
+                    if isinstance(existing_models, dict):
+                        if models:
+                            # Rebuild dict with empty metadata for each model
+                            cp["models"] = {m: {} for m in models}
+                        else:
+                            cp.pop("models", None)
                     else:
-                        # Empty list → remove the key so all live models appear
-                        cp.pop("models", None)
+                        if models:
+                            cp["models"] = list(models)
+                        else:
+                            cp.pop("models", None)
                     found = True
                     break
 

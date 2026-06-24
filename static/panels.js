@@ -8902,6 +8902,7 @@ function _buildProviderCard(p){
 
     function _renderAvailTags(models){
       availWrap.innerHTML = '';
+      availHint.style.display = models.length ? 'none' : '';
       for(const m of models){
         if(_usedModelList.includes(m)) continue;  // already active
         const tag = document.createElement('span');
