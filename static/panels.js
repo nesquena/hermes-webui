@@ -4,7 +4,7 @@ let _kanbanBoard = null;
 let _kanbanLatestEventId = 0;
 let _kanbanPollTimer = null;
 let _kanbanCurrentTaskId = null;
-let _kanbanLanesByProfile = false;
+let _kanbanLanesByProfile = true;
 // Multi-board state. _kanbanCurrentBoard is the slug of the active board
 // the UI is currently viewing. null means "use whatever the server reports
 // as active" (i.e. don't pin a specific board in API calls). The UI
@@ -1550,13 +1550,45 @@ function _kanbanCurrentFilters(){
 }
 
 function _kanbanApplyConfigDefaults(config){
-  if (!config || _kanbanConfigApplied) return;
+  if (!config) return;
+  _kanbanLanesByProfile = config.lane_by_profile === true;
+  syncKanbanViewToggle();
+  if (_kanbanConfigApplied) return;
   if ($('kanbanTenantFilter') && config.default_tenant) $('kanbanTenantFilter').dataset.defaultValue = config.default_tenant;
   if ($('kanbanIncludeArchived') && config.include_archived_by_default === true) $('kanbanIncludeArchived').checked = true;
-  if (config.lane_by_profile === true) _kanbanLanesByProfile = true;
   _kanbanConfigApplied = true;
 }
 let _kanbanConfigApplied = false;
+
+function syncKanbanViewToggle(){
+  const btn = $('btnKanbanViewToggle');
+  if (!btn) return;
+  const consolidated = !_kanbanLanesByProfile;
+  const label = t('kanban_view_consolidated');
+  btn.setAttribute('aria-pressed', consolidated ? 'true' : 'false');
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('data-i18n-title', 'kanban_view_consolidated');
+  btn.setAttribute('data-i18n-aria-label', 'kanban_view_consolidated');
+  if (typeof _setButtonTooltip === 'function') _setButtonTooltip(btn, label);
+  else btn.setAttribute('data-tooltip', label);
+}
+
+async function toggleKanbanViewMode(){
+  const btn = $('btnKanbanViewToggle');
+  const nextLaneByProfile = !_kanbanLanesByProfile;
+  if (btn) btn.disabled = true;
+  try {
+    const saved = await api('/api/kanban/config', {method: 'PATCH', body: JSON.stringify({lane_by_profile: nextLaneByProfile})});
+    _kanbanLanesByProfile = saved.lane_by_profile === true;
+    syncKanbanViewToggle();
+    _kanbanRenderBoard();
+    showToast(t(_kanbanLanesByProfile ? 'kanban_view_lanes_saved' : 'kanban_view_consolidated_saved'));
+  } catch(e) {
+    showToast(t('kanban_view_update_failed') + (e.message || e), 4000, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 
 function _kanbanSetSelectOptions(el, values, allLabelKey){
   if (!el) return;
@@ -5536,6 +5568,7 @@ async function switchToWorkspace(path,name){
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }
+  // Workspace mutation during a live turn would desync the active stream context.
   if(S.busy){
     showToast(t('workspace_busy_switch'));
     return;

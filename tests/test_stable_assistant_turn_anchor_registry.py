@@ -1301,7 +1301,7 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
         assert f"_applyToAnchor('{event_name}'" in _event_listener_body(src, event_name)
 
     token_body = _event_listener_body(src, "token")
-    assert "_scheduleRender();" in token_body
+    assert "_scheduleRender(" in token_body
     assert "function _upsertAnchorProcessProse" in src
     assert "_upsertAnchorProcessProse(displayText" in src
     reasoning_body = _event_listener_body(src, "reasoning")

@@ -3,6 +3,25 @@
 
 ## [Unreleased]
 
+## [v0.51.614] — 2026-06-23 — Release VU (Kanban consolidated view toggle)
+
+### Added
+
+- **The Kanban board can now switch between a per-profile lane view and a consolidated view.** A new toggle in the board header flips between "Lanes by profile" (tasks grouped into a horizontal lane per assignee — the existing default) and "Consolidated view" (a single set of columns with every assignee's tasks merged). The choice is saved per board (`lane_by_profile`), and the default stays lanes-by-profile so existing boards are unchanged unless you opt in. The consolidated view only regroups the tasks already returned for the board — it applies no new visibility and exposes nothing that the lane view didn't. Thanks @stefan-wisbric. (#2814)
+
+## [v0.51.613] — 2026-06-23 — Release VT (eliminate O(DOM) streaming render freeze on long answers)
+
+### Fixed
+
+- **Long agent answers no longer progressively freeze the UI while streaming.** On answers of 30,000+ characters (5,000+ DOM nodes), every streamed token ran a full-DOM link-sanitization scan, so render cost grew with the answer size and the tab eventually froze (and could crash the renderer). Link URL-scheme validation now happens inline as each DOM node is created (via a wrapped streaming-markdown renderer), eliminating the per-token full-DOM rescan, and the streaming render now caches its parse result to skip redundant re-parsing. Dangerous URL schemes (`javascript:`, `data:`, `vbscript:`, etc.) are still rejected on links and images exactly as before, and the final settled render still runs the full sanitizer. Thanks @wlknight. (#4800)
+
+## [v0.51.612] — 2026-06-23 — Release VS (background-tab notifications + profile default workspace on fresh sessions)
+
+### Fixed
+
+- **Background (visible-but-unfocused) desktop-app tabs now fire OS notifications without closing their live stream.** The browser-notification gate previously used only `document.hidden` as the background signal, so a desktop-host tab that was visible but unfocused either missed notifications or, if it spoofed hidden state, tore down its SSE stream. A desktop-owned notification-only background flag now drives the notification gate; all `document.hidden`-based stream/visibility logic is unchanged. Thanks @rodboev. (#4753)
+- **New sessions now land on the profile's default workspace instead of inheriting the current session's workspace.** Fresh-session workspace precedence is corrected to one-shot override → profile default → current-session fallback, so a configured profile default wins on New Chat (when no default is set, behavior is unchanged). The blank-page workspace-creation path and the busy-session rule are preserved. Thanks @rodboev. (#4755)
+
 ## [v0.51.611] — 2026-06-23 — Release VR (configurable JSON/YAML code-block default view)
 
 ### Added

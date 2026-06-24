@@ -48,18 +48,18 @@ class TestProfileDefaultWorkspacePersistence:
         )
 
     def test_new_session_still_inherits_default_workspace(self):
-        """newSession must still pass a workspace to /api/session/new —
-        now via the _profileSwitchWorkspace → current session → _profileDefaultWorkspace chain."""
+        """newSession must still pass a workspace to /api/session/new,
+        now via the _profileSwitchWorkspace -> _profileDefaultWorkspace -> current session chain."""
         src = read('static/sessions.js')
         m = re.search(r'async function newSession\(.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
         # inheritWs must be computed and passed to /api/session/new
         assert 'inheritWs' in fn or 'inherit' in fn.lower(), (
-            "newSession must compute an inheritWs from switch/current/default workspace"
+            "newSession must compute an inheritWs from switch/default/current workspace"
         )
         assert '_profileDefaultWorkspace' in fn, (
-            "newSession must fall through to S._profileDefaultWorkspace as last resort"
+            "newSession must prefer S._profileDefaultWorkspace before current session workspace"
         )
 
 

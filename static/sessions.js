@@ -836,13 +836,10 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
-    // One-shot profile-switch workspace: applied to the first new session after a profile
-    // switch, then cleared.  Use a dedicated flag so S._profileDefaultWorkspace (the
-    // persistent boot/settings default) is not consumed and remains available for the
-    // blank-page display on all subsequent returns to the empty state (#823).
+    // One-shot profile-switch workspace wins first; otherwise prefer the profile default.
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
-    const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
+    const inheritWs=switchWs||(S._profileDefaultWorkspace||null)||(S.session?S.session.workspace:null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',

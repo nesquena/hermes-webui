@@ -42,7 +42,7 @@ class TestStreamFinalized:
 
     def test_schedule_render_guards_on_stream_finalized(self):
         src = read('static/messages.js')
-        m = re.search(r'function _scheduleRender\(\)\{.*?\n  \}', src, re.DOTALL)
+        m = re.search(r'function _scheduleRender\([^)]*\)\{.*?\n  \}', src, re.DOTALL)
         assert m, "_scheduleRender not found"
         fn = m.group(0)
         assert '_streamFinalized' in fn, (
