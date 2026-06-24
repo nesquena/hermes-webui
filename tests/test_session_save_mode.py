@@ -119,6 +119,34 @@ def test_eager_checkpointed_user_is_removed_from_model_context():
     assert [m["content"] for m in context] == ["older", "prior"]
 
 
+def test_submitted_turn_journal_does_not_duplicate_current_model_context(tmp_path):
+    from api.turn_journal import append_turn_journal_event
+
+    session = Session(
+        session_id="journal_context_current_turn",
+        title="journal context",
+        messages=[{"role": "user", "content": "older"}],
+        context_messages=[{"role": "user", "content": "older"}],
+        active_stream_id="stream-current",
+        pending_user_message="current prompt",
+    )
+    append_turn_journal_event(
+        session.session_id,
+        {
+            "event": "submitted",
+            "stream_id": "stream-current",
+            "role": "user",
+            "content": "current prompt",
+            "created_at": 123.0,
+        },
+        session_dir=tmp_path,
+    )
+
+    context = streaming._context_messages_for_new_turn(session, "current prompt")
+
+    assert [m["content"] for m in context] == ["older"]
+
+
 def test_eager_checkpointed_user_is_not_duplicated_after_agent_result():
     merged = streaming._merge_display_messages_after_agent_result(
         previous_display=[{"role": "user", "content": "repeat me"}],

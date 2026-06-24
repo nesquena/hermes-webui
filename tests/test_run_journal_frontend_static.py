@@ -6,6 +6,21 @@ MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text()
 SESSIONS_SRC = (ROOT / "static" / "sessions.js").read_text()
 
 
+def _function_body(src: str, signature: str) -> str:
+    start = src.index(signature)
+    brace = src.index("{", start)
+    depth = 0
+    for idx in range(brace, len(src)):
+        char = src[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : idx + 1]
+    raise AssertionError(f"could not extract function body for {signature!r}")
+
+
 def test_reattach_path_uses_replay_when_status_reports_journal():
     reattach_pos = MESSAGES_SRC.index("let replayOnly=false;")
     block = MESSAGES_SRC[reattach_pos : reattach_pos + 1200]
@@ -125,6 +140,41 @@ def test_server_runtime_journal_snapshot_restores_structured_inflight_state():
     assert "activity_burst_anchors" in helper_block
     for key in ("tid", "id", "tool_call_id", "tool_use_id", "call_id"):
         assert key in helper_block
+
+
+def test_active_reload_keeps_user_only_inflight_visible_until_pending_dedupe():
+    """A just-submitted user row is visible live state before first assistant text.
+
+    On an active first-turn reload, the sidecar can still have messages=[] while
+    pending_user_message and the submitted turn journal record the same prompt.
+    The browser must not discard the user-only optimistic INFLIGHT entry as a
+    cursor-only snapshot before pending/live replay reconciliation runs.
+    """
+    helper = _function_body(SESSIONS_SRC, "function _inflightHasVisibleLiveState")
+
+    assert "msg.role === 'user'" in helper or "msg.role==='user'" in helper
+    assert "_messageComparableText(msg)" in helper or "msg.content" in helper
+
+
+def test_pending_user_merge_dedupes_workspace_prefixed_replay_rows():
+    """Pending user rows and replayed/checkpointed user rows share one turn.
+
+    The model-facing current user message may carry the WebUI workspace sentinel,
+    while pending_user_message stores only the human prompt.  Frontend transcript
+    equality must normalize the same way the renderer and backend context
+    identity do, otherwise active reload/reconnect can show two user bubbles for
+    one submitted turn.
+    """
+    same = _function_body(SESSIONS_SRC, "function _sameTranscriptMessage")
+    normalizer = _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText")
+    forced = _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope")
+
+    assert "_normalizeUserTranscriptText" in same
+    assert "_stripWorkspaceDisplayPrefix" in normalizer
+    assert "_stripAttachedFilesMarker" in normalizer
+    assert "Workspace::v1" in normalizer
+    assert "FORCED SKILL CONTEXT" in forced
+    assert "USER OVERRIDE" in forced
 
 
 def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():

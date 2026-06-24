@@ -581,7 +581,9 @@ function _inflightHasVisibleLiveState(inflight) {
   if (Array.isArray(inflight.activityBurstAnchors) && inflight.activityBurstAnchors.length) return true;
   if (Array.isArray(inflight.messages)) {
     return inflight.messages.some((msg) => {
-      if (!msg || msg.role !== 'assistant') return false;
+      if (!msg) return false;
+      if (msg.role === 'user') return Boolean(_messageComparableText(msg));
+      if (msg.role !== 'assistant') return false;
       const content = msg.content;
       if (typeof content === 'string') return content.trim();
       if (Array.isArray(content)) return content.length > 0;
@@ -2318,6 +2320,28 @@ function _stripAttachedFilesMarker(text){
   return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
 }
 
+function _stripForcedSkillEnvelope(text){
+  let value=String(text||'').trim();
+  // `/use <skill>` augments the model-facing prompt with a directive and a
+  // hidden skill-content envelope, while the optimistic UI row keeps the human
+  // prompt.  Treat them as the same submitted turn for active reload/reconnect
+  // dedupe without rewriting the persisted pending prompt.
+  value=value.replace(/^\[USER OVERRIDE\][^\n]*\n*/,'').trim();
+  value=value.replace(/\[FORCED SKILL CONTEXT:[^\]]+\][\s\S]*?\[\/FORCED SKILL CONTEXT\]\s*/g,'').trim();
+  return value;
+}
+
+function _normalizeUserTranscriptText(text){
+  let value=_stripAttachedFilesMarker(_stripForcedSkillEnvelope(text));
+  if(typeof _stripWorkspaceDisplayPrefix==='function'){
+    return _stripWorkspaceDisplayPrefix(value);
+  }
+  const raw=String(value||'');
+  const strippedV1=raw.replace(/^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*/,'');
+  if(strippedV1!==raw) return strippedV1.trim();
+  return raw.replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
+}
+
 function _sameTranscriptMessage(a,b){
   if(!(a&&b)) return false;
   const role=String(a.role||'');
@@ -2326,7 +2350,7 @@ function _sameTranscriptMessage(a,b){
   const bText=_messageComparableText(b);
   if(aText===bText) return true;
   if(role==='user'){
-    return _stripAttachedFilesMarker(aText)===_stripAttachedFilesMarker(bText);
+    return _normalizeUserTranscriptText(aText)===_normalizeUserTranscriptText(bText);
   }
   return false;
 }
