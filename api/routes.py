@@ -10934,6 +10934,20 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
 
+    if parsed.path == "/api/providers/models":
+        provider_id = (body.get("provider") or "").strip().lower()
+        if not provider_id:
+            return bad(handler, "provider is required")
+        raw_models = body.get("models")
+        if raw_models is None:
+            return bad(handler, "models is required")
+        models = [str(m).strip() for m in raw_models if str(m).strip()] if isinstance(raw_models, list) else []
+        from api.providers import set_custom_provider_models
+        result = set_custom_provider_models(provider_id, models)
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+
     if parsed.path == "/api/models/refresh":
         provider_id = (body.get("provider") or "").strip().lower()
         if not provider_id:

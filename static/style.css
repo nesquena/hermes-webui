@@ -4752,6 +4752,26 @@ main.main > #mainPlugin{display:none;}
   user-select:none;
   cursor:help;
 }
+/* Available model tag — dashed accent border to distinguish from used */
+.provider-card-model-tag-avail{
+  border-color:var(--accent);
+  border-style:dashed;
+}
+/* × button on used model pills */
+.remove-tag{
+  cursor:pointer;
+  opacity:0.6;
+  user-select:none;
+}
+.remove-tag:hover{
+  opacity:1;
+  color:var(--error);
+}
+/* + button on available model pills */
+.add-tag{
+  cursor:pointer;
+  user-select:none;
+}
 
 /* ── Session pin indicator (inline, only when pinned) ── */
 .session-pin-indicator{
