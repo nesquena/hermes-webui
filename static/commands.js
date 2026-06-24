@@ -1230,6 +1230,12 @@ async function cmdSteer(args){
  * @returns {Promise<boolean>} true when the steer was delivered, false when the
  *   draft was restored and the active stream was left untouched.
  */
+function _steerFailureMessageKey(fallback) {
+  const key = 'steer_fail_' + (fallback || 'unknown');
+  return (typeof LOCALES !== 'undefined' && LOCALES.en && LOCALES.en[key])
+    ? key : 'steer_fail_unknown';
+}
+
 function _showSteerIndicator(text){
   const inner=document.getElementById('msgInner');
   if(!inner) return;
@@ -1248,6 +1254,34 @@ function _showSteerIndicator(text){
   el.appendChild(body);
   inner.appendChild(el);
   if(typeof scrollToBottom==='function') scrollToBottom();
+}
+
+function _showSteerRecovery(msg, explicitSteer, fallback) {
+  const inner = document.getElementById('msgInner');
+  if (!inner) return;
+  const old = inner.querySelector('.steer-recovery');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = 'steer-recovery';
+  const label = document.createElement('span');
+  label.className = 'steer-recovery-label';
+  label.textContent = t(_steerFailureMessageKey(fallback));
+  el.appendChild(label);
+  const retryBtn = document.createElement('button');
+  retryBtn.className = 'steer-recovery-retry';
+  retryBtn.textContent = t('steer_recovery_retry');
+  retryBtn.addEventListener('click', () => {
+    el.remove();
+    _trySteer(msg, explicitSteer);
+  });
+  el.appendChild(retryBtn);
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'steer-recovery-dismiss';
+  dismissBtn.textContent = t('steer_recovery_dismiss');
+  dismissBtn.addEventListener('click', () => el.remove());
+  el.appendChild(dismissBtn);
+  inner.appendChild(el);
+  if (typeof scrollToBottom === 'function') scrollToBottom();
 }
 
 async function _trySteer(msg, explicitSteer){
@@ -1279,11 +1313,9 @@ async function _trySteer(msg, explicitSteer){
     if(typeof autoResize==='function')autoResize();
   }
   if(typeof renderTray==='function')renderTray();
-  if(explicitSteer){
-    showToast(t('cmd_steer_fallback'),3500);
-  } else {
-    showToast(t('busy_steer_fallback'),3500);
-  }
+  const failbackCode = result && result.fallback;
+  showToast(t(_steerFailureMessageKey(failbackCode)), 3500);
+  _showSteerRecovery(msg, explicitSteer, failbackCode);
   return false;
 }
 
