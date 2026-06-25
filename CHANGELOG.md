@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gallery-installed extensions are now activated after install instead of only being marked installed.** When an extension was installed from Settings -> Extensions without also preconfiguring `HERMES_WEBUI_EXTENSION_MANIFEST`, the gallery wrote files and showed the Installed state but the app shell did not inject the extension scripts. A second failure hit subdirectory manifests such as `desktop-companion/manifest.json`: relative assets like `assets/companion-adapter.js` were resolved as `/extensions/assets/...` instead of `/extensions/desktop-companion/assets/...`, producing a 404 and MIME-type console error. Gallery installs now build a runtime manifest from each installed extension's `manifest.json`, and explicit subdirectory manifests resolve relative assets from their manifest directory.
+
 ## [v0.51.647] — 2026-06-25 — Release XC (task detail action buttons reappear on mobile PWA)
 
 ### Fixed

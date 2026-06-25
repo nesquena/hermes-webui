@@ -95,6 +95,22 @@ may be kept in the manifest with the JSON boolean `"enabled": false`. Explicit
 `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` still work and are appended after
 manifest assets, with duplicates ignored.
 
+When an extension is installed from Settings -> Extensions, WebUI records the
+installed package and loads that package's `manifest.json` automatically on the
+next app-shell render. In this gallery-installed mode, a manifest located at
+`HERMES_WEBUI_EXTENSION_DIR/<extension-id>/manifest.json` resolves bare relative
+assets relative to that package directory. For example,
+`"scripts": ["assets/companion-adapter.js"]` in
+`desktop-companion/manifest.json` injects
+`/extensions/desktop-companion/assets/companion-adapter.js`.
+
+Manual manifests configured with `HERMES_WEBUI_EXTENSION_MANIFEST` follow the
+same rule: relative assets resolve from the manifest file's directory. A root
+manifest such as `extensions.json` keeps the existing
+`/extensions/<asset-path>` behavior, while a subdirectory manifest such as
+`desktop-companion/manifest.json` resolves relative assets under
+`/extensions/desktop-companion/`.
+
 Extension entries may also declare a read-only loopback sidecar for diagnostics:
 
 ```json
