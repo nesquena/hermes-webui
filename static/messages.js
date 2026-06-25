@@ -2545,6 +2545,42 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!message||typeof message!=='object') return '';
     return String(message.reasoning||message._reasoning||message.reasoning_content||message.thinking||'');
   }
+  // #4622: a settled tool row built from messages[].tool_calls (state.db/sidecar)
+  // can lack the result body — terminal stdout, or the diff/output that a
+  // patch/edit card renders — because the persisted row carries only a short
+  // preview (or, on a cold/paginated load, nothing). The full body lives on the
+  // live S.toolCalls entry at settle time. When a settled row and a live call
+  // match by tool id, restore the missing body fields from the live call onto
+  // the settled row's tool+payload (only when the settled value is empty — never
+  // clobber a genuine persisted body), so the rebuilt card shows full output +
+  // the Show-more expander + the rendered diff. Returns true if it enriched.
+  function _enrichSettledToolRowBodyFromLive(row, live){
+    if(!row||typeof row!=='object'||!live||typeof live!=='object') return false;
+    const tool=(row.tool&&typeof row.tool==='object')?row.tool:(row.tool={});
+    const payload=(row.payload&&typeof row.payload==='object')?row.payload:(row.payload={});
+    let enriched=false;
+    const _empty=v=>v===undefined||v===null||v==='';
+    // Body/result fields that buildToolCard reads to render output + detect diffs.
+    const liveSnippet=_anchorSceneStringPayload(live.snippet||live.result||live.output);
+    if(liveSnippet&&_empty(tool.snippet)&&_empty(payload.snippet)&&_empty(payload.result)&&_empty(payload.output)){
+      tool.snippet=liveSnippet; payload.snippet=liveSnippet; enriched=true;
+    }
+    const liveResult=_anchorSceneSafePayload(live.result);
+    if(liveResult!==undefined&&liveResult!==null&&_empty(tool.result)){ tool.result=liveResult; }
+    const liveOutput=_anchorSceneSafePayload(live.output);
+    if(liveOutput!==undefined&&liveOutput!==null&&_empty(tool.output)){ tool.output=liveOutput; }
+    // Command (shell detail-lead) + args (diff reconstruction inputs).
+    const liveCommand=_anchorSceneStringPayload(live.command||live.raw_command);
+    if(liveCommand&&_empty(tool.command)&&_empty(payload.command)){
+      tool.command=liveCommand; payload.command=liveCommand; enriched=true;
+    }
+    const liveArgs=(live.args&&typeof live.args==='object')?live.args:null;
+    const argsEmpty=o=>!o||typeof o!=='object'||Object.keys(o).length===0;
+    if(liveArgs&&argsEmpty(tool.args)&&argsEmpty(payload.args)){
+      tool.args={...liveArgs}; payload.args={...liveArgs}; enriched=true;
+    }
+    return enriched;
+  }
   function _anchorSceneRowsByMessageIndex(messages, turnStart, lastAsstIndex){
     const byIdx=new Map();
     const add=(idx,row)=>{
@@ -2577,21 +2613,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(Array.isArray(message.tool_calls)) messageTools.push(...message.tool_calls);
       if(Array.isArray(message._partial_tool_calls)) messageTools.push(...message._partial_tool_calls);
       const seenToolIds=new Set();
+      const rowByToolId=new Map();
       for(const tool of messageTools){
         const row=_anchorSceneToolRowFromCall(tool,0,idx);
         pool.push({...row,_phase:1,_encounter:encounter++});
         const tid=row.tool_call_id||(row.tool&&row.tool.id);
-        if(tid) seenToolIds.add(tid);
+        if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
       }
-      // Merge S.toolCalls for this index, dedup by tool id
+      // Merge S.toolCalls for this index, dedup by tool id. When a live call
+      // matches a settled row already in the pool, don't just skip it —
+      // restore any result body the settled row is missing (#4622): the live
+      // S.toolCalls entry carries the full terminal output / patch diff that the
+      // persisted state.db row may have dropped to a short preview or nothing.
       for(const tool of (toolsByIdx.get(idx)||[])){
         if(!tool||typeof tool!=='object') continue;
         const toolIdx=Number(tool.assistant_msg_idx);
         if(!Number.isFinite(toolIdx)||toolIdx!==idx) continue;
         const row=_anchorSceneToolRowFromCall(tool,0,idx);
         const tid=row.tool_call_id||(row.tool&&row.tool.id);
-        if(tid&&seenToolIds.has(tid)) continue;
-        if(tid) seenToolIds.add(tid);
+        if(tid&&seenToolIds.has(tid)){
+          const existing=rowByToolId.get(tid);
+          if(existing) _enrichSettledToolRowBodyFromLive(existing, tool);
+          continue;
+        }
+        if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
         pool.push({...row,_phase:1,_encounter:encounter++});
       }
       // Stable sort by (phase, started_at, encounter)

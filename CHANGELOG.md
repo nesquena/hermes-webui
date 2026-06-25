@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Terminal tool cards keep their full output, and patch/edit cards keep their diff, after a turn settles in the Transparent Stream / Worklog view.** While a turn streamed, the tool cards showed their complete output; once the stream settled (or on reload/reconnect), terminal cards collapsed to just the `$ command` line with no stdout and patch/edit cards showed their input fields with no rendered diff. The settled rebuild reconstructs each tool row from the persisted `messages[].tool_calls` (state.db / sidecar), which can carry only a short preview — or, on a cold/paginated load, nothing — for the result body; the live in-memory tool call still held the full output at settle time, but the merge dropped it (it skipped the matching live entry instead of restoring the missing body onto the surviving settled row). The merge now restores the full result body, command, and input args from the matched live tool call when the settled row is missing them (without clobbering a genuinely persisted value), so the rebuilt card shows the complete terminal stdout (with the **Show more** expander and the transparent **Output** / **Full** tabs), and renders the patch/edit diff. (#4622)
+
 ## [v0.51.646] — 2026-06-25 — Release XB (mobile transcript scrolls again)
 
 ### Fixed
