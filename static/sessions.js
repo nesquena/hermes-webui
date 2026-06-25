@@ -316,7 +316,7 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null) {
       || null;
     count = Number(snapshot && snapshot.message_count) || 0;
   }
-  if (_isSessionActivelyViewedForList(sid)) {
+  if (_isSessionOpenInChatPane(sid)) {
     _setSessionViewedCount(sid, count);
     if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
     return false;
@@ -397,9 +397,66 @@ function _hasUnreadForSession(s) {
   return s.message_count > Number(counts[s.session_id] || 0);
 }
 
-function _isSessionActivelyViewedForList(sid) {
+function _isSessionOpenInChatPane(sid) {
   if (!sid || !S.session || S.session.session_id !== sid) return false;
   if (typeof _loadingSessionId !== 'undefined' && _loadingSessionId && _loadingSessionId !== sid) return false;
+  return true;
+}
+
+function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt) {
+  if (!sid) return;
+  const count = Number(messageCount || 0);
+  const last = Number(lastMessageAt || 0);
+  _sessionListSnapshotById.set(sid, {message_count: count, last_message_at: last});
+  const isStreaming = Boolean(
+    S.session && S.session.session_id === sid
+    && (S.busy || S.activeStreamId || (S.session.active_stream_id && S.session.pending_user_message))
+  );
+  _sessionStreamingById.set(sid, isStreaming);
+  if (!isStreaming) _forgetObservedStreamingSession(sid);
+}
+
+function _patchSidebarUnreadIndicatorsForSession(sid) {
+  if (!sid || typeof document === 'undefined') return;
+  const rows = document.querySelectorAll(
+    `.session-item[data-sid="${sid}"], .session-child-session[data-sid="${sid}"], .session-lineage-segment[data-sid="${sid}"]`
+  );
+  rows.forEach((row) => {
+    row.classList.remove('unread');
+    const indicator = row.querySelector('.session-state-indicator');
+    if (indicator) indicator.classList.remove('is-unread');
+  });
+  if (S.session && S.session.session_id === sid) {
+    document.querySelectorAll('.session-item[data-sid]').forEach((row) => {
+      const rowSid = row.dataset.sid;
+      if (!rowSid || rowSid === sid) return;
+      const parentSession = (_allSessions || []).find(s => s && s.session_id === rowSid);
+      if (parentSession && _sessionLineageContainsSession(parentSession, sid)) {
+        row.classList.remove('unread');
+        const indicator = row.querySelector('.session-state-indicator');
+        if (indicator && !indicator.classList.contains('is-streaming')) indicator.classList.remove('is-unread');
+      }
+    });
+  }
+}
+
+function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0) {
+  if (!sid) return;
+  _setSessionViewedCount(sid, messageCount);
+  _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt);
+  _patchSidebarUnreadIndicatorsForSession(sid);
+  if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+}
+
+function _sessionVisitHasUnreadState(sid) {
+  if (!sid) return false;
+  if (_hasSessionCompletionUnread(sid)) return true;
+  if (!S.session || S.session.session_id !== sid) return false;
+  return _hasUnreadForSession(S.session);
+}
+
+function _isSessionActivelyViewedForList(sid) {
+  if (!_isSessionOpenInChatPane(sid)) return false;
   if (typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return false;
   if (typeof document !== 'undefined' && typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
   return true;
@@ -767,11 +824,13 @@ function _markPollingCompletionUnreadTransitions(sessions) {
     );
     const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);
     if (completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) {
-      if (!_isSessionActivelyViewedForList(sid)) {
-        _markSessionCompletionUnread(sid, s.message_count);
-      } else {
+      // Visiting a session can clear unread mid-loadSession; treat the open chat
+      // pane as read even without focus so a deferred list poll cannot re-flag it.
+      if (_isSessionOpenInChatPane(sid)) {
         // Sync viewed count so we don't flag stale unread on tab switch (#3020)
         _setSessionViewedCount(sid, messageCount);
+      } else {
+        _markSessionCompletionUnread(sid, s.message_count);
       }
     }
     _sessionStreamingById.set(sid, isStreaming);
@@ -1085,7 +1144,16 @@ async function loadSession(sid){
   // #2971: idempotent re-arm before the no-op guard revives a stream a prior
   // failed loadSession killed; no-ops on real switches.
   _rearmActiveSessionStream();
-  if(currentSid===sid && !forceReload && !_loadingSessionId) return;
+  if(currentSid===sid && !forceReload && !_loadingSessionId){
+    if(_sessionVisitHasUnreadState(sid)){
+      _acknowledgeSessionVisit(
+        sid,
+        Number(S.session.message_count || 0),
+        Number(S.session.last_message_at || S.session.updated_at || 0)
+      );
+    }
+    return;
+  }
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
@@ -1318,8 +1386,11 @@ async function loadSession(sid){
   // Sync workspace display immediately so the chip label reflects the new session's workspace
   // before any async message-loading begins (mirrors how model is handled).
   if(typeof syncTopbar==='function') syncTopbar();
-  _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
-  _clearSessionCompletionUnread(S.session.session_id);
+  _acknowledgeSessionVisit(
+    S.session.session_id,
+    Number(data.session.message_count || 0),
+    Number(data.session.last_message_at || data.session.updated_at || 0)
+  );
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
@@ -1628,6 +1699,16 @@ async function loadSession(sid){
 
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
+
+  // Re-acknowledge after the async message-load gap: deferred sidebar polls can
+  // re-mark unread while _ensureMessagesLoaded is in flight.
+  if (S.session && S.session.session_id === sid) {
+    _acknowledgeSessionVisit(
+      sid,
+      Number(S.session.message_count || 0),
+      Number(S.session.last_message_at || S.session.updated_at || 0)
+    );
+  }
 
   if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
 

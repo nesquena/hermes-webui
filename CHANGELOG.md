@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A stale yellow unread dot now clears when you visit a session, not only when you click its sidebar row.** Opening a session (including re-selecting the already-open one) now acknowledges the visit immediately, syncs the polling snapshot, clears stale sidebar unread indicators in the DOM, and re-acknowledges after the async message-load gap so a deferred sidebar poll can no longer re-flag the open session as unread.
+
 ## [v0.51.663] — 2026-06-25 — Release XS (mobile reload button shows outside standalone mode)
 
 ### Fixed

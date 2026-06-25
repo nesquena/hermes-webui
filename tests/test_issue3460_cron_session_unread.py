@@ -406,7 +406,7 @@ let _allSessions = [];
 let viewed = [];
 let unread = [];
 let renders = 0;
-function _isSessionActivelyViewedForList() {{ return false; }}
+function _isSessionOpenInChatPane() {{ return false; }}
 function _setSessionViewedCount(sid, count) {{ viewed.push([sid, count]); }}
 function _markSessionCompletionUnread(sid, count) {{ unread.push([sid, count]); }}
 function renderSessionListFromCache() {{ renders += 1; }}
@@ -447,7 +447,7 @@ let _allSessions = [{{session_id: 'cron_2', message_count: 9}}];
 let viewed = [];
 let unread = [];
 let renders = 0;
-function _isSessionActivelyViewedForList(sid) {{ return sid === 'cron_2'; }}
+function _isSessionOpenInChatPane(sid) {{ return sid === 'cron_2'; }}
 function _setSessionViewedCount(sid, count) {{ viewed.push([sid, count]); }}
 function _markSessionCompletionUnread(sid, count) {{ unread.push([sid, count]); }}
 function renderSessionListFromCache() {{ renders += 1; }}

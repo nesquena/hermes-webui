@@ -19,8 +19,16 @@ def test_messages_zero_skips_effective_model_resolution():
 
 def test_full_message_load_updates_viewed_count_after_metadata_fast_path():
     src = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    compact = re.sub(r"\s+", "", src)
 
-    assert "_setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));" in src
+    # The metadata-arrival viewed-count update now flows through
+    # _acknowledgeSessionVisit(), which calls _setSessionViewedCount() internally
+    # (and additionally syncs polling snapshots + clears the stale sidebar unread
+    # dot) so visiting a session reliably clears the yellow dot.
+    assert (
+        "_acknowledgeSessionVisit(S.session.session_id,Number(data.session.message_count||0),"
+        in compact
+    )
     assert "_setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));" in src
 
 
