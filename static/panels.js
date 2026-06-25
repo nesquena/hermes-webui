@@ -4344,7 +4344,7 @@ function _setSkillHeaderButtons(mode) {
   const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
   if (mode === 'read') { if (header) header.style.display = 'flex';  show(editBtn); show(delBtn); hide(cancelBtn); hide(saveBtn); }
-  else if (mode === 'create' || mode === 'edit') { hide(editBtn); hide(delBtn); show(cancelBtn); show(saveBtn); }
+  else if (mode === 'create' || mode === 'edit') { if (header) header.style.display = 'flex'; hide(editBtn); hide(delBtn); show(cancelBtn); show(saveBtn); }
   else { if (header) header.style.display = 'none';  hide(editBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); }
 }
 
@@ -4607,16 +4607,16 @@ function _memorySectionMtime(key) {
 }
 
 function _setMemoryHeaderButtons(mode) {
-
-  const header = $('mainMemory') && $('mainMemory').querySelector('.main-view-header');  const show = b => b && (b.style.display = '');
+  const header = $('mainMemory') && $('mainMemory').querySelector('.main-view-header');
+  const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
   const editBtn = $('btnEditMemoryDetail');
   const cancelBtn = $('btnCancelMemoryDetail');
   const saveBtn = $('btnSaveMemoryDetail');
   const meta = _memorySectionMeta(_currentMemorySection);
-  if (mode === 'read' && _currentMemorySection !== 'external_notes' && !meta.readOnly) { show(editBtn); hide(cancelBtn); hide(saveBtn); }
-  else if (mode === 'edit') { hide(editBtn); show(cancelBtn); show(saveBtn); }
-  else { if (header) header.style.display = 'none';  hide(editBtn); hide(cancelBtn); hide(saveBtn); }
+  if (mode === 'read' && _currentMemorySection !== 'external_notes' && !meta.readOnly) { if (header) header.style.display = 'flex'; show(editBtn); hide(cancelBtn); hide(saveBtn); }
+  else if (mode === 'edit') { if (header) header.style.display = 'flex'; hide(editBtn); show(cancelBtn); show(saveBtn); }
+  else { if (header) header.style.display = 'none'; hide(editBtn); hide(cancelBtn); hide(saveBtn); }
 }
 
 function _renderExternalNotesSources() {
