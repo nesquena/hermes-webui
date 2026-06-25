@@ -125,6 +125,36 @@ def _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages):
     return session
 
 
+def test_sidebar_state_db_overlay_preserves_numeric_actual_count():
+    import api.models as models
+
+    sid = "webui_float_actual_count"
+    sessions = [
+        {
+            "session_id": sid,
+            "source_tag": "webui",
+            "message_count": 2,
+            "actual_message_count": 5.0,
+            "last_message_at": 1001.0,
+            "updated_at": 1001.0,
+        }
+    ]
+
+    models._apply_sidebar_state_db_override_metadata(
+        sessions,
+        {
+            sid: {
+                "_state_db_source": "webui",
+                "_state_db_message_count": 4,
+                "_state_db_last_message_at": 1003.0,
+            }
+        },
+    )
+
+    assert sessions[0]["message_count"] == 4
+    assert sessions[0]["actual_message_count"] == 5
+
+
 def test_tail_cancelled_partial_blocks_state_db_replay():
     from api.models import merge_session_messages_append_only
 

@@ -1,8 +1,21 @@
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 import api.routes as routes
 from api import session_events
+
+
+@pytest.fixture(autouse=True)
+def _isolated_session_list_cache_state():
+    routes._session_list_cache_clear()
+    with routes._SESSIONS_CACHE_LOCK:
+        routes._SESSIONS_CACHE_INFLIGHT.clear()
+    yield
+    routes._session_list_cache_clear()
+    with routes._SESSIONS_CACHE_LOCK:
+        routes._SESSIONS_CACHE_INFLIGHT.clear()
 
 
 class _StageRecorder:
@@ -74,8 +87,9 @@ def test_session_list_cache_key_separates_profile_and_all_profiles():
     assert calls == ["default", "other", "default_all"]
 
 
-def test_session_list_cache_singleflight_rebuild_once():
+def test_session_list_cache_singleflight_rebuild_once(monkeypatch):
     routes._session_list_cache_clear()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
 
     started = threading.Event()
     release = threading.Event()
@@ -121,8 +135,9 @@ def test_session_list_cache_singleflight_rebuild_once():
     assert calls == 1
 
 
-def test_session_list_cache_follower_wait_stage_when_rebuild_inflight():
+def test_session_list_cache_follower_wait_stage_when_rebuild_inflight(monkeypatch):
     routes._session_list_cache_clear()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
 
     started = threading.Event()
     release = threading.Event()

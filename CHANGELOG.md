@@ -3,10 +3,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- **WebUI-created sessions stay in sync after the official Hermes Desktop App continues the same Hermes Agent session.** The conversation sidebar now refreshes WebUI-origin rows from settled `state.db` message counts/timestamps even when external/CLI sessions are hidden, recovers persisted sidecar rows that are readable by `/api/session` but missing from `_index.json`, full session loads avoid duplicating the sidecar prefix when merging `state.db`, and the next WebUI turn saves a single reconciled transcript instead of re-writing duplicated history.
-
 ## [v0.51.653] — 2026-06-25 — Release XI (gateway approval failures stay actionable instead of dead-ending)
 
 ### Fixed
@@ -108,6 +104,7 @@
 ### Fixed
 
 - **Internal "continue where you left off" prompts no longer leak into the visible transcript when a response is truncated by the output-length cap or a too-large tool call.** When the agent's response is cut short it emits a `[System: …]` continuation prompt, which the WebUI hides from the chat. The filter only matched the network-error variant (it required the literal "cut off by a network error" phrase), so the output-length and tool-call-too-large variants rendered as stray system bubbles. The filter now matches any `[System: …]` prompt carrying either "continue exactly where you left off" or "do not retry the same tool call", covering all three variants while still leaving genuine non-`[System:]` messages alone. Thanks @rodboev. (#4880, closes #4875)
+
 ## [v0.51.636] — 2026-06-25 — Release WQ (Android Chromium no longer jumps the transcript to the top)
 
 ### Fixed

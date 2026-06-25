@@ -3411,12 +3411,17 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
                 state_last = float(state_db_last_message_at or 0)
             except (TypeError, ValueError):
                 state_last = 0.0
+            # ``current_last`` intentionally includes ``updated_at``: if a
+            # sidecar metadata-only write happened after the state.db append,
+            # keep the conservative anti-resurrection guard and wait for a
+            # newer settled state.db message before overlaying counts again.
             if state_count > current_count and (state_last <= 0 or state_last > current_last):
+                try:
+                    existing_actual = max(0, int(session.get('actual_message_count') or 0))
+                except (TypeError, ValueError):
+                    existing_actual = 0
                 session['message_count'] = state_count
-                session['actual_message_count'] = max(
-                    state_count,
-                    int(session.get('actual_message_count') or 0) if str(session.get('actual_message_count') or '').isdigit() else 0,
-                )
+                session['actual_message_count'] = max(state_count, existing_actual)
                 if state_last > 0:
                     session['last_message_at'] = max(float(session.get('last_message_at') or 0), state_last)
                     session['updated_at'] = max(float(session.get('updated_at') or 0), state_last)
