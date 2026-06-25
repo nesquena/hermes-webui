@@ -40,6 +40,7 @@ from api.config import (
     parse_reasoning_effort,
     coerce_reasoning_effort_for_model,
     _main_model_request_overrides,
+    PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -54,6 +55,10 @@ from api.models import (
     reconciled_state_db_messages_for_session,
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
+from api.process_event_utils import (
+    completion_delivery_id,
+    mark_async_delegation_record_consumed,
+)
 
 
 def _session_payload_with_full_messages(session, *, tool_calls=None):
@@ -1659,6 +1664,14 @@ def _format_process_notification(evt: dict) -> str:
     """Format a completed background process notification for agent input."""
     if not isinstance(evt, dict):
         return ''
+    if evt.get('type') == 'async_delegation':
+        try:
+            from tools.process_registry import format_process_notification
+
+            return format_process_notification(evt) or ''
+        except Exception:
+            logger.debug("Failed to format async delegation notification", exc_info=True)
+            return ''
     if evt.get('type') != 'completion':
         return ''
     _sid = evt.get('session_id', '')
@@ -1681,6 +1694,26 @@ def _mark_process_completion_consumed(process_registry, process_id: str) -> None
             process_registry._completion_consumed.add(process_id)
     except Exception:
         logger.debug("Failed to mark process completion consumed", exc_info=True)
+
+
+def _completion_event_targets_webui_session(evt_session_key: str, session_id: str) -> bool:
+    """Return whether a completion event belongs to this WebUI session.
+
+    WebUI normally registers ``PROCESS_SESSION_INDEX[session_id] = session_id``.
+    Gateway/agent session keys can differ, so match the direct WebUI case first
+    and otherwise resolve through the same session-key index used by the
+    background wakeup path.
+    """
+    if not evt_session_key or not session_id:
+        return False
+    if evt_session_key == session_id:
+        return True
+    try:
+        with PROCESS_SESSION_INDEX_LOCK:
+            return PROCESS_SESSION_INDEX.get(evt_session_key) == session_id
+    except Exception:
+        logger.debug("Failed to resolve completion event session key", exc_info=True)
+        return False
 
 
 def _drain_webui_process_notifications(session_id: str) -> list[str]:
@@ -1716,17 +1749,20 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
             logger.debug("Failed to drain process completion queue", exc_info=True)
             break
 
-        evt_sid = str(evt.get('session_id') or '') if isinstance(evt, dict) else ''
+        evt_sid = completion_delivery_id(evt) if isinstance(evt, dict) else ''
         if not evt_sid:
             skipped_events.append(evt)
             continue
         try:
             if process_registry.is_completion_consumed(evt_sid):
                 continue
-            proc = process_registry.get(evt_sid)
+            evt_session_key = str(evt.get('session_key') or '') if isinstance(evt, dict) else ''
+            if not evt_session_key:
+                proc = process_registry.get(evt_sid)
+                evt_session_key = str(getattr(proc, 'session_key', '') or '')
         except Exception:
-            proc = None
-        if getattr(proc, 'session_key', None) != session_id:
+            evt_session_key = ''
+        if not _completion_event_targets_webui_session(evt_session_key, session_id):
             skipped_events.append(evt)
             continue
 
@@ -1752,7 +1788,13 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
         notification = _format_process_notification(evt)
         if notification:
             notifications.append(notification)
-            _mark_process_completion_consumed(process_registry, evt_sid)
+        # Matched but unformattable completions are consumed rather than
+        # replayed forever on later turns. Valid async_delegation events use the
+        # agent-side formatter above, so an empty notification here means the
+        # matched event is malformed/unsupported for this WebUI build.
+        _mark_process_completion_consumed(process_registry, evt_sid)
+        if isinstance(evt, dict) and evt.get('type') == 'async_delegation':
+            mark_async_delegation_record_consumed(evt_sid)
 
     for evt in skipped_events:
         try:
