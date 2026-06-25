@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.638] — 2026-06-25 — Release WS (faster session list — bounded continuation-fallback sidecar reads)
+
+### Fixed
+
+- **Listing sessions no longer reads entire session sidecar files when probing for compression continuations.** While `/api/sessions` builds sidebar metadata, a stale-pending repair path scans sibling sidecars for a continuation marker. That scan was documented as a shallow metadata-prefix check but `read_text()[:4096]` still loaded the whole file into memory before slicing, so it scaled with full transcript size on large sessions. It now reads a bounded head (up to 16 KB — enough to cover the first 4096 characters even with multi-byte content) and slices to the same 4096-character prefix, preserving the exact detection semantics while avoiding full-file I/O. Thanks @starship-s. (#4882)
+
 ## [v0.51.637] — 2026-06-25 — Release WR (all continuation prompts stay out of the transcript)
 
 ### Fixed

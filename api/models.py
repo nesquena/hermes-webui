@@ -540,6 +540,16 @@ def _find_top_level_json_key(text, key):
     return None
 
 
+def _read_file_head(path: Path, max_prefix_bytes: int = 4096) -> str:
+    """Read at most ``max_prefix_bytes`` bytes from ``path`` and decode UTF-8."""
+    if not isinstance(path, Path):
+        path = Path(path)
+    if max_prefix_bytes <= 0:
+        return ''
+    with path.open('rb') as fp:
+        return fp.read(max_prefix_bytes).decode('utf-8', errors='ignore')
+
+
 def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     """Read only the metadata portion before the top-level messages array."""
     buf = ''
@@ -2129,9 +2139,13 @@ def _has_compression_continuation(session) -> bool:
             if path.name.startswith('_') or path.stem == sid:
                 continue
             try:
-                head = path.read_text(encoding='utf-8', errors='ignore')[:4096]
-            except TypeError:
-                head = path.read_text(encoding='utf-8')[:4096]
+                # Preserve the old read_text()[:4096] CHARACTER-prefix semantics
+                # with bounded I/O: a UTF-8 char is at most 4 bytes, so 4096 chars
+                # fit in <=16384 bytes. Reading bytes then slicing to 4096 chars
+                # avoids a regression where a multi-byte (e.g. emoji) compression
+                # summary written before parent_session_id pushes the needle past a
+                # 4096-BYTE cutoff even though it was within the old 4096-CHAR one.
+                head = _read_file_head(path, max_prefix_bytes=16384)[:4096]
             except OSError:
                 continue
             if needle in head:
