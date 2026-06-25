@@ -4216,6 +4216,11 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     (#4842). A rename/archive/edit bumps the signature and invalidates just that
     entry, so a stale title/archived flag is impossible without re-reading.
     Returns a COPY so callers can't mutate the cached dict.
+
+    NOTE: this stat-gates on ``SESSION_DIR / f'{sid}.json'`` because that file is
+    ``Session.load_metadata_only``'s sole source for title+archived. If that ever
+    stops being true (metadata moves to another store), this gate would short-
+    circuit before the real source — update both together.
     """
     default = {"title": None, "archived": False}
     if not is_safe_session_id(sid):
