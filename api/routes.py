@@ -9429,6 +9429,11 @@ def handle_get(handler, parsed) -> bool:
 
         return j(handler, get_extension_status())
 
+    if parsed.path == "/api/extensions/registry":
+        from api.extensions import get_extension_registry
+
+        return j(handler, get_extension_registry())
+
     if parsed.path.startswith("/extensions/"):
         from api.extensions import serve_extension_static
 
@@ -10747,6 +10752,34 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.exception("extension toggle failed")
             return bad(handler, "Failed to update extension state", status=500)
+
+    if parsed.path == "/api/extensions/install":
+        from api.extensions import ExtensionInstallError, install_extension
+
+        try:
+            return j(
+                handler,
+                install_extension(body.get("id"), body.get("download_url"), body.get("sha256")),
+            )
+        except ExtensionInstallError as exc:
+            return bad(handler, str(exc), status=exc.status)
+        except Exception:
+            logger.exception("extension install failed")
+            return bad(handler, "Failed to install extension", status=500)
+
+    if parsed.path == "/api/extensions/uninstall":
+        from api.extensions import ExtensionInstallError, uninstall_extension
+
+        try:
+            return j(
+                handler,
+                uninstall_extension(body.get("id")),
+            )
+        except ExtensionInstallError as exc:
+            return bad(handler, str(exc), status=exc.status)
+        except Exception:
+            logger.exception("extension uninstall failed")
+            return bad(handler, "Failed to uninstall extension", status=500)
 
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery

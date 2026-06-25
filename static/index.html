@@ -1413,16 +1413,45 @@
             <div class="settings-section-head">
               <div>
                 <div class="settings-section-title" data-i18n="settings_tab_extensions">Extensions</div>
-                <div class="settings-section-meta">Diagnostics and enable/disable controls for configured WebUI extensions.</div>
+                <div class="settings-section-meta">Browse, install, and manage WebUI extensions.</div>
               </div>
-              <button class="sm-btn extensions-copy-diagnostics-btn" id="extensionsCopyDiagnosticsBtn" type="button" onclick="copyExtensionsDiagnostics()" disabled>Copy diagnostics</button>
             </div>
-            <div class="settings-field extensions-trust-note" id="extensionsTrustModel">
-              <label>Trust model</label>
-              <div>Extensions run in the WebUI browser origin and can access the same authenticated APIs as this session. Only load trusted local extension directories; disabling an extension takes effect after reload for already-injected assets.</div>
+            <div class="extensions-tab-bar" role="tablist">
+              <button class="extensions-tab-btn extensions-tab-active" role="tab"
+                      data-extensions-tab="gallery"
+                      onclick="switchExtensionsTab('gallery')" type="button"
+                      data-i18n="settings_extensions_gallery_tab">Gallery</button>
+              <button class="extensions-tab-btn" role="tab"
+                      data-extensions-tab="installed"
+                      onclick="switchExtensionsTab('installed')" type="button"
+                      data-i18n="settings_extensions_installed_tab">Installed</button>
+              <button class="extensions-tab-btn" role="tab"
+                      data-extensions-tab="diagnostics"
+                      onclick="switchExtensionsTab('diagnostics')" type="button"
+                      data-i18n="settings_extensions_diagnostics_tab">Diagnostics</button>
             </div>
-            <div id="extensionsDiagnostics" class="extensions-diagnostics" aria-live="polite">
-              <div class="extensions-loading">Loading extension diagnostics…</div>
+            <div data-extensions-pane="gallery">
+              <div id="extensionsGallery" class="extensions-gallery" aria-live="polite">
+                <div class="extensions-loading" data-i18n="settings_extensions_gallery_loading">Loading gallery…</div>
+              </div>
+            </div>
+            <div data-extensions-pane="installed" hidden>
+              <div id="extensionsInstalled" class="extensions-gallery" aria-live="polite">
+                <div class="extensions-loading">Loading installed extensions…</div>
+              </div>
+            </div>
+            <div data-extensions-pane="diagnostics" hidden>
+              <div class="settings-section-head" style="padding-top:8px">
+                <div></div>
+                <button class="sm-btn extensions-copy-diagnostics-btn" id="extensionsCopyDiagnosticsBtn" type="button" onclick="copyExtensionsDiagnostics()" disabled>Copy diagnostics</button>
+              </div>
+              <div class="settings-field extensions-trust-note" id="extensionsTrustModel">
+                <label>Trust model</label>
+                <div>Extensions run in the WebUI browser origin and can access the same authenticated APIs as this session. Only load trusted local extension directories; disabling an extension takes effect after reload for already-injected assets.</div>
+              </div>
+              <div id="extensionsDiagnostics" class="extensions-diagnostics" aria-live="polite">
+                <div class="extensions-loading">Loading extension diagnostics…</div>
+              </div>
             </div>
           </div>
           <div class="settings-pane" id="settingsPaneSystem">
