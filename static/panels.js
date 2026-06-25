@@ -805,9 +805,11 @@ function _setCronHeaderButtons(mode, job) {
   const delBtn = $('btnDeleteTaskDetail');
   const cancelBtn = $('btnCancelTaskDetail');
   const saveBtn = $('btnSaveTaskDetail');
+  const header = $('mainTasks') && $('mainTasks').querySelector('.main-view-header');
   const hide = b => b && (b.style.display = 'none');
   const show = b => b && (b.style.display = '');
   if (mode === 'read') {
+    if (header) header.style.display = '';
     show(runBtn);
     const status = job ? _cronStatusMeta(job) : null;
     const resumable = job && (
@@ -822,6 +824,7 @@ function _setCronHeaderButtons(mode, job) {
     show(cancelBtn); show(saveBtn);
   } else {
     [runBtn,pauseBtn,resumeBtn,editBtn,dupBtn,delBtn,cancelBtn,saveBtn].forEach(hide);
+    if (header) header.style.display = 'none';
   }
 }
 
