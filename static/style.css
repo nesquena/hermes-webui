@@ -4316,7 +4316,7 @@ main.main > #mainPlugin{display:none;}
 
 /* Tab visibility chips in Settings > Appearance */
 .tab-visibility-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;}
-.tab-visibility-chip{font-size:12px;line-height:1;padding:5px 10px;border-radius:var(--radius-pill,999px);border:1px solid var(--accent,var(--link));background:var(--accent,var(--link));color:#1a1a1a;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s,transform .15s;white-space:nowrap;user-select:none;}
+.tab-visibility-chip{font-size:12px;line-height:1;padding:5px 10px;border-radius:var(--radius-pill,999px);border:1px solid var(--accent,var(--link));background:var(--accent-bg);color:var(--accent-text);font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s,transform .15s;white-space:nowrap;user-select:none;}
 .tab-visibility-chip[draggable="true"]{cursor:grab;}
 .tab-visibility-chip.dragging{opacity:.55;cursor:grabbing;transform:scale(.96);}
 .tab-visibility-chip.drag-over{outline:2px solid var(--link,var(--accent));outline-offset:2px;}
