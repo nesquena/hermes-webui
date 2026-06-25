@@ -192,7 +192,7 @@ function _hasPendingUserMessageSignal(s) {{ return !!(s && (s.pending_user_messa
 function _isSessionEffectivelyStreaming(s) {{{effective_body}}}
 function _hasSessionCompletionUnread() {{ return false; }}
 function _markSessionCompletionUnread(sid) {{ unread.push(sid); }}
-function _isSessionActivelyViewedForList() {{ return false; }}
+function _isSessionOpenInChatPane() {{ return false; }}
 function _rememberObservedStreamingSession() {{}}
 function _forgetObservedStreamingSession() {{}}
 function _getSessionObservedStreaming() {{ return {{}}; }}
@@ -237,7 +237,7 @@ function _hasPendingUserMessageSignal(s) {{ return !!(s && (s.pending_user_messa
 function _isSessionEffectivelyStreaming(s) {{{effective_body}}}
 function _hasSessionCompletionUnread() {{ return false; }}
 function _markSessionCompletionUnread(sid) {{ unread.push(sid); }}
-function _isSessionActivelyViewedForList() {{ return false; }}
+function _isSessionOpenInChatPane() {{ return false; }}
 let observed = {{
   done: {{message_count: 5, last_message_at: 10}}
 }};
@@ -278,10 +278,10 @@ def test_polling_transition_does_not_mark_historical_first_render():
     )
 
 
-def test_polling_transition_skips_visible_focused_active_session():
+def test_polling_transition_skips_open_chat_pane():
     helper_block = _sessions_function_block(
+        "_isSessionOpenInChatPane",
         "_isSessionActivelyViewedForList",
-        "_markPollingCompletionUnreadTransitions",
     )
     transition_block = _sessions_function_block(
         "_markPollingCompletionUnreadTransitions",
@@ -290,12 +290,11 @@ def test_polling_transition_skips_visible_focused_active_session():
 
     assert "S.session.session_id !== sid" in helper_block
     assert "_loadingSessionId !== sid" in helper_block
-    assert "document.visibilityState !== 'visible'" in helper_block
-    assert "!document.hasFocus()" in helper_block
-    assert "!_isSessionActivelyViewedForList(sid)" in transition_block, (
-        "polling fallback must not create an unread marker for a session the "
-        "user is visibly and focusedly reading"
+    assert "_isSessionOpenInChatPane(sid)" in transition_block, (
+        "polling fallback must sync viewed state for the open chat pane so a "
+        "list refresh cannot re-flag a session the user just opened"
     )
+    assert "!_isSessionActivelyViewedForList(sid)" not in transition_block
 
 
 def test_polling_transition_tracks_the_same_effective_streaming_state_as_sidebar():
@@ -517,17 +516,16 @@ def test_completion_unread_clears_only_when_session_is_opened():
     assert load_idx != -1, "loadSession not found"
     load_block = SESSIONS_JS[load_idx:SESSIONS_JS.find("function _resolveSessionModelForDisplaySoon", load_idx)]
 
-    stale_guard_idx = load_block.find("if (_loadingSessionId !== sid) return;")
-    clear_idx = load_block.find("_clearSessionCompletionUnread(S.session.session_id);")
-    set_viewed_idx = load_block.find("_setSessionViewedCount(S.session.session_id")
+    assign_idx = load_block.find("S.session=data.session;")
+    acknowledge_idx = load_block.find("_acknowledgeSessionVisit(", assign_idx)
 
-    assert clear_idx != -1, "loadSession must clear explicit completion unread when the user opens the session"
-    assert stale_guard_idx != -1 and stale_guard_idx < clear_idx, (
-        "stale loadSession responses must not clear unread markers for sessions the user did not actually open"
+    assert assign_idx != -1, "loadSession must assign S.session before acknowledging visit"
+    assert acknowledge_idx != -1 and assign_idx < acknowledge_idx, (
+        "loadSession must acknowledge visit only after the session metadata response "
+        "is accepted for the in-flight load"
     )
-    assert set_viewed_idx != -1 and set_viewed_idx < clear_idx, (
-        "completion unread should clear at the same point the session is marked viewed"
-    )
+    assert "function _acknowledgeSessionVisit(" in SESSIONS_JS
+    assert "_setSessionViewedCount(sid, messageCount);" in SESSIONS_JS
 
 
 def test_historical_sessions_are_not_marked_unread_on_list_render():
