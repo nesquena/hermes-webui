@@ -1216,20 +1216,12 @@ async function cmdSteer(args){
   await _trySteer(msg, /*explicitSteer=*/true);
 }
 
-/**
- * Shared implementation for /steer and the busy_input_mode='steer' path.
- *
- * Tries the real steer endpoint first. On any non-accept response (no cached
- * agent, agent lacks steer, stream dead, etc.) it restores the draft and keeps
- * the active stream running. Steer belongs to the active run; a failed Steer
- * must not be silently upgraded into Queue, Interrupt, or Stop-and-send.
- *
- * @param {string} msg - The steer text.
- * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
- *   (vs the busy-mode auto-fallback). Affects toast wording and draft restore.
- * @returns {Promise<boolean>} true when the steer was delivered, false when the
- *   draft was restored and the active stream was left untouched.
- */
+function _steerFailureMessageKey(fallback) {
+  const key = 'steer_fail_' + (fallback || 'unknown');
+  return (typeof LOCALES !== 'undefined' && LOCALES.en && LOCALES.en[key])
+    ? key : 'steer_fail_unknown';
+}
+
 function _showSteerIndicator(text){
   const inner=document.getElementById('msgInner');
   if(!inner) return;
@@ -1250,6 +1242,49 @@ function _showSteerIndicator(text){
   if(typeof scrollToBottom==='function') scrollToBottom();
 }
 
+function _showSteerRecovery(msg, explicitSteer, fallback) {
+  const inner = document.getElementById('msgInner');
+  if (!inner) return;
+  const old = inner.querySelector('.steer-recovery');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = 'steer-recovery';
+  const label = document.createElement('span');
+  label.className = 'steer-recovery-label';
+  label.textContent = t(_steerFailureMessageKey(fallback));
+  el.appendChild(label);
+  const retryBtn = document.createElement('button');
+  retryBtn.className = 'steer-recovery-retry';
+  retryBtn.textContent = t('steer_recovery_retry');
+  retryBtn.addEventListener('click', () => {
+    el.remove();
+    void _trySteer(msg, explicitSteer).catch(console.error);
+  });
+  el.appendChild(retryBtn);
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'steer-recovery-dismiss';
+  dismissBtn.textContent = t('steer_recovery_dismiss');
+  dismissBtn.addEventListener('click', () => el.remove());
+  el.appendChild(dismissBtn);
+  inner.appendChild(el);
+  if (typeof scrollToBottom === 'function') scrollToBottom();
+}
+
+/**
+ * Shared implementation for /steer and the busy_input_mode='steer' path.
+ *
+ * Tries the real steer endpoint first. On any non-accept response (no cached
+ * agent, agent lacks steer, stream dead, etc.) it restores the draft and keeps
+ * the active stream running. Steer belongs to the active run; a failed Steer
+ * must not be silently upgraded into Queue, Interrupt, or Stop-and-send.
+ *
+ * @param {string} msg - The steer text.
+ * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
+ *   (vs the busy-mode auto-fallback). Affects draft restore prefix only;
+ *   toast wording is determined by the failure reason code.
+ * @returns {Promise<boolean>} true when the steer was delivered, false when the
+ *   draft was restored and the active stream was left untouched.
+ */
 async function _trySteer(msg, explicitSteer){
   let result=null;
   try{
@@ -1279,11 +1314,9 @@ async function _trySteer(msg, explicitSteer){
     if(typeof autoResize==='function')autoResize();
   }
   if(typeof renderTray==='function')renderTray();
-  if(explicitSteer){
-    showToast(t('cmd_steer_fallback'),3500);
-  } else {
-    showToast(t('busy_steer_fallback'),3500);
-  }
+  const fallbackCode = result && result.fallback;
+  showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
+  _showSteerRecovery(msg, explicitSteer, fallbackCode);
   return false;
 }
 

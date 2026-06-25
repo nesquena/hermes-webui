@@ -41,6 +41,44 @@ _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 _CLI_SESSIONS_CACHE_LOCK = threading.Lock()
 _CLI_SESSIONS_CACHE = {}
 
+# Per-file parse cache for Claude Code JSONL transcripts (#4718/#4662 phase 4).
+# ``~/.claude/projects`` is a GLOBAL, profile-independent directory, but the
+# sidebar re-derives every Claude Code row from scratch on each /api/sessions
+# build — fully re-reading and JSON-parsing up to CLAUDE_CODE_MAX_FILES
+# transcripts line-by-line (hundreds of MB) just to recover a title + message
+# count. That parse dominates the cold sidebar build (~650-1000ms measured on a
+# 200-file / ~130MB tree) and it repeats on every profile switch, on the 5s
+# CLI-cache expiry, and on every sidebar poll, because the higher CLI cache is
+# keyed per active profile while the underlying transcripts never change between
+# switches. This cache memoizes the EXPENSIVE per-file parse result keyed by the
+# file's (path, mtime_ns, size, ctime_ns); a warm sidebar build then re-stats the
+# files (~4ms for 200) instead of re-parsing them. Any external edit/append to a
+# transcript changes mtime_ns/size/ctime_ns and transparently invalidates just
+# that one file's entry. Bounded so a pathological projects tree can't grow it unbounded.
+_CLAUDE_CODE_PARSE_CACHE_LOCK = threading.Lock()
+_CLAUDE_CODE_PARSE_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
+_CLAUDE_CODE_PARSE_CACHE_MAX = 1000
+
+# Per-file cache for the UI-owned sidecar metadata (title + archived) that the
+# state.db sidebar projection overlays onto each CLI/cron row (#4842). The
+# projection calls _state_projection_sidecar_metadata() once per row in BOTH
+# the main visible pass AND the higher-capped (CRON_PROJECT_CHIP_LIMIT=200)
+# cron-only second pass, and each call was an uncached open() + 64KB prefix
+# read + a pure-Python JSON-key scan. On a cron-heavy profile that is up to
+# ~200 sidecar file reads per /api/sessions build — and because the enclosing
+# _CLI_SESSIONS_CACHE is keyed on a state.db content fingerprint that advances
+# on every streamed message row, that whole scan was re-paid on essentially
+# every 5s poll during a live turn (the "100% CPU / multi-second get_cli_sessions"
+# in #4842/#4808/#4672). This memoizes the parse result keyed by the sidecar's
+# (path, mtime_ns, size, ctime_ns) stat signature: a warm projection re-stats
+# each file (~1 stat) instead of re-reading+parsing it, while any genuine
+# rename/archive/edit bumps the signature and transparently invalidates just
+# that one entry. Bounded so a pathological session store can't grow it without
+# limit. Mirrors the Claude Code parse cache (#4718).
+_SIDECAR_METADATA_CACHE_LOCK = threading.Lock()
+_SIDECAR_METADATA_CACHE: "collections.OrderedDict[tuple, dict]" = collections.OrderedDict()
+_SIDECAR_METADATA_CACHE_MAX = 2000
+
 # ---------------------------------------------------------------------------
 # Stale temp-file cleanup
 # ---------------------------------------------------------------------------
@@ -3871,6 +3909,65 @@ def _parse_claude_code_jsonl(path: Path, *, max_messages: int = CLAUDE_CODE_MAX_
     return messages, summary_title, first_ts, last_ts
 
 
+def _parse_claude_code_jsonl_cached(
+    path: Path, *, max_messages: int = CLAUDE_CODE_MAX_MESSAGES_PER_FILE
+) -> tuple[list[dict], str | None, float | None, float | None]:
+    """``_parse_claude_code_jsonl`` memoized by the file's (path, mtime_ns, size, ctime_ns).
+
+    The transcript files under ``~/.claude/projects`` are global and rarely
+    change between sidebar builds, but parsing them dominates the cold
+    /api/sessions latency (and repeats on every profile switch). Caching the
+    parse result keyed by the file's stat signature collapses the warm cost to a
+    single ``os.stat`` per file. A genuine append/edit bumps ``mtime_ns``/``size``
+    /``ctime_ns`` and misses the cache, so staleness is impossible without
+    re-parsing.
+
+    ``max_messages`` is part of the key so a caller asking for a different cap
+    never reads a result truncated to a smaller one.
+    """
+    try:
+        st = path.stat()
+        # Key on mtime_ns + size + ctime_ns: size is the strong discriminator for
+        # append-only JSONL (any write changes it), and ctime_ns guards the rare
+        # same-size, same-mtime in-place edit so a content change can never serve
+        # a stale parse. A spurious ctime bump only costs one harmless re-parse.
+        key = (str(path), st.st_mtime_ns, st.st_size, st.st_ctime_ns, int(max_messages))
+    except OSError:
+        # Can't stat -> fall back to a direct (uncached) parse; it will also
+        # likely fail and return the empty tuple, matching prior behavior.
+        return _parse_claude_code_jsonl(path, max_messages=max_messages)
+
+    with _CLAUDE_CODE_PARSE_CACHE_LOCK:
+        hit = _CLAUDE_CODE_PARSE_CACHE.get(key)
+        if hit is not None:
+            _CLAUDE_CODE_PARSE_CACHE.move_to_end(key)
+            messages, summary_title, first_ts, last_ts = hit
+            # Return a shallow copy of the message list so a caller mutating it
+            # can't corrupt the cached entry; the per-message dicts are treated
+            # as read-only by all current callers.
+            return list(messages), summary_title, first_ts, last_ts
+
+    parsed = _parse_claude_code_jsonl(path, max_messages=max_messages)
+
+    with _CLAUDE_CODE_PARSE_CACHE_LOCK:
+        # Re-check under lock in case a concurrent build populated it; either
+        # entry is equally valid for the same stat signature.
+        existing = _CLAUDE_CODE_PARSE_CACHE.get(key)
+        if existing is None:
+            _CLAUDE_CODE_PARSE_CACHE[key] = parsed
+            _CLAUDE_CODE_PARSE_CACHE.move_to_end(key)
+            while len(_CLAUDE_CODE_PARSE_CACHE) > _CLAUDE_CODE_PARSE_CACHE_MAX:
+                _CLAUDE_CODE_PARSE_CACHE.popitem(last=False)
+    messages, summary_title, first_ts, last_ts = parsed
+    return list(messages), summary_title, first_ts, last_ts
+
+
+def clear_claude_code_parse_cache() -> None:
+    """Drop all memoized Claude Code transcript parses (test/lifecycle hook)."""
+    with _CLAUDE_CODE_PARSE_CACHE_LOCK:
+        _CLAUDE_CODE_PARSE_CACHE.clear()
+
+
 def _iter_claude_code_jsonl_files(projects_dir: Path | str | None = None, *, max_files: int = CLAUDE_CODE_MAX_FILES, max_file_bytes: int = CLAUDE_CODE_MAX_FILE_BYTES):
     root = Path(projects_dir).expanduser() if projects_dir is not None else _default_claude_code_projects_dir()
     if root is None:
@@ -3926,20 +4023,40 @@ def get_claude_code_sessions(projects_dir: Path | str | None = None, *, max_file
     never read during test runs.
     """
     sessions = []
+    # ``get_last_workspace()`` is loop-invariant (the same active workspace for
+    # every Claude Code row) but internally stats config.yaml + probes terminal
+    # cwd, so calling it once per row was ~200 redundant stat()s on the cold
+    # sidebar build (#4718). Resolve it a single time.
+    cc_workspace = str(get_last_workspace())
     for path in _iter_claude_code_jsonl_files(projects_dir, max_files=max_files, max_file_bytes=max_file_bytes) or []:
-        messages, summary_title, first_ts, last_ts = _parse_claude_code_jsonl(path)
+        messages, summary_title, first_ts, last_ts = _parse_claude_code_jsonl_cached(path)
         if not messages:
             continue
         sid = _claude_code_session_id(path)
+        # Match the truthiness fallback used in the assignments below: the old
+        # inline code was ``first_ts or last_ts or path.stat().st_mtime``, which
+        # also fell back to mtime for a falsy-but-not-None ``0.0`` timestamp
+        # (epoch-0 / 1970 transcripts). An identity (``is None``) guard would
+        # leave those rows with ``None`` instead of the file mtime, so use the
+        # same ``not`` test the assignments use to stay bug-for-bug compatible.
+        if not first_ts and not last_ts:
+            try:
+                _mtime = path.stat().st_mtime
+            except OSError:
+                _mtime = 0.0
+        else:
+            _mtime = None
+        created_at = first_ts or last_ts or _mtime
+        updated_at = last_ts or first_ts or _mtime
         sessions.append({
             'session_id': sid,
             'title': _claude_code_title(messages, summary_title),
-            'workspace': str(get_last_workspace()),
+            'workspace': cc_workspace,
             'model': 'claude-code',
             'message_count': len(messages),
-            'created_at': first_ts or last_ts or path.stat().st_mtime,
-            'updated_at': last_ts or first_ts or path.stat().st_mtime,
-            'last_message_at': last_ts or first_ts or path.stat().st_mtime,
+            'created_at': created_at,
+            'updated_at': updated_at,
+            'last_message_at': updated_at,
             'pinned': False,
             'archived': False,
             'project_id': None,
@@ -3963,7 +4080,7 @@ def get_claude_code_session_messages(sid, projects_dir: Path | str | None = None
     for path in _iter_claude_code_jsonl_files(projects_dir) or []:
         if _claude_code_session_id(path) != sid:
             continue
-        messages, _summary_title, _first_ts, _last_ts = _parse_claude_code_jsonl(path)
+        messages, _summary_title, _first_ts, _last_ts = _parse_claude_code_jsonl_cached(path)
         return messages
     return []
 
@@ -3971,6 +4088,10 @@ def get_claude_code_session_messages(sid, projects_dir: Path | str | None = None
 def clear_cli_sessions_cache() -> None:
     with _CLI_SESSIONS_CACHE_LOCK:
         _CLI_SESSIONS_CACHE.clear()
+    # The sidecar-metadata projection cache is stat-keyed (self-invalidating on
+    # any file change), but clear it alongside the CLI cache so an explicit
+    # reset — a mutating sidebar action or test isolation — starts fully cold.
+    clear_sidecar_metadata_cache()
 
 
 def _copy_cli_sessions(sessions: list) -> list:
@@ -4176,20 +4297,66 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
     return contexts, tuple(cache_entries)
 
 
+def clear_sidecar_metadata_cache() -> None:
+    """Drop all memoized sidebar-projection sidecar metadata (test/lifecycle hook)."""
+    with _SIDECAR_METADATA_CACHE_LOCK:
+        _SIDECAR_METADATA_CACHE.clear()
+
+
 def _state_projection_sidecar_metadata(sid: str) -> dict:
-    """Return UI-owned metadata for a state.db-projected sidebar row."""
-    metadata = {"title": None, "archived": False}
+    """Return UI-owned metadata (title + archived) for a state.db-projected row.
+
+    Memoized by the sidecar file's (path, mtime_ns, size, ctime_ns) stat
+    signature so the sidebar projection — which calls this once per row in both
+    the visible pass and the up-to-200-row cron pass — pays a single os.stat per
+    file on a warm build instead of an open() + 64KB read + JSON-key scan
+    (#4842). A rename/archive/edit bumps the signature and invalidates just that
+    entry, so a stale title/archived flag is impossible without re-reading.
+    Returns a COPY so callers can't mutate the cached dict.
+
+    NOTE: this stat-gates on ``SESSION_DIR / f'{sid}.json'`` because that file is
+    ``Session.load_metadata_only``'s sole source for title+archived. If that ever
+    stops being true (metadata moves to another store), this gate would short-
+    circuit before the real source — update both together.
+    """
+    default = {"title": None, "archived": False}
+    if not is_safe_session_id(sid):
+        return dict(default)
+    p = SESSION_DIR / f'{sid}.json'
+    try:
+        st = p.stat()
+        key = (str(p), st.st_mtime_ns, st.st_size, st.st_ctime_ns)
+    except OSError:
+        # No sidecar file (the common case for a pure state.db row) or it
+        # vanished mid-build — nothing to project, and nothing worth caching.
+        return dict(default)
+
+    with _SIDECAR_METADATA_CACHE_LOCK:
+        hit = _SIDECAR_METADATA_CACHE.get(key)
+        if hit is not None:
+            _SIDECAR_METADATA_CACHE.move_to_end(key)
+            return dict(hit)
+
+    metadata = dict(default)
     try:
         webui_meta = Session.load_metadata_only(sid)
     except Exception:
-        return metadata
-    if not webui_meta:
-        return metadata
-    title = getattr(webui_meta, 'title', None)
-    if title:
-        metadata["title"] = title
-    metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
-    return metadata
+        webui_meta = None
+    if webui_meta:
+        title = getattr(webui_meta, 'title', None)
+        if title:
+            metadata["title"] = title
+        metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
+
+    with _SIDECAR_METADATA_CACHE_LOCK:
+        # Re-check under lock in case a concurrent build populated it; either
+        # entry is equally valid for the same stat signature.
+        if key not in _SIDECAR_METADATA_CACHE:
+            _SIDECAR_METADATA_CACHE[key] = metadata
+            _SIDECAR_METADATA_CACHE.move_to_end(key)
+            while len(_SIDECAR_METADATA_CACHE) > _SIDECAR_METADATA_CACHE_MAX:
+                _SIDECAR_METADATA_CACHE.popitem(last=False)
+    return dict(metadata)
 
 
 def _load_cli_sessions_uncached(
@@ -4225,6 +4392,48 @@ def _load_cli_sessions_uncached(
             _cron_pid_cache[0] = ensure_cron_project()
         return _cron_pid_cache[0]
 
+    # Memoize the cron jobs.json job_id -> name map for this scan. The two row
+    # loops below each looked up a cron job's friendly name by re-reading and
+    # re-parsing hermes_home/cron/jobs.json PER untitled cron row — up to ~200
+    # full-file JSON parses on a cron-heavy profile (#4842). Parse it once,
+    # lazily, on the first untitled cron row we hit. {} when absent/unreadable.
+    _cron_job_names_cache: list = [None]  # list-as-cell; None = not yet resolved
+    def _cron_job_names():
+        if _cron_job_names_cache[0] is None:
+            names: dict[str, str] = {}
+            try:
+                _jobs_path = hermes_home / 'cron' / 'jobs.json'
+                if _jobs_path.exists():
+                    _jobs_data = json.loads(_jobs_path.read_text(encoding='utf-8'))
+                    for _j in _jobs_data.get('jobs', []):
+                        _jid = _j.get('id')
+                        _jname = _j.get('name')
+                        if _jid and _jname:
+                            names[str(_jid)] = _jname
+            except Exception:
+                pass  # degrade gracefully — fall back to the generic title
+            _cron_job_names_cache[0] = names
+        return _cron_job_names_cache[0]
+
+    def _cron_title_from_jobs(sid: str):
+        """Friendly cron job name for a cron_{job_id}_{ts} sid, or None."""
+        if not sid.startswith('cron_'):
+            return None
+        parts = sid.split('_')
+        if len(parts) < 3:
+            return None
+        return _cron_job_names().get(parts[1])
+
+    # get_last_workspace() reads up to two files + an is_dir()/remote probe and
+    # returns the SAME active workspace for every projected row, so calling it
+    # per row was redundant I/O on the cold sidebar build (#4842; mirrors the
+    # #4718 hoist on the Claude Code path). Resolve it once for this scan.
+    _cli_workspace_cache: list = [None]  # list-as-cell; None = not yet resolved
+    def _cli_workspace():
+        if _cli_workspace_cache[0] is None:
+            _cli_workspace_cache[0] = str(get_last_workspace())
+        return _cli_workspace_cache[0]
+
     profile_value = _cli_profile or 'default'
     for row in read_importable_agent_session_rows(
         db_path,
@@ -4241,23 +4450,10 @@ def _load_cli_sessions_uncached(
 
         _source = row['source'] or 'cli'
         _title = row['title']
-        if not _title and _source == 'cron' and sid.startswith('cron_'):
-            # Extract job_id from session ID (cron_{job_id}_{timestamp})
-            # and look up the human-friendly job name from jobs.json
-            parts = sid.split('_')
-            if len(parts) >= 3:
-                _job_id = parts[1]
-                try:
-                    _jobs_path = hermes_home / 'cron' / 'jobs.json'
-                    if _jobs_path.exists():
-                        import json as _json
-                        _jobs_data = _json.loads(_jobs_path.read_text())
-                        for _j in _jobs_data.get('jobs', []):
-                            if _j.get('id') == _job_id:
-                                _title = _j.get('name') or _title
-                                break
-                except Exception:
-                    pass  # degrade gracefully
+        if not _title and _source == 'cron':
+            # Look up the human-friendly cron job name (cron_{job_id}_{ts}) from
+            # the once-parsed jobs.json map instead of re-reading the file here.
+            _title = _cron_title_from_jobs(sid) or _title
         # If a WebUI JSON file exists for this session (e.g. previously
         # imported or renamed in the sidebar), prefer its UI-owned metadata over
         # the state.db projection. This keeps archived cron/tool/API runs hidden
@@ -4271,7 +4467,7 @@ def _load_cli_sessions_uncached(
         cli_sessions.append({
             'session_id': sid,
             'title': _display_title,
-            'workspace': str(get_last_workspace()),
+            'workspace': _cli_workspace(),
             'model': row['model'] or None,
             'message_count': row['message_count'] or row['actual_message_count'] or 0,
             'created_at': row['started_at'],
@@ -4332,21 +4528,9 @@ def _load_cli_sessions_uncached(
                     continue
                 raw_ts = row['last_activity'] or row['started_at']
                 _title = row['title']
-                if not _title and sid.startswith('cron_'):
-                    parts = sid.split('_')
-                    if len(parts) >= 3:
-                        _job_id = parts[1]
-                        try:
-                            _jobs_path = hermes_home / 'cron' / 'jobs.json'
-                            if _jobs_path.exists():
-                                import json as _json
-                                _jobs_data = _json.loads(_jobs_path.read_text())
-                                for _j in _jobs_data.get('jobs', []):
-                                    if _j.get('id') == _job_id:
-                                        _title = _j.get('name') or _title
-                                        break
-                        except Exception:
-                            pass
+                if not _title:
+                    # Friendly cron job name from the once-parsed jobs.json map.
+                    _title = _cron_title_from_jobs(sid) or _title
                 _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
@@ -4355,7 +4539,7 @@ def _load_cli_sessions_uncached(
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _display_title,
-                    'workspace': str(get_last_workspace()),
+                    'workspace': _cli_workspace(),
                     'model': row['model'] or None,
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],

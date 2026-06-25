@@ -5303,6 +5303,45 @@ let _approvalSessionId = null;
 let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
 
+const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
+
+// Dismissed approvals are namespaced by session so that two sessions carrying
+// the SAME approval_id (e.g. a gateway/run source that reuses externally
+// supplied IDs across sessions) can't have a dismissal in one session hide the
+// other's still-pending approval. Stored value is "<sid>\u0000<approval_id>".
+function _approvalDismissKey(sid, approvalId) {
+  if (!approvalId) return '';
+  return String(sid || '') + '\u0000' + String(approvalId);
+}
+
+function _getDismissedApprovals() {
+  try { return JSON.parse(localStorage.getItem(_DISMISSED_APPROVALS_KEY) || '[]'); }
+  catch (_) { return []; }
+}
+
+function _isApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return false;
+  return _getDismissedApprovals().includes(key);
+}
+
+function _markApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return;
+  const set = _getDismissedApprovals().filter(k => k !== key);
+  set.push(key);
+  try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set.slice(-100))); }
+  catch (_) {}
+}
+
+function _unmarkApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return;
+  const set = _getDismissedApprovals().filter(k => k !== key);
+  try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set)); }
+  catch (_) {}
+}
+
 function _promptActiveSessionId() {
   return (S.session && S.session.session_id) || null;
 }
@@ -5360,6 +5399,7 @@ function showApprovalForSession(sid, pending, pendingCount) {
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
+  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
@@ -5401,6 +5441,13 @@ function showApprovalCard(pending, pendingCount) {
     setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
   }
   if (typeof syncTopbar === 'function') syncTopbar();
+}
+
+function dismissApprovalCard() {
+  const sid = _approvalSessionId;
+  if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
+  hideApprovalCard(true);
+  if (sid) _clearApprovalPendingForSession(sid);
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -5466,6 +5513,7 @@ async function respondApproval(choice) {
   const sid = _approvalSessionId || (S.session && S.session.session_id);
   if (!sid) return;
   const approvalId = _approvalCurrentId;
+  _unmarkApprovalDismissed(sid, approvalId);
   // Disable all buttons immediately to prevent double-submit
   ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
     const b = $(id);
@@ -5519,7 +5567,10 @@ function _startApprovalFallbackPoll(sid) {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
       else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
+        const _resolvedEntry = _approvalPendingBySession.get(sid);
         _clearApprovalPendingForSession(sid);
+        const _resolvedId = _resolvedEntry && _resolvedEntry.pending && _resolvedEntry.pending.approval_id;
+        if (_resolvedId) _unmarkApprovalDismissed(sid, _resolvedId);
         _hideApprovalCardIfOwner(sid);
         if (!S.busy) {
           stopApprovalPollingForSession(sid);
