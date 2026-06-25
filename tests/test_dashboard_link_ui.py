@@ -14,7 +14,7 @@ STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 UI_PATH = REPO / "static" / "ui.js"
 PANELS_PATH = REPO / "static" / "panels.js"
 NODE = shutil.which("node")
-pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+requires_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     """\
@@ -352,6 +352,7 @@ def test_desktop_dashboard_link_button_stays_in_desktop_nav():
     mobile_nav = mobile_nav_match.group(0)
     assert 'id="dashboardMobileBtn"' in mobile_nav
 
+@requires_node
 def test_dashboard_dropdown_save_resyncs_chip_state():
     out = _run_dashboard_link_driver("save", mode="never", url="http://example.local:1234")
     assert out["mode"] == "never"
@@ -368,6 +369,7 @@ def test_dashboard_dropdown_save_resyncs_chip_state():
     )
 
 
+@requires_node
 def test_dashboard_chip_save_keeps_buttons_refreshed():
     out = _run_dashboard_link_driver("chip-toggle", mode="never", url="http://example.local:1234")
     assert out["mode"] == "auto"

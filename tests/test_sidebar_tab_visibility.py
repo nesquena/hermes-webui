@@ -23,7 +23,7 @@ INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
-pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+requires_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 _PANELS_DASHBOARD_DRIVER = textwrap.dedent(
     """\
@@ -430,6 +430,7 @@ def test_chip_a11y_uses_switch_role_with_aria_checked():
         "chip needs drag-over style for mouse reorder target feedback"
 
 
+@requires_node
 def test_dashboard_chip_renders_in_tab_visibility_grid():
     """Behavioral verification for render state and placement in the chip grid."""
     for mode in ("auto", "always", "never"):
@@ -445,6 +446,7 @@ def test_dashboard_chip_renders_in_tab_visibility_grid():
         assert out["chipCount"] >= 1, out
 
 
+@requires_node
 def test_dashboard_chip_off_sets_never_and_chip_on_restores_prior_mode():
     """Chip toggling must save 'never' and restore non-never mode on the next toggle."""
     out = _run_panels_driver("toggle", mode="always", prior_mode="always")
@@ -456,6 +458,7 @@ def test_dashboard_chip_off_sets_never_and_chip_on_restores_prior_mode():
     assert out["dashboardLastNonNeverMode"] == "always", out
 
 
+@requires_node
 def test_dashboard_chip_toggle_does_not_mutate_hidden_tabs_or_tab_order():
     """Dashboard chip toggles stay on the dashboard config path, never the sidebar-tab payload."""
     out = _run_panels_driver("toggle", mode="auto", prior_mode="auto")
@@ -465,6 +468,7 @@ def test_dashboard_chip_toggle_does_not_mutate_hidden_tabs_or_tab_order():
     assert out["tabOrderCalls"] == 0, out
 
 
+@requires_node
 def test_dashboard_chip_on_defaults_to_auto_without_prior_mode():
     """Missing restore state should fall back to 'auto' before returning chip-on."""
     out = _run_panels_driver("toggle", mode="never", force_no_restore=True)
