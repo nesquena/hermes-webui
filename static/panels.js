@@ -820,6 +820,7 @@ function _setCronHeaderButtons(mode, job) {
     else { show(pauseBtn); hide(resumeBtn); }
     show(editBtn); show(dupBtn); show(delBtn); hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create' || mode === 'edit') {
+    if (header) header.style.display = '';
     hide(runBtn); hide(pauseBtn); hide(resumeBtn); hide(editBtn); hide(dupBtn); hide(delBtn);
     show(cancelBtn); show(saveBtn);
   } else {
