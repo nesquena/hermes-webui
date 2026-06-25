@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`GET /api/sessions` no longer pins CPU to 100% and takes multiple seconds on profiles with many cron sessions.** The sidebar projection that turns agent state.db rows into sidebar entries did three pieces of redundant per-row file I/O — an uncached sidecar JSON read (open + 64KB prefix read + key scan), a `get_last_workspace()` resolve (up to two file reads + a directory probe), and a full `cron/jobs.json` read+parse for each untitled cron row — across both the visible pass and the higher-capped (up to 200 rows) cron-only second pass. On a cron-heavy install that was hundreds of file reads per build, and because the session-list cache is keyed on a state.db fingerprint that advances on every streamed message, the whole scan was re-paid on essentially every 5s poll during a live turn (the recurring "100% CPU / slow `/api/sessions`" from #4672 → #4808 → #4842). The sidecar metadata read is now memoized per file by its `(path, mtime_ns, size, ctime_ns)` stat signature so a warm build re-stats instead of re-reads (a rename/archive/edit still invalidates just that one entry), and the workspace resolve + jobs.json parse now happen once per build instead of once per row. Output is unchanged. (#4842)
+
 ## [v0.51.638] — 2026-06-25 — Release WS (faster session list — bounded continuation-fallback sidecar reads)
 
 ### Fixed
