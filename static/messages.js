@@ -5006,22 +5006,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
       }
-      // Fetch latest session from server to get accurate message list (includes cancel status)
-      // This ensures messages stay in sync with server, fixing race condition where local
-      // "*Task cancelled.*" message gets lost when done event overwrites S.messages
+      const _applyCancelSessionPayload=(sessionPayload)=>{
+        if(!sessionPayload||typeof sessionPayload!=='object'||!S.session||S.session.session_id!==activeSid) return false;
+        S.session=sessionPayload;
+        const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
+        _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
+        S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+        if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
+        clearLiveToolCards();if(!assistantText)removeThinking();
+        _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length);
+        renderMessages({preserveScroll:true});
+        return true;
+      };
+      // Prefer the canonical session snapshot embedded in the terminal cancel event.
+      // It includes _partial reasoning/tool rows captured by cancel_stream(), avoiding
+      // a second GET race where the visible cancelled work briefly collapses to only
+      // the fallback "Task cancelled" marker (#4076).
+      const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;
       (async()=>{
         try{
+          if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
+          // Fetch latest session from server to get accurate message list (includes cancel status)
+          // This ensures messages stay in sync with server, fixing race condition where local
+          // "*Task cancelled.*" message gets lost when done event overwrites S.messages
           const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
-          if(data&&data.session&&S.session&&S.session.session_id===activeSid){
-            S.session=data.session;
-            const _nextMsgs3018=(data.session.messages||[]).filter(m=>m&&m.role);
-            _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
-            S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
-            if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
-            clearLiveToolCards();if(!assistantText)removeThinking();
-            _markSessionViewed(activeSid, data.session.message_count ?? S.messages.length);
-            renderMessages({preserveScroll:true});
-          }
+          if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
