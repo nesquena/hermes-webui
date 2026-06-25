@@ -64,9 +64,10 @@ def is_context_compression_marker(message):
         message.get("content", ""),
         part_types={"text", "input_text", "output_text"},
     ).lower().lstrip()
+    synthetic_unbracketed_marker = bool(message.get("_compressed_summary"))
     return (
         text.startswith("[context compaction")
-        or text.startswith("context compaction")
+        or (synthetic_unbracketed_marker and text.startswith("context compaction"))
         or text.startswith("[your active task list was preserved across context compression]")
         or text.startswith("[session arc summary")
     )

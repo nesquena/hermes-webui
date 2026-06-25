@@ -269,7 +269,7 @@ def _build_redact_fn():
     )
     _ENV_RE = _re.compile(
         r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50})"
-        r"\s*=\s*(['\"]?)([^\s'\"\]\),;]+)\2"
+        r"\s*=\s*(['\"]?)(\S+)\2"
     )
 
     _PRIVKEY_RE = _re.compile(
@@ -288,20 +288,47 @@ def _build_redact_fn():
     _CODE_ENV_KEY_LITERAL_RE = _re.compile(
         r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50}=)([\"'][)\]:,]+|[)\]:,]+)"
     )
+    _ENV_KEY_PREFIX_RE = _re.compile(
+        r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50}=)"
+    )
+    _REDACTED_ENV_VALUE_RE = _re.compile(
+        r"(?:\*{3,}|[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,32}\.\.\.[A-Za-z0-9_.:/+-]{1,16})"
+    )
 
     def _restore_code_env_key_literals(original: str, redacted: str) -> str:
         if not isinstance(original, str) or not isinstance(redacted, str):
             return redacted
-        restored = redacted
-        for match in _CODE_ENV_KEY_LITERAL_RE.finditer(original):
+        literal_occurrences: dict[tuple[str, int], str] = {}
+        original_counts: dict[str, int] = {}
+        for match in _ENV_KEY_PREFIX_RE.finditer(original):
             key_prefix = match.group(1)
-            literal_suffix = match.group(2)
-            restored = restored.replace(
-                f"{key_prefix}***",
-                f"{key_prefix}{literal_suffix}",
-                1,
-            )
-        return restored
+            occurrence = original_counts.get(key_prefix, 0)
+            original_counts[key_prefix] = occurrence + 1
+            literal_match = _CODE_ENV_KEY_LITERAL_RE.match(original, match.start())
+            if literal_match:
+                literal_occurrences[(key_prefix, occurrence)] = literal_match.group(2)
+        if not literal_occurrences:
+            return redacted
+        redacted_counts: dict[str, int] = {}
+        pieces = []
+        last = 0
+        for match in _ENV_KEY_PREFIX_RE.finditer(redacted):
+            key_prefix = match.group(1)
+            occurrence = redacted_counts.get(key_prefix, 0)
+            redacted_counts[key_prefix] = occurrence + 1
+            literal_suffix = literal_occurrences.get((key_prefix, occurrence))
+            if literal_suffix is None:
+                continue
+            value_match = _REDACTED_ENV_VALUE_RE.match(redacted, match.end())
+            if not value_match:
+                continue
+            pieces.append(redacted[last:value_match.start()])
+            pieces.append(literal_suffix)
+            last = value_match.end()
+        if not pieces:
+            return redacted
+        pieces.append(redacted[last:])
+        return "".join(pieces)
 
     def _fallback_redact(text: str) -> str:
         if not isinstance(text, str) or not text:
