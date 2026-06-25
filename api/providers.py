@@ -2886,10 +2886,13 @@ def set_custom_provider_models(provider_id: str, models: list[str]) -> dict[str,
 
             _save_yaml_config_file(config_path, cfg)
 
-        # Sync in-memory cache
-        reload_config()
-        # Invalidate model cache so dropdown refreshes
-        invalidate_models_cache()
+        # Sync in-memory cache — own try/except so a reload hiccup
+        # doesn't produce a false {"ok": False} after a successful write.
+        try:
+            reload_config()
+            invalidate_models_cache()
+        except Exception:
+            logger.exception("Post-save cache sync failed for %s", provider_id)
 
         return {"ok": True, "provider": provider_id, "models": list(models) if models else []}
 
