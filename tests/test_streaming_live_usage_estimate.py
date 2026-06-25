@@ -1,4 +1,7 @@
-from api.streaming import live_usage_prompt_estimate_after_tool_delta
+from api.streaming import (
+    _live_usage_session_snapshot,
+    live_usage_prompt_estimate_after_tool_delta,
+)
 
 
 def test_live_usage_estimate_caps_tool_delta_against_previous_prompt():
@@ -48,3 +51,28 @@ def test_live_usage_estimate_caps_cumulative_tool_delta_per_turn():
     assert usage["turn_tool_prompt_tokens"] == 24_000
     assert usage["last_prompt_tokens"] == base_prompt_tokens + 24_000
     assert usage["last_prompt_tokens"] < base_prompt_tokens + (20 * 12_000)
+
+
+def test_live_usage_session_snapshot_prefers_current_stream_session():
+    current = object()
+    cache = [None]
+
+    def fail_loader(_sid):
+        raise AssertionError("hot live usage path should not reload the current session")
+
+    assert _live_usage_session_snapshot("sid", current, cache, loader=fail_loader) is current
+    assert cache[0] is current
+
+
+def test_live_usage_session_snapshot_falls_back_once_then_uses_cache():
+    loaded = object()
+    calls = []
+    cache = [None]
+
+    def loader(sid):
+        calls.append(sid)
+        return loaded
+
+    assert _live_usage_session_snapshot("sid", None, cache, loader=loader) is loaded
+    assert _live_usage_session_snapshot("sid", None, cache, loader=loader) is loaded
+    assert calls == ["sid"]

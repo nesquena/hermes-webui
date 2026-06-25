@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Live metering during active streams no longer reloads the session on every usage tick.** The streaming worker now reuses its current session object for `_live_usage_snapshot()` and only falls back to `get_session()` once before the worker has loaded that object. This removes another avoidable global-session-lock touch point while tokens and tool events are streaming, narrowing the lock-contention half of #4918 without changing usage payloads or active-stream state.
+
 ## [v0.51.653] — 2026-06-25 — Release XI (gateway approval failures stay actionable instead of dead-ending)
 
 ### Fixed

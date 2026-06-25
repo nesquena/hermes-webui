@@ -4923,6 +4923,31 @@ def live_usage_prompt_estimate_after_tool_delta(
     }
 
 
+def _live_usage_session_snapshot(session_id, current_session, cache_ref, *, loader=get_session):
+    """Return a session object for hot live-metering paths without repeated loads."""
+    if current_session is not None:
+        try:
+            cache_ref[0] = current_session
+        except Exception:
+            pass
+        return current_session
+    try:
+        cached = cache_ref[0]
+    except Exception:
+        cached = None
+    if cached is not None:
+        return cached
+    try:
+        loaded = loader(session_id)
+    except Exception:
+        return None
+    try:
+        cache_ref[0] = loaded
+    except Exception:
+        pass
+    return loaded
+
+
 def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
     """Extract a bounded result preview from a stored tool message payload."""
     if limit <= 0:
@@ -5744,6 +5769,14 @@ def _run_agent_streaming(
     # (model, base_url, provider) within one stream, so resolve it at most
     # once. Sentinel: None=not computed, 0=not applicable/failed, >0=real cap.
     _real_ctx_cache = [None]
+    _live_usage_session_cache = [None]
+
+    def _current_live_usage_session():
+        return _live_usage_session_snapshot(
+            session_id,
+            s,
+            _live_usage_session_cache,
+        )
 
     def _seed_live_prompt_estimate() -> int:
         """Capture the latest exact prompt size before adding live tool deltas."""
@@ -5760,7 +5793,7 @@ def _run_agent_streaming(
                 _base = 0
         if not _base:
             try:
-                _session_obj = get_session(session_id)
+                _session_obj = _current_live_usage_session()
                 _base = getattr(_session_obj, 'last_prompt_tokens', 0) or 0
             except Exception:
                 _base = 0
@@ -5802,10 +5835,7 @@ def _run_agent_streaming(
             'threshold_tokens': 0,
             'last_prompt_tokens': 0,
         }
-        try:
-            _session_obj = get_session(session_id)
-        except Exception:
-            _session_obj = None
+        _session_obj = _current_live_usage_session()
 
         _agent = agent
         if _agent is not None:
