@@ -1258,7 +1258,8 @@ async function loadDashboardSettings(){
     if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
   }catch(_){/* leave defaults visible */}
 }
-async function saveDashboardSettings(){
+async function saveDashboardSettings(opts){
+  opts=opts||{};
   const modeEl=$('settingsDashboardMode');
   const urlEl=$('settingsDashboardUrl');
   const statusEl=$('settingsDashboardStatus');
@@ -1275,6 +1276,7 @@ async function saveDashboardSettings(){
   }catch(err){
     if(statusEl) statusEl.textContent='Dashboard link settings failed to save.';
     else if(typeof showToast==='function') showToast('Dashboard link settings failed to save.');
+    if(opts.raiseOnError) throw err;
   }
 }
 function openHermesDashboard(event){

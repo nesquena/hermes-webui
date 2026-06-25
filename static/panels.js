@@ -6777,8 +6777,12 @@ function _toggleDashboardVisibilityChip(){
   var nextMode=currentMode==='never'
     ? (typeof _getDashboardChipRestoreMode==='function' ? _getDashboardChipRestoreMode() : 'auto')
     : 'never';
+  var previousMode=currentMode;
   modeEl.value=nextMode;
-  saveDashboardSettings();
+  Promise.resolve(saveDashboardSettings({raiseOnError:true})).catch(function(){
+    modeEl.value=previousMode;
+    if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
+  });
 }
 
 function _ensureComposerControlVisibilityState(settings){

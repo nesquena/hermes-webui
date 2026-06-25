@@ -119,8 +119,9 @@ _PANELS_DASHBOARD_DRIVER = textwrap.dedent(
     const mode = process.argv[3] || 'auto';
     const priorMode = process.argv[4] || '';
     const forceNoRestore = process.argv[5] === '1';
-    const panelsSrc = fs.readFileSync(process.argv[6], 'utf8');
-    const uiSrc = fs.readFileSync(process.argv[7], 'utf8');
+    const failSave = process.argv[6] === '1';
+    const panelsSrc = fs.readFileSync(process.argv[7], 'utf8');
+    const uiSrc = fs.readFileSync(process.argv[8], 'utf8');
 
     const container = makeEl();
     const modeEl = makeEl();
@@ -165,18 +166,27 @@ _PANELS_DASHBOARD_DRIVER = textwrap.dedent(
     global._ALWAYS_VISIBLE_TABS = new Set(['chat', 'settings']);
     global.t = (key) => key === 'tab_dashboard' ? 'Hermes Dashboard' : String(key);
 
+    let failNextSave = failSave;
     global.api = (url, opts = {}) => {
       apiCalls.push({ url: String(url), method: (opts.method || 'GET').toUpperCase(), body: opts.body || '' });
+      if (String(url) === '/api/dashboard/config' && failNextSave) {
+        failNextSave = false;
+        return Promise.reject(new Error('save failed'));
+      }
       const payload = opts.body ? JSON.parse(opts.body) : {};
       return Promise.resolve({ enabled: payload.enabled || 'auto', url: payload.url || '' });
     };
-    global.saveDashboardSettings = async function () {
+    global.saveDashboardSettings = async function (opts = {}) {
       const payload = { enabled: modeEl.value || 'auto', url: (urlEl.value || '').trim() };
-      const saved = await api('/api/dashboard/config', { method: 'POST', body: JSON.stringify(payload) });
-      const normalized = _normalizeDashboardEnabledMode(saved && saved.enabled);
-      modeEl.value = normalized;
-      _setDashboardModeForChip(normalized);
-      return saved;
+      try {
+        const saved = await api('/api/dashboard/config', { method: 'POST', body: JSON.stringify(payload) });
+        const normalized = _normalizeDashboardEnabledMode(saved && saved.enabled);
+        modeEl.value = normalized;
+        _setDashboardModeForChip(normalized);
+        return saved;
+      } catch (err) {
+        if (opts.raiseOnError) throw err;
+      }
     };
     global._setHiddenTabs = () => { hiddenCalls += 1; };
     global._setTabOrder = () => { tabOrderCalls += 1; };
@@ -194,6 +204,11 @@ _PANELS_DASHBOARD_DRIVER = textwrap.dedent(
     ]) {
       eval(extractFn(panelsSrc, name));
     }
+    const realRenderTabVisibilityChips = _renderTabVisibilityChips;
+    _renderTabVisibilityChips = function () {
+      renderCalls += 1;
+      return realRenderTabVisibilityChips();
+    };
 
     (async () => {
       if (forceNoRestore) global._dashboardLastNonNeverMode = null;
@@ -214,7 +229,21 @@ _PANELS_DASHBOARD_DRIVER = textwrap.dedent(
 
       _toggleDashboardVisibilityChip();
       await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
       const firstMode = modeEl.value;
+
+      if (action === 'toggle-fail') {
+        console.log(JSON.stringify({
+          firstMode,
+          dashboardLastNonNeverMode: global._dashboardLastNonNeverMode,
+          apiCalls,
+          hiddenCalls,
+          tabOrderCalls,
+          renderCalls,
+        }));
+        return;
+      }
+
       _toggleDashboardVisibilityChip();
       await new Promise((resolve) => setTimeout(resolve, 0));
       const secondMode = modeEl.value;
@@ -233,7 +262,13 @@ _PANELS_DASHBOARD_DRIVER = textwrap.dedent(
 )
 
 
-def _run_panels_driver(action: str, mode: str = 'auto', prior_mode: str = '', force_no_restore: bool = False) -> dict:
+def _run_panels_driver(
+    action: str,
+    mode: str = 'auto',
+    prior_mode: str = '',
+    force_no_restore: bool = False,
+    fail_save: bool = False,
+) -> dict:
     """Run the dashboard-visibility chip helpers with a DOM shim."""
     with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as f:
         f.write(_PANELS_DASHBOARD_DRIVER)
@@ -247,6 +282,7 @@ def _run_panels_driver(action: str, mode: str = 'auto', prior_mode: str = '', fo
                 mode,
                 prior_mode,
                 "1" if force_no_restore else "0",
+                "1" if fail_save else "0",
                 str(PANELS_PATH),
                 str(UI_PATH),
             ],
@@ -476,6 +512,18 @@ def test_dashboard_chip_on_defaults_to_auto_without_prior_mode():
     assert out["secondMode"] == "never", out
     assert out["hiddenCalls"] == 0, out
     assert out["tabOrderCalls"] == 0, out
+
+
+@requires_node
+def test_dashboard_chip_failed_save_restores_previous_mode():
+    """A failed chip save must roll the dropdown and chip state back to the prior mode."""
+    out = _run_panels_driver("toggle-fail", mode="auto", prior_mode="auto", fail_save=True)
+    assert out["firstMode"] == "auto", out
+    assert len([call for call in out["apiCalls"] if call["url"] == "/api/dashboard/config"]) == 1, out
+    assert out["hiddenCalls"] == 0, out
+    assert out["tabOrderCalls"] == 0, out
+    assert out["renderCalls"] == 1, out
+    assert out["dashboardLastNonNeverMode"] == "auto", out
 
 
 def test_tab_order_excludes_always_visible_tabs(monkeypatch, tmp_path):
