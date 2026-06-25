@@ -4667,6 +4667,13 @@ function scrollIfPinned(){
   if(_messageUserUnpinned) return;
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
+  const el=(typeof _messageScrollElement==='function')?_messageScrollElement():$('messages');
+  if(el&&Number.isFinite(_lastScrollTop)&&el.scrollTop<_lastScrollTop-5){
+    _messageUserUnpinned=true;
+    _scrollPinned=false;
+    _nearBottomCount=0;
+    return;
+  }
   if(_messageBottomDistance()>500) _setMessageScrollToBottom();
   _settleMessageScrollToBottom(false);
 }

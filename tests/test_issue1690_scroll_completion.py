@@ -55,8 +55,8 @@ def test_render_messages_preserve_scroll_option_uses_user_pin_state_not_stream_l
 
     assert "function renderMessages(options)" in render_body
     assert "const preserveScroll=!!(options&&options.preserveScroll);" in render_body
-    assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in render_body
-    assert "const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null" in render_body
+    assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot, forceBottom);" in render_body
+    assert "const scrollSnapshot=(!forceBottom&&(preserveScroll||_messageUserUnpinned))?_captureMessageScrollSnapshot():null" in render_body
     assert "if(preserveScroll){" in scroll_helper
     # #4124: a reader clearly away from the bottom (>250px) is treated as an active
     # reading position, so the forced follow-to-bottom is gated behind it.
@@ -73,7 +73,7 @@ def test_cached_render_path_uses_same_scroll_policy_as_fresh_render():
     render_body = _function_body(UI_JS, "renderMessages")
     cached_branch = render_body[render_body.index("if(sid&&sid!==_sessionHtmlCacheSid") : render_body.index("const compressionState=")]
 
-    assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in cached_branch
+    assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot, forceBottom);" in cached_branch
     assert "if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}" not in cached_branch
 
 
@@ -81,13 +81,11 @@ def test_session_switch_and_idle_session_load_keep_default_bottom_pin_behavior()
     load_session = _function_body(SESSIONS_JS, "loadSession")
     idle_branch = load_session[load_session.index("}else{\n      S.busy=false;") : load_session.index("// Sync context usage indicator")]
 
-    # #3326: the idle branch now renders with a CONDITIONAL preserveScroll —
-    # `renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined)`.
-    # For a normal cross-session idle load (currentSid!==sid) sameSessionForceReload
-    # is false, so the arg is undefined and the default bottom-pin behavior (#1690)
-    # is unchanged. preserveScroll only applies to a same-session external
-    # force-refresh (#3239), which is a different code path from #1690's scenario.
-    assert "syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);" in idle_branch
+    # #3326: the idle branch renders with a CONDITIONAL preserveScroll for
+    # same-session force-refreshes. Fresh session switches now pass
+    # freshSessionLoad so they intentionally bottom-pin after the new transcript
+    # renders, while same-session refreshes keep preserveScroll.
+    assert "syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:(freshSessionSwitch?{freshSessionLoad:true}:undefined));" in idle_branch
     # The idle path must NOT unconditionally preserveScroll — it stays bottom-pinned
     # for cross-session loads. Guard against a regression to an always-on preserve.
     assert "renderMessages({preserveScroll:true})" not in idle_branch

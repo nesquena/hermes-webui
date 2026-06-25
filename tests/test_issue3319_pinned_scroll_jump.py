@@ -37,3 +37,17 @@ def test_scroll_if_pinned_recovers_when_far_from_bottom():
     assert "_setMessageScrollToBottom();" in fn
     assert fn.index("_messageBottomDistance()>500") < fn.index("_settleMessageScrollToBottom(false)")
 
+
+def test_scroll_if_pinned_treats_missed_upward_scroll_as_unpinned():
+    fn = _extract_fn(UI_JS, "scrollIfPinned")
+
+    movement_idx = fn.index("el.scrollTop<_lastScrollTop-5")
+    unpin_idx = fn.index("_messageUserUnpinned=true", movement_idx)
+    return_idx = fn.index("return;", unpin_idx)
+    follow_idx = fn.index("_messageBottomDistance()>500")
+
+    assert "Number.isFinite(_lastScrollTop)" in fn
+    assert "_scrollPinned=false" in fn[movement_idx:return_idx]
+    assert "_nearBottomCount=0" in fn[movement_idx:return_idx]
+    assert movement_idx < unpin_idx < return_idx < follow_idx
+
