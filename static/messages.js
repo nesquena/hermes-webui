@@ -5559,6 +5559,15 @@ function _syncApprovalTranscriptSpace(card, opts) {
   setTimeout(measure, 420);
 }
 
+function _restoreFailedApprovalResponse(sid, errMsg) {
+  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
+    const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
+  });
+  if (_approvalPromptBelongsToActiveSession(sid)) _renderPendingApprovalForActiveSession();
+  if (typeof showToast === "function") showToast(errMsg, 5000);
+  if (typeof setStatus === "function") setStatus(errMsg);
+}
+
 function toggleApprovalCardCollapsed(forceCollapsed) {
   const card = $("approvalCard");
   if (!card) return;
@@ -5595,20 +5604,10 @@ async function respondApproval(choice) {
       return;
     }
     const errMsg = (result && result.error) || "Approval response not accepted.";
-    ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
-      const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
-    });
-    if (_approvalPromptBelongsToActiveSession(sid)) _renderPendingApprovalForActiveSession();
-    if (typeof showToast === "function") showToast(errMsg, 5000);
-    if (typeof setStatus === "function") setStatus(errMsg);
+    _restoreFailedApprovalResponse(sid, errMsg);
   } catch(e) {
     const errMsg = (e && e.message) || (t("approval_responding") + " failed");
-    ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
-      const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
-    });
-    if (_approvalPromptBelongsToActiveSession(sid)) _renderPendingApprovalForActiveSession();
-    if (typeof showToast === "function") showToast(errMsg, 5000);
-    if (typeof setStatus === "function") setStatus(errMsg);
+    _restoreFailedApprovalResponse(sid, errMsg);
   }
 }
 

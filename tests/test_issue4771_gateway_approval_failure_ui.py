@@ -48,7 +48,7 @@ def _run_node(script: str) -> dict:
         Path(script_path).unlink(missing_ok=True)
 
 
-def test_failed_gateway_approval_keeps_card_and_reenables_buttons():
+def _run_failure_case(api_js: str) -> dict:
     helpers = "\n".join(
         [
             _extract_fn(MESSAGES_JS, "_approvalDismissKey"),
@@ -61,6 +61,7 @@ def test_failed_gateway_approval_keeps_card_and_reenables_buttons():
             _extract_fn(MESSAGES_JS, "_clearApprovalPendingForSession"),
             _extract_fn(MESSAGES_JS, "_renderPendingApprovalForActiveSession"),
             _extract_fn(MESSAGES_JS, "showApprovalCard"),
+            _extract_fn(MESSAGES_JS, "_restoreFailedApprovalResponse"),
             _extract_fn(MESSAGES_JS, "respondApproval", prefix="async function "),
         ]
     )
@@ -142,11 +143,7 @@ function setTimeout(fn) {{ return 1; }}
 function showToast(msg) {{ showToastCalls.push(msg); }}
 function setStatus(msg) {{ statusCalls.push(msg); }}
 function t(key) {{ return key; }}
-function api() {{
-  const err = new Error('Gateway approval could not be relayed because the active run is unavailable. Reopen the session or retry after it reconnects.');
-  err.status = 409;
-  return Promise.reject(err);
-}}
+{api_js}
 {helpers}
 const pending = {{
   approval_id: 'appr-1',
@@ -179,7 +176,17 @@ respondApproval('once').then(() => {{
   process.stdout.write(JSON.stringify(output));
 }});
 """
-    out = _run_node(script)
+    return _run_node(script)
+
+
+def test_failed_gateway_approval_keeps_card_and_reenables_buttons():
+    out = _run_failure_case(
+        """function api() {
+  const err = new Error('Gateway approval could not be relayed because the active run is unavailable. Reopen the session or retry after it reconnects.');
+  err.status = 409;
+  return Promise.reject(err);
+}"""
+    )
     assert out["sessionId"] == "sess-1"
     assert out["approvalId"] == "appr-1"
     assert out["pendingApprovalId"] == "appr-1"
@@ -191,3 +198,25 @@ respondApproval('once').then(() => {{
     assert out["cardVisible"] is True
     assert "active run is unavailable" in out["toast"]
     assert "active run is unavailable" in out["status"]
+
+
+def test_rejected_ok_false_approval_keeps_card_and_reenables_buttons():
+    out = _run_failure_case(
+        """function api() {
+  return Promise.resolve({
+    ok: false,
+    error: 'Approval response not accepted for this session.',
+  });
+}"""
+    )
+    assert out["sessionId"] == "sess-1"
+    assert out["approvalId"] == "appr-1"
+    assert out["pendingApprovalId"] == "appr-1"
+    assert out["hideCalls"] == 0
+    assert out["renderCalls"] == 1
+    assert out["onceDisabled"] is False
+    assert out["onceLoading"] is False
+    assert out["denyDisabled"] is False
+    assert out["cardVisible"] is True
+    assert "Approval response not accepted for this session." == out["toast"]
+    assert "Approval response not accepted for this session." == out["status"]
