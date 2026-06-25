@@ -31,6 +31,7 @@ def test_compression_continuation_fallback_reads_only_file_head(monkeypatch, tmp
             return self._inner.read(size)
 
         def __enter__(self):
+            self._inner.__enter__()
             return self
 
         def __exit__(self, exc_type, exc, tb):
