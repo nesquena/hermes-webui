@@ -1093,24 +1093,24 @@ async function loadSession(sid){
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
   // from a prior session or a stray touch event during loading would place them.
-  if (freshSessionSwitch) {
-    if (typeof window !== 'undefined' && typeof window._resetSessionSwitchScrollState === 'function') {
-      window._resetSessionSwitchScrollState();
-    } else if (
+  if (currentSid !== sid && typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
+    window._resetScrollDirectionTracker();
+  }
+  if (currentSid !== sid && typeof window !== 'undefined' && typeof window._resetSessionSwitchScrollState === 'function') {
+    window._resetSessionSwitchScrollState();
+  } else if (currentSid !== sid &&
       typeof _messageUserUnpinned !== 'undefined' &&
-      typeof _scrollPinned !== 'undefined'
-    ) {
-      if (typeof _clearNewMessageScrollCue === 'function') _clearNewMessageScrollCue();
-      _messageUserUnpinned = false;
-      _scrollPinned = true;
-      if (typeof _lastScrollTop !== 'undefined') _lastScrollTop = null;
-      if (typeof _lastMessageClientHeight !== 'undefined') _lastMessageClientHeight = null;
-      if (typeof _nearBottomCount !== 'undefined') _nearBottomCount = 0;
-      if (typeof _touchStartY !== 'undefined') _touchStartY = null;
-      if (typeof _messageTouchScrollActive !== 'undefined') _messageTouchScrollActive = false;
-      if (typeof _lastMessageTouchScrollIntentMs !== 'undefined') _lastMessageTouchScrollIntentMs = -Infinity;
-      if (typeof _cancelBottomSettle === 'function') _cancelBottomSettle();
-    }
+      typeof _scrollPinned !== 'undefined') {
+    if (typeof _clearNewMessageScrollCue === 'function') _clearNewMessageScrollCue();
+    _messageUserUnpinned = false;
+    _scrollPinned = true;
+    if (typeof _lastScrollTop !== 'undefined') _lastScrollTop = null;
+    if (typeof _lastMessageClientHeight !== 'undefined') _lastMessageClientHeight = null;
+    if (typeof _nearBottomCount !== 'undefined') _nearBottomCount = 0;
+    if (typeof _touchStartY !== 'undefined') _touchStartY = null;
+    if (typeof _messageTouchScrollActive !== 'undefined') _messageTouchScrollActive = false;
+    if (typeof _lastMessageTouchScrollIntentMs !== 'undefined') _lastMessageTouchScrollIntentMs = -Infinity;
+    if (typeof _cancelBottomSettle === 'function') _cancelBottomSettle();
   }
   stopApprovalPolling();hideApprovalCard(forceReload);
   if(typeof stopSessionStream==='function') stopSessionStream();

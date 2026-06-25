@@ -812,7 +812,7 @@ function _captureMessageViewportAnchor(){
   return null;
 }
 function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
-  const container=_messageScrollElement();
+  const container=(typeof _messageScrollElement==='function')?_messageScrollElement():$('messages');
   if(!container||!anchor) return false;
   const anchorKey=String(anchor.key||'');
   let row=anchorKey?Array.from(container.querySelectorAll('[data-message-anchor-key]')).find(el=>el&&el.dataset&&el.dataset.messageAnchorKey===anchorKey):null;
@@ -836,7 +836,7 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
 }
 let _messageViewportAnchorRemounting=false;
 function _remountMessageViewportAnchor(anchor){
-  const container=_messageScrollElement();
+  const container=(typeof _messageScrollElement==='function')?_messageScrollElement():$('messages');
   if(!container||!anchor||_messageViewportAnchorRemounting) return false;
   const anchorKey=String(anchor.key||'');
   const visibleKeyNode=anchorKey
@@ -9726,7 +9726,7 @@ function _projectLiveAnchorActivitySceneForStream(streamId, mode){
   }
 }
 function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
-  const messagesEl=_messageScrollElement();
+  const messagesEl=(typeof _messageScrollElement==='function')?_messageScrollElement():$('messages');
   if(!messagesEl||!scrollSnapshot) return {readerAwayFromBottom:false,release:null};
   const beforeBottomDistance=Math.max(0,messagesEl.scrollHeight-messagesEl.scrollTop-messagesEl.clientHeight);
   // Only treat the reader as away if they were ALREADY in a non-follow state.
@@ -11048,7 +11048,7 @@ function _toolArgsSnapshot(args, limit){
 }
 
 function _captureMessageScrollSnapshot(){
-  const el=_messageScrollElement();
+  const el=(typeof _messageScrollElement==='function')?_messageScrollElement():$('messages');
   if(!el) return null;
   const bottom=Math.max(0,el.scrollHeight-el.scrollTop-el.clientHeight);
   return {
@@ -11061,7 +11061,7 @@ function _captureMessageScrollSnapshot(){
   };
 }
 function _restoreMessageScrollSnapshot(snapshot){
-  const el=_messageScrollElement();
+  const el=(typeof _messageScrollElement==='function')?_messageScrollElement():$('messages');
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
@@ -11121,7 +11121,7 @@ window._fixMobileScrollJank=function _fixMobileScrollJank(){
 };
 
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
-  const el=_messageScrollElement();
+  const el=(typeof _messageScrollElement==='function')?_messageScrollElement():$('messages');
   if(!el||!snapshot) return;
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
