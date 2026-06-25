@@ -11282,6 +11282,13 @@ function renderMessages(options){
   // Mobile scroll-jank fix: temporarily disable overflow-anchor so Chromium
   // cannot re-anchor to the topmost row during the DOM wipe-and-rebuild gap.
   if(window._fixMobileScrollJank) window._fixMobileScrollJank();
+  // The DOM wipe can briefly collapse #msgInner to zero height, causing the
+  // browser to clamp #messages.scrollTop to 0 and emit a scroll event.  That
+  // event is a render artifact, not user intent; if the scroll listener sees it
+  // with _programmaticScroll=false, it marks the reader manually unpinned and
+  // the live reply stops following / appears to jump backward.
+  _programmaticScroll=true;
+  _programmaticScrollSetAt=performance.now();
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
@@ -12475,6 +12482,7 @@ function renderMessages(options){
   }
   _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
   _recycleStash.clear();
+  if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll(160);
 }
 
 function _toolDisplayName(tc){
