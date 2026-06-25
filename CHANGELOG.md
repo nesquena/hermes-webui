@@ -3,6 +3,30 @@
 
 ## [Unreleased]
 
+## [v0.51.643] — 2026-06-25 — Release WX (unassigned tasks show up on the mobile Kanban board)
+
+### Fixed
+
+- **On the mobile Kanban board, tasks with no assignee are no longer invisible.** Mobile groups tasks into per-profile lanes, but the lane key was derived from a localized "unassigned" label, so tasks without an assignee had no stable lane and silently dropped off the board (the CLI would show, e.g., Ready = 3 while mobile showed Ready = 0). Unassigned tasks now group into a stable internal lane rendered as an explicit "unassigned" lane (sorted after the named profiles), so the mobile counts match the CLI. Thanks @rodboev. (#4853)
+
+## [v0.51.642] — 2026-06-25 — Release WW (a failed steer now shows why, with Retry / Dismiss)
+
+### Fixed
+
+- **When a mid-turn steer can't be delivered, the composer no longer dead-ends on a generic toast.** A `/steer` (or busy-mode auto-fallback) that failed previously surfaced one of two vague toasts and restored your draft, with no explanation and no way forward — in the auto-fallback case this could trap you in a bounce loop. Each of the distinct failure reasons (agent not running, no cached agent, stream ended, session not found, agent lacks steer, network/steer error) now maps to a specific message, shown in a small recovery bar above the composer with **Retry** and **Dismiss** actions. The bar's buttons are theme-aware (readable in both light and dark, including on mobile). Thanks @rodboev. (#4850, closes #4749)
+
+## [v0.51.641] — 2026-06-25 — Release WV (disabled plugins read as disabled in dark mode, active ones sort first)
+
+### Fixed
+
+- **In dark mode, disabled plugins no longer show a green "enabled-looking" badge, and active plugins sort to the top of the Plugins list.** The disabled-badge style lost a CSS specificity contest to the dark provider-badge rule, so a disabled plugin's badge rendered the same green as an enabled one — indistinguishable at a glance. A dark-mode-specific rule now renders the disabled badge in the muted surface color. The Plugins list also sorts active/enabled plugins above inactive ones (a stable partition that never reorders within a bucket), with the sort bucket always matching the badge actually shown. Thanks @rodboev. (#4848, closes #4713)
+
+## [v0.51.640] — 2026-06-25 — Release WU (faster profile switching — Claude Code transcript parses are cached)
+
+### Fixed
+
+- **Profile switching and sidebar loads are no longer dominated by re-parsing Claude Code transcripts.** On an installation with a large `~/.claude/projects` history, every `/api/sessions` build (which a profile switch triggers) re-read and JSON-parsed every Claude Code transcript file from scratch — line by line — just to recover each session's title and message count. On a 200-file / ~130MB tree that single step measured 650–1000ms and dominated the cold sidebar latency; because the directory is global but the higher session cache is keyed per active profile, it repeated in full on every switch, on the 5s CLI-cache expiry, and on every sidebar poll. The transcript parse is now memoized per file by its `(path, mtime, size)` signature, so a warm build re-stats the files (~4ms for 200) instead of re-parsing them, while any genuine edit or append transparently invalidates just that one file's entry. The redundant per-row `get_last_workspace()` call (which stats config + probes the terminal cwd) was also hoisted out of the Claude Code row loop. Measured cold-rebuild `/api/sessions` latency on a 250-session profile dropped from ~670–880ms to ~100–200ms. Output is byte-identical to the previous behavior. Thanks @rodboev for the browser-level profiling that isolated the real bottleneck. (#4718, #4662)
+
 ## [v0.51.639] — 2026-06-25 — Release WT (approval cards can be dismissed and stay dismissed)
 
 ### Fixed

@@ -41,6 +41,24 @@ _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 _CLI_SESSIONS_CACHE_LOCK = threading.Lock()
 _CLI_SESSIONS_CACHE = {}
 
+# Per-file parse cache for Claude Code JSONL transcripts (#4718/#4662 phase 4).
+# ``~/.claude/projects`` is a GLOBAL, profile-independent directory, but the
+# sidebar re-derives every Claude Code row from scratch on each /api/sessions
+# build — fully re-reading and JSON-parsing up to CLAUDE_CODE_MAX_FILES
+# transcripts line-by-line (hundreds of MB) just to recover a title + message
+# count. That parse dominates the cold sidebar build (~650-1000ms measured on a
+# 200-file / ~130MB tree) and it repeats on every profile switch, on the 5s
+# CLI-cache expiry, and on every sidebar poll, because the higher CLI cache is
+# keyed per active profile while the underlying transcripts never change between
+# switches. This cache memoizes the EXPENSIVE per-file parse result keyed by the
+# file's (path, mtime_ns, size, ctime_ns); a warm sidebar build then re-stats the
+# files (~4ms for 200) instead of re-parsing them. Any external edit/append to a
+# transcript changes mtime_ns/size/ctime_ns and transparently invalidates just
+# that one file's entry. Bounded so a pathological projects tree can't grow it unbounded.
+_CLAUDE_CODE_PARSE_CACHE_LOCK = threading.Lock()
+_CLAUDE_CODE_PARSE_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
+_CLAUDE_CODE_PARSE_CACHE_MAX = 1000
+
 # ---------------------------------------------------------------------------
 # Stale temp-file cleanup
 # ---------------------------------------------------------------------------
@@ -3871,6 +3889,65 @@ def _parse_claude_code_jsonl(path: Path, *, max_messages: int = CLAUDE_CODE_MAX_
     return messages, summary_title, first_ts, last_ts
 
 
+def _parse_claude_code_jsonl_cached(
+    path: Path, *, max_messages: int = CLAUDE_CODE_MAX_MESSAGES_PER_FILE
+) -> tuple[list[dict], str | None, float | None, float | None]:
+    """``_parse_claude_code_jsonl`` memoized by the file's (path, mtime_ns, size, ctime_ns).
+
+    The transcript files under ``~/.claude/projects`` are global and rarely
+    change between sidebar builds, but parsing them dominates the cold
+    /api/sessions latency (and repeats on every profile switch). Caching the
+    parse result keyed by the file's stat signature collapses the warm cost to a
+    single ``os.stat`` per file. A genuine append/edit bumps ``mtime_ns``/``size``
+    /``ctime_ns`` and misses the cache, so staleness is impossible without
+    re-parsing.
+
+    ``max_messages`` is part of the key so a caller asking for a different cap
+    never reads a result truncated to a smaller one.
+    """
+    try:
+        st = path.stat()
+        # Key on mtime_ns + size + ctime_ns: size is the strong discriminator for
+        # append-only JSONL (any write changes it), and ctime_ns guards the rare
+        # same-size, same-mtime in-place edit so a content change can never serve
+        # a stale parse. A spurious ctime bump only costs one harmless re-parse.
+        key = (str(path), st.st_mtime_ns, st.st_size, st.st_ctime_ns, int(max_messages))
+    except OSError:
+        # Can't stat -> fall back to a direct (uncached) parse; it will also
+        # likely fail and return the empty tuple, matching prior behavior.
+        return _parse_claude_code_jsonl(path, max_messages=max_messages)
+
+    with _CLAUDE_CODE_PARSE_CACHE_LOCK:
+        hit = _CLAUDE_CODE_PARSE_CACHE.get(key)
+        if hit is not None:
+            _CLAUDE_CODE_PARSE_CACHE.move_to_end(key)
+            messages, summary_title, first_ts, last_ts = hit
+            # Return a shallow copy of the message list so a caller mutating it
+            # can't corrupt the cached entry; the per-message dicts are treated
+            # as read-only by all current callers.
+            return list(messages), summary_title, first_ts, last_ts
+
+    parsed = _parse_claude_code_jsonl(path, max_messages=max_messages)
+
+    with _CLAUDE_CODE_PARSE_CACHE_LOCK:
+        # Re-check under lock in case a concurrent build populated it; either
+        # entry is equally valid for the same stat signature.
+        existing = _CLAUDE_CODE_PARSE_CACHE.get(key)
+        if existing is None:
+            _CLAUDE_CODE_PARSE_CACHE[key] = parsed
+            _CLAUDE_CODE_PARSE_CACHE.move_to_end(key)
+            while len(_CLAUDE_CODE_PARSE_CACHE) > _CLAUDE_CODE_PARSE_CACHE_MAX:
+                _CLAUDE_CODE_PARSE_CACHE.popitem(last=False)
+    messages, summary_title, first_ts, last_ts = parsed
+    return list(messages), summary_title, first_ts, last_ts
+
+
+def clear_claude_code_parse_cache() -> None:
+    """Drop all memoized Claude Code transcript parses (test/lifecycle hook)."""
+    with _CLAUDE_CODE_PARSE_CACHE_LOCK:
+        _CLAUDE_CODE_PARSE_CACHE.clear()
+
+
 def _iter_claude_code_jsonl_files(projects_dir: Path | str | None = None, *, max_files: int = CLAUDE_CODE_MAX_FILES, max_file_bytes: int = CLAUDE_CODE_MAX_FILE_BYTES):
     root = Path(projects_dir).expanduser() if projects_dir is not None else _default_claude_code_projects_dir()
     if root is None:
@@ -3926,20 +4003,40 @@ def get_claude_code_sessions(projects_dir: Path | str | None = None, *, max_file
     never read during test runs.
     """
     sessions = []
+    # ``get_last_workspace()`` is loop-invariant (the same active workspace for
+    # every Claude Code row) but internally stats config.yaml + probes terminal
+    # cwd, so calling it once per row was ~200 redundant stat()s on the cold
+    # sidebar build (#4718). Resolve it a single time.
+    cc_workspace = str(get_last_workspace())
     for path in _iter_claude_code_jsonl_files(projects_dir, max_files=max_files, max_file_bytes=max_file_bytes) or []:
-        messages, summary_title, first_ts, last_ts = _parse_claude_code_jsonl(path)
+        messages, summary_title, first_ts, last_ts = _parse_claude_code_jsonl_cached(path)
         if not messages:
             continue
         sid = _claude_code_session_id(path)
+        # Match the truthiness fallback used in the assignments below: the old
+        # inline code was ``first_ts or last_ts or path.stat().st_mtime``, which
+        # also fell back to mtime for a falsy-but-not-None ``0.0`` timestamp
+        # (epoch-0 / 1970 transcripts). An identity (``is None``) guard would
+        # leave those rows with ``None`` instead of the file mtime, so use the
+        # same ``not`` test the assignments use to stay bug-for-bug compatible.
+        if not first_ts and not last_ts:
+            try:
+                _mtime = path.stat().st_mtime
+            except OSError:
+                _mtime = 0.0
+        else:
+            _mtime = None
+        created_at = first_ts or last_ts or _mtime
+        updated_at = last_ts or first_ts or _mtime
         sessions.append({
             'session_id': sid,
             'title': _claude_code_title(messages, summary_title),
-            'workspace': str(get_last_workspace()),
+            'workspace': cc_workspace,
             'model': 'claude-code',
             'message_count': len(messages),
-            'created_at': first_ts or last_ts or path.stat().st_mtime,
-            'updated_at': last_ts or first_ts or path.stat().st_mtime,
-            'last_message_at': last_ts or first_ts or path.stat().st_mtime,
+            'created_at': created_at,
+            'updated_at': updated_at,
+            'last_message_at': updated_at,
             'pinned': False,
             'archived': False,
             'project_id': None,
@@ -3963,7 +4060,7 @@ def get_claude_code_session_messages(sid, projects_dir: Path | str | None = None
     for path in _iter_claude_code_jsonl_files(projects_dir) or []:
         if _claude_code_session_id(path) != sid:
             continue
-        messages, _summary_title, _first_ts, _last_ts = _parse_claude_code_jsonl(path)
+        messages, _summary_title, _first_ts, _last_ts = _parse_claude_code_jsonl_cached(path)
         return messages
     return []
 
