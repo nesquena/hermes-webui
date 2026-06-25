@@ -846,9 +846,24 @@ def test_load_session_rearms_stream_on_every_early_return():
         "helper must (re)arm startSessionStream for the currently-shown S.session"
     )
 
-    # Isolate the loadSession body.
+    # Isolate the full loadSession body. Keep this brace-aware rather than using
+    # a fixed character window; loadSession legitimately grows as session-load
+    # state invariants are added, and the fetch-error catch lives late in the
+    # function.
     fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 12000]
+    brace_ix = js.index("{", fn_ix)
+    depth = 0
+    end_ix = None
+    for idx, ch in enumerate(js[brace_ix:], brace_ix):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end_ix = idx + 1
+                break
+    assert end_ix is not None, "loadSession body did not terminate"
+    body = js[fn_ix:end_ix]
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).

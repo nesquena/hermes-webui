@@ -111,6 +111,9 @@ def test_idle_render_preserves_manual_unpin_until_explicit_bottom():
         "idle render must restore the manually-unpinned viewport instead of "
         "falling through to scrollToBottom()."
     )
-    manual_unpin_block = scroll_helper[scroll_helper.index("if(_messageUserUnpinned)") : scroll_helper.index("scrollToBottom();")]
+    manual_unpin_start = scroll_helper.index("if(_messageUserUnpinned)")
+    manual_unpin_end = scroll_helper.find("scrollToBottom();", manual_unpin_start + 1)
+    assert manual_unpin_end != -1, "manual unpin block must include a final scrollToBottom fallback"
+    manual_unpin_block = scroll_helper[manual_unpin_start:manual_unpin_end]
     assert "_restoreMessageScrollSnapshot(scrollSnapshot);" in manual_unpin_block
     assert "_maybeShowNewMessageScrollCue(scrollSnapshot);" in manual_unpin_block

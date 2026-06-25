@@ -705,7 +705,7 @@ function _messageVirtualRoleForEntry(entry){
 }
 function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
   _syncMessageVirtualHeightCache(visWithIdx);
-  const container=_messageScrollElement();
+  const container=(typeof _messageScrollElement==='function')?_messageScrollElement():$('messages');
   // #4325 opt-out: when the user disables transcript virtualization, always
   // render the full transcript (no windowing). Mirrors the <=threshold path so
   // every downstream consumer (render, anchor, prepend-delta) treats it as a
@@ -879,7 +879,7 @@ function _remountMessageViewportAnchor(anchor){
   return Number.isFinite(targetIdx)&&!!container.querySelector(`[data-msg-idx="${targetIdx}"]`);
 }
 function _compensateScrollForMeasurementDelta(renderFn){
-  const container=_messageScrollElement();
+  const container=(typeof _messageScrollElement==='function')?_messageScrollElement():$('messages');
   if(!container) return renderFn();
   const anchorBefore=_captureMessageViewportAnchor();
   const scrollTopBefore=container.scrollTop;
@@ -903,7 +903,7 @@ function _compensateScrollForMeasurementDelta(renderFn){
   _deferClearProgrammaticScroll();
 }
 function _messageViewportIntersectsRenderedRow(){
-  const container=_messageScrollElement();
+  const container=(typeof _messageScrollElement==='function')?_messageScrollElement():$('messages');
   if(!container) return true;
   const containerRect=container.getBoundingClientRect();
   const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));

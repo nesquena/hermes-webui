@@ -1080,7 +1080,10 @@ def test_scroll_listener_guards_programmatic_scroll_before_marking_active():
     in the scroll listener so that programmatic scrolls (e.g. from
     _compensateScrollForMeasurementDelta) do not arm the 150ms settle timer."""
     js = UI_JS_PATH.read_text(encoding="utf-8")
-    listener_start = js.index("el.addEventListener('scroll',()=>{")
+    listener_start = js.find("el.addEventListener('scroll',()=>{")
+    if listener_start < 0:
+        listener_start = js.find("el.addEventListener('scroll',function(){")
+    assert listener_start != -1, "transcript scroll listener must exist"
     listener_end = js.index("});", listener_start)
     listener_body = js[listener_start:listener_end]
 

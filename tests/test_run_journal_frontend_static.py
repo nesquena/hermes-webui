@@ -6,6 +6,21 @@ MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text()
 SESSIONS_SRC = (ROOT / "static" / "sessions.js").read_text()
 
 
+def _extract_function(src: str, name: str) -> str:
+    marker = f"function {name}("
+    idx = src.find(marker)
+    assert idx != -1, f"{name} not found"
+    depth = 0
+    for i, ch in enumerate(src[idx:], idx):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[idx : i + 1]
+    raise AssertionError(f"Could not extract {name}")
+
+
 def test_reattach_path_uses_replay_when_status_reports_journal():
     reattach_pos = MESSAGES_SRC.index("let replayOnly=false;")
     block = MESSAGES_SRC[reattach_pos : reattach_pos + 1200]
@@ -113,8 +128,7 @@ def test_run_journal_cursor_tracks_every_long_task_timeline_event():
 def test_server_runtime_journal_snapshot_restores_structured_inflight_state():
     helper_pos = SESSIONS_SRC.index("function _serverLiveSnapshotToolId")
     helper_block = SESSIONS_SRC[helper_pos : helper_pos + 3600]
-    load_pos = SESSIONS_SRC.index("async function loadSession")
-    load_block = SESSIONS_SRC[load_pos : load_pos + 20000]
+    load_block = _extract_function(SESSIONS_SRC, "loadSession")
 
     assert "runtime_journal_snapshot" in load_block
     assert "_serverLiveSnapshotInflight(S.session.runtime_journal_snapshot" in load_block
