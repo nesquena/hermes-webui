@@ -57,7 +57,6 @@ def test_extensions_panel_warns_about_trust_model_and_stays_install_free():
     pane_end = INDEX_HTML.index('id="settingsPaneSystem"', pane_start)
     pane = INDEX_HTML[pane_start:pane_end]
 
-    assert "Diagnostics and enable/disable controls" in pane
     assert "Extensions run in the WebUI browser origin" in pane
     assert "Only load trusted local extension directories" in pane
     assert "takes effect after reload" in pane
@@ -65,8 +64,6 @@ def test_extensions_panel_warns_about_trust_model_and_stays_install_free():
     assert "saveSettings(" not in pane
     assert "api('/api/settings'" not in pane
     assert "type=\"checkbox\"" not in pane
-    assert "Install" not in pane
-    assert "Uninstall" not in pane
     assert "marketplace" not in pane.lower()
 
 

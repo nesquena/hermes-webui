@@ -14,6 +14,11 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote, urlsplit
+import hashlib
+import io
+import time
+import zipfile
+from urllib.request import HTTPRedirectHandler, build_opener, urlopen
 
 from api.helpers import _security_headers, j
 
@@ -46,6 +51,14 @@ class ExtensionToggleError(Exception):
         self.status = status
 
 
+class ExtensionInstallError(Exception):
+    """Sanitized extension install/uninstall error safe to return to the browser."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
 EXTENSION_ROUTE_PREFIX = "/extensions/"
 _EXTENSION_DIR_ENV = "HERMES_WEBUI_EXTENSION_DIR"
 _EXTENSION_SCRIPT_URLS_ENV = "HERMES_WEBUI_EXTENSION_SCRIPT_URLS"
@@ -61,6 +74,37 @@ _MAX_DISABLED_EXTENSION_IDS = 512
 _EXTENSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _EXTENSION_STATE_WARNING_SOURCE = "extension_state"
 _EXTENSION_STATE_LOCK = threading.Lock()
+
+_GALLERY_INSTALL_STATE_FILENAME = "extension-install-manifest.json"
+_MAX_INSTALL_MANIFEST_BYTES = 128 * 1024
+_MAX_GALLERY_INSTALLED_IDS = 256
+_MAX_ZIP_DOWNLOAD_BYTES = 32 * 1024 * 1024
+_REGISTRY_URL = "https://hermes-webui.github.io/hermes-webui-extensions/registry.json"
+_REGISTRY_ALLOWED_DOWNLOAD_HOSTS = frozenset({"hermes-webui.github.io"})
+_REGISTRY_CACHE: dict = {}
+_REGISTRY_LOCK = threading.Lock()
+_REGISTRY_TTL_SECONDS = 300
+
+
+class _AllowlistRedirectHandler(HTTPRedirectHandler):
+    """Reject redirects to hosts not in the download allowlist."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlsplit(newurl)
+        if parsed.scheme != "https" or parsed.hostname not in _REGISTRY_ALLOWED_DOWNLOAD_HOSTS:
+            raise ExtensionInstallError("Download redirected to disallowed host")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _safe_download(url: str, max_bytes: int, timeout: int = 30) -> bytes:
+    """Download from an allowlisted host, rejecting cross-host redirects."""
+    opener = build_opener(_AllowlistRedirectHandler)
+    resp = opener.open(url, timeout=timeout)
+    try:
+        return resp.read(max_bytes + 1)
+    finally:
+        resp.close()
+
 
 _EXTENSION_MIME = {
     "css": "text/css",
@@ -845,6 +889,7 @@ def get_extension_status() -> Dict[str, Any]:
         },
         "manifest": manifest_status,
         "extensions": extensions,
+        "gallery_installed": _load_install_manifest().get("installed", {}),
         "warnings": diagnostics["warnings"],
     }
 
@@ -883,6 +928,280 @@ def set_extension_user_enabled(extension_id: object, enabled: object) -> Dict[st
     # while blocking other toggles; a concurrent toggle may be reflected too,
     # which is fine because the UI re-renders from the current effective state.
     return get_extension_status()
+
+
+def _install_manifest_file() -> Path:
+    return _extension_state_dir() / _GALLERY_INSTALL_STATE_FILENAME
+
+
+def _empty_install_manifest() -> Dict[str, Any]:
+    return {"version": 1, "installed": {}}
+
+
+def _load_install_manifest() -> Dict[str, Any]:
+    """Load gallery install manifest, failing safe on any error."""
+    mfile = _install_manifest_file()
+    try:
+        if not mfile.exists() or not mfile.is_file():
+            return _empty_install_manifest()
+        with mfile.open("rb") as fh:
+            raw = fh.read(_MAX_INSTALL_MANIFEST_BYTES + 1)
+        if len(raw) > _MAX_INSTALL_MANIFEST_BYTES:
+            return _empty_install_manifest()
+        parsed = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return _empty_install_manifest()
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("installed"), dict):
+        return _empty_install_manifest()
+    installed: Dict[str, Any] = {}
+    for ext_id, entry in parsed["installed"].items():
+        if not _valid_extension_id(ext_id):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        files = entry.get("files", [])
+        if not isinstance(files, list):
+            continue
+        installed[ext_id] = {
+            "version": str(entry.get("version", "unknown")),
+            "files": [f for f in files if isinstance(f, str)],
+            "installed_at": str(entry.get("installed_at", "")),
+        }
+        if len(installed) >= _MAX_GALLERY_INSTALLED_IDS:
+            break
+    return {"version": 1, "installed": installed}
+
+
+def _write_install_manifest(manifest: Dict[str, Any]) -> None:
+    """Persist install manifest with atomic same-directory replace."""
+    target = _install_manifest_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    data = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    try:
+        with tmp.open("wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def install_extension(id: object, download_url: object, sha256: object) -> Dict[str, Any]:
+    """Download, verify, and extract a gallery extension."""
+    if not _valid_extension_id(id):
+        raise ExtensionInstallError("Invalid extension id")
+    ext_id = str(id).strip()
+    if not isinstance(download_url, str) or not download_url.startswith("https://"):
+        raise ExtensionInstallError("Invalid download URL")
+    parsed_url = urlsplit(download_url)
+    if parsed_url.hostname not in _REGISTRY_ALLOWED_DOWNLOAD_HOSTS:
+        raise ExtensionInstallError("Invalid download URL")
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise ExtensionInstallError("Invalid sha256")
+    root = _extension_root()
+    if root is None:
+        raise ExtensionInstallError("Extensions not configured", 404)
+    try:
+        raw_data = _safe_download(download_url, _MAX_ZIP_DOWNLOAD_BYTES)
+    except ExtensionInstallError:
+        raise
+    except Exception as exc:
+        raise ExtensionInstallError("Download failed", 502) from exc
+    if len(raw_data) > _MAX_ZIP_DOWNLOAD_BYTES:
+        raise ExtensionInstallError("Download too large")
+    if hashlib.sha256(raw_data).hexdigest() != sha256:
+        raise ExtensionInstallError("SHA-256 mismatch")
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw_data))
+    except zipfile.BadZipFile as exc:
+        raise ExtensionInstallError("Invalid zip archive") from exc
+    ext_dir = root / ext_id
+    member_names = zf.namelist()
+    total_uncompressed = sum(info.file_size for info in zf.infolist() if not info.is_dir())
+    if total_uncompressed > _MAX_ZIP_DOWNLOAD_BYTES * 10:
+        raise ExtensionInstallError("Archive uncompressed size exceeds limit")
+    file_members = [n for n in member_names if n and not n.endswith("/")]
+    if len(file_members) > 1024:
+        raise ExtensionInstallError("Archive contains too many files")
+    # Detect and strip a single top-level directory prefix matching the extension id.
+    # Registry artifacts root files under <id>/ (e.g. desktop-companion/manifest.json).
+    strip_prefix = ""
+    candidate = ext_id + "/"
+    if all(n.startswith(candidate) for n in file_members):
+        strip_prefix = candidate
+    def _stripped(name: str) -> str:
+        if strip_prefix and name.startswith(strip_prefix):
+            return name[len(strip_prefix):]
+        return name
+    root_resolved = root.resolve()
+    ext_dir_resolved = ext_dir.resolve()
+    for member_name in file_members:
+        decoded = _fully_unquote_path(_stripped(member_name))
+        if not decoded or not _is_safe_relative_path(decoded):
+            raise ExtensionInstallError("Unsafe archive member")
+        resolved = (ext_dir / decoded).resolve()
+        try:
+            resolved.relative_to(root_resolved)
+        except ValueError as exc:
+            raise ExtensionInstallError("Zip-slip detected") from exc
+        try:
+            resolved.relative_to(ext_dir_resolved)
+        except ValueError as exc:
+            raise ExtensionInstallError("Zip-slip detected") from exc
+    # Determine version from extension.json or manifest.json in zip
+    version = "unknown"
+    for vfile in ("extension.json", "manifest.json"):
+        candidate_name = strip_prefix + vfile if strip_prefix else vfile
+        if candidate_name in member_names:
+            try:
+                mdata = json.loads(zf.read(candidate_name).decode("utf-8"))
+                if isinstance(mdata, dict) and isinstance(mdata.get("version"), str):
+                    version = mdata["version"]
+                    break
+            except Exception:
+                pass
+    with _EXTENSION_STATE_LOCK:
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        if ext_dir.is_symlink():
+            raise ExtensionInstallError("Extension directory is a symlink", 400)
+        rollback: List[Path] = []
+        try:
+            for member_name in file_members:
+                decoded = _fully_unquote_path(_stripped(member_name))
+                dest = (ext_dir / decoded).resolve()
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(zf.read(member_name))
+                rollback.append(dest)
+        except Exception as exc:
+            for path in rollback:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            try:
+                if ext_dir.exists() and not any(ext_dir.iterdir()):
+                    ext_dir.rmdir()
+            except OSError:
+                pass
+            raise ExtensionInstallError("Extraction failed", 500) from exc
+        try:
+            manifest = _load_install_manifest()
+            from datetime import datetime, timezone
+            rel_files = [p.relative_to(ext_dir_resolved).as_posix() for p in rollback]
+            manifest["installed"][ext_id] = {
+                "version": version,
+                "files": rel_files,
+                "installed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            encoded = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+            if len(encoded) > _MAX_INSTALL_MANIFEST_BYTES:
+                raise ExtensionInstallError("Install manifest would exceed size limit")
+            _write_install_manifest(manifest)
+        except ExtensionInstallError:
+            for path in rollback:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            try:
+                if ext_dir.exists() and not any(ext_dir.iterdir()):
+                    ext_dir.rmdir()
+            except OSError:
+                pass
+            raise
+        except Exception as exc:
+            for path in rollback:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            try:
+                if ext_dir.exists() and not any(ext_dir.iterdir()):
+                    ext_dir.rmdir()
+            except OSError:
+                pass
+            raise ExtensionInstallError("Failed to record install", 500) from exc
+    return {"installed": True, "id": ext_id, "version": version}
+
+
+def uninstall_extension(id: object) -> Dict[str, Any]:
+    """Remove a gallery-installed extension's files and manifest entry."""
+    if not _valid_extension_id(id):
+        raise ExtensionInstallError("Invalid extension id")
+    ext_id = str(id).strip()
+    root = _extension_root()
+    if root is None:
+        raise ExtensionInstallError("Extensions not configured", 404)
+    with _EXTENSION_STATE_LOCK:
+        manifest = _load_install_manifest()
+        entry = manifest["installed"].get(ext_id)
+        if entry is None:
+            raise ExtensionInstallError("Extension not installed", 404)
+        ext_dir = root / ext_id
+        for rel_path in entry.get("files", []):
+            if not _is_safe_relative_path(rel_path):
+                continue
+            target = (ext_dir / rel_path).resolve()
+            try:
+                target.relative_to(ext_dir.resolve())
+            except ValueError:
+                continue
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+        # Remove empty directories bottom-up
+        if ext_dir.exists():
+            for dirpath in sorted(
+                (d for d in ext_dir.rglob("*") if d.is_dir()),
+                key=lambda p: len(p.parts),
+                reverse=True,
+            ):
+                try:
+                    if not any(dirpath.iterdir()):
+                        dirpath.rmdir()
+                except OSError:
+                    pass
+            try:
+                if not any(ext_dir.iterdir()):
+                    ext_dir.rmdir()
+            except OSError:
+                pass
+        del manifest["installed"][ext_id]
+        _write_install_manifest(manifest)
+    return {"uninstalled": True, "id": ext_id}
+
+
+def get_extension_registry() -> Dict[str, Any]:
+    """Fetch the extension registry with a 5-minute TTL cache."""
+    with _REGISTRY_LOCK:
+        now = time.monotonic()
+        cached = _REGISTRY_CACHE.get("data")
+        cached_at = _REGISTRY_CACHE.get("fetched_at", 0.0)
+        if cached is not None and (now - cached_at) < _REGISTRY_TTL_SECONDS:
+            return {"entries": cached}
+        try:
+            raw = urlopen(_REGISTRY_URL, timeout=10).read(2 * 1024 * 1024)
+            data = json.loads(raw.decode("utf-8"))
+            if isinstance(data, list):
+                entries = data
+            elif isinstance(data, dict):
+                entries = data.get("extensions") or data.get("entries") or []
+            else:
+                entries = []
+            if not isinstance(entries, list):
+                entries = []
+            _REGISTRY_CACHE["data"] = entries
+            _REGISTRY_CACHE["fetched_at"] = now
+            return {"entries": entries}
+        except Exception:
+            return {"entries": [], "error": "registry_unavailable"}
 
 
 def inject_extension_tags(index_html: str) -> str:
