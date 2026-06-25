@@ -228,6 +228,24 @@ def test_state_db_reader_can_filter_by_timestamp_floor(monkeypatch, tmp_path):
     assert [m["content"] for m in messages] == ["kept", "also kept"]
 
 
+def test_limited_display_with_precomputed_sidecar_keeps_empty_state_db_guard(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_empty_state_guard"
+    sidecar_messages = [
+        {"role": "user", "content": "sidecar only", "timestamp": 10.0},
+    ]
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+
+    messages = routes._limited_webui_messages_for_display_with_sidecar(
+        session,
+        list(sidecar_messages),
+        [],
+    )
+
+    assert messages == sidecar_messages
+
+
 def test_msg_limit_session_load_reads_only_recent_state_db_tail(monkeypatch, tmp_path):
     import api.routes as routes
 
