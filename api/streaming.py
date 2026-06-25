@@ -104,12 +104,78 @@ def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 
 _ENV_LOCK = threading.Lock()
 
 _KEYLESS_CUSTOM_API_KEY = "dummy-key"
+_STREAM_WRITEBACK_DIAG_DEFAULT_THRESHOLD_MS = 250.0
 
 _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "webui_streaming_cron_profile_home",
     default=None,
 )
 _STREAMING_CRONJOB_WRAPPER_INSTALLED = False
+
+
+def _stream_writeback_diag_threshold_seconds(environ=None):
+    if environ is None:
+        environ = os.environ
+    raw = str(
+        environ.get(
+            "HERMES_WEBUI_STREAM_WRITEBACK_DIAG_MS",
+            _STREAM_WRITEBACK_DIAG_DEFAULT_THRESHOLD_MS,
+        )
+    ).strip()
+    try:
+        threshold_ms = float(raw)
+    except (TypeError, ValueError):
+        threshold_ms = _STREAM_WRITEBACK_DIAG_DEFAULT_THRESHOLD_MS
+    if threshold_ms < 0:
+        return None
+    return threshold_ms / 1000.0
+
+
+@contextlib.contextmanager
+def _stream_writeback_stage(timings, name, *, clock=time.perf_counter):
+    started = clock()
+    try:
+        yield
+    finally:
+        try:
+            timings.append((str(name), max(0.0, float(clock() - started))))
+        except Exception:
+            pass
+
+
+def _log_stream_writeback_timings(
+    session_id,
+    stream_id,
+    timings,
+    started,
+    *,
+    clock=time.perf_counter,
+    log=logger,
+    environ=None,
+):
+    threshold = _stream_writeback_diag_threshold_seconds(environ=environ)
+    if threshold is None:
+        return False
+    try:
+        total_seconds = max(0.0, float(clock() - started))
+    except Exception:
+        return False
+    if total_seconds < threshold:
+        return False
+    parts = []
+    for name, elapsed in timings or []:
+        try:
+            parts.append(f"{name}={float(elapsed) * 1000.0:.1f}ms")
+        except Exception:
+            continue
+    log.debug(
+        "stream final writeback timing session=%s stream=%s total=%.1fms stages=%s",
+        session_id,
+        stream_id,
+        total_seconds * 1000.0,
+        " ".join(parts),
+    )
+    return True
 
 
 def _install_streaming_cronjob_profile_wrapper() -> None:
@@ -7491,6 +7557,8 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                 put('cancel', {'message': 'Cancelled by user'})
                 return
+            _writeback_timings = []
+            _writeback_started = time.perf_counter()
             with _agent_lock:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
                     if _stream_writeback_can_supersede_recovery_marker(s, msg_text):
@@ -7507,46 +7575,47 @@ def _run_agent_streaming(
                             getattr(s, 'active_stream_id', None),
                         )
                         return
-                _tool_limit_reached = _agent_result_tool_limit_reached(result)
-                _result_messages = result.get('messages') or _previous_context_messages
-                _result_messages = _drop_synthetic_max_iteration_summary_requests(
-                    _result_messages,
-                    enabled=_tool_limit_reached,
-                )
-                if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False)
-                    try:
-                        append_turn_journal_event_for_stream(
-                            s.session_id,
-                            stream_id,
-                            {
-                                "event": "interrupted",
-                                "created_at": time.time(),
-                                "reason": "cancelled",
-                            },
-                        )
-                    except Exception:
-                        logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', {'message': 'Cancelled by user'})
-                    return
-                _next_context_messages = _restore_reasoning_metadata(
-                    _previous_context_messages,
-                    _result_messages,
-                )
-                _next_context_messages = _dedupe_replayed_context_messages(
-                    _previous_context_messages,
-                    _next_context_messages,
-                    msg_text,
-                )
-                s.context_messages = _deduplicate_context_messages(_next_context_messages)
-                s.messages = _merge_display_messages_after_agent_result(
-                    _previous_messages,
-                    _previous_context_messages,
-                    _restore_display_reasoning_metadata(_previous_messages, _result_messages),
-                    msg_text,
-                    source=getattr(s, 'pending_user_source', None) or 'webui',
-                )
-                _advance_truncation_watermark_after_commit(s)  # #3831
+                with _stream_writeback_stage(_writeback_timings, "merge_result"):
+                    _tool_limit_reached = _agent_result_tool_limit_reached(result)
+                    _result_messages = result.get('messages') or _previous_context_messages
+                    _result_messages = _drop_synthetic_max_iteration_summary_requests(
+                        _result_messages,
+                        enabled=_tool_limit_reached,
+                    )
+                    if cancel_event.is_set():
+                        _finalize_cancelled_turn(s, ephemeral=False)
+                        try:
+                            append_turn_journal_event_for_stream(
+                                s.session_id,
+                                stream_id,
+                                {
+                                    "event": "interrupted",
+                                    "created_at": time.time(),
+                                    "reason": "cancelled",
+                                },
+                            )
+                        except Exception:
+                            logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                        put('cancel', {'message': 'Cancelled by user'})
+                        return
+                    _next_context_messages = _restore_reasoning_metadata(
+                        _previous_context_messages,
+                        _result_messages,
+                    )
+                    _next_context_messages = _dedupe_replayed_context_messages(
+                        _previous_context_messages,
+                        _next_context_messages,
+                        msg_text,
+                    )
+                    s.context_messages = _deduplicate_context_messages(_next_context_messages)
+                    s.messages = _merge_display_messages_after_agent_result(
+                        _previous_messages,
+                        _previous_context_messages,
+                        _restore_display_reasoning_metadata(_previous_messages, _result_messages),
+                        msg_text,
+                        source=getattr(s, 'pending_user_source', None) or 'webui',
+                    )
+                    _advance_truncation_watermark_after_commit(s)  # #3831
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -8346,7 +8415,8 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', {'message': 'Cancelled by user'})
                     return
-                s.save()
+                with _stream_writeback_stage(_writeback_timings, "session_save"):
+                    s.save()
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
@@ -8397,48 +8467,50 @@ def _run_agent_streaming(
                         mark_turn_completed(s.session_id, agent=agent)
                     except Exception:
                         logger.debug("Memory lifecycle mark failed for session %s", s.session_id, exc_info=True)
-                try:
-                    _persistent_changes = _persistent_state_changes(
-                        _persistent_state_before,
-                        _persistent_state_snapshot(_profile_home),
-                    )
-                    if _persistent_changes.get("memory_saved"):
-                        put("state_saved", {
-                            "session_id": session_id,
-                            "kind": "memory",
-                            "action": "saved",
-                        })
-                    for _skill_change in _persistent_changes.get("skills") or []:
-                        put("state_saved", {
-                            "session_id": session_id,
-                            "kind": "skill",
-                            "action": _skill_change.get("action") or "updated",
-                            "name": _skill_change.get("name") or "",
-                        })
-                except Exception:
-                    logger.debug("Persistent state change detection failed for session %s", s.session_id, exc_info=True)
+                with _stream_writeback_stage(_writeback_timings, "persistent_state_scan"):
+                    try:
+                        _persistent_changes = _persistent_state_changes(
+                            _persistent_state_before,
+                            _persistent_state_snapshot(_profile_home),
+                        )
+                        if _persistent_changes.get("memory_saved"):
+                            put("state_saved", {
+                                "session_id": session_id,
+                                "kind": "memory",
+                                "action": "saved",
+                            })
+                        for _skill_change in _persistent_changes.get("skills") or []:
+                            put("state_saved", {
+                                "session_id": session_id,
+                                "kind": "skill",
+                                "action": _skill_change.get("action") or "updated",
+                                "name": _skill_change.get("name") or "",
+                            })
+                    except Exception:
+                        logger.debug("Persistent state change detection failed for session %s", s.session_id, exc_info=True)
             # Sync to state.db for /insights (opt-in setting)
-            try:
-                from api.config import load_settings as _load_settings
-                if _load_settings().get('sync_to_insights'):
-                    from api.state_sync import sync_session_usage
-                    sync_session_usage(
-                        session_id=s.session_id,
-                        input_tokens=s.input_tokens or 0,
-                        output_tokens=s.output_tokens or 0,
-                        estimated_cost=s.estimated_cost,
-                        model=model,
-                        title=s.title,
-                        message_count=len(s.messages),
-                        # #2762: pass the session's profile explicitly so the
-                        # background-thread state.db lookup doesn't fall
-                        # through to the process-global active profile and
-                        # write to the wrong DB (TLS profile is set on the
-                        # HTTP thread but not propagated to this worker).
-                        profile=getattr(s, 'profile', None),
-                    )
-            except Exception:
-                logger.debug("Failed to sync session to insights")
+            with _stream_writeback_stage(_writeback_timings, "state_sync"):
+                try:
+                    from api.config import load_settings as _load_settings
+                    if _load_settings().get('sync_to_insights'):
+                        from api.state_sync import sync_session_usage
+                        sync_session_usage(
+                            session_id=s.session_id,
+                            input_tokens=s.input_tokens or 0,
+                            output_tokens=s.output_tokens or 0,
+                            estimated_cost=s.estimated_cost,
+                            model=model,
+                            title=s.title,
+                            message_count=len(s.messages),
+                            # #2762: pass the session's profile explicitly so the
+                            # background-thread state.db lookup doesn't fall
+                            # through to the process-global active profile and
+                            # write to the wrong DB (TLS profile is set on the
+                            # HTTP thread but not propagated to this worker).
+                            profile=getattr(s, 'profile', None),
+                        )
+                except Exception:
+                    logger.debug("Failed to sync session to insights")
             usage = {
                 'input_tokens': input_tokens,
                 'output_tokens': output_tokens,
@@ -8660,18 +8732,25 @@ def _run_agent_streaming(
                         })
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
-            raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
-            _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
-            if _tool_limit_reached:
-                _done_payload['terminal_state'] = 'tool_limit_reached'
-                _done_payload['terminal_reason'] = 'max_iterations'
-            put('done', _done_payload)
-            # Emit one last metering packet for the live message-header TPS label.
-            meter_stats = meter().get_stats()
-            meter_stats['session_id'] = session_id
-            meter_stats.setdefault('tps_available', False)
-            meter_stats.setdefault('estimated', False)
-            put('metering', meter_stats)
+            with _stream_writeback_stage(_writeback_timings, "done_payload"):
+                raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
+                _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+                if _tool_limit_reached:
+                    _done_payload['terminal_state'] = 'tool_limit_reached'
+                    _done_payload['terminal_reason'] = 'max_iterations'
+                put('done', _done_payload)
+                # Emit one last metering packet for the live message-header TPS label.
+                meter_stats = meter().get_stats()
+                meter_stats['session_id'] = session_id
+                meter_stats.setdefault('tps_available', False)
+                meter_stats.setdefault('estimated', False)
+                put('metering', meter_stats)
+            _log_stream_writeback_timings(
+                getattr(s, 'session_id', session_id),
+                stream_id,
+                _writeback_timings,
+                _writeback_started,
+            )
             if _should_bg_title and _u0 and _a0:
                 threading.Thread(
                     target=_run_background_title_update,
