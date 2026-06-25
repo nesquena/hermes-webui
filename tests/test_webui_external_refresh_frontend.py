@@ -135,7 +135,7 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     reset_pos = load_body.index("S.messages = [];", clear_pos)
     assert capture_pos < clear_pos < reset_pos
     assert "const sameSessionForceReload = forceReload && currentSid===sid;" in load_body
-    assert "renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined)" in load_body
+    assert "renderMessages(sameSessionForceReload?{preserveScroll:true}:(freshSessionSwitch?{freshSessionLoad:true}:undefined))" in load_body
 
 
 def test_same_width_force_reload_invalidates_visible_message_cache():

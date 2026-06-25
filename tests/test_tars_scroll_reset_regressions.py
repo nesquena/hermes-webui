@@ -115,6 +115,15 @@ def test_external_active_refresh_defers_while_reader_is_manually_unpinned():
     assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});" in refresh
 
 
+def test_reader_unpinned_uses_physical_distance_from_bottom():
+    reader = _function_body(UI_JS, "function _isMessageReaderUnpinned")
+
+    assert "if(_messageUserUnpinned) return true;" in reader
+    assert "_messageScrollElement" in reader
+    assert "const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;" in reader
+    assert "return bottomDistance>250;" in reader
+
+
 def test_session_switch_clears_deferred_active_refresh_reason():
     load = _function_body(SESSIONS_JS, "async function loadSession")
     assert "function _clearDeferredActiveSessionExternalRefresh()" in SESSIONS_JS

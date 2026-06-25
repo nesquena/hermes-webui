@@ -3763,7 +3763,11 @@ function _recentMessageTouchScrollIntent(){
   return _messageTouchScrollActive || performance.now()-_lastMessageTouchScrollIntentMs<MESSAGE_TOUCH_SCROLL_SUPPRESS_MS;
 }
 function _isMessageReaderUnpinned(){
-  return !!_messageUserUnpinned;
+  if(_messageUserUnpinned) return true;
+  const el=(typeof _messageScrollElement==='function')?_messageScrollElement():$('messages');
+  if(!el) return false;
+  const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
+  return bottomDistance>250;
 }
 function _olderMessagesPrefetchReady(){
   const el=_messageScrollElement();
