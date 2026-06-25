@@ -19,7 +19,7 @@ a user dogfooded the workspace panel:
     The `defaultValue` parameter was silently dropped; only the placeholder
     showed (the "ghost" name the user described).
 
-Run: /root/hermes-agent/venv/bin/python -m pytest tests/test_workspace_context_menu_and_rename.py -v
+Run: ./scripts/test.sh tests/test_workspace_context_menu_and_rename.py -v
 """
 
 from __future__ import annotations
@@ -184,6 +184,20 @@ class ShowPromptDialogPrefillTests(unittest.TestCase):
                     break
         return self.src[start:end]
 
+    def test_show_prompt_dialog_restores_hidden_cancel_button(self):
+        """#4581: the outside-symlink info dialog calls showConfirmDialog with
+        hideCancel:true, which sets the shared #appDialogCancel button to
+        display:none. showPromptDialog reuses the same button, so it must restore
+        the display before showing — otherwise the next rename/new-file prompt
+        opens with no Cancel button after a user clicks an external symlink."""
+        body = self._slice_show_prompt_dialog()
+        self.assertIn(
+            "cancelBtn.style.display=''", body.replace(" ", ""),
+            "showPromptDialog must reset cancelBtn.style.display so a prior "
+            "showConfirmDialog({hideCancel:true}) can't leave the Cancel button "
+            "hidden on a subsequent prompt (#4581 regression).",
+        )
+
     def test_show_prompt_dialog_accepts_default_value_alias(self):
         body = self._slice_show_prompt_dialog()
         # Must reference `opts.defaultValue` somewhere — the alias was the
@@ -325,9 +339,18 @@ class WorkspaceTargetedCreateContextMenuTests(unittest.TestCase):
 
     def test_file_context_menu_computes_target_directory_for_create_actions(self):
         body = self._slice_function("_showFileContextMenu")
-        self.assertRegex(
-            body,
-            r"const\s+targetDir\s*=\s*item\.type===['\"]dir['\"]\s*\?\s*item\.path\s*:\s*_workspaceParentDir\(item\.path\)",
+        # After the symlink PR, the guard changed from ``item.type==='dir'``
+        # to ``isDirLike`` (covers real dirs and directory-symlinks).
+        self.assertTrue(
+            re.search(
+                r"const\s+targetDir\s*=\s*item\.type===['\"]dir['\"]\s*\?\s*item\.path\s*:\s*_workspaceParentDir\(item\.path\)",
+                body,
+            ) or re.search(
+                r"const\s+targetDir\s*=\s*isDirLike\s*\?\s*item\.path\s*:\s*_workspaceParentDir\(item\.path\)",
+                body,
+            ),
+            "targetDir must be computed from item type (dir or isDirLike) "
+            "to determine the target directory for create actions",
         )
         self.assertIn("promptNewFile(targetDir)", body)
         self.assertIn("promptNewFolder(targetDir)", body)

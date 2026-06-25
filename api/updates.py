@@ -43,7 +43,19 @@ CACHE_TTL = 1800  # 30 minutes
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
-_QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|token|password|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
+_QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|oauth_token|private_token|client_secret|app_secret|api[_-]?key|token|password|secret|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
+_FETCH_NETWORK_FAILURE_SIGNATURES = (
+    'could not resolve host',
+    'failed to connect',
+    'network is unreachable',
+    'no route to host',
+    'connection timed out',
+    'timed out after',
+    'connection reset by peer',
+    'remote end hung up unexpectedly',
+    'tls connection was non-properly terminated',
+    'ssl certificate problem',
+)
 
 
 def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CHARS) -> str:
@@ -62,6 +74,17 @@ def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CH
     if len(sanitized) > limit:
         sanitized = sanitized[:limit].rstrip() + "…"
     return sanitized
+
+
+def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
+    """Return the apply-path fetch failure message for the given stderr."""
+    detail = _sanitize_git_diagnostic(fetch_out)
+    if not detail:
+        return network_message
+    detail_lower = detail.lower()
+    if any(signature in detail_lower for signature in _FETCH_NETWORK_FAILURE_SIGNATURES):
+        return network_message
+    return f'fetch failed: {detail}'
 
 
 def _restart_blocker_snapshot() -> dict:
@@ -644,9 +667,24 @@ def _check_repo_branch(path, name, *, fetch=True):
 
 
 def _check_repo(path, name):
-    """Check if a git repo is behind its latest release. Returns dict or None."""
+    """Check if a git repo is behind its latest release. Returns dict or None.
+
+    The returned dict (when not None) always carries a ``dirty: bool`` reflecting
+    the working-tree state vs HEAD. A dirty install at-or-past the latest release
+    tag used to silently report "Up to date" with no remediation affordance, so
+    the Settings panel reads this flag to offer ``apply_force_update`` (issue
+    #4085).
+
+    When ``.git`` is absent (Docker images, pip installs), returns a minimal dict
+    with ``no_git: True`` and ``behind: None`` so the frontend can distinguish
+    "can't check" from "up to date" (issue #4356).
+    """
     if path is None or not (path / '.git').exists():
-        return None
+        return {
+            'name': name,
+            'behind': None,
+            'no_git': True,
+        }
 
     # Fetch tags first so update prompts track published releases, not every
     # development commit that lands on master/main after the latest release.
@@ -667,19 +705,43 @@ def _check_repo(path, name):
             release_info = dict(release_info)
             release_info['error'] = message
             release_info['stale_check'] = True
+            release_info['dirty'] = _is_dirty(path)
             return release_info
         return {
             'name': name,
             'behind': None,
             'error': message,
             'stale_check': True,
+            'dirty': _is_dirty(path),
         }
 
     release_info = _check_repo_release(path, name)
     if release_info is not None:
+        release_info = dict(release_info)
+        release_info['dirty'] = _is_dirty(path)
         return release_info
 
-    return _check_repo_branch(path, name, fetch=False)
+    branch_info = _check_repo_branch(path, name, fetch=False)
+    if branch_info is not None:
+        branch_info = dict(branch_info)
+        branch_info['dirty'] = _is_dirty(path)
+        return branch_info
+    return None
+
+
+def _is_dirty(path: Path, timeout: int = 1) -> bool:
+    """Return True when the working tree has uncommitted changes vs HEAD.
+
+    Same primitive as ``_dirty_suffix`` (issue #4085): ``git diff-index
+    --quiet HEAD --`` exits 0 on a clean tree and 1 on a dirty tree (not an
+    error). Real errors (timeout, missing git, fatal) are conservatively
+    reported as clean so a transient probe failure never produces a false-
+    positive "local changes" alert.
+    """
+    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    if ok:
+        return False
+    return not out or out.startswith('git exited with status ')
 
 
 def _ignored_agent_update_info() -> dict:
@@ -1135,12 +1197,33 @@ def _schedule_restart(delay: float = 2.0) -> None:
                         args = sys.argv
                     else:
                         args = [sys.executable] + sys.argv
-                    # Start new process detached, redirect all stdio to
-                    # avoid broken-pipe errors when the parent exits.
+                    # Prefer pythonw.exe over python.exe so the restarted
+                    # server does not create a visible console window.
+                    # sys.executable may point at python.exe (console
+                    # subsystem); substitute pythonw.exe if it exists
+                    # next to python.exe.
+                    _exe = sys.executable
+                    if _exe.lower().endswith('python.exe'):
+                        _w_exe = _exe[:-4] + 'w.exe'  # python.exe -> pythonw.exe
+                        if os.path.isfile(_w_exe):
+                            if getattr(sys, "frozen", False):
+                                args = sys.argv
+                            else:
+                                args = [_w_exe] + sys.argv
+                    # Start new process fully detached with NO console
+                    # window.  DETACHED_PROCESS alone is not sufficient
+                    # on modern Windows — without CREATE_NO_WINDOW a
+                    # python.exe (console-subsystem) child still flashes
+                    # an empty terminal window, which the user then
+                    # manually kills (taking the WebUI with it).
                     subprocess.Popen(
                         args,
                         cwd=os.getcwd(),
-                        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                        creationflags=(
+                            subprocess.DETACHED_PROCESS
+                            | subprocess.CREATE_NEW_PROCESS_GROUP
+                            | subprocess.CREATE_NO_WINDOW
+                        ),
                         close_fds=True,
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL,
@@ -1194,17 +1277,27 @@ def apply_force_update(target: str) -> dict:
         # --force so a remote re-tag (e.g. squash-merge that re-points an
         # existing release tag) doesn't jam the apply path with "would clobber
         # existing tag". See #2756.
-        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
         if not fetch_ok:
             return {
                 'ok': False,
-                'message': 'Could not reach the remote repository. Check your connection.',
+                'message': _apply_fetch_failure_message(
+                    fetch_out,
+                    'Could not reach the remote repository. Check your connection.',
+                ),
             }
 
         compare_ref = _select_apply_compare_ref(path)
 
-        # Discard local modifications then reset to remote HEAD
+        # Discard local modifications and untracked colliders before resetting.
+        # Do not use -x: ignored build/cache artifacts should survive force update.
         _run_git(['checkout', '.'], path)
+        _, clean_ok = _run_git(['clean', '-fd'], path)
+        if not clean_ok:
+            return {
+                'ok': False,
+                'message': 'Failed to remove untracked files before force reset',
+            }
         _, ok = _run_git(['reset', '--hard', compare_ref], path)
         if not ok:
             return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
@@ -1252,13 +1345,13 @@ def _apply_update_inner(target):
 
     # Fetch before attempting pull, so the remote ref is current.
     # --force so a remote re-tag doesn't block the update path (see #2756).
-    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
     if not fetch_ok:
         return {
             'ok': False,
-            'message': (
-                'Could not reach the remote repository. '
-                'Check your internet connection and try again.'
+            'message': _apply_fetch_failure_message(
+                fetch_out,
+                'Could not reach the remote repository. Check your internet connection and try again.',
             ),
         }
 
@@ -1304,6 +1397,9 @@ def _apply_update_inner(target):
     if not pull_ok:
         pull_lower = pull_out.lower()
         detail = pull_out.strip()[:300] if pull_out.strip() else '(no output from git)'
+        untracked_collision = (
+            'untracked working tree files would be overwritten' in pull_lower
+        )
         diverged_failure = (
             'not possible to fast-forward' in pull_lower or 'diverged' in pull_lower
         )
@@ -1397,7 +1493,10 @@ def _apply_update_inner(target):
         message_parts = [f'Pull failed: {detail}']
         if restored_note:
             message_parts.append(restored_note)
-        return {'ok': False, 'message': ' '.join(message_parts)}
+        response = {'ok': False, 'message': ' '.join(message_parts)}
+        if untracked_collision:
+            response['conflict'] = True
+        return response
 
     # Re-apply stash if we stashed.
     stash_drop_failed = False

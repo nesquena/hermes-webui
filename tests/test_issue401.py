@@ -72,14 +72,16 @@ def test_loadsession_uses_session_toolcalls_only_as_fallback():
 
 def test_rendermessages_treats_openai_toolcall_assistants_as_visible():
     """OpenAI assistant rows with empty content but tool_calls must stay anchorable."""
+    assert "function _messageIsRenderable(m)" in UI_JS
     assert "const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;" in UI_JS
-    assert "if(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)) return true;" in UI_JS
+    assert "hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)" in UI_JS
 
 
 def test_rendermessages_treats_partial_toolcall_assistants_as_visible():
     """Assistant rows carrying `_partial_tool_calls` must stay anchorable."""
+    assert "function _messageIsRenderable(m)" in UI_JS
     assert "const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;" in UI_JS
-    assert "if(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)) return true;" in UI_JS
+    assert "hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)" in UI_JS
 
 
 def test_rendermessages_rebuilds_tool_cards_from_partial_tool_calls():

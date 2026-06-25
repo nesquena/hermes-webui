@@ -30,6 +30,18 @@ def _extract_interim_handler(src):
         pos = idx
 
 
+def _visible_interim_flush_pos(fn):
+    attr_pos = fn.index("setAttribute('data-interim','1')")
+    candidates = [
+        "_flushPendingSegmentRender({force:true,skipAnchorProcessProse:true})",
+        "_flushPendingSegmentRender({force:true})",
+    ]
+    positions = [fn.find(candidate, attr_pos) for candidate in candidates]
+    positions = [pos for pos in positions if pos != -1]
+    assert positions, "visible interim flush call not found after data-interim marker"
+    return min(positions)
+
+
 class TestInterimCollapseHandlerStructure:
     """The interim_assistant handler must contain the collapse threshold and logic."""
 
@@ -93,7 +105,7 @@ class TestInterimCollapseHandlerStructure:
         src = read("static/messages.js")
         fn = _extract_interim_handler(src)
         attr_pos = fn.index("setAttribute('data-interim','1')")
-        flush_pos = fn.rindex("_flushPendingSegmentRender({force:true})")
+        flush_pos = _visible_interim_flush_pos(fn)
         assert attr_pos < flush_pos, (
             "data-interim attribute must be set before _flushPendingSegmentRender "
             "so the segment is marked before it is sealed"
@@ -102,7 +114,7 @@ class TestInterimCollapseHandlerStructure:
     def test_collapse_after_flush_before_reset(self):
         src = read("static/messages.js")
         fn = _extract_interim_handler(src)
-        flush_pos = fn.index("_flushPendingSegmentRender({force:true})")
+        flush_pos = _visible_interim_flush_pos(fn)
         collapse_pos = fn.index("INTERIM_COLLAPSE_THRESHOLD")
         reset_pos = fn.index("_resetAssistantSegment()", collapse_pos)
         assert flush_pos < collapse_pos < reset_pos, (
@@ -201,4 +213,3 @@ class TestInterimCollapseSurvivesLiveTurnRestore:
             "toggle must carry data-threshold so the delegated handler can "
             "recompute the collapse set without closure state after a restore."
         )
-

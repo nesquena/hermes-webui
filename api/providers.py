@@ -37,9 +37,11 @@ from api.config import (
     _custom_provider_slug_from_name,
     _get_label_for_model,
     _models_from_live_provider_ids,
+    _pool_entry_payloads,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
+    _thread_local_env_value,
     get_config,
     invalidate_models_cache,
     reload_config,
@@ -131,8 +133,11 @@ _account_usage_probe_semaphore: threading.BoundedSemaphore | None = None
 # represented as non-None snapshots and remain cacheable.
 _account_usage_status_cache: dict[tuple[str, str, str], tuple[float, Any]] = {}
 _account_usage_status_cache_lock = threading.Lock()
-_account_usage_worker_pool: dict[str, "_AccountUsageProbeWorker"] = {}
+_account_usage_worker_pool: dict[str, list["_AccountUsageProbeWorker"]] = {}
 _account_usage_worker_pool_lock = threading.Lock()
+
+# Per-home worker pool configuration for probe tail-latency reduction (#3787)
+_ACCOUNT_USAGE_WORKERS_PER_HOME = 2
 
 
 def _get_account_usage_probe_semaphore() -> threading.BoundedSemaphore:
@@ -676,6 +681,7 @@ else:
     print(json.dumps(_fetch_snapshot(provider, api_key)), flush=True)
 """
 
+
 # SECTION: Provider ↔ env var mapping
 
 # Maps canonical provider slug → env var name for API key.
@@ -737,6 +743,18 @@ _PROVIDER_ENV_VAR_ALIASES: dict[str, tuple[str, ...]] = {
     "opencode-go": ("OPENCODE_API_KEY",),
 }
 
+
+def _provider_credential_env_vars() -> tuple[str, ...]:
+    names = {name for name in _PROVIDER_ENV_VAR.values() if name}
+    for aliases in _PROVIDER_ENV_VAR_ALIASES.values():
+        for alias in aliases or ():
+            if alias:
+                names.add(alias)
+    return tuple(sorted(names))
+
+
+_PROVIDER_CREDENTIAL_ENV_VARS = _provider_credential_env_vars()
+
 # Providers that use OAuth or token flows — their credentials are managed
 # through the Hermes CLI, not via API keys.  The WebUI cannot set these.
 _OAUTH_PROVIDERS = frozenset({
@@ -748,7 +766,192 @@ _OAUTH_PROVIDERS = frozenset({
     "xai-oauth",
 })
 
-# SECTION: Helper functions
+
+def _entry_value(entry, *names):
+    for name in names:
+        try:
+            value = getattr(entry, name)
+        except Exception:
+            value = None
+        if value in (None, ""):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _parse_dt(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _iso(value):
+    if value in (None, ""):
+        return None
+    if hasattr(value, "isoformat"):
+        text = value.isoformat()
+        return text.replace("+00:00", "Z")
+    text = str(value).strip()
+    return text or None
+
+
+def _entry_exhausted_ttl_seconds(error_code):
+    code = str(error_code or "").strip()
+    if code == "401":
+        return 5 * 60
+    return 60 * 60
+
+
+def _entry_pool_exhausted_until(entry):
+    if str(_entry_value(entry, "last_status") or "").strip().lower() != "exhausted":
+        return None
+    reset_at = _parse_dt(getattr(entry, "last_error_reset_at", None))
+    if reset_at is not None:
+        return reset_at
+    status_at = _parse_dt(getattr(entry, "last_status_at", None))
+    if status_at is None:
+        return None
+    return status_at + timedelta(seconds=_entry_exhausted_ttl_seconds(_entry_value(entry, "last_error_code")))
+
+
+def _entry_is_pool_exhausted(entry):
+    exhausted_until = _entry_pool_exhausted_until(entry)
+    return exhausted_until is not None and datetime.now(timezone.utc) < exhausted_until
+
+
+def _safe_entry_label(entry, index):
+    label = _entry_value(entry, "label", "source") or ""
+    if not label:
+        label = "Credential " + str(index)
+    label = " ".join(str(label).split())
+    if len(label) > 64:
+        label = label[:61].rstrip() + "..."
+    return label
+
+
+def _entry_pool_retry_after(entry):
+    return _iso(_entry_pool_exhausted_until(entry))
+
+
+def _entry_pool_exhausted_reason(entry):
+    code = _entry_value(entry, "last_error_code")
+    reset_at = _entry_pool_retry_after(entry)
+    reason = "Credential pool marked this credential exhausted"
+    if code:
+        reason += " after provider status " + code
+    if reset_at:
+        reason += "; retry after " + reset_at
+    return reason + "."
+
+
+def _local_pool_snapshot(provider):
+    """Probe-free pool snapshot from local auth.json entries.
+
+    Returns a SimpleNamespace compatible with _serialize_account_usage_snapshot,
+    or None if the provider has no pool or no entries.
+    """
+    try:
+        entries = [SimpleNamespace(**payload) for payload in _pool_entry_payloads(provider)]
+    except Exception:
+        return None
+    if not entries:
+        return None
+
+    rows = []
+    available_count = 0
+    exhausted_count = 0
+    dead_count = 0
+    for index, entry in enumerate(entries, start=1):
+        label = _safe_entry_label(entry, index)
+        entry_status = str(_entry_value(entry, "last_status") or "").strip().lower()
+        if entry_status == "dead":
+            dead_count += 1
+            rows.append({
+                "label": label,
+                "status": "dead",
+                "plan": None,
+                "windows": [],
+                "details": [],
+                "unavailable_reason": "Credential permanently revoked or invalid.",
+                "retry_after": None,
+                "fetched_at": None,
+            })
+        elif _entry_is_pool_exhausted(entry):
+            exhausted_count += 1
+            rows.append({
+                "label": label,
+                "status": "exhausted",
+                "plan": None,
+                "windows": [],
+                "details": [],
+                "unavailable_reason": _entry_pool_exhausted_reason(entry),
+                "retry_after": _entry_pool_retry_after(entry),
+                "fetched_at": None,
+            })
+        else:
+            available_count += 1
+            rows.append({
+                "label": label,
+                "status": "available",
+                "plan": None,
+                "windows": [],
+                "details": [],
+                "unavailable_reason": None,
+                "retry_after": None,
+                "fetched_at": None,
+            })
+
+    if not rows:
+        return None
+
+    total = available_count + exhausted_count + dead_count
+    pool_dict = {
+        "total_credentials": total,
+        "queried_credentials": 0,
+        "available_credentials": available_count,
+        "exhausted_credentials": exhausted_count,
+        "dead_credentials": dead_count,
+        "failed_credentials": 0,
+        "plans": [],
+        "next_reset_at": None,
+        "best_remaining_by_window": [],
+        "credentials": rows,
+    }
+
+    details = [str(available_count) + "/" + str(total) + " credentials available"]
+    if exhausted_count:
+        details.append(str(exhausted_count) + " exhausted")
+    if dead_count:
+        details.append(str(dead_count) + " dead")
+
+    return SimpleNamespace(
+        provider=provider,
+        source="local_pool",
+        title="Credential pool",
+        plan=None,
+        windows=(),
+        details=tuple(details),
+        available=available_count > 0,
+        unavailable_reason=None if available_count > 0 else "All pool credentials are unavailable.",
+        fetched_at=datetime.now(timezone.utc),
+        pool=pool_dict,
+    )
 
 
 def _get_hermes_home() -> Path:
@@ -834,10 +1037,10 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
         env_path = _get_hermes_home() / ".env"
         env_values = _load_env_file(env_path)
         values.append(env_values.get(env_var))
-        values.append(os.getenv(env_var))
+        values.append(_thread_local_env_value(env_var))
         for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
             values.append(env_values.get(alias))
-            values.append(os.getenv(alias))
+            values.append(_thread_local_env_value(alias))
 
     cfg = get_config()
     model_cfg = cfg.get("model", {})
@@ -856,7 +1059,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
             if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp.get("name")):
                 cp_key = cp.get("api_key")
                 if isinstance(cp_key, str) and cp_key.startswith("${") and cp_key.endswith("}"):
-                    values.append(os.getenv(cp_key[2:-1]))
+                    values.append(_thread_local_env_value(cp_key[2:-1]))
                 else:
                     values.append(cp_key)
     return any(_looks_like_codex_oauth_token(str(value or "")) for value in values)
@@ -977,7 +1180,7 @@ def _provider_has_key(provider_id: str) -> bool:
         env_file_value = env_values.get(env_var)
         if _provider_value_counts_as_api_key(provider_id, env_file_value):
             return True
-        env_value = os.getenv(env_var)
+        env_value = _thread_local_env_value(env_var)
         if _provider_value_counts_as_api_key(provider_id, env_value):
             return True
         # Fall back to legacy env-var aliases (e.g. lmstudio's pre-#1500
@@ -986,8 +1189,21 @@ def _provider_has_key(provider_id: str) -> bool:
         for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
             if _provider_value_counts_as_api_key(provider_id, env_values.get(alias)):
                 return True
-            if _provider_value_counts_as_api_key(provider_id, os.getenv(alias)):
+            if _provider_value_counts_as_api_key(provider_id, _thread_local_env_value(alias)):
                 return True
+    # Check credential pool — covers custom providers registered via
+    # `hermes auth add` which store keys in auth.json (not config.yaml).
+    # Must be outside the `if env_var:` block above: custom providers
+    # (custom:bothub, etc.) have no env var, so that block is skipped.
+    # Uses the cached _has_explicit_pool_credentials helper which also
+    # filters gh-cli / GITHUB_TOKEN ambient entries so copilot doesn't
+    # appear just because `gh` is installed.
+    try:
+        from api.config import _has_explicit_pool_credentials
+        if _has_explicit_pool_credentials(provider_id):
+            return True
+    except ImportError:
+        pass
 
     cfg = get_config()
     # Check model.api_key — only match if this provider is the active one.
@@ -1027,14 +1243,14 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         env_file_value = env_values.get(env_var)
         if _provider_value_counts_as_api_key(provider_id, env_file_value):
             return str(env_file_value).strip() or None
-        env_value = os.getenv(env_var)
+        env_value = _thread_local_env_value(env_var)
         if _provider_value_counts_as_api_key(provider_id, env_value):
             return str(env_value).strip() or None
         for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
             alias_file_value = env_values.get(alias)
             if _provider_value_counts_as_api_key(provider_id, alias_file_value):
                 return str(alias_file_value).strip() or None
-            alias_value = os.getenv(alias)
+            alias_value = _thread_local_env_value(alias)
             if _provider_value_counts_as_api_key(provider_id, alias_value):
                 return str(alias_value).strip() or None
 
@@ -1062,9 +1278,26 @@ def _get_provider_api_key(provider_id: str) -> str | None:
             if _custom_provider_name_matches(provider_id, cp.get("name")):
                 cp_key = str(cp.get("api_key") or "").strip()
                 if cp_key.startswith("${") and cp_key.endswith("}"):
-                    return os.getenv(cp_key[2:-1], "").strip() or None
+                    return _thread_local_env_value(cp_key[2:-1]).strip() or None
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
+    # Fallback: try credential pool (e.g. bothub key stored via auth.json)
+    for entry in _pool_entry_payloads(provider_id):
+        status = str(entry.get("last_status") or "").strip().lower()
+        if status == "dead":
+            continue
+        if status == "exhausted":
+            ns = SimpleNamespace(**entry)
+            if _entry_is_pool_exhausted(ns):
+                continue
+        key = str(
+            entry.get("runtime_api_key")
+            or entry.get("agent_key")
+            or entry.get("access_token")
+            or ""
+        ).strip()
+        if key:
+            return key
     return None
 
 
@@ -1166,6 +1399,24 @@ def _agent_fetch_account_usage(provider: str, *, base_url: str | None = None, ap
 
 def _account_usage_subprocess_env(home: Path, provider: str, api_key: str | None) -> dict[str, str]:
     env = dict(os.environ)
+    try:
+        from api.config import _thread_ctx
+    except Exception:
+        _thread_ctx = None
+    if bool(getattr(_thread_ctx, "block_process_env_fallback", False)):
+        # Rely on the centralized profile scrub set (api.profiles), which unions
+        # the WebUI provider env vars + the agent auth registry + the non-registry
+        # agent credential fallback (CUSTOM_API_KEY, AWS/Bedrock family). Falling
+        # back to the WebUI-only set keeps the probe fail-closed if that import
+        # fails. (#3961 — don't leave a partial local AWS set here.)
+        _strip = set(_PROVIDER_CREDENTIAL_ENV_VARS)
+        try:
+            from api.profiles import _profile_secret_env_names, get_active_hermes_home
+            _strip.update(_profile_secret_env_names(get_active_hermes_home()))
+        except Exception:
+            _strip.update({"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"})
+        for env_name in _strip:
+            env.pop(env_name, None)
     env["HERMES_HOME"] = str(Path(home))
 
     # Profile .env values should affect only the child quota probe, not the
@@ -1228,11 +1479,13 @@ class _AccountUsageProbeWorker:
         self.last_used = time.monotonic()
         self._lock = threading.RLock()
         self._proc: subprocess.Popen[str] | None = None
+        self._closed = False
 
     def close(self) -> None:
         with self._lock:
             proc = self._proc
             self._proc = None
+            self._closed = True
         self._close_process(proc)
 
     @staticmethod
@@ -1349,6 +1602,7 @@ class _AccountUsageProbeWorker:
                 env=_account_usage_subprocess_env(self.home, provider, None),
                 **kwargs,
             )
+            self._closed = False
         except Exception:
             self._proc = None
             logger.debug("Account usage worker for %s failed to launch", provider, exc_info=True)
@@ -1421,14 +1675,34 @@ def _fetch_account_usage_once_for_home(provider: str, home: Path, *, api_key: st
     return _account_usage_payload_to_snapshot(payload)
 
 
-def _get_account_usage_probe_worker(home: Path) -> _AccountUsageProbeWorker:
+def _get_account_usage_probe_worker(home: Path) -> "_AccountUsageProbeWorker | None":
+    """Return a worker with its lock already held, or None if saturated.
+
+    The caller MUST release worker._lock after use (typically via try/finally).
+    Holding the lock across the handoff eliminates the TOCTOU window that would
+    let two concurrent probes both observe the same worker as free.
+    """
     key = str(Path(home))
+    stale: list[_AccountUsageProbeWorker] = []
+    claimed: _AccountUsageProbeWorker | None = None
     with _account_usage_worker_pool_lock:
-        worker = _account_usage_worker_pool.get(key)
-        if worker is None:
-            worker = _AccountUsageProbeWorker(Path(home))
-            _account_usage_worker_pool[key] = worker
-        return worker
+        existing_workers = _account_usage_worker_pool.get(key)
+        workers: list[_AccountUsageProbeWorker]
+        if not existing_workers:
+            workers = [_AccountUsageProbeWorker(Path(home)) for _ in range(_ACCOUNT_USAGE_WORKERS_PER_HOME)]
+        else:
+            stale = [worker for worker in existing_workers if worker._closed]
+            workers = [worker for worker in existing_workers if not worker._closed]
+            while len(workers) < _ACCOUNT_USAGE_WORKERS_PER_HOME:
+                workers.append(_AccountUsageProbeWorker(Path(home)))
+        _account_usage_worker_pool[key] = workers
+        for worker in workers:
+            if worker._lock.acquire(blocking=False):
+                claimed = worker
+                break
+    for worker in stale:
+        worker.close()
+    return claimed
 
 
 def _cleanup_account_usage_probe_workers(
@@ -1439,23 +1713,31 @@ def _cleanup_account_usage_probe_workers(
     cutoff = time.monotonic() if now is None else now
     stale: list[tuple[str, _AccountUsageProbeWorker]] = []
     with _account_usage_worker_pool_lock:
-        for key, worker in list(_account_usage_worker_pool.items()):
-            if worker._lock.acquire(blocking=False):
-                try:
-                    proc = worker._proc
-                    is_dead = proc is None or proc.poll() is not None
-                    if is_dead or cutoff - worker.last_used >= idle_seconds:
-                        stale.append((key, worker))
-                        _account_usage_worker_pool.pop(key, None)
-                finally:
-                    worker._lock.release()
+        for key, workers in list(_account_usage_worker_pool.items()):
+            for worker in workers:
+                if worker._lock.acquire(blocking=False):
+                    try:
+                        proc = worker._proc
+                        is_dead = worker._closed or (proc is not None and proc.poll() is not None)
+                        if is_dead or cutoff - worker.last_used >= idle_seconds:
+                            stale.append((key, worker))
+                    finally:
+                        worker._lock.release()
+            remaining_workers = [w for w in workers if not any(k == key and w == sw for k, sw in stale)]
+            if not remaining_workers:
+                _account_usage_worker_pool.pop(key, None)
+            else:
+                # Replenish to N so partial cleanup doesn't permanently shrink the pool
+                while len(remaining_workers) < _ACCOUNT_USAGE_WORKERS_PER_HOME:
+                    remaining_workers.append(_AccountUsageProbeWorker(Path(key)))
+                _account_usage_worker_pool[key] = remaining_workers
     for _key, worker in stale:
         worker.close()
 
 
 def _close_account_usage_probe_workers() -> None:
     with _account_usage_worker_pool_lock:
-        workers = list(_account_usage_worker_pool.values())
+        workers = [w for wlist in _account_usage_worker_pool.values() for w in wlist]
         _account_usage_worker_pool.clear()
     _close_account_usage_probe_worker_list(workers)
 
@@ -1465,15 +1747,23 @@ def _close_account_usage_probe_worker_list(workers: list[_AccountUsageProbeWorke
         worker.close()
 
 
-def _close_account_usage_probe_workers_async() -> None:
+def _close_account_usage_probe_workers_async(*, provider_id: str | None = None) -> None:
     with _account_usage_worker_pool_lock:
-        workers = list(_account_usage_worker_pool.values())
-        _account_usage_worker_pool.clear()
-    if not workers:
+        if provider_id:
+            active_home = str(_get_hermes_home())
+            workers_to_close = []
+            for key, wlist in list(_account_usage_worker_pool.items()):
+                if key == active_home:
+                    workers_to_close.extend(wlist)
+                    _account_usage_worker_pool.pop(key, None)
+        else:
+            workers_to_close = [w for wlist in _account_usage_worker_pool.values() for w in wlist]
+            _account_usage_worker_pool.clear()
+    if not workers_to_close:
         return
     thread = threading.Thread(
         target=_close_account_usage_probe_worker_list,
-        args=(workers,),
+        args=(workers_to_close,),
         daemon=True,
         name="account-usage-worker-close",
     )
@@ -1512,7 +1802,7 @@ def invalidate_account_usage_status_cache(provider_id: str | None = None) -> Non
             for key in list(_account_usage_status_cache):
                 if key[0] == normalized:
                     _account_usage_status_cache.pop(key, None)
-    _close_account_usage_probe_workers_async()
+    _close_account_usage_probe_workers_async(provider_id=normalized or None)
 
 
 def _set_cached_account_usage(
@@ -1545,7 +1835,13 @@ def _set_cached_account_usage(
 def _agent_fetch_account_usage_for_home(provider: str, home: Path, *, api_key: str | None = None) -> Any:
     try:
         _cleanup_account_usage_probe_workers()
-        return _get_account_usage_probe_worker(home).fetch(provider, api_key=api_key)
+        worker = _get_account_usage_probe_worker(home)
+        if worker is not None:
+            try:
+                return worker._fetch_locked(provider, api_key=api_key)
+            finally:
+                worker._lock.release()
+        return _fetch_account_usage_once_for_home(provider, home, api_key=api_key)
     except Exception:
         logger.debug("Account usage probe for %s failed", provider, exc_info=True)
         return None
@@ -1643,78 +1939,103 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
     if provider in _ACCOUNT_USAGE_PROVIDERS:
         return _provider_account_usage_status(provider, display_name, refresh=refresh)
 
-    if provider != "openrouter":
-        detail = "OpenAI/Anthropic rate-limit headers are a follow-up once WebUI captures provider response metadata."
+    if provider == "openrouter":
+        api_key = _get_provider_api_key("openrouter")
+        if not api_key:
+            return {
+                "ok": False,
+                "provider": "openrouter",
+                "display_name": display_name,
+                "supported": True,
+                "status": "no_key",
+                "quota": None,
+                "message": "OpenRouter quota status needs an OPENROUTER_API_KEY configured on the server.",
+            }
+        req = urllib.request.Request(
+            _OPENROUTER_KEY_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
+                raw = resp.read()
+            payload = json.loads(raw.decode("utf-8")) if isinstance(raw, (bytes, bytearray)) else json.loads(raw)
+            quota = _sanitize_openrouter_quota(payload)
+            return {
+                "ok": True,
+                "provider": "openrouter",
+                "display_name": display_name,
+                "supported": True,
+                "status": "available",
+                "label": "OpenRouter credits",
+                "quota": quota,
+                "message": "OpenRouter quota status loaded.",
+            }
+        except urllib.error.HTTPError as exc:
+            status = "invalid_key" if exc.code in (401, 403) else "unavailable"
+            message = (
+                "OpenRouter rejected the configured API key."
+                if status == "invalid_key"
+                else "OpenRouter quota status is temporarily unavailable."
+            )
+            return {
+                "ok": False,
+                "provider": "openrouter",
+                "display_name": display_name,
+                "supported": True,
+                "status": status,
+                "quota": None,
+                "message": message,
+            }
+        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
+            return {
+                "ok": False,
+                "provider": "openrouter",
+                "display_name": display_name,
+                "supported": True,
+                "status": "unavailable",
+                "quota": None,
+                "message": "OpenRouter quota status is temporarily unavailable.",
+            }
+
+    local_snapshot = _local_pool_snapshot(provider)
+    if local_snapshot is not None:
+        account_limits = _serialize_account_usage_snapshot(local_snapshot)
+        if account_limits and account_limits.get("available"):
+            return {
+                "ok": True,
+                "provider": provider,
+                "display_name": display_name,
+                "supported": True,
+                "status": "available",
+                "label": account_limits.get("title") or "Credential pool",
+                "quota": None,
+                "account_limits": account_limits,
+                "message": f"{display_name} credential pool status loaded.",
+            }
         return {
             "ok": False,
             "provider": provider,
             "display_name": display_name,
-            "supported": False,
-            "status": "unsupported",
-            "quota": None,
-            "message": f"Quota status is not available for {display_name}. {detail}",
-        }
-
-    api_key = _get_provider_api_key("openrouter")
-    if not api_key:
-        return {
-            "ok": False,
-            "provider": "openrouter",
-            "display_name": display_name,
-            "supported": True,
-            "status": "no_key",
-            "quota": None,
-            "message": "OpenRouter quota status needs an OPENROUTER_API_KEY configured on the server.",
-        }
-
-    req = urllib.request.Request(
-        _OPENROUTER_KEY_URL,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Accept": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
-            raw = resp.read()
-        payload = json.loads(raw.decode("utf-8")) if isinstance(raw, (bytes, bytearray)) else json.loads(raw)
-        quota = _sanitize_openrouter_quota(payload)
-        return {
-            "ok": True,
-            "provider": "openrouter",
-            "display_name": display_name,
-            "supported": True,
-            "status": "available",
-            "label": "OpenRouter credits",
-            "quota": quota,
-            "message": "OpenRouter quota status loaded.",
-        }
-    except urllib.error.HTTPError as exc:
-        status = "invalid_key" if exc.code in (401, 403) else "unavailable"
-        message = (
-            "OpenRouter rejected the configured API key."
-            if status == "invalid_key"
-            else "OpenRouter quota status is temporarily unavailable."
-        )
-        return {
-            "ok": False,
-            "provider": "openrouter",
-            "display_name": display_name,
-            "supported": True,
-            "status": status,
-            "quota": None,
-            "message": message,
-        }
-    except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
-        return {
-            "ok": False,
-            "provider": "openrouter",
-            "display_name": display_name,
             "supported": True,
             "status": "unavailable",
             "quota": None,
-            "message": "OpenRouter quota status is temporarily unavailable.",
+            "account_limits": account_limits,
+            "message": f"{display_name} credential pool: all credentials are unavailable.",
         }
+
+    detail = "OpenAI/Anthropic rate-limit headers are a follow-up once WebUI captures provider response metadata."
+    return {
+        "ok": False,
+        "provider": provider,
+        "display_name": display_name,
+        "supported": False,
+        "status": "unsupported",
+        "quota": None,
+        "message": f"Quota status is not available for {display_name}. {detail}",
+    }
 
 
 def _provider_is_oauth(provider_id: str) -> bool:
@@ -2084,7 +2405,7 @@ def get_providers() -> dict[str, Any]:
                 env_values = _load_env_file(env_path)
                 if _provider_value_counts_as_api_key(pid, env_values.get(env_var)):
                     key_source = "env_file"
-                elif _provider_value_counts_as_api_key(pid, os.getenv(env_var)):
+                elif _provider_value_counts_as_api_key(pid, _thread_local_env_value(env_var)):
                     key_source = "env_var"
                 else:
                     # Canonical name not set; check legacy aliases (e.g. lmstudio's
@@ -2097,7 +2418,7 @@ def get_providers() -> dict[str, Any]:
                             key_source = "env_file"
                             aliased = True
                             break
-                        if _provider_value_counts_as_api_key(pid, os.getenv(alias)):
+                        if _provider_value_counts_as_api_key(pid, _thread_local_env_value(alias)):
                             key_source = "env_var"
                             aliased = True
                             break
@@ -2294,7 +2615,15 @@ def get_providers() -> dict[str, Any]:
             # Replace env var reference to check actual value
             if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
                 env_var = cp_api_key[2:-1]
-                cp_has_key = bool(os.getenv(env_var, "").strip())
+                cp_has_key = bool(_thread_local_env_value(env_var).strip())
+            # Fallback: check credential pool (key added via hermes auth add)
+            if not cp_has_key:
+                try:
+                    from api.config import _has_explicit_pool_credentials
+                    if _has_explicit_pool_credentials(cp_id):
+                        cp_has_key = True
+                except ImportError:
+                    pass
             providers.append({
                 "id": cp_id,
                 "display_name": cp_name,

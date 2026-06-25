@@ -394,8 +394,13 @@ def test_fade_text_effect_uses_dynamic_window_check():
     assert "return _streamFadeEnabledForStream;" not in helper_block
 
     # The preferences listener must update the runtime flag immediately, not
-    # only after autosave/save completes.
-    fade_cb_start = PANELS_JS.index("const fadeTextCb=$('settingsFadeTextEffect');", 300000)
+    # only after autosave/save completes. Anchor on the listener occurrence —
+    # the one immediately followed by the terminalAutoExpand field — rather than
+    # a fragile byte offset (panels.js has two `fadeTextCb=` references: the
+    # settings-body payload builder and this listener block).
+    fade_cb_start = PANELS_JS.index(
+        "const fadeTextCb=$('settingsFadeTextEffect');\n    if(fadeTextCb){"
+    )
     fade_cb_end = PANELS_JS.index("const terminalAutoExpandCb", fade_cb_start)
     fade_cb_block = PANELS_JS[fade_cb_start:fade_cb_end]
     assert "window._fadeTextEffect=fadeTextCb.checked" in fade_cb_block
@@ -415,7 +420,7 @@ def test_thinking_blocks_persist_after_renderMessages():
     assert inner_sweep in UI_JS
     # The promoted-row guard is the only thing that changed; the rest of
     # the selector must remain intact.
-    head = ".tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking"
+    head = ".tool-worklog-group:not([data-compression-card]),.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]):not([data-event-type=\"tool\"]),.agent-activity-thinking"
     tail = ".wl-reason[data-worklog-reason-source=\"reasoning\"]"
     assert head in UI_JS
     assert tail in UI_JS
@@ -639,3 +644,55 @@ def test_transparent_entrance_animation_is_live_turn_only():
     """The entrance animation must be scoped to the live turn so it doesn't
     replay across the whole transcript on every renderMessages. (Trifecta V9.)"""
     assert "#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter" in STYLE_CSS
+
+
+def test_live_worklog_reason_mirror_is_gated_to_compact_mode():
+    """#4096: during a live multi-round turn in Transparent Stream mode, all
+    assistant prose visually bunched at the top while every tool row clustered
+    below, self-healing only when the turn settled.
+
+    Root cause: _syncLiveWorklogReasonsForAnchor() runs on every live segment
+    render (from _flushPendingSegmentRender + the RAF _doRender in messages.js).
+    It builds the top-anchored `live-worklog` rail, mirrors each round's prose
+    into a `wl-reason` row there, AND tags the real chronological inline
+    `assistant-segment` as `assistant-segment-worklog-source` (-> display:none,
+    style.css). That worklog-folding is the Compact Worklog presentation (#3401)
+    and must NOT run in Transparent Stream mode, where prose stays as visible,
+    chronologically-placed inline segments interleaved with tool rows.
+
+    The fix gates the whole function on isCompactWorklogMode(). Assert the guard
+    is the FIRST statement in the function body (before it touches
+    ensureLiveWorklogContainer / _syncWorklogReasonFromAnchor) so it actually
+    short-circuits in transparent mode rather than running the rail-build first.
+    """
+    start = UI_JS.index("function _syncLiveWorklogReasonsForAnchor(anchor, displayTextOverride){")
+    end = UI_JS.index("\nfunction ", start + 1)
+    body = UI_JS[start:end]
+
+    # The compact-mode gate exists and short-circuits non-compact (transparent) mode.
+    guard = "if(typeof isCompactWorklogMode==='function' && !isCompactWorklogMode()) return;"
+    assert guard in body, "missing transparent-mode gate on _syncLiveWorklogReasonsForAnchor"
+
+    # The guard must come BEFORE the rail is built / prose is mirrored, otherwise
+    # it would not actually prevent the bunching.
+    guard_idx = body.index(guard)
+    assert guard_idx < body.index("ensureLiveWorklogContainer("), (
+        "compact-mode gate must precede ensureLiveWorklogContainer() so transparent "
+        "mode never builds the top worklog rail"
+    )
+    assert guard_idx < body.index("_syncWorklogReasonFromAnchor("), (
+        "compact-mode gate must precede _syncWorklogReasonFromAnchor() so transparent "
+        "mode never hides the inline assistant-segment or appends a wl-reason mirror"
+    )
+
+    # Both live-render call sites still invoke the (now-gated) helper — the gate
+    # lives in the helper, not at the call sites, so live rendering is unchanged
+    # in compact mode.
+    MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+    assert MESSAGES_JS.count("_syncLiveWorklogReasonsForAnchor(assistantRow") >= 2
+
+    # The settled-render worklog-folding gate is also compact-only (regression
+    # guard against the symmetric settled-path bug).
+    render_message_start = UI_JS.index("const messageBelongsInWorklog=")
+    render_message_end = UI_JS.index("if(messageBelongsInWorklog)", render_message_start)
+    assert "isCompactWorklogMode()" in UI_JS[render_message_start:render_message_end]

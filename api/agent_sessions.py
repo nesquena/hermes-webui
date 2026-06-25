@@ -31,6 +31,7 @@ SOURCE_LABELS = {
     'slack': 'Slack',
     'telegram': 'Telegram',
     'tool': 'Tool',
+    'tui': 'TUI',
     'webui': 'WebUI',
     'weixin': 'Weixin',
 }
@@ -47,7 +48,7 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
 
     if raw == 'webui':
         session_source = 'webui'
-    elif raw == 'cli':
+    elif raw in {'cli', 'tui'}:
         session_source = 'cli'
     elif raw in MESSAGING_SOURCES:
         session_source = 'messaging'
@@ -172,11 +173,19 @@ def is_cli_session_row(row: dict) -> bool:
     source_label = _safe_lower(row.get("source_label"))
     if "webui" in {source, source_tag, raw_source, source_name, source_label}:
         return False
+    non_cli_sources = MESSAGING_SOURCES | {"cron", "tool", "api", "api_server"}
+    if {source, source_tag, raw_source, source_name, source_label} & non_cli_sources:
+        return False
     if source == "messaging":
         return False
     if source == "cli":
         return True
-    if source_tag == "cli" or raw_source == "cli" or source_name == "cli" or source_label == "cli":
+    if (
+        source_tag in {"cli", "tui"}
+        or raw_source in {"cli", "tui"}
+        or source_name in {"cli", "tui"}
+        or source_label in {"cli", "tui"}
+    ):
         return True
 
     # Legacy imported CLI rows may only be marked as CLI in sidebar metadata.
@@ -201,6 +210,14 @@ def is_cli_session_row_visible(row: dict) -> bool:
     message_count = _as_positive_int(row.get("actual_message_count") or row.get("message_count"))
     if message_count <= 0:
         return False
+
+    if "tui" in {
+        _normalize_source_name(row.get("source")),
+        _normalize_source_name(row.get("source_tag")),
+        _normalize_source_name(row.get("raw_source")),
+        _normalize_source_name(row.get("source_label")),
+    }:
+        return True
 
     if _has_cli_lineage(row):
         return True
@@ -375,10 +392,20 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         ):
             if key in tip:
                 merged[key] = tip[key]
-        if not merged.get('title'):
-            merged['title'] = tip.get('title')
-        if not merged.get('source'):
-            merged['source'] = tip.get('source')
+        if str(tip.get('source') or '').strip().lower() == 'tui':
+            # TUI continuation rows are user-visible session segments (#6, #17,
+            # ...), not opaque compression snapshots. Keep navigation pointed at
+            # the latest tip and show that tip's title so the newest conversation
+            # can be found by its visible TUI name.
+            if tip.get('title'):
+                merged['title'] = tip.get('title')
+            if tip.get('source'):
+                merged['source'] = tip.get('source')
+        else:
+            if not merged.get('title'):
+                merged['title'] = tip.get('title')
+            if not merged.get('source'):
+                merged['source'] = tip.get('source')
         merged['_lineage_root_id'] = row['id']
         merged['_lineage_tip_id'] = tip['id']
         merged['_compression_segment_count'] = segment_count
@@ -396,6 +423,7 @@ def read_importable_agent_session_rows(
     limit: int | None = 200,
     log=None,
     exclude_sources: tuple[str, ...] | None = ("cron", "webui"),
+    include_sources: tuple[str, ...] | None = None,
 ) -> list[dict]:
     """Return agent sessions projected as importable conversations.
 
@@ -409,7 +437,9 @@ def read_importable_agent_session_rows(
     sidebar. This mirrors Hermes Agent CLI's session-list behaviour: interactive
     views should stay focused on user-facing conversations, while callers that
     need a source-specific diagnostic view can opt out by passing
-    ``exclude_sources=None``.
+    ``exclude_sources=None``. ``include_sources`` is an additional narrowing
+    filter; callers that want an include-only query should explicitly pass
+    ``exclude_sources=None`` so the default exclusions do not also apply.
     """
     db_path = Path(db_path)
     if not db_path.exists():
@@ -517,6 +547,12 @@ def read_importable_agent_session_rows(
 
         where_clauses = ["s.source IS NOT NULL"]
         params: list[object] = []
+        if include_sources:
+            included = tuple(str(source) for source in include_sources if source)
+            if included:
+                placeholders = ", ".join("?" for _ in included)
+                where_clauses.append(f"s.source IN ({placeholders})")
+                params.extend(included)
         if exclude_sources:
             excluded = tuple(str(source) for source in exclude_sources if source)
             if excluded:

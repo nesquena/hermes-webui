@@ -26,6 +26,7 @@ class _FakeHandler:
 
 
 def test_sessions_list_reconciles_stale_stream_state_before_serializing(monkeypatch):
+    routes._session_list_cache_clear()
     repaired = {"value": False}
     all_sessions_calls = {"count": 0}
 
@@ -34,7 +35,7 @@ def test_sessions_list_reconciles_stale_stream_state_before_serializing(monkeypa
             self.session_id = "stale-session"
             self.active_stream_id = "stale-stream"
 
-    def fake_all_sessions(diag=None):
+    def fake_all_sessions(diag=None, **_kwargs):
         all_sessions_calls["count"] += 1
         if repaired["value"]:
             active_stream_id = None
@@ -47,6 +48,7 @@ def test_sessions_list_reconciles_stale_stream_state_before_serializing(monkeypa
                 "session_id": "stale-session",
                 "title": "Stale Session",
                 "profile": "default",
+                "message_count": 1,
                 "active_stream_id": active_stream_id,
                 "is_streaming": is_streaming,
                 "updated_at": 1,
@@ -81,6 +83,7 @@ def test_sessions_list_reconciles_stale_stream_state_before_serializing(monkeypa
     assert repaired["value"] is True
     assert sessions[0]["active_stream_id"] is None
     assert sessions[0]["is_streaming"] is False
+    routes._session_list_cache_clear()
 
 
 def test_reconcile_stale_stream_state_skips_live_stream_rows(monkeypatch):

@@ -52,6 +52,7 @@ _METADATA_FIELDS = frozenset(
         "threshold_tokens",
         "last_prompt_tokens",
         "truncation_watermark",
+        "truncation_boundary",
         "gateway_routing",
         "gateway_routing_history",
         "llm_title_generated",

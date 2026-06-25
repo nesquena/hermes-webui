@@ -7,7 +7,8 @@ text to the next tool-result message — no interruption.
 
 Falls back to {"accepted": false, "fallback": "<reason>"} when the agent
 isn't running, isn't cached, or doesn't support steer (older agent versions).
-The frontend uses the fallback signal to drop back to interrupt mode.
+The frontend uses the fallback signal to restore the draft without cancelling
+the active run.
 
 Plus a leftover-delivery flow: if the agent finishes its turn before the
 steer is consumed (no tool-call boundary), _drain_pending_steer is called
@@ -266,13 +267,14 @@ class TestFrontendWiring:
         assert "/api/chat/steer" in body, "_trySteer must POST to /api/chat/steer"
         assert "method:'POST'" in body or 'method:"POST"' in body
 
-    def test_try_steer_handles_fallback(self):
+    def test_try_steer_handles_fallback_without_cancelling(self):
         idx = self.cmds.find("async function _trySteer(")
         body = self.cmds[idx:idx + 1500]
-        # Must check result.accepted and fall back via queueSessionMessage + cancelStream
+        # Must check result.accepted and surface fallback without queueing or cancelling.
         assert "result&&result.accepted" in body or "result.accepted" in body
-        assert "queueSessionMessage" in body
-        assert "cancelStream" in body, "fallback path must cancel the stream"
+        assert "queueSessionMessage" not in body
+        assert "cancelStream" not in body, "fallback path must not cancel the stream"
+        assert "inp.value" in body, "fallback path must restore the composer draft"
 
     def test_send_busy_steer_uses_try_steer(self):
         # send() in messages.js: when busyMode === 'steer', should call _trySteer

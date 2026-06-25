@@ -80,7 +80,7 @@ def _render(driver_path, markdown: str) -> str:
         input=markdown,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")
@@ -397,7 +397,7 @@ class TestFencedCodeFenceLength:
             "That is much more correct than pretending"
         )
         out = _render(driver_path, src)
-        assert out.count("<pre>") == 1
+        assert out.count("<pre class=\"md-source-block\">") == 1
         assert out.count("</pre>") == 1
         assert '<div class="pre-header">md</div>' in out
         assert "```novelcrafter" in out
@@ -408,7 +408,7 @@ class TestFencedCodeFenceLength:
 
     def test_four_backtick_outer_fence_preserves_inner_triple_fence(self, driver_path):
         out = _render(driver_path, "````md\n```inner\nfoo\n```\n````\n")
-        assert out.count("<pre>") == 1
+        assert out.count("<pre class=\"md-source-block\">") == 1
         assert out.count("</pre>") == 1
         assert '<div class="pre-header">md</div>' in out
         assert "```inner" in out

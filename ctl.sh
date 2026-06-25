@@ -2,6 +2,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/health_probe.sh
+. "${REPO_ROOT}/scripts/lib/health_probe.sh"
 HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
 PID_FILE="${HERMES_WEBUI_PID_FILE:-${HERMES_HOME}/webui.pid}"
 LOG_FILE="${HERMES_WEBUI_LOG_FILE:-${HERMES_HOME}/webui.log}"
@@ -41,6 +43,11 @@ _load_repo_dotenv_preserving_env() {
     key="${key#export }"
     key="${key//[[:space:]]/}"
     [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    # Skip shell-readonly names (UID/GID/EUID/EGID/PPID); re-exporting them
+    # below would abort under `set -euo pipefail` with "readonly variable".
+    case "${key}" in
+      UID | GID | EUID | EGID | PPID) continue ;;
+    esac
     if [[ -n "${!key+x}" ]]; then
       value="${!key}"
       preserved+=("${key}=${value}")
@@ -48,8 +55,19 @@ _load_repo_dotenv_preserving_env() {
   done < "${env_file}"
 
   set -a
+  # Filter out shell-readonly vars (UID, GID, EUID, EGID, PPID) before
+  # sourcing.  docker-compose.yml's macOS instructions document
+  # `echo "UID=$(id -u)" >> .env`; under `set -euo pipefail` a raw
+  # `source .env` then aborts with "UID: readonly variable" before
+  # `ctl.sh status` can print anything.  Mirrors the guard start.sh uses.
+  local _ctl_env_filtered
+  _ctl_env_filtered="$(mktemp "${TMPDIR:-/tmp}/hermes-webui-ctl-env.XXXXXX")"
+  # shellcheck disable=SC2064
+  trap "rm -f '${_ctl_env_filtered}'" RETURN
+  grep -vE '^[[:space:]]*(export[[:space:]]+)?(UID|GID|EUID|EGID|PPID)=' "${env_file}" > "${_ctl_env_filtered}" || true
   # shellcheck source=/dev/null
-  source "${env_file}"
+  source "${_ctl_env_filtered}"
+  rm -f "${_ctl_env_filtered}"
   set +a
 
   local assignment
@@ -400,12 +418,16 @@ stop_cmd() {
 }
 
 _health_line() {
-  local host="$1" port="$2" url result
-  url="http://${host}:${port}/health"
-  if command -v curl >/dev/null 2>&1; then
-    if result="$(curl -fsS --max-time 2 "${url}" 2>/dev/null)"; then
-      if command -v python3 >/dev/null 2>&1; then
-        printf '%s' "${result}" | python3 -c 'import json,sys
+  local host="$1" port="$2" url scheme result
+  scheme="$(hermes_webui_probe_scheme)"
+  url="${scheme}://${host}:${port}/health"
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    echo "unknown (curl/wget not found; ${url})"
+    return 0
+  fi
+  if result="$(hermes_webui_probe_health "${host}" "${port}" "/health" 2)"; then
+    if command -v python3 >/dev/null 2>&1; then
+      printf '%s' "${result}" | python3 -c 'import json,sys
 try:
     data=json.load(sys.stdin)
     sessions=data.get("sessions", data.get("session_count", "?"))
@@ -414,19 +436,17 @@ try:
     print(f"ok ({sessions} sessions, {active} active streams)" if status == "ok" else status)
 except Exception:
     print("ok")'
-      else
-        echo "ok"
-      fi
     else
-      echo "unreachable (${url})"
+      echo "ok"
     fi
   else
-    echo "unknown (curl not found; ${url})"
+    echo "unreachable (${url})"
   fi
 }
 
 status_cmd() {
   ensure_home
+  _load_repo_dotenv_preserving_env
   _load_state_if_present
   local host="${HOST:-${HERMES_WEBUI_HOST:-127.0.0.1}}"
   local port="${PORT:-${HERMES_WEBUI_PORT:-8787}}"

@@ -28,7 +28,8 @@ def test_attached_files_context_is_hidden_from_user_message_display():
 
     assert "function _stripAttachedFilesMarkerForDisplay" in ui_src
     assert "_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content))" in ui_src
-    assert "dataset.rawText=String(displayContent).trim()" in ui_src
+    assert "const newRawText=String(displayContent).trim();" in ui_src
+    assert "row.dataset.rawText=newRawText;" in ui_src
 
 
 def test_attached_files_context_is_hidden_from_sidebar_titles():

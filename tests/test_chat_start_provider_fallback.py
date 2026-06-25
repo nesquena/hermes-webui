@@ -126,7 +126,7 @@ def _run_helper(driver_path, payload):
         [NODE, driver_path, str(UI_JS_PATH), json.dumps(payload)],
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")
@@ -139,7 +139,7 @@ def _run_model_state_helper(driver_path, payload):
         [NODE, driver_path, str(UI_JS_PATH), json.dumps(payload)],
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")

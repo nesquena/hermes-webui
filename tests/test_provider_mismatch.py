@@ -380,6 +380,48 @@ def test_default_model_save_persists_codex_provider_for_qualified_model(tmp_path
     assert saved["model"].get("base_url") != "https://openrouter.ai/api/v1"
 
 
+def test_default_model_save_clears_stale_custom_base_url_on_provider_change(tmp_path, monkeypatch):
+    """Switching the main default from one custom provider to another must drop
+    the previous provider's base_url so New Chat doesn't route to the old
+    endpoint (#4728). Previously custom:* was exempted from the base_url clear,
+    so the stale URL lingered."""
+    import yaml
+    import api.config as config
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "model:\n"
+        "  provider: custom:old-local\n"
+        "  default: old-model\n"
+        "  base_url: http://old.local/v1\n",
+        encoding="utf-8",
+    )
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_file)
+    config.cfg["model"] = {
+        "provider": "custom:old-local",
+        "default": "old-model",
+        "base_url": "http://old.local/v1",
+    }
+    config._cfg_mtime = config_file.stat().st_mtime
+    try:
+        result = config.set_hermes_default_model("new-model", provider="custom:new-local")
+        saved = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
+        config.invalidate_models_cache()
+
+    assert result["ok"] is True
+    assert saved["model"]["provider"] == "custom:new-local"
+    # The stale base_url from the OLD custom provider must not survive.
+    assert saved["model"].get("base_url") != "http://old.local/v1", (
+        f"stale custom base_url leaked: {saved['model'].get('base_url')!r}"
+    )
+
+
 def test_active_codex_at_provider_session_model_preserved(monkeypatch):
     """@openai-codex:gpt-5.5 session selections must keep their provider hint."""
     import api.routes as routes
@@ -520,6 +562,37 @@ def test_non_openrouter_slash_model_provider_context_stays_unqualified():
     )
 
     assert runtime_model == "anthropic/claude-sonnet-4.6"
+
+
+def test_configured_provider_slash_model_keeps_provider_context():
+    """Configured OpenAI-compatible providers need explicit context for slash IDs."""
+    import api.config as config
+
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "openai-codex",
+        "default": "gpt-5.5",
+    }
+    config.cfg["providers"] = {
+        "local-llama": {
+            "base_url": "http://127.0.0.1:8088/v1",
+            "api_key": "test-key",
+        },
+    }
+    try:
+        runtime_model = config.model_with_provider_context(
+            "unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL",
+            "local-llama",
+        )
+        model, provider, base_url = config.resolve_model_provider(runtime_model)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert runtime_model == "@local-llama:unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL"
+    assert model == "unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL"
+    assert provider == "local-llama"
+    assert base_url == "http://127.0.0.1:8088/v1"
 
 
 def test_cursor_acp_slash_model_always_gets_provider_hint():
@@ -1555,7 +1628,12 @@ class TestFrontendModelProviderState:
         )
         idx = src.find("function syncTopbar")
         assert idx != -1, "syncTopbar must exist"
-        block = src[idx:idx + 5200]
+        # Anchor the block to the END of syncTopbar (start of the next top-level
+        # function) rather than a fixed byte window, so unrelated additions inside
+        # syncTopbar (e.g. #3177's titlebar profile-label sync) can't push the
+        # asserted lines out of a too-small window and cause a false failure.
+        nxt = src.find("\nfunction ", idx + len("function syncTopbar"))
+        block = src[idx:nxt if nxt != -1 else idx + 6000]
         assert "missingModelIsRoutable=_providerDefersMissingModelFallback" in block
         assert "liveStillPending||missingModelIsRoutable" in block, (
             "syncTopbar must preserve routable custom:* selections instead of forcing fallback persistence"

@@ -22,7 +22,7 @@ def _block(src: str, start: str, end: str) -> str:
 def test_gateway_watcher_remains_hash_only():
     """The watcher should not try to infer restarts from state.db mtime."""
     src = _read(GATEWAY_WATCHER)
-    poll = _block(src, "    def _poll_loop(self):", "\n_watcher:")
+    poll = _block(src, "    def _poll_loop(self):", "\n_watchers:")
 
     assert "_get_db_mtime" not in src
     assert "_detect_gateway_restart" not in src
@@ -44,6 +44,14 @@ def test_gateway_sse_dedupes_reconnect_snapshot_before_refresh():
     assert "function _isDuplicateGatewaySessionSnapshot" in src
     assert "if(!_isDuplicateGatewaySessionSnapshot(data.sessions))" in handler
     assert "renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render" in handler
+
+
+def test_gateway_probe_reattaches_sse_after_profile_switch_restart():
+    """A healthy probe must revive the EventSource when the watcher restarted."""
+    src = _read(SESSIONS_JS)
+    probe = _block(src, "async function probeGatewaySSEStatus()", "\n\nfunction startGatewaySSE")
+
+    assert "if(!_gatewaySSE && typeof EventSource!=='undefined' && !(document&&document.hidden)) startGatewaySSE();" in probe
 
 
 def test_gateway_snapshot_key_matches_backend_hash_fields():

@@ -71,10 +71,12 @@ Keep each PR focused. A small related group of fixes is fine. A bug fix plus a C
 
 ### 2. Local Verification
 
-Run the test suite locally:
+Run the test suite locally through the repo runner. It creates/uses a supported
+Python 3.11-3.13 `.venv` and installs missing dev test dependencies, avoiding
+unsupported system interpreters during collection:
 
 ```bash
-pytest tests/ -v --timeout=60
+./scripts/test.sh
 ```
 
 CI also runs this suite on Python `3.11`, `3.12`, and `3.13`.

@@ -54,7 +54,16 @@ def test_load_dir_ignores_stale_session_results():
     block = _function_block(WORKSPACE_JS, "loadDir")
     assert "const sessionId=S.session.session_id" in block
     assert "encodeURIComponent(sessionId)" in block
-    assert "if(!S.session||S.session.session_id!==sessionId)return;" in block
+    # #4671 extended this guard with a workspace-tree generation check (an empty-session
+    # profile switch reuses the same session_id, so the id check alone isn't enough), so
+    # the rejection is now a compound condition. The session_id rejection must remain.
+    assert "S.session.session_id!==sessionId" in block, (
+        "loadDir must still reject results whose session_id no longer matches"
+    )
+    assert "treeGen!==_wsTreeGen" in block, (
+        "loadDir must also reject results from a superseded workspace-tree generation "
+        "(profile-switch stale-load race, #4671)"
+    )
 
 
 def test_file_preview_breadcrumb_uses_directory_navigation_for_root():

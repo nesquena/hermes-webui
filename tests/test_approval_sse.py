@@ -105,6 +105,19 @@ class TestSSEStaticAnalysis:
              "from inside the `with _lock:` block — not the unlocked _approval_sse_notify wrapper, "
              "and head must be queue_list[0] (the head, not the just-appended entry).")
 
+    def test_streaming_notify_callback_mirrors_pending_before_sse_push(self):
+        """Gateway notify callback must repopulate polling state before relying on SSE."""
+        stream_start = ROUTES_SRC.find("def _handle_sse_stream(")
+        assert stream_start != -1, "_handle_sse_stream must exist"
+        streaming_src = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+        cb_start = streaming_src.find("def _approval_notify_cb(approval_data):")
+        cb_end = streaming_src.find("_reg_notify(session_id, _approval_notify_cb)", cb_start)
+        cb_body = streaming_src[cb_start:cb_end]
+        assert "_submit_pending_for_polling(session_id, approval_data)" in cb_body, \
+            "_approval_notify_cb must mirror approval data into polling state before SSE"
+        assert "put('approval', approval_data)" in cb_body, \
+            "_approval_notify_cb must still emit the approval SSE event"
+
     def test_unsubscribe_in_finally(self):
         """SSE handler must unsubscribe in a finally block."""
         # Find the finally block that calls _approval_sse_unsubscribe
@@ -410,6 +423,52 @@ class TestSSENotifyFromSubmitPending:
                 assert payload["pending_count"] == expected_count, \
                     f"Expected pending_count={expected_count}, got {payload['pending_count']}"
         finally:
+            r._approval_sse_unsubscribe(sid, q)
+
+    def test_gateway_mirror_reconcile_tags_live_head_and_purges_stale_copy(self):
+        """Gateway mirrors must track the live head and disappear when the queue does."""
+        from api import routes as r
+
+        sid = f"sse-gateway-mirror-{uuid.uuid4().hex[:8]}"
+        approval = {
+            "command": "rm -rf /tmp/test",
+            "pattern_key": "recursive delete",
+            "pattern_keys": ["recursive delete"],
+            "description": "recursive delete",
+        }
+
+        class _GatewayEntry:
+            def __init__(self, data):
+                self.data = data
+
+        q = r._approval_sse_subscribe(sid)
+        try:
+            with r._lock:
+                r._pending.pop(sid, None)
+                r._gateway_queues[sid] = [_GatewayEntry(approval)]
+            r.submit_gateway_pending_mirror(sid, approval)
+
+            mirrored = q.get(timeout=1)
+            assert mirrored["pending"]["command"] == approval["command"]
+            assert mirrored["pending"]["_gateway_mirror"] is True
+            assert mirrored["pending_count"] == 1
+
+            with r._lock:
+                assert r._pending[sid][0]["_gateway_mirror"] is True
+                r._gateway_queues.pop(sid, None)
+                head, total, changed = r.reconcile_gateway_pending_mirror_locked(sid)
+                r._approval_sse_notify_locked(sid, head, total)
+            assert changed is True
+
+            cleared = q.get(timeout=1)
+            assert cleared["pending"] is None
+            assert cleared["pending_count"] == 0
+            with r._lock:
+                assert sid not in r._pending
+        finally:
+            with r._lock:
+                r._pending.pop(sid, None)
+                r._gateway_queues.pop(sid, None)
             r._approval_sse_unsubscribe(sid, q)
 
 

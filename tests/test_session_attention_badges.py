@@ -94,7 +94,7 @@ def test_sessions_api_includes_attention_summary_for_sidebar_rows(monkeypatch):
     try:
         routes.submit_pending(sid, {"command": "sudo service restart", "description": "Restart"})
 
-        monkeypatch.setattr(routes, "all_sessions", lambda diag=None: [{
+        monkeypatch.setattr(routes, "all_sessions", lambda diag=None, **_kwargs: [{
             "session_id": sid,
             "title": "Needs approval",
             "profile": "default",

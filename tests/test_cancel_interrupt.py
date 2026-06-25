@@ -127,6 +127,7 @@ class TestCancelInterrupt:
             result = cancel_stream(stream_id)
 
         assert result is True
+        assert ACTIVE_RUNS[stream_id]["phase"] == "cancelling"
         mock_agent.interrupt.assert_called_once_with("Cancelled by user")
         assert mock_session.active_stream_id is None
         assert mock_session.pending_user_message is None

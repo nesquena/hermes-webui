@@ -220,11 +220,12 @@ def test_auto_compression_running_card_defaults_collapsed():
     assert "open: running" not in helper
 
 
-def test_auto_compression_uses_centered_noninteractive_divider():
+def test_auto_compression_uses_inline_noninteractive_status():
     src = _read("static/style.css")
 
     assert ".auto-compression-divider" in src
-    assert "grid-template-columns:minmax(32px,1fr) auto minmax(32px,1fr)" in src
+    assert "grid-template-columns:minmax(32px,1fr) auto minmax(32px,1fr)" not in src
+    assert ".auto-compression-inline" in src
     assert "pointer-events:none" in src
     override = src.split(".auto-compression-divider{", 1)[1].split("}", 1)[0]
     assert "color:var(--muted)" in override
@@ -246,7 +247,8 @@ def test_auto_compression_worklog_row_does_not_use_tool_card_affordances():
     assert "tabindex" not in helper
     assert "tl-caret" not in helper
     assert "auto-compression-divider" in helper
-    assert "auto-compression-divider-line" in helper
+    assert "auto-compression-inline-row" in helper
+    assert "auto-compression-divider-line" not in helper
     assert "_autoCompressionPreviewText(state)" in helper
 
 
@@ -379,6 +381,10 @@ def test_auto_compression_running_card_completes_on_followup_live_events():
     helper = src.split("function _completeAutomaticCompressionOnLiveProgress", 1)[1].split("source.addEventListener('token'", 1)[0]
     assert "data-live-compression-card=\"1\"][data-compression-started-at]" in helper
     assert "window._compressionUi&&window._compressionUi.automatic&&window._compressionUi.phase==='running'" in helper
+    assert "function _ensureAnchorCompressionCompletedOnLiveProgress" in src
+    assert "_ensureAnchorCompressionCompletedOnLiveProgress(sid);" in helper
+    assert "const eventId=`synthetic:${localId}`;" in src
+    assert "_findAnchorActivityEventByLocalId(localId,'compressed')" in src
     assert "phase:'done'" in helper
     assert "message:'Context auto-compressed'" in helper
     assert "appendLiveCompressionCard({" in helper
@@ -518,7 +524,8 @@ def test_auto_compression_card_reuses_compression_card_renderer():
 
     assert "if(state.automatic) return _autoCompressionCardsHtml(state);" in src
     assert "tool-card-row compression-card-row auto-compression-divider-row" in helper
-    assert "auto-compression-divider-line" in helper
+    assert "auto-compression-inline-row" in helper
+    assert "auto-compression-divider-line" not in helper
     assert "variantClass: 'tool-card-compress-auto'" not in helper
     assert "statusLabel: preview" not in helper
 
@@ -589,31 +596,25 @@ def test_settled_transcript_suppresses_context_compaction_reference_cards():
     assert "function _shouldShowSettledCompressionReference" in src
     assert "!_isContextCompactionText(referenceText)" in src
 
-    visible_filter_start = src.find("const vis=S.messages.filter")
-    assert visible_filter_start != -1, "visible message filter not found"
-    visible_filter_end = src.find("$('emptyState')", visible_filter_start)
-    visible_filter = src[visible_filter_start:visible_filter_end]
-    assert "if(_isContextCompactionMessage(m)) return false;" in visible_filter
-
-    vis_idx_start = src.find("for(const m of S.messages)", visible_filter_end)
-    assert vis_idx_start != -1, "raw message index loop not found"
-    vis_idx_end = src.find("let lastUserRawIdx", vis_idx_start)
-    vis_idx_loop = src[vis_idx_start:vis_idx_end]
-    assert "if(_isContextCompactionMessage(m)){ri++;continue;}" in vis_idx_loop
+    helper_start = src.find("function _messageIsRenderable")
+    assert helper_start != -1, "renderable message helper not found"
+    helper_end = src.find("function _getVisibleMessagesWithIdx", helper_start)
+    assert helper_end != -1, "visible message index helper not found after renderable helper"
+    helper = src[helper_start:helper_end]
+    assert "_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)" in helper
 
 
 def test_preserved_task_list_skips_normal_visible_message_path():
     src = _read("static/ui.js")
 
-    visible_filter_start = src.find("const vis=S.messages.filter")
-    assert visible_filter_start != -1, "visible message filter not found"
-    visible_filter_end = src.find("$('emptyState')", visible_filter_start)
-    assert visible_filter_end != -1, "empty state update after visible filter not found"
-    visible_filter = src[visible_filter_start:visible_filter_end]
-    assert "if(_isContextCompactionMessage(m)) return false;" in visible_filter
-    assert "if(_isPreservedCompressionTaskListMessage(m)) return false;" in visible_filter
+    helper_start = src.find("function _messageIsRenderable")
+    assert helper_start != -1, "renderable message helper not found"
+    helper_end = src.find("function _getVisibleMessagesWithIdx", helper_start)
+    assert helper_end != -1, "visible message index helper not found after renderable helper"
+    helper = src[helper_start:helper_end]
+    assert "_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)" in helper
 
-    vis_idx_start = src.find("for(const m of S.messages)", visible_filter_end)
+    vis_idx_start = src.find("for(const m of S.messages)", helper_end)
     assert vis_idx_start != -1, "raw message index loop not found"
     vis_idx_end = src.find("let lastUserRawIdx", vis_idx_start)
     assert vis_idx_end != -1, "last user index lookup after raw message loop not found"
@@ -675,7 +676,9 @@ def test_compression_anchor_index_is_translated_into_render_window():
     assert "_compressionAnchorIndex(\n    visWithIdx," in block
     assert "insertionAnchorFull<windowStart" in block
     assert "insertionAnchorFull-windowStart" in block
-    assert "windowStart+renderVisWithIdx.length" in block
+    assert "let previousVisibleIdx=-1;" in block
+    assert "if(renderVisibleIdxs[i]<=insertionAnchorFull) previousVisibleIdx=i;" in block
+    assert "insertionAnchor=previousVisibleIdx>=0?previousVisibleIdx:0;" in block
 
 
 def test_reference_message_uses_raw_transcript_position_before_anchor_fallback():

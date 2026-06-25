@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import venv
 import webbrowser
@@ -81,6 +83,10 @@ def info(msg: str) -> None:
     print(f"[bootstrap] {msg}", flush=True)
 
 
+def warn(msg: str) -> None:
+    print(f"[bootstrap] [warn] {msg}", file=sys.stderr, flush=True)
+
+
 def is_wsl() -> bool:
     if platform.system() != "Linux":
         return False
@@ -98,18 +104,36 @@ def ensure_supported_platform() -> None:
         )
 
 
+def _walk_up_for_run_agent(start: Path) -> Path | None:
+    """Walk up the parents of ``start`` and return the first dir with run_agent.py."""
+    for parent in start.parents:
+        if (parent / "run_agent.py").exists():
+            return parent.resolve()
+    return None
+
+
 def _agent_dir_from_hermes_cli() -> Path | None:
-    """Resolve the agent install root by inspecting the `hermes` CLI shebang.
+    """Resolve the agent install root by inspecting the `hermes` CLI launcher.
 
-    The Hermes Agent installer drops a `hermes` console-script in the user's
-    PATH whose shebang points at the agent's bundled venv:
+    The Hermes Agent installer drops a `hermes` launcher in the user's PATH.
+    It comes in two shapes depending on installer version:
 
-        #!/path/to/hermes-agent/venv/bin/python3
+    1. A Python console-script whose shebang points at the agent's venv::
 
-    Walking up the parents until we find a directory that contains
-    `run_agent.py` recovers the install root regardless of where the user
-    chose to clone the agent (e.g. ~/Projects/GitHub/hermes-agent), which
-    the hard-coded candidate list in :func:`discover_agent_dir` cannot.
+           #!/path/to/hermes-agent/venv/bin/python3
+
+    2. A small POSIX shell wrapper that ``exec``s the real venv entrypoint
+       (the current installer shape — clears PYTHONPATH/PYTHONHOME first)::
+
+           #!/usr/bin/env bash
+           exec "/path/to/hermes-agent/venv/bin/hermes" "$@"
+
+    In both cases an absolute path inside the launcher points into the agent's
+    venv. Walking up its parents until we find a directory containing
+    `run_agent.py` recovers the install root regardless of where the agent
+    lives — e.g. the root-on-Linux FHS layout (`/usr/local/lib/hermes-agent`)
+    or a custom clone (`~/Projects/GitHub/hermes-agent`) — neither of which the
+    hard-coded candidate list in :func:`discover_agent_dir` can know about.
 
     Last-resort only: this is invoked after every explicit candidate
     (`HERMES_WEBUI_AGENT_DIR`, `$HERMES_HOME/hermes-agent`, etc.) has missed.
@@ -121,21 +145,40 @@ def _agent_dir_from_hermes_cli() -> Path | None:
     if not hermes_path:
         return None
     try:
+        # The launcher is tiny; read a bounded prefix so we never slurp a huge
+        # file if `hermes` resolves to something unexpected.
         with open(hermes_path, "r", encoding="utf-8", errors="replace") as f:
-            first_line = f.readline().strip()
+            lines = [f.readline() for _ in range(20)]
     except OSError:
         return None
-    if not first_line.startswith("#!"):
+    if not lines or not lines[0].startswith("#!"):
         return None
-    interp_field = first_line[2:].strip().split(None, 1)
-    if not interp_field:
-        return None
-    interp = Path(interp_field[0])
-    if not interp.is_absolute():
-        return None
-    for parent in interp.parents:
-        if (parent / "run_agent.py").exists():
-            return parent.resolve()
+
+    # Collect every absolute path the launcher references — the shebang
+    # interpreter (Python-console-script shape) plus any quoted path in an
+    # `exec`/wrapper line (shell-wrapper shape). A `#!/usr/bin/env bash`
+    # shebang yields a useless `/usr/bin/env`, so the wrapper's exec target is
+    # what actually points at the agent venv.
+    candidate_paths: list[Path] = []
+
+    shebang_field = lines[0][2:].strip().split(None, 1)
+    if shebang_field:
+        interp = Path(shebang_field[0])
+        # Skip env-style indirection (`/usr/bin/env bash`) — env itself is not
+        # in the agent tree; the real target is the wrapped exec line below.
+        if interp.is_absolute() and interp.name != "env":
+            candidate_paths.append(interp)
+
+    for line in lines[1:]:
+        for match in re.findall(r"""['"](/[^'"]+)['"]""", line):
+            candidate_paths.append(Path(match))
+
+    for candidate in candidate_paths:
+        if not candidate.is_absolute():
+            continue
+        found = _walk_up_for_run_agent(candidate)
+        if found:
+            return found
     return None
 
 
@@ -147,6 +190,11 @@ def discover_agent_dir() -> Path | None:
         str(REPO_ROOT.parent / "hermes-agent"),
         str(Path.home() / ".hermes" / "hermes-agent"),
         str(Path.home() / "hermes-agent"),
+        # Root-on-Linux FHS layout: the installer puts agent code under
+        # /usr/local/lib and links the CLI into /usr/local/bin (matches
+        # Claude Code / Codex). HERMES_HOME stays at /root/.hermes, so the
+        # `home / "hermes-agent"` candidate above does NOT cover this case.
+        "/usr/local/lib/hermes-agent",
     ]
     for raw in candidates:
         if not raw:
@@ -281,19 +329,97 @@ def install_hermes_agent() -> None:
     )
 
 
-def wait_for_health(url: str, timeout: float = 25.0) -> bool:
-    deadline = time.time() + timeout
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _tls_probe_enabled() -> bool:
+    """Mirror api.config.TLS_ENABLED: HTTPS when both cert and key are set."""
+    return bool(os.getenv("HERMES_WEBUI_TLS_CERT", "").strip()) and bool(
+        os.getenv("HERMES_WEBUI_TLS_KEY", "").strip()
+    )
+
+
+def _health_ok(url: str, verify: bool = True) -> bool:
+    """Single /health request. Returns True iff the server answered with ok.
+
+    ``verify=False`` disables TLS certificate verification (self-signed certs).
+    """
     # Validate URL scheme to prevent file:// and other dangerous schemes
     if not url.startswith(("http://", "https://")):
         raise ValueError(f"Invalid health check URL: {url}")
+    context = None
+    if url.startswith("https://") and not verify:
+        import ssl
+
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(url, timeout=2, context=context) as response:  # nosec B310
+            return b'"status": "ok"' in response.read()
+    except Exception:
+        return False
+
+
+def wait_for_health(url: str, timeout: float = 25.0) -> str:
+    """Poll /health until the server answers ok or the timeout elapses.
+
+    Returns the scheme that actually answered ("https" or "http") on success,
+    or "" on timeout. The scheme string is truthy on success, so existing
+    ``if not wait_for_health(...)`` / ``assert wait_for_health(...)`` callers
+    keep working unchanged.
+
+    TLS-aware: when TLS is configured (HERMES_WEBUI_TLS_CERT/KEY set) the server
+    serves HTTPS, so probe HTTPS first. Self-signed certs are handled by a
+    second, unverified attempt (with a one-line warning). server.py falls back
+    to plain HTTP when the cert/key are unloadable
+    (tests/test_tls_support.py::test_tls_startup_failure_fallback_to_http), so
+    HTTP is probed last to honor that contract instead of polling HTTPS forever.
+    The returned scheme reflects that fallback, so callers print the URL the
+    server is actually reachable on.
+
+    HERMES_WEBUI_TLS_INSECURE_PROBE=1 is an explicit opt-in that skips the
+    verified attempt and stays silent by contract.
+    """
+    # Validate URL scheme to prevent file:// and other dangerous schemes
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"Invalid health check URL: {url}")
+    deadline = time.time() + timeout
+    https = _tls_probe_enabled()
+    insecure_optin = _truthy(os.getenv("HERMES_WEBUI_TLS_INSECURE_PROBE"))
+    # Derive host:port/path from the passed URL, then build scheme-correct URLs.
+    parsed = urllib.parse.urlsplit(url)
+    authority = parsed.netloc
+    path = parsed.path or "/health"
+    https_url = f"https://{authority}{path}"
+    http_url = f"http://{authority}{path}"
+    warned = False
     while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=2) as response:  # nosec B310
-                if b'"status": "ok"' in response.read():
-                    return True
-        except Exception:
-            time.sleep(0.4)
-    return False
+        if not https:
+            if _health_ok(http_url, verify=True):
+                return "http"
+        else:
+            if insecure_optin:
+                if _health_ok(https_url, verify=False):
+                    return "https"
+            else:
+                if _health_ok(https_url, verify=True):
+                    return "https"
+                if _health_ok(https_url, verify=False):
+                    if not warned:
+                        warned = True
+                        warn(
+                            f"Health probe: TLS certificate at {https_url} is "
+                            "self-signed or not trusted; proceeding without "
+                            "verification."
+                        )
+                    return "https"
+            # server.py may have fallen back to plain HTTP (cert/key unloadable).
+            if _health_ok(http_url, verify=True):
+                return "http"
+        time.sleep(0.4)
+    return ""
 
 
 def open_browser(url: str) -> None:
@@ -411,7 +537,8 @@ def main() -> int:
 
     python_exe = ensure_python_has_webui_deps(discover_launcher_python(agent_dir), agent_dir)
     state_dir = Path(
-        os.getenv("HERMES_WEBUI_STATE_DIR", str(Path.home() / ".hermes" / "webui"))
+        os.getenv("HERMES_WEBUI_STATE_DIR")
+        or Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes")) / "webui"
     ).expanduser()
     state_dir.mkdir(parents=True, exist_ok=True)
 
@@ -422,8 +549,11 @@ def main() -> int:
     if agent_dir:
         os.environ["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
 
-    server_cwd = str(agent_dir or REPO_ROOT)
+    # Let operators move fallback relative writes out of a read-only agent dir.
+    server_cwd = os.environ.get("HERMES_WEBUI_SERVER_CWD", "").strip() or str(agent_dir or REPO_ROOT)
     server_path = str(REPO_ROOT / "server.py")
+    # Scheme the server will advertise (HTTPS when TLS cert+key are configured).
+    scheme = "https" if _tls_probe_enabled() else "http"
 
     # --foreground (or auto-detected supervisor): replace this process with the
     # server. The supervisor sees the long-lived server as the original child,
@@ -432,7 +562,7 @@ def main() -> int:
     foreground_reason = "--foreground" if args.foreground else _detect_supervisor()
     if foreground_reason:
         info(
-            f"Starting Hermes Web UI on http://{args.host}:{args.port} "
+            f"Starting Hermes Web UI on {scheme}://{args.host}:{args.port} "
             f"(foreground mode: {foreground_reason})"
         )
         try:
@@ -455,14 +585,41 @@ def main() -> int:
         # spawns a new process instead of replacing (Python calls CreateProcess),
         # orphaning it from any supervisor. Use Popen + exit there instead.
         if sys.platform == "win32":
-            # CREATE_NEW_PROCESS_GROUP only exists in the subprocess module on
-            # Windows; resolve it defensively (0 = no extra flags) so this line
-            # can't AttributeError if reached on a non-Windows interpreter
-            # (e.g. a win32-simulating test) — mirrors the getattr() guard used
-            # for SO_EXCLUSIVEADDRUSE.
-            _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            subprocess.Popen([python_exe, server_path],
-                             creationflags=_CREATE_NEW_PROCESS_GROUP)
+            # Mirror the robust pattern from api/updates._schedule_restart:
+            # 1. Prefer pythonw.exe (windowless subsystem) over python.exe
+            #    so the restarted server never creates a visible console window.
+            # 2. DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+            #    suppresses the brief console flash even when python.exe is used.
+            _exe = str(python_exe)
+            if _exe.lower().endswith("python.exe"):
+                _w = _exe[:-4] + "w.exe"  # python.exe -> pythonw.exe
+                if os.path.isfile(_w):
+                    _exe = _w
+            _flags = 0
+            for _attr in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP",
+                          "CREATE_NO_WINDOW"):
+                _flags |= getattr(subprocess, _attr, 0)
+            # Redirect the windowless child's stdout/stderr to a real log file
+            # (not DEVNULL): server.py writes startup/request/error diagnostics
+            # to stdout/stderr, and with no console (pythonw + CREATE_NO_WINDOW)
+            # there is nowhere else for them to go — DEVNULL would silently drop
+            # all Windows server logs after a supervisor restart. Mirror the
+            # default-path log sink (state_dir/bootstrap-<port>.log).
+            _win_log_path = state_dir / f"bootstrap-{args.port}.log"
+            _win_log = _win_log_path.open("ab")
+            try:
+                subprocess.Popen(
+                    [_exe, str(server_path)],
+                    cwd=str(server_cwd),
+                    env=os.environ.copy(),
+                    creationflags=_flags,
+                    close_fds=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=_win_log,
+                    stderr=subprocess.STDOUT,
+                )
+            finally:
+                _win_log.close()
             sys.exit(0)
         os.execv(python_exe, [python_exe, server_path])
         # Unreachable — execv either replaces the process or raises.
@@ -472,7 +629,7 @@ def main() -> int:
     # /health, then return. Suitable for an interactive `bash start.sh` run.
     log_path = state_dir / f"bootstrap-{args.port}.log"
 
-    info(f"Starting Hermes Web UI on http://{args.host}:{args.port}")
+    info(f"Starting Hermes Web UI on {scheme}://{args.host}:{args.port}")
     with log_path.open("ab") as log_file:
         proc = subprocess.Popen(
             [python_exe, server_path],
@@ -483,17 +640,22 @@ def main() -> int:
             start_new_session=True,
         )
 
-    health_url = f"http://{args.host}:{args.port}/health"
-    if not wait_for_health(health_url):
+    health_url = f"{scheme}://{args.host}:{args.port}/health"
+    healthy_scheme = wait_for_health(health_url)
+    if not healthy_scheme:
         raise RuntimeError(
             f"Web UI did not become healthy at {health_url}. "
             f"Check the log at {log_path}. Server PID: {proc.pid}"
         )
 
+    # server.py falls back to plain HTTP when the cert/key are unloadable, so the
+    # scheme that actually answered the probe is the one the server is reachable
+    # on — use it for the ready URL and browser-open, not the configured scheme.
+    ready_scheme = healthy_scheme or scheme
     app_url = (
-        f"http://localhost:{args.port}"
+        f"{ready_scheme}://localhost:{args.port}"
         if args.host in ("127.0.0.1", "localhost")
-        else f"http://{args.host}:{args.port}"
+        else f"{ready_scheme}://{args.host}:{args.port}"
     )
     info(f"Web UI is ready: {app_url}")
     info(f"Log file: {log_path}")

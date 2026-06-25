@@ -29,6 +29,13 @@ def isolate_models_catalog_state(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "_get_auth_store_path", lambda: auth_store_path)
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: None)
+    # Point the stale-cache loader's path at an isolated (by default nonexistent)
+    # temp file so the over-budget stale fallback (#3928 follow-up) stays
+    # hermetic — otherwise it would read the real ~/.../models_cache.json and
+    # tests asserting the static fallback become order/environment-dependent
+    # flakes. Tests exercising the stale path override _get_models_cache_path
+    # to write their own payload.
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: tmp_path / "models_cache.json")
     monkeypatch.setattr(cfg, "_delete_models_cache_on_disk", lambda: None)
     monkeypatch.setattr(
         cfg,
@@ -50,6 +57,7 @@ def isolate_models_catalog_state(monkeypatch, tmp_path):
 
     return {
         "auth_store_path": auth_store_path,
+        "models_cache_path": tmp_path / "models_cache.json",
     }
 
 
@@ -103,6 +111,42 @@ def _configure_local_sources(
     )
     env_lookup = dict(env_vars or {})
     monkeypatch.setattr(cfg.os, "getenv", lambda key, default=None: env_lookup.get(key, default or ""))
+
+
+def _build_stale_disk_cache_payload() -> dict:
+    return {
+        "active_provider": "ollama-cloud",
+        "default_model": "ollama-cloud/chat-1",
+        "configured_model_badges": {
+            "ollama-cloud/chat-1": {
+                "role": "primary",
+                "provider": "ollama-cloud",
+                "label": "Primary",
+            }
+        },
+        "groups": [
+            {
+                "provider": "Ollama Cloud",
+                "provider_id": "ollama-cloud",
+                "models": [
+                    {"id": "ollama-cloud/chat-1", "label": "Chat 1"},
+                ],
+            }
+        ],
+        "aliases": {
+            "chat": "ollama-cloud/chat-1",
+        },
+        # Current schema (so the stale-cache loader's schema guard accepts it),
+        # but a deliberately stale _webui_version + fingerprint so the STRICT
+        # loader rejects it — this is exactly the "recoverable stale cache" case.
+        "_schema_version": cfg._MODELS_CACHE_SCHEMA_VERSION,
+        "_webui_version": "v999",
+        "_source_fingerprint": {
+            "catalog": "stale",
+            "config_yaml": {"size": 42},
+            "auth_json": {"size": 7},
+        },
+    }
 
 
 def test_static_catalog_budget_fallback_lists_local_providers(
@@ -192,6 +236,190 @@ def test_budget_exceeded_foreground_uses_richer_static_catalog_and_refreshes_out
     assert rebuild_calls["count"] == 1
     assert cfg._available_models_cache == live_result
     assert cfg._cache_build_in_progress is False
+
+
+def test_budget_exceeded_uses_shape_only_stale_cache_before_static_fallback(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    models_cache_path = isolate_models_catalog_state["models_cache_path"]
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: models_cache_path)
+    models_cache_path.write_text(
+        json.dumps(_build_stale_disk_cache_payload()),
+        encoding="utf-8",
+    )
+
+    live_result = {
+        "active_provider": "openrouter",
+        "default_model": "openrouter/google/gemini-2.5-pro",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "OpenRouter",
+                "provider_id": "openrouter",
+                "models": [
+                    {
+                        "id": "openrouter/google/gemini-2.5-pro",
+                        "label": "Gemini 2.5 Pro",
+                    }
+                ],
+            }
+        ],
+        "aliases": {},
+    }
+    rebuild_calls = {"count": 0}
+
+    def _slow_rebuild(_builder):
+        rebuild_calls["count"] += 1
+        time.sleep(0.2)
+        return copy.deepcopy(live_result)
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _slow_rebuild)
+
+    expected_fallback = _build_stale_disk_cache_payload()
+    expected_fallback.pop("_schema_version")
+    expected_fallback.pop("_webui_version")
+    expected_fallback.pop("_source_fingerprint")
+    result = cfg.get_available_models()
+
+    assert any(
+        g["provider_id"] == "ollama-cloud" for g in result["groups"]
+    )
+    assert result == expected_fallback
+    assert "ollama-cloud" not in {
+        g["provider_id"] for g in cfg._static_models_catalog_without_live_probes()["groups"]
+    }
+    assert (
+        cfg._available_models_cache is None
+        or cfg._available_models_cache != expected_fallback
+    )
+
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if cfg._available_models_cache == live_result:
+            break
+        time.sleep(0.01)
+
+    assert rebuild_calls["count"] == 1
+    assert cfg._available_models_cache == live_result
+    assert cfg._cache_build_in_progress is False
+
+
+def test_budget_exceeded_fallback_uses_static_when_stale_disk_cache_invalid(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    models_cache_path = isolate_models_catalog_state["models_cache_path"]
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: models_cache_path)
+    models_cache_path.write_text(
+        json.dumps({"active_provider": "openai-api", "default_model": "gpt-5.5"}),
+        encoding="utf-8",
+    )
+    assert cfg._load_stale_models_cache_from_disk() is None
+
+    live_result = {
+        "active_provider": "openrouter",
+        "default_model": "openrouter/google/gemini-2.5-pro",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "OpenRouter",
+                "provider_id": "openrouter",
+                "models": [
+                    {
+                        "id": "openrouter/google/gemini-2.5-pro",
+                        "label": "Gemini 2.5 Pro",
+                    }
+                ],
+            }
+        ],
+        "aliases": {},
+    }
+    rebuild_calls = {"count": 0}
+
+    def _slow_rebuild(_builder):
+        rebuild_calls["count"] += 1
+        time.sleep(0.2)
+        return copy.deepcopy(live_result)
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _slow_rebuild)
+
+    expected_static = cfg._static_models_catalog_without_live_probes()
+    result = cfg.get_available_models()
+
+    assert result == expected_static
+    assert all(g["provider_id"] != "ollama-cloud" for g in result["groups"])
+
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if cfg._available_models_cache == live_result:
+            break
+        time.sleep(0.01)
+
+    assert rebuild_calls["count"] == 1
+    assert cfg._available_models_cache == live_result
+
+
+def test_load_stale_models_cache_from_disk_defaults_missing_aliases(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    payload = _build_stale_disk_cache_payload()
+    payload.pop("aliases")
+    models_cache_path = isolate_models_catalog_state["models_cache_path"]
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: models_cache_path)
+    models_cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    stale = cfg._load_stale_models_cache_from_disk()
+    assert stale is not None
+    assert stale["aliases"] == {}
+
+
+def test_load_stale_models_cache_from_disk_rejects_cross_schema(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """A shape-valid but cross-schema cache must be rejected even on the stale
+    fallback path — its groups/badge shape may be incompatible with the current
+    picker and serving it could surface a broken catalog."""
+    payload = _build_stale_disk_cache_payload()
+    payload["_schema_version"] = cfg._MODELS_CACHE_SCHEMA_VERSION + 1
+    models_cache_path = isolate_models_catalog_state["models_cache_path"]
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: models_cache_path)
+    models_cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cfg._load_stale_models_cache_from_disk() is None
+
+
+def test_load_stale_models_cache_reconstructs_aliases_from_config(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """When the disk cache lacks aliases (the save path never persisted them),
+    the stale loader must reconstruct them from current config so /model <alias>
+    slash-command resolution keeps working during the over-budget fallback."""
+    payload = _build_stale_disk_cache_payload()
+    payload.pop("aliases", None)
+    models_cache_path = isolate_models_catalog_state["models_cache_path"]
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: models_cache_path)
+    models_cache_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        cfg, "cfg", {"model": {"aliases": {"fast": "ollama-cloud/chat-1"}}}, raising=False
+    )
+
+    stale = cfg._load_stale_models_cache_from_disk()
+    assert stale is not None
+    assert stale["aliases"] == {"fast": "ollama-cloud/chat-1"}
 
 
 def test_default_group_survives_only_as_emergency_last_resort(

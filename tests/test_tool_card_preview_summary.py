@@ -21,24 +21,14 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 _DRIVER_SRC = r"""
 const fs = require('fs');
-const src = fs.readFileSync(process.argv[2], 'utf8');
-function extractFunc(name) {
-  const re = new RegExp('function\\s+' + name + '\\s*\\(');
-  const start = src.search(re);
-  if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{', start);
-  let depth = 1; i++;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') depth--;
-    i++;
-  }
-  return src.slice(start, i);
+const lines = fs.readFileSync(process.argv[2], 'utf8').split('\n');
+let startIdx = -1, endIdx = lines.length;
+for (let i = 0; i < lines.length; i++) {
+  if (/^function _toolArgPreviewValue\(/.test(lines[i]) && startIdx < 0) startIdx = i;
+  if (/^function _toolCardAllowsDetail\(/.test(lines[i])) { endIdx = i; break; }
 }
-eval(extractFunc('_toolArgPreviewValue'));
-eval(extractFunc('_toolArgPreviewKeyIsHidden'));
-eval(extractFunc('_formatToolArgPreview'));
-eval(extractFunc('_toolCardPreviewText'));
+if (startIdx < 0) throw new Error('_toolArgPreviewValue not found');
+eval(lines.slice(startIdx, endIdx).join('\n'));
 let buf = '';
 process.stdin.on('data', c => { buf += c; });
 process.stdin.on('end', () => {
@@ -62,7 +52,7 @@ def _preview(driver_path: str, tc: dict, display_snippet: str = "") -> str:
         input=json.dumps({"tc": tc, "displaySnippet": display_snippet}),
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr)

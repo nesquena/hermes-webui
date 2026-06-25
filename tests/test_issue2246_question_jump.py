@@ -23,7 +23,7 @@ def test_assistant_footer_gets_completed_turn_question_jump_button():
     assert "const _qJumpTarget=(!isUser&&!m._live)?questionRawIdxByAssistantRawIdx.get(rawIdx):undefined;" in UI_JS
     assert "const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)" in UI_JS
     assert "_questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)" in UI_JS
-    assert "msg-question-jump-btn" in UI_JS
+    assert "msg-question-jump-btn session-jump-btn session-jump-btn--inline" in UI_JS
 
 
 def test_multi_segment_turn_jumps_to_first_assistant_segment():
@@ -36,6 +36,11 @@ def test_multi_segment_turn_jumps_to_first_assistant_segment():
 
 
 def test_question_jump_expands_windowed_history_and_highlights_question():
+    assert "function _messageVisibleIndexForRawIdx(rawIdx, visWithIdx)" in UI_JS
+    assert "function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container)" in UI_JS
+    assert "const visibleIdx=_messageVisibleIndexForRawIdx(questionRawIdx, visWithIdx);" in UI_JS
+    assert "container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container);" in UI_JS
+    assert "_messageVirtualWindowKey='';" in UI_JS
     assert "_messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount())" in UI_JS
     assert "renderMessages({ preserveScroll:true })" in UI_JS
     assert "row.scrollIntoView({block:'center',behavior:'smooth'})" in UI_JS
@@ -43,13 +48,41 @@ def test_question_jump_expands_windowed_history_and_highlights_question():
     assert "msg-question-highlight" in UI_JS
 
 
-def test_question_jump_button_is_quiet_and_hidden_on_mobile():
+def test_question_jump_button_matches_bottom_button_size_on_mobile():
     assert ".msg-question-jump-btn" in STYLE_CSS
+    assert ".session-jump-btn--inline" in STYLE_CSS
+    assert "height: 32px;" in STYLE_CSS
+    assert "min-width: 32px;" in STYLE_CSS
+    assert "padding: 0 11px;" in STYLE_CSS
     assert "margin-left: auto;" in STYLE_CSS
     assert ".msg-question-highlight .msg-body" in STYLE_CSS
     assert "@keyframes question-highlight-pulse" in STYLE_CSS
     assert "@media (max-width: 600px)" in STYLE_CSS
-    assert ".msg-question-jump-btn { display: none; }" in STYLE_CSS
+    assert "width: 32px;" in STYLE_CSS
+    assert "max-width: 32px;" in STYLE_CSS
+    assert ".msg-question-jump-btn span:last-child { display: none; }" in STYLE_CSS
+
+
+def test_question_jump_footer_is_discoverable_on_desktop_without_exposing_actions():
+    # Desktop cannot rely on the mobile always-visible footer override, but the
+    # per-turn jump affordance is navigation, not quiet action chrome. Keep only
+    # the jump button discoverable at rest; reveal timestamp/actions on hover or
+    # keyboard focus.
+    block_anchor = "Desktop/tablet keeps the per-turn jump affordance discoverable"
+    block_start = STYLE_CSS.index(block_anchor)
+    block_end = STYLE_CSS.index(".assistant-turn .msg-foot-with-usage", block_start)
+    desktop_jump_block = STYLE_CSS[block_start:block_end]
+
+    assert "@media (min-width: 641px)" in desktop_jump_block
+
+    assert ".assistant-turn .msg-foot:has(.msg-question-jump-btn)" in desktop_jump_block
+    assert "opacity: 1;" in desktop_jump_block
+    assert ".msg-foot:has(.msg-question-jump-btn) .msg-time" in desktop_jump_block
+    assert ".msg-foot:has(.msg-question-jump-btn) .msg-actions" in desktop_jump_block
+    assert "pointer-events: none;" in desktop_jump_block
+    assert ".assistant-turn:hover .msg-foot:has(.msg-question-jump-btn) .msg-actions" in desktop_jump_block
+    assert ".assistant-turn:focus-within .msg-foot:has(.msg-question-jump-btn) .msg-actions" in desktop_jump_block
+    assert "pointer-events: auto;" in desktop_jump_block
 
 
 def test_question_jump_text_is_localized():

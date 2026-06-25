@@ -253,22 +253,25 @@ function syncWorkspacePanelUI(){
 
 function toggleMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
-  const overlay=$('mobileOverlay');
   if(!sidebar)return;
   const isOpen=sidebar.classList.contains('mobile-open');
   if(isOpen){closeMobileSidebar();}
-  else{sidebar.classList.add('mobile-open');if(overlay)overlay.classList.add('visible');}
+  else{
+    try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
+    sidebar.classList.remove('mobile-session-page');sidebar.classList.add('mobile-panel-drawer','mobile-open');
+  }
 }
 function closeMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
-  if(sidebar)sidebar.classList.remove('mobile-open');
+  if(sidebar)sidebar.classList.remove('mobile-open','mobile-session-page','mobile-panel-drawer');
   if(overlay)overlay.classList.remove('visible');
 }
 
-const _PWA_SIDEBAR_SWIPE_EDGE=28;
-const _PWA_SIDEBAR_SWIPE_TRIGGER=72;
-const _PWA_SIDEBAR_SWIPE_MAX_VERTICAL=48;
+const _PWA_SIDEBAR_SWIPE_EDGE=80;
+const _PWA_SIDEBAR_SWIPE_CLAIM=10;
+const _PWA_SIDEBAR_SWIPE_TRIGGER=64;
+const _PWA_SIDEBAR_SWIPE_MAX_VERTICAL=56;
 let _pwaSidebarSwipe=null;
 
 function _isPwaStandalone(){
@@ -284,35 +287,55 @@ function _isInteractiveSwipeTarget(target){
   catch(_){return false;}
 }
 
+function _pwaSidebarSwipePoint(e){
+  const touch=e&&e.touches&&e.touches[0]||e&&e.changedTouches&&e.changedTouches[0];
+  const src=touch||e;
+  if(!src)return null;
+  return {clientX:Number(src.clientX)||0,clientY:Number(src.clientY)||0};
+}
+
+function _isTouchPointerEvent(e){
+  return !!(e&&e.pointerType==='touch');
+}
+
 function _openMobileSidebarFromGesture(){
   if(_isDesktopWidth())return;
   const sidebar=document.querySelector('.sidebar');
-  const overlay=$('mobileOverlay');
   if(!sidebar)return;
+  try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
   const layout=document.querySelector('.layout');
   if(layout)layout.classList.remove('sidebar-collapsed');
   sidebar.classList.remove('sidebar-collapsed');
   try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
+  sidebar.classList.remove('mobile-session-page');
+  sidebar.classList.add('mobile-panel-drawer');
   sidebar.classList.add('mobile-open');
-  if(overlay)overlay.classList.add('visible');
 }
 
 function _onPwaSidebarSwipeStart(e){
-  if(!_isPwaStandalone()||_isDesktopWidth())return;
+  if(_isDesktopWidth())return;
+  if(_isTouchPointerEvent(e))return;
   if(e.pointerType==='mouse'||(e.pointerType&&e.pointerType!=='touch'&&e.pointerType!=='pen'))return;
   if(document.querySelector('.sidebar')?.classList.contains('mobile-open'))return;
-  const clientX=Number(e.clientX)||0;
-  if(clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
+  const point=_pwaSidebarSwipePoint(e);
+  if(!point)return;
+  if(point.clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
   if(_isInteractiveSwipeTarget(e.target))return;
-  _pwaSidebarSwipe={startX:clientX,startY:Number(e.clientY)||0,active:true,opened:false};
+  _pwaSidebarSwipe={startX:point.clientX,startY:point.clientY,active:true,opened:false};
 }
 
 function _onPwaSidebarSwipeMove(e){
+  if(_isTouchPointerEvent(e))return;
   const swipe=_pwaSidebarSwipe;
   if(!swipe||!swipe.active||swipe.opened)return;
-  const dx=(Number(e.clientX)||0)-swipe.startX;
-  const dy=(Number(e.clientY)||0)-swipe.startY;
+  const point=_pwaSidebarSwipePoint(e);
+  if(!point)return;
+  const dx=point.clientX-swipe.startX;
+  const dy=point.clientY-swipe.startY;
   if(dx<0||Math.abs(dy)>_PWA_SIDEBAR_SWIPE_MAX_VERTICAL*1.5){_pwaSidebarSwipe=null;return;}
+  if(dx>=_PWA_SIDEBAR_SWIPE_CLAIM&&dx>Math.abs(dy)*1.2){
+    if(e.cancelable)e.preventDefault();
+  }
   if(dx>=_PWA_SIDEBAR_SWIPE_TRIGGER&&Math.abs(dy)<=_PWA_SIDEBAR_SWIPE_MAX_VERTICAL&&dx>Math.abs(dy)*1.5){
     if(e.cancelable)e.preventDefault();
     swipe.opened=true;
@@ -320,10 +343,21 @@ function _onPwaSidebarSwipeMove(e){
   }
 }
 
-function _onPwaSidebarSwipeEnd(){_pwaSidebarSwipe=null;}
-function _onPwaSidebarSwipeCancel(){_pwaSidebarSwipe=null;}
+function _onPwaSidebarSwipeEnd(e){if(_isTouchPointerEvent(e))return;_pwaSidebarSwipe=null;}
+function _onPwaSidebarSwipeCancel(e){if(_isTouchPointerEvent(e))return;_pwaSidebarSwipe=null;}
 
 function _installPwaSidebarSwipeGesture(){
+  // #4660 review (Codex CORE): the #pwaSidebarEdgeGuard element is now
+  // pointer-events:none (CSS), so it can no longer intercept hit-testing for
+  // taps / vertical scrolls that merely start in the left edge strip — those
+  // pass through to the underlying .messages scroller. The edge-swipe-to-open
+  // gesture is handled entirely by the window-level CAPTURE touch/pointer
+  // listeners below (which see the event regardless of the guard), so no
+  // dedicated guard-element listener is needed.
+  window.addEventListener('touchstart', _onPwaSidebarSwipeStart, {capture:true,passive:true});
+  window.addEventListener('touchmove', _onPwaSidebarSwipeMove, {capture:true,passive:false});
+  window.addEventListener('touchend', _onPwaSidebarSwipeEnd, {capture:true,passive:true});
+  window.addEventListener('touchcancel', _onPwaSidebarSwipeCancel, {capture:true,passive:true});
   window.addEventListener('pointerdown', _onPwaSidebarSwipeStart, {passive:true});
   window.addEventListener('pointermove', _onPwaSidebarSwipeMove, {passive:false});
   window.addEventListener('pointerup', _onPwaSidebarSwipeEnd, {passive:true});
@@ -436,10 +470,9 @@ function mobileSwitchPanel(name){
     closeMobileSidebar();
   } else {
     const sidebar=document.querySelector('.sidebar');
-    const overlay=$('mobileOverlay');
     if(sidebar){
-      sidebar.classList.add('mobile-open');
-      if(overlay)overlay.classList.add('visible');
+      sidebar.classList.remove('mobile-session-page');
+      sidebar.classList.add('mobile-panel-drawer','mobile-open');
     }
   }
 }
@@ -463,6 +496,36 @@ $('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat
 $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
+function _micIsLocalhostOrLoopback(hostname){
+  const host=String(hostname||'').toLowerCase().replace(/^\[|\]$/g,'');
+  return host==='localhost'
+    || host.endsWith('.localhost')
+    || host==='::1'
+    || host==='0:0:0:0:0:0:0:1'
+    || /^127\./.test(host);
+}
+
+function _micOriginNeedsSecureContext(){
+  if(window.isSecureContext===true) return false;
+  const loc=window.location||{};
+  const protocol=loc.protocol||'';
+  return protocol==='http:'&&!_micIsLocalhostOrLoopback(loc.hostname);
+}
+
+function _micToastKeyForRecognitionError(error){
+  if((error==='not-allowed'||error==='service-not-allowed'||error==='audio-capture')
+      && _micOriginNeedsSecureContext()){
+    return 'mic_insecure_origin';
+  }
+  const msgs={
+    'not-allowed':'mic_denied',
+    'service-not-allowed':'mic_denied',
+    'no-speech':'mic_no_speech',
+    'network':'mic_network',
+  };
+  return msgs[error]||null;
+}
+
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
   const _canRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
@@ -677,12 +740,8 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
         _forceMediaRecorder=true;
         recognition=null;
       }
-      const msgs={
-        'not-allowed':t('mic_denied'),
-        'no-speech':t('mic_no_speech'),
-        'network':t('mic_network'),
-      };
-      showToast(msgs[event.error]||t('mic_error')+event.error);
+      const messageKey=_micToastKeyForRecognitionError(event.error);
+      showToast(messageKey?t(messageKey):t('mic_error')+event.error);
     };
 
     return sr;
@@ -739,6 +798,12 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     _isRecording=true;
     _finalText='';
     _prefix=ta.value;
+    if(_micOriginNeedsSecureContext()){
+      _isRecording=false;
+      window._micPendingSend=false;
+      showToast(t('mic_insecure_origin'));
+      return;
+    }
     if(recognition && !_forceMediaRecorder && !_rawAudioMode){
       _activeCaptureMode='speech';
       recognition.start();
@@ -788,7 +853,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
       _isRecording=false;
       window._micPendingSend=false;
       _stopTracks();
-      showToast(t('mic_denied'));
+      showToast(t(_micToastKeyForRecognitionError('not-allowed')||'mic_denied'));
     }
   };
 
@@ -853,7 +918,47 @@ window._micPendingSend=window._micPendingSend||false;
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
   let _voiceModeThinkingSid=null;
+  let _browserTtsKeepAlive=null;
+  let _browserTtsWatchdog=null;
+  let _browserTtsSuppressNextErrorRearm=false;
   const SILENCE_MS=1800; // auto-send after 1.8s silence
+
+  function _clearBrowserTtsRecovery(){
+    if(_browserTtsKeepAlive){
+      clearInterval(_browserTtsKeepAlive);
+      _browserTtsKeepAlive=null;
+    }
+    if(_browserTtsWatchdog){
+      clearTimeout(_browserTtsWatchdog);
+      _browserTtsWatchdog=null;
+    }
+  }
+
+  function _armBrowserTtsRecovery(clean, rate){
+    _clearBrowserTtsRecovery();
+    _browserTtsSuppressNextErrorRearm=false;
+    const safeRate=(Number.isFinite(rate)&&rate>0)?rate:1;
+    // Chromium can drop utter.onend on later turns, so force a recovery path.
+    const watchdogMs=Math.max(4000,Math.round((String(clean||'').length/(12*safeRate))*1000)+10000);
+    _browserTtsWatchdog=setTimeout(()=>{
+      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      _browserTtsSuppressNextErrorRearm=true;
+      try{ speechSynthesis.cancel(); }catch(_){}
+      _clearBrowserTtsRecovery();
+      _startListening();
+    },watchdogMs);
+    _browserTtsKeepAlive=setInterval(()=>{
+      if(!_voiceModeActive||_voiceModeState!=='speaking'){
+        _clearBrowserTtsRecovery();
+        return;
+      }
+      if(!speechSynthesis.speaking) return;
+      try{
+        speechSynthesis.pause();
+        speechSynthesis.resume();
+      }catch(_){}
+    },10000);
+  }
 
   function _setState(state){
     _voiceModeState=state;
@@ -867,6 +972,12 @@ window._micPendingSend=window._micPendingSend||false;
 
   function _startListening(){
     if(!_voiceModeActive) return;
+    if(_micOriginNeedsSecureContext()){
+      _deactivate();
+      showToast(t('mic_insecure_origin'));
+      return;
+    }
+    _clearBrowserTtsRecovery();
     _setState('listening');
 
     _recognition=new SpeechRecognition();
@@ -921,7 +1032,8 @@ window._micPendingSend=window._micPendingSend||false;
       }
       if(event.error==='not-allowed'||event.error==='service-not-allowed'||event.error==='audio-capture'){
         _deactivate();
-        showToast(t('mic_denied'));
+        const messageKey=_micToastKeyForRecognitionError(event.error);
+        showToast(messageKey?t(messageKey):t('mic_error')+event.error);
         return;
       }
       // Other errors — try to restart
@@ -993,6 +1105,46 @@ window._micPendingSend=window._micPendingSend||false;
     }
     if(!clean){ _startListening(); return; }
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
+    if(engine==="elevenlabs"){
+      _ttsSpeaking=true;
+      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: clean, engine: 'elevenlabs'})
+      })
+      .then(r => {
+        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
+        return r.blob();
+      })
+      .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        _playingEdgeAudio=audio;
+        audio.onended = () => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+        };
+        audio.onerror = () => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        };
+        audio.play().catch(e => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        });
+      })
+      .catch(() => {
+        _ttsSpeaking=false;
+        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      });
+      return;
+    }
     if(engine==="edge"){
       const voice=localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural";
       const savedRate=parseFloat(localStorage.getItem("hermes-tts-rate"));
@@ -1057,14 +1209,27 @@ window._micPendingSend=window._micPendingSend||false;
     if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
 
     utter.onend=()=>{
+      _browserTtsSuppressNextErrorRearm=false;
+      _clearBrowserTtsRecovery();
       // After speaking, go back to listening
-      if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+      if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
     };
     utter.onerror=()=>{
+      _clearBrowserTtsRecovery();
+      if(_browserTtsSuppressNextErrorRearm){
+        _browserTtsSuppressNextErrorRearm=false;
+        return;
+      }
       if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
     };
 
-    speechSynthesis.speak(utter);
+    _armBrowserTtsRecovery(clean, utter.rate);
+    try{
+      speechSynthesis.speak(utter);
+    }catch(_){
+      _clearBrowserTtsRecovery();
+      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+    }
   }
 
   // Hook into response completion — observe when the agent finishes
@@ -1103,6 +1268,10 @@ window._micPendingSend=window._micPendingSend||false;
   };
 
   function _activate(){
+    if(_micOriginNeedsSecureContext()){
+      showToast(t('mic_insecure_origin'));
+      return;
+    }
     _voiceModeActive=true;
     modeBtn.classList.add('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
@@ -1121,10 +1290,12 @@ window._micPendingSend=window._micPendingSend||false;
     _voiceModeActive=false;
     _voiceModeState='idle';
     _voiceModeThinkingSid=null;
+    _browserTtsSuppressNextErrorRearm=false;
     modeBtn.classList.remove('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
     bar.style.display='none';
     clearTimeout(_silenceTimer);
+    _clearBrowserTtsRecovery();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
@@ -1255,6 +1426,7 @@ $('modelSelect').onchange=async()=>{
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
   if(!S.session){
+    if(typeof _rememberEmptyComposerModelOverride==='function') _rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider);
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncReasoningChip==='function') syncReasoningChip();
     return;
@@ -1296,14 +1468,15 @@ $('msg').addEventListener('input',()=>{
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;
-  if(text.startsWith('/')&&text.indexOf('\n')===-1){
+  const _slashIdx=typeof _activeSlashCommandOffset==='function'?_activeSlashCommandOffset(text):-1;
+  if(_slashIdx>=0&&text.indexOf('\n')===-1){
     if(typeof getSlashAutocompleteMatches==='function'){
       getSlashAutocompleteMatches(text).then(matches=>{
         if(($('msg').value||'')!==text) return;
         if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
       });
     }else{
-      const prefix=text.slice(1);
+      const prefix=text.slice(_slashIdx+1);
       const matches=getMatchingCommands(prefix);
       if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
     }
@@ -1340,11 +1513,6 @@ let _imeComposing=false;
 })();
 function _isImeEnter(e){return e.isComposing||e.keyCode===229||_imeComposing;}
 window._isImeEnter=_isImeEnter;
-function _isVirtualKeyboardLikelyOpen(){
-  const vv=window.visualViewport;
-  if(!vv||!window.innerHeight)return true;
-  return window.innerHeight-vv.height>120;
-}
 // #3076: a touch-primary device (`pointer:coarse`) can still have a
 // physical keyboard attached (Android tablet + Bluetooth keyboard,
 // detachable Surface in tablet mode, iPad + Magic Keyboard). When that
@@ -1368,7 +1536,7 @@ $('msg').addEventListener('keydown',e=>{
     if(e.key==='ArrowUp'){e.preventDefault();navigateCmdDropdown(-1);return;}
     if(e.key==='ArrowDown'){e.preventDefault();navigateCmdDropdown(1);return;}
     if(e.key==='Tab'){e.preventDefault();selectCmdDropdownItem();return;}
-    if(e.key==='Escape'){e.preventDefault();hideCmdDropdown();return;}
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();return;}
     if(e.key==='Enter'&&!e.shiftKey){
       if(_isImeEnter(e)){return;}
       e.preventDefault();
@@ -1377,9 +1545,13 @@ $('msg').addEventListener('keydown',e=>{
     }
   }
   // Send key: respect user preference.
-  // On touch-primary devices with the software keyboard open, default to
-  // Enter = newline since there's no physical Shift key. Hardware keyboards on
-  // tablets keep desktop behavior when the viewport is not keyboard-shrunk.
+  // On touch-primary devices (coarse pointer, no fine pointer co-existing),
+  // default to Enter = newline regardless of whether the visual viewport has
+  // shrunk. The viewport-shrink heuristic (_isVirtualKeyboardLikelyOpen) was
+  // unreliable on iOS Safari and some Android browsers where the keyboard
+  // doesn't consistently reduce vv.height by >120px. The pointer media query
+  // pair is a sufficient and more reliable signal for "software keyboard only".
+  // Hardware keyboards on tablets are covered by _hasFinePointerCoexisting.
   // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
@@ -1387,8 +1559,7 @@ $('msg').addEventListener('keydown',e=>{
     const isNumpadEnter=_isNumpadEnter(e);
     const _mobileDefault=matchMedia('(pointer:coarse)').matches
       &&!_hasFinePointerCoexisting()
-      &&window._sendKey==='enter'
-      &&_isVirtualKeyboardLikelyOpen();
+      &&window._sendKey==='enter';
     if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(isNumpadEnter||e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
@@ -1441,6 +1612,13 @@ document.addEventListener('keydown',async e=>{
     // stream running on its own session; the user just gets a fresh blank one.
     await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
   }
+  // Cmd/Ctrl+, opens/closes Settings (VS Code convention).
+  // Fire globally — like VS Code, don't skip text inputs.
+  if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&e.key===','){
+    e.preventDefault();
+    if(typeof toggleSettings==='function') toggleSettings();
+    return;
+  }
   if(e.key==='Escape'){
     // Close onboarding overlay if open (skip/dismiss the wizard)
     const onboardingOverlay=$('onboardingOverlay');
@@ -1464,29 +1642,74 @@ document.addEventListener('keydown',async e=>{
       const bar=editArea.closest('.msg-row')&&editArea.closest('.msg-row').querySelector('.msg-edit-bar');
       if(bar){const cancel=bar.querySelector('.msg-edit-cancel');if(cancel)cancel.click();}
     }
+    // Blur composer to enable j/k message navigation.
+    // Skip while an IME candidate window is composing — Escape there should
+    // dismiss the candidate, not blur the composer (CJK input).
+    if(document.activeElement===$('msg') && !e.isComposing && !_imeComposing){
+      $('msg').blur();
+    }
   }
 });
+const LARGE_TEXT_PASTE_CHAR_THRESHOLD=4000;
+const LARGE_TEXT_PASTE_LINE_THRESHOLD=100;
+function _largeTextPasteLineCount(text){
+  const value=String(text||'');
+  const lines=value.split('\n');
+  return value.endsWith('\n')?lines.length-1:lines.length;
+}
+function _shouldAttachLargePastedText(text){
+  const value=String(text||'');
+  if(!value.trim())return false;
+  return value.length>=LARGE_TEXT_PASTE_CHAR_THRESHOLD || _largeTextPasteLineCount(value)>=LARGE_TEXT_PASTE_LINE_THRESHOLD;
+}
+function _largeTextPasteFileName(now){
+  const d=new Date(now||Date.now());
+  const stamp=d.toISOString().replace(/[:.]/g,'-').replace('T','_').replace('Z','');
+  const existing=new Set((S.pendingFiles||[]).map(f=>f&&f.name).filter(Boolean));
+  let name=`pasted-text-${stamp}.md`;
+  for(let i=2;existing.has(name);i++)name=`pasted-text-${stamp}-${i}.md`;
+  return name;
+}
+function _largeTextPasteFile(text,now){
+  const name=_largeTextPasteFileName(now||Date.now());
+  return new File([String(text||'')],name,{type:'text/markdown;charset=utf-8'});
+}
+function _largeTextPasteFitsUploadLimit(file){
+  return !(file&&typeof MAX_UPLOAD_BYTES==='number'&&file.size>MAX_UPLOAD_BYTES);
+}
+function _attachLargePastedText(file){
+  addFiles([file]);
+  if(typeof setStatus==='function')setStatus(t('text_pasted')+file.name);
+  return file;
+}
 $('msg').addEventListener('paste',e=>{
   const items=Array.from(e.clipboardData?.items||[]);
-  // When the clipboard carries BOTH text and an image (common from Notes,
-  // Word, browsers, Slack — the OS attaches a rendered preview alongside
-  // the plain text), prefer the text and let the browser paste normally.
-  // Only intercept when the clipboard is image-only (true screenshot paste).
-  // Tighten the image filter to kind==='file' so string items advertising an
-  // image MIME (e.g. text/html with an embedded data URI) are not misclassified.
-  const hasText=items.some(i=>i.kind==='string'&&(i.type==='text/plain'||i.type==='text/html'));
+  // Extract image items (kind==='file' filter avoids misclassifying text/html
+  // with embedded data URIs as images).
   const imageItems=items.filter(i=>i.kind==='file'&&i.type.startsWith('image/'));
-  if(!imageItems.length||hasText)return;
+  if(imageItems.length){
+    // If text is also present (common when copying images from browsers, Notes,
+    // Slack, etc.), let the browser paste the text normally AND attach the image.
+    // Only preventDefault when the clipboard is image-only (true screenshot paste).
+    const hasText=items.some(i=>i.kind==='string'&&(i.type==='text/plain'||i.type==='text/html'));
+    if(!hasText)e.preventDefault();
+    const pasteTs=Date.now();
+    const files=imageItems.map((i,idx)=>{
+      const blob=i.getAsFile();
+      const ext=i.type.split('/')[1]||'png';
+      const suffix=imageItems.length>1?`-${idx+1}`:'';
+      return new File([blob],`screenshot-${pasteTs}${suffix}.${ext}`,{type:i.type});
+    });
+    addFiles(files);
+    setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+    return;
+  }
+  const plainText=e.clipboardData?.getData('text/plain')||'';
+  if(!_shouldAttachLargePastedText(plainText))return;
+  const pastedTextFile=_largeTextPasteFile(plainText);
+  if(!_largeTextPasteFitsUploadLimit(pastedTextFile))return;
   e.preventDefault();
-  const pasteTs=Date.now();
-  const files=imageItems.map((i,idx)=>{
-    const blob=i.getAsFile();
-    const ext=i.type.split('/')[1]||'png';
-    const suffix=imageItems.length>1?`-${idx+1}`:'';
-    return new File([blob],`screenshot-${pasteTs}${suffix}.${ext}`,{type:i.type});
-  });
-  addFiles(files);
-  setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+  _attachLargePastedText(pastedTextFile);
 });
 document.querySelectorAll('.suggestion').forEach(btn=>{
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
@@ -1897,7 +2120,7 @@ function applyBotName(){
   // The saved assistant name applies to the default profile only.
   // Non-default profiles use their own profile names.
   const name=assistantDisplayName();
-  document.title=name;
+  if(!S.session) document.title=name;
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
   const logo=document.querySelector('.sidebar-header .logo');
@@ -2024,6 +2247,87 @@ function applyCustomLogo(settings){
   }
 }
 
+const _COMPOSER_CONTROL_TOGGLE_DEFS=[
+  {key:'hide_composer_attach',label:'Attach',labelKey:'composer_control_attach',selectors:['#btnAttach']},
+  {key:'hide_composer_saved_prompts',label:'Saved prompts',labelKey:'composer_control_saved_prompts',selectors:['#btnSavedPrompts']},
+  {key:'hide_composer_mic',label:'Mic',labelKey:'composer_control_mic',selectors:['#btnMic']},
+  {key:'hide_composer_profile',label:'Profile',labelKey:'composer_control_profile',selectors:['#profileChipWrap']},
+  {key:'hide_composer_workspace',label:'Workspace',labelKey:'composer_control_workspace',selectors:['.composer-ws-wrap','#composerMobileWorkspaceAction']},
+  {key:'hide_composer_model',label:'Model',labelKey:'composer_control_model',selectors:['.composer-model-wrap','#composerMobileModelAction']},
+  {key:'hide_composer_reasoning',label:'Reasoning',labelKey:'composer_control_reasoning',selectors:['#composerReasoningWrap','#composerMobileReasoningAction']},
+  {key:'hide_composer_context',label:'Context',labelKey:'composer_control_context',selectors:['#ctxIndicatorWrap','#composerMobileContextAction']},
+];
+window._COMPOSER_CONTROL_TOGGLE_DEFS=_COMPOSER_CONTROL_TOGGLE_DEFS;
+
+const _COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=[
+  {key:'hide_composer_voice_mode',label:'Voice mode',labelKey:'composer_control_voice_mode',selectors:['#btnVoiceMode']},
+  {key:'hide_composer_yolo',label:'YOLO',labelKey:'composer_control_yolo',selectors:['#yoloPill']},
+  {key:'hide_composer_bg_badge',label:'Background badge',labelKey:'composer_control_bg_badge',selectors:['#bgBadge']},
+  {key:'hide_composer_mobile_config',label:'Mobile config',labelKey:'composer_control_mobile_config',selectors:['#composerMobileConfigBtn']},
+  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip']},
+  {key:'hide_composer_toolsets',label:'Toolsets',labelKey:'composer_control_toolsets',selectors:['#composerToolsetsWrap']},
+  {key:'hide_composer_status',label:'Status',labelKey:'composer_control_status',selectors:['#composerStatus']},
+];
+window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS;
+
+function _allComposerControlToggleDefs(){
+  return _COMPOSER_CONTROL_TOGGLE_DEFS.concat(_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS);
+}
+
+function _composerControlVisibilityFromSettings(settings){
+  const next={};
+  for(const def of _allComposerControlToggleDefs()){
+    next[def.key]=!!(settings&&settings[def.key]);
+  }
+  return next;
+}
+window._composerControlVisibilityFromSettings=_composerControlVisibilityFromSettings;
+
+function _setComposerControlHidden(el, hidden){
+  if(!el) return;
+  el.classList.toggle('composer-control-hidden', !!hidden);
+  if(hidden) el.setAttribute('aria-hidden','true');
+  else el.removeAttribute('aria-hidden');
+}
+
+function _applyComposerFooterVisibilitySettings(){
+  const hidden=window._composerControlVisibility||{};
+  for(const def of _allComposerControlToggleDefs()){
+    const isHidden=!!hidden[def.key];
+    for(const selector of def.selectors){
+      document.querySelectorAll(selector).forEach(el=>_setComposerControlHidden(el,isHidden));
+    }
+  }
+
+  const hideMic=!!hidden.hide_composer_mic;
+  if(hideMic&&window._micActive&&typeof window._stopMic==='function'){
+    try{window._stopMic();}catch(_){ }
+  }
+
+  const hideSavedPrompts=!!hidden.hide_composer_saved_prompts;
+  const savedBtn=$('btnSavedPrompts');
+  const savedPopup=$('savedPromptsPopup');
+  if(hideSavedPrompts&&savedPopup){
+    savedPopup.style.display='none';
+    if(savedBtn) savedBtn.setAttribute('aria-expanded','false');
+  }
+
+  if(hidden.hide_composer_workspace&&typeof closeWsDropdown==='function') closeWsDropdown();
+  if(hidden.hide_composer_profile&&typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(hidden.hide_composer_model&&typeof closeModelDropdown==='function') closeModelDropdown();
+  if(hidden.hide_composer_reasoning&&typeof closeReasoningDropdown==='function') closeReasoningDropdown();
+  if(hidden.hide_composer_toolsets&&typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(hidden.hide_composer_mobile_config&&typeof closeMobileComposerConfig==='function') closeMobileComposerConfig();
+}
+window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
+
+function _applyTitlebarProfileVisibility(){
+  const btn=$('titlebarProfileBtn');
+  if(!btn) return;
+  btn.style.display=window._showTitlebarProfile?'':'none';
+}
+window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
+
 (async()=>{
   // Load send key preference
   let _bootSettings={};
@@ -2051,9 +2355,13 @@ function applyCustomLogo(settings){
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
     applyEmptyStateSuggestionPref();
+    // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
+    // It caused scroll-up flicker on long sessions, so it's off for everyone
+    // unless explicitly opted in; long transcripts render in full by default.
+    window._virtualizeTranscript=s.virtualize_transcript===true;
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
-    window._showCliSessions=!!s.show_cli_sessions;
+    window._showCliSessions=s.show_cli_sessions!==false;
     window._showPreviousMessagingSessions=!!s.show_previous_messaging_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
@@ -2068,6 +2376,8 @@ function applyCustomLogo(settings){
         ? s.worklog_details_expanded_default
         : s.activity_feed_expanded_default
     );
+    window._workspaceTodosTab=!!s.workspace_todos_tab;
+    if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
     window._inflightStateLimits={
@@ -2080,6 +2390,9 @@ function applyCustomLogo(settings){
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._autoScrollFollow=s.auto_scroll_follow!==false;
+    window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
+    window._showTitlebarProfile=!!s.show_titlebar_profile;
+    _applyTitlebarProfileVisibility();
     window._botName=s.bot_name||'Hermes';
     if(s.default_model_provider) window._activeProvider=s.default_model_provider;
     if(s.default_model){
@@ -2107,6 +2420,12 @@ function applyCustomLogo(settings){
       }
     }
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
+    window._renderUserMarkdown=!!s.render_user_markdown;
+    // JSON/YAML structured code-block default view (#484): auto | on | off,
+    // plus the 'auto'-mode line threshold (sanitized int 1..1000, fallback 10).
+    window._structuredCodeDefaultView=['on','off','auto'].includes(s.structured_code_default_view)?s.structured_code_default_view:'auto';
+    const _sctLines=parseInt(s.structured_code_auto_tree_lines,10);
+    window._structuredCodeAutoTreeLines=(Number.isFinite(_sctLines)&&_sctLines>=1&&_sctLines<=1000)?_sctLines:10;
     // Reconcile appearance: prefer localStorage (what the user last saw) over
     // the server.  If they diverge (e.g. a previous autosave POST failed),
     // push the localStorage values back to the server so settings.json stays
@@ -2149,6 +2468,7 @@ function applyCustomLogo(settings){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
+    _applyComposerFooterVisibilitySettings();
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
@@ -2160,9 +2480,10 @@ function applyCustomLogo(settings){
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
+    window._virtualizeTranscript=false;  // settings-load failed: default-OFF (experimental/opt-in) (#4343)
     window._showTps=false;
     window._fadeTextEffect=false;
-    window._showCliSessions=false;
+    window._showCliSessions=true;  // settings-load failed: mirror the True config default (#3988)
     window._soundEnabled=false;
     window._notificationsEnabled=false;
     window._whatsNewSummaryEnabled=false;
@@ -2171,12 +2492,17 @@ function applyCustomLogo(settings){
     window._chatActivityDisplayMode='compact_worklog';
     window._transparentStream=false;
     window._terminalAutoExpandOnOutput=false;
+    window._workspaceTodosTab=false;
+    if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
     window._sessionJumpButtonsEnabled=false;
+    window._structuredCodeDefaultView='auto';
+    window._structuredCodeAutoTreeLines=10;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._autoScrollFollow=true;
+    window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
@@ -2186,6 +2512,7 @@ function applyCustomLogo(settings){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
+    _applyComposerFooterVisibilitySettings();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
   // Non-blocking update check (fire-and-forget, once per tab session)
@@ -2202,6 +2529,8 @@ function applyCustomLogo(settings){
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  const titleLabel=$('titlebarProfileLabel');
+  if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.

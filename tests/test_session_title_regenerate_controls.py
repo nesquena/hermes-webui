@@ -21,21 +21,19 @@ def test_session_action_menu_exposes_regenerate_title_control():
     assert "renderSessionListFromCache();" in SESSIONS_JS
 
 
-def test_imported_sessions_skip_regenerate_action_without_broadening_shared_gate():
+def test_writable_imported_sessions_keep_regenerate_action_without_broadening_shared_gate():
     # The shared _isReadOnlySession() helper must stay scoped to read_only flags
     # so it does not silently disable rename/pin/archive/etc. for imported
-    # sessions. The is_imported guard is scoped to the regenerate action only,
-    # matching the backend 403 guard in api/routes.py.
+    # sessions. Writable imported sessions should still expose regenerate.
     helper_idx = SESSIONS_JS.index("function _isReadOnlySession(session)")
     next_helper_idx = SESSIONS_JS.index("function _sourceKeyForSession", helper_idx)
     helper_block = SESSIONS_JS[helper_idx:next_helper_idx]
     assert "session.is_imported" not in helper_block, (
-        "_isReadOnlySession must not include is_imported — it gates rename/pin/archive too"
+        "_isReadOnlySession must not include is_imported; writable imports need regenerate"
     )
-    # The regenerate action is gated on !session.is_imported next to its api call.
     regen_idx = SESSIONS_JS.index("api('/api/session/title/regenerate'")
     guard_window = SESSIONS_JS[regen_idx - 600:regen_idx]
-    assert "if(!session.is_imported){" in guard_window
+    assert "session.is_imported" not in guard_window
 
 
 def test_regenerate_title_i18n_and_changelog_entries_exist():
@@ -56,11 +54,19 @@ def test_regenerate_endpoint_persists_generated_title_without_reordering_sidebar
     next_endpoint_idx = ROUTES_PY.index('"/api/personality/set"', endpoint_idx)
     block = ROUTES_PY[endpoint_idx:next_endpoint_idx]
     assert "generate_session_title_for_session" in block
-    assert "s.llm_title_generated = True" in block
-    assert "s.save(touch_updated_at=False)" in block
-    assert "_sync_session_title_to_insights(s)" in block
-    assert 'publish_session_list_changed("session_title_regenerate", profile=getattr(s, "profile", None))' in block
-    assert "Read-only imported sessions cannot be renamed" in block
+    assert '_persist_generated_session_title(s, next_title, event_reason="session_title_regenerate")' in block
+    assert "Read-only imported sessions cannot regenerate titles" in block
+
+
+def test_regenerate_helper_persists_generated_title_and_publishes_sidebar_refresh():
+    helper_idx = ROUTES_PY.index("def _persist_generated_session_title")
+    queue_idx = ROUTES_PY.index("def _queue_generated_title_for_imported_session", helper_idx)
+    helper_block = ROUTES_PY[helper_idx:queue_idx]
+    assert "mark_session_title_generated(session)" in helper_block
+    assert "session.save(touch_updated_at=False)" in helper_block
+    assert "_sync_session_title_to_insights(session)" in helper_block
+    assert "_publish_session_list_changed(" in helper_block
+    assert "session_id=sid" in helper_block
 
 
 def test_regenerate_endpoint_syncs_title_to_state_db_when_enabled():

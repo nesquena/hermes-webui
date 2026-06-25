@@ -71,6 +71,7 @@ class TestSidebarCancelAction:
         assert "session.source" in body
         assert "session.source_label" in body
         assert "if (_isMessagingSession(session)) return false;" in body
+        assert "raw === 'tui'" in body
         assert "return session.is_cli_session === true;" in body
 
     def test_cli_sessions_hide_duplicate_and_delete_in_action_menu(self):

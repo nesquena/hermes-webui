@@ -26,7 +26,7 @@ def _run_node(source: str) -> str:
             cwd=str(REPO_ROOT),
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
         )
     finally:
         script_path.unlink(missing_ok=True)

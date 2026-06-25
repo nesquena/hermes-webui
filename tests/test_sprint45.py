@@ -14,15 +14,14 @@ import urllib.request
 
 import os
 
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE, TEST_STATE_DIR
 REPO = pathlib.Path(__file__).parent.parent
 # Use HERMES_WEBUI_TEST_STATE_DIR if available (set by conftest for the test process),
-# falling back to the conventional webui-mvp-test path.
+# falling back to the shared isolated TEST_STATE_DIR (temp-rooted, never ~/.hermes).
 def _get_settings_file() -> pathlib.Path:
     """Resolve SETTINGS_FILE at call time (env var set by conftest after module import)."""
     state_dir = pathlib.Path(
-        os.environ.get("HERMES_WEBUI_TEST_STATE_DIR",
-                       str(pathlib.Path.home() / ".hermes" / "webui-mvp-test"))
+        os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(TEST_STATE_DIR))
     )
     return state_dir / "settings.json"
 
@@ -102,10 +101,15 @@ def test_first_password_enablement_returns_cookie_and_keeps_browser_logged_in():
             _get_settings_file().write_text(_json.dumps(clean, indent=2), encoding="utf-8")
         except Exception:
             pass
-        # Then: tell the server to clear auth via API (must use the session cookie)
+        # Then: tell the server to clear auth via API (must use the session cookie
+        # and prove possession of the current password under auth-disable safety).
         try:
             _headers = {"Cookie": cookie_header} if cookie_header else {}
-            post("/api/settings", {"_clear_password": True}, headers=_headers)
+            post(
+                "/api/settings",
+                {"_clear_password": True, "_current_password": "sprint45-secret"},
+                headers=_headers,
+            )
         except Exception:
             pass
         _restore_settings_file(original_settings)

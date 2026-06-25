@@ -1,7 +1,10 @@
 """Sprint 3 tests: cron API, skills API, memory API, input validation."""
-import json, uuid, urllib.request, urllib.error
+import json, pathlib, shutil, tempfile, urllib.request, urllib.error
 
 from tests._pytest_port import BASE
+
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
@@ -15,6 +18,15 @@ def post(path, body=None):
             return json.loads(r.read()), r.status
     except urllib.error.HTTPError as e:
         return json.loads(e.read()), e.code
+
+
+def make_outside_trusted_dir(prefix):
+    home_root = pathlib.Path.home().resolve()
+    temp_root = pathlib.Path(tempfile.gettempdir()).resolve()
+    base_root = temp_root if temp_root != home_root and home_root not in (temp_root, *temp_root.parents) else REPO_ROOT
+    outside_root = base_root / ".tmp-outside-trusted"
+    outside_root.mkdir(exist_ok=True)
+    return pathlib.Path(tempfile.mkdtemp(prefix=f"{prefix}-", dir=outside_root))
 
 def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
@@ -208,21 +220,25 @@ def test_session_update_unknown_id_returns_404():
 def test_session_update_rejects_workspace_outside_trusted_root(tmp_path):
     d, _ = post("/api/session/new", {})
     sid = d["session"]["session_id"]
-    outside = tmp_path / "outside"
-    outside.mkdir(parents=True, exist_ok=True)
-    result, status = post("/api/session/update", {"session_id": sid, "workspace": str(outside)})
-    assert status == 400
-    assert "outside" in result.get("error", "").lower()
+    outside = make_outside_trusted_dir("outside")
+    try:
+        result, status = post("/api/session/update", {"session_id": sid, "workspace": str(outside)})
+        assert status == 400
+        assert "outside" in result.get("error", "").lower()
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
 
 
 def test_chat_start_rejects_workspace_outside_trusted_root(tmp_path):
     d, _ = post("/api/session/new", {})
     sid = d["session"]["session_id"]
-    outside = tmp_path / "outside-chat"
-    outside.mkdir(parents=True, exist_ok=True)
-    result, status = post("/api/chat/start", {"session_id": sid, "message": "hello", "workspace": str(outside)})
-    assert status == 400
-    assert "outside" in result.get("error", "").lower()
+    outside = make_outside_trusted_dir("outside-chat")
+    try:
+        result, status = post("/api/chat/start", {"session_id": sid, "message": "hello", "workspace": str(outside)})
+        assert status == 400
+        assert "outside" in result.get("error", "").lower()
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
 
 
 def test_workspace_add_allows_external_valid_paths(tmp_path):
@@ -251,19 +267,23 @@ def test_legacy_chat_rejects_workspace_outside_trusted_root(tmp_path):
     """Legacy /api/chat must use the same trusted workspace validation as /api/chat/start."""
     d, _ = post("/api/session/new", {})
     sid = d["session"]["session_id"]
-    outside = tmp_path / "outside-legacy-chat"
-    outside.mkdir(parents=True, exist_ok=True)
-    result, status = post("/api/chat", {"session_id": sid, "message": "hello", "workspace": str(outside)})
-    assert status == 400
-    assert "outside" in result.get("error", "").lower()
+    outside = make_outside_trusted_dir("outside-legacy-chat")
+    try:
+        result, status = post("/api/chat", {"session_id": sid, "message": "hello", "workspace": str(outside)})
+        assert status == 400
+        assert "outside" in result.get("error", "").lower()
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
 
 
 def test_session_new_rejects_workspace_outside_trusted_root(tmp_path):
-    outside = tmp_path / "outside-new"
-    outside.mkdir(parents=True, exist_ok=True)
-    result, status = post("/api/session/new", {"workspace": str(outside)})
-    assert status == 400
-    assert "outside" in result.get("error", "").lower()
+    outside = make_outside_trusted_dir("outside-new")
+    try:
+        result, status = post("/api/session/new", {"workspace": str(outside)})
+        assert status == 400
+        assert "outside" in result.get("error", "").lower()
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
 
 
 def test_session_search_returns_matches(cleanup_test_sessions):

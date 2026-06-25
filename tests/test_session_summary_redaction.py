@@ -34,7 +34,7 @@ def _write_session_with_secret_title():
         created_at=now,
         updated_at=now,
         profile="default",
-        messages=[],
+        messages=[{"role": "user", "content": "visible row", "timestamp": now}],
         tool_calls=[],
     )
     # Save through the model layer so the sidebar index is updated just like a

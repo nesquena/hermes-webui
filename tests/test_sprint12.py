@@ -29,6 +29,15 @@ def make_session(created_list):
     return sid
 
 
+def _make_session_visible(sid):
+    from api.models import Session
+
+    session = Session.load(sid)
+    assert session is not None
+    session.messages = [{"role": "user", "content": "visible row", "timestamp": 1.0}]
+    session.save()
+
+
 # ── Settings API ──────────────────────────────────────────────────────────
 
 def test_settings_get_returns_defaults():
@@ -121,8 +130,9 @@ def test_pinned_in_session_list():
     created = []
     try:
         sid = make_session(created)
-        # Pin it and give it a title so it shows in the list
+        # Give it one real message so the default sidebar route keeps it visible.
         post("/api/session/rename", {"session_id": sid, "title": "Pinned Test"})
+        _make_session_visible(sid)
         post("/api/session/pin", {"session_id": sid, "pinned": True})
         d, _ = get("/api/sessions")
         match = [s for s in d['sessions'] if s['session_id'] == sid]

@@ -45,4 +45,4 @@ def test_zeus_modals_are_not_navy():
 
 def test_zeus_i18n_lists_skin_in_all_locales():
     # There are 12 locales; each should include zeus in the skin list.
-    assert I18N_JS.count("/zeus/") == 13
+    assert I18N_JS.count("/zeus/") == 14

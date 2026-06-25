@@ -6,14 +6,15 @@ STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def test_tool_cards_use_legacy_compact_header_without_tool_output_badge():
-    """Tool cards keep the legacy compact header: icon, tool name, preview."""
+    """Tool cards keep the compact header without surfacing output as a badge."""
     build_start = UI_JS.index('function buildToolCard(tc){')
     build_end = UI_JS.index('function _syncToolCallGroupSummary', build_start)
     build_tool_card = UI_JS[build_start:build_end]
 
     assert 'tool-card-badge' not in build_tool_card
     assert 'Tool output' not in build_tool_card
-    assert '<span class="tool-card-name">${esc(displayName)}</span>' in build_tool_card
+    assert '<span class="tool-card-name-label">${esc(displayName)}</span>' in build_tool_card
+    assert '<span class="tool-card-name-generic">${esc(genericName)}</span>' in build_tool_card
 
 
 def test_tool_card_badge_style_is_absent():

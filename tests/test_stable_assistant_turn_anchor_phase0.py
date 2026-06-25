@@ -1,8 +1,7 @@
 """Phase 0 contract tests for Stable Assistant Turn Anchors (#3926).
 
-The first implementation slice is intentionally non-visual. It adds the
-inventory and pure helper surface that later phases can wire into send(),
-attachLiveStream(), replay hydration, and renderMessages().
+The first implementation slice was intentionally non-visual. Later slices keep
+the same inventory contract while adding narrow, tested wiring points.
 """
 from __future__ import annotations
 
@@ -88,10 +87,18 @@ def test_phase0_scaffold_is_loaded_before_current_rendering_modules():
     messages_pos = html.index('static/messages.js?v=__WEBUI_VERSION__')
 
     assert anchor_pos < ui_pos < sessions_pos < messages_pos
+    ui_src = _read(UI_JS)
     assert "'./static/assistant_turn_anchors.js' + VQ" in _read(SW_JS)
-    assert "HermesAssistantTurnAnchors" not in _read(UI_JS)
+    assert "projectAssistantTurnAnchorSettledMessageFinalAnswer" in ui_src
+    assert "createAssistantTurnAnchorRegistry" not in ui_src
+    assert "applyAssistantTurnAnchorSourceEvent" not in ui_src
+    assert "HermesAssistantTurnAnchors" in ui_src
     assert "HermesAssistantTurnAnchors" not in _read(SESSIONS_JS)
-    assert "HermesAssistantTurnAnchors" not in _read(MESSAGES_JS)
+    messages_src = _read(MESSAGES_JS)
+    assert "window._liveAnchorRegistries" in messages_src
+    assert "createAssistantTurnAnchorRegistry" in messages_src
+    assert "applyAssistantTurnAnchorSourceEvent" in messages_src
+    assert "projectAssistantTurnAnchorActivityScene" in messages_src
 
 
 def test_phase0_inventory_names_current_state_layers_in_authority_order():
@@ -223,6 +230,9 @@ def test_phase0_inventory_doc_matches_scaffold_contract():
         "`INFLIGHT`",
         "Stream closure state",
         "Live DOM",
+        "Slice 7 Dual-Run Reconciler",
+        "`HermesAssistantTurnAnchors.reconcileAssistantTurnAnchorActivityScene()`",
+        "`activity_scene_reconciliation_v1`",
         "Dedupe Invariant",
         "`event_id`",
         "`run_id + seq`",

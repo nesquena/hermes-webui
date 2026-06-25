@@ -228,6 +228,184 @@ def test_state_db_full_replay_does_not_append_after_sidecar_tail():
     assert merged[-1]["content"] == "opened browser preview"
 
 
+def test_state_db_only_user_prompt_before_sidecar_tail_is_reinserted_chronologically():
+    """A missing state.db-only user prompt must not be hidden by a newer sidecar tail.
+
+    Interruption/restart recovery can persist a newer assistant/error tail in
+    the WebUI sidecar while the user prompt that triggered it only exists in
+    state.db. The append-only reconciliation should preserve that state-backed
+    user turn and place it before the newer sidecar tail instead of treating
+    every state row older than the sidecar tail as replay.
+    """
+    sidecar_messages = [
+        {"role": "user", "content": "old user", "timestamp": 100.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 101.0},
+        {"role": "assistant", "content": "newer recovery tail", "timestamp": 103.0},
+    ]
+    state_messages = [
+        {"role": "user", "content": "old user", "timestamp": 100.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 101.0},
+        {"role": "user", "content": "missing prompt", "timestamp": 102.0},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+
+    assert [m["content"] for m in merged] == [
+        "old user",
+        "old assistant",
+        "missing prompt",
+        "newer recovery tail",
+    ]
+
+
+def test_state_db_only_user_prompt_equal_timestamp_stays_before_assistant_tail():
+    """Same-timestamp rescued user prompts must not render after the answer."""
+    sidecar_messages = [
+        {"role": "assistant", "content": "answer", "timestamp": 100.0},
+    ]
+    state_messages = [
+        {"role": "user", "content": "the question", "timestamp": 100.0},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+
+    assert [m["content"] for m in merged] == ["the question", "answer"]
+
+
+def test_state_db_rescue_same_second_multiturn_keeps_order_no_user_assistant_inversion():
+    """Regression (#4216): when an EARLIER user/assistant turn, a recovery tail,
+    and the rescued state-only prompt all share one timestamp, the rescue must
+    NOT insert the prompt before the earlier assistant (which would produce
+    user, user, assistant — re-ordering the already-answered turn). The rescued
+    prompt belongs after the earlier turn, before the recovery tail."""
+    sidecar_messages = [
+        {"role": "user", "content": "old user", "timestamp": 100.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 100.0},
+        {"role": "user", "content": "recovery tail", "timestamp": 100.0},
+    ]
+    state_messages = [
+        {"role": "user", "content": "missing prompt", "timestamp": 100.0},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+    contents = [m["content"] for m in merged]
+
+    # The rescued prompt lands after the answered turn, not before its assistant.
+    assert contents == ["old user", "old assistant", "missing prompt", "recovery tail"], contents
+    # No user message is inverted ahead of an assistant that already answered it:
+    # 'old assistant' must come before BOTH later user turns.
+    assert contents.index("old assistant") < contents.index("missing prompt")
+    assert contents.index("old assistant") < contents.index("recovery tail")
+
+
+def test_state_db_only_user_prompt_does_not_split_tool_call_and_result_pair():
+    """Chronological rescue must preserve assistant tool_call/tool result adjacency."""
+    sidecar_messages = [
+        {
+            "role": "assistant",
+            "content": "I will inspect it",
+            "timestamp": 100.0,
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file"}}],
+        },
+        {"role": "tool", "content": "tool result", "timestamp": 101.0, "tool_call_id": "call_1"},
+        {"role": "assistant", "content": "final answer", "timestamp": 103.0},
+    ]
+    state_messages = [
+        {"role": "user", "content": "missing prompt", "timestamp": 100.5},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+
+    assert [m["content"] for m in merged] == [
+        "I will inspect it",
+        "tool result",
+        "missing prompt",
+        "final answer",
+    ]
+
+
+def test_state_db_rescue_equal_timestamp_does_not_split_tool_call_result_pair():
+    """Regression (#4216): when the rescued prompt and an assistant(tool_calls)
+    -> tool result block share one timestamp, the rescue must NOT land between
+    the tool call and its result (which would corrupt tool context / 400). It
+    belongs after the complete tool pair."""
+    sidecar_messages = [
+        {"role": "user", "content": "u", "timestamp": 100.0},
+        {
+            "role": "assistant",
+            "content": "call",
+            "timestamp": 100.0,
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f"}}],
+        },
+        {"role": "tool", "content": "res", "timestamp": 100.0, "tool_call_id": "c1"},
+        {"role": "user", "content": "recovery tail", "timestamp": 100.0},
+    ]
+    state_messages = [
+        {"role": "user", "content": "missing", "timestamp": 100.0},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+    contents = [m["content"] for m in merged]
+
+    assert contents == ["u", "call", "res", "missing", "recovery tail"], contents
+    # The assistant tool_call is immediately followed by its tool result.
+    roles = [m["role"] for m in merged]
+    ai = roles.index("assistant")
+    assert roles[ai + 1] == "tool", f"tool pair split: {roles}"
+
+
+def test_state_db_rescue_equal_timestamp_does_not_split_multi_tool_result_block():
+    """Regression (#4216): a multi-tool assistant turn (2+ tool_calls -> 2+
+    adjacent tool results) sharing the rescue timestamp must not have the
+    rescued prompt land between the tool results — the whole contiguous tool
+    block stays intact and the prompt lands after it."""
+    sidecar_messages = [
+        {"role": "user", "content": "u", "timestamp": 100.0},
+        {
+            "role": "assistant",
+            "content": "call",
+            "timestamp": 100.0,
+            "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "f"}},
+                {"id": "c2", "type": "function", "function": {"name": "g"}},
+            ],
+        },
+        {"role": "tool", "content": "r1", "timestamp": 100.0, "tool_call_id": "c1"},
+        {"role": "tool", "content": "r2", "timestamp": 100.0, "tool_call_id": "c2"},
+        {"role": "user", "content": "recovery", "timestamp": 100.0},
+    ]
+    state_messages = [
+        {"role": "user", "content": "missing", "timestamp": 100.0},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+    roles = [m["role"] for m in merged]
+    contents = [m["content"] for m in merged]
+
+    assert contents == ["u", "call", "r1", "r2", "missing", "recovery"], contents
+    # Both tool results stay contiguous immediately after the assistant.
+    ai = roles.index("assistant")
+    assert roles[ai + 1] == "tool" and roles[ai + 2] == "tool", f"multi-tool block split: {roles}"
+
+
+def test_state_db_only_user_prompt_before_sidecar_start_is_not_resurrected_without_watermark():
+    """No-watermark context/compression reads must not revive old pre-sidecar users."""
+    sidecar_messages = [
+        {"role": "assistant", "content": "compacted summary", "timestamp": 200.0},
+        {"role": "assistant", "content": "current answer", "timestamp": 201.0},
+    ]
+    state_messages = [
+        {"role": "user", "content": "compressed-out old prompt", "timestamp": 100.0},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+
+    assert [m["content"] for m in merged] == [
+        "compacted summary",
+        "current answer",
+    ]
+
+
 def test_state_db_middle_segment_replay_does_not_append_after_sidecar_tail():
     """A replayed state.db segment from the middle must not be appended after the tail."""
     sidecar_messages = [

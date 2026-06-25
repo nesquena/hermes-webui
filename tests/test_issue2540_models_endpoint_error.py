@@ -12,10 +12,16 @@ class _ConfigState:
         self.old_cache = config._available_models_cache
         self.old_cache_ts = config._available_models_cache_ts
         self.old_cache_fp = config._available_models_cache_source_fingerprint
+        self.old_live_budget = config._LIVE_REBUILD_BUDGET_SECONDS
         config._cfg_mtime = 0.0
         config._available_models_cache = None
         config._available_models_cache_ts = 0.0
         config._available_models_cache_source_fingerprint = None
+        # This file pins custom-endpoint error shaping, not the separate async
+        # provider-catalog budget fallback. Force the synchronous rebuild path
+        # so slower Python 3.11 shards cannot fall onto the global 4s fallback
+        # and mask the endpoint-specific error contract under test.
+        config._LIVE_REBUILD_BUDGET_SECONDS = 0.0
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -24,6 +30,7 @@ class _ConfigState:
         config._available_models_cache = self.old_cache
         config._available_models_cache_ts = self.old_cache_ts
         config._available_models_cache_source_fingerprint = self.old_cache_fp
+        config._LIVE_REBUILD_BUDGET_SECONDS = self.old_live_budget
         return False
 
 

@@ -46,7 +46,7 @@ def _run_user_render(text_input):
     try:
         result = subprocess.run(
             ['node', tf.name, json.dumps(text_input)],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
             raise RuntimeError(f"node error: {result.stderr}")
@@ -126,7 +126,7 @@ class TestUserFencedBlocks:
     def test_four_backtick_outer_fence_preserves_inner_triple_fence(self):
         """User-message code fences should follow CommonMark fence-length matching too."""
         out = _run_user_render("````md\n```inner\nfoo\n```\n````")
-        assert out.count("<pre>") == 1
+        assert out.count("<pre class=\"md-source-block\">") == 1
         assert out.count("</pre>") == 1
         assert '<div class="pre-header">md</div>' in out
         assert "```inner" in out

@@ -18,6 +18,15 @@ def _btn_new_chat_handler() -> str:
     return BOOT_JS[start:end]
 
 
+def _load_session_clear_block() -> str:
+    start = SESSIONS_JS.find("async function loadSession(")
+    clear_start = SESSIONS_JS.find("if (currentSid !== sid || forceReload) {", start)
+    clear_end = SESSIONS_JS.find("// Phase 1: Load metadata only", clear_start)
+    assert start != -1, "loadSession not found"
+    assert clear_start != -1 and clear_end != -1, "loadSession clear block not found"
+    return SESSIONS_JS[start:clear_end]
+
+
 def test_new_session_remembers_regular_empty_session_id():
     start = SESSIONS_JS.find("async function newSession(")
     end = SESSIONS_JS.find("async function loadSession(", start)
@@ -74,9 +83,7 @@ def test_pre_switch_draft_flush_rechecks_stale_loading_guard():
     freshly-loaded C state. The guard is `if (_loadingSessionId !== sid) return;`
     placed AFTER the awaited save and BEFORE the `S.messages = []` clear
     (Codex pre-release CORE catch, #3471)."""
-    start = SESSIONS_JS.find("async function loadSession(")
-    assert start != -1, "loadSession not found"
-    body = SESSIONS_JS[start:start + 4000]
+    body = _load_session_clear_block()
     await_idx = body.find("await _saveComposerDraftNow(currentSid")
     guard_idx = body.find("if (_loadingSessionId !== sid) return;", await_idx)
     clear_idx = body.find("S.messages = [];", await_idx)

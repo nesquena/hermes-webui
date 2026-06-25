@@ -13,6 +13,7 @@ Covers:
   4. switch_profile(process_wide=False) does NOT mutate process globals
   5. Concurrent requests on different threads see independent profiles
 """
+import logging
 import os
 import threading
 from pathlib import Path
@@ -228,6 +229,60 @@ class TestProfileCookieHelpers:
         handler = MagicMock()
         handler.headers.get = lambda k, d='': 'hermes_profile=social_profile' if k == 'Cookie' else d
         assert get_profile_cookie(handler) is None
+
+
+# ── 1b. Profile cookie name resolution (env > legacy env > default) ───────────
+
+class TestProfileCookieNameResolution:
+
+    def test_default_when_unset(self, monkeypatch):
+        from api.helpers import PROFILE_COOKIE_NAME, get_profile_cookie_name
+        monkeypatch.delenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        monkeypatch.delenv('WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        assert get_profile_cookie_name() == PROFILE_COOKIE_NAME
+
+    def test_canonical_env_overrides_default(self, monkeypatch):
+        from api.helpers import get_profile_cookie_name
+        monkeypatch.delenv('WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        monkeypatch.setenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_alt')
+        assert get_profile_cookie_name() == 'hermes_profile_alt'
+
+    def test_legacy_env_still_honoured(self, monkeypatch):
+        from api.helpers import get_profile_cookie_name
+        monkeypatch.delenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_legacy')
+        assert get_profile_cookie_name() == 'hermes_profile_legacy'
+
+    def test_canonical_takes_precedence_over_legacy(self, monkeypatch):
+        from api.helpers import get_profile_cookie_name
+        monkeypatch.setenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', 'canonical')
+        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'legacy')
+        assert get_profile_cookie_name() == 'canonical'
+
+    def test_blank_canonical_falls_back_to_legacy(self, monkeypatch):
+        from api.helpers import get_profile_cookie_name
+        monkeypatch.setenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', '   ')
+        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_legacy')
+        assert get_profile_cookie_name() == 'hermes_profile_legacy'
+
+    def test_blank_envs_fall_back_to_default(self, monkeypatch):
+        from api.helpers import PROFILE_COOKIE_NAME, get_profile_cookie_name
+        monkeypatch.setenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', '   ')
+        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', '')
+        assert get_profile_cookie_name() == PROFILE_COOKIE_NAME
+
+    def test_legacy_deprecation_warns_only_once(self, monkeypatch, caplog):
+        # get_profile_cookie_name() runs on every request, so the deprecation
+        # warning for the legacy env var must be emitted once per process.
+        import api.helpers as helpers
+        monkeypatch.delenv('HERMES_WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_legacy')
+        monkeypatch.setattr(helpers, '_legacy_profile_cookie_warned', False)
+        with caplog.at_level(logging.WARNING, logger='api.helpers'):
+            for _ in range(3):
+                assert helpers.get_profile_cookie_name() == 'hermes_profile_legacy'
+        warned = [r for r in caplog.records if 'deprecated' in r.getMessage()]
+        assert len(warned) == 1
 
 
 # ── 2. Thread-local request context ──────────────────────────────────────────

@@ -11,13 +11,21 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
+import secrets
 import shutil
 import stat
 import subprocess
 import concurrent.futures
-from pathlib import Path
+import threading
+import time
+from pathlib import Path, PurePosixPath
 
 logger = logging.getLogger(__name__)
+
+_ESCAPE_AUTH_TTL_SECONDS = 300
+_ESCAPE_AUTH_LOCK = threading.Lock()
+_ESCAPE_AUTH_TOKENS: dict[str, dict[str, str | int | float]] = {}
 
 from api.config import (
     WORKSPACES_FILE as _GLOBAL_WS_FILE,
@@ -58,6 +66,77 @@ def _last_workspace_file() -> Path:
     return _profile_state_dir() / 'last_workspace.txt'
 
 
+def _expanduser_path(path: str | Path) -> Path:
+    """Return *path* after shell-style home expansion.
+
+    ``Path.expanduser()`` on Windows does not consistently honor a monkeypatched
+    ``HOME`` in tests, which makes host-native replay diverge from the repo's
+    portability expectations. Use ``os.path.expanduser`` as the expansion source,
+    then wrap it back into ``Path``.
+    """
+    raw = str(path)
+    if raw.startswith('~'):
+        home = (
+            os.environ.get('HOME')
+            or os.environ.get('USERPROFILE')
+            or (
+                (os.environ.get('HOMEDRIVE') or '') + (os.environ.get('HOMEPATH') or '')
+            )
+            or str(Path.home())
+        )
+        if raw in ('~', '~/', '~\\'):
+            return Path(home)
+        if raw.startswith('~/') or raw.startswith('~\\'):
+            return Path(home) / raw[2:]
+        # NOTE: ``~user`` / ``~root`` forms are intentionally NOT expanded here.
+        # Master deliberately does not block ``/root`` (#510/#521 — Hermes commonly
+        # runs as root, where ``/root`` is the legitimate home and is allowed via
+        # the home carve-out). Expanding ``~root`` -> ``/root`` for a NON-root
+        # deployment would let it register root's home; leaving the literal form
+        # (resolved relative to cwd, then rejected if it escapes) is the safer
+        # behavior and matches the current security model.
+    return Path(raw)
+
+
+def _resolve_path(path: str | Path) -> Path:
+    """Resolve *path* after env-aware home expansion, without raising."""
+    return _safe_resolve(_expanduser_path(path))
+
+
+def _home_path() -> Path:
+    """Return the current effective home directory with env-aware expansion."""
+    return _resolve_path("~")
+
+
+def _as_posix_path(path: str | Path | None) -> PurePosixPath | None:
+    if path in (None, ""):
+        return None
+    raw = _strip_surrounding_quotes(str(path)).strip().replace('\\', '/')
+    # Reject embedded null bytes here rather than letting them survive normpath
+    # and crash later at .resolve() with an uncaught ValueError (surfaces as a
+    # 500). Fail-closed: treat as an invalid path.
+    if '\x00' in raw:
+        return None
+    if not raw.startswith('/'):
+        return None
+    return PurePosixPath(posixpath.normpath(raw))
+
+
+def _posix_is_within(path: PurePosixPath, root: PurePosixPath) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _normalize_posix_path(path: str | Path | None) -> str | None:
+    candidate = _as_posix_path(path)
+    if candidate is None:
+        return None
+    return candidate.as_posix()
+
+
 def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
     """Return True when the active terminal backend runs outside this WebUI host."""
     if not isinstance(terminal_cfg, dict):
@@ -91,8 +170,20 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
     raw = _strip_surrounding_quotes(str(path)).strip()
     if not raw:
         return None
-    candidate = Path(raw).expanduser().resolve()
-    base = Path(cwd).expanduser().resolve()
+    if '\x00' in raw or '\x00' in cwd:
+        return None
+    normalized_raw = _normalize_posix_path(raw)
+    normalized_cwd = _normalize_posix_path(cwd)
+    if normalized_raw is not None and normalized_cwd is not None:
+        posix_candidate = PurePosixPath(normalized_raw)
+        posix_base = PurePosixPath(normalized_cwd)
+        if _is_blocked_workspace_path(Path(normalized_raw), normalized_raw) or _is_blocked_workspace_path(Path(normalized_cwd), normalized_cwd):
+            return None
+        if posix_candidate == posix_base or _posix_is_within(posix_candidate, posix_base):
+            return _resolve_path(normalized_raw)
+        return None
+    candidate = _resolve_path(raw)
+    base = _resolve_path(cwd)
     if _is_blocked_workspace_path(candidate, raw) or _is_blocked_workspace_path(base, cwd):
         return None
     if candidate == base or _is_within(candidate, base):
@@ -124,14 +215,18 @@ def _profile_default_workspace() -> str:
         for key in ('workspace', 'default_workspace'):
             ws = cfg.get(key)
             if ws:
-                p = Path(str(ws)).expanduser().resolve()
+                if remote_terminal:
+                    return str(ws).strip()
+                p = _resolve_path(str(ws))
                 if remote_terminal or p.is_dir():
                     return str(p)
         # Fall through to terminal.cwd — the agent's configured working directory
         if isinstance(terminal_cfg, dict):
             cwd = terminal_cfg.get('cwd', '')
             if cwd and str(cwd) not in ('.', ''):
-                p = Path(str(cwd)).expanduser().resolve()
+                if remote_terminal:
+                    return str(cwd).strip()
+                p = _resolve_path(str(cwd))
                 if remote_terminal or p.is_dir():
                     return str(p)
     except (ImportError, Exception):
@@ -139,9 +234,9 @@ def _profile_default_workspace() -> str:
     try:
         from api.config import DEFAULT_WORKSPACE as _LIVE_DEFAULT_WORKSPACE
 
-        return str(Path(_LIVE_DEFAULT_WORKSPACE).expanduser().resolve())
+        return str(_resolve_path(_LIVE_DEFAULT_WORKSPACE))
     except Exception:
-        return str(Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve())
+        return str(_resolve_path(_BOOT_DEFAULT_WORKSPACE))
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
@@ -156,14 +251,14 @@ def _clean_workspace_list(workspaces: list) -> list:
       confusion with the 'default' profile name).
     Returns the cleaned list (may be empty).
     """
-    hermes_profiles = (Path.home() / '.hermes' / 'profiles').resolve()
+    hermes_profiles = (_home_path() / '.hermes' / 'profiles').resolve()
     result = []
     for w in workspaces:
         path = w.get('path', '')
         name = w.get('name', '')
         if not path:
             continue
-        p = _safe_resolve(Path(path).expanduser())
+        p = _safe_resolve(_expanduser_path(path))
         # Skip paths inside a DIFFERENT profile's directory (cross-profile leak).
         # Allow paths inside the CURRENT profile's own directory (e.g. test workspaces
         # created under ~/.hermes/profiles/webui/webui-mvp-test/).
@@ -199,6 +294,11 @@ def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does 
         st = candidate.stat()
     except FileNotFoundError:
         return f"{missing_label}: {candidate}"
+    except ValueError as exc:
+        # Embedded null byte (or similar invalid path) — .stat() raises ValueError,
+        # not OSError. Report as an access error rather than letting it surface as
+        # an uncaught 500.
+        return f"Cannot access path: {candidate!r}. Invalid path ({exc})."
     except PermissionError as exc:
         return (
             f"Cannot access path: {candidate}. The server process could not inspect "
@@ -322,7 +422,10 @@ def _safe_resolve(p: Path) -> Path:
     """Path.resolve() that never raises — falls back to the input path on error."""
     try:
         return p.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
+        # ValueError covers embedded-null-byte paths, which .resolve() raises on
+        # — fail-closed to the raw path so the downstream block-list gate rejects
+        # it cleanly instead of surfacing a 500.
         return p
 
 
@@ -382,6 +485,46 @@ def _workspace_blocked_roots() -> tuple[Path, ...]:
     return tuple(_out)
 
 
+def _is_blocked_posix_workspace_path(raw_path: str | Path | None) -> bool:
+    """Detect blocked POSIX-style system roots even on non-POSIX hosts."""
+    candidate = _as_posix_path(raw_path)
+    if candidate is None:
+        return False
+    if candidate == PurePosixPath('/'):
+        return True
+    carveouts = (
+        PurePosixPath('/var/folders'),
+        PurePosixPath('/private/var/folders'),
+        PurePosixPath('/var/tmp'),
+        PurePosixPath('/private/var/tmp'),
+    )
+    for tmp in carveouts:
+        if _posix_is_within(candidate, tmp):
+            return False
+    blocked_roots = (
+        PurePosixPath('/etc'),
+        PurePosixPath('/usr'),
+        PurePosixPath('/var'),
+        PurePosixPath('/bin'),
+        PurePosixPath('/sbin'),
+        PurePosixPath('/boot'),
+        PurePosixPath('/proc'),
+        PurePosixPath('/sys'),
+        PurePosixPath('/dev'),
+        PurePosixPath('/lib'),
+        PurePosixPath('/lib64'),
+        PurePosixPath('/opt/homebrew'),
+        PurePosixPath('/System'),
+        PurePosixPath('/Library'),
+        PurePosixPath('/private/etc'),
+        PurePosixPath('/private/var'),
+    )
+    for blocked in blocked_roots:
+        if _posix_is_within(candidate, blocked):
+            return True
+    return False
+
+
 def _is_blocked_system_path(candidate: Path) -> bool:
     """Return True if *candidate* falls under a blocked system root.
 
@@ -435,9 +578,14 @@ def _is_blocked_workspace_path(candidate: Path, raw_path: str | Path | None = No
     raw = None
     if raw_path not in (None, ""):
         try:
-            raw = Path(raw_path).expanduser()
+            normalized_posix = _normalize_posix_path(raw_path)
+            raw = Path(normalized_posix) if normalized_posix is not None else _expanduser_path(raw_path)
         except Exception:
             raw = None
+
+    posix_probe = raw_path if raw_path not in (None, "") else candidate.as_posix()
+    if _is_blocked_posix_workspace_path(posix_probe):
+        return True
 
     exact = _workspace_blocked_exact_roots()
     if candidate in exact or (raw is not None and raw in _workspace_blocked_roots()):
@@ -487,7 +635,7 @@ def _trusted_workspace_roots() -> list[Path]:
         if candidate in (None, ""):
             return
         try:
-            p = Path(candidate).expanduser().resolve()
+            p = _resolve_path(candidate)
         except Exception:
             return
         if not p.exists() or not p.is_dir():
@@ -497,7 +645,7 @@ def _trusted_workspace_roots() -> list[Path]:
         if p not in roots:
             roots.append(p)
 
-    add(Path.home())
+    add(_home_path())
     add(_BOOT_DEFAULT_WORKSPACE)
     for w in load_workspaces():
         add(w.get("path"))
@@ -525,14 +673,14 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
         return [str(p) for p in roots[:limit]]
 
     if raw.startswith("~"):
-        target = Path(raw).expanduser()
+        target = _expanduser_path(raw)
     elif Path(raw).is_absolute():
         target = Path(raw)
     else:
-        target = Path.home() / raw
+        target = _home_path() / raw
 
     try:
-        match_target = target.expanduser().resolve()
+        match_target = _resolve_path(target)
     except Exception:
         match_target = target
 
@@ -542,7 +690,7 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
     home_root: Path | None = None
     if preserve_tilde:
         try:
-            home_root = Path.home().expanduser().resolve()
+            home_root = _home_path()
         except Exception:
             home_root = None
     suggestions: list[str] = []
@@ -584,7 +732,7 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
     show_hidden = leaf.startswith('.')
 
     try:
-        parent_resolved = parent.expanduser().resolve()
+        parent_resolved = _resolve_path(parent)
     except Exception:
         return suggestions[:limit]
 
@@ -634,9 +782,9 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     trusted (it was validated at server startup).
     """
     if path in (None, ""):
-        return Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve()
+        return _resolve_path(_BOOT_DEFAULT_WORKSPACE)
 
-    candidate = Path(path).expanduser().resolve()
+    candidate = _resolve_path(path)
 
     access_error = _workspace_access_error(candidate)
     remote_candidate = _remote_terminal_workspace_candidate(path)
@@ -653,7 +801,7 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
     # (A) Trusted if under the user's home directory — cross-platform via Path.home()
     # Must be checked before system roots to allow symlinks like /var/home.
-    _home = Path.home().resolve()
+    _home = _home_path()
     if _home != Path("/"):
         try:
             candidate.relative_to(_home)
@@ -661,14 +809,13 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         except ValueError:
             pass
 
-    # Block known system roots and their children.
     if _is_blocked_workspace_path(candidate, path):
         raise ValueError(f"Path points to a system directory: {candidate}")
 
     # (B) Trusted if already in the saved workspace list — covers non-home installs
     try:
         saved = load_workspaces()
-        saved_paths = {Path(w["path"]).resolve() for w in saved if w.get("path")}
+        saved_paths = {_resolve_path(w["path"]) for w in saved if w.get("path")}
         if candidate in saved_paths:
             return candidate
     except Exception:
@@ -680,7 +827,7 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     #     was already validated at server startup, so any sub-path of it is safe
     #     without requiring the user to add it to the workspace list manually.
     try:
-        boot_default = Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve()
+        boot_default = _resolve_path(_BOOT_DEFAULT_WORKSPACE)
         candidate.relative_to(boot_default)
         return candidate
     except ValueError:
@@ -729,7 +876,7 @@ def validate_workspace_to_add(path: str) -> Path:
     and users routinely paste those into the Add Space input.
     """
     path = _strip_surrounding_quotes(path)
-    candidate = Path(path).expanduser().resolve()
+    candidate = _resolve_path(path)
 
     access_error = _workspace_access_error(candidate)
     remote_candidate = _remote_terminal_workspace_candidate(path)
@@ -745,11 +892,10 @@ def validate_workspace_to_add(path: str) -> Path:
 
     # Home directory is always trusted regardless of where it lives on disk
     # (e.g. /var/home/... on systemd-homed Fedora/RHEL).
-    _home = Path.home().resolve()
+    _home = _home_path()
     if _home != Path("/") and _is_within(candidate, _home):
         return candidate
 
-    # Block known system roots and their immediate children.
     if _is_blocked_workspace_path(candidate, path):
         raise ValueError(f"Path points to a system directory: {candidate}")
 
@@ -1081,32 +1227,54 @@ def list_dir(workspace: Path, rel: str='.'):
                 return  # target is under link_target — ancestor → cycle
             except ValueError:
                 pass
-            # Hide symlinks that resolve outside the workspace (can never be opened).
+            # Tag symlinks whose resolved target escapes the workspace root.
+            # Previously silently dropped; now emitted with target_outside_workspace=True
+            # so the workspace tree can show the link exists (display-only — the
+            # read/list gate in safe_resolve_ws / open_anchored_fd still blocks
+            # navigation through it).
+            target_outside_workspace = False
             try:
                 link_target.relative_to(ws_resolved)
             except ValueError:
-                return
+                target_outside_workspace = True
             if _is_blocked_system_path(link_target):
                 return
-            is_dir = link_target.is_dir()
             display_path = name
             if rel and rel != '.':
                 display_path = rel + '/' + display_path
             mtime_ns = lstat_result.st_mtime_ns if lstat_result is not None else None
-            entry = {
-                'name': name,
-                'path': display_path,
-                'type': 'symlink',
-                'target': str(link_target),
-                'is_dir': is_dir,
-                'mtime_ns': mtime_ns,
-            }
-            if not is_dir:
-                try:
-                    entry['size'] = link_target.stat().st_size
-                except OSError:
-                    entry['size'] = None
-            entries.append(entry)
+            if target_outside_workspace:
+                # #4581 hardening: a display-only escape-target symlink must NOT
+                # disclose where it points. Emit ONLY display-safe fields — never
+                # the resolved outside path, target-derived is_dir, or target size
+                # (the row exists to show the link is present; navigation/read
+                # through it stays blocked by safe_resolve_ws/open_anchored_fd).
+                entry = {
+                    'name': name,
+                    'path': display_path,
+                    'type': 'symlink',
+                    'is_dir': False,
+                    'target_outside_workspace': True,
+                    'mtime_ns': mtime_ns,
+                }
+                entries.append(entry)
+            else:
+                is_dir = link_target.is_dir()
+                entry = {
+                    'name': name,
+                    'path': display_path,
+                    'type': 'symlink',
+                    'target': str(link_target),
+                    'is_dir': is_dir,
+                    'target_outside_workspace': False,
+                    'mtime_ns': mtime_ns,
+                }
+                if not is_dir:
+                    try:
+                        entry['size'] = link_target.stat().st_size
+                    except OSError:
+                        entry['size'] = None
+                entries.append(entry)
         else:
             entry_path = name
             if rel and rel != '.':
@@ -1242,6 +1410,7 @@ def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = 
             'size': entry.get('size'),
             'mtime_ns': entry.get('mtime_ns'),
             'target': entry.get('target'),
+            'target_outside_workspace': entry.get('target_outside_workspace'),
         })
     raw = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
@@ -1265,6 +1434,202 @@ def read_file_content(workspace: Path, rel: str) -> dict:
         raw = fh.read(MAX_FILE_BYTES + 1)
     content = raw.decode('utf-8', errors='replace')
     return {'path': rel, 'content': content, 'size': len(raw), 'lines': content.count('\n') + 1}
+
+
+def _normalize_workspace_rel_path(rel: str | Path) -> str:
+    raw = _strip_surrounding_quotes(str(rel or "")).strip().replace("\\", "/")
+    if not raw or raw == ".":
+        return "."
+    norm = posixpath.normpath(raw)
+    if not norm or norm == ".":
+        return "."
+    if norm == ".." or norm.startswith("../") or norm.startswith("/"):
+        raise ValueError(f"Path traversal blocked: {rel}")
+    return norm
+
+
+def _escape_virtual_path(root: str, rel: str) -> str:
+    root_norm = _normalize_workspace_rel_path(root)
+    rel_norm = _normalize_workspace_rel_path(rel)
+    if root_norm == ".":
+        return rel_norm
+    if rel_norm == ".":
+        return root_norm
+    return f"{root_norm}/{rel_norm}"
+
+
+def _escape_surface_target(workspace: Path, rel: str) -> tuple[Path, Path]:
+    workspace_root = workspace.resolve()
+    surface_rel = _normalize_workspace_rel_path(rel)
+    surface_posix = PurePosixPath(surface_rel)
+    parent_rel = str(surface_posix.parent)
+    if parent_rel in ("", "."):
+        parent_path = workspace_root
+    else:
+        parent_path = safe_resolve_ws(workspace_root, parent_rel)
+    surface_path = parent_path / surface_posix.name
+    if not surface_path.is_symlink():
+        raise ValueError(f"Path is not an escape-target symlink: {rel}")
+    target = surface_path.resolve()
+    if not target.exists():
+        raise ValueError(f"Path is no longer reachable: {rel}")
+    try:
+        target.relative_to(workspace_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(f"Path does not escape workspace: {rel}")
+    if _is_blocked_system_path(target):
+        raise ValueError(f"Path points to a system directory: {target}")
+    return surface_path, target
+
+
+def _escape_authorized_root(target: Path) -> tuple[Path, str]:
+    resolved_target = target.resolve()
+    if resolved_target.is_dir():
+        return resolved_target, "."
+    return resolved_target.parent, resolved_target.name
+
+
+class EscapeAuthorizationExpiredError(ValueError):
+    pass
+
+
+def _escape_prune_tokens(now: float | None = None) -> None:
+    cutoff = time.time() if now is None else now
+    expired = [token for token, record in _ESCAPE_AUTH_TOKENS.items() if float(record.get("expires_at") or 0.0) <= cutoff]
+    for token in expired:
+        _ESCAPE_AUTH_TOKENS.pop(token, None)
+
+
+def authorize_escape_target(workspace: Path, session_id: str, rel: str) -> dict:
+    """Mint a short-lived browser-only grant for one surfaced escape-target symlink."""
+    workspace_root = workspace.resolve()
+    _surface_path, target = _escape_surface_target(workspace_root, rel)
+    external_root, external_entry_rel = _escape_authorized_root(target)
+    token = secrets.token_urlsafe(24)
+    expires_at = time.time() + _ESCAPE_AUTH_TTL_SECONDS
+    record = {
+        "session_id": str(session_id or ""),
+        "workspace_root": str(workspace_root),
+        "surface_path": _normalize_workspace_rel_path(rel),
+        "external_root": str(external_root),
+        "external_entry_rel": external_entry_rel,
+        "surface_target": str(target),
+        "expires_at": expires_at,
+    }
+    with _ESCAPE_AUTH_LOCK:
+        _escape_prune_tokens()
+        _ESCAPE_AUTH_TOKENS[token] = record
+    return {
+        "token": token,
+        "path": record["surface_path"],
+        "is_dir": target.is_dir(),
+        "expires_at": expires_at,
+        "expires_in": _ESCAPE_AUTH_TTL_SECONDS,
+        "read_only": True,
+    }
+
+
+def _escape_authorization_record(workspace: Path, session_id: str, token: str) -> dict:
+    workspace_root = str(workspace.resolve())
+    token = str(token or "").strip()
+    if not token:
+        raise ValueError("Escape authorization token is required")
+    now = time.time()
+    with _ESCAPE_AUTH_LOCK:
+        _escape_prune_tokens(now)
+        record = dict(_ESCAPE_AUTH_TOKENS.get(token) or {})
+    if not record:
+        raise EscapeAuthorizationExpiredError("Escape authorization expired")
+    if str(record.get("session_id") or "") != str(session_id or ""):
+        raise EscapeAuthorizationExpiredError("Escape authorization expired")
+    if str(record.get("workspace_root") or "") != workspace_root:
+        raise EscapeAuthorizationExpiredError("Escape authorization expired")
+    surface_path = _normalize_workspace_rel_path(record.get("surface_path") or ".")
+    surface_target = str(record.get("surface_target") or "")
+    try:
+        _surface, current_target = _escape_surface_target(Path(workspace_root), surface_path)
+    except ValueError:
+        raise EscapeAuthorizationExpiredError("Escape authorization expired") from None
+    if str(current_target.resolve()) != surface_target:
+        raise EscapeAuthorizationExpiredError("Escape authorization expired")
+    if not current_target.exists() or _is_blocked_system_path(current_target):
+        raise EscapeAuthorizationExpiredError("Escape authorization expired")
+    return record
+
+
+def resolve_authorized_escape_request(workspace: Path, session_id: str, token: str, rel: str) -> dict:
+    record = _escape_authorization_record(workspace, session_id, token)
+    surface_path = _normalize_workspace_rel_path(record["surface_path"])
+    request_path = _normalize_workspace_rel_path(rel)
+    try:
+        requested_rel = str(PurePosixPath(request_path).relative_to(PurePosixPath(surface_path)))
+    except ValueError:
+        raise ValueError(f"Path traversal blocked: {rel}") from None
+    if not requested_rel:
+        requested_rel = "."
+    external_root = Path(str(record["external_root"]))
+    external_entry_rel = _normalize_workspace_rel_path(record.get("external_entry_rel") or ".")
+    if external_entry_rel == ".":
+        external_rel = requested_rel
+    elif requested_rel == ".":
+        external_rel = external_entry_rel
+    else:
+        external_rel = str(PurePosixPath(external_entry_rel) / PurePosixPath(requested_rel))
+    target = external_root / external_rel
+    return {
+        "record": record,
+        "workspace_root": Path(str(record["workspace_root"])),
+        "surface_path": surface_path,
+        "request_path": request_path,
+        "external_rel": external_rel,
+        "external_root": external_root,
+        "target": target,
+    }
+
+
+def list_authorized_escape_dir(workspace: Path, session_id: str, token: str, rel: str) -> dict:
+    resolved = resolve_authorized_escape_request(workspace, session_id, token, rel)
+    external_root = resolved["external_root"]
+    external_rel = resolved["external_rel"]
+    entries = list_dir(external_root, external_rel)
+    surface_path = resolved["surface_path"]
+    external_root_resolved = external_root.resolve()
+    for entry in entries:
+        entry["path"] = _escape_virtual_path(surface_path, entry.get("path") or ".")
+        entry["escape_read_only"] = True
+        target = entry.get("target")
+        if not target:
+            continue
+        try:
+            target_path = Path(str(target)).resolve()
+            target_rel = target_path.relative_to(external_root_resolved).as_posix()
+        except Exception:
+            entry.pop("target", None)
+            continue
+        entry["target"] = _escape_virtual_path(surface_path, target_rel)
+    return {
+        "path": resolved["request_path"],
+        "entries": entries,
+        "signature": dir_signature(external_root, external_rel, entries),
+        "virtual_root": surface_path,
+        "read_only": True,
+    }
+
+
+def read_authorized_escape_file_content(workspace: Path, session_id: str, token: str, rel: str) -> dict:
+    resolved = resolve_authorized_escape_request(workspace, session_id, token, rel)
+    payload = read_file_content(resolved["external_root"], resolved["external_rel"])
+    payload["path"] = resolved["request_path"]
+    payload["escape_read_only"] = True
+    return payload
+
+
+def raw_authorized_escape_target(workspace: Path, session_id: str, token: str, rel: str) -> tuple[Path, Path]:
+    resolved = resolve_authorized_escape_request(workspace, session_id, token, rel)
+    target = safe_resolve_ws(resolved["external_root"], resolved["external_rel"])
+    return resolved["external_root"], target
 
 
 # ── Git detection ──────────────────────────────────────────────────────────

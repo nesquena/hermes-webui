@@ -290,7 +290,8 @@ def _server_hermes_home() -> pathlib.Path:
     env_path = data.get("system", {}).get("env_path", "")
     if env_path:
         return pathlib.Path(env_path).parent
-    return pathlib.Path(os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(pathlib.Path.home() / ".hermes" / "webui-mvp-test")))
+    from tests._pytest_port import TEST_STATE_DIR
+    return pathlib.Path(os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(TEST_STATE_DIR)))
 
 
 def _server_reachable() -> bool:

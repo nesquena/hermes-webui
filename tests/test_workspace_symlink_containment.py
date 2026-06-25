@@ -1,6 +1,13 @@
 import pytest
 
-from api.workspace import list_dir, read_file_content, safe_resolve_ws
+from api.workspace import (
+    authorize_escape_target,
+    list_authorized_escape_dir,
+    list_dir,
+    read_file_content,
+    resolve_authorized_escape_request,
+    safe_resolve_ws,
+)
 
 
 def test_safe_resolve_blocks_external_symlink_directory(tmp_path):
@@ -11,13 +18,23 @@ def test_safe_resolve_blocks_external_symlink_directory(tmp_path):
     (outside / "secret.txt").write_text("outside", encoding="utf-8")
     (workspace / "escape").symlink_to(outside)
 
+    # The read/list gate still blocks navigation through the escape symlink.
     with pytest.raises(ValueError, match="Path traversal blocked"):
         safe_resolve_ws(workspace, "escape")
 
     with pytest.raises(ValueError, match="Path traversal blocked"):
         list_dir(workspace, "escape")
 
-    assert "escape" not in {entry["name"] for entry in list_dir(workspace, ".")}
+    # The escape symlink is now emitted (display-only) with target_outside_workspace=True.
+    entries = {e["name"]: e for e in list_dir(workspace, ".")}
+    assert "escape" in entries
+    assert entries["escape"]["type"] == "symlink"
+    assert entries["escape"]["target_outside_workspace"] is True
+    # #4581 hardening: display-only escape rows are uniformly is_dir=False — the
+    # target's real dir/file nature is target-derived metadata we don't disclose
+    # (the row is non-navigable regardless).
+    assert entries["escape"]["is_dir"] is False
+    assert "target" not in entries["escape"]
 
 
 def test_read_file_blocks_external_symlink_file(tmp_path):
@@ -28,10 +45,16 @@ def test_read_file_blocks_external_symlink_file(tmp_path):
     (outside / "secret.txt").write_text("outside", encoding="utf-8")
     (workspace / "secret-link.txt").symlink_to(outside / "secret.txt")
 
+    # The read gate still blocks reading through the escape symlink.
     with pytest.raises(ValueError, match="Path traversal blocked"):
         read_file_content(workspace, "secret-link.txt")
 
-    assert "secret-link.txt" not in {entry["name"] for entry in list_dir(workspace, ".")}
+    # The escape symlink is now emitted (display-only) with target_outside_workspace=True.
+    entries = {e["name"]: e for e in list_dir(workspace, ".")}
+    assert "secret-link.txt" in entries
+    assert entries["secret-link.txt"]["type"] == "symlink"
+    assert entries["secret-link.txt"]["target_outside_workspace"] is True
+    assert entries["secret-link.txt"]["is_dir"] is False
 
 
 def test_internal_symlink_still_resolves_within_workspace(tmp_path):
@@ -51,6 +74,98 @@ def test_internal_symlink_still_resolves_within_workspace(tmp_path):
     if not w._DIR_FD_OK:
         pytest.skip("internal symlink listing is platform-dependent without dir_fd")
     assert "inside-link.txt" in {entry["name"] for entry in list_dir(workspace, ".")}
+
+
+def test_authorized_escape_request_reanchors_descendants(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    (outside / "nested").mkdir(parents=True)
+    (outside / "nested" / "inside.txt").write_text("inside", encoding="utf-8")
+    (workspace / "escape").symlink_to(outside)
+
+    grant = authorize_escape_target(workspace, "sess-1", "escape")
+    resolved = resolve_authorized_escape_request(
+        workspace,
+        "sess-1",
+        grant["token"],
+        "escape/nested/inside.txt",
+    )
+
+    assert resolved["surface_path"] == "escape"
+    assert resolved["external_rel"] == "nested/inside.txt"
+    assert resolved["target"] == outside / "nested" / "inside.txt"
+
+
+def test_authorized_escape_request_expires_when_surface_target_changes(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside_a = tmp_path / "outside-a"
+    outside_b = tmp_path / "outside-b"
+    workspace.mkdir()
+    outside_a.mkdir()
+    outside_b.mkdir()
+    escape = workspace / "escape"
+    escape.symlink_to(outside_a)
+
+    grant = authorize_escape_target(workspace, "sess-1", "escape")
+
+    escape.unlink()
+    escape.symlink_to(outside_b)
+
+    with pytest.raises(ValueError, match="expired"):
+        resolve_authorized_escape_request(workspace, "sess-1", grant["token"], "escape")
+
+
+def test_authorized_escape_request_keeps_other_live_grants(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside_a = tmp_path / "outside-a"
+    outside_b = tmp_path / "outside-b"
+    workspace.mkdir()
+    outside_a.mkdir()
+    outside_b.mkdir()
+    (outside_a / "alpha.txt").write_text("alpha", encoding="utf-8")
+    (outside_b / "beta.txt").write_text("beta", encoding="utf-8")
+    (workspace / "escape-a").symlink_to(outside_a)
+    (workspace / "escape-b").symlink_to(outside_b)
+
+    grant_a = authorize_escape_target(workspace, "sess-1", "escape-a")
+    grant_b = authorize_escape_target(workspace, "sess-1", "escape-b")
+
+    resolved_a = resolve_authorized_escape_request(
+        workspace,
+        "sess-1",
+        grant_a["token"],
+        "escape-a/alpha.txt",
+    )
+    resolved_b = resolve_authorized_escape_request(
+        workspace,
+        "sess-1",
+        grant_b["token"],
+        "escape-b/beta.txt",
+    )
+
+    assert resolved_a["target"] == outside_a / "alpha.txt"
+    assert resolved_b["target"] == outside_b / "beta.txt"
+
+
+def test_authorized_listing_keeps_nested_child_escape_display_only(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    second_outside = tmp_path / "second-outside"
+    workspace.mkdir()
+    outside.mkdir()
+    second_outside.mkdir()
+    (workspace / "escape").symlink_to(outside)
+    (outside / "nested-escape").symlink_to(second_outside)
+
+    grant = authorize_escape_target(workspace, "sess-1", "escape")
+    payload = list_authorized_escape_dir(workspace, "sess-1", grant["token"], "escape")
+    entries = {entry["name"]: entry for entry in payload["entries"]}
+
+    assert entries["nested-escape"]["path"] == "escape/nested-escape"
+    assert entries["nested-escape"]["target_outside_workspace"] is True
+    assert entries["nested-escape"]["escape_read_only"] is True
+    assert "target" not in entries["nested-escape"]
 
 
 # ── TOCTOU hardening (#3398): a path that passes safe_resolve_ws() but is then
@@ -230,7 +345,9 @@ def test_list_read_create_work_on_no_dir_fd_fallback(tmp_path, monkeypatch):
     assert "a.txt" in names
     if w._DIR_FD_OK:
         assert "internal" in names          # legit internal symlink listed
-    assert "escape" not in names        # external symlink hidden
+    assert "escape" in names            # external symlink emitted (display-only)
+    escape_entry = next(e for e in w.list_dir(workspace, ".") if e["name"] == "escape")
+    assert escape_entry["target_outside_workspace"] is True
     assert w.read_file_content(workspace, "a.txt")["content"] == "hi"
 
     fd = w.open_anchored_create_fd(workspace, workspace / "new" / "f.txt")
@@ -277,3 +394,84 @@ def test_read_blocked_when_workspace_root_raced_to_symlink(tmp_path):
             pass  # refused — correct
     finally:
         os.open = real_open
+
+
+# ── #4510: escape-target symlinks are now emitted as display-only rows ──────
+#    The escape filter was widened (not removed): symlinks whose resolved target
+#    sits outside the workspace root are now emitted with
+#    target_outside_workspace=True instead of being silently dropped. The
+#    read/list gate (safe_resolve_ws / open_anchored_fd) is unchanged and still
+#    blocks navigation through them. ──────────────────────────────────────────
+
+
+def test_list_dir_in_workspace_symlink_shape(tmp_path):
+    """In-workspace symlinks emit type='symlink' with target_outside_workspace=False."""
+    import api.workspace as w
+
+    if not w._DIR_FD_OK:
+        pytest.skip("symlink listing requires dir_fd support")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "data.txt").write_text("hello", encoding="utf-8")
+    (workspace / "link.txt").symlink_to(workspace / "data.txt")
+
+    entries = {e["name"]: e for e in w.list_dir(workspace, ".")}
+    assert "link.txt" in entries
+    assert entries["link.txt"]["type"] == "symlink"
+    assert entries["link.txt"]["target_outside_workspace"] is False
+    assert entries["link.txt"]["is_dir"] is False
+    assert entries["link.txt"]["target"] == str((workspace / "data.txt").resolve())
+
+
+def test_list_dir_outside_workspace_symlink_emitted_with_flag(tmp_path):
+    """Escape-target symlinks are emitted with target_outside_workspace=True."""
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (outside / "file.txt").write_text("external", encoding="utf-8")
+    (workspace / "ext-link.txt").symlink_to(outside / "file.txt")
+
+    entries = {e["name"]: e for e in list_dir(workspace, ".")}
+    assert "ext-link.txt" in entries
+    assert entries["ext-link.txt"]["type"] == "symlink"
+    assert entries["ext-link.txt"]["target_outside_workspace"] is True
+    assert entries["ext-link.txt"]["is_dir"] is False
+    # #4581 hardening: a display-only escape-target row must NOT disclose where it
+    # points — no resolved outside path, no target-derived size, no target-derived
+    # metadata. Only the link name/path + the display-only flag are emitted.
+    assert "target" not in entries["ext-link.txt"]
+    assert "size" not in entries["ext-link.txt"]
+
+
+def test_list_dir_external_symlink_blocked_system_path_unchanged(tmp_path):
+    """Symlinks to blocked system paths (/etc, /usr) are still filtered out."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "etc-link").symlink_to("/etc")
+    (workspace / "usr-link").symlink_to("/usr")
+
+    names = {e["name"] for e in list_dir(workspace, ".")}
+    assert "etc-link" not in names
+    assert "usr-link" not in names
+
+
+def test_list_dir_escape_symlink_read_still_blocked(tmp_path):
+    """Listing shows the escape symlink (display-only) but read_file_content
+    on the same target still raises ValueError — proving the read gate is intact."""
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    (workspace / "escape.txt").symlink_to(outside / "secret.txt")
+
+    # Listing emits the entry with target_outside_workspace=True
+    entries = {e["name"]: e for e in list_dir(workspace, ".")}
+    assert "escape.txt" in entries
+    assert entries["escape.txt"]["target_outside_workspace"] is True
+
+    # But reading through it is still blocked
+    with pytest.raises(ValueError, match="Path traversal blocked"):
+        read_file_content(workspace, "escape.txt")

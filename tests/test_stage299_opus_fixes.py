@@ -42,7 +42,7 @@ def test_count_files_has_iteration_cap():
 
 def test_page_files_has_iteration_cap():
     src = _read_source()
-    start = src.find("def _llm_wiki_page_files(")
+    start = src.find("def _llm_wiki_page_files_uncached(")
     end = src.find("\ndef ", start + 1)
     body = src[start:end]
     assert "_LLM_WIKI_MAX_FILES" in body

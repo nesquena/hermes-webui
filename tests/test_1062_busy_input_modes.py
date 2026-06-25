@@ -95,20 +95,20 @@ class TestSlashCommandHandlers:
 
     def test_cmd_steer_delegates_to_try_steer(self):
         """/steer delegates to _trySteer which calls /api/chat/steer with
-        a queue+cancel fallback. The fallback path is exercised by tests
+        a non-destructive fallback. The fallback path is exercised by tests
         in test_real_steer.py — this test just pins the delegation."""
         idx = COMMANDS_JS.find("async function cmdSteer(")
         assert idx >= 0
         body = COMMANDS_JS[idx:idx + 800]
-        # cmdSteer now delegates to _trySteer; the fallback (queueSessionMessage
-        # + cancelStream) lives inside _trySteer.
+        # cmdSteer delegates to _trySteer; fallback must not queue+cancel.
         assert "_trySteer" in body, "cmdSteer must call _trySteer to use the real /api/chat/steer endpoint"
-        # The shared helper must contain the fallback path
+        # The shared helper must contain the non-destructive fallback path.
         helper_idx = COMMANDS_JS.find("async function _trySteer(")
         assert helper_idx >= 0, "_trySteer helper must exist"
         helper_body = COMMANDS_JS[helper_idx:helper_idx + 2000]
-        assert "queueSessionMessage" in helper_body
-        assert "cancelStream" in helper_body
+        assert "queueSessionMessage" not in helper_body
+        assert "cancelStream" not in helper_body
+        assert "inp.value" in helper_body
         # Toast should differ from interrupt to signal it's the steer path
         assert "cmd_steer_fallback" in helper_body or "steer_fallback" in helper_body
 
@@ -116,14 +116,13 @@ class TestSlashCommandHandlers:
 # ── send() busy branch ───────────────────────────────────────────────────
 
     def test_slash_commands_clear_pending_files(self):
-        """All three busy command handlers must clear S.pendingFiles (directly
-        or via _trySteer) after enqueuing, so staged files are not duplicated.
+        """Queue/interrupt clear S.pendingFiles after enqueuing; steer failure
+        preserves staged files so the user can choose the next explicit action.
 
         cmdQueue and cmdInterrupt call queueSessionMessage themselves and clear
-        S.pendingFiles directly.  cmdSteer delegates to _trySteer.  The fallback/interrupt path clears
-        S.pendingFiles inside _trySteer; the success path returns early and
-        send() handles the post-await clear.  Either way files are not
-        duplicated — we verify by checking _trySteer body for the clearing.
+        S.pendingFiles directly. cmdSteer delegates to _trySteer. _trySteer no
+        longer clears files on failure because it no longer falls back to
+        cancel-and-queue behavior.
         """
         # cmdQueue and cmdInterrupt clear pendingFiles directly
         for fn_name in ("cmdQueue", "cmdInterrupt"):
@@ -136,17 +135,13 @@ class TestSlashCommandHandlers:
             assert "renderTray()" in body, (
                 f"{fn_name} must call renderTray() after clearing pendingFiles"
             )
-        # cmdSteer delegates to _trySteer; that helper clears pendingFiles
+        # cmdSteer delegates to _trySteer; the helper must not clear files in
+        # the fallback path because the draft is restored instead of queued.
         idx_try = COMMANDS_JS.find("function _trySteer(")
         assert idx_try >= 0, "_trySteer not found"
         try_body = COMMANDS_JS[idx_try:idx_try + 1600]
-        assert "S.pendingFiles=[]" in try_body, (
-            "_trySteer must clear S.pendingFiles in its fallback path — "
-            "without this, files are lost on steer→interrupt fallback"
-        )
-        assert "renderTray()" in try_body, (
-            "_trySteer must call renderTray() after clearing pendingFiles"
-        )
+        assert "S.pendingFiles=[]" not in try_body
+        assert "renderTray()" in try_body
 
 
 class TestBusySendButton:
@@ -229,27 +224,41 @@ class TestBusySendButton:
         )
 
     def test_send_refreshes_primary_button_after_chat_start_stream_id(self):
-        """send() must call updateSendBtn in the chat/start try block after assigning streamId.
+        """send() must call updateSendBtn after streamId is assigned and before attachLiveStream.
 
-        setBusy(true) already ran updateSendBtn while activeStreamId was still null, so the
-        Stop affordance did not appear until something else (e.g. typing) called
-        updateSendBtn again.
+        setBusy(true) runs before the API request with activeStreamId still null.  The
+        Stop affordance must be refreshed as soon as we have streamId so it cannot be
+        skipped by optional post-start UI failures.
         """
         send_start = MESSAGES_JS.find("async function send(")
         assert send_start >= 0, "send() not found in messages.js"
         send_end = MESSAGES_JS.find("const LIVE_STREAMS={}", send_start)
         assert send_end > send_start, "could not find end of send() body"
         send_body = MESSAGES_JS[send_start:send_end]
+        api_idx = send_body.find("const startData=await api('/api/chat/start'")
+        assert api_idx >= 0, "send() should issue /api/chat/start"
+        catch_idx = send_body.find("}catch(e){", api_idx)
+        assert catch_idx >= 0, "send() should have API error catch after /api/chat/start"
         assign = "S.activeStreamId = streamId;"
         apos = send_body.find(assign)
         assert apos >= 0, "send() must assign S.activeStreamId from startData"
-        after_assign = send_body[apos:]
-        end_try = after_assign.find("  }catch(e){")
-        assert end_try > 0, "send() outer try/catch not found after stream id assign"
-        try_after_assign = after_assign[:end_try]
-        assert "updateSendBtn" in try_after_assign, (
-            "send() must call updateSendBtn() in the chat/start try block after assigning "
-            "streamId so the primary button switches to Stop without waiting for composer input"
+        assert apos > catch_idx, (
+            "send() must assign S.activeStreamId only after /api/chat/start succeeds"
+        )
+        update_idx = send_body.find("updateSendBtn();", apos)
+        assert update_idx >= 0, "send() must call updateSendBtn() after assigning streamId"
+        assert update_idx > apos, (
+            "send() should call updateSendBtn() after S.activeStreamId is assigned"
+        )
+        attach_idx = send_body.find("attachLiveStream(activeSid, streamId, uploadedNames);")
+        assert attach_idx > update_idx, (
+            "send() should refresh primary button before opening SSE stream attach"
+        )
+        optional_idx = send_body.find("_runOptionalPostStartUiStep('post-start ui/bookkeeping'", apos)
+        assert optional_idx >= 0, "send() should run optional post-start UI/bookkeeping"
+        assert optional_idx > update_idx, (
+            "send() must call updateSendBtn() before entering optional post-start helper so optional failures "
+            "cannot skip it."
         )
 
 
@@ -282,9 +291,25 @@ class TestSendBusyBranchDispatch:
             "after setBusy(false) picks up the queued message"
         )
 
+    def test_send_busy_steer_preserves_files_when_steer_not_delivered(self):
+        """Busy-mode steer must only clear staged files after delivered steer.
+
+        A failed steer restores the draft and leaves the active stream running,
+        so staged files must remain available for the user's next explicit
+        Queue or Interrupt action.
+        """
+        send_idx = MESSAGES_JS.find("async function send(")
+        assert send_idx >= 0, "send() not found"
+        steer_idx = MESSAGES_JS.find("busyMode==='steer'", send_idx)
+        assert steer_idx >= 0, "busy steer branch not found"
+        branch = MESSAGES_JS[steer_idx:steer_idx + 900]
+        assert "const _steerDelivered=await _trySteer" in branch
+        assert "if(_steerDelivered){S.pendingFiles=[];renderTray();}" in branch
+        assert branch.index("const _steerDelivered=await _trySteer") < branch.index("if(_steerDelivered){S.pendingFiles=[];renderTray();}")
+
 
     def test_slash_commands_intercepted_before_busymode_routing(self):
-        """The three busy-control slash commands (/steer /interrupt /queue) must be
+        """Busy-control slash commands (/steer /interrupt /queue /yolo) must be
         intercepted at the TOP of the busy block — before the busyMode routing — so
         they execute immediately while the agent is running.
 
@@ -298,22 +323,26 @@ class TestSendBusyBranchDispatch:
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
         assert busy_start >= 0, "busy block not found"
         # The intercept must appear BEFORE the busyMode assignment
-        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue'", busy_start)
+        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
         assert intercept_idx >= 0, (
-            "send() must intercept /steer /interrupt /queue before the busyMode "
+            "send() must intercept /steer /interrupt /queue /terminal /goal /yolo before the busyMode "
             "routing block — otherwise they queue instead of executing immediately"
         )
         assert intercept_idx < busymode_idx, (
             "The slash-command intercept must come BEFORE the busyMode routing "
             "so /steer executes while the agent is running, not after the turn ends"
         )
+        intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
+        assert "'yolo'" in intercept_block, (
+            "The busy-mode slash-command allowlist must include /yolo"
+        )
 
     def test_steer_intercept_calls_handler_directly(self):
         """The busy-intercept must dispatch via _bc.fn(_pc.args), not queue the text."""
         send_idx = MESSAGES_JS.find("async function send(")
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
-        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue'", busy_start)
+        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         assert intercept_idx >= 0
         # Get the intercept block (up to the next busyMode assignment)
         busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
@@ -335,7 +364,7 @@ class TestSendBusyBranchDispatch:
         """
         send_idx = MESSAGES_JS.find("async function send(")
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
-        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue'", busy_start)
+        intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
         intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
         clear_idx = intercept_block.find("$('msg').value=''")

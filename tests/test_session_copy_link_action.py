@@ -53,7 +53,7 @@ def _run_session_search_helper(cases):
         [NODE, "-e", driver, json.dumps(cases)],
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)

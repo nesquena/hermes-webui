@@ -323,3 +323,229 @@ def test_cron_worker_does_not_silently_fall_back_on_profile_context_failure():
         "cron subprocess target appears to catch profile-context setup before "
         "entering the context; do not fall back to an unpinned run_job call."
     )
+
+
+def test_streaming_cronjob_wrapper_uses_profile_context_only_for_tool_call(tmp_path, monkeypatch):
+    """The chat cronjob fix must use the cron profile context at call time.
+
+    Holding cron.jobs module globals for an entire streaming run would race with
+    other profiles. The wrapper should instead enter the existing locked cron
+    context only while the cronjob tool handler itself executes.
+    """
+    import types
+
+    from api import profiles as p
+    from api import streaming as st
+
+    profile_home = tmp_path / "home" / "profiles" / "ops"
+    events = []
+
+    class Ctx:
+        def __init__(self, home):
+            self.home = str(home)
+
+        def __enter__(self):
+            events.append(("enter", self.home))
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append(("exit", self.home))
+            return False
+
+    def original_handler(args, **kwargs):
+        events.append(("handler", args.get("action"), st._STREAMING_CRON_PROFILE_HOME.get()))
+        return "ok"
+
+    class Entry:
+        name = "cronjob"
+        toolset = "cronjob"
+        schema = {"name": "cronjob"}
+        handler = staticmethod(original_handler)
+        check_fn = None
+        requires_env = []
+        is_async = False
+        description = ""
+        emoji = "⏰"
+        max_result_size_chars = None
+        dynamic_schema_overrides = None
+
+    entry = Entry()
+
+    class Registry:
+        def get_entry(self, name):
+            assert name == "cronjob"
+            return entry
+
+        def register(self, **kwargs):
+            events.append(("register", kwargs["name"]))
+            entry.handler = kwargs["handler"]
+
+    tools_pkg = types.ModuleType("tools")
+    registry_mod = types.ModuleType("tools.registry")
+    registry_mod.__dict__["registry"] = Registry()
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.registry", registry_mod)
+    monkeypatch.setattr(st, "_STREAMING_CRONJOB_WRAPPER_INSTALLED", False)
+    monkeypatch.setattr(p, "cron_profile_context_for_home", Ctx)
+
+    st._install_streaming_cronjob_profile_wrapper()
+    assert events == [("register", "cronjob")]
+
+    token = st._STREAMING_CRON_PROFILE_HOME.set(str(profile_home))
+    try:
+        assert entry.handler({"action": "list"}, task_id="t1") == "ok"
+    finally:
+        st._STREAMING_CRON_PROFILE_HOME.reset(token)
+
+    assert events == [
+        ("register", "cronjob"),
+        ("enter", str(profile_home)),
+        ("handler", "list", str(profile_home)),
+        ("exit", str(profile_home)),
+    ]
+
+
+def test_streaming_cronjob_wrapper_context_survives_threadpool_context_copy(tmp_path, monkeypatch):
+    """Lock the cross-thread contextvar contract used by agent tool dispatch.
+
+    WebUI sets the active profile on the streaming thread, then the Hermes agent
+    dispatches sync tools on a ThreadPoolExecutor worker under a copied
+    contextvars context. The cronjob wrapper must still see the profile context
+    on that worker or it silently falls back to the default profile.
+    """
+    import concurrent.futures
+    import contextvars
+    import types
+
+    from api import profiles as p
+    from api import streaming as st
+
+    profile_home = tmp_path / "home" / "profiles" / "ops"
+    events = []
+
+    class Ctx:
+        def __init__(self, home):
+            self.home = str(home)
+
+        def __enter__(self):
+            events.append(("enter", self.home))
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append(("exit", self.home))
+            return False
+
+    def original_handler(args, **kwargs):
+        events.append(("handler", args.get("action"), st._STREAMING_CRON_PROFILE_HOME.get()))
+        return "ok"
+
+    class Entry:
+        name = "cronjob"
+        toolset = "cronjob"
+        schema = {"name": "cronjob"}
+        handler = staticmethod(original_handler)
+        check_fn = None
+        requires_env = []
+        is_async = False
+        description = ""
+        emoji = "⏰"
+        max_result_size_chars = None
+        dynamic_schema_overrides = None
+
+    entry = Entry()
+
+    class Registry:
+        def get_entry(self, name):
+            assert name == "cronjob"
+            return entry
+
+        def register(self, **kwargs):
+            events.append(("register", kwargs["name"]))
+            entry.handler = kwargs["handler"]
+
+    registry_mod = types.ModuleType("tools.registry")
+    registry_mod.__dict__["registry"] = Registry()
+    monkeypatch.setitem(sys.modules, "tools.registry", registry_mod)
+    monkeypatch.setattr(st, "_STREAMING_CRONJOB_WRAPPER_INSTALLED", False)
+    monkeypatch.setattr(p, "cron_profile_context_for_home", Ctx)
+
+    st._install_streaming_cronjob_profile_wrapper()
+    token = st._STREAMING_CRON_PROFILE_HOME.set(str(profile_home))
+    try:
+        copied_context = contextvars.copy_context()
+    finally:
+        st._STREAMING_CRON_PROFILE_HOME.reset(token)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(copied_context.run, entry.handler, {"action": "list"})
+        assert future.result(timeout=5) == "ok"
+
+    assert events == [
+        ("register", "cronjob"),
+        ("enter", str(profile_home)),
+        ("handler", "list", str(profile_home)),
+        ("exit", str(profile_home)),
+    ]
+
+
+def test_streaming_cronjob_wrapper_leaves_calls_unwrapped_without_streaming_profile(monkeypatch):
+    """CLI/default calls through the registered cronjob handler are unchanged."""
+    import types
+
+    from api import streaming as st
+
+    events = []
+
+    def original_handler(args, **kwargs):
+        events.append(("handler", args.get("action")))
+        return "ok"
+
+    class Entry:
+        name = "cronjob"
+        toolset = "cronjob"
+        schema = {"name": "cronjob"}
+        handler = staticmethod(original_handler)
+        check_fn = None
+        requires_env = []
+        is_async = False
+        description = ""
+        emoji = "⏰"
+        max_result_size_chars = None
+        dynamic_schema_overrides = None
+
+    entry = Entry()
+
+    class Registry:
+        def get_entry(self, name):
+            assert name == "cronjob"
+            return entry
+
+        def register(self, **kwargs):
+            entry.handler = kwargs["handler"]
+
+    registry_mod = types.ModuleType("tools.registry")
+    registry_mod.__dict__["registry"] = Registry()
+    monkeypatch.setitem(sys.modules, "tools.registry", registry_mod)
+    monkeypatch.setattr(st, "_STREAMING_CRONJOB_WRAPPER_INSTALLED", False)
+
+    st._install_streaming_cronjob_profile_wrapper()
+
+    assert entry.handler({"action": "list"}) == "ok"
+    assert events == [("handler", "list")]
+
+
+def test_streaming_profile_home_mutation_avoids_long_lived_cron_cache_patch():
+    """Guard the streaming integration seam for issue #4580.
+
+    Streaming still mutates process env briefly for legacy fallbacks, but cron
+    path caches must be scoped to the cronjob tool-call boundary via the
+    wrapper/contextvar path — not patched for the full agent turn.
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "api" / "streaming.py").read_text(encoding="utf-8")
+    assert "_install_streaming_cronjob_profile_wrapper()" in src
+    assert "_STREAMING_CRON_PROFILE_HOME.set(_profile_home)" in src
+    assert "_STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)" in src
+    assert "def _patch_streaming_profile_module_caches" not in src
+    assert "old_profile_module_cache_snapshot" not in src

@@ -81,8 +81,15 @@ class TestComposerPlaceholderProfile:
         # Find the function block (starts with 'async function switchToProfile')
         m = re.search(r'async function switchToProfile\s*\(', src)
         assert m, "switchToProfile must be an async function"
-        # Get everything after the function declaration (enough context)
-        after = src[m.start():m.start()+5000]
+        # Slice the WHOLE function body — bounded by the next top-level function
+        # (openProfileCreate) — rather than a fixed char window. The profile-switch
+        # loading-skeleton + race-guard work (#4671) grew switchToProfile past every
+        # fixed window we tried (5000 -> 6500 -> still short at offset ~6609), so anchor
+        # on the next-function boundary instead so this can't drift again. The
+        # applyBotName() call still fires on every switch; this is purely about the test
+        # reading the whole body.
+        end = src.find("function openProfileCreate(", m.start())
+        after = src[m.start():end] if end != -1 else src[m.start():]
         assert "applyBotName" in after, \
             "switchToProfile must call applyBotName after profile switch"
 

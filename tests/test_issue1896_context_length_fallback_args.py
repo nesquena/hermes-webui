@@ -209,14 +209,18 @@ def test_routes_session_load_fallback_passes_config_overrides():
     # The route block may delegate the resolver details to a helper, but the
     # session-load path must still call the helper and that helper must preserve
     # the same kwargs as the streaming.py fix.
-    block_end = ROUTES_PY.find("if _fb_cl:", idx)
-    assert block_end != -1, "_fb_cl assignment not found after fallback comment"
+    block_end = ROUTES_PY.find("_session_tool_calls =", idx)
+    assert block_end != -1, "session-load fallback block end not found after fallback comment"
     block = ROUTES_PY[idx:block_end]
     helper_start = ROUTES_PY.find("def _resolve_context_length_for_session_model")
     assert helper_start != -1, "context-length resolver helper not found"
     helper_end = ROUTES_PY.find("\ndef ", helper_start + 1)
     helper = ROUTES_PY[helper_start:helper_end if helper_end != -1 else len(ROUTES_PY)]
     assert "_resolve_context_length_for_session_model" in block
+    assert "_should_accept_session_context_length_refresh" in block, (
+        "session-load fallback must gate lower-confidence recomputes before "
+        "replacing persisted context metadata. See #4248."
+    )
     # Same kwargs as the streaming.py fix.
     assert "config_context_length=" in helper, (
         "session-load fallback in api/routes.py must pass config_context_length= "

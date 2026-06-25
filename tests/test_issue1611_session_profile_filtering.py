@@ -14,9 +14,20 @@ all_profiles=1 opt-in path. End-to-end HTTP-level tests live separately under
 tests/test_sessions_endpoint.py if/when added.
 """
 
+import json
+import os
+import sqlite3
+import time
+from collections import OrderedDict
+from types import SimpleNamespace
+from unittest.mock import patch
+import urllib.request
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+
+from tests._pytest_port import BASE
 
 
 # ── _profiles_match helper ─────────────────────────────────────────────────
@@ -95,6 +106,22 @@ def test_all_profiles_query_flag_false_values():
         assert _all_profiles_query_flag(u) is False, f"path {path!r} should be false"
 
 
+def test_all_profiles_enabled_in_normal_mode(monkeypatch):
+    """The aggregate toggle still works outside isolated-profile mode."""
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: False)
+    assert routes._all_profiles_enabled(urlparse('/api/sessions?all_profiles=1')) is True
+
+
+def test_all_profiles_disabled_in_isolated_mode(monkeypatch):
+    """An isolated deployment must ignore all_profiles=1 aggregate requests."""
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: True)
+    assert routes._all_profiles_enabled(urlparse('/api/sessions?all_profiles=1')) is False
+
+
 # ── No client-side CLI bypass ──────────────────────────────────────────────
 
 
@@ -131,15 +158,31 @@ def test_static_sessions_js_uses_all_profiles_query_when_toggle_on():
     repo_root = Path(__file__).parent.parent
     src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
 
-    assert "_showAllProfiles ? '?all_profiles=1' : ''" in src, (
-        "Expected fetch path to flip on the toggle state"
+    assert "if(_showAllProfiles) qs.set('all_profiles','1');" in src, (
+        "Expected session-list fetch query to flip on the all-profiles toggle state"
     )
-    assert "api('/api/sessions' + allProfilesQS,{timeoutToast:false})" in src, (
+    assert "const projectQS = _showAllProfiles ? '?all_profiles=1' : '';" in src, (
+        "Expected project fetch path to flip on the all-profiles toggle state"
+    )
+    assert "api('/api/sessions' + sessionListQS" in src, (
         "Expected /api/sessions fetch to use the variant query"
     )
-    assert "api('/api/projects' + allProfilesQS,{timeoutToast:false})" in src, (
+    assert "api('/api/projects' + projectQS" in src, (
         "Expected /api/projects fetch to use the variant query"
     )
+
+
+def test_static_sessions_js_marks_all_profiles_imports_with_profile():
+    """All-profiles row opens must opt into cross-profile import explicitly."""
+    from pathlib import Path
+
+    repo_root = Path(__file__).parent.parent
+    src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
+
+    assert "function _externalImportPayload(session)" in src
+    assert "payload.all_profiles = true;" in src
+    assert "payload.profile = session.profile;" in src
+    assert "JSON.stringify(_externalImportPayload(s))" in src
 
 
 # ── SHOULD-FIX #2: profile filter must run BEFORE messaging-source dedupe ──
@@ -208,6 +251,419 @@ def test_static_sessions_js_trusts_server_profile_scoping():
         "Client otherProfileCount must come from server, not strict-equality fallback"
     )
 
+
+# ── Direct session access must also honor active profile ───────────────────
+
+
+class _ProfileScopedSession:
+    def __init__(self, session_id="foreign_001", profile="other"):
+        self.session_id = session_id
+        self.profile = profile
+        self.active_stream_id = None
+        self.messages = [{"role": "user", "content": "foreign profile secret"}]
+        self.tool_calls = []
+        self.pending_user_message = None
+        self.pending_attachments = []
+        self.pending_started_at = None
+        self.context_length = 0
+        self.threshold_tokens = 0
+        self.last_prompt_tokens = 0
+
+    def compact(self, *args, **kwargs):
+        return {
+            "session_id": self.session_id,
+            "title": "Foreign session",
+            "profile": self.profile,
+            "workspace": "/tmp/foreign",
+            "model": "gpt-test",
+            "message_count": len(self.messages),
+        }
+
+
+def test_get_session_rejects_session_from_inactive_profile():
+    """A known session_id from another profile must not bypass /api/sessions scoping.
+
+    /api/sessions already filters rows by active profile.  The detail endpoint
+    must apply the same check after loading the sidecar; otherwise a stale URL or
+    guessed id can disclose another profile's transcript.
+    """
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    parsed = urlparse("/api/session?session_id=foreign_001&messages=1&resolve_model=0")
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", return_value=_ProfileScopedSession()), \
+         patch("api.routes._clear_stale_stream_state", return_value=False), \
+         patch("api.routes._lookup_cli_session_metadata", return_value={}), \
+         patch("api.routes.get_state_db_session_messages", return_value=[]), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(headers={"Cookie": "hermes_profile=default"}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert "json" not in captured, "foreign-profile transcript must not be returned"
+
+
+def test_get_session_rejects_metadata_only_session_from_inactive_profile():
+    """Metadata-only loads must not bypass the active-profile boundary."""
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    parsed = urlparse("/api/session?session_id=foreign_001&messages=0&resolve_model=0")
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", return_value=_ProfileScopedSession()), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(headers={"Cookie": "hermes_profile=default"}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert "json" not in captured, "foreign-profile metadata must not be returned"
+
+
+def test_get_session_rejects_cookieless_session_from_inactive_profile():
+    """Cookieless requests must still enforce the active-profile boundary."""
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    parsed = urlparse("/api/session?session_id=foreign_001&messages=0&resolve_model=0")
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", return_value=_ProfileScopedSession()), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(headers={}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert "json" not in captured, "cookieless foreign-profile metadata must not be returned"
+
+
+def test_get_session_rejects_cli_session_from_inactive_profile():
+    """CLI fallback responses must use the same active-profile boundary."""
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    parsed = urlparse("/api/session?session_id=cli_foreign&messages=1&resolve_model=0")
+    with patch("api.routes._get_active_profile_name", return_value="default"), \
+         patch("api.routes.get_session", side_effect=KeyError), \
+         patch("api.routes.SESSION_INDEX_FILE", SimpleNamespace(exists=lambda: False)), \
+         patch("api.routes._lookup_cli_session_metadata", return_value={"profile": "other"}), \
+         patch("api.routes.get_cli_session_messages", return_value=[{"role": "user", "content": "foreign profile secret"}]), \
+         patch("api.routes.bad", side_effect=fake_bad), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes.handle_get(SimpleNamespace(headers={"Cookie": "hermes_profile=default"}), parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert "json" not in captured, "foreign-profile CLI transcript must not be returned"
+
+
+# ── Direct session export must also honor active profile ─────────────────
+
+
+class _ExportCaptureHandler:
+    def __init__(self):
+        self.headers = {}
+        self.status = None
+        self.sent_headers = []
+        self.ended = False
+        self.wfile = SimpleNamespace(write=self._write)
+        self.body = b""
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.sent_headers.append((name, value))
+
+    def end_headers(self):
+        self.ended = True
+
+    def _write(self, data):
+        self.body += data
+
+
+def test_session_export_rejects_session_from_inactive_profile():
+    """A known session_id from another profile must not bypass /api/sessions scoping.
+
+    /api/sessions hides foreign-profile rows by default, but the export endpoint
+    loaded directly by id and serialized the sidecar. It must apply the same
+    active-profile check before writing the JSON attachment.
+    """
+    import api.routes as routes
+
+    captured = {}
+
+    def fake_bad(_handler, message, status=400, **_kwargs):
+        captured["bad"] = {"message": message, "status": status}
+        return captured["bad"]
+
+    foreign = SimpleNamespace(
+        session_id="foreign_export_001",
+        profile="other",
+        messages=[{"role": "user", "content": "foreign profile secret"}],
+    )
+
+    handler = _ExportCaptureHandler()
+    parsed = urlparse("/api/session/export?session_id=foreign_export_001")
+    with patch("api.routes.get_session", return_value=foreign), \
+         patch("api.routes.get_active_profile_name", return_value="default"), \
+         patch("api.routes.bad", side_effect=fake_bad):
+        routes._handle_session_export(handler, parsed)
+
+    assert captured.get("bad", {}).get("status") == 404
+    assert handler.status is None
+    assert handler.body == b""
+
+
+def test_session_export_allows_session_from_active_profile():
+    """Same-profile exports still stream the redacted JSON attachment."""
+    import api.routes as routes
+
+    active = SimpleNamespace(
+        session_id="active_export_001",
+        profile="default",
+        messages=[{"role": "user", "content": "same profile content"}],
+    )
+
+    handler = _ExportCaptureHandler()
+    parsed = urlparse("/api/session/export?session_id=active_export_001")
+    with patch("api.routes.get_session", return_value=active), \
+         patch("api.routes.get_active_profile_name", return_value="default"), \
+         patch("api.routes.redact_session_data", side_effect=lambda data: data):
+        routes._handle_session_export(handler, parsed)
+
+    assert handler.status == 200
+    assert handler.ended is True
+    assert b"same profile content" in handler.body
+    assert ("Cache-Control", "no-store") in handler.sent_headers
+
+
+# ── Imported sessions must be stamped with the active profile ───────────────
+
+
+class _ImportedSessionStub:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+        self.session_id = kwargs.get("session_id") or "imported_profile_001"
+        self.profile = kwargs.get("profile")
+        self.messages = kwargs.get("messages") or []
+        self.pinned = False
+
+    def save(self):
+        self.saved = True
+
+    def compact(self):
+        return {
+            "session_id": self.session_id,
+            "profile": self.profile,
+            "workspace": getattr(self, "workspace", None),
+            "message_count": len(self.messages),
+        }
+
+
+def test_session_import_stamps_active_profile():
+    """JSON imports must not create root/default-owned rows from named profiles.
+
+    The import route validates the workspace under the request's active profile.
+    If the new Session is then saved with profile=None, default/root requests can
+    later export the transcript or use the session id to read files from that
+    named-profile workspace. Pin the import-time ownership stamp directly.
+    """
+    import api.routes as routes
+
+    captured = {}
+    body = {
+        "title": "Named profile import",
+        "workspace": "/tmp/named-profile-workspace",
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "named profile secret"}],
+    }
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    sessions = OrderedDict()
+    with patch("api.routes.get_active_profile_name", return_value="poc"), \
+         patch("api.routes.resolve_trusted_workspace", return_value=Path("/tmp/named-profile-workspace")), \
+         patch("api.routes.Session", side_effect=lambda **kwargs: _ImportedSessionStub(**kwargs)), \
+         patch.object(routes, "SESSIONS", sessions), \
+         patch("api.routes.publish_session_list_changed"), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes._handle_session_import(SimpleNamespace(headers={}), body)
+
+    session = captured["json"]["data"]["session"]
+    assert captured["json"]["status"] == 200
+    assert session["profile"] == "poc"
+    assert sessions["imported_profile_001"].profile == "poc"
+
+
+def test_session_import_default_profile_remains_default_owned():
+    """Root/default imports keep the legacy default ownership semantics."""
+    import api.routes as routes
+
+    captured = {}
+    body = {
+        "messages": [{"role": "user", "content": "default profile content"}],
+    }
+
+    def fake_j(_handler, data, status=200, **_kwargs):
+        captured["json"] = {"data": data, "status": status}
+        return captured["json"]
+
+    sessions = OrderedDict()
+    with patch("api.routes.get_active_profile_name", return_value="default"), \
+         patch("api.routes.resolve_trusted_workspace", return_value=Path("/tmp/default-workspace")), \
+         patch("api.routes.Session", side_effect=lambda **kwargs: _ImportedSessionStub(**kwargs)), \
+         patch.object(routes, "SESSIONS", sessions), \
+         patch("api.routes.publish_session_list_changed"), \
+         patch("api.routes.j", side_effect=fake_j):
+        routes._handle_session_import(SimpleNamespace(headers={}), body)
+
+    session = captured["json"]["data"]["session"]
+    assert session["profile"] == "default"
+    assert sessions["imported_profile_001"].profile == "default"
+
+
+def _profile_state_db_path(profile: str | None = None) -> Path:
+    root = Path(os.environ["HERMES_WEBUI_TEST_STATE_DIR"])
+    if profile:
+        return root / "profiles" / profile / "state.db"
+    return root / "state.db"
+
+
+def _ensure_agent_state_db(profile: str | None = None) -> sqlite3.Connection:
+    db_path = _profile_state_db_path(profile)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            user_id TEXT,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            title TEXT
+        );
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            timestamp REAL NOT NULL
+        );
+    """)
+    conn.commit()
+    return conn
+
+
+def _insert_agent_session(conn: sqlite3.Connection, session_id: str, *, source: str, title: str) -> None:
+    started_at = time.time()
+    conn.execute(
+        "INSERT OR REPLACE INTO sessions (id, source, title, model, started_at, message_count) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (session_id, source, title, "openai/gpt-5", started_at, 2),
+    )
+    conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, ?)",
+        (session_id, "Hello from other profile", started_at),
+    )
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'assistant', ?, ?)",
+        (session_id, "Reply from other profile", started_at + 1),
+    )
+    conn.commit()
+
+
+def _delete_agent_session(conn: sqlite3.Connection, session_id: str) -> None:
+    conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+    conn.commit()
+
+
+def _get_json(path: str) -> tuple[dict, int]:
+    req = urllib.request.Request(BASE + path)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read()), resp.status
+
+
+def _post_json(path: str, body: dict) -> tuple[dict, int]:
+    req = urllib.request.Request(
+        BASE + path,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read()), resp.status
+
+
+def test_all_profiles_query_includes_named_profile_cli_sessions():
+    """all_profiles=1 should aggregate agent sessions from non-active named profiles."""
+    conn = _ensure_agent_state_db("issue1611-named")
+    sid = "issue1611_named_profile_cli_001"
+    try:
+        _insert_agent_session(
+            conn,
+            sid,
+            source="telegram",
+            title="Named Profile Telegram Session",
+        )
+        _post_json("/api/settings", {"show_cli_sessions": True})
+
+        scoped, scoped_status = _get_json("/api/sessions")
+        assert scoped_status == 200
+        assert sid not in {row.get("session_id") for row in scoped.get("sessions", [])}
+
+        aggregate, aggregate_status = _get_json("/api/sessions?all_profiles=1")
+        assert aggregate_status == 200
+        session = next(
+            row for row in aggregate.get("sessions", [])
+            if row.get("session_id") == sid
+        )
+        assert session.get("profile") == "issue1611-named"
+        assert aggregate.get("all_profiles") is True
+    finally:
+        try:
+            _post_json("/api/settings", {"show_cli_sessions": False})
+        finally:
+            _delete_agent_session(conn, sid)
+            conn.close()
 
 # ── Cleanup ────────────────────────────────────────────────────────────────
 

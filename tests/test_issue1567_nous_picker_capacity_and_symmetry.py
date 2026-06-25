@@ -248,6 +248,45 @@ class TestBuildNousFeaturedSet:
         )
 
 
+class TestGenericPickerOverflowHelper:
+    """The shared overflow splitter keeps the full catalog reachable."""
+
+    def test_large_non_nous_catalog_splits_without_dropping_tail(self):
+        from api.config import _split_picker_overflow_models, _MODEL_PICKER_VISIBLE_TARGET
+
+        ordered = [
+            {"id": f"provider/model-{i:02d}", "label": f"Model {i:02d}"}
+            for i in range(40)
+        ]
+        visible, extras = _split_picker_overflow_models(ordered, provider_id="openai-codex")
+
+        assert len(visible) == _MODEL_PICKER_VISIBLE_TARGET
+        assert len(extras) == len(ordered) - _MODEL_PICKER_VISIBLE_TARGET
+        assert [m["id"] for m in visible + extras] == [m["id"] for m in ordered], (
+            "The generic overflow helper must preserve provider order when no "
+            "sticky selection needs to be surfaced."
+        )
+
+    def test_large_non_nous_catalog_keeps_selected_tail_visible(self):
+        from api.config import _split_picker_overflow_models
+
+        ordered = [
+            {"id": f"provider/model-{i:02d}", "label": f"Model {i:02d}"}
+            for i in range(40)
+        ]
+        sticky = "provider/model-39"
+        visible, extras = _split_picker_overflow_models(
+            ordered,
+            selected_model_id=sticky,
+            provider_id="openai-codex",
+        )
+
+        visible_ids = {m["id"] for m in visible}
+        extra_ids = {m["id"] for m in extras}
+        assert sticky in visible_ids, "Sticky selection must stay visible after the shared overflow split."
+        assert sticky not in extra_ids, "Sticky selection cannot remain hidden in extra_models."
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Section 2 — End-to-end /api/models behaviour with the cap applied
 # ────────────────────────────────────────────────────────────────────────
@@ -407,9 +446,14 @@ class TestNousLiveFetchEmpty:
 
     def test_hermes_cli_unavailable_falls_back_to_static_4(self, monkeypatch, tmp_path):
         """When hermes_cli is unavailable (raises) — distinct from returning [] —
-        we DO fall back to the static 4-entry list so the picker isn't empty
-        in that degraded environment. This preserves pre-#1538 behavior for
-        test envs without hermes_cli."""
+        we DO fall back to the static list so the picker isn't empty in that
+        degraded environment. This preserves pre-#1538 behavior for test envs
+        without hermes_cli.
+
+        Note: _seed_provider_models_from_core() may have enriched the static
+        list at import time if hermes_cli was available then, so we assert the
+        original 4 curated entries are present (subset) rather than an exact
+        count (#4413)."""
         _scrub_provider_env(monkeypatch)
         _install_fake_hermes_cli(
             monkeypatch,
@@ -427,9 +471,19 @@ class TestNousLiveFetchEmpty:
                 "the curated static fallback so the picker isn't empty in "
                 "test envs that lack the agent package."
             )
-            assert len(nous_groups[0]["models"]) == 4, (
-                "Static fallback should expose the curated 4-entry list "
-                "from _PROVIDER_MODELS['nous']."
+            # The original curated 4 entries must all be present.
+            nous_ids = {m["id"] for m in nous_groups[0]["models"]}
+            _curated_nous_ids = {
+                m["id"] for m in config._PROVIDER_MODELS.get("nous", [])
+                if m["id"].startswith("@nous:")
+            }
+            assert _curated_nous_ids.issubset(nous_ids), (
+                f"Static fallback is missing curated @nous: entries. "
+                f"Expected subset {_curated_nous_ids}, got {nous_ids}"
+            )
+            assert len(nous_groups[0]["models"]) >= 4, (
+                "Static fallback should expose at least the curated 4-entry "
+                "list from _PROVIDER_MODELS['nous']."
             )
         finally:
             restore()

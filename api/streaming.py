@@ -4,6 +4,7 @@ Includes Sprint 10 cancel support via CANCEL_FLAGS.
 """
 import base64
 import contextlib
+import contextvars
 import json
 import logging
 import mimetypes
@@ -38,6 +39,7 @@ from api.config import (
     load_settings,
     parse_reasoning_effort,
     coerce_reasoning_effort_for_model,
+    _main_model_request_overrides,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -53,6 +55,44 @@ from api.models import (
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
 
+
+def _session_payload_with_full_messages(session, *, tool_calls=None):
+    """Return compact session metadata plus the embedded full transcript.
+
+    ``Session.compact()`` may intentionally use metadata-only counts from an
+    index/sidebar load. A settled SSE payload that embeds ``session.messages``
+    must report the count of that embedded transcript, otherwise completion and
+    reconcile paths can mistake a complete payload for a stale short window.
+    """
+    messages = list(getattr(session, 'messages', None) or [])
+    raw = session.compact() | {
+        'messages': messages,
+        'message_count': len(messages),
+    }
+    if tool_calls is not None:
+        raw['tool_calls'] = tool_calls
+    return raw
+
+
+def _compact_for_echo_compare(value: str) -> str:
+    """Normalize visible stream text for duplicate echo detection."""
+    return re.sub(r'\s+', '', str(value or ''))
+
+
+def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 4096) -> tuple[str, bool]:
+    """Remove ``suffix`` from ``value`` when they match after whitespace folding."""
+    raw = str(value or '')
+    candidate = _compact_for_echo_compare(suffix)
+    if not raw or not candidate:
+        return raw, False
+    tail = raw[-max(len(str(suffix or '')) * 3, search_window):]
+    offset = len(raw) - len(tail)
+    for idx in range(len(tail) + 1):
+        if _compact_for_echo_compare(tail[idx:]) == candidate:
+            return raw[: offset + idx].rstrip(), True
+    return raw, False
+
+
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
 # interleave their os.environ writes. This global lock serializes the env
@@ -64,6 +104,78 @@ from api.session_ops import mark_session_title_generated, session_has_manual_tit
 _ENV_LOCK = threading.Lock()
 
 _KEYLESS_CUSTOM_API_KEY = "dummy-key"
+
+_STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "webui_streaming_cron_profile_home",
+    default=None,
+)
+_STREAMING_CRONJOB_WRAPPER_INSTALLED = False
+
+
+def _install_streaming_cronjob_profile_wrapper() -> None:
+    """Wrap the agent cronjob tool so calls run under the streaming profile.
+
+    The in-chat agent run already binds per-turn contextvars for other
+    session-scoped state. Cron jobs are special because ``cron.jobs`` snapshots
+    path constants at import time, so the model-facing ``cronjob`` tool must
+    enter the existing WebUI cron profile context at the tool-call boundary.
+    That context uses the cron-specific lock and restores the module caches as
+    soon as the single cron tool call returns, avoiding long-lived global path
+    mutation for the whole agent turn.
+    """
+    global _STREAMING_CRONJOB_WRAPPER_INSTALLED
+    if _STREAMING_CRONJOB_WRAPPER_INSTALLED:
+        return
+    try:
+        from tools.registry import registry
+    except Exception:
+        logger.debug("streaming cronjob wrapper: tools registry unavailable", exc_info=True)
+        return
+
+    entry = registry.get_entry("cronjob")
+    if entry is None:
+        try:
+            import tools.cronjob_tools  # noqa: F401
+        except Exception:
+            logger.debug("streaming cronjob wrapper: cronjob tool import failed", exc_info=True)
+        entry = registry.get_entry("cronjob")
+    if entry is None:
+        logger.debug("streaming cronjob wrapper: cronjob tool not registered")
+        return
+    original_handler = entry.handler
+    if getattr(original_handler, "_webui_streaming_profile_wrapper", False):
+        _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+        return
+
+    # This relies on the agent tool executor's ``propagate_context_to_thread``
+    # using an unfiltered ``contextvars.copy_context()`` so this WebUI-owned
+    # contextvar reaches the sync cronjob handler even when the tool call runs
+    # on the agent's ThreadPoolExecutor worker.
+    def _profile_scoped_cronjob_handler(args, **kwargs):
+        profile_home = _STREAMING_CRON_PROFILE_HOME.get()
+        if not profile_home:
+            return original_handler(args, **kwargs)
+        from api.profiles import cron_profile_context_for_home
+        with cron_profile_context_for_home(Path(profile_home)):
+            return original_handler(args, **kwargs)
+
+    _profile_scoped_cronjob_handler.__dict__["_webui_streaming_profile_wrapper"] = True
+    _profile_scoped_cronjob_handler.__dict__["_webui_original_handler"] = original_handler
+    registry.register(
+        name=entry.name,
+        toolset=entry.toolset,
+        schema=entry.schema,
+        handler=_profile_scoped_cronjob_handler,
+        check_fn=entry.check_fn,
+        requires_env=entry.requires_env,
+        is_async=entry.is_async,
+        description=entry.description,
+        emoji=entry.emoji,
+        max_result_size_chars=entry.max_result_size_chars,
+        dynamic_schema_overrides=entry.dynamic_schema_overrides,
+    )
+    _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+
 
 _PERSISTENT_MEMORY_FILES = (
     ("memory", ("memories", "MEMORY.md")),
@@ -146,11 +258,17 @@ def _apply_profile_provider_context_to_streaming_model(
 
     profile_provider_normalized = _normalize_provider_id(profile_provider)
     model_lower = (model or "").lower()
-    for prefix in ("gpt", "claude", "gemini"):
-        if model_lower.startswith(prefix):
-            if _normalize_provider_id(prefix) != profile_provider_normalized:
-                return profile_default_model, provider_context, True
-            return model, provider_context, False
+    # Only run the bare-prefix family match on un-namespaced model ids. A custom
+    # namespace like "gemini_cli/..." or "claude-relay/..." merely *starts with* a
+    # first-party token; matching it here would clobber the model to the profile
+    # default on the send path (the #4278 collision — the slash-qualified branch
+    # below routes through the fixed _normalize_provider_id instead).
+    if "/" not in model_lower:
+        for prefix in ("gpt", "claude", "gemini"):
+            if model_lower.startswith(prefix):
+                if _normalize_provider_id(prefix) != profile_provider_normalized:
+                    return profile_default_model, provider_context, True
+                return model, provider_context, False
 
     if "/" in model_lower:
         slash_prefix = model_lower.split("/", 1)[0]
@@ -1148,6 +1266,7 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
+    session.pending_user_source = None
     if not _session_has_cancel_marker(session):
         agent_name = _preferred_agent_display_name_for_session(session)
         session.messages.append({
@@ -1166,6 +1285,7 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
+    session.pending_user_source = None
     try:
         import pathlib
         pathlib.Path(session.path).unlink(missing_ok=True)
@@ -1510,6 +1630,31 @@ def _bind_turn_session_identity(session_id: str):
         _reset_turn_session_identity(tokens)
 
 
+def _stale_completion_max_age_seconds() -> float:
+    """Max age (seconds) a background-process completion may sit in the queue
+    before the WebUI drain treats it as stale and drops it instead of
+    prepending it to the user's next turn.
+
+    Completions older than this are silently consumed (not requeued) so a
+    notification that finally fires long after the user moved on cannot
+    contaminate an unrelated later turn. See nesquena/hermes-webui#4029.
+
+    Configurable via HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS. A value of
+    0 (or negative) disables age-gating and restores the legacy drain-all
+    behavior. Defaults to 6 hours.
+    """
+    raw = os.environ.get("HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS=%r; using default",
+                raw,
+            )
+    return 6 * 60 * 60  # 6 hours
+
+
 def _format_process_notification(evt: dict) -> str:
     """Format a completed background process notification for agent input."""
     if not isinstance(evt, dict):
@@ -1558,6 +1703,10 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
     if completion_queue is None:
         return []
 
+    # Computed once per drain (not per event): reads/validates the env cap a
+    # single time so an invalid value logs at most one warning per drain.
+    stale_completion_max_age = _stale_completion_max_age_seconds()
+
     while True:
         try:
             evt = completion_queue.get_nowait()
@@ -1580,6 +1729,25 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
         if getattr(proc, 'session_key', None) != session_id:
             skipped_events.append(evt)
             continue
+
+        # Age-gate stale completions: a completion that fires long after the
+        # user moved on must not be prepended to an unrelated later turn
+        # (nesquena/hermes-webui#4029). Drop (consume, do not requeue) any
+        # completion whose enqueue time is older than the configured cap.
+        # Events without a 'completed_at' (older agent builds) are never
+        # dropped here, preserving backward-compatible behavior.
+        if stale_completion_max_age > 0 and isinstance(evt, dict):
+            completed_at = evt.get('completed_at')
+            if isinstance(completed_at, (int, float)) and completed_at > 0:
+                age = time.time() - completed_at
+                if age > stale_completion_max_age:
+                    logger.info(
+                        "Dropping stale background-process completion for "
+                        "session %s (age %.0fs > cap %.0fs)",
+                        evt_sid, age, stale_completion_max_age,
+                    )
+                    _mark_process_completion_consumed(process_registry, evt_sid)
+                    continue
 
         notification = _format_process_notification(evt)
         if notification:
@@ -2413,6 +2581,48 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
     return 'minimax' in text or 'minimaxi.com' in text
 
 
+def _route_rejects_reasoning_extra(provider: str = '', model: str = '', base_url: str = '') -> bool:
+    """Routes known to reject an ``extra_body`` ``reasoning`` parameter with HTTP 400.
+
+    Title generation injects ``extra_body={"reasoning": {"enabled": False}}`` to
+    suppress thinking on reasoning-capable models (#2083). But OpenAI Chat
+    Completions (and Azure OpenAI) reject unknown top-level params with a 400, so
+    that inject silently fails the title call and falls back to a low-quality
+    heuristic title (#4161). Skip the inject for those routes.
+
+    OpenRouter Anthropic mandatory-reasoning models (Claude Sonnet 4.6 / Opus 4.8)
+    are reasoning-capable but reject a reasoning *disable* — title gen only needs
+    reasoning off, so skip the inject for them too rather than risk the same 400.
+    """
+    provider_lower = str(provider or '').strip().lower()
+    model_lower = str(model or '').strip().lower()
+    # Hostname-based match (not substring) so a proxy URL that merely *contains*
+    # one of these strings in a path segment isn't mis-classified.
+    host = ''
+    try:
+        from urllib.parse import urlsplit
+        host = (urlsplit(str(base_url or '').strip()).hostname or '').lower()
+    except Exception:
+        host = ''
+    if host == 'api.openai.com' or host.endswith('.openai.azure.com'):
+        return True
+    # Azure AI Foundry chat-completions hosts (also reject the reasoning param).
+    if host.endswith('.services.ai.azure.com') or host.endswith('.cognitiveservices.azure.com'):
+        return True
+    if provider_lower in ('openai', 'openai-api', 'openai-codex'):
+        return True
+    if (
+        provider_lower in ('azure', 'azure-foundry', 'azure-ai-foundry', 'azure-ai')
+        or provider_lower.startswith('azure/')
+        or provider_lower.startswith('azure-')
+    ):
+        return True
+    if (host == 'openrouter.ai' or host.endswith('.openrouter.ai')) and model_lower.startswith('anthropic/'):
+        # Anthropic on OpenRouter: mandatory-reasoning families reject a disable.
+        return True
+    return False
+
+
 def _get_aux_title_config() -> dict:
     """Return title_generation auxiliary config, or an empty dict on errors."""
     try:
@@ -2594,7 +2804,9 @@ def generate_title_raw_via_aux(
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
-    reasoning_extra = {"reasoning": {"enabled": False}}
+    reasoning_extra = {}
+    if not _route_rejects_reasoning_extra(provider, model, base_url):
+        reasoning_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
         reasoning_extra["reasoning_split"] = True
     try:
@@ -2619,7 +2831,7 @@ def generate_title_raw_via_aux(
                         max_tokens=max_tokens,
                         temperature=0.2,
                         timeout=_timeout,
-                        extra_body=reasoning_extra,
+                        extra_body=reasoning_extra or None,
                     )
                     raw, empty_status = _extract_title_response(resp, aux=True)
                     if raw:
@@ -2707,10 +2919,22 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         api_kwargs.pop('tools', None)
                         api_kwargs['temperature'] = 0.1
                         api_kwargs['timeout'] = 15.0
+                        # Reasoning suppression for title gen is already handled
+                        # route-correctly by `_build_api_kwargs()` from the
+                        # `agent.reasoning_config = {"enabled": False}` set above —
+                        # each provider profile applies (or deliberately omits) the
+                        # disable in the form its endpoint accepts (OpenAI/Nous omit
+                        # the field; LM Studio uses top-level reasoning_effort;
+                        # OpenRouter Anthropic mandatory-reasoning is omitted). Do NOT
+                        # re-inject a generic `reasoning:{enabled:False}` here — that
+                        # re-adds a 400-rejected param on top of the profile output
+                        # (#4161). MiniMax still needs reasoning_split, which the
+                        # profile path does not add.
+                        _tg_extra = dict(api_kwargs.get('extra_body') or {})
                         if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
-                            extra_body = dict(api_kwargs.get('extra_body') or {})
-                            extra_body['reasoning_split'] = True
-                            api_kwargs['extra_body'] = extra_body
+                            _tg_extra['reasoning_split'] = True
+                        if _tg_extra:
+                            api_kwargs['extra_body'] = _tg_extra
                         if 'max_completion_tokens' in api_kwargs:
                             api_kwargs['max_completion_tokens'] = max_tokens
                         else:
@@ -3135,10 +3359,12 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             saved_pending_user_message = getattr(s, 'pending_user_message', None)
             saved_pending_attachments = list(getattr(s, 'pending_attachments', []) or [])
             saved_pending_started_at = getattr(s, 'pending_started_at', None)
+            saved_pending_user_source = getattr(s, 'pending_user_source', None)
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = []
             s.pending_started_at = None
+            s.pending_user_source = None
             try:
                 # skip_index=False so the snapshot appears in _index.json with
                 # the pre_compression_snapshot marker. The sidebar projection
@@ -3157,6 +3383,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 s.pending_user_message = saved_pending_user_message
                 s.pending_attachments = saved_pending_attachments
                 s.pending_started_at = saved_pending_started_at
+                s.pending_user_source = saved_pending_user_source
             return
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
@@ -3177,6 +3404,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             snapshot.pending_user_message = None
             snapshot.pending_attachments = []
             snapshot.pending_started_at = None
+            snapshot.pending_user_source = None
             snapshot.save(touch_updated_at=False, skip_index=False)
             logger.info(
                 "Marked pre-compression session %s as sidebar-hidden snapshot",
@@ -3330,6 +3558,12 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
         # API 400 errors on strict providers (empty assistant content).
         if msg.get('_partial') and not str(msg.get('content') or '').strip():
             continue
+        # Note: _recovered user messages are NOT skipped here — they may need
+        # to be retained to preserve role alternation when a kept assistant
+        # follows.  The _recovered skip happens in a final pass after orphaned
+        # tool_calls are stripped, so the anchor check is exact (#4283).
+        # Temporarily mark _recovered users so the final pass can find them.
+        is_recovered = msg.get('_recovered') and msg.get('role') == 'user'
         role = msg.get('role')
         if role == 'tool':
             tid = msg.get('tool_call_id') or ''
@@ -3337,6 +3571,8 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        if is_recovered:
+            sanitized['_recovered'] = True  # temporary marker — stripped before return
         if strip_native_images and 'content' in sanitized:
             sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
         if sanitized.get('role'):
@@ -3369,7 +3605,35 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
             else:
                 msg = dict(msg, tool_calls=kept)
         filtered_clean.append(msg)
-    return filtered_clean
+
+    # Fourth pass: drop _recovered user messages unless removing one would fuse
+    # two same-role neighbours.  Operating on filtered_clean (post orphaned-tool/
+    # tool_calls stripping) means the neighbour check is exact (#4283).  The
+    # decision uses the ACTUAL kept sequence: the previously-kept message's role
+    # (`final[-1]`) and the next surviving message's role.  A _recovered user is
+    # kept ONLY when it separates two assistants (prev kept == assistant AND next
+    # surviving == assistant) — i.e. it is an answered turn whose removal would
+    # leave `assistant, assistant` adjacency.  In every other case dropping it is
+    # safe and correct: it would either leave a clean `user, assistant` pair, or
+    # (if next is a user) it is a stale unanswered prompt that must not replay.
+    # Deciding only on "an assistant follows" (ignoring the prev kept role) is the
+    # bug that re-introduced `user, _recovered user, assistant` → adjacent users
+    # → strict-provider 400 once the anchoring assistant's predecessor was a user.
+    final = []
+    for i, msg in enumerate(filtered_clean):
+        if msg.get('_recovered') and msg.get('role') == 'user':
+            prev_role = final[-1].get('role') if final else None
+            next_role = None
+            for j in range(i + 1, len(filtered_clean)):
+                next_role = filtered_clean[j].get('role')
+                break
+            # Keep only if this recovered user actually separates two assistants.
+            if not (prev_role == 'assistant' and next_role == 'assistant'):
+                continue  # drop — fusing the neighbours is clean, or it's a stale prompt
+            # Keep but strip the temporary marker
+            msg = {k: v for k, v in msg.items() if k != '_recovered'}
+        final.append(msg)
+    return final
 
 
 def _api_safe_message_positions(messages):
@@ -3395,12 +3659,17 @@ def _api_safe_message_positions(messages):
             continue
         if msg.get('_partial') and not str(msg.get('content') or '').strip():
             continue
+        # Note: _recovered user messages are NOT skipped here — deferred to
+        # a final pass after orphaned tool_calls stripping (#4283).
+        is_recovered = msg.get('_recovered') and msg.get('role') == 'user'
         role = msg.get('role')
         if role == 'tool':
             tid = msg.get('tool_call_id') or ''
             if not tid or tid not in valid_tool_call_ids:
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        if is_recovered:
+            sanitized['_recovered'] = True  # temporary marker — stripped before return
         if sanitized.get('role'):
             out.append((idx, sanitized))
 
@@ -3428,7 +3697,24 @@ def _api_safe_message_positions(messages):
             else:
                 msg = dict(msg, tool_calls=kept)
         filtered_out.append((idx, msg))
-    return filtered_out
+
+    # Fourth pass: drop _recovered user messages unless removing one would fuse
+    # two same-role neighbours — mirrors _sanitize_messages_for_api pass 4 (#4283).
+    # Decide on the ACTUAL kept sequence: prev kept role (final_out[-1]) + next
+    # surviving role. Keep ONLY when it separates two assistants; otherwise drop.
+    final_out = []
+    for i, (idx, msg) in enumerate(filtered_out):
+        if msg.get('_recovered') and msg.get('role') == 'user':
+            prev_role = final_out[-1][1].get('role') if final_out else None
+            next_role = None
+            for j in range(i + 1, len(filtered_out)):
+                next_role = filtered_out[j][1].get('role')
+                break
+            if not (prev_role == 'assistant' and next_role == 'assistant'):
+                continue
+            msg = {k: v for k, v in msg.items() if k != '_recovered'}
+        final_out.append((idx, msg))
+    return final_out
 
 
 def _deduplicate_context_messages(messages):
@@ -3696,24 +3982,69 @@ def _strip_replayed_context_items(existing_messages, candidates):
     return cleaned
 
 
-def _dedupe_replayed_context_messages(previous_context, result_messages):
+def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None):
     """Keep model context append-only without replayed blocks/summaries."""
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not previous_context or not result_messages:
         return result_messages
+    previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
     if not _messages_have_prefix(result_messages, previous_context):
+        # Agent-side role-sequence repair can replace the last prior user row
+        # with a repaired current-user row. In that shape the result no longer
+        # has `previous_context` as an exact prefix, but it should still be
+        # merged as: previous context + clean current turn + assistant/tool delta.
+        if (
+            msg_text
+            and len(previous_context) >= 1
+            and len(result_messages) >= len(previous_context)
+            and _messages_have_prefix(result_messages, previous_context[:-1])
+        ):
+            boundary_idx = len(previous_context) - 1
+            boundary_row = result_messages[boundary_idx]
+            is_stale_merge = bool(
+                previous_user_tail
+                and _detect_stale_user_merge(
+                    boundary_row,
+                    msg_text,
+                    previous_user_tail,
+                    previous_context=previous_context,
+                )
+            )
+            if is_stale_merge or _looks_like_current_user_turn(boundary_row, msg_text):
+                if is_stale_merge:
+                    # Clean only the stale-merged boundary row; leave all prior
+                    # history in previous_context untouched.
+                    cleaned_boundary = copy.deepcopy(boundary_row)
+                    cleaned_boundary['content'] = msg_text
+                    candidates = [cleaned_boundary] + result_messages[boundary_idx + 1:]
+                else:
+                    candidates = result_messages[boundary_idx:]
+                candidates = _strip_replayed_prefix(previous_context, candidates)
+                if candidates:
+                    candidates = _strip_replayed_context_items(previous_context, candidates)
+                return previous_context + candidates
         return result_messages
     candidates = result_messages[len(previous_context):]
+    # Strip stale merges only from the new-turn candidate slice so that
+    # legitimate historical user rows in the already-committed previous_context
+    # prefix are never rewritten.
+    if msg_text and previous_user_tail:
+        candidates = _strip_stale_user_merge_from_messages(
+            candidates,
+            msg_text,
+            previous_user_tail,
+            previous_context=previous_context,
+        )
     candidates = _strip_replayed_prefix(previous_context, candidates)
     if candidates:
         candidates = _strip_replayed_context_items(previous_context, candidates)
     return previous_context + candidates
 
 
-def _dedupe_replayed_active_context(previous_context, result_messages):
+def _dedupe_replayed_active_context(previous_context, result_messages, msg_text=None):
     """Keep model context append-only without re-appending a replayed tail."""
-    return _dedupe_replayed_context_messages(previous_context, result_messages)
+    return _dedupe_replayed_context_messages(previous_context, result_messages, msg_text)
 
 
 def _is_context_compression_marker(msg):
@@ -3809,6 +4140,215 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
     if current_user_key and _message_identity(history[-1]) == current_user_key:
         return history[:-1]
     return history
+
+
+def _strip_workspace_prefixes_for_compare(text: str) -> str:
+    """Remove WebUI workspace sentinels anywhere before text comparison."""
+    value = _strip_workspace_prefix(text, include_legacy=True)
+    for pattern in (_WORKSPACE_PREFIX_ANY_RE, _LEGACY_WORKSPACE_PREFIX_ANY_RE):
+        value = pattern.sub('', value)
+    return value.strip()
+
+
+def _normalize_user_text(text):
+    """Collapse whitespace and strip workspace sentinels for tail comparisons."""
+    if not isinstance(text, str):
+        return ""
+    return " ".join(_strip_workspace_prefixes_for_compare(text).split())
+
+
+def _raw_message_text(value) -> str:
+    """Extract text from a message content payload without stripping markup.
+
+    Used for the stale-user-merge detector so the literal boundary between
+    the prior tail and the current turn survives into the comparison. The
+    thinking-markup strip in ``_message_text`` collapses newlines, which
+    would defeat the boundary check.
+    """
+    if isinstance(value, list):
+        return ' '.join(
+            str(p.get('text') or p.get('content') or '')
+            for p in value
+            if isinstance(p, dict)
+        )
+    return str(value or '')
+
+
+def _stale_user_tail_candidate(msg):
+    """Return normalized text if msg is a user row that could be a stale tail."""
+    if not isinstance(msg, dict) or msg.get('role') != 'user':
+        return None
+    raw = _raw_message_text(msg.get('content', ''))
+    if not raw.strip():
+        return None
+    return _normalize_user_text(raw)
+
+
+def _last_user_row(messages):
+    """Return the last user-role row in `messages`, or None."""
+    for msg in reversed(list(messages or [])):
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            return msg
+    return None
+
+
+def _stale_prefix_matches_prior_user_context(stale_prefix, stale_segments, previous_context):
+    """Return True when a stale prefix is explainable by prior user context.
+
+    First-generation repair usually produces segments matching consecutive
+    prior user rows. Once a session is already contaminated, later repair can
+    replay a stable stale prefix from an older polluted row even after newer
+    clean user turns have moved the context tail forward. Handle both shapes
+    while still requiring all evidence to come from prior user-role rows.
+    """
+    prior_rows = [
+        _stale_user_tail_candidate(msg)
+        for msg in previous_context or []
+    ]
+    prior_rows = [row for row in prior_rows if row]
+    if not prior_rows:
+        return False
+
+    if stale_segments:
+        segment_count = len(stale_segments)
+        for start in range(0, len(prior_rows) - segment_count + 1):
+            if prior_rows[start:start + segment_count] == stale_segments:
+                return True
+
+        # Already-polluted sessions may replay paragraphs from older polluted
+        # rows after newer clean turns have advanced the context tail. In that
+        # shape the stale paragraphs are still all prior user content, but they
+        # are substrings within older merged rows rather than standalone rows.
+        #
+        # NOTE: this substring match is intentionally loose (a stale segment can
+        # coincidentally appear inside an unrelated prior row). Correctness does
+        # NOT depend on it being precise — the caller (_detect_stale_user_merge)
+        # only reaches here once the row's suffix already normalizes to the
+        # ENTIRE submitted turn, so anything this branch flags has a prefix that
+        # is extra-to-the-submission. Cleaning therefore only ever rewrites the
+        # row to the user's actual current turn; it can never drop legitimate
+        # current-turn content even on a coincidental substring hit.
+        row_index = 0
+        row_offset = 0
+        matched_all_segments = True
+        for segment in stale_segments:
+            matched_segment = False
+            while row_index < len(prior_rows):
+                row = prior_rows[row_index]
+                pos = row.find(segment, row_offset)
+                if pos >= 0:
+                    row_offset = pos + len(segment)
+                    matched_segment = True
+                    break
+                row_index += 1
+                row_offset = 0
+            if not matched_segment:
+                matched_all_segments = False
+                break
+        if matched_all_segments:
+            return True
+
+    prefix_norm = _normalize_user_text(stale_prefix)
+    if not prefix_norm:
+        return False
+    for row in prior_rows:
+        if row == prefix_norm or row.startswith(f'{prefix_norm} '):
+            return True
+    return False
+
+
+def _detect_stale_user_merge(message, msg_text, previous_user_tail, previous_context=None):
+    """Return True if `message` is the current user turn with a stale prefix merged in.
+
+    The agent's defensive repair path can concatenate prior user context with
+    the submitted current turn as ``<stale>\\n\\n<current>``. The stale portion
+    can be either the immediate prior user tail or a replayed prefix from an
+    older already-polluted user row. The literal ``\\n\\n`` boundary must survive
+    into the comparison; a single-newline or space-only join is not the repair
+    shape and must not match. Workspace sentinels may be present on either or
+    both halves and are stripped before comparison.
+    """
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    current_norm = _normalize_user_text(msg_text)
+    if not current_norm:
+        return False
+
+    merged = _raw_message_text(message.get('content', '')).replace("\r\n", "\n")
+    if "\n\n" not in merged:
+        return False
+
+    # The user's current turn can itself contain paragraph breaks. Find a repair
+    # boundary whose suffix normalizes to the *entire* submitted turn, then treat
+    # only the prefix as stale context. A plain split-and-last-segment check would
+    # miss ``<stale>\n\n<current paragraph A>\n\n<current paragraph B>``.
+    stale_segments = []
+    stale_prefix = ''
+    search_end = len(merged)
+    while search_end > 0:
+        boundary_idx = merged.rfind("\n\n", 0, search_end)
+        if boundary_idx < 0:
+            break
+        suffix = merged[boundary_idx + 2:]
+        if _normalize_user_text(suffix) == current_norm:
+            prefix = merged[:boundary_idx]
+            candidate_segments = [
+                _normalize_user_text(segment)
+                for segment in prefix.split("\n\n")
+            ]
+            if candidate_segments and all(candidate_segments):
+                stale_segments = candidate_segments
+                stale_prefix = prefix
+                break
+            # The suffix matched the submitted turn, but this boundary leaves
+            # blank prefix segments; try the next candidate boundary to the left.
+        search_end = boundary_idx
+    if not stale_segments:
+        return False
+
+    if previous_context is not None and _stale_prefix_matches_prior_user_context(
+        stale_prefix,
+        stale_segments,
+        previous_context,
+    ):
+        return True
+
+    return bool(
+        previous_context is None
+        and len(stale_segments) == 1
+        and _normalize_user_text(previous_user_tail) == stale_segments[0]
+    )
+
+
+def _strip_stale_user_merge_from_messages(
+    messages,
+    msg_text,
+    previous_user_tail,
+    previous_context=None,
+):
+    """Return messages with stale-prefixed current user turns replaced by clean ones.
+
+    Both context-merge (model-facing) and display-merge (visible transcript)
+    callers funnel through this so a single detection rule governs persistence.
+    The current user row is replaced with a clean copy using `msg_text` so the
+    displayed bubble matches what the human submitted, never the polluted pair.
+    """
+    if not messages or not msg_text:
+        return messages
+    out = []
+    for msg in messages:
+        if _detect_stale_user_merge(
+            msg,
+            msg_text,
+            previous_user_tail,
+            previous_context=previous_context,
+        ):
+            cleaned = copy.deepcopy(msg) if isinstance(msg, dict) else {'role': 'user', 'content': msg_text}
+            cleaned['content'] = msg_text
+            out.append(cleaned)
+        else:
+            out.append(msg)
+    return out
 
 
 def _save_streaming_checkpoint(session):
@@ -3965,24 +4505,32 @@ def _stream_writeback_can_supersede_recovery_marker(session, msg_text):
     return False
 
 
-def _retire_truncation_watermark_after_commit(session) -> None:
-    """Clear a positive truncation watermark once a new user turn is committed
+def _advance_truncation_watermark_after_commit(session) -> None:
+    """Advance a positive truncation watermark once a new user turn is committed
     to ``session.messages`` (#3831).
 
     retry/undo/Edit set a positive watermark to suppress the *replaced* tail from
     the append-only state.db merge; Session.save() deliberately never auto-clears
-    it (#2914). But nothing retired it when the user then sent a NEW turn, so it
-    froze at the old edit boundary and later dropped those post-edit turns on an
-    empty-sidecar reconcile. Once the new turn is durably in messages the merge's
-    max-sidecar guard suppresses the replaced tail without the watermark, so it is
-    safe — and necessary — to retire it here. Cleared to None, never 0.0 (the
-    truncate-to-empty sentinel that must keep blocking replay, #2914).
+    it (#2914). Once the new turn is durably in messages we advance the watermark
+    to the newest user message timestamp so that state.db rows newer than the
+    watermark are still merged in, while the replaced pre-edit tail remains
+    filtered. Never 0.0 (the truncate-to-empty sentinel that must keep blocking
+    replay, #2914).
     """
-    if getattr(session, 'truncation_watermark', None):
-        session.truncation_watermark = None
+    if not getattr(session, 'truncation_watermark', None):
+        return
+    messages = getattr(session, 'messages', None) or []
+    # Walk backwards to find the newest user message timestamp
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            ts = msg.get('timestamp')
+            if isinstance(ts, (int, float)) and ts > 0:
+                session.truncation_watermark = float(ts)
+                return
+    session.truncation_watermark = time.time()
 
 
-def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text):
+def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text, source: str = "webui"):
     """Keep UI transcript durable while allowing model context to compact.
 
     If Hermes Agent returns a normal append-only history, append that delta to
@@ -4019,6 +4567,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     result_messages = list(result_messages or [])
     if not result_messages:
         return previous_display
+    previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
 
     # ── Backfill normal turns from previous_context that are missing from
     # previous_display.  After context compression recovery, previous_context
@@ -4041,6 +4590,19 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         _has_context_only_turns = bool(_context_id_set - _display_id_set)
         if _has_context_only_turns:
             context_keys = [_message_identity(m) for m in previous_context]
+            # Precompute display keys once; avoids repeated json.dumps calls inside
+            # the inner any() loop (was O(D²·C) — see perf fix below).
+            _display_keys = [_message_identity(m) for m in previous_display]
+            # Multiset mirror of context_keys[_cursor:] kept in sync as _cursor
+            # advances. Enables O(1) membership tests in the any() check instead
+            # of an O(N) list scan, while preserving EXACT list-slice semantics:
+            # _message_identity intentionally returns duplicate keys for
+            # identical-content turns (and None for empty rows), so a plain set
+            # would drop a key still present later in the slice. A count-keyed
+            # dict (including None) matches `in context_keys[_cursor:]` exactly.
+            _remaining_ck_counts = {}
+            for _ck in context_keys:
+                _remaining_ck_counts[_ck] = _remaining_ck_counts.get(_ck, 0) + 1
             _backfilled = []
             # #3300 fix: track ONLY context rows we splice in, so the
             # visible-display backbone is never suppressed. Sharing one set
@@ -4052,7 +4614,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             _context_inserted = set()
             _cursor = 0
             for _display_idx, _dmsg in enumerate(previous_display):
-                _dkey = _message_identity(_dmsg)
+                _dkey = _display_keys[_display_idx]
                 if _dkey is not None:
                     _j = _cursor
                     while _j < len(context_keys) and context_keys[_j] != _dkey:
@@ -4064,10 +4626,20 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                             if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not _is_context_compression_marker(_cmsg):
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _context_inserted.add(_ckey)
+                        # Sync multiset: decrement keys consumed by advancing
+                        # the cursor to _j+1 (delete at zero so membership matches
+                        # the list slice exactly).
+                        for _k in range(_cursor, _j + 1):
+                            _consumed_ck = context_keys[_k]
+                            _ck_n = _remaining_ck_counts.get(_consumed_ck, 0) - 1
+                            if _ck_n <= 0:
+                                _remaining_ck_counts.pop(_consumed_ck, None)
+                            else:
+                                _remaining_ck_counts[_consumed_ck] = _ck_n
                         _cursor = _j + 1
                     elif not any(
-                        _message_identity(_future_dmsg) in context_keys[_cursor:]
-                        for _future_dmsg in previous_display[_display_idx + 1:]
+                        _display_keys[_fi] in _remaining_ck_counts
+                        for _fi in range(_display_idx + 1, len(_display_keys))
                     ):
                         for _k in range(_cursor, len(context_keys)):
                             _ckey = context_keys[_k]
@@ -4076,6 +4648,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _context_inserted.add(_ckey)
                         _cursor = len(context_keys)
+                        _remaining_ck_counts.clear()
                 # The display row is the visible backbone — always preserve it,
                 # in order, even when an earlier (identical-content) turn or a
                 # backfilled context row shares its timestamp-less identity.
@@ -4098,6 +4671,15 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
 
     if _messages_have_prefix(result_messages, previous_context):
         candidates = result_messages[len(previous_context):]
+        # Normalize stale merges only in the new-turn slice; never rewrite
+        # historical rows in the already-committed previous_context prefix.
+        if msg_text and previous_user_tail:
+            candidates = _strip_stale_user_merge_from_messages(
+                candidates,
+                msg_text,
+                previous_user_tail,
+                previous_context=previous_context,
+            )
         candidates = _strip_replayed_prefix(previous_display, candidates)
         candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
@@ -4107,6 +4689,14 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             if _is_context_compression_marker(m)
         ]
         turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
+        # Normalize stale merges only in the current-turn slice.
+        if msg_text and previous_user_tail:
+            turn_candidates = _strip_stale_user_merge_from_messages(
+                turn_candidates,
+                msg_text,
+                previous_user_tail,
+                previous_context=previous_context,
+            )
         candidates = marker_candidates + turn_candidates
 
     merged = previous_display[:]
@@ -4139,6 +4729,8 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         # exchange and then clear the pending prompt. Materialize the current
         # turn at the transcript boundary before the assistant/tool response.
         current_user_msg = {'role': 'user', 'content': msg_text}
+        if source and source != 'webui':
+            current_user_msg['_source'] = source
         insert_at = 0
         while insert_at < len(candidates) and _is_context_compression_marker(candidates[insert_at]):
             insert_at += 1
@@ -4182,6 +4774,8 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         ):
             display_msg = copy.deepcopy(msg)
             display_msg['content'] = msg_text
+            if source and source != 'webui':
+                display_msg['_source'] = source
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
@@ -4573,18 +5167,38 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         'timestamp': recovered_ts,
         '_recovered': True,
     }
+    pending_source = getattr(session, 'pending_user_source', None)
+    if pending_source and pending_source != 'webui':
+        recovered['_source'] = pending_source
     pending_attachments = getattr(session, 'pending_attachments', None)
     if pending_attachments:
         recovered['attachments'] = list(pending_attachments)
     session.messages.append(recovered)
-    # The new user turn is now committed to messages (#3831): retire a positive
-    # truncation watermark left over from a prior retry/undo/edit so it cannot
-    # freeze at the old edit boundary and later drop these post-edit turns on an
-    # empty-sidecar reconcile. Cleared to None — never 0.0 (the truncate-to-empty
-    # sentinel, #2914). Safe here because the row is durably in messages, so the
-    # merge's max-sidecar guard suppresses the replaced tail without the watermark.
+    # Mirror to context_messages so the _recovered flag survives the state.db
+    # round-trip (#4283).  state.db has no _recovered column, so without this
+    # mirror the next turn's reconciled_state_db_messages_for_session(
+    # prefer_context=True) finds the recovered user as a flagless state.db
+    # delta and _sanitize_messages_for_api cannot filter it — causing the
+    # interrupted turn's prompt to be prepended to every subsequent turn.
+    # Placing the mirror here (rather than in _persist_cancelled_turn) covers
+    # all three callers: cancel, provider-error, and exception paths.
+    ctx = getattr(session, 'context_messages', None)
+    if isinstance(ctx, list) and ctx:
+        rec_text = " ".join(str(recovered.get('content') or '').split())
+        if not any(
+            isinstance(e, dict) and e.get('role') == 'user'
+            and " ".join(str(e.get('content') or '').split()) == rec_text
+            for e in ctx[-8:]
+        ):
+            ctx.append({k: v for k, v in recovered.items() if k != 'timestamp'})
+    # The new user turn is now committed to messages (#3831): advance a positive
+    # truncation watermark left over from a prior retry/undo/edit so that
+    # merge_session_messages_append_only() still filters out replaced pre-edit
+    # rows from state.db. The merge's sidecar_advanced_past_watermark guard
+    # allows state.db rows newer than the watermark, so post-edit turns are not
+    # dropped. Never 0.0 (the truncate-to-empty sentinel, #2914).
     if getattr(session, 'truncation_watermark', None):
-        session.truncation_watermark = None
+        session.truncation_watermark = float(recovered_ts)
     return True
 
 
@@ -5207,50 +5821,126 @@ def _run_agent_streaming(
                 _cc = getattr(_agent, 'context_compressor', None)
                 if _cc:
                     _cc_cl_u = getattr(_cc, 'context_length', 0) or 0
-                    # Default-only guard (#3256): the agent-side compressor is
-                    # built in agent_init with the global model.context_length
-                    # applied unconditionally — for non-default models that
-                    # value is the stale global cap (e.g. 232K). Drop it here
-                    # so the live usage payload doesn't surface the wrong cap.
-                    # PERF: resolve the real per-model cap at most once per
-                    # stream (cached in _real_ctx_cache). This snapshot runs on
-                    # every metering tick; doing the config read + metadata
-                    # lookup per tick froze non-default-model streams.
+                    # Stale-compressor self-heal (#3256, broadened): the
+                    # agent-side compressor caches a context_length from the
+                    # model it was *built/last-updated* with. After an in-place
+                    # model switch (or when agent_init seeded it with the global
+                    # model.context_length cap), that cached value can be the
+                    # WRONG model's window — e.g. a session on claude-opus-4.8
+                    # (1M / 936k prompt on Copilot) whose compressor still holds
+                    # claude-opus-4.5's 168k. The original guard only corrected
+                    # the narrow case where the cached value equalled the config
+                    # cap exactly; a leftover *other-model* value (168k) slipped
+                    # straight through to the live usage payload. Broaden it:
+                    # ALWAYS resolve the real per-model window for the agent's
+                    # CURRENT model and, when that differs from the cached value,
+                    # surface the real one. Frontend hydration (GET /api/session)
+                    # already does this; this aligns the streaming path with it
+                    # so "refresh shows 1M, send-a-message drops to 168k" can't
+                    # happen.
+                    # PERF: resolve at most once per stream (cached in
+                    # _real_ctx_cache). This snapshot runs on every metering
+                    # tick; doing the config read + metadata lookup per tick
+                    # froze non-default-model streams.
                     if _real_ctx_cache[0] is None:
-                        _resolved_real = 0  # 0 = guard not applicable / failed
+                        _resolved_real = 0  # 0 = no correction / lookup failed
                         try:
-                            from api.config import get_config as _gc_u
-                            _cfg_u = _gc_u()
-                            _mcfg_u = _cfg_u.get('model', {}) if isinstance(_cfg_u, dict) else {}
-                            if isinstance(_mcfg_u, dict):
-                                _def_u = str(_mcfg_u.get('default') or '').strip()
-                                _raw_u = _mcfg_u.get('context_length')
+                            _sm_u = str(getattr(_agent, 'model', '') or '').strip()
+                            _prov_u = str(getattr(_agent, 'provider', '') or '').strip()
+                            _base_u = str(getattr(_agent, 'base_url', '') or '').strip()
+                            _key_u = getattr(_agent, 'api_key', '') or ''
+                            if _sm_u:
+                                # Resolve the real window through the SAME helper
+                                # hydration uses (routes._context_length_lookup_inputs_for_model
+                                # + get_model_context_length). This honors the
+                                # nested per-model config override
+                                # (model.<provider>.models.<model>.context_length,
+                                # e.g. claude-opus-4.8 -> 1,000,000) and custom-
+                                # provider keys, so the streaming/SSE path and the
+                                # GET /api/session path land on the IDENTICAL value.
+                                # Reusing the helper (instead of hand-reading the
+                                # flat top-level model.context_length, which is
+                                # None here) is what prevents a new mismatch like
+                                # "refresh shows 1M, send-a-message shows 936k".
                                 try:
-                                    _cl_u = int(_raw_u) if _raw_u is not None else 0
-                                except (TypeError, ValueError):
-                                    _cl_u = 0
-                                _sm_u = str(getattr(_agent, 'model', '') or '').strip()
-                                from api.routes import _model_matches_configured_default as _mmcd_u
-                                if (
-                                    _cl_u > 0
-                                    and _cc_cl_u == _cl_u
-                                    and _def_u
-                                    and _sm_u
-                                    and not _mmcd_u(_sm_u, _def_u, getattr(_agent, 'provider', '') or '')
-                                ):
-                                    # Recompute from real per-model metadata.
+                                    from api.routes import (
+                                        _context_length_lookup_inputs_for_model as _cli_u,
+                                        _should_accept_session_context_length_refresh as _accept_u,
+                                    )
+                                    from agent.model_metadata import get_model_context_length as _g_u
+                                    # Resolve the SESSION's own profile config, not
+                                    # the ambient one. This worker is a detached
+                                    # thread that does NOT inherit the per-request
+                                    # thread-local profile context, so a bare
+                                    # get_config() resolves the process-global
+                                    # (default) profile (#3294) — for a non-default
+                                    # profile that pins a different per-model
+                                    # context_length, that would surface the WRONG
+                                    # profile's window in the live payload. Read the
+                                    # session's profile home explicitly, mirroring
+                                    # the worker's own _cfg resolution below.
                                     try:
-                                        from agent.model_metadata import get_model_context_length as _g_u
-                                        _real_u = _g_u(
-                                            _sm_u,
-                                            getattr(_agent, 'base_url', '') or '',
-                                            config_context_length=None,
-                                            provider=getattr(_agent, 'provider', '') or '',
-                                        ) or 0
-                                        if _real_u:
+                                        from api.config import get_config_for_profile_home as _gch_u
+                                        from api.profiles import get_hermes_home_for_profile as _ghp_u
+                                        _ph_u = _ghp_u(getattr(_session_obj, 'profile', None))
+                                        _cfg_u = _gch_u(_ph_u)
+                                    except Exception:
+                                        from api.config import get_config as _gc_u
+                                        _cfg_u = _gc_u()
+                                    _lk_u = _cli_u(
+                                        _sm_u,
+                                        _prov_u,
+                                        base_url=_base_u,
+                                        api_key=_key_u,
+                                        cfg=_cfg_u if isinstance(_cfg_u, dict) else {},
+                                    )
+                                    _real_u = _g_u(
+                                        _sm_u,
+                                        _lk_u.base_url,
+                                        api_key=_lk_u.api_key,
+                                        config_context_length=_lk_u.config_context_length,
+                                        provider=_lk_u.provider or _prov_u or '',
+                                        custom_providers=_lk_u.custom_providers,
+                                    ) or 0
+                                    # Only treat it as a correction when the real
+                                    # window is valid AND disagrees with the
+                                    # compressor's cached value. Equal => nothing
+                                    # to fix, leave the fast path untouched.
+                                    # #4248: never let a low-confidence 256k metadata
+                                    # fallback clobber a LARGER cached window — that
+                                    # would reintroduce the very "drops to a smaller
+                                    # window mid-stream" regression this guard fixes.
+                                    # Reuse the exact acceptance gate hydration uses.
+                                    # NOTE: we deliberately omit model_changed (=False
+                                    # default) here, unlike hydration. The streaming
+                                    # path can't cheaply know if the model changed
+                                    # since the compressor was seeded, so we err
+                                    # toward the LARGER window (auto-compress fires
+                                    # late, not early — the safe direction), and the
+                                    # next GET /api/session hydration self-heals any
+                                    # genuine downward 256k case via model_changed.
+                                    if (
+                                        _real_u and _real_u != _cc_cl_u
+                                        and _accept_u(_cc_cl_u, _real_u)
+                                    ):
+                                        _resolved_real = _real_u
+                                except TypeError:
+                                    # Older hermes-agent: legacy 2-arg form.
+                                    try:
+                                        from api.routes import (
+                                            _should_accept_session_context_length_refresh as _accept2_u,
+                                        )
+                                        from agent.model_metadata import get_model_context_length as _g2_u
+                                        _real_u = _g2_u(_sm_u, _base_u) or 0
+                                        if (
+                                            _real_u and _real_u != _cc_cl_u
+                                            and _accept2_u(_cc_cl_u, _real_u)
+                                        ):
                                             _resolved_real = _real_u
                                     except Exception:
                                         pass
+                                except Exception:
+                                    pass
                         except Exception:
                             _resolved_real = 0
                         _real_ctx_cache[0] = _resolved_real
@@ -5391,6 +6081,7 @@ def _run_agent_streaming(
     # Placed ABOVE the _checkpoint_stop cluster so that cluster stays adjacent
     # to the `try:` (preserves the Issue #765 static-locator invariant).
     _turn_session_identity_tokens = None
+    _streaming_cron_profile_home_token = None
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -5430,16 +6121,20 @@ def _run_agent_streaming(
         # process-level active-profile global.  Falls back gracefully.
         try:
             from api.profiles import (
+                filter_runtime_env_for_gateway_parity,
                 patch_skill_home_modules,
                 get_hermes_home_for_profile,
                 get_profile_runtime_env,
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
+            _streaming_cron_profile_home_token = _STREAMING_CRON_PROFILE_HOME.set(_profile_home)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
+            _safe_profile_runtime_env = filter_runtime_env_for_gateway_parity(_profile_runtime_env)
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
+            _safe_profile_runtime_env = {}
             patch_skill_home_modules = None
 
         # Profile-aware provider/model enrichment: when the session belongs
@@ -5491,12 +6186,13 @@ def _run_agent_streaming(
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
+        _install_streaming_cronjob_profile_wrapper()
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
         # and preventing a deadlock where the restore would re-enter the same lock.
         with _ENV_LOCK:
-            old_profile_env = {key: os.environ.get(key) for key in _profile_runtime_env}
+            old_profile_env = {key: os.environ.get(key) for key in _safe_profile_runtime_env}
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
@@ -5504,7 +6200,7 @@ def _run_agent_streaming(
             old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             old_hermes_home = os.environ.get('HERMES_HOME')
-            os.environ.update(_profile_runtime_env)
+            os.environ.update(_safe_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id
@@ -5515,9 +6211,12 @@ def _run_agent_streaming(
             os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
-                # Patch module-level caches to match the active profile.
+                # Patch skill module caches to match the active profile.
                 # _set_hermes_home() does this for process-wide switches
-                # but per-request switches skip it (#1700).
+                # but per-request switches skip it (#1700). The in-chat
+                # cronjob tool is wrapped separately at its tool-call boundary
+                # with cron_profile_context_for_home (#4580) so cron.jobs path
+                # caches are not mutated for the entire agent turn.
                 # Modules were prewarmed by _prewarm_skill_tool_modules()
                 # above, so we only do lightweight sys.modules lookups and
                 # attribute assignments here — no first-time import under
@@ -5554,12 +6253,32 @@ def _run_agent_streaming(
         # the chat stuck in "Thinking…" forever.
         _approval_registered = False
         _unreg_notify = None
+        _cleanup_gateway_pending_mirror = None
         try:
+            try:
+                from api.route_approvals import (
+                    submit_gateway_pending_mirror as _submit_pending_for_polling,
+                    reconcile_gateway_pending_mirror_locked as _reconcile_gateway_pending_mirror_locked,
+                    _approval_sse_notify_locked as _approval_sse_notify_locked,
+                    _lock as _approval_lock,
+                )
+                def _cleanup_gateway_pending_mirror():
+                    with _approval_lock:
+                        head, total, _changed = _reconcile_gateway_pending_mirror_locked(session_id)
+                        _approval_sse_notify_locked(session_id, head, total)
+            except ImportError:
+                _submit_pending_for_polling = None
+                _cleanup_gateway_pending_mirror = None
             from tools.approval import (
                 register_gateway_notify as _reg_notify,
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
+                if _submit_pending_for_polling is not None:
+                    try:
+                        _submit_pending_for_polling(session_id, approval_data)
+                    except Exception:
+                        logger.warning("Failed to mirror approval into WebUI polling state", exc_info=True)
                 put('approval', approval_data)
             _reg_notify(session_id, _approval_notify_cb)
             _approval_registered = True
@@ -5640,8 +6359,22 @@ def _run_agent_streaming(
             # Throttle: emit metering events at most every 100 ms so the per-message
             # TPS label feels live during fast token streams without flooding SSE.
             _metering_last_emit = [time.monotonic() - 1]  # fire immediately on first token
+            _reasoning_last_put = [0.0]
+            _reasoning_buffer = ['']
             _metering_output_deltas = [0]
             _metering_reasoning_deltas = [0]
+
+            def _flush_reasoning_buffer():
+                # #4729: emit any coalesced-but-not-yet-flushed reasoning text immediately.
+                # The ~10 Hz throttle in on_reasoning leaves a sub-100ms tail in the buffer;
+                # the agent never calls reasoning_callback(None), and reasoning can transition
+                # to tool calls / visible output, so we must flush at every boundary that
+                # closes or reorders the live reasoning stream — otherwise the tail is
+                # silently lost from the live Thinking view (the frontend appends deltas).
+                if _reasoning_buffer[0]:
+                    put('reasoning', {'text': _reasoning_buffer[0]})
+                    _reasoning_buffer[0] = ''
+
 
             def _emit_metering():
                 now = time.monotonic()
@@ -5655,22 +6388,66 @@ def _run_agent_streaming(
                 stats.setdefault('estimated', False)
                 put('metering', stats)
 
-            def _compact_for_echo_compare(value: str) -> str:
-                return re.sub(r'\s+', ' ', str(value or '')).strip()
-
             def _is_visible_output_echo(text: str) -> bool:
                 candidate = _compact_for_echo_compare(text)
                 if not candidate:
                     return False
+                visible_output = STREAM_PARTIAL_TEXT.get(stream_id, '')
                 visible_tail = _compact_for_echo_compare(
-                    STREAM_PARTIAL_TEXT.get(stream_id, '')[-max(len(str(text)) * 2, 512):]
+                    visible_output[-max(len(str(text)) * 2, 512):]
                 )
-                return bool(visible_tail and visible_tail.endswith(candidate))
+                if visible_tail and visible_tail.endswith(candidate):
+                    return True
+                # Some runtimes can report a prefix of the already-streamed final
+                # answer through reasoning after visible output has completed. That
+                # prefix is not a tail echo, so catch only substantial chunks that
+                # are already present in the visible assistant stream. Short text
+                # stays on the stricter suffix path to avoid hiding genuine
+                # reasoning that happens to reuse an answer phrase.
+                if len(candidate) < 80:
+                    return False
+                visible_compact = _compact_for_echo_compare(visible_output)
+                return bool(visible_compact and candidate in visible_compact)
+
+            def _strip_reasoning_output_echo(text: str) -> bool:
+                nonlocal _reasoning_segments
+                removed = False
+                if stream_id in STREAM_REASONING_TEXT:
+                    next_text, did_remove = _strip_compact_echo_suffix(
+                        STREAM_REASONING_TEXT.get(stream_id, ''),
+                        text,
+                    )
+                    if did_remove:
+                        STREAM_REASONING_TEXT[stream_id] = next_text
+                        removed = True
+                next_buffer, did_remove_buffer = _strip_compact_echo_suffix(_reasoning_buffer[0], text)
+                if did_remove_buffer:
+                    _reasoning_buffer[0] = next_buffer
+                    removed = True
+                for idx in (_current_reasoning_idx, _current_reasoning_idx - 1):
+                    if idx not in _reasoning_segments:
+                        continue
+                    next_segment, did_remove_segment = _strip_compact_echo_suffix(
+                        _reasoning_segments.get(idx, ''),
+                        text,
+                    )
+                    if not did_remove_segment:
+                        continue
+                    if next_segment:
+                        _reasoning_segments[idx] = next_segment
+                    else:
+                        _reasoning_segments.pop(idx, None)
+                    removed = True
+                    break
+                return removed
 
             def on_token(text):
                 nonlocal _token_sent
                 if text is None:
                     return  # end-of-stream sentinel
+                # #4729: visible output is starting — flush any buffered reasoning tail
+                # first so the live Thinking stream is complete before/at the transition.
+                _flush_reasoning_buffer()
                 _token_sent = True
                 # Accumulate partial text so cancel_stream() can persist it (#893)
                 if stream_id in STREAM_PARTIAL_TEXT:
@@ -5686,6 +6463,9 @@ def _run_agent_streaming(
             def on_reasoning(text):
                 nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
                 if text is None:
+                    # Flush any remaining coalesced reasoning buffer so the last
+                    # partial window is not lost when the reasoning phase ends.
+                    _flush_reasoning_buffer()
                     return
                 _tool_boundary_advanced = False
                 reasoning_delta = str(text)
@@ -5704,7 +6484,19 @@ def _run_agent_streaming(
                 # concatenation is correct there.
                 if stream_id in STREAM_REASONING_TEXT:
                     STREAM_REASONING_TEXT[stream_id] += reasoning_delta
-                put('reasoning', {'text': reasoning_delta})
+                # Accumulate into a coalescing buffer so every delta reaches the
+                # browser — reasoning deltas are incremental, not idempotent.
+                _reasoning_buffer[0] += reasoning_delta
+                # Throttle reasoning SSE events to ~10 Hz to avoid overwhelming the
+                # frontend renderer. Each event triggers _parseStreamState() which
+                # scans the full accumulated text — 10k+ reasoning tokens/second
+                # builds up and locks the JS main thread. The user still sees live
+                # Thinking updates, just at a sustainable rate.
+                now = time.monotonic()
+                if now - _reasoning_last_put[0] >= 0.1:
+                    _reasoning_last_put[0] = now
+                    put('reasoning', {'text': _reasoning_buffer[0]})
+                    _reasoning_buffer[0] = ''
                 # Track reasoning deltas in the meter so live TPS reflects all AI output.
                 _metering_reasoning_deltas[0] += 1
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
@@ -5722,11 +6514,15 @@ def _run_agent_streaming(
                 visible = str(text).strip()
                 if not visible:
                     return
+                reasoning_echo = _strip_reasoning_output_echo(visible)
                 already_streamed = bool(cb_kwargs.get('already_streamed', False)) or _is_visible_output_echo(visible)
-                put('interim_assistant', {
+                payload = {
                     'text': visible,
                     'already_streamed': already_streamed,
-                })
+                }
+                if reasoning_echo:
+                    payload['reasoning_echo'] = True
+                put('interim_assistant', payload)
 
             # Pre-initialise the activity counter here so on_tool (which
             # closes over it) never captures an unbound name even if this
@@ -5776,6 +6572,9 @@ def _run_agent_streaming(
 
             def on_tool(*cb_args, **cb_kwargs):
                 nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
+                # #4729: a tool boundary closes/reorders the live reasoning stream — flush
+                # any buffered reasoning tail first so it isn't stranded behind the tool event.
+                _flush_reasoning_buffer()
                 event_type = None
                 name = None
                 preview = None
@@ -5857,10 +6656,30 @@ def _run_agent_streaming(
                     # Fallback: poll for pending approval in case notify_cb wasn't
                     # registered (e.g. older approval module without gateway support).
                     try:
-                        from tools.approval import has_pending as _has_pending, _pending, _lock
-                        if _has_pending(session_id):
-                            with _lock:
-                                p = dict(_pending.get(session_id, {}))
+                        from api.route_approvals import (
+                            _gateway_queues as _approval_gateway_queues,
+                            _lock as _approval_lock,
+                            _pending as _approval_pending,
+                            reconcile_gateway_pending_mirror_locked as _reconcile_gateway_pending_mirror_locked,
+                        )
+                        from tools.approval import has_blocking_approval as _has_blocking_approval
+                        if _has_blocking_approval(session_id):
+                            p = None
+                            with _approval_lock:
+                                _reconcile_gateway_pending_mirror_locked(session_id)
+                                queue = _approval_pending.get(session_id)
+                                if isinstance(queue, list):
+                                    p = dict(queue[0]) if queue else None
+                                elif queue:
+                                    p = dict(queue)
+                                if p is None:
+                                    gw_queue = _approval_gateway_queues.get(session_id) or []
+                                    if gw_queue:
+                                        raw = getattr(gw_queue[0], 'data', None) or {}
+                                        if raw:
+                                            p = dict(raw)
+                                        else:
+                                            logger.warning("Gateway queue entry for %s has no .data attribute", session_id)
                             if p:
                                 put('approval', p)
                     except ImportError:
@@ -6074,6 +6893,7 @@ def _run_agent_streaming(
             _prefill_context = _load_webui_prefill_context(_cfg)
             _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
             _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
+            _main_request_overrides = _main_model_request_overrides(_cfg)
             put('context_status', {
                 'session_id': session_id,
                 'prefill': _public_prefill_context_status(_prefill_context),
@@ -6255,6 +7075,8 @@ def _run_agent_streaming(
                 _agent_kwargs['max_iterations'] = _max_iterations_cfg
             if 'max_tokens' in _agent_params and _max_tokens_cfg is not None:
                 _agent_kwargs['max_tokens'] = _max_tokens_cfg
+            if 'request_overrides' in _agent_params and _main_request_overrides:
+                _agent_kwargs['request_overrides'] = _main_request_overrides
             # Params added in newer hermes-agent — skip if not supported
             if 'api_mode' in _agent_params:
                 _agent_kwargs['api_mode'] = _rt.get('api_mode')
@@ -6296,6 +7118,7 @@ def _run_agent_streaming(
                     _fallback_resolved or {},
                     sorted(_toolsets) if _toolsets else [],
                     _reasoning_config or {},
+                    _main_request_overrides or {},
                     _public_prefill_context_status(_prefill_context),
                     # #1897: profile_home is part of the agent's identity because
                     # AIAgent caches `_cached_system_prompt` from `load_soul_md()`
@@ -6597,6 +7420,11 @@ def _run_agent_streaming(
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
+            # #4729: the run is done — flush any reasoning tail still in the coalescing
+            # buffer (the agent never calls reasoning_callback(None), and a turn can end on
+            # reasoning with no trailing token/tool boundary to trigger a flush) so the last
+            # sub-100ms window reaches the live Thinking view before the terminal done event.
+            _flush_reasoning_buffer()
             if cancel_event.is_set():
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
@@ -6708,6 +7536,7 @@ def _run_agent_streaming(
                 _next_context_messages = _dedupe_replayed_context_messages(
                     _previous_context_messages,
                     _next_context_messages,
+                    msg_text,
                 )
                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                 s.messages = _merge_display_messages_after_agent_result(
@@ -6715,8 +7544,9 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _restore_display_reasoning_metadata(_previous_messages, _result_messages),
                     msg_text,
+                    source=getattr(s, 'pending_user_source', None) or 'webui',
                 )
-                _retire_truncation_watermark_after_commit(s)  # #3831
+                _advance_truncation_watermark_after_commit(s)  # #3831
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -6999,6 +7829,7 @@ def _run_agent_streaming(
                                 _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
+                                    msg_text,
                                 )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
@@ -7006,8 +7837,9 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
+                                    source=getattr(s, 'pending_user_source', None) or 'webui',
                                 )
-                                _retire_truncation_watermark_after_commit(s)  # #3831
+                                _advance_truncation_watermark_after_commit(s)  # #3831
                                 # Skip the error block — jump directly to the
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
@@ -7061,6 +7893,7 @@ def _run_agent_streaming(
                         s.pending_user_message = None
                         s.pending_attachments = []
                         s.pending_started_at = None
+                        s.pending_user_source = None
                         try:
                             _snapshot_and_append_partial_on_error(s, stream_id)
                         except Exception:
@@ -7085,7 +7918,7 @@ def _run_agent_streaming(
                         except Exception:
                             pass
                         _error_payload['session'] = redact_session_data(
-                            s.compact() | {'messages': s.messages, 'tool_calls': s.tool_calls}
+                            _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
                         )
                         _error_payload['session_id'] = s.session_id
                         _error_payload['old_session_id'] = _compression_origin_session_id
@@ -7241,6 +8074,7 @@ def _run_agent_streaming(
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
+                s.pending_user_source = None
                 # Tag the matching user message with attachment filenames for display on reload
                 # Only tag a user message whose content relates to this turn's text
                 # (msg_text is the full message including the [Attached files: ...] suffix)
@@ -7343,25 +8177,48 @@ def _run_agent_streaming(
                     # cap (e.g. 232K) that would clobber the real 1M metadata
                     # on every stream end. In that case skip the compressor
                     # value and let the fallback resolver below recompute.
+                    # #4618: broaden the stale-compressor guard the same way the
+                    # live-usage snapshot does. The OLD test only skipped the
+                    # compressor value when it equalled the config cap EXACTLY
+                    # (a non-default model carrying the global cap). But a
+                    # compressor can hold a DIFFERENT model's window after an
+                    # in-place model switch (e.g. opus-4.5's 168k lingering on an
+                    # opus-4.8 1M session) — that value != the config cap, so the
+                    # old guard let it persist to s.context_length and the SSE
+                    # payload, snapping the indicator back to 168k at turn-end.
+                    # Resolve the real per-model window via the SAME helper the
+                    # live path + hydration use and skip the compressor value
+                    # whenever the real window differs, honoring the #4248
+                    # acceptance gate (never let a low-confidence 256k fallback
+                    # clobber a larger cached window).
                     _skip_cc_cl = False
                     try:
-                        _model_cfg_cc = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
-                        if isinstance(_model_cfg_cc, dict):
-                            _cfg_default_cc = str(_model_cfg_cc.get('default') or '').strip()
-                            _raw_cfg_cl_cc = _model_cfg_cc.get('context_length')
+                        from api.routes import (
+                            _context_length_lookup_inputs_for_model as _cli_cc,
+                            _should_accept_session_context_length_refresh as _accept_cc,
+                        )
+                        from agent.model_metadata import get_model_context_length as _g_cc
+                        _sess_model_cc = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                        if _sess_model_cc and _cc_cl > 0:
+                            _lk_cc = _cli_cc(
+                                _sess_model_cc,
+                                resolved_provider or '',
+                                base_url=getattr(agent, 'base_url', '') or resolved_base_url or '',
+                                api_key=getattr(agent, 'api_key', '') or resolved_api_key or '',
+                                cfg=_cfg if isinstance(_cfg, dict) else {},
+                            )
                             try:
-                                _cfg_cl_cc = int(_raw_cfg_cl_cc) if _raw_cfg_cl_cc is not None else 0
-                            except (TypeError, ValueError):
-                                _cfg_cl_cc = 0
-                            _sess_model_cc = str(getattr(agent, 'model', resolved_model or '') or '').strip()
-                            from api.routes import _model_matches_configured_default as _mmcd_cc
-                            if (
-                                _cfg_cl_cc > 0
-                                and _cc_cl == _cfg_cl_cc
-                                and _cfg_default_cc
-                                and _sess_model_cc
-                                and not _mmcd_cc(_sess_model_cc, _cfg_default_cc, resolved_provider or '')
-                            ):
+                                _real_cc = _g_cc(
+                                    _sess_model_cc,
+                                    _lk_cc.base_url,
+                                    api_key=_lk_cc.api_key,
+                                    config_context_length=_lk_cc.config_context_length,
+                                    provider=_lk_cc.provider or resolved_provider or '',
+                                    custom_providers=_lk_cc.custom_providers,
+                                ) or 0
+                            except TypeError:
+                                _real_cc = _g_cc(_sess_model_cc, _lk_cc.base_url) or 0
+                            if _real_cc and _real_cc != _cc_cl and _accept_cc(_cc_cl, _real_cc):
                                 _skip_cc_cl = True
                     except Exception:
                         pass
@@ -7609,31 +8466,46 @@ def _run_agent_streaming(
                 _orig_cc_cl_sse = _cc_cl_sse
                 _orig_cc_thresh_sse = getattr(_cc, 'threshold_tokens', 0) or 0
                 _dropped_stale_cap_sse = False
-                # Default-only guard (#3256): the agent-side context_compressor
-                # is constructed in agent_init with the global model.context_length
-                # applied unconditionally, so for non-default models its
-                # context_length is the stale global cap (e.g. 232K) — surfacing
-                # it via SSE makes the indicator show the wrong window even
-                # after the session was correctly resized. Drop the compressor
-                # value in that case and let the fallback resolver below recompute.
+                # Default-only guard (#3256), broadened (#4618): the agent-side
+                # context_compressor caches a context_length from the model it
+                # was built/last-updated with. For a non-default model it may be
+                # the stale global cap (e.g. 232K); after an in-place model switch
+                # it may be a DIFFERENT model's window (e.g. opus-4.5's 168k on an
+                # opus-4.8 1M session). Either way, surfacing it via the terminal
+                # `done` SSE makes the indicator REVERT to the wrong window on
+                # stream end (messages.js overwrites S.lastUsage with this payload)
+                # — the exact "send a message reverts to 168k" symptom. Resolve
+                # the real per-model window via the SAME helper the live path +
+                # hydration use; drop the compressor value whenever the real
+                # window differs, honoring the #4248 acceptance gate (never let a
+                # low-confidence 256k fallback clobber a larger cached window).
                 try:
-                    _model_cfg_sse = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
-                    if isinstance(_model_cfg_sse, dict):
-                        _cfg_default_sse = str(_model_cfg_sse.get('default') or '').strip()
-                        _raw_cfg_cl_sse = _model_cfg_sse.get('context_length')
+                    from api.routes import (
+                        _context_length_lookup_inputs_for_model as _cli_sse,
+                        _should_accept_session_context_length_refresh as _accept_sse,
+                    )
+                    from agent.model_metadata import get_model_context_length as _g_sse
+                    _sess_model_sse = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                    if _sess_model_sse and _cc_cl_sse > 0:
+                        _lk_sse = _cli_sse(
+                            _sess_model_sse,
+                            resolved_provider or '',
+                            base_url=getattr(agent, 'base_url', '') or resolved_base_url or '',
+                            api_key=getattr(agent, 'api_key', '') or resolved_api_key or '',
+                            cfg=_cfg if isinstance(_cfg, dict) else {},
+                        )
                         try:
-                            _cfg_cl_sse = int(_raw_cfg_cl_sse) if _raw_cfg_cl_sse is not None else 0
-                        except (TypeError, ValueError):
-                            _cfg_cl_sse = 0
-                        _sess_model_sse = str(getattr(agent, 'model', resolved_model or '') or '').strip()
-                        from api.routes import _model_matches_configured_default as _mmcd_sse
-                        if (
-                            _cfg_cl_sse > 0
-                            and _cc_cl_sse == _cfg_cl_sse
-                            and _cfg_default_sse
-                            and _sess_model_sse
-                            and not _mmcd_sse(_sess_model_sse, _cfg_default_sse, resolved_provider or '')
-                        ):
+                            _real_sse = _g_sse(
+                                _sess_model_sse,
+                                _lk_sse.base_url,
+                                api_key=_lk_sse.api_key,
+                                config_context_length=_lk_sse.config_context_length,
+                                provider=_lk_sse.provider or resolved_provider or '',
+                                custom_providers=_lk_sse.custom_providers,
+                            ) or 0
+                        except TypeError:
+                            _real_sse = _g_sse(_sess_model_sse, _lk_sse.base_url) or 0
+                        if _real_sse and _real_sse != _cc_cl_sse and _accept_sse(_cc_cl_sse, _real_sse):
                             _cc_cl_sse = 0
                             _dropped_stale_cap_sse = True
                 except Exception:
@@ -7788,7 +8660,7 @@ def _run_agent_streaming(
                         })
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
-            raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
+            raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
             _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
             if _tool_limit_reached:
                 _done_payload['terminal_state'] = 'tool_limit_reached'
@@ -7816,6 +8688,16 @@ def _run_agent_streaming(
                 # so it doesn't block the stream.
                 _maybe_schedule_title_refresh(s, put, agent)
         finally:
+            # #4729: guaranteed-exit flush of any reasoning tail still buffered. On the
+            # normal path the on_token/on_tool/post-run flushes already emptied it (no-op
+            # here); on an exception or retry path that bypassed those, this emits the tail
+            # before the outer handler sends apperror — so the live Thinking view never
+            # loses its last coalesced chunk. Runs before stream teardown; STREAM_REASONING_TEXT
+            # already mirrors the full text for persistence regardless.
+            try:
+                _flush_reasoning_buffer()
+            except Exception:
+                pass
             # Stop the live metering ticker
             _metering_stop.set()
             # Unregister the gateway approval callback and unblock any threads
@@ -7825,6 +8707,11 @@ def _run_agent_streaming(
                     _unreg_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister approval callback")
+            if _cleanup_gateway_pending_mirror is not None:
+                try:
+                    _cleanup_gateway_pending_mirror()
+                except Exception:
+                    logger.debug("Failed to reconcile gateway approval mirror")
             if _clarify_registered and _unreg_clarify_notify is not None:
                 try:
                     _unreg_clarify_notify(session_id)
@@ -7973,6 +8860,7 @@ def _run_agent_streaming(
                                 _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
+                                    msg_text,
                                 )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
@@ -7980,8 +8868,9 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
+                                    source=getattr(s, 'pending_user_source', None) or 'webui',
                                 )
-                                _retire_truncation_watermark_after_commit(s)  # #3831
+                                _advance_truncation_watermark_after_commit(s)  # #3831
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
                         return  # skip error emission
@@ -8030,6 +8919,7 @@ def _run_agent_streaming(
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
+                s.pending_user_source = None
                 try:
                     _snapshot_and_append_partial_on_error(s, stream_id)
                 except Exception:
@@ -8081,6 +8971,8 @@ def _run_agent_streaming(
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
+        if _streaming_cron_profile_home_token is not None:
+            _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on
         # every exit path so a reused thread-pool worker leaks no identity and
@@ -8162,9 +9054,10 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     interrupted.
 
     If no agent is cached, the agent is too old to support steer, or no
-    stream is active, return {"accepted": False, "fallback": "<reason>"}
-    so the frontend can fall back to interrupt or queue mode. The
-    fallback path is the existing behaviour from PR #1062.
+    stream is active, return {"accepted": False, "fallback": "<reason>"}.
+    The frontend must surface that failure without cancelling the active run;
+    Steer is active-run guidance, not implicit permission to Queue, Interrupt,
+    or Stop-and-send.
 
     Returns 200 with {"accepted": bool, "fallback": str|None,
     "stream_id": str|None}.
@@ -8198,7 +9091,8 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         except Exception:
             logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
     if not cached:
-        # No active agent for this session — caller falls back to interrupt
+        # No active agent for this session — caller surfaces a steer failure
+        # without cancelling the active run.
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
                            "stream_id": None})
     agent = cached[0]
@@ -8327,6 +9221,11 @@ def cancel_stream(stream_id: str) -> bool:
             active_run_entry = None
         if active_run_entry and not active_run_session_id:
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
+
+    # Mark the worker lifecycle registry immediately. The SSE maps may be popped
+    # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
+    # health polling sees during that detached window.
+    update_active_run(stream_id, phase="cancelling")
 
     # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
     # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
@@ -8467,6 +9366,7 @@ def cancel_stream(stream_id: str) -> bool:
                 # the cleanup.
                 try:
                     _pending_user = getattr(_cs, 'pending_user_message', None)
+                    _pending_source = getattr(_cs, 'pending_user_source', None)
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
                     _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
                     _pending_started = getattr(_cs, 'pending_started_at', None) or 0
@@ -8492,11 +9392,16 @@ def cancel_stream(stream_id: str) -> bool:
                                 if _pending_user == _last_content or _pending_user in _last_content:
                                     _already_persisted = True
                         if not _already_persisted:
+                            _recovered_ts = int(time.time())
+                            if isinstance(_pending_started, (int, float)) and _pending_started > 0:
+                                _recovered_ts = int(_pending_started)
                             _user_turn: dict = {
                                 'role': 'user',
                                 'content': _pending_user,
-                                'timestamp': int(time.time()),
+                                'timestamp': _recovered_ts,
                             }
+                            if _pending_source and _pending_source != 'webui':
+                                _user_turn['_source'] = _pending_source
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
@@ -8509,6 +9414,7 @@ def cancel_stream(stream_id: str) -> bool:
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []
                 _cs.pending_started_at = None
+                _cs.pending_user_source = None
                 # Persist any partial assistant text that was streamed before cancel (#893).
                 # Preserving partial content means the user sees what the agent had
                 # produced rather than losing it entirely.  The marker is _partial=True

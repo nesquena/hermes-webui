@@ -105,6 +105,10 @@ services:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
       - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
+      # Let the WebUI health/status checks reach the gateway container over
+      # the compose network. Cron listing is local, but scheduled ticking and
+      # the Tasks/System gateway pill need a reachable gateway URL (#4483).
+      - HERMES_API_URL=http://hermes-agent:8642
       # Match your host user's UID/GID for correct file permissions.
       # In two-container setups the WebUI auto-detects UID/GID from the shared
       # hermes-home volume, but you can override explicitly if needed (#668):

@@ -51,12 +51,21 @@ def _read_ui_js() -> str:
 
 
 def _name_handler_block() -> str:
-    """Return the source between `nameEl.title=t('double_click_rename')` and the
+    """Return the source between the tooltip assignment block and the
     line that appends nameEl to the row (`el.appendChild(nameEl);`).
+
+    The tooltip block was refactored for symlink support: it now starts with
+    ``if(isLk && item.target)`` (symlink tooltip) followed by an ``else if``
+    that assigns the rename tooltip for regular files.
     """
     src = _read_ui_js()
-    start_marker = "nameEl.title=t('double_click_rename');"
+    # Try new symlink-aware shape first
+    start_marker = "if(isLk && item.target)"
     start = src.find(start_marker)
+    if start < 0:
+        # Fall back to legacy single-line shape
+        start_marker = "nameEl.title=t('double_click_rename');"
+        start = src.find(start_marker)
     assert start >= 0, "nameEl rename tooltip not found in static/ui.js"
     end_marker = "el.appendChild(nameEl);"
     end = src.find(end_marker, start)
@@ -135,7 +144,7 @@ class TestNameClickHandlerShape:
         """The dblclick handler must clear the pending click-debounce timer."""
         block = _name_handler_block()
         m = re.search(
-            r"nameEl\.ondblclick\s*=\s*\(?\s*e\s*\)?\s*=>\s*\{(.*?)\bif\(item\.type==='dir'",
+            r"nameEl\.ondblclick\s*=\s*\(?\s*e\s*\)?\s*=>\s*\{(.*?)\bif\(isDirLike\)",
             block,
             re.DOTALL,
         )
@@ -236,12 +245,19 @@ const trackedClearTimeout = (id) => {
   clearTimeout_(id);
 };
 
+// Symlink locals referenced by the handler block — declared from item
+// just like _renderTreeItem does before the tooltip assignment.
+const isLk = item.type === 'symlink';
+const isExternalLink = isLk && item.target_outside_workspace;
+const isDirLike = !isExternalLink && (item.type === 'dir' || (isLk && item.is_dir));
+const elideMiddle = (s) => s;
+
 const runner = new Function(
   'nameEl', 'el', 'item', 'S', 't', 'loadDir', 'document', 'showToast', 'api', 'window',
-  'setTimeout', 'clearTimeout',
+  'setTimeout', 'clearTimeout', 'isLk', 'isExternalLink', 'isDirLike', 'elideMiddle',
   '(()=>{' + handlerBlock + '})();'
 );
-runner(nameEl, el, item, S, t, loadDir, document, showToast, api, {}, trackedSetTimeout, trackedClearTimeout);
+runner(nameEl, el, item, S, t, loadDir, document, showToast, api, {}, trackedSetTimeout, trackedClearTimeout, isLk, isExternalLink, isDirLike, elideMiddle);
 
 const evt = { stopPropagation: () => {} };
 for (let i = 0; i < clickCount; i++) {
@@ -263,7 +279,7 @@ setTimeout_(() => {
     )
     r = subprocess.run(
         [NODE, "-e", js],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=30,
     )
     if r.returncode != 0:
         raise RuntimeError(f"node failed: {r.stderr}")

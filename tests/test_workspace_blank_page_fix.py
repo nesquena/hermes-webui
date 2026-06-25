@@ -129,6 +129,22 @@ class TestWorkspaceSwitcherBlankPage:
             "switchToWorkspace must call /api/session/new when S.session is null"
         )
 
+    def test_switch_to_workspace_keeps_busy_guard_after_blank_page_create(self):
+        src = read('static/panels.js')
+        start = src.find('async function switchToWorkspace(')
+        assert start != -1, "switchToWorkspace not found"
+        fn = src[start:src.find('async function toggleWorktreePanel', start)]
+        assert "t('workspace_busy_switch')" in fn, (
+            "switchToWorkspace must keep the busy-session workspace switch toast"
+        )
+        blank_create = fn.index("api('/api/session/new'")
+        busy_guard = fn.index('if(S.busy)')
+        update_call = fn.index("api('/api/session/update'")
+        assert blank_create < busy_guard < update_call, (
+            "switchToWorkspace must auto-create blank-page sessions before the busy guard, "
+            "then return before workspace update while busy"
+        )
+
     def test_prompt_workspace_path_auto_creates_session(self):
         src = read('static/panels.js')
         m = re.search(r'async function promptWorkspacePath\(\)\{.*?\n\}', src, re.DOTALL)

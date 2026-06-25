@@ -401,7 +401,7 @@ function _connectTerminalOutput(){
   const sid=_terminalSessionId();
   if(!sid)return;
   if(TERMINAL_UI.source){
-    try{TERMINAL_UI.source.close();}catch(_){}
+    try{if(TERMINAL_UI.source.readyState!==2)TERMINAL_UI.source.close();}catch(_){}
     TERMINAL_UI.source=null;
   }
   const url=new URL('api/terminal/output',document.baseURI||location.href);
@@ -419,7 +419,7 @@ function _connectTerminalOutput(){
   source.addEventListener('terminal_closed',()=>{
     if(TERMINAL_UI.source!==source)return;
     if(TERMINAL_UI.term)TERMINAL_UI.term.writeln('\r\n[terminal closed]\r\n');
-    try{source.close();}catch(_){}
+    try{if(source&&source.readyState!==2)source.close();}catch(_){}
     TERMINAL_UI.source=null;
     setTimeout(()=>closeComposerTerminal(null,{skipApi:true}),260);
   });
@@ -428,7 +428,7 @@ function _connectTerminalOutput(){
     let msg=t('terminal_error');
     try{msg=(JSON.parse(ev.data)||{}).error||msg;}catch(_){}
     if(TERMINAL_UI.term)TERMINAL_UI.term.writeln('\r\n[terminal error] '+msg+'\r\n');
-    try{source.close();}catch(_){}
+    try{if(source&&source.readyState!==2)source.close();}catch(_){}
     TERMINAL_UI.source=null;
   });
 }
@@ -557,7 +557,7 @@ async function closeComposerTerminal(sessionId,opts){
   opts=opts||{};
   const sid=sessionId||TERMINAL_UI.sessionId||_terminalSessionId();
   if(TERMINAL_UI.source){
-    try{TERMINAL_UI.source.close();}catch(_){}
+    try{if(TERMINAL_UI.source&&TERMINAL_UI.source.readyState!==2)TERMINAL_UI.source.close();}catch(_){}
     TERMINAL_UI.source=null;
   }
   if(sid&&!opts.skipApi){
@@ -588,7 +588,7 @@ async function closeComposerTerminal(sessionId,opts){
 async function restartComposerTerminal(){
   if(!TERMINAL_UI.open||TERMINAL_UI.collapsed)return;
   if(TERMINAL_UI.source){
-    try{TERMINAL_UI.source.close();}catch(_){}
+    try{if(TERMINAL_UI.source&&TERMINAL_UI.source.readyState!==2)TERMINAL_UI.source.close();}catch(_){}
     TERMINAL_UI.source=null;
   }
   if(TERMINAL_UI.term)TERMINAL_UI.term.reset();
@@ -646,7 +646,7 @@ async function _resizeComposerTerminal(){
 }
 
 window.addEventListener('beforeunload',()=>{
-  if(TERMINAL_UI.source)try{TERMINAL_UI.source.close();}catch(_){}
+  if(TERMINAL_UI.source)try{if(TERMINAL_UI.source&&TERMINAL_UI.source.readyState!==2)TERMINAL_UI.source.close();}catch(_){}
   if(TERMINAL_UI.sessionId){
     const url=new URL('api/terminal/close',document.baseURI||location.href).href;
     const body=JSON.stringify({session_id:TERMINAL_UI.sessionId});

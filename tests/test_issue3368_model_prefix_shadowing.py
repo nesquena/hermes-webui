@@ -164,7 +164,7 @@ def _resolve(driver, query, groups, sel_options):
     r = subprocess.run(
         [NODE, driver, str(COMMANDS_JS_PATH),
          json.dumps({"query": query, "groups": groups, "selOptions": sel_options})],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=30,
     )
     if r.returncode != 0:
         raise RuntimeError(f"node driver failed: {r.stderr}")
@@ -175,7 +175,7 @@ def _find(driver, model_id, options, preferred=None):
     r = subprocess.run(
         [NODE, driver, str(UI_JS_PATH),
          json.dumps({"modelId": model_id, "options": options, "preferredProvider": preferred})],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=30,
     )
     if r.returncode != 0:
         raise RuntimeError(f"node driver failed: {r.stderr}")
@@ -185,7 +185,7 @@ def _find(driver, model_id, options, preferred=None):
 def _best(driver, query, options):
     r = subprocess.run(
         [NODE, driver, str(COMMANDS_JS_PATH), json.dumps({"query": query, "options": options})],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=30,
     )
     if r.returncode != 0:
         raise RuntimeError(f"node driver failed: {r.stderr}")

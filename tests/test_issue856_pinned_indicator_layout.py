@@ -140,7 +140,7 @@ def test_sidebar_uses_local_inflight_state_for_immediate_spinner():
     assert "function _purgeStaleInflightEntries()" in SESSIONS_JS
     assert "delete INFLIGHT[sid];" in SESSIONS_JS
     assert "function _isSessionEffectivelyStreaming(s)" in SESSIONS_JS
-    assert "const isStreaming=_isSessionEffectivelyStreaming(s);" in SESSIONS_JS
+    assert "const ownStreaming=_isSessionEffectivelyStreaming(s)" in SESSIONS_JS
     assert "if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();" in messages_js
 
 

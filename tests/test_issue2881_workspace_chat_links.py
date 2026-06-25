@@ -63,7 +63,7 @@ def _render(driver_path: str, markdown: str) -> str:
         input=markdown,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr)

@@ -13,8 +13,8 @@ def test_done_and_restore_filters_recovery_messages_from_frontend_state():
     assert "_filterRecoveryControlMessages(S.messages || [])" in MESSAGES_JS
     assert "if(!m||m.role==='tool') return false;" in MESSAGES_JS
     assert "if(m.recovery_control===true) return true;" in MESSAGES_JS
-    assert "previous response was cut off by a network error" in MESSAGES_JS
     assert "continue exactly where you left off" in MESSAGES_JS
+    assert "do not retry the same tool call" in MESSAGES_JS
 
 
 def test_apererror_recovers_on_recovery_control_event():
@@ -27,7 +27,8 @@ def test_ui_rejects_recovery_control_as_visible_assistant_content():
     assert "function _isRecoveryControlMessageText" in UI_JS
     assert "function _assistantMessageHasVisibleContent" in UI_JS
     assert "if(_isRecoveryControlMessage(m)) return false;" in UI_JS
-    assert "if(_isRecoveryControlMessage(m)){ri++;continue;}" in UI_JS
+    assert "function _messageIsRenderable(m)" in UI_JS
+    assert "if(_isRecoveryControlMessage(m)) return false;" in UI_JS[UI_JS.index("function _messageIsRenderable(m)"):]
     assert "_assistantMessageHasVisibleContent(m)" in UI_JS
 
 

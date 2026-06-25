@@ -197,10 +197,18 @@ class TestSmdHelpers:
             "_smdWrittenLen=0" in fn or "_smdWrittenLen = 0" in fn
         ), "_smdNewParser must reset _smdWrittenLen to 0"
 
-    def test_smd_new_parser_calls_default_renderer(self):
+    def test_smd_new_parser_calls_safe_renderer(self):
         fn = extract_fn(MESSAGES_JS, "_smdNewParser")
-        assert fn and "default_renderer" in fn, (
-            "_smdNewParser must call smd.default_renderer() to create a renderer"
+        assert fn and (
+            "_safeSmdRenderer(" in fn or "_streamFadeRenderer(" in fn
+        ), (
+            "_smdNewParser must use _safeSmdRenderer or _streamFadeRenderer "
+            "so URL scheme safety is applied inline via set_attr hook"
+        )
+        # Verify _safeSmdRenderer itself uses smd.default_renderer internally
+        safefn = extract_fn(MESSAGES_JS, "_safeSmdRenderer")
+        assert safefn and "default_renderer" in safefn, (
+            "_safeSmdRenderer must call smd.default_renderer() to create the base renderer"
         )
 
     def test_smd_new_parser_calls_parser(self):
@@ -706,16 +714,41 @@ class TestSmdUrlSchemeSanitization:
         assert "_smdFileHref" in MESSAGES_JS
         assert "api/media?path=" in MESSAGES_JS
 
-    def test_sanitize_called_after_smd_write(self):
-        # _smdWrite must invoke _sanitizeSmdLinks on assistantBody after feeding the parser,
-        # so anchors/images created mid-stream get their javascript:/data:/vbscript:
-        # hrefs/srcs stripped before the user can click them.
-        fn = extract_fn(MESSAGES_JS, "_smdWrite")
-        assert fn, "_smdWrite function not found"
-        assert "_sanitizeSmdLinks" in fn, (
-            "_smdWrite must call _sanitizeSmdLinks(assistantBody) after parser_write "
-            "so unsafe URL schemes are stripped from newly-added anchors/images "
-            "before the user can click them"
+    def test_url_safety_via_renderer_set_attr(self):
+        # URL scheme safety is now enforced inline by the renderer's set_attr
+        # hook (_safeSmdRenderer or _streamFadeRenderer) as smd creates each
+        # DOM node, eliminating the post-hoc _sanitizeSmdLinks O(DOM) scan
+        # per token that caused progressive streaming freeze on long answers.
+        safefn = extract_fn(MESSAGES_JS, "_safeSmdRenderer")
+        assert safefn, "_safeSmdRenderer must exist for URL safety on the non-fade path"
+        assert "set_attr" in safefn, (
+            "_safeSmdRenderer must override set_attr to validate href/src inline"
+        )
+        assert "_SMD_SAFE_URL_RE" in safefn, (
+            "_safeSmdRenderer set_attr must use _SMD_SAFE_URL_RE for href safety"
+        )
+        assert "_SMD_SAFE_IMG_URL_RE" in safefn, (
+            "_safeSmdRenderer set_attr must use _SMD_SAFE_IMG_URL_RE for src safety"
+        )
+        assert "data-blocked-scheme" in safefn, (
+            "_safeSmdRenderer set_attr must set data-blocked-scheme on unsafe URLs"
+        )
+        # _safeSmdRenderer algorithm must be the same as the proven
+        # _streamFadeRenderer set_attr (fade path has been in production).
+        fadefn = extract_fn(MESSAGES_JS, "_streamFadeRenderer")
+        assert fadefn and "set_attr" in fadefn, "_streamFadeRenderer must also have set_attr"
+        # Both renderers go through _smdRendererWithoutUnderscoreEmphasis so
+        # the set_attr hook is part of the final parser — verify the call chain.
+        newparser = extract_fn(MESSAGES_JS, "_smdNewParser")
+        assert newparser and "fade ? _streamFadeRenderer(el) : _safeSmdRenderer(el)" in newparser, (
+            "_smdNewParser must route non-fade to _safeSmdRenderer and fade to _streamFadeRenderer"
+        )
+        # _sanitizeSmdLinks is still defined and used at parser_end as a final
+        # safety net — not removed, just no longer called on every token.
+        assert "_sanitizeSmdLinks" in MESSAGES_JS, "_sanitizeSmdLinks must still exist"
+        endfn = extract_fn(MESSAGES_JS, "_smdEndParser")
+        assert endfn and "_sanitizeSmdLinks" in endfn, (
+            "_smdEndParser must still call _sanitizeSmdLinks as a final safety net"
         )
 
     def test_sanitize_called_at_parser_end(self):

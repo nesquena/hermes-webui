@@ -8,6 +8,7 @@ import os
 import re
 import signal
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -157,6 +158,7 @@ class QuietHTTPServer(ThreadingHTTPServer):
         server_address = args[0] if args else kwargs.get('server_address', None)
         if server_address and ':' in server_address[0]:
             self.address_family = socket.AF_INET6
+        self.ssl_context: object | None = None
         super().__init__(*args, **kwargs)
         self.accept_loop_requests_total = 0
         self.accept_loop_last_request_at = 0.0
@@ -185,6 +187,31 @@ class QuietHTTPServer(ThreadingHTTPServer):
         else:
             super().server_bind()
 
+    def get_request(self):
+        """Accept a connection without letting TLS handshakes block the loop.
+
+        ``ssl.wrap_socket(listening_socket)`` performs the TLS handshake inside
+        ``accept()``. A browser/network probe that opens TCP but never sends a
+        ClientHello can then freeze the one accept loop, leaving the process
+        alive but unable to serve any later clients. Accept the raw socket here
+        and wrap the accepted connection with ``do_handshake_on_connect=False``
+        so any slow/broken handshake times out in its own request thread.
+        """
+        request, client_address = self.socket.accept()
+        ssl_context = getattr(self, "ssl_context", None)
+        if ssl_context is None:
+            return request, client_address
+        try:
+            tls_request = ssl_context.wrap_socket(
+                request,
+                server_side=True,
+                do_handshake_on_connect=False,
+            )
+        except Exception:
+            request.close()
+            raise
+        return tls_request, client_address
+
     def _handle_request_noblock(self):
         """Record accept-loop progress before dispatching a request handler.
 
@@ -207,7 +234,10 @@ class QuietHTTPServer(ThreadingHTTPServer):
         exc_type, exc_value, _ = sys.exc_info()
         
         # Silently ignore common connection errors caused by client disconnects
-        if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError):
+        if exc_type in (
+            ConnectionResetError, BrokenPipeError, ConnectionAbortedError,
+            TimeoutError, ssl.SSLError, ssl.SSLEOFError,
+        ):
             return
         
         # Also handle socket errors that indicate client disconnect
@@ -273,6 +303,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
 
+    @staticmethod
+    def _safe_webui_print(message: str) -> None:
+        """Emit a request log line without letting logging break responses."""
+        try:
+            print(message, flush=True)
+        except Exception:
+            # Agent/tool code can redirect or close process-wide stdout/stderr
+            # in another thread. HTTP response handling must not depend on
+            # those global streams remaining writable.
+            pass
+
     def log_request(self, code: str='-', size: str='-') -> None:
         """Structured JSON logs for each request."""
         import json as _json
@@ -299,7 +340,7 @@ class Handler(BaseHTTPRequestHandler):
         if forwarded_for:
             record_data['forwarded_for'] = forwarded_for
         record = _json.dumps(record_data)
-        print(f'[webui] {record}', flush=True)
+        self._safe_webui_print(f'[webui] {record}')
 
     def do_GET(self) -> None:
         self._req_t0 = time.time()
@@ -319,7 +360,7 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception:
-            print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
+            self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
@@ -328,7 +369,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 # Unexpected failure while sending the error response itself.
                 # Log it so we know something is wrong with our error handler.
-                traceback.print_exc()
+                self._safe_webui_print(traceback.format_exc())
         finally:
             clear_request_profile()
 
@@ -358,7 +399,7 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception:
-            print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
+            self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
@@ -367,7 +408,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 # Unexpected failure while sending the error response itself.
                 # Log it so we know something is wrong with our error handler.
-                traceback.print_exc()
+                self._safe_webui_print(traceback.format_exc())
         finally:
             clear_request_profile()
 
@@ -582,7 +623,18 @@ def main() -> None:
     # Start the gateway session watcher for real-time SSE updates
     try:
         from api.gateway_watcher import start_watcher
-        start_watcher()
+
+        def _start_watcher_safe():
+            try:
+                start_watcher()
+            except Exception as e:
+                print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+
+        t = threading.Thread(target=_start_watcher_safe, daemon=True)
+        t.start()
+        t.join(timeout=5)
+        if t.is_alive():
+            print('[tip] Gateway watcher still initializing (non-blocking)', flush=True)
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
 
@@ -626,7 +678,7 @@ def main() -> None:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             ctx.load_cert_chain(TLS_CERT, TLS_KEY)
-            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            httpd.ssl_context = ctx
             print(f'  TLS enabled: cert={TLS_CERT}, key={TLS_KEY}', flush=True)
         except Exception as e:
             print(f'[!!] WARNING: TLS setup failed ({e}), falling back to HTTP', flush=True)

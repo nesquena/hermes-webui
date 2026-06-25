@@ -43,6 +43,7 @@ def test_active_session_idle_reconcile_clears_stale_busy_and_inflight_state():
     assert "!s.is_streaming" in helper_body, "server idle helper must require is_streaming=false"
     assert "!s.active_stream_id" in helper_body, "server idle helper must require no active stream id"
     assert "!s.pending_user_message" in helper_body, "server idle helper must require no pending user text"
+    assert "!s.pending_started_at" in helper_body, "server idle helper must require no pending turn marker"
     assert "S.busy=false" in body, "stale local busy state must be cleared"
     assert "S.activeStreamId=null" in body, "stale active stream id must be cleared"
     assert "delete INFLIGHT[sid]" in body, "stale active-session inflight cache must be purged"
@@ -57,6 +58,41 @@ def test_active_session_idle_reconcile_clears_stale_busy_and_inflight_state():
         "idle reconciliation must reload the current transcript from server truth "
         "so missed stream_end events do not leave the active pane stale"
     )
+
+
+def test_effective_streaming_ignores_stale_raw_active_stream_ids():
+    local_body = _function_body(SESSIONS_SRC, "function _isSessionLocallyStreaming(")
+    pending_body = _function_body(SESSIONS_SRC, "function _hasPendingUserMessageSignal(")
+    effective_body = _function_body(SESSIONS_SRC, "function _isSessionEffectivelyStreaming(")
+
+    assert "s.active_stream_id" not in effective_body
+    assert "_hasPendingUserMessageSignal(s)" in effective_body
+    assert "s.pending_started_at" not in effective_body
+
+    script = f"""
+let S = {{ session: null, busy: false }};
+function _isSessionLocallyStreaming(s) {{{local_body}}}
+function _hasPendingUserMessageSignal(s) {{{pending_body}}}
+function _isSessionEffectivelyStreaming(s) {{{effective_body}}}
+const rows = {{
+  serverStreaming: _isSessionEffectivelyStreaming({{session_id:'child', is_streaming:true, active_stream_id:'stream-1'}}),
+  staleActiveStream: _isSessionEffectivelyStreaming({{session_id:'child', is_streaming:false, active_stream_id:'dead-stream'}}),
+  pendingUser: _isSessionEffectivelyStreaming({{session_id:'child', pending_user_message:'working'}}),
+  pendingFlag: _isSessionEffectivelyStreaming({{session_id:'child', has_pending_user_message:true}}),
+  pendingStartedOnly: _isSessionEffectivelyStreaming({{session_id:'child', pending_started_at:123}}),
+  idle: _isSessionEffectivelyStreaming({{session_id:'child'}}),
+}};
+console.log(JSON.stringify(rows));
+"""
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    assert json.loads(result.stdout) == {
+        "serverStreaming": True,
+        "staleActiveStream": False,
+        "pendingUser": True,
+        "pendingFlag": True,
+        "pendingStartedOnly": False,
+        "idle": False,
+    }
 
 
 def test_active_session_idle_reconcile_schedules_forced_transcript_reload():
